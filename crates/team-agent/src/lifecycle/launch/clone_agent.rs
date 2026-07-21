@@ -1,10 +1,7 @@
-use std::path::Path;
-use std::time::Duration;
-
 use crate::lifecycle::*;
-use crate::model::enums::Provider;
 use crate::model::ids::AgentId;
 use crate::provider::SessionId;
+use std::path::Path;
 
 use super::*;
 
@@ -30,11 +27,6 @@ pub fn clone_agent(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
         })?;
-    let provider = source_agent
-        .get("provider")
-        .and_then(serde_json::Value::as_str)
-        .and_then(crate::lifecycle::profile_launch::parse_provider)
-        .unwrap_or(Provider::Codex);
     let source_session_id = source_agent
         .get("session_id")
         .and_then(serde_json::Value::as_str)
@@ -65,35 +57,19 @@ pub fn clone_agent(
         open_display,
         Some(selected.team_key.as_str()),
     )?;
-    let convergence_deadline = crate::provider::session::backing_convergence_deadline(
-        provider,
-        crate::provider::session::BackingConvergenceOperation::Clone,
-    );
-    let verified = wait_for_agent_session(
+    let verified = read_agent_session(
         &selected.run_workspace,
         selected.team_key.as_str(),
         as_agent_id,
         source_session_id.as_ref(),
-        provider,
-        convergence_deadline,
     );
-    let (session_id, backing_path) = match verified {
-        Ok(proof) => proof,
-        Err(error) => {
-            let rollback = crate::lifecycle::remove_agent(
-                &selected.run_workspace,
-                as_agent_id,
-                true,
-                true,
-                Some(selected.team_key.as_str()),
-            );
-            return match rollback {
-                Ok(_) => Err(error),
-                Err(rollback_error) => Err(LifecycleError::StatePersist(format!(
-                    "{error}; clone rollback failed: {rollback_error}"
-                ))),
-            };
-        }
+    let (session_id, backing_path, backing_state) = match verified {
+        Some((session_id, backing_path)) => (
+            Some(session_id),
+            Some(backing_path),
+            CloneBackingState::Verified,
+        ),
+        None => (None, None, CloneBackingState::PendingFirstTurn),
     };
     materialized.keep();
     Ok(CloneAgentReport {
@@ -102,49 +78,29 @@ pub fn clone_agent(
         env: added.env,
         session_id,
         backing_path,
+        backing_state,
     })
 }
 
-fn wait_for_agent_session(
+fn read_agent_session(
     workspace: &Path,
     team_key: &str,
     agent_id: &AgentId,
     source_session_id: Option<&SessionId>,
-    provider: Provider,
-    deadline: Duration,
-) -> Result<(SessionId, std::path::PathBuf), LifecycleError> {
-    let started = std::time::Instant::now();
-    loop {
-        if let Ok(state) = crate::state::projection::select_runtime_state(workspace, Some(team_key))
-        {
-            if let Some(agent) = state
-                .get("agents")
-                .and_then(|agents| agents.get(agent_id.as_str()))
-            {
-                let session = agent
-                    .get("session_id")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.is_empty());
-                let backing = agent
-                    .get("rollout_path")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(std::path::PathBuf::from);
-                if let (Some(session), Some(backing)) = (session, backing) {
-                    let distinct =
-                        source_session_id.is_none_or(|source| source.as_str() != session);
-                    if distinct && backing.is_file() {
-                        return Ok((SessionId::new(session), backing));
-                    }
-                }
-            }
-        }
-        if started.elapsed() >= deadline {
-            return Err(LifecycleError::Provider(format!(
-                "clone_session_unverified: provider={provider:?} agent={agent_id} has no readable distinct provider backing within {}ms",
-                deadline.as_millis()
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+) -> Option<(SessionId, std::path::PathBuf)> {
+    let state = crate::state::projection::select_runtime_state(workspace, Some(team_key)).ok()?;
+    let agent = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))?;
+    let session = agent
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let backing = agent
+        .get("rollout_path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)?;
+    let distinct = source_session_id.is_none_or(|source| source.as_str() != session);
+    (distinct && backing.is_file()).then(|| (SessionId::new(session), backing))
 }

@@ -3084,6 +3084,7 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "captured_at",
             "captured_via",
             "attribution_confidence",
+            "capture_state",
             "spawn_cwd",
             "spawned_at",
             "pane_id",

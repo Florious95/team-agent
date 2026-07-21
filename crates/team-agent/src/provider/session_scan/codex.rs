@@ -4,21 +4,23 @@ pub(super) fn apply_spawned_at_filter(
     out: &mut Vec<CapturedSessionCandidate>,
     context: &CaptureSessionContext,
 ) {
-    let Some(spawned_at) = context.spawned_at.as_deref().and_then(parse_spawned_at) else {
+    let Some(raw_spawned_at) = context.spawned_at.as_deref() else {
         return;
     };
-    let grace = std::time::Duration::from_secs(5);
-    let cutoff = spawned_at.checked_sub(grace).unwrap_or(spawned_at);
+    let Some(spawned_at) = parse_spawned_at(raw_spawned_at) else {
+        out.clear();
+        return;
+    };
     out.retain(|candidate| {
         let path = match candidate.captured.rollout_path.as_ref() {
             Some(p) => p.as_path(),
             None => return false,
         };
         match codex_rollout_created_at(path) {
-            Some(created_at) => created_at >= cutoff,
+            Some(created_at) => created_at >= spawned_at,
             None => std::fs::metadata(path)
                 .and_then(|meta| meta.modified())
-                .map(|mtime| mtime >= cutoff)
+                .map(|mtime| mtime >= spawned_at)
                 .unwrap_or(false),
         }
     });
@@ -77,11 +79,62 @@ fn created_at_from_rollout_filename(path: &std::path::Path) -> Option<std::time:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
+    use std::path::PathBuf;
 
     #[test]
     fn parse_spawned_at_rfc3339_roundtrips_and_rejects_junk() {
         assert!(parse_spawned_at("2026-06-10T21:40:00+00:00").is_some());
         assert!(parse_spawned_at("not-a-date").is_none());
         assert!(parse_spawned_at("").is_none());
+    }
+
+    fn candidate(path: PathBuf, session_id: &str) -> CapturedSessionCandidate {
+        CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: Some(SessionId::new(session_id)),
+                rollout_path: Some(RolloutPath::new(path)),
+                captured_via: CaptureVia::FsWatch,
+                attribution_confidence: Confidence::High,
+                spawn_cwd: PathBuf::from("/tmp"),
+            },
+            embedded_agent_id: None,
+            positive_agent_id_match: false,
+            agent_path_match: false,
+        }
+    }
+
+    #[test]
+    fn spawned_at_filter_rejects_prior_round_and_accepts_current_rollout() {
+        let dir =
+            std::env::temp_dir().join(format!("ta-codex-spawn-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale =
+            dir.join("rollout-2026-07-21T22-45-40-11111111-1111-4111-8111-111111111111.jsonl");
+        let fresh =
+            dir.join("rollout-2026-07-21T23-20-01-22222222-2222-4222-8222-222222222222.jsonl");
+        std::fs::write(&stale, "{}\n").unwrap();
+        std::fs::write(&fresh, "{}\n").unwrap();
+        let context = CaptureSessionContext {
+            agent_id: "worker".to_string(),
+            spawn_cwd: dir.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some("2026-07-21T23:20:00+00:00".to_string()),
+            expected_session_id: None,
+            provider_projects_root: None,
+        };
+        let mut out = vec![
+            candidate(stale, "11111111-1111-4111-8111-111111111111"),
+            candidate(fresh.clone(), "22222222-2222-4222-8222-222222222222"),
+        ];
+        apply_spawned_at_filter(&mut out, &context);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].captured.rollout_path.as_ref().unwrap().as_path(),
+            fresh
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

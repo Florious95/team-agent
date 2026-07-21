@@ -671,8 +671,16 @@ pub struct CloneAgentReport {
     pub source_agent_id: AgentId,
     pub new_agent_id: AgentId,
     pub env: AgentActionEnvelope,
-    pub session_id: SessionId,
-    pub backing_path: PathBuf,
+    pub session_id: Option<SessionId>,
+    pub backing_path: Option<PathBuf>,
+    pub backing_state: CloneBackingState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloneBackingState {
+    Verified,
+    PendingFirstTurn,
 }
 
 /// Read-only remove-agent flag requirements for the target's current state.

@@ -5,24 +5,11 @@ use std::time::{Duration, SystemTime};
 use crate::model::enums::Provider;
 use crate::provider::{CommandPlan, ProviderError, SessionId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BackingConvergenceOperation {
-    Clone,
-    Fork,
-}
-
-pub(crate) fn backing_convergence_deadline(
-    provider: Provider,
-    operation: BackingConvergenceOperation,
-) -> Duration {
-    match (provider, operation) {
-        (Provider::Claude | Provider::ClaudeCode, _) => Duration::from_secs(45),
-        (Provider::Codex | Provider::Copilot, BackingConvergenceOperation::Clone) => {
-            Duration::from_secs(30)
-        }
-        (Provider::Codex, BackingConvergenceOperation::Fork) => Duration::from_secs(10),
-        (Provider::Copilot, BackingConvergenceOperation::Fork) => Duration::from_secs(5),
-        (Provider::GeminiCli | Provider::Fake, _) => Duration::from_secs(5),
+pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
+    match provider {
+        Provider::Claude | Provider::ClaudeCode => Duration::from_secs(45),
+        Provider::Codex => Duration::from_secs(10),
+        Provider::Copilot | Provider::GeminiCli | Provider::Fake => Duration::from_secs(5),
     }
 }
 
@@ -240,21 +227,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn convergence_deadlines_are_provider_and_operation_specific() {
+    fn context_fork_deadlines_are_provider_specific() {
         assert_eq!(
-            backing_convergence_deadline(Provider::Claude, BackingConvergenceOperation::Clone),
+            context_fork_convergence_deadline(Provider::Claude),
             Duration::from_secs(45)
         );
         assert_eq!(
-            backing_convergence_deadline(Provider::Codex, BackingConvergenceOperation::Clone),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            backing_convergence_deadline(Provider::Codex, BackingConvergenceOperation::Fork),
+            context_fork_convergence_deadline(Provider::Codex),
             Duration::from_secs(10)
         );
         assert_eq!(
-            backing_convergence_deadline(Provider::Copilot, BackingConvergenceOperation::Fork),
+            context_fork_convergence_deadline(Provider::Copilot),
             Duration::from_secs(5)
         );
     }

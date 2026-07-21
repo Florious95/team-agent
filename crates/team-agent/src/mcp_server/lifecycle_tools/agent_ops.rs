@@ -161,9 +161,10 @@ pub(crate) fn clone_agent(
             "new_agent_id": report.new_agent_id.as_str(),
             "state_file": report.env.state_file.to_string_lossy().to_string(),
             "coordinator_started": report.env.coordinator_started,
-            "session_id": report.session_id.as_str(),
-            "new_session_id": report.session_id.as_str(),
-            "backing_path": report.backing_path.to_string_lossy().to_string(),
+            "session_id": report.session_id.as_ref().map(|session| session.as_str()),
+            "new_session_id": report.session_id.as_ref().map(|session| session.as_str()),
+            "backing_path": report.backing_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+            "backing_state": report.backing_state,
         })),
     })
 }

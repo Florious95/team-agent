@@ -2379,9 +2379,10 @@ pub mod lifecycle_port {
                 "status": "cloned",
                 "source_agent_id": report.source_agent_id.as_str(),
                 "new_agent_id": report.new_agent_id.as_str(),
-                "session_id": report.session_id.as_str(),
-                "new_session_id": report.session_id.as_str(),
-                "backing_path": report.backing_path.to_string_lossy(),
+                "session_id": report.session_id.as_ref().map(|session| session.as_str()),
+                "new_session_id": report.session_id.as_ref().map(|session| session.as_str()),
+                "backing_path": report.backing_path.as_ref().map(|path| path.to_string_lossy()),
+                "backing_state": report.backing_state,
             })),
             Err(error) => Ok(error_value(error)),
         }

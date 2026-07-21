@@ -22,6 +22,7 @@
 //! per-file layout.
 
 pub(crate) mod claude;
+pub(crate) mod claude_fork;
 pub(crate) mod codex;
 pub(crate) mod copilot;
 pub(crate) mod copilot_fork;

@@ -335,7 +335,7 @@ where
         //   * `transcript_missing` — trigger event has fired (report_result /
         //     first_send_at / pane_output_advanced) AND elapsed > threshold
         //     AND zero candidates / no backing
-        //   * `waiting_for_transcript` — still in grace period
+        //   * `pending_first_turn` — no verified backing yet, still in grace
         // The state field surfaces in status/diagnose without changing the
         // authoritative tuple contract (we never write session_id without
         // backing). Throttled event emission is done by the caller (tick).
@@ -415,11 +415,11 @@ where
 /// 0.4.6 Stage 3: classify a pending agent's capture state into one of:
 ///   * `transcript_missing` — has had a strong trigger event AND elapsed
 ///     beyond grace threshold AND still no backing
-///   * `waiting_for_transcript` — still in grace period or no trigger yet
+///   * `pending_first_turn` — still in grace period or no trigger yet
 ///
 /// Trigger events (CR M2): any of `first_send_at`, `last_result_at`, or a
 /// recent `last_pane_output_at` indicates the worker has been interactively
-/// used / done something. Without ANY trigger, we stay in waiting state
+/// used / done something. Without ANY trigger, we stay pending
 /// even past the grace window (silent worker is not a failure to capture).
 ///
 /// Threshold: 30 seconds from spawned_at OR 15 seconds from the first
@@ -477,7 +477,7 @@ fn classify_pending_capture_state(
     if has_trigger && past_spawn_grace && past_trigger_grace && candidate_count == 0 {
         "transcript_missing"
     } else {
-        "waiting_for_transcript"
+        "pending_first_turn"
     }
 }
 
@@ -1150,12 +1150,25 @@ fn claimed_provider_session_keys(
 ) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     let team_key = crate::state::projection::team_state_key(state);
-    // 1. Non-pending worker sessions (existing behaviour).
+    // 1. Every other already-known worker session. The pending row itself is
+    // excluded so an incomplete tuple can still be repaired in place.
     for (agent_id, agent) in agents {
         if pending_ids.contains(agent_id) {
             continue;
         }
         push_provider_session_keys(&mut keys, &team_key, agent_id, agent);
+    }
+    if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+        for (nested_team_key, team_state) in teams {
+            if let Some(nested_agents) = team_state.get("agents").and_then(Value::as_object) {
+                for (agent_id, agent) in nested_agents {
+                    if nested_team_key == &team_key && pending_ids.contains(agent_id) {
+                        continue;
+                    }
+                    push_provider_session_keys(&mut keys, nested_team_key, agent_id, agent);
+                }
+            }
+        }
     }
     // 2. P0 (lane-046-capture-gap): leader anchor sessions. The leader's
     //    own provider transcript must never be attributed to a worker. Scan
@@ -1866,6 +1879,73 @@ mod u1_tests {
             "worker candidate that collides with team-scoped leader_receiver \
              session MUST be excluded by claimed_provider_session_keys; got {:?}",
             report.assigned
+        );
+    }
+
+    #[test]
+    fn pending_capture_state_stays_pending_until_a_trigger_expires() {
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        let mut agent = serde_json::Map::new();
+        agent.insert("spawned_at".to_string(), serde_json::json!(old));
+        assert_eq!(
+            super::classify_pending_capture_state(&agent, 0),
+            "pending_first_turn"
+        );
+
+        let trigger = (chrono::Utc::now() - chrono::Duration::seconds(20)).to_rfc3339();
+        agent.insert("first_send_at".to_string(), serde_json::json!(trigger));
+        assert_eq!(
+            super::classify_pending_capture_state(&agent, 0),
+            "transcript_missing"
+        );
+    }
+
+    #[test]
+    fn existing_team_session_is_rejected_while_fresh_candidate_is_accepted() {
+        let mut state = serde_json::json!({
+            "session_name": "current",
+            "agents": {
+                "clone": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            },
+            "teams": {
+                "archived": {
+                    "agents": {
+                        "old-seat": {
+                            "provider": "codex",
+                            "session_id": "stale-session",
+                            "rollout_path": "/tmp/stale.jsonl"
+                        }
+                    }
+                }
+            }
+        });
+        let mut canned = BTreeMap::new();
+        canned.insert(
+            "clone".to_string(),
+            vec![
+                worker_owned_candidate("stale-session", "/tmp/stale.jsonl"),
+                worker_owned_candidate("fresh-session", "/tmp/fresh.jsonl"),
+            ],
+        );
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+
+        assert_eq!(report.assigned, vec!["clone".to_string()]);
+        assert_eq!(
+            state["agents"]["clone"]["session_id"].as_str(),
+            Some("fresh-session")
         );
     }
 

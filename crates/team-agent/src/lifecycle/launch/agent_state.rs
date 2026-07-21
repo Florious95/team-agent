@@ -93,6 +93,10 @@ pub(super) fn running_agent_state(
         "attribution_confidence".to_string(),
         serde_json::Value::Null,
     );
+    state.insert(
+        "capture_state".to_string(),
+        serde_json::json!("pending_first_turn"),
+    );
     if let Some(started_agent) = started_agent {
         persist_started_agent_plan_state(&mut state, started_agent);
         if let Some(layout_window) = started_agent.layout_window.as_ref() {

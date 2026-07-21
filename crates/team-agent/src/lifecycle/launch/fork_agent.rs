@@ -12,42 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// `fork_agent(workspace, source_agent_id, as_agent_id, ...)`(`lifecycle/operations.py:284`)。
-/// native session fork(provider 须 supports_session_fork ∧ auth_mode!=compatible_api);
-/// 失败回滚,每条失败臂 `adapter.cleanup_mcp`。
-pub fn fork_agent(
-    workspace: &Path,
-    source_agent_id: &AgentId,
-    as_agent_id: &AgentId,
-    label: Option<&str>,
-    open_display: bool,
-    team: Option<&str>,
-) -> Result<ForkAgentReport, LifecycleError> {
-    let selected = crate::state::selector::resolve_active_team(
-        workspace,
-        team,
-        crate::state::selector::SelectorMode::RequireSpec,
-    )
-    .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    // **0.3.24 add-agent socket drift fix** (same root cause): fork-agent must
-    // also route to the live team's persisted tmux endpoint, not the workspace-
-    // hash for_workspace socket. Same orphan-on-wrong-socket pathology.
-    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-        &selected.run_workspace,
-        Some(selected.team_key.as_str()),
-    )
-    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
-    fork_agent_with_transport(
-        workspace,
-        source_agent_id,
-        as_agent_id,
-        label,
-        open_display,
-        team,
-        &transport,
-    )
-}
-
 pub fn fork_agent_with_transport(
     workspace: &Path,
     source_agent_id: &AgentId,
@@ -328,8 +292,38 @@ pub fn fork_agent_with_transport(
         as_agent_id.as_str(),
         Some(&fork_team),
     );
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        plan.provider_projects_root = source_backing.parent().map(Path::to_path_buf);
+    }
     let window = WindowName::new(as_agent_id.as_str());
     let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
+    let mut claude_fork = None;
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        let target_session_id = plan.expected_session_id.as_ref().ok_or_else(|| {
+            LifecycleError::Provider(
+                "claude fork plan has no target session id for snapshot copy".to_string(),
+            )
+        })?;
+        claude_fork = Some(
+            crate::provider::adapters::claude_fork::materialize_claude_fork(
+                source_backing,
+                &session_id,
+                target_session_id,
+            )
+            .map_err(|error| {
+                let _ = std::fs::write(&spec_path, text.as_bytes());
+                cleanup_fork_mcp_artifacts(
+                    &workspace,
+                    as_agent_id,
+                    &mcp_config_path,
+                    &profile_launch,
+                );
+                LifecycleError::Provider(format!(
+                    "context_fork_unavailable: claude snapshot copy failed: {error}"
+                ))
+            })?,
+        );
+    }
     let mut reserved_state = state.clone();
     reserve_forked_agent_state(
         &mut reserved_state,
@@ -406,10 +400,8 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
-    let convergence_deadline = crate::provider::session::backing_convergence_deadline(
-        provider,
-        crate::provider::session::BackingConvergenceOperation::Fork,
-    );
+    let convergence_deadline =
+        crate::provider::session::context_fork_convergence_deadline(provider);
     let context_proof = match crate::provider::session::verify_context_fork(
         provider,
         &session_id,
@@ -484,6 +476,9 @@ pub fn fork_agent_with_transport(
         profile_launch: &profile_launch,
     })?;
     materialized_role.keep();
+    if let Some(materialized) = claude_fork.as_mut() {
+        materialized.keep();
+    }
     if let Some(materialized) = copilot_fork.as_mut() {
         materialized.keep();
     }
