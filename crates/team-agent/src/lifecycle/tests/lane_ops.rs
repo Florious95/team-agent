@@ -22,9 +22,43 @@ fn emit_codex_fork_backing(argv: &[String]) {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join(format!("rollout-{session_id}.jsonl")),
-        format!(r#"{{"session_meta":{{"payload":{{"id":"{session_id}"}}}}}}\n"#),
+        format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
+            chrono::Utc::now().to_rfc3339()
+        ),
     )
     .unwrap();
+}
+
+pub(super) struct LaneHomeGuard {
+    previous: Option<std::ffi::OsString>,
+    root: PathBuf,
+}
+
+impl LaneHomeGuard {
+    pub(super) fn enter(tag: &str) -> Self {
+        static HOME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "ta-lane-home-{tag}-{}-{}",
+            std::process::id(),
+            HOME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &root);
+        Self { previous, root }
+    }
+}
+
+impl Drop for LaneHomeGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 /// Recording transport for Lane-A v2: `list_windows`/`list_targets` answer from a configurable window
@@ -1619,6 +1653,7 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
 #[test]
 #[serial_test::serial(env)]
 fn lanea_fork_report_session_id_is_not_pane_id() {
+    let _home = LaneHomeGuard::enter("fork-report");
     let ws = fork_ws(DELEG_ROLE_ALPHA); // codex+subscription -> native fork supported -> full success path
     let tx = LaneTransport::new("team-laneateam", &[]);
     let report =

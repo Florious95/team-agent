@@ -152,6 +152,7 @@ fabricated={fabricated:?} body={} raw={}",
 #[test]
 #[serial(a7_mcp)]
 fn a7_fork_agent_label_becomes_new_role() {
+    let _home = hermetic_guard::HermeticTestEnv::enter("a7-fork-label");
     let harness = McpSimHarness::new();
     let _coordinator_guard = CoordinatorStopGuard {
         ws: harness.workspace_path().to_path_buf(),
@@ -179,7 +180,22 @@ fn a7_fork_agent_label_becomes_new_role() {
     std::fs::create_dir_all(&shim_dir).unwrap();
     std::fs::write(
         shim_dir.join("claude"),
-        "#!/bin/sh\nprintf 'Claude Code\\n> \\n'\nexec sleep 300\n",
+        r#"#!/bin/sh
+sid=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--session-id" ]; then sid="$arg"; fi
+  prev="$arg"
+done
+if [ -n "$sid" ]; then
+  encoded=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
+  dir="$HOME/.claude/projects/$encoded"
+  mkdir -p "$dir"
+  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
+fi
+printf 'Claude Code\n> \n'
+exec sleep 300
+"#,
     )
     .unwrap();
     #[cfg(unix)]

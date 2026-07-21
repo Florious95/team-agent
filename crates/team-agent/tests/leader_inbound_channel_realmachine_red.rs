@@ -74,6 +74,7 @@ impl RealTeam {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("teamdir/agents")).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
         let team = format!("l3li{tag}");
         std::fs::write(
             root.join("teamdir/TEAM.md"),
@@ -103,6 +104,7 @@ impl RealTeam {
         Command::new(bin())
             .args(args)
             .current_dir(&self.root)
+            .env("HOME", self.root.join("home"))
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .output()

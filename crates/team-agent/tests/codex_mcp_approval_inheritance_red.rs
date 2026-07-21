@@ -170,6 +170,7 @@ fn inherited_bypass_non_dry_run_does_not_require_yes_but_explicit_raise_does() {
 #[test]
 #[serial(env)]
 fn inherited_bypass_is_preserved_across_restart_start_add_and_fork() {
+    let _home = hermetic_guard::HermeticTestEnv::enter("codex-approval-fork-inherited");
     let _ancestry = MockAncestry::codex_bypass();
 
     let restart_ws = runtime_workspace("restart-inherited", &[("worker_a", "Worker A")]);
@@ -297,6 +298,7 @@ fn inherited_bypass_is_preserved_across_restart_start_add_and_fork() {
 #[test]
 #[serial(env)]
 fn add_agent_preserves_restricted_default_and_fork_preserves_restricted_origin() {
+    let _home = hermetic_guard::HermeticTestEnv::enter("codex-approval-fork-restricted");
     let _ancestry = MockAncestry::restricted();
 
     let add_team = team_dir_with_running_workspace("add-restricted");
@@ -966,6 +968,7 @@ impl RecordingTransport {
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> SpawnResult {
+        emit_codex_fork_backing(argv);
         let mut spawns = self.spawns.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
@@ -984,6 +987,29 @@ impl RecordingTransport {
             child_pid: None,
         }
     }
+}
+
+fn emit_codex_fork_backing(argv: &[String]) {
+    if !argv
+        .windows(2)
+        .any(|pair| pair[0] == "codex" && pair[1] == "fork")
+    {
+        return;
+    }
+    static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+    let sequence = SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
+    let session_id = format!("approval-fork-{}-{sequence}", std::process::id());
+    let root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
+        .join(".codex/sessions/approval-fixture");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(format!("rollout-{session_id}.jsonl")),
+        format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
+            chrono::Utc::now().to_rfc3339()
+        ),
+    )
+    .unwrap();
 }
 
 impl Transport for RecordingTransport {

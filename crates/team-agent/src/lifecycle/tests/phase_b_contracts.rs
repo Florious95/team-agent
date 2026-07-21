@@ -1,5 +1,5 @@
 use super::agent_ops::lanea_team_ws;
-use super::lane_ops::{fork_ws, LaneTransport};
+use super::lane_ops::{fork_ws, LaneHomeGuard, LaneTransport};
 use super::launch_spawn::{
     quick_start_team_dir, seed_healthy_coordinator, DELEG_ROLE_ALPHA, QS_VALID_ROLE,
 };
@@ -131,6 +131,7 @@ fn concurrent_reset_discard_session_serializes() {
 #[test]
 #[serial_test::serial(env)]
 fn add_fork_remove_share_lifecycle_lock_behavior() {
+    let _home = LaneHomeGuard::enter("phase-b-fork");
     let (add_team, add_workspace, add_role, add_transport) = add_fixture();
     let add_agent = aid("w2");
     let add_state_before =
