@@ -666,6 +666,15 @@ pub struct ForkAgentReport {
     pub session_id: Option<SessionId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneAgentReport {
+    pub source_agent_id: AgentId,
+    pub new_agent_id: AgentId,
+    pub env: AgentActionEnvelope,
+    pub session_id: SessionId,
+    pub backing_path: PathBuf,
+}
+
 /// Read-only remove-agent flag requirements for the target's current state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveAgentFlagRequirements {

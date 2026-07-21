@@ -25,6 +25,7 @@ const EXPECTED_TOOLS: &[&str] = &[
     "stop_agent",
     "reset_agent",
     "add_agent",
+    "clone_agent",
     "fork_agent",
     "request_human",
     "stuck_list",

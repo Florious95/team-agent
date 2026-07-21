@@ -514,6 +514,17 @@ pub struct ForkAgentArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloneAgentArgs {
+    pub source_agent: String,
+    pub workspace: PathBuf,
+    pub team: Option<String>,
+    pub as_agent: String,
+    pub label: Option<String>,
+    pub no_display: bool,
+    pub json: bool,
+}
+
 /// `remove-agent`(`parser.py:414`)。`--from-spec` 须配 `--confirm`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveAgentArgs {

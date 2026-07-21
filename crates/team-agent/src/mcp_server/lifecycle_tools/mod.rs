@@ -6,5 +6,5 @@
 mod agent_ops;
 mod state_status;
 
-pub(crate) use agent_ops::{fork_agent, reset_agent, stop_agent};
+pub(crate) use agent_ops::{clone_agent, fork_agent, reset_agent, stop_agent};
 pub(crate) use state_status::{get_team_status, update_state};

@@ -17,7 +17,9 @@ use team_agent::coordinator::{
     coordinator_pid_path, write_coordinator_metadata, MetadataSource, Pid, WorkspacePath,
 };
 use team_agent::db::schema::open_db;
-use team_agent::lifecycle::{fork_agent_with_transport, remove_agent_with_transport};
+use team_agent::lifecycle::{
+    add_agent_with_transport, fork_agent_with_transport, remove_agent_with_transport,
+};
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
@@ -66,13 +68,12 @@ fn remove_agent_rollback_restores_agent_health_after_post_delete_failure() {
 #[test]
 #[serial(env)]
 fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn_failure() {
-    let _env = EnvGuard::set(FAIL_FORK_AFTER_SPAWN, "save_runtime_state");
+    let env = EnvGuard::set(FAIL_FORK_AFTER_SPAWN, "save_runtime_state");
     let fixture = RollbackFixture::new("fork-post-spawn");
     fixture.seed_team();
     fixture.seed_sibling_team_with_same_fork_id();
     fixture.seed_healthy_coordinator();
     let spec_before = fixture.spec_text();
-    let state_before = load_runtime_state(&fixture.team).unwrap();
     let transport = RecordingTransport::new("team-rollbackteam", &["alpha", "bravo"]);
 
     let result = fork_agent_with_transport(
@@ -103,14 +104,93 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
         spec_after, spec_before,
         "fork post-spawn rollback must restore team.spec.yaml byte-for-byte; result={result:?}"
     );
-    assert_eq!(
-        state_after, state_before,
-        "fork post-spawn rollback must restore runtime state and leave no half-created agent; result={result:?}"
-    );
+    assert_failed_fork_has_only_target_tombstone(&state_after, "newfork", "rollbackteam");
     assert!(
         !mcp_path.exists(),
         "fork post-spawn rollback must cleanup the MCP config written for the half-created agent; leaked={}",
         mcp_path.display()
+    );
+
+    // A rollback tombstone prevents stale-writer resurrection, but must not
+    // permanently reserve the name. The next legitimate add clears it.
+    drop(env);
+    let role = fixture.team.join("agents/newfork.md");
+    std::fs::write(&role, agent_doc("newfork", "Replacement worker")).unwrap();
+    let retry = add_agent_with_transport(
+        &fixture.team,
+        &aid("newfork"),
+        &role,
+        false,
+        None,
+        &transport,
+    );
+    assert!(
+        retry.is_ok(),
+        "same-name retry must clear tombstone: {retry:?}"
+    );
+    let retried = load_runtime_state(&fixture.team).unwrap();
+    assert!(
+        retried
+            .get("agents")
+            .and_then(|agents| agents.get("newfork"))
+            .is_some(),
+        "same-name retry must recreate the target row"
+    );
+    assert_ne!(
+        retried
+            .get("agent_lifecycle")
+            .and_then(|rows| rows.get("newfork"))
+            .and_then(|row| row.get("state"))
+            .and_then(serde_json::Value::as_str),
+        Some("retired"),
+        "same-name retry must clear the target retirement tombstone"
+    );
+}
+
+fn assert_failed_fork_has_only_target_tombstone(
+    state: &serde_json::Value,
+    target: &str,
+    team_key: &str,
+) {
+    assert!(
+        state
+            .get("agents")
+            .and_then(|agents| agents.get(target))
+            .is_none(),
+        "failed fork must leave no target agent row"
+    );
+    let lifecycle = state
+        .get("agent_lifecycle")
+        .and_then(serde_json::Value::as_object)
+        .expect("rollback must retain the target tombstone");
+    assert_eq!(lifecycle.len(), 1, "only target may be tombstoned");
+    assert_eq!(
+        lifecycle
+            .get(target)
+            .and_then(|row| row.get("state"))
+            .and_then(serde_json::Value::as_str),
+        Some("retired")
+    );
+    let team = state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .expect("selected team projection");
+    assert!(
+        team.get("agents")
+            .and_then(|agents| agents.get(target))
+            .is_none(),
+        "selected team must contain no failed target row"
+    );
+    assert_eq!(
+        team.get("agent_lifecycle")
+            .and_then(|rows| rows.get(target))
+            .and_then(|row| row.get("state"))
+            .and_then(serde_json::Value::as_str),
+        Some("retired")
+    );
+    assert!(
+        state.pointer("/teams/sibling/agents/newfork").is_some(),
+        "same-named sibling row must survive target rollback"
     );
 }
 

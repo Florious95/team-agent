@@ -89,13 +89,13 @@ Use `team-agent attach-leader` / `team-agent claim-leader` to bind the leader pa
 |---|---|---|---|---|
 | `claude` / `claude_code` | yes (`--resume <id>`, transcript-verified) | yes (JSONL stream) | yes (role `model` overrides `provider_models`) | yes (`--fork-session` + new `--session-id`) |
 | `codex` | yes (`codex resume <id>`, session-store-verified) | yes (turn JSONL) | yes (role `model`) | yes (`codex fork`) |
-| `copilot` | yes (`copilot --resume <id|name>`, sqlite `sessions` row) | not yet (phase 1: `provider.classify.unsupported` event) | yes (role `model`) | **no — `CapabilityUnsupported`** |
+| `copilot` | yes (`copilot --resume <id|name>`, sqlite `sessions` row) | not yet (phase 1: `provider.classify.unsupported` event) | yes (role `model`) | yes (isolated `COPILOT_HOME` store fork) |
 | `gemini_cli` | no | no | yes | no |
 | `fake` (testing only) | no | no | n/a | no |
 
 Notes:
 - Per-worker model override means a role-doc `model:` value wins over `TEAM.md` `provider_models.<provider>`; subscription defaults still fill blanks.
-- Copilot's `caps.fork=false` is a hard refusal in 0.3.7 — `team-agent fork-agent` against a Copilot worker returns a structured `CapabilityUnsupported` error instead of falling back to a fresh spawn (honest by design).
+- Copilot fork copies the source session into an isolated `COPILOT_HOME` and rekeys its SQLite session references atomically. Missing or incomplete backing fails closed; it never falls back to a fresh spawn.
 - Copilot phase-1 idle/turn detection is intentionally Unknown; tick emits a single explicit `provider.classify.unsupported` event per state change (P4 dedup), never a silent default.
 
 ## Provider Prep
@@ -213,9 +213,14 @@ team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --wor
 Semantic distinction:
 
 - `team-agent add-agent <agent> --role-file <file>` — add a **new** worker not yet in team state.
+- `team-agent clone-agent <source> --as <new>` — reread the source worker's latest role file and start a **fresh, verified** provider session. It never copies conversation context.
+- `team-agent fork-agent <source> --as <new>` — reread the same latest role file and create a distinct, verified provider session that forks the source context. If the provider backing cannot be verified, the command fails and rolls back instead of silently cloning fresh.
 - `team-agent start-agent <agent>` — (re)launch a worker that **already exists** in team state but whose window is missing.
+- `team-agent reset-agent <agent> --discard-session` — keep the same seat and deliberately start it with fresh context.
 - `team-agent restart .` — resume a fully **stopped** team from stored worker sessions.
 - `team-agent quick-start <dir>` — first-time team creation from role docs; for existing teams use `restart`, and use `restart --allow-fresh` only after explicit user consent to discard context.
+
+Clone/fork names are always explicit: run concurrent calls with a different `--as` value for each new seat. A successful result includes the verified new `session_id`; a tmux window alone is not success. Updating the source role file affects the next clone/fork without requiring a full-team rebuild. Automatic knowledge write-back from a clone/fork into the source role file is not provided.
 
 Removing a worker at runtime is the symmetric `team-agent remove-agent <agent> --workspace . --confirm`.
 

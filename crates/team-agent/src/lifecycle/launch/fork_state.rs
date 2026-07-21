@@ -14,6 +14,61 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+pub(super) fn reserve_forked_agent_state(
+    state: &mut serde_json::Value,
+    source_agent_id: &AgentId,
+    as_agent_id: &AgentId,
+    spec_agent: &Value,
+    dynamic_role_file: &Path,
+) -> Result<(), LifecycleError> {
+    let agents = state
+        .as_object_mut()
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("runtime state root is not an object".to_string())
+        })?
+        .entry("agents".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let agent_map = agents.as_object_mut().ok_or_else(|| {
+        LifecycleError::StatePersist("runtime state agents is not an object".to_string())
+    })?;
+    if agent_map.contains_key(as_agent_id.as_str()) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "agent id already exists: {as_agent_id}"
+        )));
+    }
+    crate::lifecycle::restart::remove::clear_agent_retirement_in_state(state, as_agent_id);
+    let agents = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("runtime state agents is not an object".to_string())
+        })?;
+    let mut entry = serde_json::json!({
+        "status": "forking",
+        "agent_id": as_agent_id.as_str(),
+        "window": as_agent_id.as_str(),
+        "forked_from": source_agent_id.as_str(),
+        "dynamic_role_file": dynamic_role_file.to_string_lossy().to_string(),
+        "role_source_ownership": "managed",
+    });
+    if let Some(object) = entry.as_object_mut() {
+        for key in [
+            "provider",
+            "auth_mode",
+            "model",
+            "profile",
+            "role",
+            "effort",
+        ] {
+            if let Some(value) = spec_agent.get(key) {
+                object.insert(key.to_string(), yaml_value_to_json(value));
+            }
+        }
+    }
+    agents.insert(as_agent_id.as_str().to_string(), entry);
+    Ok(())
+}
+
 pub(super) fn maybe_fail_fork_after_spawn(step: &str) -> Result<(), LifecycleError> {
     let Ok(reason) = std::env::var("TEAM_AGENT_TEST_FAIL_FORK_AFTER_SPAWN") else {
         return Ok(());
@@ -202,6 +257,8 @@ pub(super) fn upsert_forked_agent_state(
     spawn: &crate::transport::SpawnResult,
     spawn_cwd: &Path,
     profile_dir: Option<&Path>,
+    dynamic_role_file: &Path,
+    context_proof: &crate::provider::session::ContextForkProof,
 ) -> Result<(), LifecycleError> {
     if !state.is_object() {
         *state = serde_json::json!({});
@@ -242,6 +299,14 @@ pub(super) fn upsert_forked_agent_state(
         serde_json::json!(source_agent_id.as_str()),
     );
     entry.insert(
+        "dynamic_role_file".to_string(),
+        serde_json::json!(dynamic_role_file.to_string_lossy().to_string()),
+    );
+    entry.insert(
+        "role_source_ownership".to_string(),
+        serde_json::json!("managed"),
+    );
+    entry.insert(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn_cwd.to_string_lossy().to_string()),
     );
@@ -274,14 +339,36 @@ pub(super) fn upsert_forked_agent_state(
             );
         }
     }
-    entry.insert("session_id".to_string(), serde_json::Value::Null);
-    entry.insert("rollout_path".to_string(), serde_json::Value::Null);
-    entry.insert("captured_at".to_string(), serde_json::Value::Null);
-    entry.insert("captured_via".to_string(), serde_json::Value::Null);
+    entry.insert(
+        "session_id".to_string(),
+        serde_json::json!(context_proof.new_session_id.as_str()),
+    );
+    entry.insert(
+        "rollout_path".to_string(),
+        serde_json::json!(context_proof.backing_path.to_string_lossy().to_string()),
+    );
+    entry.insert(
+        "captured_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    entry.insert(
+        "captured_via".to_string(),
+        serde_json::json!(context_proof.captured_via),
+    );
     entry.insert(
         "attribution_confidence".to_string(),
-        serde_json::Value::Null,
+        serde_json::json!(context_proof.attribution_confidence),
     );
+    if let Some(root) = context_proof.managed_backing_root.as_ref() {
+        entry.insert(
+            "session_backing_root".to_string(),
+            serde_json::json!(root.to_string_lossy().to_string()),
+        );
+        entry.insert(
+            "session_backing_ownership".to_string(),
+            serde_json::json!("managed"),
+        );
+    }
     persist_command_plan_state(&mut entry, plan, profile_launch);
     agent_map.insert(
         as_agent_id.as_str().to_string(),

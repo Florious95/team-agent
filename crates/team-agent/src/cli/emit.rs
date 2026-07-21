@@ -115,6 +115,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "stop-agent" => cmd_stop_agent(&stop_agent_args(args, cwd)?).map(emit_result),
         "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?).map(emit_result),
         "add-agent" => cmd_add_agent(&add_agent_args(args, cwd)?).map(emit_result),
+        "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?).map(emit_result),
         "fork-agent" => cmd_fork_agent(&fork_agent_args(args, cwd)?).map(emit_result),
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?).map(emit_result),
         "stuck-list" => cmd_stuck_list(&stuck_list_args(args, cwd)).map(emit_result),
@@ -330,6 +331,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]".to_string(),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
+        Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
         // 0.5.26 (§7.6): removed from help; dispatch was never wired.
@@ -1354,6 +1356,21 @@ fn add_agent_args(args: &[String], cwd: &Path) -> Result<AddAgentArgs, CliError>
 fn fork_agent_args(args: &[String], cwd: &Path) -> Result<ForkAgentArgs, CliError> {
     let parsed = parse_args(args);
     Ok(ForkAgentArgs {
+        source_agent: required_pos(&parsed, 0, "source_agent")?,
+        workspace: workspace(&parsed, cwd),
+        team: parsed.team,
+        as_agent: parsed
+            .as_agent
+            .ok_or_else(|| CliError::Usage("missing --as".to_string()))?,
+        label: parsed.label,
+        no_display: parsed.no_display,
+        json: parsed.json,
+    })
+}
+
+fn clone_agent_args(args: &[String], cwd: &Path) -> Result<CloneAgentArgs, CliError> {
+    let parsed = parse_args(args);
+    Ok(CloneAgentArgs {
         source_agent: required_pos(&parsed, 0, "source_agent")?,
         workspace: workspace(&parsed, cwd),
         team: parsed.team,

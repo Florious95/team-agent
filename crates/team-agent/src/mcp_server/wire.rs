@@ -33,6 +33,7 @@ pub fn tools_contract() -> Vec<Value> {
         McpTool::StopAgent,
         McpTool::ResetAgent,
         McpTool::AddAgent,
+        McpTool::CloneAgent,
         McpTool::ForkAgent,
         McpTool::RequestHuman,
         McpTool::StuckList,
@@ -378,6 +379,7 @@ fn tool_contract(tool: McpTool) -> Value {
         McpTool::StopAgent => ("Stop a running worker.", vec!["agent_id"]),
         McpTool::ResetAgent => ("Reset one worker to a fresh session.", vec!["agent_id", "discard_session"]),
         McpTool::AddAgent => ("Add a first-class worker from a role file.", vec!["new_agent_id", "role_file_path"]),
+        McpTool::CloneAgent => ("Clone a worker role into a fresh provider session.", vec!["source_agent_id", "as_agent_id"]),
         McpTool::ForkAgent => ("Fork a running worker.", vec!["source_agent_id", "as_agent_id"]),
         McpTool::RequestHuman => ("Ask the leader or user for human input.", vec!["question"]),
         McpTool::StuckList => ("List manually suppressed idle alerts.", Vec::new()),
@@ -522,6 +524,23 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
                 string_property("Optional display label."),
             );
         }
+        McpTool::CloneAgent => {
+            insert_property(
+                &mut properties,
+                "source_agent_id",
+                string_property("Agent id to clone from."),
+            );
+            insert_property(
+                &mut properties,
+                "as_agent_id",
+                string_property("Agent id for the cloned worker."),
+            );
+            insert_property(
+                &mut properties,
+                "label",
+                string_property("Optional display label."),
+            );
+        }
         McpTool::RequestHuman => {
             insert_property(
                 &mut properties,
@@ -591,13 +610,7 @@ pub(crate) fn dispatch_tool(
         McpTool::SendMessage => {
             let target = message_target_from_value(args.get("to"));
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-            let outcome = tools.send_message(
-                &target,
-                content,
-                None,
-                None,
-                None,
-            )?;
+            let outcome = tools.send_message(&target, content, None, None, None)?;
             match outcome {
                 SendOutcome::WorkerAccepted { .. } => Ok(ToolOk {
                     fields: object_fields(outcome.to_value()),
@@ -668,6 +681,15 @@ pub(crate) fn dispatch_tool(
                 .unwrap_or(""),
             args.get("label").and_then(Value::as_str),
         ),
+        McpTool::CloneAgent => tools.clone_agent(
+            args.get("source_agent_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            args.get("as_agent_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            args.get("label").and_then(Value::as_str),
+        ),
         McpTool::RequestHuman => tools.request_human(
             args.get("question").and_then(Value::as_str).unwrap_or(""),
             args.get("task_id").and_then(Value::as_str),
@@ -695,6 +717,7 @@ fn scope_ceiling_tool(tool: McpTool) -> bool {
             | McpTool::GetTeamStatus
             | McpTool::StopAgent
             | McpTool::ResetAgent
+            | McpTool::CloneAgent
             | McpTool::ForkAgent
     )
 }

@@ -1,14 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::provider::types::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
 
 use super::{CaptureSessionContext, CapturedSessionCandidate};
 
 pub(super) fn scan_session_store(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Ok(home) = crate::provider::adapters::copilot_fork::copilot_home() else {
         return Vec::new();
     };
-    let db_path = home.join(".copilot").join("session-store.db");
+    let db_path = home.join("session-store.db");
     if !db_path.exists() {
         return Vec::new();
     }
@@ -59,6 +59,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct HomeGuard {
@@ -172,6 +173,49 @@ mod tests {
         let out = scan_session_store(&ctx);
         assert!(out.is_empty());
         drop(home_guard);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn copilot_scanner_respects_copilot_home() {
+        let base = tmp_root("custom-home");
+        let copilot_home = base.join("isolated-copilot");
+        std::fs::create_dir_all(&copilot_home).unwrap();
+        let worker_id = "1142c4c2-0000-4000-8000-000000000001";
+        let conn = rusqlite::Connection::open(copilot_home.join("session-store.db")).unwrap();
+        conn.execute(
+            "create table sessions (id text primary key, cwd text, updated_at integer)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into sessions (id, cwd, updated_at) values (?1, '/tmp/ws', 1)",
+            [worker_id],
+        )
+        .unwrap();
+        drop(conn);
+        let previous = std::env::var_os("COPILOT_HOME");
+        std::env::set_var("COPILOT_HOME", &copilot_home);
+        let ctx = CaptureSessionContext {
+            agent_id: "worker".to_string(),
+            spawn_cwd: base.join("ws"),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: Some(SessionId::new(worker_id)),
+            provider_projects_root: None,
+        };
+        let out = scan_session_store(&ctx);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].captured.session_id.as_ref().unwrap().as_str(),
+            worker_id
+        );
+        match previous {
+            Some(value) => std::env::set_var("COPILOT_HOME", value),
+            None => std::env::remove_var("COPILOT_HOME"),
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 

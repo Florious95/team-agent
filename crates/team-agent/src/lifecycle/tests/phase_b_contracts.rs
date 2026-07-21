@@ -129,6 +129,7 @@ fn concurrent_reset_discard_session_serializes() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn add_fork_remove_share_lifecycle_lock_behavior() {
     let (add_team, add_workspace, add_role, add_transport) = add_fixture();
     let add_agent = aid("w2");

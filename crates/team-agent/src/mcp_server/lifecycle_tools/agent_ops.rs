@@ -134,6 +134,40 @@ pub(crate) fn fork_agent(
     })
 }
 
+pub(crate) fn clone_agent(
+    workspace: &Path,
+    owner_team: Option<&TeamKey>,
+    source_agent_id: &str,
+    as_agent_id: &str,
+    label: Option<&str>,
+) -> ToolResult {
+    emit_newer_daemon_preserved_if_present(workspace)?;
+    let lifecycle_workspace = lifecycle_workspace(workspace, owner_team, false)?;
+    let report = crate::lifecycle::launch::clone_agent(
+        &lifecycle_workspace,
+        &AgentId::new(source_agent_id),
+        &AgentId::new(as_agent_id),
+        label,
+        false,
+        owner_team.map(TeamKey::as_str),
+    )
+    .map_err(tool_runtime_error)?;
+    Ok(ToolOk {
+        fields: object_fields(serde_json::json!({
+            "ok": true,
+            "status": "cloned",
+            "source_agent_id": report.source_agent_id.as_str(),
+            "agent_id": report.new_agent_id.as_str(),
+            "new_agent_id": report.new_agent_id.as_str(),
+            "state_file": report.env.state_file.to_string_lossy().to_string(),
+            "coordinator_started": report.env.coordinator_started,
+            "session_id": report.session_id.as_str(),
+            "new_session_id": report.session_id.as_str(),
+            "backing_path": report.backing_path.to_string_lossy().to_string(),
+        })),
+    })
+}
+
 fn reset_refusal_reason(reason: ResetRefusal) -> Value {
     match reason {
         ResetRefusal::DiscardSessionRequired => {
@@ -440,9 +474,9 @@ fn prepare_selected_team_state(
             state,
         )
         .map_err(|e| {
-        tool_runtime_error(format!(
-            "save MCP lifecycle scoped state {}: {e}",
-            workspace.display()
-        ))
-    })
+            tool_runtime_error(format!(
+                "save MCP lifecycle scoped state {}: {e}",
+                workspace.display()
+            ))
+        })
 }

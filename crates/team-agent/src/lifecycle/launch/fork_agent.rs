@@ -1,7 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
+use super::*;
+use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
@@ -10,10 +8,9 @@ use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
-
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
-
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// `fork_agent(workspace, source_agent_id, as_agent_id, ...)`(`lifecycle/operations.py:284`)。
 /// native session fork(provider 须 supports_session_fork ∧ auth_mode!=compatible_api);
@@ -104,12 +101,8 @@ pub fn fork_agent_with_transport(
     let source_agent = find_spec_agent(&spec, source_agent_id).ok_or_else(|| {
         LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
     })?;
-    // 0.4.6 tuple-atomic contract (audit §Fork 修改清单, line 201): fork
-    // must require the COMPLETE source tuple (session_id + rollout_path +
-    // captured_at + captured_via) before treating the scalar session_id
-    // as resumable truth. A row carrying only `session_id` is a partial
-    // tuple (pre-0.4.6 bug source), and the native fork would attach to
-    // a session that has no confirmed backing.
+    // Fork requires the complete source tuple before treating session_id as
+    // resumable truth; a scalar-only row has no confirmed backing.
     let source_agent_state = state
         .get("agents")
         .and_then(|v| v.get(source_agent_id.as_str()))
@@ -142,7 +135,24 @@ pub fn fork_agent_with_transport(
              (session_id+rollout_path+captured_at+captured_via required)"
         )));
     }
-    let session_id = crate::provider::SessionId::new(session_id_str.unwrap().to_string());
+    let Some(source_backing_raw) = rollout_path_str else {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session backing is missing"
+        )));
+    };
+    let source_backing = Path::new(source_backing_raw);
+    if !source_backing.is_file() {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session backing is not readable: {}",
+            source_backing.display()
+        )));
+    }
+    let Some(source_session_id) = session_id_str else {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session id is missing"
+        )));
+    };
+    let session_id = crate::provider::SessionId::new(source_session_id.to_string());
     let session_name = state
         .get("session_name")
         .and_then(|v| v.as_str())
@@ -160,7 +170,24 @@ pub fn fork_agent_with_transport(
             as_agent_id.as_str()
         )));
     }
-    let new_spec = append_forked_agent(&spec, source_agent, source_agent_id, as_agent_id, label)?;
+    let mut materialized_role = materialize_latest_role(
+        &workspace,
+        &fork_team_dir,
+        &state,
+        source_agent_id,
+        as_agent_id,
+        label,
+    )?;
+    clamp_materialized_role_to_leader(materialized_role.path(), &spec)?;
+    let team_meta = crate::compiler::read_front_matter(&fork_team_dir.join("TEAM.md"))
+        .map(|(meta, _)| meta)
+        .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+    let workspace_s = workspace.to_string_lossy().to_string();
+    let compiled =
+        crate::compiler::compile_role_agent(materialized_role.path(), &team_meta, &workspace_s)
+            .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+    let new_spec =
+        append_forked_agent(&spec, &compiled.agent, source_agent_id, as_agent_id, label)?;
     // validate 用角色定义目录的 team_workspace(校验 working_directory),非 spec 落点。
     let validate_ws =
         crate::model::paths::team_workspace(&fork_team_dir).unwrap_or_else(|_| workspace.clone());
@@ -223,14 +250,43 @@ pub fn fork_agent_with_transport(
     })?;
     // E5 §3:profiles 随角色定义目录(team_dir),不随已迁出的 spec。
     let profile_dir = fork_team_dir.join("profiles");
-    let profile_launch =
-        crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
+    let mut profile_launch =
+        match crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
             &workspace,
             as_agent_id.as_str(),
             new_agent,
             Some(&profile_dir),
             Some(&mcp_config),
-        )?;
+        ) {
+            Ok(profile_launch) => profile_launch,
+            Err(error) => {
+                let _ = std::fs::write(&spec_path, text.as_bytes());
+                let _ = std::fs::remove_file(&mcp_config_path);
+                return Err(error);
+            }
+        };
+    let mut copilot_fork = None;
+    if provider == Provider::Copilot {
+        let materialized = crate::provider::adapters::copilot_fork::materialize_copilot_fork(
+            &workspace,
+            as_agent_id.as_str(),
+            &session_id,
+        )
+        .map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            LifecycleError::Provider(error.to_string())
+        })?;
+        profile_launch.env_overlay.insert(
+            "COPILOT_HOME".to_string(),
+            materialized.home().to_string_lossy().to_string(),
+        );
+        profile_launch.env_overlay.insert(
+            "TEAM_AGENT_INTERNAL_COPILOT_FORK_SESSION_ID".to_string(),
+            materialized.session_id().as_str().to_string(),
+        );
+        copilot_fork = Some(materialized);
+    }
     let command_model = profile_launch.command_overrides.model.as_deref().or(model);
     // 0.4.x provider effort MVP: fork inherits effort from the new agent JSON
     // (compiler.rs propagated the role/team effort into the agent at fork-spawn).
@@ -257,8 +313,12 @@ pub fn fork_agent_with_transport(
         )
         .map_err(|e| {
             let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
             LifecycleError::Provider(e.to_string())
         })?;
+    profile_launch
+        .env_overlay
+        .remove("TEAM_AGENT_INTERNAL_COPILOT_FORK_SESSION_ID");
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
         point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
     }
@@ -269,6 +329,26 @@ pub fn fork_agent_with_transport(
         Some(&fork_team),
     );
     let window = WindowName::new(as_agent_id.as_str());
+    let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
+    let mut reserved_state = state.clone();
+    reserve_forked_agent_state(
+        &mut reserved_state,
+        source_agent_id,
+        as_agent_id,
+        new_agent,
+        materialized_role.path(),
+    )?;
+    if let Err(error) = crate::state::repository::StateRepository::new(&workspace).save(
+        crate::state::repository::StateWriteIntent::ForkAgent {
+            team_key: &fork_team,
+            agent_id: as_agent_id.as_str(),
+        },
+        &reserved_state,
+    ) {
+        let _ = std::fs::write(&spec_path, text.as_bytes());
+        cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+        return Err(LifecycleError::StatePersist(error.to_string()));
+    }
     // fork inherits the parent agent's owner team via runtime state (`active_team_key`).
     let mut env =
         inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
@@ -286,6 +366,11 @@ pub fn fork_agent_with_transport(
             provider,
         ),
     );
+    // The workspace lock protects the metadata reservation (managed role + spec).
+    // Provider spawn and backing convergence are per-seat work and must not hold
+    // the workspace-wide lock, otherwise N independent forks serialize behind a
+    // slow provider. Final state promotion reacquires the lock below.
+    drop(_lock);
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
             &session_name,
@@ -305,60 +390,60 @@ pub fn fork_agent_with_transport(
             &env_unset,
         )
     };
-    let spawn = spawn_result.map_err(|e| {
-        let _ = std::fs::write(&spec_path, text.as_bytes());
-        LifecycleError::Transport(e.to_string())
-    })?;
-    let old_state = state.clone();
-    let mut next_state = state;
-    upsert_forked_agent_state(
-        &mut next_state,
-        source_agent_id,
-        as_agent_id,
-        new_agent,
-        &safety,
+    let spawn = match spawn_result {
+        Ok(spawn) => spawn,
+        Err(error) => {
+            rollback_fork_after_spawn(
+                &workspace,
+                transport,
+                &session_name,
+                &window,
+                &mcp_config_path,
+                as_agent_id,
+                &profile_launch,
+                &fork_team,
+            );
+            return Err(LifecycleError::Transport(error.to_string()));
+        }
+    };
+    let context_proof = match crate::provider::session::verify_context_fork(
+        provider,
+        &session_id,
         &plan,
-        &profile_launch,
-        &spawn,
-        &workspace,
-        Some(&profile_dir),
-    )?;
-    if let Some(agent) = next_state
-        .get_mut("agents")
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|agents| agents.get_mut(as_agent_id.as_str()))
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        persist_effective_approval_policy(agent, &safety);
-    }
-    if let Err(e) = maybe_fail_fork_after_spawn("save_runtime_state") {
-        rollback_fork_after_spawn(
-            &workspace,
-            &spec_path,
-            &text,
-            &old_state,
-            transport,
-            &session_name,
-            &window,
-            &mcp_config_path,
-            as_agent_id,
-            &profile_launch,
-            &fork_team,
-        );
-        return Err(e);
-    }
-    if let Err(e) = crate::state::repository::StateRepository::new(&workspace).save(
-        crate::state::repository::StateWriteIntent::ForkAgent {
-            team_key: &fork_team,
-            agent_id: as_agent_id.as_str(),
-        },
-        &next_state,
+        &backing_before,
+        std::time::Duration::from_secs(3),
     ) {
+        Ok(proof) => proof,
+        Err(error) => {
+            rollback_fork_after_spawn(
+                &workspace,
+                transport,
+                &session_name,
+                &window,
+                &mcp_config_path,
+                as_agent_id,
+                &profile_launch,
+                &fork_team,
+            );
+            return Err(LifecycleError::Provider(error.to_string()));
+        }
+    };
+    if let Err(error) = finalize_fork_state(ForkFinalizeInput {
+        workspace: &workspace,
+        team_key: &fork_team,
+        source_agent_id,
+        agent_id: as_agent_id,
+        spec_agent: new_agent,
+        safety: &safety,
+        plan: &plan,
+        profile_launch: &profile_launch,
+        spawn: &spawn,
+        profile_dir: &profile_dir,
+        dynamic_role_file: materialized_role.path(),
+        context_proof: &context_proof,
+    }) {
         rollback_fork_after_spawn(
             &workspace,
-            &spec_path,
-            &text,
-            &old_state,
             transport,
             &session_name,
             &window,
@@ -367,42 +452,13 @@ pub fn fork_agent_with_transport(
             &profile_launch,
             &fork_team,
         );
-        return Err(LifecycleError::StatePersist(e.to_string()));
+        return Err(error);
     }
-    let registration =
-        crate::state::projection::select_runtime_state(&workspace, Some(fork_team.as_str()))
-            .map_err(|e| e.to_string())
-            .and_then(|saved| {
-                let agent = saved
-                    .get("agents")
-                    .and_then(|agents| agents.get(as_agent_id.as_str()))
-                    .ok_or_else(|| "canonical team row is missing".to_string())?;
-                if agent.get("pane_id").and_then(serde_json::Value::as_str)
-                    != Some(spawn.pane_id.as_str())
-                {
-                    return Err("canonical team pane_id does not match spawned pane".to_string());
-                }
-                if agent.get("window").and_then(serde_json::Value::as_str) != Some(window.as_str())
-                {
-                    return Err("canonical team window does not match spawned window".to_string());
-                }
-                if let Some(pid) = spawn.child_pid {
-                    if agent.get("pane_pid").and_then(serde_json::Value::as_u64)
-                        != Some(u64::from(pid))
-                    {
-                        return Err(
-                            "canonical team pane_pid does not match spawned process".to_string()
-                        );
-                    }
-                }
-                Ok(())
-            });
-    if let Err(reason) = registration {
+    if let Err(error) =
+        verify_fork_registration(&workspace, &fork_team, as_agent_id, &spawn, &window)
+    {
         rollback_fork_after_spawn(
             &workspace,
-            &spec_path,
-            &text,
-            &old_state,
             transport,
             &session_name,
             &window,
@@ -411,46 +467,22 @@ pub fn fork_agent_with_transport(
             &profile_launch,
             &fork_team,
         );
-        return Err(LifecycleError::StatePersist(format!(
-            "fork spawned but team registration readback failed: {reason}"
-        )));
+        return Err(error);
     }
-    if let Err(e) = maybe_fail_fork_after_spawn("start_coordinator") {
-        rollback_fork_after_spawn(
-            &workspace,
-            &spec_path,
-            &text,
-            &old_state,
-            transport,
-            &session_name,
-            &window,
-            &mcp_config_path,
-            as_agent_id,
-            &profile_launch,
-            &fork_team,
-        );
-        return Err(e);
-    }
-    let coordinator_started = crate::coordinator::start_coordinator(
-        &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
-    )
-    .map(|report| report.ok)
-    .map_err(|e| {
-        rollback_fork_after_spawn(
-            &workspace,
-            &spec_path,
-            &text,
-            &old_state,
-            transport,
-            &session_name,
-            &window,
-            &mcp_config_path,
-            as_agent_id,
-            &profile_launch,
-            &fork_team,
-        );
-        LifecycleError::StatePersist(e.to_string())
+    let coordinator_started = start_fork_coordinator(ForkCoordinatorInput {
+        workspace: &workspace,
+        team_key: &fork_team,
+        agent_id: as_agent_id,
+        transport,
+        session_name: &session_name,
+        window: &window,
+        mcp_config_path: &mcp_config_path,
+        profile_launch: &profile_launch,
     })?;
+    materialized_role.keep();
+    if let Some(materialized) = copilot_fork.as_mut() {
+        materialized.keep();
+    }
     Ok(ForkAgentReport {
         source_agent_id: source_agent_id.clone(),
         new_agent_id: as_agent_id.clone(),
@@ -459,34 +491,6 @@ pub fn fork_agent_with_transport(
             state_file: crate::state::persist::runtime_state_path(&workspace),
             coordinator_started,
         },
-        session_id: None,
+        session_id: Some(context_proof.new_session_id),
     })
-}
-
-pub(super) fn rollback_fork_after_spawn(
-    workspace: &Path,
-    spec_path: &Path,
-    spec_text: &str,
-    old_state: &serde_json::Value,
-    transport: &dyn Transport,
-    session_name: &SessionName,
-    window: &WindowName,
-    mcp_config_path: &Path,
-    agent_id: &AgentId,
-    profile_launch: &crate::provider::ProviderProfileLaunch,
-    team_key: &str,
-) {
-    let _ = transport.kill_window(&Target::SessionWindow {
-        session: session_name.clone(),
-        window: window.clone(),
-    });
-    let _ = std::fs::write(spec_path, spec_text.as_bytes());
-    let _ = crate::state::repository::StateRepository::new(workspace).save(
-        crate::state::repository::StateWriteIntent::AgentRollback {
-            team_key: Some(team_key),
-            agent_id: agent_id.as_str(),
-        },
-        old_state,
-    );
-    cleanup_fork_mcp_artifacts(workspace, agent_id, mcp_config_path, profile_launch);
 }

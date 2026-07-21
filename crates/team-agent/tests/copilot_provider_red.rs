@@ -434,12 +434,12 @@ agents_md_present={}",
     );
 }
 
-/// Face 4 (C-4-2/3, verdict `fork_agent_copilot_returns_capability_unsupported`):
-/// forking a copilot worker must return a STRUCTURED capability error naming the
-/// provider and the missing capability — never a silent fallback to a fresh restart.
+/// Face 4 re-charter: Copilot has a real store-fork primitive, so the blanket
+/// capability refusal is retired. Missing backing must still fail closed before
+/// spawn rather than silently degrading to a fresh session.
 #[test]
 #[serial(env)]
-fn copilot_fork_returns_structured_capability_unsupported() {
+fn copilot_fork_is_supported_but_missing_backing_never_falls_back_fresh() {
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("fork");
     let team_dir = write_copilot_team(&ws, "cp-fork", &["mcp_team"], false);
@@ -451,6 +451,7 @@ fn copilot_fork_returns_structured_capability_unsupported() {
     // is what fires.
     seed_session_id(&ws, "worker_a");
 
+    let fork_transport = RecordingTransport::new();
     let result = team_agent::lifecycle::launch::fork_agent_with_transport(
         &team_dir,
         &team_agent::model::ids::AgentId::new("worker_a"),
@@ -458,26 +459,27 @@ fn copilot_fork_returns_structured_capability_unsupported() {
         None,
         false,
         None,
-        &RecordingTransport::new(),
+        &fork_transport,
     );
 
-    let text = format!("{result:?}");
-    let mut failures = Vec::new();
-    if result.is_ok() {
-        failures.push(format!(
-            "C-4-3: copilot fork must be refused (no silent fallback to a fresh spawn); got Ok: {text}"
-        ));
-    }
-    if !(text.contains("copilot") && text.contains("fork")) {
-        failures.push(format!(
-            "C-4-2: the refusal must be structured — naming provider `copilot` and the \
-missing `fork` capability (Python unsupported-plug parity); got {text}"
-        ));
-    }
+    let text = format!("{result:?}").to_lowercase();
     assert!(
-        failures.is_empty(),
-        "copilot fork capability contract failed:\n{}",
-        failures.join("\n")
+        team_agent::provider::get_adapter(Provider::Copilot)
+            .caps()
+            .fork,
+        "Copilot store fork is a supported capability"
+    );
+    assert!(
+        result.is_err(),
+        "fixture has no Copilot store backing: {result:?}"
+    );
+    assert!(
+        !text.contains("capability") && !text.contains("does not support native session fork"),
+        "Copilot must not be rejected by the retired blanket capability gate: {result:?}"
+    );
+    assert!(
+        fork_transport.spawns.lock().unwrap().is_empty(),
+        "missing Copilot backing must fail before spawn, never fresh-fallback"
     );
 }
 

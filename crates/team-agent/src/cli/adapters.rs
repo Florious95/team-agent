@@ -876,8 +876,10 @@ fn fake_shutdown(workspace: &Path) -> Result<Value, CliError> {
             }
         }
     }
-    crate::state::repository::StateRepository::new(workspace)
-        .save(crate::state::repository::StateWriteIntent::FakeE2eSeed, &state)?;
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::FakeE2eSeed,
+        &state,
+    )?;
     Ok(json!({
         "ok": true,
         "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
@@ -1364,6 +1366,20 @@ pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
 pub fn cmd_fork_agent(args: &ForkAgentArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
         lifecycle_port::fork_agent(
+            &args.workspace,
+            &args.source_agent,
+            &args.as_agent,
+            args.label.as_deref(),
+            !args.no_display,
+            args.team.as_deref(),
+        )?,
+        args.json,
+    ))
+}
+
+pub fn cmd_clone_agent(args: &CloneAgentArgs) -> Result<CmdResult, CliError> {
+    Ok(CmdResult::from_json(
+        lifecycle_port::clone_agent(
             &args.workspace,
             &args.source_agent,
             &args.as_agent,

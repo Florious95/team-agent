@@ -301,14 +301,14 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: false,
             },
-            // Copilot(C-4-1 cr verdict):resume 走 --resume <sid>;**无 fork** 旗标,
-            // session-store 不支持 branched continuation → caps.fork=false 显式拒。
+            // Copilot resume 走 --resume <sid>;store fork 在隔离 COPILOT_HOME
+            // 复制并重键 session backing 后以 --resume <new sid> 启动。
             // native_mcp_config=true(`--additional-mcp-config` 接 inline JSON 或 @file);
             // writes_global_settings=false(session 走 --session-id 预定 UUID,不污染
             // ~/.copilot/mcp-config.json,help 原文 "augments config for this session")。
             Provider::Copilot => ProviderCaps {
                 resume: true,
-                fork: false,
+                fork: true,
                 native_mcp_config: true,
                 writes_global_settings: false,
             },
@@ -829,10 +829,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push("--fork-session".to_string());
                 Ok(argv)
             }
-            // C-4-2 cr verdict: copilot 无 fork 旗标 + session-store 不支持 branched
-            // continuation → 显式 CapabilityUnsupported,**绝不** silent fallback 到
-            // restart-from-scratch(MUST-NOT-13 诚实)。本分支理论上不可达(caps.fork=false
-            // 已在 fork_with_context 入口拦截,line 582),保留作 totality 守护。
+            // Context-free adapter calls cannot materialize the Copilot store fork.
+            // The lifecycle path uses `fork_plan`, which receives the prepared isolated
+            // backing; never degrade this context-free call to a fresh spawn.
             Provider::Copilot => Err(ProviderError::CapabilityUnsupported(
                 "copilot CLI 无 fork 旗标,session-store 不支持 branched continuation".to_string(),
             )),
@@ -917,6 +916,51 @@ impl ProviderAdapter for BasicProviderAdapter {
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(CommandPlan::argv_only(argv))
+            }
+            Provider::Copilot => {
+                if ctx.auth_mode == AuthMode::CompatibleApi {
+                    return Err(ProviderError::CapabilityUnsupported(
+                        "copilot does not support session fork in compatible_api mode".to_string(),
+                    ));
+                }
+                let profile = ctx.profile_launch.ok_or_else(|| {
+                    ProviderError::Command(
+                        "copilot fork requires a prepared provider profile".to_string(),
+                    )
+                })?;
+                let expected = profile
+                    .env_overlay
+                    .get("TEAM_AGENT_INTERNAL_COPILOT_FORK_SESSION_ID")
+                    .filter(|value| !value.is_empty())
+                    .map(SessionId::new)
+                    .ok_or_else(|| {
+                        ProviderError::Command(
+                            "copilot fork session backing was not materialized".to_string(),
+                        )
+                    })?;
+                let root = profile
+                    .env_overlay
+                    .get("COPILOT_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        ProviderError::Command("copilot fork root was not materialized".to_string())
+                    })?;
+                let mut argv = copilot_base_command_resume(
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                );
+                argv.push("--resume".to_string());
+                argv.push(expected.as_str().to_string());
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(expected),
+                    provider_projects_root: Some(root),
+                    managed_mcp_config: profile.managed_mcp_config,
+                })
             }
             _ => self
                 .fork_with_context(

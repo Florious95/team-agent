@@ -291,6 +291,15 @@ pub use fork_agent::{fork_agent, fork_agent_with_transport};
 mod fork_state;
 pub(super) use fork_state::*;
 
+mod fork_finalize;
+pub(super) use fork_finalize::*;
+
+mod role_source;
+pub(super) use role_source::*;
+
+mod clone_agent;
+pub use clone_agent::clone_agent;
+
 mod ownership;
 pub(super) use ownership::*;
 pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};

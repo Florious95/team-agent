@@ -293,7 +293,22 @@ fn write_claude_shim(workspace: &Path) -> PathBuf {
     let shim = bin_dir.join("claude");
     std::fs::write(
         &shim,
-        "#!/bin/sh\necho \"claude shim ready\"\nexec sleep 3600\n",
+        r#"#!/bin/sh
+sid=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--session-id" ]; then sid="$arg"; fi
+  prev="$arg"
+done
+if [ -n "$sid" ]; then
+  encoded=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
+  dir="$HOME/.claude/projects/$encoded"
+  mkdir -p "$dir"
+  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
+fi
+echo "claude shim ready"
+exec sleep 3600
+"#,
     )
     .expect("write claude shim");
     #[cfg(unix)]

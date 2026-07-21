@@ -29,3 +29,4 @@ include!("tests/classify.rs");
 include!("tests/idle.rs");
 include!("tests/adapter.rs");
 include!("tests/faults.rs");
+include!("tests/copilot_fork.rs");

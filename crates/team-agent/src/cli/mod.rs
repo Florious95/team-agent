@@ -2357,8 +2357,33 @@ pub mod lifecycle_port {
                 "ok": true,
                 "source_agent_id": report.source_agent_id.as_str(),
                 "new_agent_id": report.new_agent_id.as_str(),
+                "session_id": report.session_id.as_ref().map(|session| session.as_str()),
+                "new_session_id": report.session_id.as_ref().map(|session| session.as_str()),
             })),
             Err(e) => Ok(error_value(e)),
+        }
+    }
+    pub fn clone_agent(
+        workspace: &Path,
+        source_agent: &str,
+        as_agent_id: &str,
+        label: Option<&str>,
+        open_display: bool,
+        team: Option<&str>,
+    ) -> Result<Value, CliError> {
+        let source = crate::model::ids::AgentId::new(source_agent);
+        let dest = crate::model::ids::AgentId::new(as_agent_id);
+        match crate::lifecycle::clone_agent(workspace, &source, &dest, label, open_display, team) {
+            Ok(report) => Ok(json!({
+                "ok": true,
+                "status": "cloned",
+                "source_agent_id": report.source_agent_id.as_str(),
+                "new_agent_id": report.new_agent_id.as_str(),
+                "session_id": report.session_id.as_str(),
+                "new_session_id": report.session_id.as_str(),
+                "backing_path": report.backing_path.to_string_lossy(),
+            })),
+            Err(error) => Ok(error_value(error)),
         }
     }
     /// `runtime.remove_agent`(`cmd_remove_agent`;`--from-spec` 须配 `--confirm`)。

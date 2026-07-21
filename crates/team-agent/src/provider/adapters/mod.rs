@@ -24,4 +24,5 @@
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod copilot;
+pub(crate) mod copilot_fork;
 pub(crate) mod fake;

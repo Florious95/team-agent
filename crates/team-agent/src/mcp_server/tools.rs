@@ -139,7 +139,7 @@ impl TeamOrchestratorTools {
                     reconcile_assigned_task(latest, latest_team_key.as_deref(), &task_value);
                 },
             )
-        .map_err(tool_runtime_error)?;
+            .map_err(tool_runtime_error)?;
 
         let content = assignment_message(task, message);
         let out = self.send_message(
@@ -572,6 +572,22 @@ impl TeamOrchestratorTools {
         )
     }
 
+    pub fn clone_agent(
+        &self,
+        source_agent_id: &str,
+        as_agent_id: &str,
+        label: Option<&str>,
+    ) -> ToolResult {
+        let owner_team = self.canonical_owner_team_key()?;
+        super::lifecycle_tools::clone_agent(
+            &self.workspace,
+            owner_team.as_ref(),
+            source_agent_id,
+            as_agent_id,
+            label,
+        )
+    }
+
     /// `request_human` (`tools.py:342-346`): create a `requires_ack` leader message via
     /// the shared leader-delivery funnel; sender = env / inferred / `"unknown"`.
     /// Returns `{ok:true, message_id, status:"needs_human"}`.
@@ -797,9 +813,7 @@ impl TeamOrchestratorTools {
             .collect();
         let best = ranked.first().cloned();
         let hint = if let Some(best) = best.as_deref() {
-            format!(
-                "the requested peer is not in your owner team; did you mean `{best}`?"
-            )
+            format!("the requested peer is not in your owner team; did you mean `{best}`?")
         } else {
             "the requested peer is not part of your team; worker-origin MCP cannot widen team scope.".to_string()
         };

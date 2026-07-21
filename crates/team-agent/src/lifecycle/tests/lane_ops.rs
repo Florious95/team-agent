@@ -8,6 +8,25 @@ const DELEG_ROLE_ALPHA_COMPAT: &str = "---\nname: alpha\nrole: Alpha Worker\npro
 type LaneKills = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 pub(super) type LaneSpawns = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>;
 
+fn emit_codex_fork_backing(argv: &[String]) {
+    if !argv.windows(2).any(|pair| pair == ["codex", "fork"]) {
+        return;
+    }
+    static SESSION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SESSION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_id = format!("lane-fork-{}-{sequence}", std::process::id());
+    let root = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".codex/sessions/lane-fixture");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(format!("rollout-{session_id}.jsonl")),
+        format!(r#"{{"session_meta":{{"payload":{{"id":"{session_id}"}}}}}}\n"#),
+    )
+    .unwrap();
+}
+
 /// Recording transport for Lane-A v2: `list_windows`/`list_targets` answer from a configurable window
 /// set (golden's `_tmux_window_exists` primitive = `tmux list-windows`); `kill_window` + spawn_first/into
 /// are RECORDED. Every other method returns a benign Ok (never panics) so stop/reset/remove/fork run
@@ -56,6 +75,7 @@ impl crate::transport::Transport for LaneTransport {
         _c: &std::path::Path,
         _e: &std::collections::BTreeMap<String, String>,
     ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        emit_codex_fork_backing(argv);
         self.spawns
             .lock()
             .unwrap()
@@ -87,6 +107,7 @@ impl crate::transport::Transport for LaneTransport {
         _c: &std::path::Path,
         _e: &std::collections::BTreeMap<String, String>,
     ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        emit_codex_fork_backing(argv);
         self.spawns
             .lock()
             .unwrap()
@@ -1594,13 +1615,9 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
     );
 }
 
-// ── FORK (fork-report-session-id-is-pane-id) [RED] — report session_id is the captured id / None, not pane
-// Golden operations.py:399,408 returns state['agents'][as_agent_id].get('session_id') — the captured
-// provider session id (or None if capture missed, raise_on_missed=False). Rust sets
-// session_id: Some(SessionId::new(spawn.pane_id)) (launch.rs:502) — the tmux pane id ('%newfork'),
-// a different value kind. RED: the report session_id must NOT be the pane id (None, since the Rust fork
-// path performs no session capture).
+// Successful fork reports the verified provider session id, never the pane id.
 #[test]
+#[serial_test::serial(env)]
 fn lanea_fork_report_session_id_is_not_pane_id() {
     let ws = fork_ws(DELEG_ROLE_ALPHA); // codex+subscription -> native fork supported -> full success path
     let tx = LaneTransport::new("team-laneateam", &[]);
@@ -1613,9 +1630,9 @@ fn lanea_fork_report_session_id_is_not_pane_id() {
         "golden operations.py:399,408: report.session_id is the captured provider session id / None, NEVER the \
          tmux pane id; Rust returns Some(pane_id='%newfork')"
     );
-    assert_eq!(
-        report.session_id, None,
-        "the Rust fork path captures no session -> report.session_id must be None (golden capture-missed), not the pane id"
+    assert!(
+        report.session_id.is_some(),
+        "a successful fork must carry the verified NEW provider session id"
     );
 }
 
