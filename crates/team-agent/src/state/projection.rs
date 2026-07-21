@@ -312,6 +312,20 @@ fn team_has_live_leader_binding(team: &Value) -> bool {
     is_non_null_object("leader_receiver") || is_non_null_object("team_owner")
 }
 
+fn team_has_attached_leader_receiver(team: &Value) -> bool {
+    let Some(receiver) = team.get("leader_receiver").and_then(Value::as_object) else {
+        return false;
+    };
+    receiver
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("attached"))
+        && receiver
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .is_some_and(|pane| !pane.is_empty())
+}
+
 fn all_present_agents_terminal(team: &Value) -> bool {
     let Some(agents) = team.get("agents").and_then(Value::as_object) else {
         return false;
@@ -497,7 +511,11 @@ pub fn resolve_runtime_team_scope(
                 .get("active_team_key")
                 .and_then(Value::as_str)
                 .filter(|active| {
-                    alive.contains_key(*active) || teams.is_none_or(Map::is_empty)
+                    alive.contains_key(*active)
+                        || teams.is_none_or(Map::is_empty)
+                        || teams
+                            .and_then(|teams| teams.get(*active))
+                            .is_some_and(team_has_attached_leader_receiver)
                 })
                 .map(str::to_string)
                 .or_else(|| {
@@ -1227,6 +1245,49 @@ mod tests {
             resolved.state.get("active_team_key").and_then(Value::as_str),
             Some("alpha")
         );
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_accepts_attached_receiver_recovery() {
+        let ws = temp_ws_with_state(&json!({
+            "active_team_key": "alpha",
+            "teams": {
+                "alpha": {
+                    "agents": {},
+                    "leader_receiver": {"status": "attached", "pane_id": "%9"}
+                }
+            }
+        }));
+        let resolved = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
+        assert_eq!(resolved.canonical_team_key, "alpha");
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_accepts_shutdown_receiver_recovery() {
+        let ws = temp_ws_with_state(&json!({
+            "active_team_key": "alpha",
+            "teams": {
+                "alpha": {
+                    "status": "shutdown",
+                    "agents": {"worker": {"status": "stopped"}},
+                    "leader_receiver": {"status": "attached", "pane_id": "%9"}
+                }
+            }
+        }));
+        let resolved = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
+        assert_eq!(resolved.canonical_team_key, "alpha");
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_rejects_owner_only_stub() {
+        let ws = temp_ws_with_state(&json!({
+            "active_team_key": "old-team",
+            "teams": {
+                "old-team": {"agents": {}, "team_owner": {"pane_id": "%9"}}
+            }
+        }));
+        let error = resolve_runtime_team_scope(&ws, Some("current")).unwrap_err();
+        assert!(error.to_string().contains("team 'current' not found"));
     }
 
     #[test]
