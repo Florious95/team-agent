@@ -63,6 +63,59 @@ impl Case {
         self.workspace.to_str().expect("ws utf8")
     }
 
+    fn state_path(&self) -> PathBuf {
+        self.workspace
+            .join(".team")
+            .join("runtime")
+            .join("state.json")
+    }
+
+    /// Seed the SOURCE session tuple so the fork reaches its success path (a
+    /// hermetic PATH-shim has no real captured backing). Required after the R1
+    /// fixture revision: the success-path shim needs a valid source to copy from,
+    /// or the fork refuses with "source session backing missing" before it ever
+    /// materializes a role. The RED (compiled-spec vs latest-role) is unchanged.
+    fn seed_source_session_tuple(&self) {
+        let rollout = self.workspace.join("fixture-source-rollout.jsonl");
+        std::fs::write(&rollout, "{\"type\":\"fixture-source\"}\n").expect("write source rollout");
+        let Ok(raw) = std::fs::read_to_string(self.state_path()) else {
+            return;
+        };
+        let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return;
+        };
+        let tuple = serde_json::json!({
+            "session_id": "sess-cf-batch1-source",
+            "rollout_path": rollout.to_string_lossy(),
+            "captured_at": "2026-07-21T00:00:00Z",
+            "captured_via": "contract-fixture"
+        });
+        let mut patch = |row: &mut serde_json::Value| {
+            if let Some(obj) = row.as_object_mut() {
+                for (k, v) in tuple.as_object().unwrap() {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        };
+        if let Some(row) = state.get_mut("agents").and_then(|a| a.get_mut(SOURCE)) {
+            patch(row);
+        }
+        if let Some(teams) = state
+            .get_mut("teams")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for team in teams.values_mut() {
+                if let Some(row) = team.get_mut("agents").and_then(|a| a.get_mut(SOURCE)) {
+                    patch(row);
+                }
+            }
+        }
+        let _ = std::fs::write(
+            self.state_path(),
+            serde_json::to_string_pretty(&state).unwrap(),
+        );
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         self.env
             .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
@@ -148,13 +201,31 @@ fn write_source_role(workspace: &Path, body: &str) {
     .expect("write source role doc");
 }
 
+/// REVISION (implement interlock, 2026-07-21): the original R1 shim only spawned
+/// (`echo; exec sleep 3600`) and never produced a session transcript. During
+/// batch1/2 implement, runtime-owner surfaced a genuine contract conflict: the
+/// successor implementation, per R3/MUST-17, must obtain a `ContextForkProof`
+/// (NEW session_id + readable changed backing) or return `context_fork_unverified`
+/// and ROLL BACK the NEW managed role/spec/state/window. A shim that never emits a
+/// transcript therefore forces a rollback, so R1's "NEW materialized role exists
+/// and carries the marker" assertion would go red for the WRONG reason (the role
+/// was correctly rolled back), and keeping the role green would leave a half-seat
+/// (violating R3/R5 atomicity). Per leader ruling (L1 r2 precedent) the fix is a
+/// single-point fixture revision: the shim now writes a legitimate session
+/// backing (success path) so the fork completes without rollback and the NEW
+/// managed role is retained — while R1's RED cause is UNCHANGED: baseline does not
+/// consult backing and clones the role from the COMPILED SPEC, so the marker
+/// edited into the source role file after quick-start is still absent.
 fn write_claude_shim(workspace: &Path) -> PathBuf {
     let bin_dir = workspace.join("shim-bin");
     std::fs::create_dir_all(&bin_dir).expect("create shim dir");
     let shim = bin_dir.join("claude");
+    // Success-path shim: emit a session transcript into the hermetic HOME so the
+    // implementation can capture a verified NEW backing and NOT roll back the
+    // fork (matching batch2's emit_transcript=true success shim).
     std::fs::write(
         &shim,
-        "#!/bin/sh\necho \"claude shim ready\"\nexec sleep 3600\n",
+        "#!/bin/sh\nmkdir -p \"$HOME/.claude/projects/shim\"\necho '{\"type\":\"shim\"}' > \"$HOME/.claude/projects/shim/session.jsonl\"\necho 'claude shim ready'\nexec sleep 3600\n",
     )
     .expect("write claude shim");
     #[cfg(unix)]
@@ -200,6 +271,10 @@ fn r10_clone_agent_is_a_discoverable_cli_verb() {
 fn r1_fork_materializes_latest_source_role_file() {
     let mut case = Case::start("cf-r1");
     case.quick_start();
+    // Seed the source backing so the revised success-path shim lets the fork
+    // complete (without a valid source tuple the fork refuses before it ever
+    // materializes a role). The RED cause is unchanged by this.
+    case.seed_source_session_tuple();
 
     // Edit the SOURCE role file AFTER quick-start compiled the original body.
     let marker = "ROLE_REV_9F3K_LATEST";
@@ -218,8 +293,11 @@ fn r1_fork_materializes_latest_source_role_file() {
         "--json",
     ]);
     // The command need not be green at baseline; what R1 pins is that IF a NEW
-    // role is materialized, it reflects the LATEST source role file. Read the
-    // materialized role for NEW and assert the fresh marker is present.
+    // role is materialized, it reflects the LATEST source role file. With the
+    // revised success-path shim the fork completes (exit 0) yet clones the role
+    // from the stale COMPILED SPEC, so the marker is absent — the RED cause is the
+    // compiled-spec projection, not a rollback. Read the materialized role for NEW
+    // and assert the fresh marker is present.
     let _ = fork;
 
     let new_role_marker_present = materialized_role_contains(&case.workspace, NEW, marker);
