@@ -131,4 +131,38 @@ mod tests {
         common::apply_spawned_at_filter(Provider::Codex, &context, &mut out);
         assert!(out.is_empty());
     }
+
+    #[test]
+    fn unique_window_uses_created_at_not_active_sibling_mtime() {
+        let dir =
+            std::env::temp_dir().join(format!("ta-codex-created-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale =
+            dir.join("rollout-2026-07-22T03-12-13-11111111-1111-4111-8111-111111111111.jsonl");
+        let fresh =
+            dir.join("rollout-2026-07-22T03-15-30-22222222-2222-4222-8222-222222222222.jsonl");
+        std::fs::write(&stale, "{}\n").unwrap();
+        std::fs::write(&fresh, "{}\n").unwrap();
+        let context = CaptureSessionContext {
+            agent_id: "clone".to_string(),
+            spawn_cwd: dir.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some("2026-07-22T03:15:29+00:00".to_string()),
+            expected_session_id: None,
+            provider_projects_root: None,
+        };
+        let mut out = vec![
+            candidate(stale, "11111111-1111-4111-8111-111111111111"),
+            candidate(fresh.clone(), "22222222-2222-4222-8222-222222222222"),
+        ];
+        common::apply_spawn_time_window_if_unique(Provider::Codex, &context, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].captured.rollout_path.as_ref().unwrap().as_path(),
+            fresh
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

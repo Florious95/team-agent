@@ -132,11 +132,11 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
         "fork must allocate a new RFC4122 expected_session_id distinct from source; plan={fork:?}"
     );
     assert!(
-        argv_contains_adjacent(
-            &fork.argv,
-            &["--resume", source_session.as_str(), "--fork-session"]
-        ) && argv_has_flag(&fork.argv, "--session-id"),
-        "fork argv must carry both source resume and new --session-id; argv={:?}",
+        argv_contains_adjacent(&fork.argv, &["--resume", fork_session_id])
+            && !argv_has_flag(&fork.argv, "--session-id")
+            && !argv_has_flag(&fork.argv, "--fork-session")
+            && !fork.argv.iter().any(|arg| arg == source_session.as_str()),
+        "fork argv must resume only the materialized snapshot id; argv={:?}",
         fork.argv
     );
 

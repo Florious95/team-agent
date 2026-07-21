@@ -9,17 +9,10 @@ pub(super) struct ForkPostSpawnInput<'a> {
     pub agent_id: &'a AgentId,
     pub profile_launch: &'a crate::provider::ProviderProfileLaunch,
     pub team_key: &'a str,
-    pub provider: Provider,
     pub spawn: &'a crate::transport::SpawnResult,
-    pub plan: &'a crate::provider::CommandPlan,
-    pub source_backing: &'a Path,
-    pub source_session_id: &'a crate::provider::SessionId,
 }
 
-pub(super) fn prepare_fork_backing_after_live_spawn(
-    input: ForkPostSpawnInput<'_>,
-) -> Result<Option<crate::provider::adapters::claude_fork::ClaudeForkMaterialization>, LifecycleError>
-{
+pub(super) fn ensure_fork_spawn_live(input: ForkPostSpawnInput<'_>) -> Result<(), LifecycleError> {
     let rollback = || {
         rollback_fork_after_spawn(
             input.workspace,
@@ -43,27 +36,33 @@ pub(super) fn prepare_fork_backing_after_live_spawn(
             input.spawn.pane_id.as_str()
         )));
     }
-    if !matches!(input.provider, Provider::Claude | Provider::ClaudeCode) {
+    Ok(())
+}
+
+pub(super) fn prepare_claude_fork_backing(
+    provider: Provider,
+    plan: &crate::provider::CommandPlan,
+    source_backing: &Path,
+    source_session_id: &crate::provider::SessionId,
+) -> Result<Option<crate::provider::adapters::claude_fork::ClaudeForkMaterialization>, LifecycleError>
+{
+    if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         return Ok(None);
     }
-    let target_session_id = input.plan.expected_session_id.as_ref().ok_or_else(|| {
-        LifecycleError::Provider(
-            "claude fork plan has no target session id for snapshot copy".to_string(),
-        )
+    let target_session_id = plan.expected_session_id.as_ref().ok_or_else(|| {
+        LifecycleError::Provider("claude fork plan has no snapshot session id".to_string())
     })?;
-    match crate::provider::adapters::claude_fork::materialize_claude_fork(
-        input.source_backing,
-        input.source_session_id,
+    crate::provider::adapters::claude_fork::materialize_claude_fork(
+        source_backing,
+        source_session_id,
         target_session_id,
-    ) {
-        Ok(materialized) => Ok(Some(materialized)),
-        Err(error) => {
-            rollback();
-            Err(LifecycleError::Provider(format!(
-                "context_fork_unavailable: claude snapshot copy failed after live spawn: {error}"
-            )))
-        }
-    }
+    )
+    .map(Some)
+    .map_err(|error| {
+        LifecycleError::Provider(format!(
+            "context_fork_unavailable: claude snapshot copy failed before spawn: {error}"
+        ))
+    })
 }
 
 pub(super) struct ForkCoordinatorInput<'a> {
@@ -119,6 +118,8 @@ pub(super) struct ForkFinalizeInput<'a> {
     pub profile_dir: &'a Path,
     pub dynamic_role_file: &'a Path,
     pub context_proof: &'a crate::provider::session::ContextForkProof,
+    pub spawned_at: &'a str,
+    pub spawn_epoch: u64,
 }
 
 pub(super) fn finalize_fork_state(input: ForkFinalizeInput<'_>) -> Result<(), LifecycleError> {
@@ -148,6 +149,8 @@ pub(super) fn finalize_fork_state(input: ForkFinalizeInput<'_>) -> Result<(), Li
         Some(input.profile_dir),
         input.dynamic_role_file,
         input.context_proof,
+        input.spawned_at,
+        input.spawn_epoch,
     )?;
     if let Some(agent) = next_state
         .get_mut("agents")

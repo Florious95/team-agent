@@ -97,6 +97,11 @@ pub(super) fn cleanup_fork_mcp_artifacts(
             .join(".team/runtime/provider-env")
             .join(format!("{}.env", agent_id.as_str())),
     );
+    let _ = std::fs::remove_dir_all(
+        workspace
+            .join(".team/runtime/copilot-instructions")
+            .join(agent_id.as_str()),
+    );
     if let Some(config_dir) = profile_launch.claude_config_dir.as_ref() {
         let _ = std::fs::remove_dir_all(config_dir.parent().unwrap_or(config_dir));
     }
@@ -259,6 +264,8 @@ pub(super) fn upsert_forked_agent_state(
     profile_dir: Option<&Path>,
     dynamic_role_file: &Path,
     context_proof: &crate::provider::session::ContextForkProof,
+    spawned_at: &str,
+    spawn_epoch: u64,
 ) -> Result<(), LifecycleError> {
     if !state.is_object() {
         *state = serde_json::json!({});
@@ -314,6 +321,8 @@ pub(super) fn upsert_forked_agent_state(
         "pane_id".to_string(),
         serde_json::json!(spawn.pane_id.as_str()),
     );
+    entry.insert("spawned_at".to_string(), serde_json::json!(spawned_at));
+    entry.insert("spawn_epoch".to_string(), serde_json::json!(spawn_epoch));
     if let Some(pid) = spawn.child_pid {
         entry.insert("pane_pid".to_string(), serde_json::json!(pid));
     }

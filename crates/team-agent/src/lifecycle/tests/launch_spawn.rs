@@ -2481,6 +2481,10 @@ fn restart_allow_fresh_copilot_keeps_session_id_null_until_capture_confirms() {
         .windows(2)
         .find_map(|pair| (pair[0] == "--session-id").then(|| pair[1].clone()))
         .expect("copilot fresh spawn argv must include --session-id");
+    let instructions =
+        std::fs::read_to_string(ws.join(".team/runtime/copilot-instructions/alpha/AGENTS.md"))
+            .expect("restart/add/clone spawn must materialize Copilot instructions");
+    assert!(instructions.contains("Alpha Worker"));
     let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
     let agent = state.pointer("/agents/alpha").expect("alpha state");
     // 0.4.6 contract: session_id stays null until scanner confirms sqlite.

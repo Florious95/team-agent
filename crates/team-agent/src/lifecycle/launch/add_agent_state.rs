@@ -28,6 +28,11 @@ pub(super) fn rollback_add_agent_atomic(
     agent_id: &AgentId,
     reason: &str,
 ) {
+    let _ = std::fs::remove_dir_all(
+        run_workspace
+            .join(".team/runtime/copilot-instructions")
+            .join(agent_id.as_str()),
+    );
     let spec_restored = if let Some(text) = pre_spec_text {
         std::fs::write(spec_path, text).is_ok()
     } else {

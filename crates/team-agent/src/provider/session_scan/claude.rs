@@ -75,7 +75,7 @@ pub(super) fn apply_expected_session_filter(
             .collect();
         return Ok(positive_only);
     }
-    super::common::apply_spawn_time_window_if_unique(context, &mut out);
+    super::common::apply_spawn_time_window_if_unique(Provider::Claude, context, &mut out);
     Ok(out)
 }
 

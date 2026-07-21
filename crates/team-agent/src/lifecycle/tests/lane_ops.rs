@@ -202,7 +202,7 @@ impl crate::transport::Transport for LaneTransport {
         &self,
         _p: &crate::transport::PaneId,
     ) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
-        Ok(crate::model::enums::PaneLiveness::Unknown)
+        Ok(crate::model::enums::PaneLiveness::Live)
     }
     fn list_targets(
         &self,
@@ -1669,6 +1669,12 @@ fn lanea_fork_report_session_id_is_not_pane_id() {
         report.session_id.is_some(),
         "a successful fork must carry the verified NEW provider session id"
     );
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let row = &state["agents"]["newfork"];
+    assert!(row["spawned_at"]
+        .as_str()
+        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()));
+    assert_eq!(row["spawn_epoch"], serde_json::json!(1));
 }
 
 // ── REMOVE #6/#12 (remove-rollback-no-agent-health-3 / remove-rollback-health-1) [SEAM #[ignore]] ────

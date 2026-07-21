@@ -297,6 +297,29 @@ pub fn fork_agent_with_transport(
     }
     let window = WindowName::new(as_agent_id.as_str());
     let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
+    let mut claude_fork = prepare_claude_fork_backing(provider, &plan, source_backing, &session_id)
+        .map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            error
+        })?;
+    let mut env =
+        inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
+    apply_profile_launch_env(&mut env, &profile_launch);
+    apply_mcp_auto_approval_env(&mut env, &safety);
+    if provider == Provider::Copilot {
+        apply_copilot_instructions_overlay(
+            &workspace,
+            as_agent_id.as_str(),
+            &system_prompt,
+            &mut env,
+        )
+        .map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            error
+        })?;
+    }
     let mut reserved_state = state.clone();
     reserve_forked_agent_state(
         &mut reserved_state,
@@ -316,14 +339,7 @@ pub fn fork_agent_with_transport(
         cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
         return Err(LifecycleError::StatePersist(error.to_string()));
     }
-    // fork inherits the parent agent's owner team via runtime state (`active_team_key`).
-    let mut env =
-        inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
-    apply_profile_launch_env(&mut env, &profile_launch);
-    apply_mcp_auto_approval_env(&mut env, &safety);
-    // golden operations.py:336 -> _tmux_start_command_for_agent_window (runtime.py:1017-1020): branch on
-    // _tmux_session_exists — an ABSENT session => new-session (spawn_first), present => new-window
-    // (spawn_into). The Rust restart seam (restart.rs spawn_agent_window) uses the same branch.
+    // Match launch/restart: absent session spawns first; otherwise add a window.
     let session_live = transport.has_session(&session_name).unwrap_or(false);
     let env_unset = crate::layout::worker_env::isolate_worker_spawn_env(
         provider,
@@ -338,6 +354,9 @@ pub fn fork_agent_with_transport(
     // the workspace-wide lock, otherwise N independent forks serialize behind a
     // slow provider. Final state promotion reacquires the lock below.
     drop(_lock);
+    let spawned_at = spawn_timestamp();
+    // A fork target is new by contract, so its first lifecycle cohort is epoch 1.
+    let spawn_epoch = 1;
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
             &session_name,
@@ -373,7 +392,7 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
-    let mut claude_fork = prepare_fork_backing_after_live_spawn(ForkPostSpawnInput {
+    ensure_fork_spawn_live(ForkPostSpawnInput {
         workspace: &workspace,
         transport,
         session_name: &session_name,
@@ -382,11 +401,7 @@ pub fn fork_agent_with_transport(
         agent_id: as_agent_id,
         profile_launch: &profile_launch,
         team_key: &fork_team,
-        provider,
         spawn: &spawn,
-        plan: &plan,
-        source_backing,
-        source_session_id: &session_id,
     })?;
     let convergence_deadline =
         crate::provider::session::context_fork_convergence_deadline(provider);
@@ -425,6 +440,8 @@ pub fn fork_agent_with_transport(
         profile_dir: &profile_dir,
         dynamic_role_file: materialized_role.path(),
         context_proof: &context_proof,
+        spawned_at: &spawned_at,
+        spawn_epoch,
     }) {
         rollback_fork_after_spawn(
             &workspace,

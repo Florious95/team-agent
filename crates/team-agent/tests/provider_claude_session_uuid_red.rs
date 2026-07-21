@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use team_agent::model::enums::{AuthMode, Provider};
-use team_agent::provider::{get_adapter, SessionId};
+use team_agent::provider::{get_adapter, ProviderCommandContext, SessionId};
 
 #[test]
 fn claude_fresh_launch_session_id_is_rfc4122_uuid_not_session_prefix() {
@@ -35,26 +35,41 @@ fn claude_fresh_launch_session_id_is_rfc4122_uuid_not_session_prefix() {
 }
 
 #[test]
-fn claude_fork_new_session_id_is_rfc4122_uuid_not_session_prefix() {
+fn claude_fork_snapshot_id_is_rfc4122_uuid_and_resume_only() {
     let source_session = SessionId::new("11111111-2222-4333-8444-555555555555");
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
-        let argv = adapter
-            .fork(Some(&source_session), AuthMode::Subscription, None)
-            .expect("Claude fork command should build");
-        let new_session_id = session_id_after_flag(&argv);
+        let plan = adapter
+            .fork_plan(
+                Some(&source_session),
+                ProviderCommandContext {
+                    auth_mode: AuthMode::Subscription,
+                    mcp_config: None,
+                    system_prompt: None,
+                    model: None,
+                    tools: &[],
+                    profile_launch: None,
+                    agent_id_hint: None,
+                    effort: None,
+                },
+            )
+            .expect("Claude lifecycle fork plan should build");
+        let snapshot_id = plan
+            .expected_session_id
+            .as_ref()
+            .expect("Claude lifecycle fork must allocate a snapshot id")
+            .as_str();
 
         assert!(
-            is_rfc4122_uuid(new_session_id),
-            "Claude fork --session-id must generate a valid RFC4122 UUID accepted by Claude CLI; provider={provider:?} new_session_id={new_session_id:?} argv={argv:?}"
+            is_rfc4122_uuid(snapshot_id),
+            "Claude fork snapshot id must be a valid RFC4122 UUID; provider={provider:?} snapshot_id={snapshot_id:?} plan={plan:?}"
         );
         assert!(
-            !new_session_id.starts_with("session-"),
-            "Claude fork --session-id must not use Team Agent's invalid session-<hex> prefix; provider={provider:?} new_session_id={new_session_id:?} argv={argv:?}"
-        );
-        assert!(
-            argv_contains_adjacent(&argv, &["--resume", source_session.as_str(), "--fork-session"]),
-            "Claude fork must still resume/fork from the source session while generating a separate UUID for --session-id; argv={argv:?}"
+            argv_contains_adjacent(&plan.argv, &["--resume", snapshot_id])
+                && !plan.argv.iter().any(|arg| arg == "--session-id")
+                && !plan.argv.iter().any(|arg| arg == "--fork-session")
+                && !plan.argv.iter().any(|arg| arg == source_session.as_str()),
+            "Claude fork must resume only the materialized snapshot id; provider={provider:?} plan={plan:?}"
         );
     }
 }

@@ -150,7 +150,6 @@ pub(super) fn apply_spawned_at_filter(
         };
         if matches!(provider, Provider::Codex) {
             return super::codex::rollout_created_at(path.as_path())
-                .or_else(|| candidate_mtime(path.as_path()))
                 .is_some_and(|created_at| created_at >= spawned_at);
         }
         candidate_mtime(path.as_path()).is_some_and(|mtime| mtime >= spawned_at)
@@ -164,6 +163,7 @@ fn candidate_mtime(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 pub(super) fn apply_spawn_time_window_if_unique(
+    provider: Provider,
     context: &CaptureSessionContext,
     out: &mut Vec<CapturedSessionCandidate>,
 ) {
@@ -184,12 +184,11 @@ pub(super) fn apply_spawn_time_window_if_unique(
                 .captured
                 .rollout_path
                 .as_ref()
-                .and_then(|p| {
-                    std::fs::metadata(p.as_path())
-                        .and_then(|m| m.modified())
-                        .ok()
+                .and_then(|p| match provider {
+                    Provider::Codex => super::codex::rollout_created_at(p.as_path()),
+                    _ => candidate_mtime(p.as_path()),
                 })
-                .is_some_and(|mtime| mtime >= spawned_at)
+                .is_some_and(|created_at| created_at >= spawned_at)
         })
         .cloned()
         .collect();

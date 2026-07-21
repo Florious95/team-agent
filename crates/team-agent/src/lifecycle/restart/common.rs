@@ -327,6 +327,14 @@ pub(super) fn spawn_agent_window(
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
+    if provider == crate::provider::Provider::Copilot {
+        crate::lifecycle::launch::apply_copilot_instructions_overlay(
+            workspace,
+            agent_id.as_str(),
+            &system_prompt,
+            &mut env,
+        )?;
+    }
     // 0.3.28 Step 3: per Python parity, worker spawn cwd is ALWAYS `workspace`.
     // The persisted-state `agent.spawn_cwd` override is ignored (it was a
     // Rust-only extension that drifted to `.team/runtime/<team_key>/` after
