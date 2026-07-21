@@ -349,13 +349,9 @@ pub fn fork_agent_with_transport(
             provider,
         ),
     );
-    // The workspace lock protects the metadata reservation (managed role + spec).
-    // Provider spawn and backing convergence are per-seat work and must not hold
-    // the workspace-wide lock, otherwise N independent forks serialize behind a
-    // slow provider. Final state promotion reacquires the lock below.
+    // Release the metadata lock before per-seat provider convergence; finalize reacquires it.
     drop(_lock);
     let spawned_at = spawn_timestamp();
-    // A fork target is new by contract, so its first lifecycle cohort is epoch 1.
     let spawn_epoch = 1;
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
@@ -410,6 +406,9 @@ pub fn fork_agent_with_transport(
         &session_id,
         &plan,
         &backing_before,
+        as_agent_id.as_str(),
+        &workspace,
+        &spawned_at,
         convergence_deadline,
     ) {
         Ok(proof) => proof,

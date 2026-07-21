@@ -49,10 +49,24 @@ pub(crate) fn verify_context_fork(
     source_session_id: &SessionId,
     plan: &CommandPlan,
     before: &ContextBackingSnapshot,
+    agent_id: &str,
+    spawn_cwd: &Path,
+    spawned_at: &str,
     deadline: Duration,
 ) -> Result<ContextForkProof, ProviderError> {
     if provider == Provider::Copilot {
         return verify_copilot_fork(source_session_id, plan);
+    }
+    if provider == Provider::Codex {
+        return verify_codex_fork(
+            source_session_id,
+            plan,
+            before,
+            agent_id,
+            spawn_cwd,
+            spawned_at,
+            deadline,
+        );
     }
     let started = std::time::Instant::now();
     loop {
@@ -88,6 +102,66 @@ pub(crate) fn verify_context_fork(
     }
     Err(ProviderError::CaptureFailed(format!(
         "context_fork_unverified: {provider:?} produced no readable NEW session backing within {}ms",
+        deadline.as_millis()
+    )))
+}
+
+fn verify_codex_fork(
+    source_session_id: &SessionId,
+    plan: &CommandPlan,
+    before: &ContextBackingSnapshot,
+    agent_id: &str,
+    spawn_cwd: &Path,
+    spawned_at: &str,
+    deadline: Duration,
+) -> Result<ContextForkProof, ProviderError> {
+    let context = crate::provider::session_scan::CaptureSessionContext {
+        agent_id: agent_id.to_string(),
+        spawn_cwd: spawn_cwd.to_path_buf(),
+        pane_id: None,
+        pane_pid: None,
+        spawned_at: Some(spawned_at.to_string()),
+        expected_session_id: plan.expected_session_id.clone(),
+        provider_projects_root: plan.provider_projects_root.clone(),
+    };
+    let started = std::time::Instant::now();
+    loop {
+        let current = jsonl_files(&before.root);
+        for candidate in
+            crate::provider::session_scan::scan_session_candidates_once(Provider::Codex, &context)?
+        {
+            let Some(path) = candidate.captured.rollout_path.as_ref() else {
+                continue;
+            };
+            let Some(stamp) = current.get(path.as_path()) else {
+                continue;
+            };
+            if before.files.get(path.as_path()) == Some(stamp) {
+                continue;
+            }
+            let Some(new_session_id) = candidate.captured.session_id else {
+                continue;
+            };
+            if new_session_id == *source_session_id {
+                continue;
+            }
+            return Ok(ContextForkProof {
+                provider: Provider::Codex,
+                source_session_id: source_session_id.clone(),
+                new_session_id,
+                backing_path: path.as_path().to_path_buf(),
+                captured_via: "context_fork_verified".to_string(),
+                attribution_confidence: "high".to_string(),
+                managed_backing_root: None,
+            });
+        }
+        if started.elapsed() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(ProviderError::CaptureFailed(format!(
+        "context_fork_unverified: Codex produced no readable NEW session backing within {}ms",
         deadline.as_millis()
     )))
 }
@@ -225,6 +299,7 @@ fn session_id_from_jsonl(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn context_fork_deadlines_are_provider_specific() {
@@ -240,5 +315,68 @@ mod tests {
             context_fork_convergence_deadline(Provider::Copilot),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn codex_fork_proof_ignores_changed_stale_and_foreign_rollouts() {
+        let root =
+            std::env::temp_dir().join(format!("ta-codex-fork-proof-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let current_cwd = root.join("current");
+        let foreign_cwd = root.join("foreign");
+        std::fs::create_dir_all(&current_cwd).unwrap();
+        std::fs::create_dir_all(&foreign_cwd).unwrap();
+        let stale = root.join(
+            "2026/07/16/rollout-2026-07-16T08-05-43-019f6686-e2b6-7000-8000-000000000001.jsonl",
+        );
+        let fresh = root.join(
+            "2026/07/22/rollout-2026-07-22T04-01-01-019f8644-7450-7000-8000-000000000002.jsonl",
+        );
+        let foreign = root.join(
+            "2026/07/22/rollout-2026-07-22T04-01-02-019f8644-7838-7000-8000-000000000003.jsonl",
+        );
+        let write_rollout = |path: &Path, cwd: &Path, id: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{}\"}}}}\n",
+                    cwd.to_string_lossy()
+                ),
+            )
+            .unwrap();
+        };
+        write_rollout(&stale, &current_cwd, "stale-session");
+        let plan = CommandPlan {
+            argv: Vec::new(),
+            expected_session_id: None,
+            provider_projects_root: Some(root.clone()),
+            managed_mcp_config: false,
+        };
+        let before = ContextBackingSnapshot::capture(Provider::Codex, &plan);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&stale)
+            .unwrap()
+            .write_all(b"{\"type\":\"event_msg\"}\n")
+            .unwrap();
+        write_rollout(&foreign, &foreign_cwd, "foreign-session");
+        write_rollout(&fresh, &current_cwd, "fresh-session");
+
+        let proof = verify_context_fork(
+            Provider::Codex,
+            &SessionId::new("source-session"),
+            &plan,
+            &before,
+            "fork",
+            &current_cwd,
+            "2026-07-21T20:00:00+00:00",
+            Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(proof.new_session_id.as_str(), "fresh-session");
+        assert_eq!(proof.backing_path, fresh);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

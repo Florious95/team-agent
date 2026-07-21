@@ -8,7 +8,7 @@ const DELEG_ROLE_ALPHA_COMPAT: &str = "---\nname: alpha\nrole: Alpha Worker\npro
 type LaneKills = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 pub(super) type LaneSpawns = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>;
 
-fn emit_codex_fork_backing(argv: &[String]) {
+fn emit_codex_fork_backing(argv: &[String], cwd: &std::path::Path) {
     if !argv.windows(2).any(|pair| pair == ["codex", "fork"]) {
         return;
     }
@@ -23,7 +23,8 @@ fn emit_codex_fork_backing(argv: &[String]) {
     std::fs::write(
         root.join(format!("rollout-{session_id}.jsonl")),
         format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}},\"created_at\":\"{}\"}}\n",
+            cwd.to_string_lossy(),
             chrono::Utc::now().to_rfc3339()
         ),
     )
@@ -106,10 +107,10 @@ impl crate::transport::Transport for LaneTransport {
         session: &crate::transport::SessionName,
         window: &crate::transport::WindowName,
         argv: &[String],
-        _c: &std::path::Path,
+        c: &std::path::Path,
         _e: &std::collections::BTreeMap<String, String>,
     ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
-        emit_codex_fork_backing(argv);
+        emit_codex_fork_backing(argv, c);
         self.spawns
             .lock()
             .unwrap()
@@ -138,10 +139,10 @@ impl crate::transport::Transport for LaneTransport {
         session: &crate::transport::SessionName,
         window: &crate::transport::WindowName,
         argv: &[String],
-        _c: &std::path::Path,
+        c: &std::path::Path,
         _e: &std::collections::BTreeMap<String, String>,
     ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
-        emit_codex_fork_backing(argv);
+        emit_codex_fork_backing(argv, c);
         self.spawns
             .lock()
             .unwrap()
