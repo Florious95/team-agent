@@ -365,16 +365,16 @@ fn orphan_self_terminate_false_when_workspace_exists() {
 
 #[test]
 fn metadata_ok_requires_all_three_to_match() {
-    // metadata.py:37-43 — pid ∧ protocol_version==2 ∧ schema_version==3.
-    let good = meta(555, PROTOCOL_VERSION, GOLDEN_SCHEMA_VERSION);
+    // metadata.py:37-43 — pid, protocol version, and current message schema all match.
+    let good = meta(555, PROTOCOL_VERSION, crate::db::schema::SCHEMA_VERSION);
     assert!(coordinator_metadata_ok(Some(&good), Pid(555)));
     // pid 不符 → false。
     assert!(!coordinator_metadata_ok(Some(&good), Pid(999)));
     // protocol_version 不符(bump 触发 restart_incompatible)→ false。
-    let bad_proto = meta(555, 1, GOLDEN_SCHEMA_VERSION);
+    let bad_proto = meta(555, 1, crate::db::schema::SCHEMA_VERSION);
     assert!(!coordinator_metadata_ok(Some(&bad_proto), Pid(555)));
     // schema_version 不符 → false(不可静默继续旧 schema 写库,card §89)。
-    let bad_schema = meta(555, PROTOCOL_VERSION, 2);
+    let bad_schema = meta(555, PROTOCOL_VERSION, crate::db::schema::SCHEMA_VERSION - 1);
     assert!(!coordinator_metadata_ok(Some(&bad_schema), Pid(555)));
 }
 
