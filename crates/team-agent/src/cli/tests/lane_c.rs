@@ -361,7 +361,7 @@ fn cleanup_orphans_dryrun_golden_envelope() {
 // ── fix_schema: golden fix_schema_layout diagnosis envelope (schema_migration.py:258) ─────────────
 // {ok,status,db_path,schema_version,user_version,layout_diffs,recommended_action,would_backup_path,
 // fixed,rebuilds}. RUST mod.rs:538-540 stub {ok,fixed:false}. db_path/would_backup_path are
-// path/clock-derived; lock the deterministic fields. SCHEMA_VERSION==3. RED. ─────────────────────
+// path/clock-derived; lock the deterministic fields against the canonical SCHEMA_VERSION. ────────
 #[test]
 fn fix_schema_golden_layout_diagnosis_envelope() {
     let ws = tmp_workspace();
@@ -370,8 +370,8 @@ fn fix_schema_golden_layout_diagnosis_envelope() {
     assert_eq!(v["status"], json!("missing"), "missing db: status missing");
     assert_eq!(
         v["schema_version"],
-        json!(3),
-        "golden schema_version == SCHEMA_VERSION (3)"
+        json!(crate::db::schema::SCHEMA_VERSION),
+        "golden schema_version == canonical SCHEMA_VERSION"
     );
     assert_eq!(v["user_version"], json!(0), "missing db user_version == 0");
     assert_eq!(
