@@ -298,6 +298,38 @@
       "ts": "<TS>"
     },
     {
+      "action": "kill-session",
+      "argv": [
+        "tmux",
+        "kill-session",
+        "-t",
+        "team-phasegolden"
+      ],
+      "caller": "shutdown.team_session",
+      "caller_pid": 0,
+      "endpoint": null,
+      "event": "transport.pre_kill_audit",
+      "phase": "pre_call",
+      "targets": [
+        "team-phasegolden"
+      ],
+      "ts": "<TS>"
+    },
+    {
+      "action": "kill-server",
+      "argv": [
+        "tmux",
+        "kill-server"
+      ],
+      "caller": "shutdown.empty_owned_endpoint",
+      "caller_pid": 0,
+      "endpoint": null,
+      "event": "transport.pre_kill_audit",
+      "phase": "pre_call",
+      "targets": [],
+      "ts": "<TS>"
+    },
+    {
       "endpoint": "<SOCKET>",
       "error": null,
       "event": "shutdown.owned_endpoint_cleanup",
