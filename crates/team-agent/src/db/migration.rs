@@ -26,6 +26,7 @@ pub const MANAGED_TABLE_LAYOUTS: &[(&str, &[&str])] = &[
             "requires_ack",
             "status",
             "content",
+            "presentation",
             "artifact_refs",
             "created_at",
             "updated_at",
@@ -121,7 +122,7 @@ pub const MANAGED_TABLE_LAYOUTS: &[(&str, &[&str])] = &[
 
 /// rebuild / 建缺表用的 DDL 模板(`schema_migration.py:CREATE_TABLE_SQL`,`__TABLE__` 占位)。
 const CREATE_TABLE_TEMPLATES: &[(&str, &str)] = &[
-    ("messages", "create table if not exists __TABLE__ (\n          message_id text primary key,\n          owner_team_id text,\n          task_id text,\n          sender text,\n          recipient text,\n          reply_to text,\n          requires_ack integer,\n          status text,\n          content text,\n          artifact_refs text,\n          created_at text,\n          updated_at text,\n          delivered_at text,\n          acknowledged_at text,\n          error text,\n          delivery_attempts integer not null default 0\n        )"),
+    ("messages", "create table if not exists __TABLE__ (\n          message_id text primary key,\n          owner_team_id text,\n          task_id text,\n          sender text,\n          recipient text,\n          reply_to text,\n          requires_ack integer,\n          status text,\n          content text,\n          presentation text not null default '{\"sink\":\"leader\",\"class\":\"message\"}',\n          artifact_refs text,\n          created_at text,\n          updated_at text,\n          delivered_at text,\n          acknowledged_at text,\n          error text,\n          delivery_attempts integer not null default 0\n        )"),
     ("results", "create table if not exists __TABLE__ (\n          result_id text primary key,\n          owner_team_id text,\n          task_id text not null,\n          agent_id text not null,\n          envelope text not null,\n          status text not null,\n          created_at text not null\n        )"),
     ("scheduled_events", "create table if not exists __TABLE__ (\n          id integer primary key,\n          owner_team_id text,\n          due_at text not null,\n          target text not null,\n          kind text not null,\n          payload_json text not null,\n          status text not null,\n          created_at text not null,\n          fired_at text,\n          result_json text\n        )"),
     ("delivery_tokens", "create table if not exists __TABLE__ (\n          message_id text primary key,\n          unique_token text not null,\n          injected_at text not null,\n          visible_at text,\n          consumed_at text,\n          failed_at text,\n          failure_reason text\n        )"),
@@ -641,11 +642,11 @@ mod tests {
         assert_eq!(m1, "t");
         drop(conn);
 
-        // 迁移后 diagnosis = ok / user_version=3。
+        // 迁移后 diagnosis = ok / current user_version。
         let after = schema_diagnosis(&path, SCHEMA_VERSION).unwrap();
         assert!(after.ok);
         assert_eq!(after.status, "ok");
-        assert_eq!(after.user_version, 3);
+        assert_eq!(after.user_version, SCHEMA_VERSION);
 
         // 备份文件已写(team.db.pre-migration-*-from-v1.bak)。
         let runtime = path.parent().unwrap();
@@ -670,7 +671,7 @@ mod tests {
         let d = schema_diagnosis(&path, SCHEMA_VERSION).unwrap();
         assert!(d.ok);
         assert_eq!(d.status, "ok");
-        assert_eq!(d.user_version, 3);
+        assert_eq!(d.user_version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -788,7 +789,7 @@ mod tests {
         initialize_schema(&conn, Some(&path)).unwrap();
         let cols = table_layout(&conn, "messages").unwrap();
         assert!(!cols.iter().any(|c| c == "legacy_junk"), "废列应被丢弃");
-        assert_eq!(cols.len(), 16);
+        assert_eq!(cols.len(), 17);
         assert_eq!(table_count(&conn, "messages").unwrap(), 1);
     }
 
@@ -846,7 +847,7 @@ mod tests {
                 rebuilds,
             } => {
                 assert!(diagnosis.ok);
-                assert_eq!(diagnosis.user_version, 3);
+                assert_eq!(diagnosis.user_version, SCHEMA_VERSION);
                 assert_eq!(rebuilds.len(), 8);
             }
             other => panic!("expected Fixed, got {other:?}"),

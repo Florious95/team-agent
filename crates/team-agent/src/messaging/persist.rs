@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::db::message_store::{MessageRowStatus, MessageStore, PersistMessageInput};
 use crate::model::ids::{AgentId, TaskId, TeamKey};
 
+use super::presentation::PresentationRequest;
 use super::send::TrustedSender;
 use super::MessagingError;
 
@@ -64,6 +65,7 @@ impl DeliveryBlocker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialDisposition {
     Accepted,
+    StoredOnly,
     QueuedUntilLeaderAttach,
     Blocked(DeliveryBlocker),
 }
@@ -72,6 +74,7 @@ impl InitialDisposition {
     fn row_status(self) -> MessageRowStatus {
         match self {
             Self::Accepted => MessageRowStatus::Accepted,
+            Self::StoredOnly => MessageRowStatus::StoredOnly,
             Self::QueuedUntilLeaderAttach => MessageRowStatus::QueuedUntilLeaderAttach,
             Self::Blocked(DeliveryBlocker::CoordinatorUnavailable) => {
                 MessageRowStatus::QueuedCoordinatorUnavailable
@@ -82,7 +85,7 @@ impl InitialDisposition {
     fn error(self) -> Option<&'static str> {
         match self {
             Self::Blocked(blocker) => Some(blocker.as_str()),
-            Self::Accepted | Self::QueuedUntilLeaderAttach => None,
+            Self::Accepted | Self::StoredOnly | Self::QueuedUntilLeaderAttach => None,
         }
     }
 }
@@ -100,6 +103,7 @@ pub struct ResolvedSendIntent {
     pub requires_ack: bool,
     pub requested_message_id: Option<String>,
     pub initial_disposition: InitialDisposition,
+    pub presentation: PresentationRequest,
 }
 
 impl ResolvedSendIntent {
@@ -128,6 +132,7 @@ impl ResolvedSendIntent {
             requires_ack,
             requested_message_id,
             initial_disposition: InitialDisposition::Accepted,
+            presentation: PresentationRequest::default(),
         }
     }
 }
@@ -158,6 +163,7 @@ pub fn persist_resolved_send(
         }
     }
     let status = intent.initial_disposition.row_status();
+    let presentation = serde_json::to_string(&intent.presentation)?;
     let message_id = store.persist_message(PersistMessageInput {
         message_id: intent.requested_message_id.as_deref(),
         owner_team_id: intent.owner_team_id.as_ref().map(TeamKey::as_str),
@@ -168,6 +174,7 @@ pub fn persist_resolved_send(
         requires_ack: intent.requires_ack,
         status,
         content: &intent.content,
+        presentation: &presentation,
         error: intent.initial_disposition.error(),
     })?;
     Ok(PersistResolution::Persisted(PersistedSend {
@@ -177,7 +184,9 @@ pub fn persist_resolved_send(
         row_status: status,
         blocker: match intent.initial_disposition {
             InitialDisposition::Blocked(blocker) => Some(blocker),
-            InitialDisposition::Accepted | InitialDisposition::QueuedUntilLeaderAttach => None,
+            InitialDisposition::Accepted
+            | InitialDisposition::StoredOnly
+            | InitialDisposition::QueuedUntilLeaderAttach => None,
         },
     }))
 }
@@ -264,6 +273,52 @@ mod tests {
         assert_eq!(status, "queued_coordinator_unavailable");
         assert_eq!(delivered_at, None);
         assert_eq!(error.as_deref(), Some("coordinator_unavailable"));
+    }
+
+    #[test]
+    fn stored_only_persists_requested_presentation_without_delivery_eligibility() {
+        let workspace = workspace("stored-only");
+        let mut intent = ResolvedSendIntent::accepted(
+            SendOrigin::Mcp,
+            &workspace,
+            Some(TeamKey::new("team-a")),
+            LogicalRecipient::Leader,
+            TrustedSender::from_runtime_identity(AgentId::new("worker_a")),
+            None,
+            "stage evidence",
+            None,
+            false,
+            None,
+        );
+        intent.initial_disposition = InitialDisposition::StoredOnly;
+        intent.presentation = PresentationRequest {
+            sink: super::super::presentation::PresentationSink::Casefile,
+            class: super::super::presentation::PresentationClass::StageResult,
+            case_id: Some("case-7".to_string()),
+        };
+        let PersistResolution::Persisted(persisted) = persist_resolved_send(&intent).unwrap()
+        else {
+            panic!("fresh intent must persist")
+        };
+        assert_eq!(persisted.row_status, MessageRowStatus::StoredOnly);
+        let store = MessageStore::open(&workspace).unwrap();
+        let connection = crate::db::schema::open_db(store.db_path()).unwrap();
+        let (status, presentation): (String, String) = connection
+            .query_row(
+                "select status, presentation from messages where message_id = ?1",
+                [&persisted.message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "stored_only");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&presentation).unwrap(),
+            serde_json::json!({
+                "sink": "casefile",
+                "class": "stage_result",
+                "case_id": "case-7"
+            })
+        );
     }
 
     #[test]

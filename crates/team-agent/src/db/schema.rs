@@ -12,11 +12,11 @@ use rusqlite::Connection;
 use crate::db::DbError;
 
 /// `schema.py:90`。
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// 8 张表的 DDL(逐字照搬 `schema.py:initialize_schema` 的内联建表;含 `if not exists`)。
 /// 顺序与 Python 一致(leader_notification_log 在 ensure 块后创建)。
-const CREATE_MESSAGES: &str = "create table if not exists messages (\n              message_id text primary key,\n              owner_team_id text,\n              task_id text,\n              sender text,\n              recipient text,\n              reply_to text,\n              requires_ack integer,\n              status text,\n              content text,\n              artifact_refs text,\n              created_at text,\n              updated_at text,\n              delivered_at text,\n              acknowledged_at text,\n              error text,\n              delivery_attempts integer not null default 0\n            )";
+const CREATE_MESSAGES: &str = "create table if not exists messages (\n              message_id text primary key,\n              owner_team_id text,\n              task_id text,\n              sender text,\n              recipient text,\n              reply_to text,\n              requires_ack integer,\n              status text,\n              content text,\n              presentation text not null default '{\"sink\":\"leader\",\"class\":\"message\"}',\n              artifact_refs text,\n              created_at text,\n              updated_at text,\n              delivered_at text,\n              acknowledged_at text,\n              error text,\n              delivery_attempts integer not null default 0\n            )";
 const CREATE_RESULTS: &str = "create table if not exists results (\n              result_id text primary key,\n              owner_team_id text,\n              task_id text not null,\n              agent_id text not null,\n              envelope text not null,\n              status text not null,\n              created_at text not null\n            )";
 const CREATE_SCHEDULED_EVENTS: &str = "create table if not exists scheduled_events (\n              id integer primary key,\n              owner_team_id text,\n              due_at text not null,\n              target text not null,\n              kind text not null,\n              payload_json text not null,\n              status text not null,\n              created_at text not null,\n              fired_at text,\n              result_json text\n            )";
 const CREATE_DELIVERY_TOKENS: &str = "create table if not exists delivery_tokens (\n              message_id text primary key,\n              unique_token text not null,\n              injected_at text not null,\n              visible_at text,\n              consumed_at text,\n              failed_at text,\n              failure_reason text\n            )";
@@ -47,6 +47,7 @@ const MESSAGE_COLUMNS: &[&str] = &[
     "requires_ack",
     "status",
     "content",
+    "presentation",
     "artifact_refs",
     "created_at",
     "updated_at",
@@ -264,6 +265,10 @@ pub fn initialize_schema(
                 "owner_team_id",
                 "alter table messages add column owner_team_id text",
             ),
+            (
+                "presentation",
+                "alter table messages add column presentation text not null default '{\"sink\":\"leader\",\"class\":\"message\"}'",
+            ),
         ],
     )?;
     ensure_table_columns(
@@ -354,13 +359,13 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_three() {
+    fn user_version_is_four() {
         let conn = fresh();
         let v: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
     }
 
     #[test]
@@ -378,6 +383,7 @@ mod tests {
                 "requires_ack",
                 "status",
                 "content",
+                "presentation",
                 "artifact_refs",
                 "created_at",
                 "updated_at",
@@ -394,7 +400,7 @@ mod tests {
         // initialize_schema 二次调用(if not exists / 无缺列)→ 不报错、schema 不变 + 索引仍在。
         let conn = fresh();
         initialize_schema(&conn, None).unwrap();
-        assert_eq!(table_layout(&conn, "messages").unwrap().len(), 16);
+        assert_eq!(table_layout(&conn, "messages").unwrap().len(), 17);
         let idx: i64 = conn
             .query_row(
                 "select count(*) from sqlite_master where type='index' and sql is not null",
@@ -422,6 +428,13 @@ mod tests {
                     ("requires_ack", "INTEGER", 0, None, 0),
                     ("status", "TEXT", 0, None, 0),
                     ("content", "TEXT", 0, None, 0),
+                    (
+                        "presentation",
+                        "TEXT",
+                        1,
+                        Some("'{\"sink\":\"leader\",\"class\":\"message\"}'"),
+                        0,
+                    ),
                     ("artifact_refs", "TEXT", 0, None, 0),
                     ("created_at", "TEXT", 0, None, 0),
                     ("updated_at", "TEXT", 0, None, 0),

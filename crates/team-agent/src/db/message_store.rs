@@ -85,6 +85,7 @@ pub struct NotificationClaimParams<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageRowStatus {
     Accepted,
+    StoredOnly,
     QueuedUntilLeaderAttach,
     QueuedCoordinatorUnavailable,
 }
@@ -93,6 +94,7 @@ impl MessageRowStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
+            Self::StoredOnly => "stored_only",
             Self::QueuedUntilLeaderAttach => "queued_until_leader_attach",
             Self::QueuedCoordinatorUnavailable => "queued_coordinator_unavailable",
         }
@@ -111,6 +113,7 @@ pub struct PersistMessageInput<'a> {
     pub requires_ack: bool,
     pub status: MessageRowStatus,
     pub content: &'a str,
+    pub presentation: &'a str,
     pub error: Option<&'a str>,
 }
 
@@ -182,9 +185,9 @@ impl MessageStore {
         conn.execute(
             "insert into messages(
                 message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
-                status, content, artifact_refs, created_at, updated_at, delivered_at,
+                status, content, presentation, artifact_refs, created_at, updated_at, delivered_at,
                 acknowledged_at, error, delivery_attempts
-            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '[]', ?10, ?10, null, null, ?11, 0)",
+            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '[]', ?11, ?11, null, null, ?12, 0)",
             params![
                 message_id,
                 input.owner_team_id,
@@ -195,6 +198,7 @@ impl MessageStore {
                 if input.requires_ack { 1 } else { 0 },
                 input.status.as_str(),
                 input.content,
+                input.presentation,
                 now,
                 input.error,
             ],
@@ -226,6 +230,7 @@ impl MessageStore {
             requires_ack,
             status: MessageRowStatus::Accepted,
             content,
+            presentation: r#"{"sink":"leader","class":"message"}"#,
             error: None,
         })
     }
@@ -259,6 +264,7 @@ impl MessageStore {
             requires_ack,
             status: MessageRowStatus::Accepted,
             content,
+            presentation: r#"{"sink":"leader","class":"message"}"#,
             error: None,
         })
     }
