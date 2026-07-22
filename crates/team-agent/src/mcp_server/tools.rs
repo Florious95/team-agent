@@ -352,6 +352,36 @@ impl TeamOrchestratorTools {
         task_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> ToolResult {
+        self.report_result_with_presentation(
+            envelope,
+            summary,
+            status,
+            changes,
+            tests,
+            risks,
+            artifacts,
+            next_actions,
+            task_id,
+            agent_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_result_with_presentation(
+        &self,
+        envelope: Option<&Value>,
+        summary: Option<&str>,
+        status: ResultStatus,
+        changes: Option<&[Value]>,
+        tests: Option<&[Value]>,
+        risks: Option<&[Value]>,
+        artifacts: Option<&[Value]>,
+        next_actions: Option<&[Value]>,
+        task_id: Option<&str>,
+        agent_id: Option<&str>,
+        presentation: Option<&Value>,
+    ) -> ToolResult {
         if let Some(envelope) = envelope {
             self.validate_rpc_scope_args("report_result", envelope)?;
         }
@@ -360,6 +390,11 @@ impl TeamOrchestratorTools {
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         ensure_object(&mut base);
         if let Some(obj) = base.as_object_mut() {
+            if !obj.contains_key("presentation") {
+                if let Some(presentation) = presentation {
+                    obj.insert("presentation".to_string(), presentation.clone());
+                }
+            }
             if !obj.contains_key("summary") {
                 obj.insert(
                     "summary".to_string(),
@@ -488,6 +523,13 @@ impl TeamOrchestratorTools {
             self.note_unknown_result_status(&raw);
         }
         let normalized = normalize_report_envelope(&base);
+        if let Some(error) = normalized.presentation_error.as_deref() {
+            return Err(ToolError::new(
+                ToolErrorReason::InvalidToolArguments,
+                format!("invalid presentation: {error}"),
+                "PresentationError",
+            ));
+        }
         let warnings = report_result_integrity_warnings(&base, &normalized);
         let mut env_value = normalized_envelope_value(&normalized);
         copy_report_attribution_fields(&base, &mut env_value);

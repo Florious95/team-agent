@@ -652,7 +652,7 @@ pub(crate) fn dispatch_tool(
                 SendOutcome::Direct(ok) => Ok(ok),
             }
         }
-        McpTool::ReportResult => tools.report_result(
+        McpTool::ReportResult => tools.report_result_with_presentation(
             args.get("envelope"),
             args.get("summary").and_then(Value::as_str),
             // cr verdict (T3-1 refined): an unknown status literal normalizes to
@@ -684,6 +684,7 @@ pub(crate) fn dispatch_tool(
                 .map(Vec::as_slice),
             args.get("task_id").and_then(Value::as_str),
             args.get("agent_id").and_then(Value::as_str),
+            args.get("presentation"),
         ),
         McpTool::UpdateState => {
             tools.update_state(args.get("note").and_then(Value::as_str).unwrap_or(""))

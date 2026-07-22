@@ -628,6 +628,14 @@ fn report_result_for_owner_team_inner(
     fallback_primary_error: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
     validate_result_envelope(envelope)?;
+    let (presentation_request, presentation_error) =
+        super::presentation::normalize_presentation(envelope.get("presentation"));
+    if let Some(error) = presentation_error {
+        return Err(MessagingError::Validation(format!(
+            "invalid presentation: {error}"
+        )));
+    }
+    let presentation = super::presentation::decide_presentation(&presentation_request);
     let store = MessageStore::open(workspace)?;
     let result_id = envelope
         .get("result_id")
@@ -644,6 +652,12 @@ fn report_result_for_owner_team_inner(
                 serde_json::Value::String(result_id.clone()),
             );
         }
+    }
+    if let Some(obj) = stored.as_object_mut() {
+        obj.insert(
+            "presentation".to_string(),
+            serde_json::to_value(&presentation)?,
+        );
     }
     let conn = crate::db::schema::open_db(store.db_path())?;
     let state_for_owner =
@@ -710,6 +724,71 @@ fn report_result_for_owner_team_inner(
         out.insert("notification_event_id".to_string(), serde_json::Value::Null);
         return Ok(serde_json::Value::Object(out));
     }
+    let event_log = EventLog::new(workspace);
+    if presentation.effective_sink != super::presentation::PresentationSink::Leader {
+        event_log.write(
+            "presentation.stored_without_live_inject",
+            serde_json::json!({
+                "result_id": result_id,
+                "owner_team_id": owner_team,
+                "requested_sink": presentation.requested_sink,
+                "effective_sink": presentation.effective_sink,
+                "class": presentation.class,
+                "policy_reason": presentation.policy_reason,
+            }),
+        )?;
+        event_log.write(
+            "mcp.report_result",
+            serde_json::json!({
+                "leader_notified": false,
+                "notification_channel": presentation.effective_sink,
+                "notification_message_id": serde_json::Value::Null,
+                "notification_status": "stored_not_presented",
+                "owner_team_id": owner_team,
+                "result_id": result_id,
+            }),
+        )?;
+        let mut out = serde_json::Map::new();
+        out.insert("ok".to_string(), serde_json::Value::Bool(true));
+        out.insert(
+            "result_id".to_string(),
+            serde_json::Value::String(result_id),
+        );
+        out.insert(
+            "task_id".to_string(),
+            serde_json::Value::String(task_id.to_string()),
+        );
+        copy_report_attribution_fields(envelope, &mut out);
+        out.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(agent_id.to_string()),
+        );
+        out.insert("acknowledged_messages".to_string(), serde_json::json!([]));
+        out.insert(
+            "leader_notified".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        out.insert(
+            "notification_message_id".to_string(),
+            serde_json::Value::Null,
+        );
+        out.insert(
+            "notification_status".to_string(),
+            serde_json::Value::String("stored_not_presented".to_string()),
+        );
+        out.insert(
+            "notification_channel".to_string(),
+            serde_json::Value::String(presentation.effective_sink.as_str().to_string()),
+        );
+        out.insert("notification_event_id".to_string(), serde_json::Value::Null);
+        if let Some(warnings) = report_result_array(envelope, "warnings") {
+            out.insert(
+                "warnings".to_string(),
+                serde_json::Value::Array(warnings.clone()),
+            );
+        }
+        return Ok(serde_json::Value::Object(out));
+    }
     // #230 N31/N32 funnel: report_result must go through the shared leader-delivery
     // primitive synchronously, NOT via a parallel queued scheduled_events row. The
     // legacy path was MUST-8 / I-3 violating (the deferred notification status was returned
@@ -717,8 +796,7 @@ fn report_result_for_owner_team_inner(
     let content =
         format_report_result_notification(&result_id, task_id, agent_id, status, envelope);
     let state = report_owner_state(&state_for_owner, &owner_team);
-    let event_log = EventLog::new(workspace);
-    let mut outcome = match super::leader_receiver::send_to_leader_receiver(
+    let mut outcome = match super::leader_receiver::send_to_leader_receiver_with_presentation(
         workspace,
         &state,
         "leader",
@@ -727,6 +805,8 @@ fn report_result_for_owner_team_inner(
         agent_id,
         false,
         Some(&result_id),
+        None,
+        &presentation,
         &event_log,
     ) {
         Ok(outcome) => outcome,
@@ -1245,7 +1325,8 @@ pub fn collect_results_and_notify_watchers(
 
 #[cfg(test)]
 mod tests {
-    use super::format_report_result_notification;
+    use super::{format_report_result_notification, report_result};
+    use crate::message_store::MessageStore;
 
     #[test]
     fn report_result_notification_includes_full_envelope_sections() {
@@ -1291,5 +1372,48 @@ mod tests {
         assert!(notification.contains("Artifacts: .team/artifacts/evidence.md: evidence"));
         assert!(notification.contains("Next actions: ship after review"));
         assert!(notification.contains("Result id: res_1"));
+    }
+
+    #[test]
+    fn casefile_result_is_stored_without_a_leader_notification_row() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-casefile-result-{}-{}",
+            std::process::id(),
+            super::next_result_id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let out = report_result(
+            &workspace,
+            &serde_json::json!({
+                "schema_version": "result_envelope_v1",
+                "task_id": "task-1",
+                "agent_id": "worker",
+                "status": "success",
+                "summary": "stage evidence",
+                "changes": [],
+                "tests": [],
+                "risks": [],
+                "artifacts": [],
+                "next_actions": [],
+                "presentation": {
+                    "sink": "casefile",
+                    "class": "stage_result",
+                    "case_id": "case-1"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(out["notification_status"], "stored_not_presented");
+        assert_eq!(out["leader_notified"], false);
+        let store = MessageStore::open(&workspace).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        let result_count: i64 = conn
+            .query_row("select count(*) from results", [], |row| row.get(0))
+            .unwrap();
+        let message_count: i64 = conn
+            .query_row("select count(*) from messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(result_count, 1);
+        assert_eq!(message_count, 0);
     }
 }
