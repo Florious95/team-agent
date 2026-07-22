@@ -655,13 +655,15 @@ where
         .get("spawn_cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())?;
-    // Canonical attribution requires a process-cohort boundary. Without it,
-    // delayed capture can consume an older same-cwd transcript and falsely
-    // promote pending_first_turn to captured.
+    // New cohorts carry a boundary and are filtered fail-closed by the
+    // canonical scanner. Legacy rows may predate spawned_at; keep their
+    // boundary absent so they can still use the allocator's identity,
+    // collision, and unique-candidate guards instead of being skipped.
     let spawned_at = agent
         .get("spawned_at")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     Some(PendingSessionCapture {
         agent_id: agent_id.to_string(),
         provider,
@@ -684,7 +686,7 @@ where
                 .get("pane_pid")
                 .and_then(Value::as_u64)
                 .and_then(|pid| u32::try_from(pid).ok()),
-            spawned_at: Some(spawned_at.to_string()),
+            spawned_at,
             expected_session_id: if matches!(provider, Provider::Codex) {
                 None
             } else {
@@ -1909,7 +1911,7 @@ mod u1_tests {
     }
 
     #[test]
-    fn canonical_pending_capture_requires_spawned_at_boundary() {
+    fn canonical_pending_capture_preserves_legacy_missing_boundary() {
         let agent = serde_json::json!({
             "provider": "codex",
             "status": "running",
@@ -1917,7 +1919,9 @@ mod u1_tests {
             "capture_state": "pending_first_turn"
         });
         let mut adapter_for = crate::provider::get_adapter;
-        assert!(pending_session_capture("clone", &agent, &mut adapter_for).is_none());
+        let pending = pending_session_capture("clone", &agent, &mut adapter_for)
+            .expect("legacy row still participates in canonical capture");
+        assert_eq!(pending.context.spawned_at, None);
     }
 
     #[test]

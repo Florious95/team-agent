@@ -71,10 +71,11 @@ fn codex_identity_rollout(
     std::fs::write(
         &path,
         format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}}}}\n\
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\",\"created_at\":\"{}\"}}}}}}\n\
              {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
              {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
-            workspace.to_string_lossy()
+            workspace.to_string_lossy(),
+            chrono::Utc::now().to_rfc3339()
         ),
     )
     .unwrap();
