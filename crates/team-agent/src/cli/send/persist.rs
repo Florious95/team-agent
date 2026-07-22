@@ -25,6 +25,7 @@ pub fn send_options_from_args(args: &SendArgs) -> SendOptions {
         watch_result: args.watch_result,
         team: args.team.as_ref().map(|s| TeamKey::new(s.clone())),
         message_id: args.message_id.clone(),
+        presentation: args.presentation.clone(),
         ..SendOptions::default()
     }
 }

@@ -468,6 +468,7 @@ fn send_args_fixture() -> SendArgs {
         confirm_human: false,
         json: false,
         message_id: None,
+        presentation: crate::messaging::presentation::PresentationRequest::default(),
         pane: None,
         to_name: None,
         to_leader: None,

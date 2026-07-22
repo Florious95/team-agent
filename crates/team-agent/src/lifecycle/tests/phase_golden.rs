@@ -267,6 +267,7 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         confirm_human: false,
         json: true,
         message_id: Some("phase-golden-message".to_string()),
+        presentation: crate::messaging::presentation::PresentationRequest::default(),
         pane: None,
         to_name: None,
         to_leader: None,

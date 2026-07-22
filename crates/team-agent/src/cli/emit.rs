@@ -775,6 +775,9 @@ struct ParsedArgs {
     socket: Option<String>,
     thread_id: Option<String>,
     message_id: Option<String>,
+    presentation_sink: Option<String>,
+    message_class: Option<String>,
+    case_id: Option<String>,
     content: Option<String>,
     primary_error: Option<String>,
     agent_id: Option<String>,
@@ -865,6 +868,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--socket" => parsed.socket = next_arg(args, &mut i),
             "--thread-id" => parsed.thread_id = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
+            "--presentation-sink" => parsed.presentation_sink = next_arg(args, &mut i),
+            "--message-class" => parsed.message_class = next_arg(args, &mut i),
+            "--case-id" => parsed.case_id = next_arg(args, &mut i),
             "--content" => parsed.content = next_arg(args, &mut i),
             "--primary-error" => parsed.primary_error = next_arg(args, &mut i),
             "--result-json" => parsed.result_json = next_arg(args, &mut i),
@@ -880,6 +886,17 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             }
             other if other.starts_with("--to-leader=") => {
                 parsed.to_leader = Some(other.trim_start_matches("--to-leader=").to_string());
+            }
+            other if other.starts_with("--presentation-sink=") => {
+                parsed.presentation_sink =
+                    Some(other.trim_start_matches("--presentation-sink=").to_string());
+            }
+            other if other.starts_with("--message-class=") => {
+                parsed.message_class =
+                    Some(other.trim_start_matches("--message-class=").to_string());
+            }
+            other if other.starts_with("--case-id=") => {
+                parsed.case_id = Some(other.trim_start_matches("--case-id=").to_string());
             }
             other if other.starts_with("--provider=") => {
                 parsed.provider = Some(other.trim_start_matches("--provider=").to_string());
@@ -1029,6 +1046,23 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     };
     let message_start = usize::from(target.is_some());
     let workspace = workspace(&parsed, cwd);
+    let presentation_value = if parsed.presentation_sink.is_some()
+        || parsed.message_class.is_some()
+        || parsed.case_id.is_some()
+    {
+        Some(serde_json::json!({
+            "sink": parsed.presentation_sink.clone(),
+            "class": parsed.message_class.clone(),
+            "case_id": parsed.case_id.clone(),
+        }))
+    } else {
+        None
+    };
+    let (presentation, presentation_error) =
+        crate::messaging::presentation::normalize_presentation(presentation_value.as_ref());
+    if let Some(error) = presentation_error {
+        return Err(CliError::Usage(format!("invalid presentation: {error}")));
+    }
     Ok(SendArgs {
         target,
         message: parsed
@@ -1049,6 +1083,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         confirm_human: false,
         json: parsed.json,
         message_id: None,
+        presentation,
         pane: parsed.pane.clone(),
         to_name: parsed.to_name.clone(),
         to_leader: parsed.to_leader.clone(),
@@ -1111,11 +1146,22 @@ fn validate_send_flags(args: &[String]) -> Result<(), CliError> {
         "--timeout",
         "--confirm-human",
         "--message-id",
+        "--presentation-sink",
+        "--message-class",
+        "--case-id",
         "--json",
         "-h",
         "--help",
     ];
-    const ALLOWED_PREFIXES: &[&str] = &["--team=", "--pane=", "--to-name=", "--to-leader="];
+    const ALLOWED_PREFIXES: &[&str] = &[
+        "--team=",
+        "--pane=",
+        "--to-name=",
+        "--to-leader=",
+        "--presentation-sink=",
+        "--message-class=",
+        "--case-id=",
+    ];
     if let Some(flag) = args.iter().find(|arg| {
         arg.starts_with('-')
             && !ALLOWED.contains(&arg.as_str())
@@ -2013,6 +2059,48 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn send_presentation_flags_map_to_the_typed_request() {
+        let cwd = tmp_workspace();
+        let args = send_args(
+            &cli_argv(&[
+                "leader",
+                "progress",
+                "--presentation-sink",
+                "casefile",
+                "--message-class",
+                "progress",
+                "--case-id",
+                "case-9",
+            ]),
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(
+            args.presentation.sink,
+            crate::messaging::presentation::PresentationSink::Casefile
+        );
+        assert_eq!(
+            args.presentation.class,
+            crate::messaging::presentation::PresentationClass::Progress
+        );
+        assert_eq!(args.presentation.case_id.as_deref(), Some("case-9"));
+    }
+
+    #[test]
+    fn send_presentation_flags_fail_closed_when_incomplete() {
+        let cwd = tmp_workspace();
+        let error = send_args(
+            &cli_argv(&["leader", "progress", "--presentation-sink", "casefile"]),
+            &cwd,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CliError::Usage(message) if message == "invalid presentation: missing_class"
+        ));
     }
 
     #[test]

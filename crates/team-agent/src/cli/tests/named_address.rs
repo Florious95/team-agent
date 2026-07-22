@@ -157,6 +157,7 @@ fn named_send_args(
         confirm_human: false,
         json: true,
         message_id: None,
+        presentation: crate::messaging::presentation::PresentationRequest::default(),
         pane: pane.map(str::to_string),
         to_name: to_name.map(str::to_string),
         to_leader: None,

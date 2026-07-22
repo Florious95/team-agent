@@ -49,6 +49,7 @@ fn cli_send_persists_real_message_row() {
         confirm_human: false,
         json: true,
         message_id: None,
+        presentation: crate::messaging::presentation::PresentationRequest::default(),
         pane: None,
         to_name: None,
         to_leader: None,

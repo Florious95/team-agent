@@ -169,6 +169,7 @@ pub fn send_to_canonical_leader_target(
         confirm_human: false,
         json: true,
         message_id: None,
+        presentation: crate::messaging::presentation::PresentationRequest::default(),
         pane: None,
         to_name: None,
         to_leader: None,

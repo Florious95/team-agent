@@ -323,6 +323,7 @@ pub struct SendArgs {
     /// When set, the store insert uses this id verbatim; a repeat with the same
     /// id returns a `Duplicate` refusal instead of creating a second row.
     pub message_id: Option<String>,
+    pub presentation: crate::messaging::presentation::PresentationRequest,
     /// Deprecated compatibility input. Public send refuses pane identity and
     /// requires a logical recipient so persistence always precedes delivery.
     pub pane: Option<String>,
