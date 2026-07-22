@@ -406,6 +406,7 @@ pub fn fork_agent_with_transport(
         &session_id,
         &plan,
         &backing_before,
+        claude_fork.as_ref().map(|materialized| materialized.path()),
         as_agent_id.as_str(),
         &workspace,
         &spawned_at,

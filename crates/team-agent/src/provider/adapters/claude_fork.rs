@@ -9,6 +9,10 @@ pub(crate) struct ClaudeForkMaterialization {
 }
 
 impl ClaudeForkMaterialization {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub(crate) fn keep(&mut self) {
         self.keep = true;
     }

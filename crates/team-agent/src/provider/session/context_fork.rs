@@ -49,6 +49,7 @@ pub(crate) fn verify_context_fork(
     source_session_id: &SessionId,
     plan: &CommandPlan,
     before: &ContextBackingSnapshot,
+    expected_backing_path: Option<&Path>,
     agent_id: &str,
     spawn_cwd: &Path,
     spawned_at: &str,
@@ -68,32 +69,63 @@ pub(crate) fn verify_context_fork(
             deadline,
         );
     }
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        return verify_claude_fork(
+            provider,
+            source_session_id,
+            plan,
+            before,
+            expected_backing_path,
+            deadline,
+        );
+    }
+    Err(ProviderError::CaptureFailed(format!(
+        "context_fork_unverified: {provider:?} has no verifiable fork backing"
+    )))
+}
+fn verify_claude_fork(
+    provider: Provider,
+    source_session_id: &SessionId,
+    plan: &CommandPlan,
+    before: &ContextBackingSnapshot,
+    expected_backing_path: Option<&Path>,
+    deadline: Duration,
+) -> Result<ContextForkProof, ProviderError> {
+    let expected = plan.expected_session_id.as_ref().ok_or_else(|| {
+        ProviderError::CaptureFailed(
+            "context_fork_unverified: Claude plan has no expected session id".to_string(),
+        )
+    })?;
+    let path = expected_backing_path.ok_or_else(|| {
+        ProviderError::CaptureFailed(
+            "context_fork_unverified: Claude plan has no exact snapshot backing".to_string(),
+        )
+    })?;
+    let expected_name = format!("{}.jsonl", expected.as_str());
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        return Err(ProviderError::CaptureFailed(format!(
+            "context_fork_unverified: Claude snapshot backing does not match expected session {}",
+            expected.as_str()
+        )));
+    }
     let started = std::time::Instant::now();
     loop {
-        for (path, stamp) in jsonl_files(&before.root) {
-            let changed = before.files.get(&path).is_none_or(|old| *old != stamp);
-            if !changed || !readable_jsonl(&path) {
-                continue;
+        if let Some(stamp) = file_stamp(path) {
+            let changed = before.files.get(path).is_none_or(|old| *old != stamp);
+            let observed_matches =
+                session_id_from_jsonl(path).is_none_or(|observed| observed == expected.as_str());
+            if changed && readable_jsonl(path) && observed_matches && expected != source_session_id
+            {
+                return Ok(ContextForkProof {
+                    provider,
+                    source_session_id: source_session_id.clone(),
+                    new_session_id: expected.clone(),
+                    backing_path: path.to_path_buf(),
+                    captured_via: "context_fork_verified".to_string(),
+                    attribution_confidence: "high".to_string(),
+                    managed_backing_root: None,
+                });
             }
-            let observed = session_id_from_jsonl(&path);
-            let new_session_id = match (&plan.expected_session_id, observed) {
-                (Some(expected), Some(observed)) if observed != expected.as_str() => continue,
-                (Some(expected), _) => expected.clone(),
-                (None, Some(observed)) => SessionId::new(observed),
-                (None, None) => continue,
-            };
-            if new_session_id == *source_session_id {
-                continue;
-            }
-            return Ok(ContextForkProof {
-                provider,
-                source_session_id: source_session_id.clone(),
-                new_session_id,
-                backing_path: path,
-                captured_via: "context_fork_verified".to_string(),
-                attribution_confidence: "high".to_string(),
-                managed_backing_root: None,
-            });
         }
         if started.elapsed() >= deadline {
             break;
@@ -248,19 +280,21 @@ fn jsonl_files(root: &Path) -> BTreeMap<PathBuf, FileStamp> {
             if path.is_dir() {
                 pending.push(path);
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-                if let Ok(meta) = entry.metadata() {
-                    files.insert(
-                        path,
-                        FileStamp {
-                            len: meta.len(),
-                            modified: meta.modified().ok(),
-                        },
-                    );
+                if let Some(stamp) = file_stamp(&path) {
+                    files.insert(path, stamp);
                 }
             }
         }
     }
     files
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
 }
 
 fn readable_jsonl(path: &Path) -> bool {
@@ -368,6 +402,7 @@ mod tests {
             &SessionId::new("source-session"),
             &plan,
             &before,
+            None,
             "fork",
             &current_cwd,
             "2026-07-21T20:00:00+00:00",
@@ -377,6 +412,88 @@ mod tests {
 
         assert_eq!(proof.new_session_id.as_str(), "fresh-session");
         assert_eq!(proof.backing_path, fresh);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claude_fork_proof_is_partitioned_by_exact_snapshot_path() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-claude-fork-proof-partition-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".team/logs")).unwrap();
+        let expected = SessionId::new("22222222-2222-4222-8222-222222222222");
+        let plan = CommandPlan {
+            argv: Vec::new(),
+            expected_session_id: Some(expected.clone()),
+            provider_projects_root: Some(root.clone()),
+            managed_mcp_config: false,
+        };
+        let before = ContextBackingSnapshot::capture(Provider::Claude, &plan);
+        std::fs::write(
+            root.join(".team/logs/events.jsonl"),
+            "{\"event\":\"noise\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("11111111-1111-4111-8111-111111111111.jsonl"),
+            "{\"type\":\"sibling-snapshot\"}\n",
+        )
+        .unwrap();
+        let expected_path = root.join(format!("{}.jsonl", expected.as_str()));
+        std::fs::write(&expected_path, "{\"type\":\"own-snapshot\"}\n").unwrap();
+        let proof = verify_context_fork(
+            Provider::Claude,
+            &SessionId::new("source-session"),
+            &plan,
+            &before,
+            Some(&expected_path),
+            "fork",
+            &root,
+            "2026-07-22T00:00:00Z",
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(proof.new_session_id, expected);
+        assert_eq!(proof.backing_path, expected_path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn claude_fork_proof_never_uses_events_jsonl_as_backing() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-claude-fork-proof-no-events-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".team/logs")).unwrap();
+        let expected = SessionId::new("33333333-3333-4333-8333-333333333333");
+        let plan = CommandPlan {
+            argv: Vec::new(),
+            expected_session_id: Some(expected.clone()),
+            provider_projects_root: Some(root.clone()),
+            managed_mcp_config: false,
+        };
+        let before = ContextBackingSnapshot::capture(Provider::Claude, &plan);
+        std::fs::write(
+            root.join(".team/logs/events.jsonl"),
+            "{\"event\":\"noise\"}\n",
+        )
+        .unwrap();
+        let missing = root.join(format!("{}.jsonl", expected.as_str()));
+        let error = verify_context_fork(
+            Provider::Claude,
+            &SessionId::new("source-session"),
+            &plan,
+            &before,
+            Some(&missing),
+            "fork",
+            &root,
+            "2026-07-22T00:00:00Z",
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("context_fork_unverified"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
