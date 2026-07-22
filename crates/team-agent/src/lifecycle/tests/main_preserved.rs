@@ -318,6 +318,7 @@ fn reset_agent_discard_session_rebuilds_window_via_start_respawn() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn reset_agent_discard_session_syncs_projection_epoch_inputs_for_restart_agent_command() {
     let ws = restart_ws_two_resumable_workers();
     let mut state = crate::state::persist::load_runtime_state(&ws).expect("load state");

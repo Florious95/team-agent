@@ -351,8 +351,8 @@ pub fn fork_agent_with_transport(
     );
     // Release the metadata lock before per-seat provider convergence; finalize reacquires it.
     drop(_lock);
-    let spawned_at = spawn_timestamp();
-    let spawn_epoch = 1;
+    let spawn_epoch = 1_u64;
+    let spawned_at = spawn_timestamp_for_agent(u32::try_from(spawn_epoch).unwrap_or(u32::MAX));
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
             &session_name,
