@@ -871,7 +871,9 @@ pub mod lifecycle_port {
                 ) {
                     kill_error = Some(format!("pre-kill audit failed: {error}"));
                 } else if let Err(error) = transport.kill_session(session) {
-                    if !tmux_absent_error(&error.to_string()) {
+                    if tmux_absent_error(&error.to_string()) {
+                        push_unique_session(&mut killed_sessions, session.clone());
+                    } else {
                         kill_error = Some(error.to_string());
                     }
                 } else {
