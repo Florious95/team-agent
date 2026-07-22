@@ -1829,6 +1829,7 @@ pub fn deliver_pending_messages(
     let store = MessageStore::open(workspace)?;
     let message_ids = {
         let conn = crate::db::schema::open_db(store.db_path())?;
+        // `stored_only` is intentionally absent: C6 chose durable presentation without C5.
         let mut stmt = conn.prepare(
             "select message_id from messages
              where status in (

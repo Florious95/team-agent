@@ -815,6 +815,29 @@ mod tests {
         assert_eq!(status_of(&read(&s), &mid), "failed");
     }
 
+    #[test]
+    fn claim_for_delivery_never_claims_stored_only_presentation() {
+        let s = store();
+        let mid = s
+            .persist_message(PersistMessageInput {
+                message_id: None,
+                owner_team_id: Some("team-a"),
+                task_id: None,
+                sender: "worker",
+                recipient: "leader",
+                reply_to: None,
+                requires_ack: false,
+                status: MessageRowStatus::StoredOnly,
+                content: "casefile evidence",
+                presentation: r#"{"sink":"casefile","class":"stage_result"}"#,
+                error: None,
+            })
+            .unwrap();
+        assert!(!s.claim_for_delivery(&mid).unwrap());
+        assert_eq!(status_of(&read(&s), &mid), "stored_only");
+        assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 0);
+    }
+
     // ───────────────────────────── mark state machine ─────────────────────────────
 
     #[test]
