@@ -339,28 +339,33 @@ fn form9_anti_regex_tooth_class_not_content() {
 /// ONLY explicit typed stage_result earns durable-only for report_result.
 #[test]
 fn form9c_non_stage_result_class_stays_leader_despite_casefile_request() {
-    for class in ["message", "progress"] {
-        let env = json!({
-            "summary": "x",
-            "presentation": {"sink": "casefile", "class": class}
-        });
-        let v = serde_json::to_value(&normalize_report_envelope(&env)).expect("serialize");
-        let p = v.get("presentation").unwrap_or_else(|| {
-            panic!("POST-GREEN: presentation present for non-stage_result class {class}")
-        });
-        assert_eq!(
-            p.get("effective_sink").and_then(Value::as_str),
-            Some("leader"),
-            "MUST-8: report_result class={class} (not stage_result) has no durable-only \
-             eligibility; a casefile request must resolve to effective leader (user_delivery)"
-        );
-        // And the audit must record the requested casefile + the forced leader
-        // effective, so the escalation is explainable (not a silent rewrite).
-        assert_eq!(
-            p.get("requested_sink").and_then(Value::as_str),
-            Some("casefile"),
-            "requested casefile must be preserved in audit for class={class}"
-        );
+    // r19 matrix completion: BOTH non-leader sinks (casefile, silent) across BOTH
+    // non-stage_result classes (message, progress). Fixing sink=casefile only
+    // would leave the silent face of the violation untested.
+    for sink in ["casefile", "silent"] {
+        for class in ["message", "progress"] {
+            let env = json!({
+                "summary": "x",
+                "presentation": {"sink": sink, "class": class}
+            });
+            let v = serde_json::to_value(&normalize_report_envelope(&env)).expect("serialize");
+            let p = v
+                .get("presentation")
+                .unwrap_or_else(|| panic!("POST-GREEN: presentation present for {sink}/{class}"));
+            assert_eq!(
+                p.get("effective_sink").and_then(Value::as_str),
+                Some("leader"),
+                "MUST-8: report_result class={class} (not stage_result) has no durable-only \
+                 eligibility; a {sink} request must resolve to effective leader (user_delivery)"
+            );
+            // Audit must record the requested non-leader sink + the forced leader
+            // effective, so the escalation is explainable (not a silent rewrite).
+            assert_eq!(
+                p.get("requested_sink").and_then(Value::as_str),
+                Some(sink),
+                "requested {sink} must be preserved in audit for class={class}"
+            );
+        }
     }
 }
 
@@ -552,51 +557,57 @@ fn form15_malformed_casefile_fails_closed_not_silent() {
 }
 
 /// form15c (r19 §2.4 revision, case_id traceability tooth): a durable-only
-/// report_result — the ONLY eligible shape being `stage_result` + a non-leader
-/// sink — MUST carry a `case_id` so the orchestration_stage_artifact is
-/// traceable by case (signed amendment §2 line 42 + §4 lines 97-100). A
-/// `stage_result` + `casefile` with NO case_id is an illegal combination and
-/// MUST fail closed at ingress; case_id being fully optional (presentation.rs
-/// pre-fix / wire.rs required=[sink,class] only) left the traceability clause
-/// toothless. Baseline red: no ingest validation, case_id ignored entirely.
+/// report_result — the eligible shape being `stage_result` + a non-leader sink
+/// (casefile OR silent) — MUST carry a `case_id` so the
+/// orchestration_stage_artifact is traceable by case (signed amendment §2 line
+/// 42 + §4 lines 97-100; the amendment explicitly keeps `silent` durable-only
+/// AND pullable/traceable). `stage_result` + non-leader sink with NO case_id is
+/// an illegal combination and MUST fail closed at ingress; case_id being fully
+/// optional (presentation.rs pre-fix / wire.rs required=[sink,class] only) left
+/// the traceability clause toothless. Baseline red: no ingest validation.
+///
+/// r19 matrix completion: both non-leader sinks (casefile, silent) — silent is
+/// equally a durable-only stage artifact, so its missing-case_id face must
+/// fail closed too.
 #[test]
-fn form15c_stage_result_casefile_without_case_id_fails_closed() {
-    // stage_result durable-only requested but no case_id -> fail closed.
-    let env = json!({
-        "summary": "x",
-        "presentation": {"sink": "casefile", "class": "stage_result"}
-    });
-    let v = serde_json::to_value(&normalize_report_envelope(&env)).expect("serialize");
-    let err = v.get("presentation_error").and_then(Value::as_str);
-    assert_eq!(
-        err,
-        Some("missing_case_id"),
-        "POST-GREEN: stage_result+casefile without case_id fails closed (case_id traceability \
-         clause); durable-only must be case-traceable, not anonymous"
-    );
+fn form15c_stage_result_nonleader_sink_without_case_id_fails_closed() {
+    for sink in ["casefile", "silent"] {
+        // stage_result durable-only requested but no case_id -> fail closed.
+        let env = json!({
+            "summary": "x",
+            "presentation": {"sink": sink, "class": "stage_result"}
+        });
+        let v = serde_json::to_value(&normalize_report_envelope(&env)).expect("serialize");
+        let err = v.get("presentation_error").and_then(Value::as_str);
+        assert_eq!(
+            err,
+            Some("missing_case_id"),
+            "POST-GREEN: stage_result+{sink} without case_id fails closed (case_id \
+             traceability clause); durable-only must be case-traceable, not anonymous"
+        );
 
-    // Positive control: the SAME shape WITH a case_id is accepted as durable-only
-    // (effective casefile, no error) — the tooth rejects only the missing-case_id
-    // case, it does not blanket-reject legitimate traceable stage results.
-    let ok = json!({
-        "summary": "x",
-        "presentation": {"sink": "casefile", "class": "stage_result", "case_id": "bug-42"}
-    });
-    let vok = serde_json::to_value(&normalize_report_envelope(&ok)).expect("serialize");
-    let p = vok
-        .get("presentation")
-        .expect("POST-GREEN: traceable stage_result accepted");
-    assert!(
-        p.get("presentation_error").is_none()
-            || vok
-                .get("presentation_error")
+        // Positive control: the SAME shape WITH a case_id is accepted as
+        // durable-only (effective == requested sink, no error) — the tooth
+        // rejects only missing-case_id, never blanket-rejects legitimate
+        // traceable stage results.
+        let ok = json!({
+            "summary": "x",
+            "presentation": {"sink": sink, "class": "stage_result", "case_id": "bug-42"}
+        });
+        let vok = serde_json::to_value(&normalize_report_envelope(&ok)).expect("serialize");
+        let p = vok
+            .get("presentation")
+            .expect("POST-GREEN: traceable stage_result accepted");
+        assert!(
+            vok.get("presentation_error")
                 .and_then(Value::as_str)
                 .is_none(),
-        "a stage_result+casefile WITH case_id must NOT fail closed (positive control)"
-    );
-    assert_eq!(
-        p.get("effective_sink").and_then(Value::as_str),
-        Some("casefile"),
-        "traceable stage_result+casefile stays durable-only (effective casefile)"
-    );
+            "a stage_result+{sink} WITH case_id must NOT fail closed (positive control)"
+        );
+        assert_eq!(
+            p.get("effective_sink").and_then(Value::as_str),
+            Some(sink),
+            "traceable stage_result+{sink} stays durable-only (effective == requested {sink})"
+        );
+    }
 }
