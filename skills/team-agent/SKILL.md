@@ -87,7 +87,7 @@ Use `team-agent attach-leader` / `team-agent claim-leader` to bind the leader pa
 
 | Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
 |---|---|---|---|---|
-| `claude` / `claude_code` | yes (`--resume <id>`, transcript-verified) | yes (JSONL stream) | yes (role `model` overrides `provider_models`) | yes (`--fork-session` + new `--session-id`) |
+| `claude` / `claude_code` | yes (`--resume <id>`, transcript-verified) | yes (JSONL stream) | yes (role `model` overrides `provider_models`) | yes (snapshot copy + only `--resume <snapshot-id>`) |
 | `codex` | yes (`codex resume <id>`, session-store-verified) | yes (turn JSONL) | yes (role `model`) | yes (`codex fork`) |
 | `copilot` | yes (`copilot --resume <id|name>`, sqlite `sessions` row) | not yet (phase 1: `provider.classify.unsupported` event) | yes (role `model`) | yes (isolated `COPILOT_HOME` store fork) |
 | `gemini_cli` | no | no | yes | no |
@@ -213,14 +213,14 @@ team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --wor
 Semantic distinction:
 
 - `team-agent add-agent <agent> --role-file <file>` — add a **new** worker not yet in team state.
-- `team-agent clone-agent <source> --as <new>` — reread the source worker's latest role file and start a **fresh, verified** provider session. It never copies conversation context.
+- `team-agent clone-agent <source> --as <new>` — reread the source worker's latest role file and start a fresh provider seat. It never copies conversation context. Success is initially honest `capture_state: pending_first_turn` with `session_id`, `new_session_id`, and `backing_path` all null; after the first turn, canonical capture changes the state to `captured` and fills the backing tuple.
 - `team-agent fork-agent <source> --as <new>` — reread the same latest role file and create a distinct, verified provider session that forks the source context. If the provider backing cannot be verified, the command fails and rolls back instead of silently cloning fresh.
 - `team-agent start-agent <agent>` — (re)launch a worker that **already exists** in team state but whose window is missing.
 - `team-agent reset-agent <agent> --discard-session` — keep the same seat and deliberately start it with fresh context.
 - `team-agent restart .` — resume a fully **stopped** team from stored worker sessions.
 - `team-agent quick-start <dir>` — first-time team creation from role docs; for existing teams use `restart`, and use `restart --allow-fresh` only after explicit user consent to discard context.
 
-Clone/fork names are always explicit: run concurrent calls with a different `--as` value for each new seat. A successful result includes the verified new `session_id`; a tmux window alone is not success. Updating the source role file affects the next clone/fork without requiring a full-team rebuild. Automatic knowledge write-back from a clone/fork into the source role file is not provided.
+Clone/fork names are always explicit: run concurrent calls with a different `--as` value for each new seat. Fork success includes a verified new `session_id` and independent backing; a tmux window alone is not fork success. Clone success uses the honest `pending_first_turn` state above until first-turn capture, never a fabricated verified tuple. Updating the source role file affects the next clone/fork without requiring a full-team rebuild. Automatic knowledge write-back from a clone/fork into the source role file is not provided.
 
 Removing a worker at runtime is the symmetric `team-agent remove-agent <agent> --workspace . --confirm`.
 
