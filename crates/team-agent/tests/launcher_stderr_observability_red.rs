@@ -39,15 +39,46 @@ use std::process::{Command, Output};
 mod hermetic_guard;
 use hermetic_guard::HermeticTestEnv;
 
+/// Gate6 CI-hermeticity revision: test-owned fake `claude` on PATH (PATH-shim
+/// discipline). The launcher's `is_installed` gate runs BEFORE the non-TTY
+/// attach; on a host without a real Claude binary (CI) the unshimmed fixture
+/// dies at `Provider claude command 'claude' not found` and never reaches the
+/// child-stderr persistence path under test. The shim mimics
+/// `claude -- --version` (prints, exits 0); the asserted failure is the tmux
+/// client attach, not the provider process, so assertion semantics are
+/// unchanged.
+fn write_fake_claude_shim(workspace: &Path) -> PathBuf {
+    let bin_dir = workspace.join("shim-bin");
+    std::fs::create_dir_all(&bin_dir).expect("create shim dir");
+    let shim = bin_dir.join("claude");
+    std::fs::write(&shim, "#!/bin/sh\necho 'claude shim 0.0.0-fake'\nexit 0\n")
+        .expect("write claude shim");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod claude shim");
+    }
+    bin_dir
+}
+
 /// Run the managed `claude` launcher from OUTSIDE a TTY (stdin/out/err are
 /// pipes, TERM unset) so the tmux attach client fails with
 /// `open terminal failed: not a terminal` and the launcher returns status 1 —
-/// the exact §4.2 reproduction, with no real provider needed.
+/// the exact §4.2 reproduction, with no real provider needed (`claude` is a
+/// test-owned PATH shim).
 fn run_launcher_non_tty(env: &HermeticTestEnv, workspace: &Path) -> Output {
+    let shim_dir = write_fake_claude_shim(workspace);
+    let shim_path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").expect("PATH present")
+    );
     Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .args(["claude", "--json", "--", "--version"])
         .current_dir(workspace)
         .env("HOME", env.home())
+        .env("PATH", shim_path)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .env_remove("TERM")

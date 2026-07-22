@@ -68,10 +68,29 @@ const TEAM_NAME: &str = "cf-batch4";
 const SOURCE: &str = "cp_worker";
 const NEW: &str = "cp_fork";
 
+/// Gate6 CI-hermeticity revision: the R7 fixture must pin the process-ancestry
+/// seam explicitly (`TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON`) instead of
+/// depending on the REAL ancestry of the test-runner host. Unpinned, a local
+/// runner descending from a dangerous-bypass leader yields
+/// `source=leader_process` (historical local green) while a clean CI runner
+/// correctly yields `source=disabled` — a non-hermetic assertion, not a product
+/// regression. Precedent: `codex_mcp_approval_inheritance_red.rs` `MockAncestry`
+/// (pins both bypass and restricted leader argv).
+const ANCESTRY_ENV: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
+const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
+const RESTRICTED_LEADER_ARGV: &[&str] = &[
+    "codex",
+    "--sandbox",
+    "read-only",
+    "--ask-for-approval",
+    "on-request",
+];
+
 struct Case {
     env: HermeticTestEnv,
     workspace: PathBuf,
     shim_path: String,
+    ancestry_json: String,
     socket: Option<PathBuf>,
 }
 
@@ -82,6 +101,13 @@ impl Case {
     /// pass vacuously. (R8 does not use Case: it exercises the library entry with
     /// an in-process RecordingTransport — see `r8_...`.)
     fn start(tag: &str) -> Self {
+        Self::start_with_ancestry(tag, &["codex", CODEX_BYPASS])
+    }
+
+    /// Every CLI invocation of this Case pins `ancestry_argv` through the
+    /// product's existing test seam so the derived approval policy is a
+    /// function of the FIXTURE, never of the host process tree.
+    fn start_with_ancestry(tag: &str, ancestry_argv: &[&str]) -> Self {
         let env = HermeticTestEnv::enter(tag);
         let workspace = env.workspace("ws");
         write_team_docs(&workspace, "claude");
@@ -95,6 +121,7 @@ impl Case {
             env,
             workspace,
             shim_path,
+            ancestry_json: serde_json::to_string(ancestry_argv).expect("ancestry argv json"),
             socket: None,
         };
         case.quick_start();
@@ -114,8 +141,14 @@ impl Case {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.env
-            .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
+        self.env.run_cli_env(
+            &self.workspace,
+            args,
+            &[
+                ("PATH", self.shim_path.as_str()),
+                (ANCESTRY_ENV, self.ancestry_json.as_str()),
+            ],
+        )
     }
 
     fn quick_start(&mut self) {
@@ -450,7 +483,11 @@ fn r8_copilot_fork_is_no_longer_capability_refused() {
 #[test]
 fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
     // Claude source + success-path backing shim so the fork COMPLETES and a NEW
-    // row exists to inspect — no vacuous pass on a refused fork.
+    // row exists to inspect — no vacuous pass on a refused fork. The dangerous
+    // leader is established by the PINNED ancestry seam (see ANCESTRY_ENV note):
+    // `source=leader_process` is only correct when a dangerous ancestor is
+    // actually detected, so the fixture must supply one instead of borrowing
+    // the host's.
     let case = Case::start("cf-r7");
     let fork = case.fork(NEW);
     assert_eq!(
@@ -484,6 +521,54 @@ fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
         Some(true),
         "guardrail: a fork must never carry a capability above the leader \
          (worker_capability_above_leader must not be true); MUST-16. policy={policy}"
+    );
+}
+
+/// R7b reverse positive control — with a pinned RESTRICTED leader ancestry the
+/// fork's policy must resolve to `source=disabled` (fail-closed), never
+/// `leader_process`, and still never escalate. This is the CI-truth face of the
+/// clamp (a clean runner == no dangerous ancestor) and proves r7 does not pass
+/// by constant behavior: the same fixture flips leader_process↔disabled purely
+/// on the pinned seam. Mirrors the deterministic product contract
+/// `lifecycle/tests/core.rs` (clean mocked ancestry → Disabled).
+///
+/// NOTE deliberately NOT asserted with the seam UNSET: unpinned, the policy is
+/// a function of the host process tree (the exact non-hermeticity this
+/// revision removes), so an unset-seam assertion would be red on any host
+/// whose own leader runs dangerously.
+#[test]
+fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
+    let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
+    let fork = case.fork(NEW);
+    assert_eq!(
+        fork.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "R7b fixture precondition: the claude fork must complete so a NEW row exists to check the \
+         policy (no vacuous control). fork={fork}"
+    );
+
+    let rows = case.team_agent_rows();
+    let new_row = rows.get(NEW).unwrap_or_else(|| {
+        panic!(
+            "R7b fixture precondition: NEW fork row must exist to inspect the policy; rows={rows:?}"
+        )
+    });
+    let policy = new_row.get("effective_approval_policy").unwrap_or_else(|| {
+        panic!("NEW fork row must carry an effective_approval_policy; row={new_row}")
+    });
+    assert_eq!(
+        policy.get("source").and_then(Value::as_str),
+        Some("disabled"),
+        "reverse control: a restricted/clean leader ancestry must resolve to source=disabled \
+         (fail-closed), never leader_process. policy={policy}"
+    );
+    assert_ne!(
+        policy
+            .get("worker_capability_above_leader")
+            .and_then(Value::as_bool),
+        Some(true),
+        "reverse control: a restricted leader must never yield a fork above the leader; MUST-16. \
+         policy={policy}"
     );
 }
 
