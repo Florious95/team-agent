@@ -1738,6 +1738,45 @@ mod u1_tests {
     }
 
     #[test]
+    fn codex_shared_single_candidate_without_identity_is_deferred() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "parent-peer": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                },
+                "worker-a": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let candidate = leader_like_candidate(
+            "019f3327-shared",
+            "/Users/alauda/.codex/sessions/2026/07/06/rollout-shared.jsonl",
+        );
+        let mut canned = BTreeMap::new();
+        canned.insert("parent-peer".to_string(), vec![candidate.clone()]);
+        canned.insert("worker-a".to_string(), vec![candidate]);
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+
+        assert!(report.assigned.is_empty(), "report={report:?}");
+        assert!(state["agents"]["parent-peer"].get("session_id").is_none());
+        assert!(state["agents"]["worker-a"].get("session_id").is_none());
+    }
+
+    #[test]
     fn codex_embedded_identity_assigns_each_same_cwd_worker_to_own_rollout() {
         let mut state = serde_json::json!({
             "agents": {
