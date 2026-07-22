@@ -1004,9 +1004,19 @@ fn contract_d_codex_rollout_requires_provider_lifecycle_shape_or_stays_unknown()
 
     let ws = tmp_dir("d-valid-rollout");
     let valid = ws.join("codex-session.jsonl");
+    let session_meta = serde_json::json!({
+        "session_meta": {"payload": {
+            "id": "codex-contract-d",
+            "cwd": ws.to_string_lossy(),
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        }}
+    });
     std::fs::write(
         &valid,
-        r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"ct1"}}"#,
+        format!(
+            "{session_meta}\n{}\n",
+            r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"ct1"}}"#
+        ),
     )
     .unwrap();
     let adapter = get_adapter(Provider::Codex);

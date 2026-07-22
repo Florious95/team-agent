@@ -536,10 +536,11 @@ impl RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
+        cwd: &Path,
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> SpawnResult {
-        emit_codex_fork_backing(argv);
+        emit_codex_fork_backing(argv, cwd);
         let mut spawns = self.spawns.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
@@ -559,7 +560,7 @@ impl RecordingTransport {
     }
 }
 
-fn emit_codex_fork_backing(argv: &[String]) {
+fn emit_codex_fork_backing(argv: &[String], cwd: &Path) {
     if !argv
         .windows(2)
         .any(|pair| pair[0] == "codex" && pair[1] == "fork")
@@ -575,12 +576,16 @@ fn emit_codex_fork_backing(argv: &[String]) {
     let root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
         .join(".codex/sessions/worker-spawn-env-fixture");
     std::fs::create_dir_all(&root).unwrap();
+    let record = serde_json::json!({
+        "session_meta": {"payload": {
+            "id": session_id.clone(),
+            "cwd": cwd.to_string_lossy(),
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        }}
+    });
     std::fs::write(
         root.join(format!("rollout-{session_id}.jsonl")),
-        format!(
-            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
-            chrono::Utc::now().to_rfc3339()
-        ),
+        format!("{record}\n"),
     )
     .unwrap();
 }
@@ -595,10 +600,10 @@ impl Transport for RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env, &[]))
+        Ok(self.spawn_result(session, window, argv, cwd, env, &[]))
     }
 
     fn spawn_into(
@@ -606,10 +611,10 @@ impl Transport for RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env, &[]))
+        Ok(self.spawn_result(session, window, argv, cwd, env, &[]))
     }
 
     fn spawn_first_with_env_unset(
@@ -617,11 +622,11 @@ impl Transport for RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env, env_unset))
+        Ok(self.spawn_result(session, window, argv, cwd, env, env_unset))
     }
 
     fn spawn_into_with_env_unset(
@@ -629,11 +634,11 @@ impl Transport for RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env, env_unset))
+        Ok(self.spawn_result(session, window, argv, cwd, env, env_unset))
     }
 
     fn inject(
