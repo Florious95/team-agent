@@ -550,3 +550,53 @@ fn form15_malformed_casefile_fails_closed_not_silent() {
         "POST-GREEN: a casefile sink with no class fails closed loudly; silence must not hide escalation"
     );
 }
+
+/// form15c (r19 §2.4 revision, case_id traceability tooth): a durable-only
+/// report_result — the ONLY eligible shape being `stage_result` + a non-leader
+/// sink — MUST carry a `case_id` so the orchestration_stage_artifact is
+/// traceable by case (signed amendment §2 line 42 + §4 lines 97-100). A
+/// `stage_result` + `casefile` with NO case_id is an illegal combination and
+/// MUST fail closed at ingress; case_id being fully optional (presentation.rs
+/// pre-fix / wire.rs required=[sink,class] only) left the traceability clause
+/// toothless. Baseline red: no ingest validation, case_id ignored entirely.
+#[test]
+fn form15c_stage_result_casefile_without_case_id_fails_closed() {
+    // stage_result durable-only requested but no case_id -> fail closed.
+    let env = json!({
+        "summary": "x",
+        "presentation": {"sink": "casefile", "class": "stage_result"}
+    });
+    let v = serde_json::to_value(&normalize_report_envelope(&env)).expect("serialize");
+    let err = v.get("presentation_error").and_then(Value::as_str);
+    assert_eq!(
+        err,
+        Some("missing_case_id"),
+        "POST-GREEN: stage_result+casefile without case_id fails closed (case_id traceability \
+         clause); durable-only must be case-traceable, not anonymous"
+    );
+
+    // Positive control: the SAME shape WITH a case_id is accepted as durable-only
+    // (effective casefile, no error) — the tooth rejects only the missing-case_id
+    // case, it does not blanket-reject legitimate traceable stage results.
+    let ok = json!({
+        "summary": "x",
+        "presentation": {"sink": "casefile", "class": "stage_result", "case_id": "bug-42"}
+    });
+    let vok = serde_json::to_value(&normalize_report_envelope(&ok)).expect("serialize");
+    let p = vok
+        .get("presentation")
+        .expect("POST-GREEN: traceable stage_result accepted");
+    assert!(
+        p.get("presentation_error").is_none()
+            || vok
+                .get("presentation_error")
+                .and_then(Value::as_str)
+                .is_none(),
+        "a stage_result+casefile WITH case_id must NOT fail closed (positive control)"
+    );
+    assert_eq!(
+        p.get("effective_sink").and_then(Value::as_str),
+        Some("casefile"),
+        "traceable stage_result+casefile stays durable-only (effective casefile)"
+    );
+}
