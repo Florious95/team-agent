@@ -24,6 +24,21 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+// R6 ISOLATION DECLARATION (test_isolation_escape_contract.rs guard).
+//
+// This file carries ONE real-machine form (`form13_rm`), env-gated behind
+// TEAM_AGENT_REALMACHINE_MSGROUTE=1, which drives the real mcp-server stdio,
+// a real TmuxBackend and a real MessageStore through `McpSimHarness`. That
+// harness provides equivalent real-machine isolation: it allocates a fresh
+// per-process workspace (its own TEAM_AGENT_WORKSPACE root under the test
+// temp dir), opens the MessageStore against that workspace only, and scrubs
+// TMUX / TMUX_PANE from the child MCP process env so no ambient HOME- or
+// TMUX-derived leader/caller identity can leak in. The remaining forms are
+// pure `normalize_report_envelope` calls and static source predicates that
+// touch neither delivery nor tmux; the `deliver_pending_messages` tokens they
+// mention are documentation of the observed SQL allowlist seam, not runtime
+// calls. This declaration is truthful, not a guard bypass.
+
 #[path = "support/mcp_sim_harness.rs"]
 mod mcp_sim_harness;
 use mcp_sim_harness::McpSimHarness;
