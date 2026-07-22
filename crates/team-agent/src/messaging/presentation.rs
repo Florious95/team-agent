@@ -43,6 +43,12 @@ pub enum PresentationClass {
     Timeout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationSource {
+    Send,
+    ReportResult,
+}
+
 impl PresentationClass {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -104,11 +110,17 @@ impl Default for PresentationRequest {
 
 impl Default for PresentationDecision {
     fn default() -> Self {
-        decide_presentation(&PresentationRequest::default())
+        decide_presentation(
+            &PresentationRequest::default(),
+            PresentationSource::ReportResult,
+        )
     }
 }
 
-pub fn decide_presentation(request: &PresentationRequest) -> PresentationDecision {
+pub fn decide_presentation(
+    request: &PresentationRequest,
+    source: PresentationSource,
+) -> PresentationDecision {
     let critical = matches!(
         request.class,
         PresentationClass::StagePass
@@ -121,6 +133,13 @@ pub fn decide_presentation(request: &PresentationRequest) -> PresentationDecisio
         (
             PresentationSink::Leader,
             format!("critical_class:{}", request.class.as_str()),
+        )
+    } else if source == PresentationSource::ReportResult
+        && request.class != PresentationClass::StageResult
+    {
+        (
+            PresentationSink::Leader,
+            format!("user_delivery_class:{}", request.class.as_str()),
         )
     } else {
         (
@@ -137,6 +156,25 @@ pub fn decide_presentation(request: &PresentationRequest) -> PresentationDecisio
         policy_reason,
         policy_version: "team-presentation-v1".to_string(),
     }
+}
+
+pub fn normalize_report_presentation(
+    value: Option<&Value>,
+) -> (PresentationRequest, Option<String>) {
+    let (request, error) = normalize_presentation(value);
+    if error.is_some() {
+        return (request, error);
+    }
+    let missing_case_id = request.class == PresentationClass::StageResult
+        && request.sink != PresentationSink::Leader
+        && request
+            .case_id
+            .as_deref()
+            .is_none_or(|case_id| case_id.trim().is_empty());
+    if missing_case_id {
+        return (request, Some("missing_case_id".to_string()));
+    }
+    (request, None)
 }
 
 pub fn normalize_presentation(value: Option<&Value>) -> (PresentationRequest, Option<String>) {
@@ -219,15 +257,51 @@ mod tests {
             class: PresentationClass::Blocking,
             case_id: None,
         };
-        let decision = decide_presentation(&request);
+        let decision = decide_presentation(&request, PresentationSource::ReportResult);
         assert_eq!(decision.effective_sink, PresentationSink::Leader);
         assert_eq!(decision.policy_reason, "critical_class:blocking");
 
-        let benign = decide_presentation(&PresentationRequest {
+        let benign = PresentationRequest {
             sink: PresentationSink::Casefile,
             class: PresentationClass::Message,
             case_id: None,
-        });
-        assert_eq!(benign.effective_sink, PresentationSink::Casefile);
+        };
+        assert_eq!(
+            decide_presentation(&benign, PresentationSource::Send).effective_sink,
+            PresentationSink::Casefile
+        );
+        assert_eq!(
+            decide_presentation(&benign, PresentationSource::ReportResult).effective_sink,
+            PresentationSink::Leader
+        );
+    }
+
+    #[test]
+    fn report_stage_result_requires_case_id_only_for_non_leader_sink() {
+        assert_eq!(
+            normalize_report_presentation(Some(
+                &json!({"sink": "casefile", "class": "stage_result"})
+            ))
+            .1,
+            Some("missing_case_id".to_string())
+        );
+        assert_eq!(
+            normalize_report_presentation(Some(&json!({
+                "sink": "casefile",
+                "class": "stage_result",
+                "case_id": "case-1"
+            })))
+            .1,
+            None
+        );
+        assert_eq!(
+            normalize_presentation(Some(&json!({
+                "sink": "casefile",
+                "class": "stage_result"
+            })))
+            .1,
+            None,
+            "send normalization remains unchanged"
+        );
     }
 }

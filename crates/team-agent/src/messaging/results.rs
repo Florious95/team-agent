@@ -629,13 +629,16 @@ fn report_result_for_owner_team_inner(
 ) -> Result<serde_json::Value, MessagingError> {
     validate_result_envelope(envelope)?;
     let (presentation_request, presentation_error) =
-        super::presentation::normalize_presentation(envelope.get("presentation"));
+        super::presentation::normalize_report_presentation(envelope.get("presentation"));
     if let Some(error) = presentation_error {
         return Err(MessagingError::Validation(format!(
             "invalid presentation: {error}"
         )));
     }
-    let presentation = super::presentation::decide_presentation(&presentation_request);
+    let presentation = super::presentation::decide_presentation(
+        &presentation_request,
+        super::presentation::PresentationSource::ReportResult,
+    );
     let store = MessageStore::open(workspace)?;
     let result_id = envelope
         .get("result_id")

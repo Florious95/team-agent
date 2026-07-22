@@ -10,7 +10,9 @@ use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
 use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_presentation};
-use super::presentation::{decide_presentation, PresentationRequest, PresentationSink};
+use super::presentation::{
+    decide_presentation, PresentationRequest, PresentationSink, PresentationSource,
+};
 use super::{
     persist_resolved_send, DeliveryBlocker, DeliveryOutcome, DeliveryRefusal, DeliveryStatus,
     InitialDisposition, LogicalRecipient, MessagingError, PersistResolution, ResolvedSendIntent,
@@ -121,7 +123,7 @@ pub fn send_message(
     backfill_leader_binding_for_delivery_view(&mut state, &raw_state);
     let recipient = match target {
         MessageTarget::Single(target) if target == "leader" => {
-            let presentation = decide_presentation(&opts.presentation);
+            let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
             if presentation.effective_sink != PresentationSink::Leader {
                 let mut intent = ResolvedSendIntent::accepted(
                     opts.origin,

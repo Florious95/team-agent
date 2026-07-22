@@ -105,8 +105,11 @@ pub fn normalize_report_envelope(env: &Value) -> NormalizedReportEnvelope {
     let task_id = text_field(env, "task_id").unwrap_or_else(|| "manual".to_string());
     let agent_id = text_field(env, "agent_id").unwrap_or_else(|| "unknown".to_string());
     let (presentation_request, presentation_error) =
-        crate::messaging::presentation::normalize_presentation(env.get("presentation"));
-    let presentation = crate::messaging::presentation::decide_presentation(&presentation_request);
+        crate::messaging::presentation::normalize_report_presentation(env.get("presentation"));
+    let presentation = crate::messaging::presentation::decide_presentation(
+        &presentation_request,
+        crate::messaging::presentation::PresentationSource::ReportResult,
+    );
     NormalizedReportEnvelope {
         schema_version: "result_envelope_v1".to_string(),
         task_id: TaskId::new(task_id),

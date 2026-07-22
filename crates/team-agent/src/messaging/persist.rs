@@ -301,6 +301,7 @@ mod tests {
                 class: super::super::presentation::PresentationClass::StageResult,
                 case_id: Some("case-7".to_string()),
             },
+            super::super::presentation::PresentationSource::Send,
         );
         let PersistResolution::Persisted(persisted) = persist_resolved_send(&intent).unwrap()
         else {
