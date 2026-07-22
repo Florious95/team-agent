@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.53
+
+- **Feature: verified agent clone/fork lifecycle.** `clone-agent` copies the latest role into a fresh session, while `fork-agent` preserves verified provider context for Codex, Claude, and Copilot. Per-agent spawn boundaries are captured before transport spawn, backing attribution is provider-scoped and convergence-bounded, concurrent forks require unique backing, and failed operations roll back their own panes, state, and generated artifacts.
+
+- **Hardening: launcher failure attribution without broader cleanup authority.** Launcher stderr is captured as a bounded, redacted diagnostic; every destructive tmux call is preceded by a persisted `transport.pre_kill_audit`; and the same-socket canary proves a launcher failure does not kill a pre-existing session. The original external killer has not been identified: these changes add attribution and observability, not a claimed root-cause fix. The prohibition on adding or expanding `kill-server` or cleanup authority remains in force.
+
+- **Fix: `PaneWorkspaceMismatch` compatibility for explicitly claimed cross-workspace leaders.** A leader observed across workspaces can remain reachable only when the live pane identity, binding nonce, and authorized workspace agree. Recycled panes, missing nonces, and foreign workspaces still fail closed; physical channel selection remains separate from claim authority and endpoint convergence.
+
+- **Regression hardening: four release-gate families.** Canonical Codex fixtures now carry the real cwd shape; fixed-time environment seams are isolated per test; shutdown preserves tombstones when a target session is absent; and leader claims separate canonical team scope, observed live authority, convergence probing, and persisted audit evidence.
+
 ## 0.5.52
 
 - **Fix: team-key split-brain — one canonical runtime team key across retirement, restart, and per-team state merge (slices 1 / 2a / 2b).**
