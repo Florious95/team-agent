@@ -360,6 +360,29 @@ fn push_state_tmux_endpoints(state: &Value, out: &mut BTreeSet<String>) {
     }
 }
 
+fn state_records_pane_endpoint(state: &Value, pane_id: &str, endpoint: &str) -> bool {
+    let record_matches = |record: &Value| {
+        record.get("pane_id").and_then(Value::as_str) == Some(pane_id)
+            && record
+                .get("tmux_socket")
+                .and_then(Value::as_str)
+                .is_some_and(|recorded| tmux_endpoints_match(recorded, endpoint))
+    };
+    ["team_owner", "leader_receiver"]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(&record_matches))
+        || state
+            .get("teams")
+            .and_then(Value::as_object)
+            .is_some_and(|teams| {
+                teams.values().any(|team| {
+                    ["team_owner", "leader_receiver"]
+                        .iter()
+                        .any(|key| team.get(*key).is_some_and(&record_matches))
+                })
+            })
+}
+
 fn requeue_exhausted_watchers_after_attach(
     workspace: &Path,
     state: &Value,
@@ -497,10 +520,15 @@ pub fn claim_leader(
         .iter()
         .filter(|target| target.info.pane_id.as_str() == caller)
         .min_by_key(|target| {
+            let recorded_caller_authority = target.endpoint.as_deref().is_some_and(|endpoint| {
+                state_records_pane_endpoint(&raw_state, &caller, endpoint)
+            });
             let in_target_workspace = target.info.current_path.as_deref().is_some_and(|path| {
                 crate::messaging::leader_channel::path_is_in_workspace(path, workspace)
             });
-            target.source.claim_priority(in_target_workspace)
+            target
+                .source
+                .claim_priority(recorded_caller_authority, in_target_workspace)
         });
     let caller_pane_info = caller_candidate.map(|target| &target.info);
     let mut caller_target = caller_candidate.and_then(|target| {
@@ -1381,15 +1409,18 @@ impl ClaimLeaderTargetSource {
         }
     }
 
-    fn claim_priority(self, in_target_workspace: bool) -> u8 {
+    fn claim_priority(self, recorded_caller_authority: bool, in_target_workspace: bool) -> u8 {
+        if recorded_caller_authority {
+            return 0;
+        }
         if !in_target_workspace {
-            return self.priority();
+            return self.priority() + 1;
         }
         match self {
-            Self::Workspace => 0,
-            Self::StateRecorded => 1,
-            Self::CurrentTmux => 2,
-            Self::Default => 3,
+            Self::Workspace => 1,
+            Self::StateRecorded => 2,
+            Self::CurrentTmux => 3,
+            Self::Default => 4,
         }
     }
 }
