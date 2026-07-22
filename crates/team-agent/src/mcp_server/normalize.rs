@@ -104,6 +104,8 @@ pub fn normalize_report_envelope(env: &Value) -> NormalizedReportEnvelope {
     let summary = text_field(env, "summary").unwrap_or_else(|| "completed".to_string());
     let task_id = text_field(env, "task_id").unwrap_or_else(|| "manual".to_string());
     let agent_id = text_field(env, "agent_id").unwrap_or_else(|| "unknown".to_string());
+    let (presentation, presentation_error) =
+        crate::messaging::presentation::normalize_presentation(env.get("presentation"));
     NormalizedReportEnvelope {
         schema_version: "result_envelope_v1".to_string(),
         task_id: TaskId::new(task_id),
@@ -115,6 +117,8 @@ pub fn normalize_report_envelope(env: &Value) -> NormalizedReportEnvelope {
         risks: normalize_risks(env.get("risks")),
         artifacts: normalize_artifacts(env.get("artifacts")),
         next_actions: normalize_next_actions(env.get("next_actions")),
+        presentation,
+        presentation_error,
     }
 }
 

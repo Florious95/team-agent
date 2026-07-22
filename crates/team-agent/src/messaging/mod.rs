@@ -68,6 +68,7 @@ pub mod leader_channel;
 pub mod leader_receiver;
 pub mod peers;
 pub mod persist;
+pub mod presentation;
 pub mod results;
 pub mod scheduler;
 pub mod selftest;
