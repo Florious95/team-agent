@@ -446,7 +446,10 @@ fn message_not_silently_stuck_accepted_when_coordinator_dead() {
     assert!(out.ok, "durable persistence is the send success boundary");
     assert_eq!(out.status, DeliveryStatus::Blocked);
     assert_eq!(out.message_status.0, "queued_coordinator_unavailable");
-    assert!(out.message_id.as_deref().is_some_and(|id| id.starts_with("msg_")));
+    assert!(out
+        .message_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("msg_")));
     assert_eq!(out.reason, Some(DeliveryRefusal::CoordinatorUnavailable));
     assert!(
         out.verification
@@ -2288,6 +2291,53 @@ fn u1_multi_team_send_does_not_backfill_top_level_leader_binding() {
         )
         .unwrap();
     assert_eq!(owner_team_id.as_deref(), Some("team-b"));
+}
+
+#[test]
+fn casefile_leader_send_is_durable_without_entering_leader_funnel() {
+    let ws = tmp_ws("casefile-send");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let opts = SendOptions {
+        team: Some(TeamKey::new("team-a")),
+        requires_ack: false,
+        presentation: crate::messaging::presentation::PresentationRequest {
+            sink: crate::messaging::presentation::PresentationSink::Casefile,
+            class: crate::messaging::presentation::PresentationClass::Progress,
+            case_id: Some("case-1".to_string()),
+        },
+        ..SendOptions::default()
+    };
+    let out = send_message(
+        &ws,
+        &MessageTarget::Single("leader".to_string()),
+        "internal progress",
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(out.status, DeliveryStatus::StoredOnly);
+    assert_eq!(out.message_status.0, "stored_only");
+    let store = store_for(&ws);
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let (status, presentation): (String, String) = conn
+        .query_row(
+            "select status, presentation from messages where message_id = ?1",
+            [out.message_id.as_deref().unwrap()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "stored_only");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&presentation).unwrap()["effective_sink"],
+        "casefile"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════

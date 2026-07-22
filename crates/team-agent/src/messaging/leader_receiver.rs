@@ -14,6 +14,7 @@ use crate::transport::{
 
 use super::helpers::MessageStatusShadow;
 use super::persist::persist_internal_send;
+use super::presentation::PresentationDecision;
 use super::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, InitialDisposition,
     InternalSendKind, MessagingError, PersistResolution,
@@ -70,6 +71,35 @@ pub fn send_to_leader_receiver_with_message_id(
     requested_message_id: Option<&str>,
     event_log: &EventLog,
 ) -> Result<DeliveryOutcome, MessagingError> {
+    send_to_leader_receiver_with_presentation(
+        workspace,
+        state,
+        leader_id,
+        content,
+        task_id,
+        sender,
+        requires_ack,
+        result_id,
+        requested_message_id,
+        &PresentationDecision::default(),
+        event_log,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn send_to_leader_receiver_with_presentation(
+    workspace: &Path,
+    state: &serde_json::Value,
+    leader_id: &str,
+    content: &str,
+    task_id: Option<&TaskId>,
+    sender: &str,
+    requires_ack: bool,
+    result_id: Option<&str>,
+    requested_message_id: Option<&str>,
+    presentation: &PresentationDecision,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
     let store = MessageStore::open(workspace)?;
     let owner_team = active_team_key(workspace, state);
     if requires_ack {
@@ -90,6 +120,7 @@ pub fn send_to_leader_receiver_with_message_id(
         false,
         requested_message_id,
         InitialDisposition::Accepted,
+        Some(presentation),
     )? {
         PersistResolution::Duplicate(requested) => {
             return Ok(DeliveryOutcome {
@@ -643,6 +674,7 @@ pub fn enqueue_leader_mailbox_until_attach(
         false,
         None,
         InitialDisposition::QueuedUntilLeaderAttach,
+        None,
     )?
     else {
         unreachable!("offline mailbox does not accept caller-supplied ids")

@@ -57,6 +57,7 @@ pub fn deliver_stored_message(
         requires_ack,
         None,
         super::InitialDisposition::Accepted,
+        None,
     )?
     else {
         unreachable!("internal delivery does not accept caller-supplied ids")

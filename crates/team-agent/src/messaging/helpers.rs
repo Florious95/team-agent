@@ -25,6 +25,7 @@ static RESULT_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn status_wire(status: DeliveryStatus) -> &'static str {
     match status {
         DeliveryStatus::Delivered => "delivered",
+        DeliveryStatus::StoredOnly => "stored_only",
         DeliveryStatus::Failed => "failed",
         DeliveryStatus::Queued => "queued",
         DeliveryStatus::Blocked => "blocked",

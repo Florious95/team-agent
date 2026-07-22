@@ -9,7 +9,8 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
-use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_message_id};
+use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_presentation};
+use super::presentation::{decide_presentation, PresentationRequest, PresentationSink};
 use super::{
     persist_resolved_send, DeliveryBlocker, DeliveryOutcome, DeliveryRefusal, DeliveryStatus,
     InitialDisposition, LogicalRecipient, MessagingError, PersistResolution, ResolvedSendIntent,
@@ -72,6 +73,7 @@ pub struct SendOptions {
     /// the store insert uses this id verbatim; a repeat with the same id is rejected
     /// as [`DeliveryRefusal::Duplicate`] instead of creating a second row.
     pub message_id: Option<String>,
+    pub presentation: PresentationRequest,
 }
 
 impl Default for SendOptions {
@@ -91,6 +93,7 @@ impl Default for SendOptions {
             block_until_delivered: true,
             team: None,
             message_id: None,
+            presentation: PresentationRequest::default(),
         }
     }
 }
@@ -118,7 +121,53 @@ pub fn send_message(
     backfill_leader_binding_for_delivery_view(&mut state, &raw_state);
     let recipient = match target {
         MessageTarget::Single(target) if target == "leader" => {
-            let outcome = send_to_leader_receiver_with_message_id(
+            let presentation = decide_presentation(&opts.presentation);
+            if presentation.effective_sink != PresentationSink::Leader {
+                let mut intent = ResolvedSendIntent::accepted(
+                    opts.origin,
+                    workspace,
+                    opts.team.clone(),
+                    LogicalRecipient::Leader,
+                    opts.sender.clone(),
+                    opts.task_id.clone(),
+                    content,
+                    None,
+                    false,
+                    opts.message_id.clone(),
+                );
+                intent.initial_disposition = InitialDisposition::StoredOnly;
+                intent.presentation = presentation.clone();
+                let persisted = match persist_resolved_send(&intent)? {
+                    PersistResolution::Persisted(persisted) => persisted,
+                    PersistResolution::Duplicate(message_id) => {
+                        return Ok(refused_outcome_with_id(
+                            DeliveryRefusal::Duplicate,
+                            Some(message_id),
+                        ));
+                    }
+                };
+                event_log.write(
+                    "presentation.stored_without_live_inject",
+                    serde_json::json!({
+                        "message_id": persisted.message_id,
+                        "requested_sink": presentation.requested_sink,
+                        "effective_sink": presentation.effective_sink,
+                        "class": presentation.class,
+                        "policy_reason": presentation.policy_reason,
+                    }),
+                )?;
+                return Ok(DeliveryOutcome {
+                    ok: true,
+                    status: DeliveryStatus::StoredOnly,
+                    message_status: MessageStatusShadow("stored_only".to_string()),
+                    message_id: Some(persisted.message_id),
+                    verification: Some("durable_without_live_inject".to_string()),
+                    stage: None,
+                    reason: None,
+                    channel: Some(presentation.effective_sink.as_str().to_string()),
+                });
+            }
+            let outcome = send_to_leader_receiver_with_presentation(
                 workspace,
                 &state,
                 "leader",
@@ -128,6 +177,7 @@ pub fn send_message(
                 opts.requires_ack,
                 None,
                 opts.message_id.as_deref(),
+                &presentation,
                 &event_log,
             )?;
             if matches!(outcome.status, DeliveryStatus::Queued) && owner_pane_is_dead(&state) {

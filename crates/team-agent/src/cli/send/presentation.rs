@@ -285,6 +285,7 @@ pub(super) fn first_target(target: &MessageTarget) -> String {
 pub(super) fn delivery_status_wire(status: DeliveryStatus) -> &'static str {
     match status {
         DeliveryStatus::Delivered => "delivered",
+        DeliveryStatus::StoredOnly => "stored_only",
         DeliveryStatus::Failed => "failed",
         DeliveryStatus::Queued => "queued",
         DeliveryStatus::Blocked => "blocked",

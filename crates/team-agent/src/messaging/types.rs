@@ -20,6 +20,8 @@ use super::helpers::MessageStatusShadow;
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
     Delivered,
+    /// Durable presentation obligation intentionally did not enter physical injection.
+    StoredOnly,
     Failed,
     /// busy → 延后不丢 (card §131:不 mark failed,留队列)。
     Queued,

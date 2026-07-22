@@ -95,7 +95,7 @@ pub use leader_channel::{
 pub use leader_receiver::{
     deliver_to_leader_fallback_pane, enqueue_leader_mailbox_until_attach,
     mirror_peer_message_to_leader, send_to_leader_receiver,
-    send_to_leader_receiver_with_message_id,
+    send_to_leader_receiver_with_message_id, send_to_leader_receiver_with_presentation,
 };
 pub use peers::allow_peer_talk;
 pub use persist::{

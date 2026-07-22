@@ -419,6 +419,11 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
                 string_property("Target agent id, 'leader', or '*' for broadcast."),
             );
             insert_property(&mut properties, "content", string_property("Message body."));
+            insert_property(
+                &mut properties,
+                "presentation",
+                presentation_property("Optional durable presentation routing."),
+            );
         }
         McpTool::ReportResult => {
             insert_property(
@@ -466,6 +471,11 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
                 &mut properties,
                 "agent_id",
                 string_property("Optional reporting agent id override."),
+            );
+            insert_property(
+                &mut properties,
+                "presentation",
+                presentation_property("Optional durable presentation routing."),
             );
         }
         McpTool::UpdateState => {
@@ -590,6 +600,23 @@ fn object_property(description: &str) -> Value {
     serde_json::json!({"type": "object", "description": description, "additionalProperties": true})
 }
 
+fn presentation_property(description: &str) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": description,
+        "properties": {
+            "sink": {"type": "string", "enum": ["leader", "casefile", "silent"]},
+            "class": {"type": "string", "enum": [
+                "message", "progress", "stage_result", "stage_pass", "bounce",
+                "blocking", "final_review", "timeout"
+            ]},
+            "case_id": {"type": "string"}
+        },
+        "required": ["sink", "class"],
+        "additionalProperties": false
+    })
+}
+
 fn array_property(description: &str) -> Value {
     serde_json::json!({"type": "array", "description": description, "items": {"type": "object", "additionalProperties": true}})
 }
@@ -610,7 +637,14 @@ pub(crate) fn dispatch_tool(
         McpTool::SendMessage => {
             let target = message_target_from_value(args.get("to"));
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-            let outcome = tools.send_message(&target, content, None, None, None)?;
+            let outcome = tools.send_message_with_presentation(
+                &target,
+                content,
+                None,
+                None,
+                None,
+                args.get("presentation"),
+            )?;
             match outcome {
                 SendOutcome::WorkerAccepted { .. } => Ok(ToolOk {
                     fields: object_fields(outcome.to_value()),

@@ -178,6 +178,34 @@ impl TeamOrchestratorTools {
         requires_ack: Option<bool>,
         scope_override: Option<Scope>,
     ) -> Result<SendOutcome, ToolError> {
+        self.send_message_with_presentation(
+            to,
+            content,
+            task_id,
+            requires_ack,
+            scope_override,
+            None,
+        )
+    }
+
+    pub fn send_message_with_presentation(
+        &self,
+        to: &MessageTarget,
+        content: &str,
+        task_id: Option<&str>,
+        requires_ack: Option<bool>,
+        scope_override: Option<Scope>,
+        presentation: Option<&Value>,
+    ) -> Result<SendOutcome, ToolError> {
+        let (presentation, presentation_error) =
+            crate::messaging::presentation::normalize_presentation(presentation);
+        if let Some(error) = presentation_error {
+            return Err(ToolError::new(
+                ToolErrorReason::InvalidToolArguments,
+                format!("invalid presentation: {error}"),
+                "PresentationError",
+            ));
+        }
         let canonical_owner_team = self.canonical_owner_team_key()?;
         if matches!(scope_override, Some(Scope::Workspace)) {
             return Err(self.rpc_scope_refused(
@@ -227,6 +255,7 @@ impl TeamOrchestratorTools {
             sender,
             requires_ack: ack,
             team: canonical_owner_team,
+            presentation,
             ..SendOptions::default()
         };
         if is_worker_recipient(to) {

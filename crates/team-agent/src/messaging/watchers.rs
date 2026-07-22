@@ -195,6 +195,7 @@ fn deliver_primary_watcher(
         false,
         None,
         super::InitialDisposition::Accepted,
+        None,
     )?
     else {
         unreachable!("watcher notifications do not accept caller-supplied ids")

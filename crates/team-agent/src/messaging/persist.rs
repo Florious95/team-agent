@@ -204,6 +204,7 @@ pub(crate) fn persist_internal_send(
     requires_ack: bool,
     requested_message_id: Option<&str>,
     initial_disposition: InitialDisposition,
+    presentation: Option<&PresentationDecision>,
 ) -> Result<PersistResolution, MessagingError> {
     let mut intent = ResolvedSendIntent::accepted(
         SendOrigin::Internal(kind),
@@ -218,6 +219,9 @@ pub(crate) fn persist_internal_send(
         requested_message_id.map(ToOwned::to_owned),
     );
     intent.initial_disposition = initial_disposition;
+    if let Some(presentation) = presentation {
+        intent.presentation = presentation.clone();
+    }
     persist_resolved_send(&intent)
 }
 

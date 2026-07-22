@@ -142,6 +142,7 @@ fn run_contract_suite(
             false,
             None,
             super::InitialDisposition::Accepted,
+            None,
         )
         .ok()?
         {
