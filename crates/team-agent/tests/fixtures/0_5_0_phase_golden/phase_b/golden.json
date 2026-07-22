@@ -534,7 +534,7 @@
             "metadata": {
               "binary_path": "<TEAM_AGENT_BIN>",
               "binary_version": "<VERSION>",
-              "message_store_schema_version": 3,
+              "message_store_schema_version": 4,
               "pid": 0,
               "protocol_version": 2,
               "source": "boot",
@@ -545,7 +545,7 @@
             "ok": true,
             "pid": 0,
             "schema": {
-              "message_store_schema_version": 3
+              "message_store_schema_version": 4
             },
             "schema_error": null,
             "schema_ok": true,
