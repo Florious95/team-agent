@@ -2565,14 +2565,27 @@ mod tests {
     }
 
     #[test]
-    fn explicit_claim_prefers_the_callers_ambient_tmux_endpoint() {
-        assert!(
-            ClaimLeaderTargetSource::CurrentTmux.priority()
-                < ClaimLeaderTargetSource::StateRecorded.priority()
-        );
-        assert!(
-            ClaimLeaderTargetSource::CurrentTmux.priority()
-                < ClaimLeaderTargetSource::Workspace.priority()
+    fn claim_authority_preserves_recorded_absolute_observation() {
+        let workspace = Path::new("/tmp/workspace-a");
+        let absolute = "/tmp/tmux-501/ta-live";
+        let state = json!({
+            "leader_receiver": {"pane_id": "%9", "tmux_socket": absolute}
+        });
+        let pane = observed_pane();
+        let targets = vec![
+            ClaimLeaderTargetCandidate {
+                info: pane.clone(),
+                endpoint: Some(crate::tmux_backend::socket_name_for_workspace(workspace)),
+            },
+            ClaimLeaderTargetCandidate {
+                info: pane,
+                endpoint: Some(absolute.to_string()),
+            },
+        ];
+
+        assert_eq!(
+            authoritative_observed_endpoint(workspace, &state, &targets, &targets[0]).as_deref(),
+            Some(absolute)
         );
     }
 }
