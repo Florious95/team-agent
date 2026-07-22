@@ -3221,30 +3221,41 @@ fn gate054_status_surfaces_pending_leader_notifications() {
 
 #[test]
 fn gate054_fallback_pane_grep_guard_no_cross_server_chain_when_socket_recorded() {
-    // Structural grep: the recorded-socket branch of the fallback inject
-    // chain must NOT compose the workspace or default tmux backends after
-    // the endpoint backend rejects. This is the byte-level fence against
-    // silent regression.
+    // Structural grep: the recorded-socket transport set must contain only
+    // the endpoint backend, while workspace/default transports remain in the
+    // no-socket arm. Physical injection must consume the pane returned by the
+    // shared resolver rather than rebuilding a target from state.
     let src = include_str!("../leader_receiver.rs");
-    let inject_start = src
-        .find("let inject_result: Result<InjectReport, TransportError>")
-        .expect("fallback inject chain must remain single-typed");
-    let inject_end = src[inject_start..]
-        .find("};\n\n    match inject_result")
-        .map(|off| inject_start + off + 2)
-        .expect("fallback inject chain must terminate before match");
-    let chain = &src[inject_start..inject_end];
-    // The socket-recorded arm is the `Some(socket) => {..}` block. It must
-    // NOT contain a workspace or default fallback.
-    let some_arm_start = chain.find("Some(socket) => {").expect("Some(socket) arm");
-    let some_arm_end = chain[some_arm_start..]
-        .find("None => {")
-        .map(|off| some_arm_start + off)
-        .expect("None arm must follow");
-    let some_arm = &chain[some_arm_start..some_arm_end];
+    let transports_start = src
+        .find("let transports: Vec<Box<dyn Transport>>")
+        .expect("fallback transport set must remain explicit");
+    let transports_end = src[transports_start..]
+        .find("let mut resolved")
+        .map(|off| transports_start + off)
+        .expect("transport selection must precede shared resolution");
+    let transports = &src[transports_start..transports_end];
+    let socket_arm_start = transports
+        .find("Some(socket) =>")
+        .expect("recorded-socket arm");
+    let socket_arm_end = transports[socket_arm_start..]
+        .find("None =>")
+        .map(|off| socket_arm_start + off)
+        .expect("no-socket arm must follow");
+    let socket_arm = &transports[socket_arm_start..socket_arm_end];
     assert!(
-        !some_arm.contains("tmux_workspace_transport")
-            && !some_arm.contains("tmux_default_transport"),
-        "0.5.5 gate054: socket-recorded fallback arm must not compose workspace/default backends; arm={some_arm}"
+        socket_arm.contains("tmux_endpoint_transport")
+            && !socket_arm.contains("tmux_workspace_transport")
+            && !socket_arm.contains("tmux_default_transport"),
+        "0.5.5 gate054: socket-recorded fallback arm must remain endpoint-only; arm={socket_arm}"
+    );
+    let no_socket_arm = &transports[socket_arm_end..];
+    assert!(
+        no_socket_arm.contains("tmux_workspace_transport")
+            && no_socket_arm.contains("tmux_default_transport"),
+        "0.5.5 gate054: workspace/default transports belong only to the no-socket arm; arm={no_socket_arm}"
+    );
+    assert!(
+        src.contains("let target = Target::Pane(PaneId::new(channel.pane_id));"),
+        "fallback injection must consume the shared resolver's typed channel"
     );
 }

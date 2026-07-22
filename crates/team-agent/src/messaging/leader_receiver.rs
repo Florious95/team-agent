@@ -258,8 +258,7 @@ pub fn deliver_to_leader_fallback_pane(
         attempt_payload.clone(),
     )?;
 
-    let Some(pane_id) = pane_id.filter(|pane| !pane.is_empty() && pane != "__team_agent_unbound__")
-    else {
+    let Some(receiver) = leader_receiver_record(state) else {
         let failed = serde_json::json!({
             "message_id": message_id,
             "result_id": result_id,
@@ -267,7 +266,7 @@ pub fn deliver_to_leader_fallback_pane(
             "pane_id": null,
             "primary_error": primary_error,
             "delivered_via": "fallback_pane",
-            "reason": "no_bound_pane",
+            "reason": "no_bound_receiver",
         });
         event_log.write("leader_receiver.fallback_pane_failed", failed)?;
         return Ok(DeliveryOutcome {
@@ -283,7 +282,6 @@ pub fn deliver_to_leader_fallback_pane(
     };
 
     let rendered = render_fallback_pane_message(content, message_id, primary_error);
-    let target = Target::Pane(PaneId::new(&pane_id));
     let payload = InjectPayload::Text(rendered);
     // 0.5.5 gate054 cross-team notify boundary: when the leader receiver
     // has a recorded `tmux_socket` (canonical), that socket is a HARD
@@ -301,25 +299,63 @@ pub fn deliver_to_leader_fallback_pane(
     // stays pending in the store, coordinator surfaces the pending
     // notification via status/monitor, and no cross-server injection is
     // attempted.
-    let inject_result: Result<InjectReport, TransportError> = match leader_tmux_socket(state) {
-        Some(socket) => {
-            let backend = crate::transport_factory::tmux_endpoint_transport(socket);
-            backend.inject(&target, &payload, Key::Enter, true)
-        }
-        None => {
-            // No socket recorded → legacy (pre-0.5) shape where the receiver
-            // was implicitly bound to the workspace-canonical tmux server.
-            // Keep the workspace→default chain here (single team assumption)
-            // but never mix it with a recorded-socket team.
-            let backend = crate::transport_factory::tmux_workspace_transport(workspace);
-            backend
-                .inject(&target, &payload, Key::Enter, true)
-                .or_else(|_| {
-                    let backend = crate::transport_factory::tmux_default_transport();
-                    backend.inject(&target, &payload, Key::Enter, true)
-                })
-        }
+    let socket_bound = leader_tmux_socket(state).is_some();
+    let transports: Vec<Box<dyn Transport>> = match leader_tmux_socket(state) {
+        Some(socket) => vec![Box::new(crate::transport_factory::tmux_endpoint_transport(
+            socket,
+        ))],
+        None => vec![
+            Box::new(crate::transport_factory::tmux_workspace_transport(
+                workspace,
+            )),
+            Box::new(crate::transport_factory::tmux_default_transport()),
+        ],
     };
+    let mut resolved = None;
+    let mut refusal = "leader channel unavailable".to_string();
+    for transport in transports {
+        match super::leader_channel::resolve_live_leader_channel(
+            workspace,
+            receiver,
+            transport.as_ref(),
+        ) {
+            super::leader_channel::LeaderChannelResolution::Live(
+                super::leader_channel::LiveLeaderChannel::DirectTmux(channel),
+            ) => {
+                resolved = Some((transport, channel));
+                break;
+            }
+            other => refusal = format!("{other:?}"),
+        }
+    }
+    let Some((transport, channel)) = resolved else {
+        event_log.write(
+            "leader_receiver.fallback_pane_failed",
+            serde_json::json!({
+                "message_id": message_id,
+                "result_id": result_id,
+                "owner_team_id": owner_team_id,
+                "pane_id": pane_id,
+                "primary_error": primary_error,
+                "delivered_via": "fallback_pane",
+                "socket_bound": socket_bound,
+                "reason": refusal,
+            }),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Blocked,
+            message_status: MessageStatusShadow("blocked".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some("run team-agent claim-leader or team-agent takeover".to_string()),
+            stage: None,
+            reason: Some(DeliveryRefusal::LeaderNotAttached),
+            channel: Some("rebind_required".to_string()),
+        });
+    };
+    let target = Target::Pane(PaneId::new(channel.pane_id));
+    let inject_result: Result<InjectReport, TransportError> =
+        transport.inject(&target, &payload, Key::Enter, true);
 
     match inject_result {
         Ok(report) => {
@@ -484,6 +520,17 @@ fn receiver_or_owner_field<'a>(state: &'a Value, record: &str, field: &str) -> O
 fn leader_record_field<'a>(state: &'a Value, field: &str) -> Option<&'a Value> {
     receiver_or_owner_field(state, "leader_receiver", field)
         .or_else(|| receiver_or_owner_field(state, "team_owner", field))
+}
+
+fn leader_receiver_record(state: &Value) -> Option<&Value> {
+    state.get("leader_receiver").or_else(|| {
+        let active = state.get("active_team_key").and_then(Value::as_str)?;
+        state
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.get(active))
+            .and_then(|team| team.get("leader_receiver"))
+    })
 }
 
 fn owner_epoch_i64(state: &Value) -> Option<i64> {

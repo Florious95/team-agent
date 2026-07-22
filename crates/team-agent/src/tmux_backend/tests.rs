@@ -12,7 +12,9 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use super::{CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend};
+use super::{
+    CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
+};
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv,
@@ -395,10 +397,7 @@ fn spawn_first_frames_via_new_session_builder_and_parses_pane_id() {
     let pane_inventory = "%3\tteamsess\t0\tw1\t0\t/dev/ttys003\tnode\t1\t/work/dir\t1\t0\t123\n";
     let (be, rec) = backend_with(
         MockResp::Out(ok("")),
-        vec![
-            MockResp::Out(ok("%3\n")),
-            MockResp::Out(ok(pane_inventory)),
-        ],
+        vec![MockResp::Out(ok("%3\n")), MockResp::Out(ok(pane_inventory))],
     );
     let s = SessionName::new("teamsess");
     let w = WindowName::new("w1");
@@ -443,10 +442,7 @@ fn spawn_into_frames_via_new_window_builder() {
     let pane_inventory = "%4\tteamsess\t1\tw2\t0\t/dev/ttys004\tnode\t1\t/work/dir\t1\t0\t124\n";
     let (be, rec) = backend_with(
         MockResp::Out(ok("")),
-        vec![
-            MockResp::Out(ok("%4\n")),
-            MockResp::Out(ok(pane_inventory)),
-        ],
+        vec![MockResp::Out(ok("%4\n")), MockResp::Out(ok(pane_inventory))],
     );
     let s = SessionName::new("teamsess");
     let w = WindowName::new("w2");
@@ -518,10 +514,7 @@ fn spawn_with_command_refuses_and_rolls_back_spawn_pane_owned_by_other_window() 
     let pane_inventory = "%5\tteamsess\t1\tw2\t0\t/dev/ttys005\tnode\t1\t/work/dir\t1\t0\t125\n";
     let (be, rec) = backend_with(
         MockResp::Out(ok("")),
-        vec![
-            MockResp::Out(ok("%5\n")),
-            MockResp::Out(ok(pane_inventory)),
-        ],
+        vec![MockResp::Out(ok("%5\n")), MockResp::Out(ok(pane_inventory))],
     );
     let err = be
         .spawn_into(
@@ -1791,9 +1784,9 @@ fn query_single_field_argv_and_nonzero_maps_to_none() {
 // display-message N+1 fallback is gone). leader_env stays the reverse-env real-machine bit.
 #[test]
 fn list_targets_argv_and_parses_tmux_pane_format() {
-    const FMT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}";
-    let stdout = "%7__TA_FIELD__team-x__TA_FIELD__0__TA_FIELD__win0__TA_FIELD__0__TA_FIELD__/dev/ttys003__TA_FIELD__codex__TA_FIELD__1__TA_FIELD__/Users/me/work__TA_FIELD__1__TA_FIELD__0__TA_FIELD__41001\n\
-                      %8__TA_FIELD__team-x__TA_FIELD__1__TA_FIELD__win1__TA_FIELD__0__TA_FIELD__/dev/ttys004__TA_FIELD__node__TA_FIELD__0__TA_FIELD__/Users/me/other__TA_FIELD__0__TA_FIELD__0__TA_FIELD__41002\n";
+    const FMT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}__TA_FIELD__#{@team_agent_pane_binding_nonce}";
+    let stdout = "%7__TA_FIELD__team-x__TA_FIELD__0__TA_FIELD__win0__TA_FIELD__0__TA_FIELD__/dev/ttys003__TA_FIELD__codex__TA_FIELD__1__TA_FIELD__/Users/me/work__TA_FIELD__1__TA_FIELD__0__TA_FIELD__41001__TA_FIELD__nonce-7\n\
+                      %8__TA_FIELD__team-x__TA_FIELD__1__TA_FIELD__win1__TA_FIELD__0__TA_FIELD__/dev/ttys004__TA_FIELD__node__TA_FIELD__0__TA_FIELD__/Users/me/other__TA_FIELD__0__TA_FIELD__0__TA_FIELD__41002__TA_FIELD__\n";
     let (be, rec) = backend_with(MockResp::Out(ok(stdout)), vec![]);
     let panes = be.list_targets().expect("list_targets ok");
     assert_eq!(
@@ -1845,6 +1838,19 @@ fn list_targets_argv_and_parses_tmux_pane_format() {
         Some(41002),
         "field[11] -> pane_pid (second pane)"
     );
+    assert_eq!(
+        p.leader_env
+            .get(PANE_BINDING_NONCE_METADATA_KEY)
+            .map(String::as_str),
+        Some("nonce-7"),
+        "field[12] pane option -> pane-instance binding metadata"
+    );
+    assert!(
+        !panes[1]
+            .leader_env
+            .contains_key(PANE_BINDING_NONCE_METADATA_KEY),
+        "an empty pane option must remain absent"
+    );
 
     // nonzero exit -> empty vec (golden returncode != 0 -> []).
     let (be, _r) = backend_with(
@@ -1856,6 +1862,35 @@ fn list_targets_argv_and_parses_tmux_pane_format() {
             .expect("list_targets ok on nonzero")
             .is_empty(),
         "a nonzero list-panes must map to an EMPTY Vec (not Err)"
+    );
+}
+
+#[test]
+fn set_pane_binding_nonce_is_socket_scoped_and_pane_local() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let runner = MockCommandRunner {
+        recorded: Arc::clone(&rec),
+        stdin_recorded: Arc::new(Mutex::new(Vec::new())),
+        queue: Mutex::new(VecDeque::new()),
+        default: MockResp::Out(ok("")),
+    };
+    let be =
+        TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), "/tmp/ta-pane-binding.sock");
+    be.set_pane_binding_nonce(&PaneId::new("%7"), "nonce-7")
+        .expect("set pane binding nonce");
+    assert_eq!(
+        rec.lock().unwrap()[0],
+        svec(&[
+            "tmux",
+            "-S",
+            "/tmp/ta-pane-binding.sock",
+            "set-option",
+            "-p",
+            "-t",
+            "%7",
+            "@team_agent_pane_binding_nonce",
+            "nonce-7",
+        ])
     );
 }
 

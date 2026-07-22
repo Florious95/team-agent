@@ -3,8 +3,11 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::message_store::MessageStore;
 use crate::model::enums::PaneLiveness;
@@ -495,12 +498,32 @@ pub fn claim_leader(
         .filter(|target| target.info.pane_id.as_str() == caller)
         .min_by_key(|target| target.source.priority());
     let caller_pane_info = caller_candidate.map(|target| &target.info);
-    let caller_target = caller_candidate.and_then(|target| {
-        claim_target_from_pane_info(workspace, &target.info).map(|mut claim_target| {
+    let mut caller_target = caller_candidate.and_then(|target| {
+        claim_target_from_pane_info(&target.info).map(|mut claim_target| {
             claim_target.endpoint = target.endpoint.clone();
             claim_target
         })
     });
+    if let (Some(candidate), Some(target)) = (caller_candidate, caller_target.as_mut()) {
+        if candidate.info.current_path.as_deref().is_some_and(|path| {
+            !crate::messaging::leader_channel::path_is_in_workspace(path, workspace)
+        }) {
+            let endpoint = target.endpoint.as_deref().ok_or_else(|| {
+                LeaderError::Validation(
+                    "explicit cross-workspace claim requires a canonical tmux endpoint".to_string(),
+                )
+            })?;
+            if !Path::new(endpoint).is_absolute() {
+                return Err(LeaderError::Validation(
+                    "explicit cross-workspace claim requires an absolute tmux endpoint".to_string(),
+                ));
+            }
+            let nonce = next_pane_binding_nonce(workspace, endpoint, &candidate.info.pane_id);
+            target.scope_authority = Some("explicit_claim".to_string());
+            target.authorized_team_workspace = Some(canonical_workspace(workspace));
+            target.binding_nonce = Some(nonce);
+        }
+    }
     let env_team = std::env::var("TEAM_AGENT_TEAM_ID")
         .ok()
         .filter(|team| !team.is_empty());
@@ -695,6 +718,7 @@ fn claim_lease_no_incident_with_target(
     let non_empty_caller_pane = NonEmptyPaneId::try_from_pane(caller_pane)?;
     let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
     if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
+        write_claim_target_pane_nonce(caller_target)?;
         let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
         let observed_endpoint = caller_target.and_then(|target| target.endpoint.as_deref());
         let convergence_candidate = observed_endpoint.or(current_endpoint.as_deref());
@@ -718,6 +742,7 @@ fn claim_lease_no_incident_with_target(
                 pane_info,
                 observed_endpoint.or(current_endpoint.as_deref()),
                 scoped_team.or(team),
+                caller_target,
             )
         });
         if converged || observation_refreshed {
@@ -883,6 +908,7 @@ fn claim_lease_no_incident_with_target(
     } else {
         LeaseReason::VacantAcquired
     };
+    write_claim_target_pane_nonce(caller_target)?;
     let mut identity = leader_identity_context(workspace, Some(team_id.as_str()), Some(state))?;
     if let Some(uuid) = caller_target.and_then(|target| target.leader_session_uuid.as_ref()) {
         identity.leader_session_uuid = uuid.clone();
@@ -898,6 +924,13 @@ fn claim_lease_no_incident_with_target(
         Discovery::ClaimLeader,
         caller_target.and_then(|target| target.pane_info.clone()),
     );
+    if let Some(target) = caller_target {
+        receiver.scope_authority.clone_from(&target.scope_authority);
+        receiver
+            .authorized_team_workspace
+            .clone_from(&target.authorized_team_workspace);
+        receiver.binding_nonce.clone_from(&target.binding_nonce);
+    }
     if let Some(endpoint) = observed_endpoint.as_ref() {
         receiver.tmux_socket = Some(endpoint.clone());
     }
@@ -1313,6 +1346,9 @@ struct LeaderClaimTarget {
     team_id: Option<String>,
     pane_info: Option<PaneInfo>,
     endpoint: Option<String>,
+    scope_authority: Option<String>,
+    authorized_team_workspace: Option<PathBuf>,
+    binding_nonce: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1333,9 +1369,9 @@ enum ClaimLeaderTargetSource {
 impl ClaimLeaderTargetSource {
     fn priority(self) -> u8 {
         match self {
-            Self::StateRecorded => 0,
-            Self::Workspace => 1,
-            Self::CurrentTmux => 2,
+            Self::CurrentTmux => 0,
+            Self::StateRecorded => 1,
+            Self::Workspace => 2,
             Self::Default => 3,
         }
     }
@@ -1402,15 +1438,11 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
     targets
 }
 
-fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<LeaderClaimTarget> {
+fn claim_target_from_pane_info(target: &PaneInfo) -> Option<LeaderClaimTarget> {
     if !target.active {
         return None;
     }
     let provider = super::attribute_pane_provider(target)?;
-    let current_path = target.current_path.as_deref()?;
-    if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
-        return None;
-    }
     Some(LeaderClaimTarget {
         provider,
         leader_session_uuid: target_leader_session_uuid(target),
@@ -1421,7 +1453,72 @@ fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<Le
             .cloned(),
         pane_info: Some(target.clone()),
         endpoint: None,
+        scope_authority: None,
+        authorized_team_workspace: None,
+        binding_nonce: None,
     })
+}
+
+fn workspace_claim_target_from_pane_info(
+    workspace: &Path,
+    target: &PaneInfo,
+) -> Option<LeaderClaimTarget> {
+    let current_path = target.current_path.as_deref()?;
+    if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
+        return None;
+    }
+    claim_target_from_pane_info(target)
+}
+
+fn write_claim_target_pane_nonce(target: Option<&LeaderClaimTarget>) -> Result<(), LeaderError> {
+    let Some(target) = target.filter(|target| target.scope_authority.is_some()) else {
+        return Ok(());
+    };
+    let endpoint = target.endpoint.as_deref().ok_or_else(|| {
+        LeaderError::Validation("explicit claim is missing its tmux endpoint".to_string())
+    })?;
+    let pane = target
+        .pane_info
+        .as_ref()
+        .map(|info| &info.pane_id)
+        .ok_or_else(|| {
+            LeaderError::Validation("explicit claim is missing its pane observation".to_string())
+        })?;
+    let nonce = target.binding_nonce.as_deref().ok_or_else(|| {
+        LeaderError::Validation("explicit claim is missing its pane binding nonce".to_string())
+    })?;
+    tmux_backend_for_endpoint(endpoint)
+        .set_pane_binding_nonce(pane, nonce)
+        .map_err(|error| {
+            LeaderError::Validation(format!(
+                "failed to bind the explicit leader pane instance: {error}"
+            ))
+        })
+}
+
+fn canonical_workspace(workspace: &Path) -> PathBuf {
+    workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf())
+}
+
+fn next_pane_binding_nonce(workspace: &Path, endpoint: &str, pane: &PaneId) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let material = format!(
+        "{}\0{endpoint}\0{}\0{}\0{nanos}\0{counter}",
+        canonical_workspace(workspace).display(),
+        pane.as_str(),
+        std::process::id(),
+    );
+    let digest = Sha256::digest(material.as_bytes());
+    digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn target_leader_session_uuid(target: &PaneInfo) -> Option<crate::model::ids::LeaderSessionUuid> {
@@ -1447,7 +1544,7 @@ fn validate_attach_target(
     // a real Codex/Claude/Copilot binary. This is a targeted escape
     // hatch — `Provider::Fake` is not selectable from the user-facing
     // provider list, only wired in test/fixture flows.
-    let claim_target = match claim_target_from_pane_info(workspace, target) {
+    let claim_target = match workspace_claim_target_from_pane_info(workspace, target) {
         Some(target) => Some(target),
         None if matches!(requested_provider, Provider::Fake) => None,
         None => return Err("leader_pane_validation_failed"),
@@ -1553,7 +1650,7 @@ impl TargetScanLiveness {
         let live_panes = targets
             .iter()
             .filter_map(|target| {
-                let claim_target = claim_target_from_pane_info(workspace, target)?;
+                let claim_target = workspace_claim_target_from_pane_info(workspace, target)?;
                 if let Some(owner_uuid) = owner_uuid.as_deref() {
                     let target_uuid = claim_target.leader_session_uuid.as_ref()?.as_str();
                     if target_uuid != owner_uuid {
@@ -1656,6 +1753,9 @@ fn make_receiver(
         pane_tty: target.as_ref().and_then(|t| t.tty.clone()),
         pane_current_command: target.as_ref().and_then(|t| t.current_command.clone()),
         tmux_socket: crate::tmux_backend::socket_name_from_tmux_env(),
+        scope_authority: None,
+        authorized_team_workspace: None,
+        binding_nonce: None,
         fingerprint: target.as_ref().map(receiver_fingerprint),
         leader_session_uuid: Some(uuid.clone()),
         owner_epoch: Some(epoch),
@@ -1685,6 +1785,7 @@ fn refresh_already_bound_receiver_observation(
     observed: &PaneInfo,
     observed_endpoint: Option<&str>,
     team_key: Option<&str>,
+    claim_target: Option<&LeaderClaimTarget>,
 ) -> bool {
     let attached_at = now_ts();
     let mut refreshed = state
@@ -1696,6 +1797,7 @@ fn refresh_already_bound_receiver_observation(
                 observed,
                 observed_endpoint,
                 attached_at.as_str(),
+                claim_target,
             )
         });
     if let Some(team_key) = team_key {
@@ -1710,6 +1812,7 @@ fn refresh_already_bound_receiver_observation(
                     observed,
                     observed_endpoint,
                     attached_at.as_str(),
+                    claim_target,
                 )
             });
     }
@@ -1721,6 +1824,7 @@ fn refresh_receiver_observation(
     observed: &PaneInfo,
     observed_endpoint: Option<&str>,
     attached_at: &str,
+    claim_target: Option<&LeaderClaimTarget>,
 ) -> bool {
     let before = Value::Object(receiver.clone());
     receiver.insert(
@@ -1773,6 +1877,26 @@ fn refresh_receiver_observation(
         receiver.insert(
             "tmux_socket".to_string(),
             Value::String(endpoint.to_string()),
+        );
+    }
+    if let Some(target) = claim_target.filter(|target| target.scope_authority.is_some()) {
+        receiver.insert(
+            "scope_authority".to_string(),
+            Value::String(target.scope_authority.clone().unwrap_or_default()),
+        );
+        receiver.insert(
+            "authorized_team_workspace".to_string(),
+            Value::String(
+                target
+                    .authorized_team_workspace
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+        );
+        receiver.insert(
+            "binding_nonce".to_string(),
+            Value::String(target.binding_nonce.clone().unwrap_or_default()),
         );
     }
     receiver.insert(
@@ -2303,6 +2427,7 @@ mod tests {
             &observed_pane(),
             Some("/tmp/team-agent-live.sock"),
             Some("team-a"),
+            None,
         ));
         let receiver = &state["leader_receiver"];
         assert_eq!(receiver["owner_epoch"], json!(10));
@@ -2319,6 +2444,69 @@ mod tests {
         assert_eq!(
             state["teams"]["team-a"]["leader_receiver"]["owner_epoch"],
             json!(10)
+        );
+    }
+
+    #[test]
+    fn already_bound_explicit_claim_persists_cross_workspace_authority() {
+        let mut state = json!({
+            "leader_receiver": {"status": "attached", "pane_id": "%7"},
+            "teams": {"team-a": {"leader_receiver": {
+                "status": "attached", "pane_id": "%7"
+            }}}
+        });
+        let target = LeaderClaimTarget {
+            provider: Provider::Codex,
+            leader_session_uuid: None,
+            team_id: Some("team-a".to_string()),
+            pane_info: Some(observed_pane()),
+            endpoint: Some("/tmp/team-agent-live.sock".to_string()),
+            scope_authority: Some("explicit_claim".to_string()),
+            authorized_team_workspace: Some(PathBuf::from("/tmp/workspace-a")),
+            binding_nonce: Some("nonce-7".to_string()),
+        };
+
+        assert!(refresh_already_bound_receiver_observation(
+            &mut state,
+            &observed_pane(),
+            Some("/tmp/team-agent-live.sock"),
+            Some("team-a"),
+            Some(&target),
+        ));
+        for receiver in [
+            &state["leader_receiver"],
+            &state["teams"]["team-a"]["leader_receiver"],
+        ] {
+            assert_eq!(receiver["scope_authority"], json!("explicit_claim"));
+            assert_eq!(
+                receiver["authorized_team_workspace"],
+                json!("/tmp/workspace-a")
+            );
+            assert_eq!(receiver["binding_nonce"], json!("nonce-7"));
+        }
+    }
+
+    #[test]
+    fn pane_binding_nonce_rotates_per_explicit_claim() {
+        let workspace = Path::new("/tmp/workspace-a");
+        let endpoint = "/tmp/team-agent-live.sock";
+        let pane = PaneId::new("%7");
+        let first = next_pane_binding_nonce(workspace, endpoint, &pane);
+        let second = next_pane_binding_nonce(workspace, endpoint, &pane);
+        assert_eq!(first.len(), 32);
+        assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn explicit_claim_prefers_the_callers_ambient_tmux_endpoint() {
+        assert!(
+            ClaimLeaderTargetSource::CurrentTmux.priority()
+                < ClaimLeaderTargetSource::StateRecorded.priority()
+        );
+        assert!(
+            ClaimLeaderTargetSource::CurrentTmux.priority()
+                < ClaimLeaderTargetSource::Workspace.priority()
         );
     }
 }

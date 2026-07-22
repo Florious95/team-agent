@@ -101,6 +101,7 @@ pub fn resolve_live_leader_channel(
         .current_path
         .as_deref()
         .is_some_and(|path| !path_is_in_workspace(path, workspace))
+        && !explicit_claim_authority_matches(workspace, receiver, &observed)
     {
         return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch);
     }
@@ -113,12 +114,38 @@ pub fn resolve_live_leader_channel(
     }))
 }
 
-fn path_is_in_workspace(path: &Path, workspace: &Path) -> bool {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+fn explicit_claim_authority_matches(
+    workspace: &Path,
+    receiver: &Value,
+    observed: &PaneInfo,
+) -> bool {
+    if string_field(receiver, "scope_authority") != Some("explicit_claim") {
+        return false;
+    }
+    let Some(authorized_workspace) = string_field(receiver, "authorized_team_workspace") else {
+        return false;
+    };
+    if canonical_path(Path::new(authorized_workspace)) != canonical_path(workspace) {
+        return false;
+    }
+    let Some(recorded_nonce) = string_field(receiver, "binding_nonce") else {
+        return false;
+    };
+    observed
+        .leader_env
+        .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+        .filter(|nonce| !nonce.is_empty())
+        .is_some_and(|live_nonce| live_nonce == recorded_nonce)
+}
+
+pub(crate) fn path_is_in_workspace(path: &Path, workspace: &Path) -> bool {
+    let path = canonical_path(path);
+    let workspace = canonical_path(workspace);
     path == workspace || path.starts_with(workspace)
+}
+
+fn canonical_path(path: &Path) -> std::path::PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn receiver_transport_conflicts(receiver: &Value) -> bool {

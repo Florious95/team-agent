@@ -40,6 +40,9 @@ use crate::transport::{
     TransportError, TurnVerification, WindowName,
 };
 
+pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
+const TMUX_PANE_BINDING_NONCE_OPTION: &str = "@team_agent_pane_binding_nonce";
+
 /// Result of running an external command — the typed output of the OS edge.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -277,6 +280,23 @@ impl TmuxBackend {
         } else {
             Self::new()
         }
+    }
+
+    pub(crate) fn set_pane_binding_nonce(
+        &self,
+        pane: &PaneId,
+        nonce: &str,
+    ) -> Result<(), TransportError> {
+        let argv = [
+            "tmux".to_string(),
+            "set-option".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            TMUX_PANE_BINDING_NONCE_OPTION.to_string(),
+            nonce.to_string(),
+        ];
+        self.run_ok(&argv)
     }
 
     /// Backend with an injected runner (tests: canned/recording tmux output). Shared default socket.
@@ -2340,7 +2360,7 @@ impl Transport for TmuxBackend {
         // killing the per-pane display-message N+1 fallback.
         // Use a printable sentinel so the 12-field frame stays explicit in argv/log evidence;
         // `parse_pane_info_line` retains compatibility with legacy tab-delimited output.
-        const TMUX_PANE_FORMAT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}";
+        const TMUX_PANE_FORMAT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}__TA_FIELD__#{@team_agent_pane_binding_nonce}";
         let argv = self.tmux_argv(&[
             "tmux".to_string(),
             "list-panes".to_string(),
@@ -2544,6 +2564,13 @@ fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
     if fields.len() < 11 {
         return None;
     }
+    let mut leader_env = BTreeMap::new();
+    if let Some(nonce) = fields.get(12).and_then(|raw| non_empty(raw)) {
+        leader_env.insert(
+            PANE_BINDING_NONCE_METADATA_KEY.to_string(),
+            nonce.to_string(),
+        );
+    }
     Some(PaneInfo {
         pane_id: PaneId::new(fields[0]),
         session: SessionName::new(fields[1]),
@@ -2555,7 +2582,7 @@ fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
         active: fields[7] == "1",
         current_path: non_empty(fields[8]).map(PathBuf::from),
         pane_pid: fields.get(11).and_then(|raw| parse_optional_u32(raw)),
-        leader_env: BTreeMap::new(),
+        leader_env,
     })
 }
 
