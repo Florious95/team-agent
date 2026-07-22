@@ -968,6 +968,17 @@ fn allocate_session_candidates(
             CandidateMatchKind::Any,
             item,
         ) {
+            Some(candidate)
+                if codex_no_expected(item)
+                    && candidate_is_visible_to_pending_peer(
+                        item,
+                        &candidate,
+                        pending,
+                        candidates_by_agent,
+                    ) =>
+            {
+                ambiguous.insert(item.agent_id.clone());
+            }
             Some(candidate) => {
                 claimed.extend(captured_provider_session_keys(item, &candidate.captured));
                 assignments.insert(item.agent_id.clone(), candidate);
@@ -983,6 +994,30 @@ fn allocate_session_candidates(
         }
     }
     (assignments, ambiguous)
+}
+
+fn candidate_is_visible_to_pending_peer(
+    owner: &PendingSessionCapture,
+    candidate: &CapturedSessionCandidate,
+    pending: &[PendingSessionCapture],
+    candidates_by_agent: &BTreeMap<String, Vec<CapturedSessionCandidate>>,
+) -> bool {
+    let owner_keys = captured_provider_session_keys(owner, &candidate.captured);
+    pending.iter().any(|peer| {
+        peer.agent_id != owner.agent_id
+            && peer.provider == owner.provider
+            && peer.team_key == owner.team_key
+            && candidates_by_agent
+                .get(&peer.agent_id)
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|peer_candidate| {
+                        !owner_keys.is_disjoint(&captured_provider_session_keys(
+                            peer,
+                            &peer_candidate.captured,
+                        ))
+                    })
+                })
+    })
 }
 
 fn allocate_global_one_to_one(
