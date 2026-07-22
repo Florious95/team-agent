@@ -496,7 +496,12 @@ pub fn claim_leader(
     let caller_candidate = targets
         .iter()
         .filter(|target| target.info.pane_id.as_str() == caller)
-        .min_by_key(|target| target.source.priority());
+        .min_by_key(|target| {
+            let in_target_workspace = target.info.current_path.as_deref().is_some_and(|path| {
+                crate::messaging::leader_channel::path_is_in_workspace(path, workspace)
+            });
+            target.source.claim_priority(in_target_workspace)
+        });
     let caller_pane_info = caller_candidate.map(|target| &target.info);
     let mut caller_target = caller_candidate.and_then(|target| {
         claim_target_from_pane_info(&target.info).map(|mut claim_target| {
@@ -1372,6 +1377,18 @@ impl ClaimLeaderTargetSource {
             Self::CurrentTmux => 0,
             Self::StateRecorded => 1,
             Self::Workspace => 2,
+            Self::Default => 3,
+        }
+    }
+
+    fn claim_priority(self, in_target_workspace: bool) -> u8 {
+        if !in_target_workspace {
+            return self.priority();
+        }
+        match self {
+            Self::Workspace => 0,
+            Self::StateRecorded => 1,
+            Self::CurrentTmux => 2,
             Self::Default => 3,
         }
     }
