@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 // ── REUSE: step 2 model (ids + normalized-envelope value enums) ─────────────
-use crate::messaging::presentation::PresentationRequest;
+use crate::messaging::presentation::PresentationDecision;
 use crate::model::enums::{ChangeKind, ResultStatus, RiskSeverity, TestStatus};
 use crate::model::ids::{AgentId, TaskId, TeamKey};
 
@@ -368,7 +368,7 @@ pub struct NormalizedReportEnvelope {
     pub risks: Vec<NormalizedRisk>,
     pub artifacts: Vec<NormalizedArtifact>,
     pub next_actions: Vec<NormalizedNextAction>,
-    pub presentation: PresentationRequest,
+    pub presentation: PresentationDecision,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation_error: Option<String>,
 }

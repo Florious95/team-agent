@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::db::message_store::{MessageRowStatus, MessageStore, PersistMessageInput};
 use crate::model::ids::{AgentId, TaskId, TeamKey};
 
-use super::presentation::PresentationRequest;
+use super::presentation::PresentationDecision;
 use super::send::TrustedSender;
 use super::MessagingError;
 
@@ -103,7 +103,7 @@ pub struct ResolvedSendIntent {
     pub requires_ack: bool,
     pub requested_message_id: Option<String>,
     pub initial_disposition: InitialDisposition,
-    pub presentation: PresentationRequest,
+    pub presentation: PresentationDecision,
 }
 
 impl ResolvedSendIntent {
@@ -132,7 +132,7 @@ impl ResolvedSendIntent {
             requires_ack,
             requested_message_id,
             initial_disposition: InitialDisposition::Accepted,
-            presentation: PresentationRequest::default(),
+            presentation: PresentationDecision::default(),
         }
     }
 }
@@ -291,11 +291,13 @@ mod tests {
             None,
         );
         intent.initial_disposition = InitialDisposition::StoredOnly;
-        intent.presentation = PresentationRequest {
-            sink: super::super::presentation::PresentationSink::Casefile,
-            class: super::super::presentation::PresentationClass::StageResult,
-            case_id: Some("case-7".to_string()),
-        };
+        intent.presentation = super::super::presentation::decide_presentation(
+            &super::super::presentation::PresentationRequest {
+                sink: super::super::presentation::PresentationSink::Casefile,
+                class: super::super::presentation::PresentationClass::StageResult,
+                case_id: Some("case-7".to_string()),
+            },
+        );
         let PersistResolution::Persisted(persisted) = persist_resolved_send(&intent).unwrap()
         else {
             panic!("fresh intent must persist")
@@ -316,7 +318,11 @@ mod tests {
             serde_json::json!({
                 "sink": "casefile",
                 "class": "stage_result",
-                "case_id": "case-7"
+                "case_id": "case-7",
+                "requested_sink": "casefile",
+                "effective_sink": "casefile",
+                "policy_reason": "requested_sink:casefile",
+                "policy_version": "team-presentation-v1"
             })
         );
     }

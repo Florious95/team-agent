@@ -80,6 +80,18 @@ pub struct PresentationRequest {
     pub case_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresentationDecision {
+    pub sink: PresentationSink,
+    pub class: PresentationClass,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_id: Option<String>,
+    pub requested_sink: PresentationSink,
+    pub effective_sink: PresentationSink,
+    pub policy_reason: String,
+    pub policy_version: String,
+}
+
 impl Default for PresentationRequest {
     fn default() -> Self {
         Self {
@@ -87,6 +99,43 @@ impl Default for PresentationRequest {
             class: PresentationClass::Message,
             case_id: None,
         }
+    }
+}
+
+impl Default for PresentationDecision {
+    fn default() -> Self {
+        decide_presentation(&PresentationRequest::default())
+    }
+}
+
+pub fn decide_presentation(request: &PresentationRequest) -> PresentationDecision {
+    let critical = matches!(
+        request.class,
+        PresentationClass::StagePass
+            | PresentationClass::Bounce
+            | PresentationClass::Blocking
+            | PresentationClass::FinalReview
+            | PresentationClass::Timeout
+    );
+    let (effective_sink, policy_reason) = if critical {
+        (
+            PresentationSink::Leader,
+            format!("critical_class:{}", request.class.as_str()),
+        )
+    } else {
+        (
+            request.sink,
+            format!("requested_sink:{}", request.sink.as_str()),
+        )
+    };
+    PresentationDecision {
+        sink: request.sink,
+        class: request.class,
+        case_id: request.case_id.clone(),
+        requested_sink: request.sink,
+        effective_sink,
+        policy_reason,
+        policy_version: "team-presentation-v1".to_string(),
     }
 }
 
@@ -161,5 +210,24 @@ mod tests {
             normalize_presentation(Some(&json!({"sink": "bogus", "class": "message"}))).1,
             Some("unknown_sink:bogus".to_string())
         );
+    }
+
+    #[test]
+    fn critical_classes_force_leader_while_prose_is_ignored() {
+        let request = PresentationRequest {
+            sink: PresentationSink::Casefile,
+            class: PresentationClass::Blocking,
+            case_id: None,
+        };
+        let decision = decide_presentation(&request);
+        assert_eq!(decision.effective_sink, PresentationSink::Leader);
+        assert_eq!(decision.policy_reason, "critical_class:blocking");
+
+        let benign = decide_presentation(&PresentationRequest {
+            sink: PresentationSink::Casefile,
+            class: PresentationClass::Message,
+            case_id: None,
+        });
+        assert_eq!(benign.effective_sink, PresentationSink::Casefile);
     }
 }
