@@ -1,7 +1,7 @@
 //! leader::start — leader_start_plan / start_leader / leader_session_name(派生 tmux session 名)。
 
 use std::collections::BTreeMap;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -243,14 +243,10 @@ pub fn execute_leader_plan(
     } else if plan.is_external_leader {
         persist_external_leader_topology_marker(plan, workspace)?;
     }
-    let status = run_leader_argv(&argv, &plan.leader_env, plan, workspace)?;
-    let code = status.code();
-    if !status.success() {
-        return Err(LeaderError::Start(format!(
-            "leader launcher exited with status {}",
-            code.map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        )));
+    let process = run_leader_argv(&argv, &plan.leader_env, plan, workspace)?;
+    let code = process.status.code();
+    if !process.status.success() {
+        return Err(LeaderError::Start(leader_launcher_failure(&process)));
     }
     if detached {
         Ok(LeaderLaunchOutcome {
@@ -471,14 +467,10 @@ fn execute_managed_leader_plan(
         workspace.to_path_buf(),
         spawned.pane_id.as_str().to_string(),
     );
-    let status = run_leader_argv(&plan.argv, &BTreeMap::new(), plan, workspace)?;
-    let code = status.code();
-    if !status.success() {
-        return Err(LeaderError::Start(format!(
-            "leader launcher exited with status {}",
-            code.map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        )));
+    let process = run_leader_argv(&plan.argv, &BTreeMap::new(), plan, workspace)?;
+    let code = process.status.code();
+    if !process.status.success() {
+        return Err(LeaderError::Start(leader_launcher_failure(&process)));
     }
     ensure_managed_provider_live_after_attach(&transport, &spawned)?;
     Ok(LeaderLaunchOutcome {
@@ -1213,7 +1205,7 @@ fn run_leader_argv(
     env: &BTreeMap<String, String>,
     plan: &LeaderStartPlan,
     workspace: &Path,
-) -> Result<std::process::ExitStatus, LeaderError> {
+) -> Result<LeaderProcessExit, LeaderError> {
     let Some(program) = argv.first() else {
         return Err(LeaderError::Start(
             "leader launch argv is empty".to_string(),
@@ -1234,8 +1226,13 @@ fn run_leader_argv(
     command
         .args(argv.iter().skip(1))
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stdout(Stdio::inherit());
+    let capture_stderr = plan.mode != LeaderStartMode::ExecProvider;
+    command.stderr(if capture_stderr {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
     // 0.4.x order fix: env_remove MUST run AFTER envs(). The `env` map comes
     // from `merged_exec_env` which seeds with `std::env::vars().collect()` —
     // calling `.envs(env)` re-adds every inherited CLAUDE_CODE_* the launching
@@ -1248,10 +1245,109 @@ fn run_leader_argv(
         command.env_remove(key);
     }
     let mut child = command.spawn()?;
+    let stderr_reader = child.stderr.take().map(|mut child_stderr| {
+        std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            let mut buf = [0_u8; 4096];
+            loop {
+                let Ok(read) = child_stderr.read(&mut buf) else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                let _ = std::io::stderr().write_all(&buf[..read]);
+                push_bounded_stderr(&mut captured, &buf[..read]);
+            }
+            captured
+        })
+    });
     if plan.mode == LeaderStartMode::ExecProvider {
         spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());
     }
-    child.wait().map_err(LeaderError::Io)
+    let status = child.wait().map_err(LeaderError::Io)?;
+    let stderr = match stderr_reader {
+        Some(reader) => match reader.join() {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => String::new(),
+        },
+        None => String::new(),
+    };
+    Ok(LeaderProcessExit { status, stderr })
+}
+
+const LEADER_STDERR_LIMIT: usize = 8192;
+
+struct LeaderProcessExit {
+    status: std::process::ExitStatus,
+    stderr: String,
+}
+
+fn push_bounded_stderr(captured: &mut Vec<u8>, chunk: &[u8]) {
+    if chunk.len() >= LEADER_STDERR_LIMIT {
+        captured.clear();
+        captured.extend_from_slice(&chunk[chunk.len() - LEADER_STDERR_LIMIT..]);
+        return;
+    }
+    let excess = captured
+        .len()
+        .saturating_add(chunk.len())
+        .saturating_sub(LEADER_STDERR_LIMIT);
+    if excess > 0 {
+        captured.drain(..excess);
+    }
+    captured.extend_from_slice(chunk);
+}
+
+fn leader_launcher_failure(process: &LeaderProcessExit) -> String {
+    let status = process
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    format_launcher_failure(&status, process.status.code().is_none(), &process.stderr)
+}
+
+fn format_launcher_failure(status: &str, signaled: bool, raw_stderr: &str) -> String {
+    let stderr_class = classify_launcher_stderr(raw_stderr, signaled);
+    let stderr = bounded_stderr_text(crate::redaction::redact_external_text(raw_stderr.trim()));
+    let stderr = if stderr.is_empty() {
+        "<empty>".to_string()
+    } else {
+        stderr
+    };
+    format!(
+        "leader launcher exited with status {status}; stderr_class={stderr_class}; stderr_excerpt={stderr}"
+    )
+}
+
+fn bounded_stderr_text(stderr: String) -> String {
+    if stderr.len() <= LEADER_STDERR_LIMIT {
+        return stderr;
+    }
+    let mut start = stderr.len() - LEADER_STDERR_LIMIT;
+    while !stderr.is_char_boundary(start) {
+        start += 1;
+    }
+    stderr[start..].to_string()
+}
+
+fn classify_launcher_stderr(stderr: &str, signaled: bool) -> &'static str {
+    let stderr = stderr.to_ascii_lowercase();
+    if stderr.contains("server exited") {
+        "server_exited"
+    } else if stderr.contains("no server running") || stderr.contains("failed to connect to server")
+    {
+        "no_server"
+    } else if stderr.contains("not a terminal") {
+        "not_a_terminal"
+    } else if stderr.contains("can't find session") || stderr.contains("no sessions") {
+        "target_missing"
+    } else if signaled {
+        "signal"
+    } else {
+        "non_zero"
+    }
 }
 
 fn spawn_exec_provider_startup_prompt_handler(provider: Provider, workspace: PathBuf) {
@@ -1447,8 +1543,9 @@ mod tests {
     };
 
     use super::{
-        ensure_managed_provider_live_after_attach, execute_leader_plan,
-        handle_exec_provider_startup_prompts, shlex_quote,
+        ensure_managed_provider_live_after_attach, execute_leader_plan, format_launcher_failure,
+        handle_exec_provider_startup_prompts, push_bounded_stderr, shlex_quote,
+        LEADER_STDERR_LIMIT,
     };
 
     struct ScriptedTransport {
@@ -1980,5 +2077,29 @@ mod tests {
             "leader_start_plan must keep leader_session_name on the \
              external/attach paths; body excerpt: {body}"
         );
+    }
+
+    #[test]
+    fn launcher_failure_redacts_credentials_before_persistence() {
+        let failure = format_launcher_failure(
+            "1",
+            false,
+            "open terminal failed: not a terminal API_TOKEN=secret-value \
+             Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        );
+
+        assert!(failure.contains("stderr_class=not_a_terminal"));
+        assert!(failure.contains("[REDACTED]"));
+        assert!(!failure.contains("secret-value"));
+        assert!(!failure.contains("abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn launcher_stderr_capture_is_bounded_to_tail() {
+        let mut captured = vec![b'a'; LEADER_STDERR_LIMIT - 2];
+        push_bounded_stderr(&mut captured, b"XYZ");
+
+        assert_eq!(captured.len(), LEADER_STDERR_LIMIT);
+        assert!(captured.ends_with(b"XYZ"));
     }
 }

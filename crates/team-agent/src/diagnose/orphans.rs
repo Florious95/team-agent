@@ -48,6 +48,14 @@ impl OrphanScanScope {
             canonical_current_workspace: canonicalize_workspace(workspace),
         }
     }
+
+    fn workspace(&self) -> &Path {
+        match self {
+            Self::CurrentWorkspace {
+                canonical_current_workspace,
+            } => canonical_current_workspace,
+        }
+    }
 }
 
 fn canonicalize_workspace(workspace: &Path) -> PathBuf {
@@ -262,7 +270,7 @@ fn cleanup_report(report: ScanReport, scope: &OrphanScanScope) -> CleanupReport 
             }
             continue;
         }
-        if kill_tmux_session(orphan) {
+        if kill_tmux_session(orphan, scope.workspace()) {
             killed.push(orphan_value(orphan, "killed"));
         } else {
             failed.push(orphan_value(orphan, "failed"));
@@ -790,14 +798,27 @@ fn orphan_value(orphan: &OrphanRecord, action: &str) -> Value {
     value
 }
 
-fn kill_tmux_session(orphan: &OrphanRecord) -> bool {
+fn kill_tmux_session(orphan: &OrphanRecord, audit_workspace: &Path) -> bool {
     let (Some(socket), Some(session)) = (&orphan.tmux_socket, &orphan.session) else {
         return false;
     };
     // Phase 1d Batch 6: factory tmux-socket-name helper. Explicit
     // tmux-only kill; conpty shim orphans are NOT routed here (design
     // §Batch 6).
-    crate::transport_factory::tmux_socket_name_transport(socket)
+    let transport = crate::transport_factory::tmux_socket_name_transport(socket);
+    let targets = vec![session.clone()];
+    if crate::kill_audit::pre_kill_audit(
+        &crate::event_log::EventLog::new(audit_workspace),
+        &transport,
+        "diagnose.orphans.tmux_session",
+        crate::kill_audit::KILL_SESSION,
+        &targets,
+    )
+    .is_err()
+    {
+        return false;
+    }
+    transport
         .kill_session(&SessionName::new(session.clone()))
         .is_ok()
 }

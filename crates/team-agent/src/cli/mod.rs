@@ -374,6 +374,19 @@ pub mod lifecycle_port {
                     );
                     let mut error = None;
                     for session in &sessions {
+                        let targets = vec![session.as_str().to_string()];
+                        if let Err(audit_error) = crate::kill_audit::pre_kill_audit(
+                            event_log,
+                            transport,
+                            "shutdown.shared_socket_individual",
+                            crate::kill_audit::KILL_SESSION,
+                            &targets,
+                        ) {
+                            error.get_or_insert_with(|| {
+                                format!("pre-kill audit failed: {audit_error}")
+                            });
+                            continue;
+                        }
                         if let Err(err) = transport.kill_session(session) {
                             if !tmux_absent_error(&err.to_string()) {
                                 error.get_or_insert_with(|| err.to_string());
@@ -386,7 +399,20 @@ pub mod lifecycle_port {
                         error,
                     };
                 }
-                let error = transport.kill_server().err().map(|error| error.to_string());
+                let targets = sessions
+                    .iter()
+                    .map(|session| session.as_str().to_string())
+                    .collect::<Vec<_>>();
+                let error = match crate::kill_audit::pre_kill_audit(
+                    event_log,
+                    transport,
+                    "shutdown.exclusive_socket",
+                    crate::kill_audit::KILL_SERVER,
+                    &targets,
+                ) {
+                    Ok(()) => transport.kill_server().err().map(|error| error.to_string()),
+                    Err(error) => Some(format!("pre-kill audit failed: {error}")),
+                };
                 ShutdownSocketCleanup {
                     killed_sessions: sessions,
                     spared_sessions: Vec::new(),
@@ -406,6 +432,18 @@ pub mod lifecycle_port {
                 }
                 let mut error = None;
                 for session in &to_kill {
+                    let targets = vec![session.as_str().to_string()];
+                    if let Err(audit_error) = crate::kill_audit::pre_kill_audit(
+                        event_log,
+                        transport,
+                        "shutdown.selected_session",
+                        crate::kill_audit::KILL_SESSION,
+                        &targets,
+                    ) {
+                        error
+                            .get_or_insert_with(|| format!("pre-kill audit failed: {audit_error}"));
+                        continue;
+                    }
                     if let Err(err) = transport.kill_session(session) {
                         if !tmux_absent_error(&err.to_string()) {
                             error.get_or_insert_with(|| err.to_string());
@@ -418,6 +456,59 @@ pub mod lifecycle_port {
                     error,
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod kill_audit_tests {
+        use std::collections::BTreeMap;
+
+        use super::*;
+        use crate::transport::test_support::OfflineTransport;
+        use crate::transport::{PaneId, PaneInfo, SessionName};
+
+        #[test]
+        fn audit_write_failure_skips_destructive_kill() {
+            let root =
+                std::env::temp_dir().join(format!("ta-kill-audit-fail-{}", std::process::id()));
+            let blocked_parent = root.join("not-a-directory");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(&blocked_parent, b"file").unwrap();
+            let event_log = crate::event_log::EventLog::at(blocked_parent.join("events.jsonl"));
+            let session = SessionName::new("team-audit-fail");
+            let transport = OfflineTransport::new()
+                .with_session_present(true)
+                .with_targets(vec![PaneInfo {
+                    pane_id: PaneId::new("%1"),
+                    session: session.clone(),
+                    window_index: Some(0),
+                    window_name: None,
+                    pane_index: Some(0),
+                    tty: None,
+                    current_command: None,
+                    current_path: None,
+                    active: true,
+                    pane_pid: None,
+                    leader_env: BTreeMap::new(),
+                }]);
+            let cleanup = bare_shutdown_socket_cleanup(
+                &transport,
+                &json!({
+                    "is_external_leader": true,
+                    "tmux_socket_source": "leader_env",
+                }),
+                &event_log,
+            );
+
+            assert!(
+                !transport.calls().contains(&"kill_session"),
+                "an unaudited destructive call must not execute"
+            );
+            assert!(cleanup
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("pre-kill audit failed")));
+            let _ = std::fs::remove_dir_all(root);
         }
     }
 
@@ -499,6 +590,17 @@ pub mod lifecycle_port {
                      session=`{}` action=skipping_kill (post-Step-9 will hard-fail)",
                     session.as_str()
                 );
+                continue;
+            }
+            let targets = vec![session.as_str().to_string()];
+            if let Err(audit_error) = crate::kill_audit::pre_kill_audit(
+                event_log,
+                transport,
+                "shutdown.managed_worker_session",
+                crate::kill_audit::KILL_SESSION,
+                &targets,
+            ) {
+                error.get_or_insert_with(|| format!("pre-kill audit failed: {audit_error}"));
                 continue;
             }
             if let Err(err) = transport.kill_session(session) {
@@ -596,6 +698,16 @@ pub mod lifecycle_port {
                     "skipped_files": cleanup.skipped_files.clone(),
                 }),
             );
+            return cleanup;
+        }
+        if let Err(error) = crate::kill_audit::pre_kill_audit(
+            event_log,
+            transport,
+            "shutdown.empty_owned_endpoint",
+            crate::kill_audit::KILL_SERVER,
+            &[],
+        ) {
+            cleanup.error = Some(format!("pre-kill audit failed: {error}"));
             return cleanup;
         }
         if let Err(error) = transport.kill_server() {
@@ -748,11 +860,22 @@ pub mod lifecycle_port {
                 let _ =
                     crate::lifecycle::display::close_team_display_backends(&run_workspace, session);
             } else {
-                push_unique_session(&mut killed_sessions, session.clone());
-                if let Err(error) = transport.kill_session(session) {
+                let targets = vec![session.as_str().to_string()];
+                let event_log = crate::event_log::EventLog::new(&run_workspace);
+                if let Err(error) = crate::kill_audit::pre_kill_audit(
+                    &event_log,
+                    transport,
+                    "shutdown.team_session",
+                    crate::kill_audit::KILL_SESSION,
+                    &targets,
+                ) {
+                    kill_error = Some(format!("pre-kill audit failed: {error}"));
+                } else if let Err(error) = transport.kill_session(session) {
                     if !tmux_absent_error(&error.to_string()) {
                         kill_error = Some(error.to_string());
                     }
+                } else {
+                    push_unique_session(&mut killed_sessions, session.clone());
                 }
                 let _ =
                     crate::lifecycle::display::close_team_display_backends(&run_workspace, session);

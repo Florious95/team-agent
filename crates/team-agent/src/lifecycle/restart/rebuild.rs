@@ -449,6 +449,15 @@ fn restart_with_selected_team_and_transport(
              moved leader to dedicated session)",
             session_name.as_str()
         );
+        let targets = vec![session_name.as_str().to_string()];
+        crate::kill_audit::pre_kill_audit(
+            &crate::event_log::EventLog::new(&selected.run_workspace),
+            transport,
+            "restart.stale_worker_session",
+            crate::kill_audit::KILL_SESSION,
+            &targets,
+        )
+        .map_err(|error| LifecycleError::Transport(format!("pre-kill audit failed: {error}")))?;
         transport
             .kill_session(&session_name)
             .map_err(|e| LifecycleError::Transport(e.to_string()))?;

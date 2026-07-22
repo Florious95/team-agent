@@ -42,6 +42,7 @@ pub mod db;
 
 // step 4 (event_log) — events.jsonl 唯一审计流(append/tail/rotation + 稳定事件名)。
 pub mod event_log;
+pub(crate) mod kill_audit;
 
 // step 5 (state) — state.json 持久化/identity/owner-gate/projection(bug-084 韧性)。
 pub mod state;
