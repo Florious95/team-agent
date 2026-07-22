@@ -515,25 +515,27 @@ pub fn claim_leader(
         .unwrap_or_default();
     let raw_state = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
     let event_log = crate::event_log::EventLog::new(workspace);
+    let active_team = crate::messaging::leader_receiver::active_team_key(workspace, &raw_state);
+    let requested_team = team
+        .filter(|team| !team.is_empty())
+        .or_else(|| {
+            raw_state
+                .get("active_team_key")
+                .and_then(Value::as_str)
+                .filter(|team| !team.is_empty())
+        })
+        .unwrap_or(active_team.as_str());
+    let team_id = TeamKey::new(requested_team.to_string());
     let targets = claim_leader_targets(workspace, &raw_state);
-    let caller_candidate = targets
-        .iter()
-        .filter(|target| target.info.pane_id.as_str() == caller)
-        .min_by_key(|target| {
-            let recorded_caller_authority = target.endpoint.as_deref().is_some_and(|endpoint| {
-                state_records_pane_endpoint(&raw_state, &caller, endpoint)
-            });
-            let in_target_workspace = target.info.current_path.as_deref().is_some_and(|path| {
-                crate::messaging::leader_channel::path_is_in_workspace(path, workspace)
-            });
-            target
-                .source
-                .claim_priority(recorded_caller_authority, in_target_workspace)
-        });
+    let caller_candidate =
+        select_claim_authority(workspace, &raw_state, team_id.as_str(), &targets, &caller);
     let caller_pane_info = caller_candidate.map(|target| &target.info);
+    let observed_endpoint = caller_candidate.and_then(|candidate| {
+        authoritative_observed_endpoint(workspace, &raw_state, &targets, candidate)
+    });
     let mut caller_target = caller_candidate.and_then(|target| {
         claim_target_from_pane_info(&target.info).map(|mut claim_target| {
-            claim_target.endpoint = target.endpoint.clone();
+            claim_target.endpoint.clone_from(&observed_endpoint);
             claim_target
         })
     });
@@ -557,29 +559,6 @@ pub fn claim_leader(
             target.binding_nonce = Some(nonce);
         }
     }
-    let env_team = std::env::var("TEAM_AGENT_TEAM_ID")
-        .ok()
-        .filter(|team| !team.is_empty());
-    let explicit_team = team.filter(|team| !team.is_empty());
-    let active_team = crate::messaging::leader_receiver::active_team_key(workspace, &raw_state);
-    let active_team_from_state = raw_state
-        .get("active_team_key")
-        .and_then(Value::as_str)
-        .filter(|team| !team.is_empty());
-    let requested_team = explicit_team
-        .or(active_team_from_state)
-        .or_else(|| {
-            caller_target
-                .as_ref()
-                .and_then(|target| target.team_id.as_deref())
-        })
-        .or(env_team.as_deref())
-        .or(Some(active_team.as_str()));
-    let team_id = TeamKey::new(
-        requested_team
-            .map(str::to_string)
-            .unwrap_or_else(|| active_team.clone()),
-    );
     let scoped_team = if team_id.as_str() == active_team
         || raw_state
             .get("teams")
@@ -1089,6 +1068,8 @@ fn apply_endpoint_convergence(
                 "new_tmux_endpoint": candidate_endpoint,
                 "candidate_source": candidate_source,
                 "owner_epoch": owner_epoch.0,
+                "persisted": false,
+                "checked_paths": convergence_checked_paths(team_id.as_str()),
             })),
             false,
         ),
@@ -1104,6 +1085,8 @@ fn apply_endpoint_convergence(
                 "reason": reason,
                 "candidate_source": candidate_source,
                 "owner_epoch": owner_epoch.0,
+                "persisted": false,
+                "checked_paths": convergence_checked_paths(team_id.as_str()),
                 "action": format!(
                     "old tmux endpoint {old_endpoint} still has this team's session or pane tuple; run team-agent diagnose --json before retrying restart"
                 ),
@@ -1388,41 +1371,80 @@ struct LeaderClaimTarget {
 struct ClaimLeaderTargetCandidate {
     info: PaneInfo,
     endpoint: Option<String>,
-    source: ClaimLeaderTargetSource,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ClaimLeaderTargetSource {
-    StateRecorded,
-    Workspace,
-    CurrentTmux,
-    Default,
+fn select_claim_authority<'a>(
+    workspace: &Path,
+    state: &Value,
+    team_id: &str,
+    targets: &'a [ClaimLeaderTargetCandidate],
+    caller: &str,
+) -> Option<&'a ClaimLeaderTargetCandidate> {
+    targets
+        .iter()
+        .filter(|target| {
+            target.info.pane_id.as_str() == caller
+                && target.info.active
+                && super::attribute_pane_provider(&target.info).is_some()
+        })
+        .min_by_key(|target| {
+            let recorded = target
+                .endpoint
+                .as_deref()
+                .is_some_and(|endpoint| state_records_pane_endpoint(state, caller, endpoint));
+            let in_workspace = target.info.current_path.as_deref().is_some_and(|path| {
+                crate::messaging::leader_channel::path_is_in_workspace(path, workspace)
+            });
+            let team_affinity = match target
+                .info
+                .leader_env
+                .get("TEAM_AGENT_TEAM_ID")
+                .filter(|value| !value.is_empty())
+            {
+                Some(observed) if observed == team_id => 0,
+                None => 1,
+                Some(_) => 2,
+            };
+            (
+                !recorded,
+                !in_workspace,
+                team_affinity,
+                target.info.pane_pid.unwrap_or(u32::MAX),
+                target.info.session.as_str().to_string(),
+                target.info.window_index.unwrap_or(u32::MAX),
+                target.info.pane_index.unwrap_or(u32::MAX),
+                target.info.tty.clone().unwrap_or_default(),
+            )
+        })
 }
 
-impl ClaimLeaderTargetSource {
-    fn priority(self) -> u8 {
-        match self {
-            Self::CurrentTmux => 0,
-            Self::StateRecorded => 1,
-            Self::Workspace => 2,
-            Self::Default => 3,
-        }
-    }
-
-    fn claim_priority(self, recorded_caller_authority: bool, in_target_workspace: bool) -> u8 {
-        if recorded_caller_authority {
-            return 0;
-        }
-        if !in_target_workspace {
-            return self.priority() + 1;
-        }
-        match self {
-            Self::Workspace => 1,
-            Self::StateRecorded => 2,
-            Self::CurrentTmux => 3,
-            Self::Default => 4,
-        }
-    }
+fn authoritative_observed_endpoint(
+    workspace: &Path,
+    state: &Value,
+    targets: &[ClaimLeaderTargetCandidate],
+    authority: &ClaimLeaderTargetCandidate,
+) -> Option<String> {
+    let recorded = state_recorded_tmux_endpoints(state);
+    let workspace_name = crate::tmux_backend::socket_name_for_workspace(workspace);
+    let workspace_path = crate::tmux_backend::socket_path_for_workspace(workspace);
+    targets
+        .iter()
+        .filter(|candidate| candidate.info == authority.info)
+        .filter_map(|candidate| candidate.endpoint.as_ref())
+        .min_by_key(|endpoint| {
+            let canonical_workspace_endpoint = endpoint.as_str() == workspace_name
+                || workspace_path
+                    .as_ref()
+                    .is_some_and(|path| path.to_string_lossy().as_ref() == endpoint.as_str());
+            (
+                !state_records_pane_endpoint(state, authority.info.pane_id.as_str(), endpoint),
+                !recorded.contains(endpoint.as_str()),
+                !canonical_workspace_endpoint,
+                !Path::new(endpoint.as_str()).is_absolute(),
+                endpoint.as_str(),
+            )
+        })
+        .cloned()
 }
 
 fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTargetCandidate> {
@@ -1438,7 +1460,6 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
                 .map(|info| ClaimLeaderTargetCandidate {
                     info,
                     endpoint: resolved_endpoint.clone(),
-                    source: ClaimLeaderTargetSource::CurrentTmux,
                 }),
         );
     }
@@ -1453,7 +1474,6 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
                 .map(|info| ClaimLeaderTargetCandidate {
                     info,
                     endpoint: resolved_endpoint.clone(),
-                    source: ClaimLeaderTargetSource::StateRecorded,
                 }),
         );
     }
@@ -1467,7 +1487,6 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
             .map(|info| ClaimLeaderTargetCandidate {
                 info,
                 endpoint: workspace_endpoint.clone(),
-                source: ClaimLeaderTargetSource::Workspace,
             }),
     );
     let default_backend = crate::transport_factory::tmux_default_transport();
@@ -1480,7 +1499,6 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
             .map(|info| ClaimLeaderTargetCandidate {
                 info,
                 endpoint: default_endpoint.clone(),
-                source: ClaimLeaderTargetSource::Default,
             }),
     );
     targets
