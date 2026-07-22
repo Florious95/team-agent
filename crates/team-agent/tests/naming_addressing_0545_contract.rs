@@ -346,6 +346,10 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
     for required in [
         "logical recipient",
         "returns after the message is persisted",
+        "--presentation-sink",
+        "--message-class",
+        "--case-id",
+        "every sink remains durable",
     ] {
         assert!(
             help.contains(required),

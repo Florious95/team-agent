@@ -317,8 +317,11 @@ fn command_help(command: Option<&str>) -> String {
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => concat!(
             "usage: team-agent send TO MESSAGE... ",
-            "[--workspace WORKSPACE] [--team TEAM] [--json]\n\n",
-            "TO is a logical recipient; send returns after the message is persisted."
+            "[--workspace WORKSPACE] [--team TEAM] ",
+            "[--presentation-sink leader|casefile|silent --message-class CLASS [--case-id CASE]] ",
+            "[--json]\n\n",
+            "TO is a logical recipient; send returns after the message is persisted. ",
+            "Presentation changes live display only; every sink remains durable."
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),

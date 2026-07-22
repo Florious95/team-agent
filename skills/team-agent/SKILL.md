@@ -166,6 +166,7 @@ For diagnosis, run `team-agent profile show deepseek --workspace . --json`; neve
 - `quick-start` is only for first-time team creation from role docs. If that team already has runtime state, use `team-agent restart . --team <session_name_or_team_name>` to resume it. If restart cannot recover context, explain the loss and wait for explicit user consent before using `team-agent restart . --allow-fresh`; never reset context through quick-start.
 - If the user explicitly asks a worker to create or operate a nested child team, first read `references/team-in-team.md`. Child teams must use an independent child workspace, never the parent `.team/current`.
 - `team-agent send --watch-result coder "Do the bounded task"` sends a direct worker message, returns after delivery, and lets the coordinator collect/report completion asynchronously.
+- Advanced orchestration callers may add `--presentation-sink leader|casefile|silent --message-class CLASS [--case-id CASE]`. All sinks remain durable and pullable; `casefile`/`silent` suppress only live leader injection. Missing presentation metadata preserves the normal leader-visible behavior.
 - After `send --watch-result` succeeds, do not run `sleep`, `status`, `inbox`, or `collect` polling loops unless the user explicitly asks for diagnosis; the coordinator will notify the leader when the result arrives.
 - `team-agent send --task task_initial "Start"` routes by task.
 - `team-agent status` shows team, worker health, result-store counts, `session_id`, `captured_via`, and attribution confidence. `team-agent status --json` is compact and context-safe by default; use `team-agent status --detail --json` only for raw runtime-state diagnostics.
@@ -236,6 +237,8 @@ team_orchestrator.send_message(to="<agent_id>", content="short coordination note
 team_orchestrator.send_message(to="*", content="short broadcast")
 team_orchestrator.report_result(summary="short completion", status="success", tests=[{"command":"command","status":"passed"}])
 ```
+
+For typed orchestration traffic, both `send_message` and `report_result` accept `presentation={"sink":"leader|casefile|silent","class":"message|progress|stage_result|stage_pass|bounce|blocking|final_review|timeout","case_id":"optional-case"}`. If the object is present, `sink` and `class` are required and unknown values fail closed. `casefile` and `silent` are durable-only, not deletion. The fixed critical classes `stage_pass`, `bounce`, `blocking`, `final_review`, and `timeout` always appear on the leader screen even when another sink is requested. Routing uses the typed class, never words in the content or summary.
 
 Do not pass `sender`, `task_id`, `requires_ack`, `schema_version`, or `agent_id` unless doing a low-level compatibility diagnostic. The MCP runtime fills those fields and keeps delivery metadata in runtime state and event logs. If provider env loses the worker id, MCP infers it from active task/message state and falls back to an explicit `unknown` sender instead of treating the worker as leader.
 

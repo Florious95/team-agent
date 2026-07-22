@@ -11,6 +11,16 @@
     "agent_id": { "type": "string", "minLength": 1 },
     "status": { "enum": ["success", "blocked", "failed", "partial"] },
     "summary": { "type": "string" },
+    "presentation": {
+      "type": "object",
+      "required": ["sink", "class"],
+      "additionalProperties": false,
+      "properties": {
+        "sink": { "enum": ["leader", "casefile", "silent"] },
+        "class": { "enum": ["message", "progress", "stage_result", "stage_pass", "bounce", "blocking", "final_review", "timeout"] },
+        "case_id": { "type": "string", "minLength": 1 }
+      }
+    },
     "changes": {
       "type": "array",
       "items": {

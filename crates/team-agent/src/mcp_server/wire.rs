@@ -369,11 +369,14 @@ fn python_repr(value: &str) -> String {
 fn tool_contract(tool: McpTool) -> Value {
     let (description, required) = match tool {
         McpTool::SendMessage => (
-            "Send a message to a teammate, the leader, or '*' for all other team members. Provide only target and content; Team Agent fills sender, task id, ack policy, and delivery metadata.",
+            "Send a message to a teammate, the leader, or '*' for all other team members. Team Agent fills identity and delivery metadata; optional presentation routing is durable and never drops the message.",
             vec!["to", "content"],
         ),
         McpTool::AssignTask => ("Assign or update a task in the team graph and deliver it to its assignee.", vec!["task"]),
-        McpTool::ReportResult => ("Report task completion with a result envelope.", Vec::new()),
+        McpTool::ReportResult => (
+            "Report task completion with a durable result envelope. Optional presentation routing controls live leader display, not persistence.",
+            Vec::new(),
+        ),
         McpTool::UpdateState => ("Append a note to team state and rewrite team_state.md.", vec!["note"]),
         McpTool::GetTeamStatus => ("Return machine-readable team status.", Vec::new()),
         McpTool::StopAgent => ("Stop a running worker.", vec!["agent_id"]),
