@@ -59,14 +59,23 @@ use team_agent::transport::{
 
 const SOCKET: &str = "/private/tmp/tmux-501/ta-pwm-red";
 const PANE: &str = "%1";
+/// The LIVE pane-binding-nonce seam (runtime-owner-b msg_859e769113f8): the tmux
+/// pane option `@team_agent_pane_binding_nonce` is projected, in the same
+/// list-panes frame, into the existing `PaneInfo.leader_env` under this key. It is
+/// baseline-compatible identity metadata (NOT a process env), read at delivery
+/// from `list_targets`. This lets the offline fixture supply a LIVE nonce distinct
+/// from the receiver's recorded nonce — closing the WLEAK false-green hole where a
+/// weak impl could pass form1 on `receiver.binding_nonce` alone.
+const PANE_BINDING_NONCE_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
 
 /// A mock transport whose single leader pane reports a configurable
-/// `current_path` and endpoint, so `resolve_live_leader_channel` exercises the
-/// path/nonce branch deterministically.
+/// `current_path`, endpoint, AND live pane-binding-nonce (via leader_env), so
+/// `resolve_live_leader_channel` exercises the path/nonce branch deterministically.
 struct PaneTransport {
     endpoint: String,
     pane_id: String,
     current_path: PathBuf,
+    live_nonce: Option<String>,
 }
 
 impl PaneTransport {
@@ -75,7 +84,15 @@ impl PaneTransport {
             endpoint: SOCKET.to_string(),
             pane_id: PANE.to_string(),
             current_path: current_path.to_path_buf(),
+            live_nonce: None,
         }
+    }
+
+    /// Set the LIVE pane-scoped binding nonce projected into leader_env (the
+    /// value the product reads from the live pane option, not from state).
+    fn with_live_nonce(mut self, nonce: &str) -> Self {
+        self.live_nonce = Some(nonce.to_string());
+        self
     }
 }
 
@@ -87,6 +104,10 @@ impl Transport for PaneTransport {
         Some(self.endpoint.clone())
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        let mut leader_env = BTreeMap::new();
+        if let Some(nonce) = &self.live_nonce {
+            leader_env.insert(PANE_BINDING_NONCE_KEY.to_string(), nonce.clone());
+        }
         Ok(vec![PaneInfo {
             pane_id: PaneId::new(self.pane_id.clone()),
             session: SessionName::new("team-pwm"),
@@ -98,7 +119,7 @@ impl Transport for PaneTransport {
             current_path: Some(self.current_path.clone()),
             active: true,
             pane_pid: Some(4242),
-            leader_env: BTreeMap::new(),
+            leader_env,
         }])
     }
     fn spawn_first(
@@ -220,41 +241,57 @@ fn is_live(res: &LeaderChannelResolution) -> bool {
 fn form1_explicit_claim_sibling_with_matching_nonce_delivers() {
     let workspace = PathBuf::from("/private/tmp/pwm-workspace-a");
     let sibling_cwd = PathBuf::from("/private/tmp/pwm-workspace-b");
-    let transport = PaneTransport::new(&sibling_cwd);
+    // The LIVE pane nonce (from the pane option, projected into leader_env) MATCHES
+    // the receiver's recorded nonce — this is a genuine authorized instance.
+    let transport = PaneTransport::new(&sibling_cwd).with_live_nonce("nonce-match-abc");
     let receiver = claimed_receiver("explicit_claim", Some("nonce-match-abc"));
 
     let res = resolve_live_leader_channel(&workspace, &receiver, &transport);
     assert!(
         is_live(&res),
-        "an explicitly-claimed sibling-workspace pane with a matching binding nonce must resolve \
-         Live (both directions deliver); baseline refuses it PaneWorkspaceMismatch because resolve \
-         has no explicit_claim+nonce branch (locate §8.6.1). res={res:?}"
+        "an explicitly-claimed sibling-workspace pane whose LIVE pane-binding-nonce matches the \
+         receiver's recorded nonce must resolve Live (both directions deliver); baseline refuses \
+         PaneWorkspaceMismatch because resolve has no explicit_claim+nonce branch (locate §8.6.1). \
+         res={res:?}"
     );
 }
 
-/// FORM 2 — same socket + same pane id but MISSING/DIFFERENT nonce must remain
-/// refused (WLEAK). Discriminator: the refusal is correct, but it must be keyed on
-/// nonce mismatch, not merely exact-path. Baseline refuses a sibling by exact
-/// path; post-fix it must still refuse when the explicit-claim nonce is
-/// missing/wrong. This form is a POSITIVE CONTROL: it must stay refused across the
-/// fix (guards against a fix that blanket-accepts siblings).
+/// FORM 2 — POSITIVE CONTROL / WLEAK tooth: a sibling pane whose LIVE
+/// pane-binding-nonce is MISSING or DIFFERS from the receiver's recorded nonce
+/// must remain refused. This is the tooth a weak fix that passes form1 on
+/// `receiver.binding_nonce` alone would fail: the resolver must compare the LIVE
+/// pane option (leader_env seam), not the receiver's self-claim. Must stay refused
+/// across the fix (guards blanket-accept of siblings).
 #[test]
-fn form2_sibling_with_missing_or_wrong_nonce_stays_refused() {
+fn form2_sibling_with_missing_or_wrong_live_nonce_stays_refused() {
     let workspace = PathBuf::from("/private/tmp/pwm-workspace-a");
     let sibling_cwd = PathBuf::from("/private/tmp/pwm-workspace-b");
-    let transport = PaneTransport::new(&sibling_cwd);
+    let receiver = claimed_receiver("explicit_claim", Some("nonce-match-abc"));
 
-    // missing nonce
-    let missing = claimed_receiver("explicit_claim", None);
+    // (a) LIVE nonce DIFFERS from the receiver's recorded nonce (recycled %1).
+    let wrong_live = PaneTransport::new(&sibling_cwd).with_live_nonce("nonce-DIFFERENT-recycled");
     assert!(
         is_mismatch(&resolve_live_leader_channel(
-            &workspace, &missing, &transport
+            &workspace,
+            &receiver,
+            &wrong_live
         )),
-        "positive control: an explicit-claim sibling with MISSING binding nonce must remain \
-         PaneWorkspaceMismatch (WLEAK); a fix must not blanket-accept siblings."
+        "positive control (WLEAK): a sibling whose LIVE pane-binding-nonce DIFFERS from the \
+         receiver's recorded nonce (recycled %1) must remain PaneWorkspaceMismatch; a fix must \
+         compare the live pane option, not blanket-accept on receiver.binding_nonce."
     );
-    // different nonce is exercised at the live layer (the mock cannot mismatch a
-    // live pane-scoped option); the offline guard here pins missing-nonce refusal.
+
+    // (b) LIVE nonce MISSING (no pane option projected).
+    let missing_live = PaneTransport::new(&sibling_cwd);
+    assert!(
+        is_mismatch(&resolve_live_leader_channel(
+            &workspace,
+            &receiver,
+            &missing_live
+        )),
+        "positive control (WLEAK): a sibling with NO live binding nonce must remain \
+         PaneWorkspaceMismatch; a fix must not accept a sibling lacking a matching live nonce."
+    );
 }
 
 /// FORM 3 — GUARDRAIL (naturally-green): the target workspace itself and a
@@ -296,9 +333,9 @@ fn form3_workspace_and_descendant_cwd_still_deliver_guardrail() {
 fn form4_claimed_authority_is_not_immediately_rejected_by_resolver() {
     let workspace = PathBuf::from("/private/tmp/pwm-workspace-a");
     let sibling_cwd = PathBuf::from("/private/tmp/pwm-workspace-b");
-    let transport = PaneTransport::new(&sibling_cwd);
-    // A receiver that recorded an explicit claim with a matching live nonce is, by
-    // the claim contract, delivery-usable. The resolver must honor it.
+    // The live pane nonce matches the receiver's recorded nonce — a genuine,
+    // delivery-usable authorized claim. The resolver must honor it.
+    let transport = PaneTransport::new(&sibling_cwd).with_live_nonce("nonce-match-abc");
     let receiver = claimed_receiver("explicit_claim", Some("nonce-match-abc"));
     let res = resolve_live_leader_channel(&workspace, &receiver, &transport);
     assert!(
@@ -310,27 +347,51 @@ fn form4_claimed_authority_is_not_immediately_rejected_by_resolver() {
 }
 
 /// FORM 5 — direct send and report_result primary delivery use the SAME resolver,
-/// and the fallback must not bypass it. Structural source guard (runtime-owner-b
-/// boundary msg_84c1aa8a3870): the fallback physical-inject site in `results.rs`
-/// must resolve its channel through `resolve_live_leader_channel` (the same typed
-/// DirectTmux channel), NOT rebuild pane/socket from state and inject directly.
-/// Baseline red: `results.rs` fallback reads pane/socket and injects, bypassing
-/// the resolver, so a missing/mismatched nonce is refused on primary yet slips
-/// through fallback.
+/// and the fallback must not bypass it. DOUBLE structural guard, corrected per
+/// runtime-owner-b (msg_847fe346a8e0): the TRUE fallback physical-inject primitive
+/// is `leader_receiver.rs::deliver_to_leader_fallback_pane` (not results.rs, which
+/// is only the caller). Guarding results.rs would false-red and push duplicate
+/// logic into the caller.
+///   Lock A — the fallback PRIMITIVE resolves its channel through
+///     `resolve_live_leader_channel` (the same typed DirectTmux channel), not a
+///     state-rebuilt `leader_pane_id`+`Target::Pane` inject.
+///   Lock B — the results.rs CALLER only invokes that single helper; it does not
+///     build its own pane/socket inject.
+/// Baseline red: `deliver_to_leader_fallback_pane` reads `leader_pane_id(state)`
+/// and injects `Target::Pane` directly (leader_receiver.rs:206-300), bypassing the
+/// resolver — a missing/mismatched nonce refuses primary yet slips through
+/// fallback.
 #[test]
-fn form5_fallback_consumes_same_resolver_not_state_rebuilt_pane() {
-    let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/messaging/results.rs");
-    let text = std::fs::read_to_string(src).expect("read results.rs");
-    // The fallback inject path must route through the shared resolver.
-    let fallback_uses_resolver = text.contains("resolve_live_leader_channel")
-        || text.contains("resolve_leader_channel")
-        || text.contains("LiveLeaderChannel");
+fn form5_fallback_primitive_consumes_same_resolver_and_caller_only_delegates() {
+    // Lock A: the fallback primitive must route through the shared resolver.
+    let primitive = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging/leader_receiver.rs"
+    );
+    let ptext = std::fs::read_to_string(primitive).expect("read leader_receiver.rs");
+    let primitive_uses_resolver =
+        ptext.contains("resolve_live_leader_channel") || ptext.contains("LiveLeaderChannel");
     assert!(
-        fallback_uses_resolver,
-        "the report_result fallback physical inject must consume the SAME \
-         resolve_live_leader_channel typed channel (primary+fallback share one resolver; a \
-         missing/mismatched nonce must refuse BOTH, not slip through fallback by \
-         primary_error text special-casing). Baseline results.rs rebuilds pane/socket from state \
-         and injects, bypassing the resolver (runtime-owner-b boundary; locate §8.6.5)."
+        primitive_uses_resolver,
+        "Lock A: the fallback physical-inject primitive \
+         `deliver_to_leader_fallback_pane` (leader_receiver.rs) must resolve its channel through \
+         resolve_live_leader_channel (same typed DirectTmux channel), not a state-rebuilt \
+         leader_pane_id + Target::Pane inject; else a missing/mismatched nonce refused on primary \
+         slips through fallback (runtime-owner-b boundary; locate §8.6.5)."
+    );
+
+    // Lock B: the results.rs caller only delegates to that single helper (no
+    // self-built pane/socket inject). Baseline already delegates; this guards
+    // against a "fix" that duplicates inject logic into the caller.
+    let caller = concat!(env!("CARGO_MANIFEST_DIR"), "/src/messaging/results.rs");
+    let ctext = std::fs::read_to_string(caller).expect("read results.rs");
+    let delegates = ctext.contains("deliver_to_leader_fallback_pane");
+    // The caller must NOT itself build a raw pane inject target for the fallback.
+    let caller_builds_own_inject = ctext.contains("Target::Pane") && ctext.contains("inject(");
+    assert!(
+        delegates && !caller_builds_own_inject,
+        "Lock B: results.rs must delegate the fallback to the single \
+         deliver_to_leader_fallback_pane primitive and must not build its own pane/socket inject \
+         (no duplicated fallback logic in the caller)."
     );
 }
