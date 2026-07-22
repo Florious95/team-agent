@@ -284,12 +284,21 @@ fn form8_critical_class_forces_effective_leader_with_reason() {
 /// Baseline red: no class concept, so neither case is distinguishable.
 #[test]
 fn form9_anti_regex_tooth_class_not_content() {
-    // (a) benign class, alarming content -> must stay non-leader-forced.
-    let benign_class_alarming_content = json!({
+    // r19 revision (MUST-8 amendment compliance): the anti-regex tooth must be
+    // demonstrated on the ONLY class that can legitimately be durable-only for a
+    // report_result — `stage_result`. A non-stage_result class must NOT reach a
+    // non-leader sink at all (see form9c), so it cannot carry the anti-regex
+    // demonstration without itself violating MUST-8.
+
+    // (a) anti-regex negative: a `stage_result` (legitimately durable-only) with
+    // ALARMING content must NOT be promoted to leader by the prose. Escalation
+    // reads typed class only; "BLOCKING" words in the summary do not make a
+    // noncritical stage_result critical.
+    let stage_result_alarming_content = json!({
         "summary": "THIS IS BLOCKING BLOCKING BLOCKING",
-        "presentation": {"sink": "casefile", "class": "message"}
+        "presentation": {"sink": "casefile", "class": "stage_result"}
     });
-    let n_a = normalize_report_envelope(&benign_class_alarming_content);
+    let n_a = normalize_report_envelope(&stage_result_alarming_content);
     let v_a = serde_json::to_value(&n_a).expect("serialize");
     let p_a = v_a
         .get("presentation")
@@ -297,10 +306,11 @@ fn form9_anti_regex_tooth_class_not_content() {
     assert_eq!(
         p_a.get("effective_sink").and_then(Value::as_str),
         Some("casefile"),
-        "content words must NOT promote a noncritical class to leader"
+        "content words must NOT promote a noncritical stage_result to leader (anti-regex)"
     );
 
-    // (b) critical class, benign content -> must be promoted.
+    // (b) anti-regex positive: a typed critical class with BENIGN content must
+    // be promoted to leader by the TYPE, not the prose.
     let critical_class_benign_content = json!({
         "summary": "all good, nothing to see",
         "presentation": {"sink": "casefile", "class": "blocking"}
@@ -315,6 +325,43 @@ fn form9_anti_regex_tooth_class_not_content() {
         Some("leader"),
         "typed critical class must be promoted regardless of benign content"
     );
+}
+
+/// form9c (r19 revision, MUST-8 compliance): a `report_result` whose
+/// presentation class is NOT the sole durable-only-eligible `stage_result`
+/// (here `message`) MUST resolve to effective leader regardless of the
+/// requested casefile/silent sink — a non-stage_result result is `user_delivery`
+/// and keeps its on-screen protection. Requesting casefile does NOT grant it
+/// durable-only quiet. Baseline red: no class concept / no user_delivery gate.
+///
+/// r19 verdict: the pre-revision form9(a) encoded the VIOLATING semantics
+/// (message class -> effective casefile). This form fences the signed rule that
+/// ONLY explicit typed stage_result earns durable-only for report_result.
+#[test]
+fn form9c_non_stage_result_class_stays_leader_despite_casefile_request() {
+    for class in ["message", "progress"] {
+        let env = json!({
+            "summary": "x",
+            "presentation": {"sink": "casefile", "class": class}
+        });
+        let v = serde_json::to_value(&normalize_report_envelope(&env)).expect("serialize");
+        let p = v.get("presentation").unwrap_or_else(|| {
+            panic!("POST-GREEN: presentation present for non-stage_result class {class}")
+        });
+        assert_eq!(
+            p.get("effective_sink").and_then(Value::as_str),
+            Some("leader"),
+            "MUST-8: report_result class={class} (not stage_result) has no durable-only \
+             eligibility; a casefile request must resolve to effective leader (user_delivery)"
+        );
+        // And the audit must record the requested casefile + the forced leader
+        // effective, so the escalation is explainable (not a silent rewrite).
+        assert_eq!(
+            p.get("requested_sink").and_then(Value::as_str),
+            Some("casefile"),
+            "requested casefile must be preserved in audit for class={class}"
+        );
+    }
 }
 
 /// form10 (offline seam): retry/rebind preserves the effective decision; a
