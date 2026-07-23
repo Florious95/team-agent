@@ -501,6 +501,8 @@ impl MessageStore {
         Ok(rows == 1)
     }
 
+    /// Read inbox rows through [`Self::inbox`]; recovery transitions below are
+    /// separate repository owners and are not claim eligibility.
     pub fn requeue_blocked_leader_messages(
         &self,
         owner_team_id: &str,
