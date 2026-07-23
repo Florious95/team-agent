@@ -2484,6 +2484,7 @@ pub mod lifecycle_port {
                 "new_agent_id": report.new_agent_id.as_str(),
                 "session_id": report.session_id.as_ref().map(|session| session.as_str()),
                 "new_session_id": report.session_id.as_ref().map(|session| session.as_str()),
+                "backing_state": report.backing_state,
             })),
             Err(e) => Ok(error_value(e)),
         }

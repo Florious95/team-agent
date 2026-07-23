@@ -8,14 +8,33 @@
 //! registration (pane/window), never the NEW provider backing (locate §3
 //! success/readback fork_agent.rs:312-463 violates MUST-17/N36).
 //!
-//! - **R2 verified truth**: a fork that returns ok MUST carry a non-null NEW
-//!   `session_id` that differs from the source, and its backing must be readable.
-//!   Baseline red: fork returns ok with session_id null.
-//! - **R3 false-success teeth**: a provider shim that only SPAWNS (sleeps) and
-//!   never produces a NEW transcript/backing must NOT be reported as a forked
-//!   context — the new implementation must refuse/rollback
-//!   (`context_fork_unverified`). Baseline red: fork reports ok anyway (spawn ==
-//!   success), which is exactly the 2026-07-17 false-success family (locate §2).
+//! - **R2 verified-OR-pending truth** (2026-07-24 A 案裁定 msg_8eee0559ca68):
+//!   a fork that returns `ok:true` may be in either of TWO typed shapes ONLY:
+//!     (a) Verified — carries a non-null NEW `session_id` distinct from the
+//!         source (and its backing is readable), or
+//!     (b) Pending — `backing_state == "pending_context_fork"` AND
+//!         `session_id / new_session_id / backing_path` remain null (tuple
+//!         null; seat still registered). This preserves 0.5.58 齿① typed
+//!         Pending admissibility.
+//!   Forbidden shapes STILL RED (伪造 detection): `ok:true` + non-null
+//!   `session_id`/`new_session_id` that either equals the source OR is not
+//!   accompanied by a Verified backing_state (i.e. a "helpful" retry that
+//!   fabricates a tuple). NOTE: A 案 explicitly retires the previous
+//!   §7 R2 "ok:true ⇒ non-null NEW session id" postulate because it
+//!   encoded the synchronous-only world-view locate.md identifies as the
+//!   P0 root cause; retained by-字段 predicates: (i) 伪造 tuple 必红,
+//!   (ii) 禁静默降级 fresh clone.
+//! - **R3 false-success + pending-vs-refuse teeth** (A 案 co-revision): a
+//!   provider shim that only SPAWNS (sleeps) and produces NO NEW
+//!   transcript/backing may exit in one of two typed shapes:
+//!     (a) Refuse/rollback with `context_fork_unverified` (`ok:false`), or
+//!     (b) Pending (`ok:true` + `backing_state=="pending_context_fork"`
+//!         + tuple null + seat registered + typed grace bound).
+//!   The FORBIDDEN shape (2026-07-17 false-success family): `ok:true` with
+//!   a non-null `session_id`/`new_session_id` absent a Verified
+//!   backing_state — i.e. fabricated tuple. Silently downgrading to a
+//!   fresh-clone code path (dropping `backing_state` from the report so it
+//!   looks like a Verified clone) is also RED.
 //!
 //! Offline structural RED (PATH-shim provider, zero tokens): the source session
 //! backing is seeded as fixture prep (a hermetic shim has no real captured
@@ -241,67 +260,219 @@ fn write_claude_shim(workspace: &Path, emit_transcript: bool) -> PathBuf {
     bin_dir
 }
 
-/// R2 — a fork that returns ok MUST carry a non-null NEW session id distinct
-/// from the source. Baseline red: fork returns ok with a null session id
-/// (locate §3 report_type: `ForkAgentReport.session_id: Option`, None at
-/// baseline), so "ok" does not prove a forked context.
-#[test]
-fn r2_fork_ok_carries_a_verified_new_session_id() {
-    let case = Case::start("cf-r2", true);
-    let fork = case.fork();
+/// Helper: classify the fork report into one of the FOUR admissible shapes
+/// under A-案 (msg_8eee0559ca68). Returns `Err(msg)` for forbidden shapes.
+///
+/// Admissible:
+///   (V)  Verified              — ok:true + backing_state=="verified"
+///        (or absent) + non-null session_id/new_session_id distinct from source
+///   (P)  Pending                — ok:true + backing_state=="pending_context_fork"
+///        + all of session_id/new_session_id/backing_path null
+///   (Ru) Refuse: unverified     — ok:false, error == "context_fork_unverified"
+///   (Ro) Refuse: rollback other — ok:false, error != "context_fork_unverified"
+///
+/// Forbidden (RED-ted):
+///   (F1) Fabricated tuple       — ok:true + non-null session_id (either == source
+///        OR without a Verified backing_state)
+///   (F2) Silent fresh-clone     — ok:true + backing_state absent AND
+///        `fell_back_to_clone` or `fresh_clone` truthy (any of the marker keys)
+enum ForkShape {
+    Verified { new_session_id: String },
+    Pending,
+    RefuseUnverified,
+    RefuseOther,
+}
 
-    // The case phenomenon: baseline reports ok. R2 pins that ok is not enough —
-    // it must carry a verified NEW session id.
-    if fork.get("ok").and_then(Value::as_bool) != Some(true) {
-        // If the product refuses (a legitimate non-ok), R2 does not apply; but
-        // baseline reports ok, so we assert the verified-session requirement.
-        return;
-    }
-    let new_session = fork
+const SOURCE_SESSION_ID: &str = "sess-cf-batch2-source";
+
+fn classify_fork_shape(fork: &Value) -> Result<ForkShape, String> {
+    let ok = fork.get("ok").and_then(Value::as_bool) == Some(true);
+    let backing_state = fork
+        .get("backing_state")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let session_id = fork
         .get("new_session_id")
         .or_else(|| fork.get("session_id"))
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty());
+    let backing_path = fork
+        .get("backing_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let downgraded_marker = fork
+        .get("fell_back_to_clone")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || fork
+            .get("fresh_clone")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || fork
+            .get("downgraded_to_clone")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+    if !ok {
+        let error = fork.get("error").and_then(Value::as_str).unwrap_or("");
+        return Ok(if error == "context_fork_unverified" {
+            ForkShape::RefuseUnverified
+        } else {
+            ForkShape::RefuseOther
+        });
+    }
+
+    // ok:true. Two admissible shapes: Verified or Pending.
+    if backing_state == "pending_context_fork" {
+        // Pending shape MUST have tuple null.
+        if session_id.is_some() || backing_path.is_some() {
+            return Err(format!(
+                "Pending shape (backing_state=pending_context_fork) must carry \
+                 tuple null (session_id=null, backing_path=null); got \
+                 session_id={:?} backing_path={:?}. §7#4 typed Pending禁伪造 tuple. \
+                 fork={fork}",
+                session_id, backing_path
+            ));
+        }
+        return Ok(ForkShape::Pending);
+    }
+
+    // ok:true, not pending → must be Verified.
+    let sid = match session_id {
+        Some(s) => s.to_string(),
+        None => {
+            return Err(format!(
+                "ok:true + backing_state={:?} (not pending_context_fork) but \
+                 session_id is null. Either declare Pending (backing_state=\
+                 \"pending_context_fork\") or produce a Verified NEW session id \
+                 (locate §7 R2 revised A 案). fork={fork}",
+                backing_state
+            ));
+        }
+    };
+    if sid == SOURCE_SESSION_ID {
+        return Err(format!(
+            "Fabricated tuple: ok:true + session_id == source ({SOURCE_SESSION_ID}); \
+             a Verified fork MUST have a NEW session id distinct from source. \
+             §7#4 禁伪造. fork={fork}"
+        ));
+    }
+    if downgraded_marker {
+        return Err(format!(
+            "Silent fresh-clone downgrade detected while reporting ok:true with a \
+             session_id: framework may not silently swap fork for clone. §7#4 禁静默降级. \
+             fork={fork}"
+        ));
+    }
+    if !backing_state.is_empty() && backing_state != "verified" {
+        return Err(format!(
+            "ok:true carries non-null session_id but backing_state={:?} — only \
+             \"verified\" or \"pending_context_fork\" are admissible. fork={fork}",
+            backing_state
+        ));
+    }
+    Ok(ForkShape::Verified {
+        new_session_id: sid,
+    })
+}
+
+/// R2 — a fork that returns ok is admissible in ONE of two typed shapes ONLY
+/// (A 案 msg_8eee0559ca68 revising the 0.5.53-era synchronous-only postulate):
+///   (V) Verified   — non-null NEW session id distinct from source
+///   (P) Pending    — backing_state=="pending_context_fork" + tuple null
+/// Baseline red: fork returns ok with session_id null AND no
+/// backing_state=="pending_context_fork" declared — neither typed shape.
+#[test]
+fn r2_fork_ok_is_typed_verified_or_pending() {
+    let case = Case::start("cf-r2", true);
+    let fork = case.fork();
+    if fork.get("ok").and_then(Value::as_bool) != Some(true) {
+        // If the product refuses (a legitimate non-ok), R2 does not apply
+        // — the refuse-shape face is R3's concern.
+        return;
+    }
+    let shape = classify_fork_shape(&fork).unwrap_or_else(|msg| panic!("{msg}"));
+    match shape {
+        ForkShape::Verified { new_session_id } => {
+            // Verified is the strongest admissible ok shape. Reasserted the
+            // distinctness lock the retired R2 relied on:
+            assert_ne!(
+                new_session_id, SOURCE_SESSION_ID,
+                "Verified NEW session id MUST differ from source (already \
+                 covered by classifier F1, but pinned for future refactor \
+                 safety). fork={fork}"
+            );
+        }
+        ForkShape::Pending => {
+            // Pending is the new admissible ok shape enabled by 0.5.58 齿①.
+            // Nothing further to assert here: classifier already guaranteed
+            // tuple null.
+        }
+        ForkShape::RefuseUnverified | ForkShape::RefuseOther => {
+            unreachable!("classified as ok:true; refuse arms unreachable")
+        }
+    }
+}
+
+/// R2b (A 案 新增) — baseline enforcement that the report SCHEMA admits
+/// a `backing_state` field. Without a typed `backing_state` discriminant
+/// the Pending shape has no code representation, so 齿① typed Pending
+/// cannot be observed by any downstream consumer (silent Pending =
+/// forbidden by §7#4). Baseline red: `ForkAgentReport` at 5b847e4 does
+/// not include a `backing_state` key at all — the field is absent from
+/// every fork report, which means Pending is unrepresentable.
+#[test]
+fn r2b_fork_report_schema_admits_typed_backing_state() {
+    // We probe by inspecting a real fork report's key set. Any successful
+    // baseline case will do — R2 (emit_transcript=true) is the closest
+    // to the golden path.
+    let case = Case::start("cf-r2b", true);
+    let fork = case.fork();
+    let has_backing_state = fork
+        .as_object()
+        .map(|o| o.contains_key("backing_state"))
+        .unwrap_or(false);
     assert!(
-        new_session.is_some(),
-        "a fork reporting ok MUST carry a non-null NEW session id (verified context proof), not \
-         session_id=null; a spawned window is not a forked context (locate §2/§3). fork={fork}"
-    );
-    assert_ne!(
-        new_session,
-        Some("sess-cf-batch2-source"),
-        "the NEW session id must DIFFER from the source session id; fork={fork}"
+        has_backing_state,
+        "fork report schema missing `backing_state` discriminant. 0.5.58 齿① \
+         typed Pending is only observable if the report exposes a \
+         backing_state field taking values \"verified\" | \
+         \"pending_context_fork\" (or the refuse arms). Without it, the \
+         Pending arm collapses back to indistinguishable ok:true — silent \
+         Pending is forbidden by §7#4. fork={fork}"
     );
 }
 
-/// R3 false-success teeth — a provider shim that only spawns (no transcript /
-/// backing) must NOT be reported as a forked context. Baseline red: fork reports
-/// ok even though no NEW backing was produced (spawn == success, the 2026-07-17
-/// false-success family). The new implementation must refuse/rollback with a
-/// discriminable `context_fork_unverified`.
+/// R3 false-success + pending-vs-refuse teeth (A 案 co-revision) — a
+/// provider shim that only SPAWNS and produces NO NEW transcript/backing
+/// must NOT be reported as a Verified forked context. Admissible outcomes:
+///   (P)  Pending (`backing_state==pending_context_fork` + tuple null +
+///                 seat retained pending typed grace expiry), or
+///   (Ru) Refuse with `context_fork_unverified`, or
+///   (Ro) Other typed refuse.
+/// Forbidden (RED): `ok:true` with a fabricated non-null NEW session id
+/// (spawn-as-success, 2026-07-17 false-success family) OR silent
+/// fresh-clone downgrade.
 #[test]
-fn r3_spawn_without_transcript_is_not_a_forked_context() {
+fn r3_spawn_without_transcript_is_pending_or_refuse_never_fabricated() {
     let case = Case::start("cf-r3", false);
     let fork = case.fork();
-
-    let ok = fork.get("ok").and_then(Value::as_bool) == Some(true);
-    let has_verified_new_backing = fork
-        .get("new_session_id")
-        .or_else(|| fork.get("session_id"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .is_some();
-
-    // The teeth: a spawn that produced NO transcript/backing must NOT be a green
-    // fork. The old implementation accepts spawn-as-success — it returns ok:true
-    // with no verified NEW backing. The new implementation must refuse/rollback
-    // with a discriminable `context_fork_unverified` (ok:false), OR at minimum
-    // must not report ok while carrying no verified NEW backing.
-    assert!(
-        !(ok && !has_verified_new_backing),
-        "a provider that only spawned (no transcript/backing) must NOT be reported ok as a forked \
-         context: the old implementation accepts spawn-as-success (ok:true, no NEW backing). \
-         Expected refuse/rollback (context_fork_unverified). got ok={ok} \
-         verified_new_backing={has_verified_new_backing}. fork={fork}"
-    );
+    let shape = classify_fork_shape(&fork).unwrap_or_else(|msg| panic!("{msg}"));
+    match shape {
+        ForkShape::Verified { new_session_id } => {
+            // A shim that emits no transcript CANNOT legitimately arrive at
+            // Verified: the classifier already validates the session id
+            // shape, but the R3 case adds the semantic guarantee that no
+            // real backing was produced. If the product reports Verified
+            // anyway, the false-success family has resurfaced.
+            panic!(
+                "spawn-only shim reported Verified with new_session_id={new_session_id:?}; \
+                 no NEW backing was produced by design. This is the 2026-07-17 \
+                 false-success family — spawn is not success. fork={fork}"
+            );
+        }
+        ForkShape::Pending | ForkShape::RefuseUnverified | ForkShape::RefuseOther => {
+            // All three are admissible for the R3 shim path.
+        }
+    }
 }

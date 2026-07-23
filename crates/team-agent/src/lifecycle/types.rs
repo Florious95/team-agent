@@ -664,6 +664,14 @@ pub struct ForkAgentReport {
     pub new_agent_id: AgentId,
     pub env: AgentActionEnvelope,
     pub session_id: Option<SessionId>,
+    pub backing_state: ForkBackingState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkBackingState {
+    Verified,
+    PendingContextFork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

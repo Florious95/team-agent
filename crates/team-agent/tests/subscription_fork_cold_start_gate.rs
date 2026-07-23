@@ -23,19 +23,33 @@
 //!     §7#1 no hidden prompt / §7#3 no cwd-latest relaxation /
 //!     §7#4 typed observable Pending, no silent fresh-clone downgrade.
 //!
-//! GATE:
-//! - The subscription execution is gated behind
-//!   `TEAM_AGENT_REALMACHINE_FORK=1`. Unauthorized runs skip WITHOUT
-//!   producing a green — the skip message names the missing gate.
-//! - CI / offline-shim environments MUST NOT set this gate. Presence
-//!   of `TEAM_AGENT_TEST_SHIM=1` OR `CODEX_FORCE_STDIO=1` (leftover
+//! GATE(2026-07-24 leader ruling msg_abdbe53fe030 — 门形态定标):
+//! - Six subscription tests carry `#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization"]`.
+//!   A default `cargo test` counts them as **ignored** (visible in the
+//!   summary line — the loud face) but does NOT execute them, so
+//!   all-targets regression gates stay green independently of the
+//!   subscription gate. This decouples the regular regression door
+//!   from the subscription door WITHOUT falling into the silent
+//!   assumed-green family: the ignored count IS the noise.
+//! - To execute them you must BOTH pass `--ignored` to cargo AND set
+//!   `TEAM_AGENT_REALMACHINE_FORK=1`. Missing the gate ⇒ hard panic
+//!   (unauthorized runs never count as green). Presence of
+//!   `TEAM_AGENT_TEST_SHIM=1` OR `CODEX_FORCE_STDIO=1` (leftover
 //!   shim env from adjacent contract tests) short-circuits with a
-//!   HARD skip that documents why an offline shim green never
-//!   substitutes for the real gate.
+//!   HARD REFUSE panic that documents why an offline shim green
+//!   never substitutes for the real gate.
 //! - The verifier is the ONLY authorized runner; leader must
 //!   pre-authorize each execution (subscription cost + provider
 //!   quota impact). See `.team/artifacts/at-least-once-three-questions-criteria.md`
 //!   for the operational discipline mirror.
+//! - The subscription gate is ALSO a hard ship-gate independent of
+//!   this file: the pre-release 3-serial subscription rule
+//!   (`subscription-realmachine-3-serial-preship-gate`) enforces the
+//!   real run at release time; `#[ignore]` here does not weaken that
+//!   because ship acceptance never delegates to unit test defaults.
+//! - `frozen_markers_present_in_this_file_bytes` remains UNGATED and
+//!   runs by default — it is a pure textual sanity that must always
+//!   catch a lost marker regardless of subscription availability.
 //!
 //! CURRENT STATE:
 //! - Baseline @5b847e4: fork-agent is broken; running this gate
@@ -117,6 +131,7 @@ fn require_gate_or_skip(test_name: &str) {
 // `codex --version` line (verifier records it in the verdict).
 
 #[test]
+#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization; run via `cargo test -- --ignored`"]
 #[serial(env)]
 fn subscription_fork_codex_version_pinned() {
     require_gate_or_skip("subscription_fork_codex_version_pinned");
@@ -145,6 +160,7 @@ fn subscription_fork_codex_version_pinned() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization; run via `cargo test -- --ignored`"]
 #[serial(env)]
 fn subscription_fork_no_prompt_end_to_end() {
     require_gate_or_skip("subscription_fork_no_prompt_end_to_end");
@@ -177,6 +193,7 @@ fn subscription_fork_no_prompt_end_to_end() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization; run via `cargo test -- --ignored`"]
 #[serial(env)]
 fn subscription_fork_cold_start_over_ten_seconds_tolerated() {
     require_gate_or_skip("subscription_fork_cold_start_over_ten_seconds_tolerated");
@@ -201,6 +218,7 @@ fn subscription_fork_cold_start_over_ten_seconds_tolerated() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization; run via `cargo test -- --ignored`"]
 #[serial(env)]
 fn subscription_fork_nonce_inherited_from_source() {
     require_gate_or_skip("subscription_fork_nonce_inherited_from_source");
@@ -219,6 +237,7 @@ fn subscription_fork_nonce_inherited_from_source() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization; run via `cargo test -- --ignored`"]
 #[serial(env)]
 fn subscription_fork_target_distinct_new_session_id() {
     require_gate_or_skip("subscription_fork_target_distinct_new_session_id");
@@ -239,6 +258,7 @@ fn subscription_fork_target_distinct_new_session_id() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "requires TEAM_AGENT_REALMACHINE_FORK=1 + leader authorization; run via `cargo test -- --ignored`"]
 #[serial(env)]
 fn subscription_fork_source_unchanged_after_fork() {
     require_gate_or_skip("subscription_fork_source_unchanged_after_fork");

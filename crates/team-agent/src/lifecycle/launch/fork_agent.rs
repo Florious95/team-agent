@@ -243,7 +243,6 @@ pub fn fork_agent_with_transport(
         plan.provider_projects_root = source_backing.parent().map(Path::to_path_buf);
     }
     let window = WindowName::new(as_agent_id.as_str());
-    let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
     let mut claude_fork = prepare_claude_fork_backing(
         provider,
         &plan,
@@ -255,6 +254,10 @@ pub fn fork_agent_with_transport(
         cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
         error
     })?;
+    // The framework-created Claude snapshot is only fork input, not provider
+    // proof. Observe changes made after materialization so a spawn-only
+    // provider cannot turn the copied source backing into a Verified result.
+    let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
     let mut env =
         inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
     apply_profile_launch_env(&mut env, &profile_launch);
@@ -472,6 +475,11 @@ pub fn fork_agent_with_transport(
     if let Some(materialized) = copilot_fork.as_mut() {
         materialized.keep();
     }
+    let backing_state = if context_proof.is_some() {
+        ForkBackingState::Verified
+    } else {
+        ForkBackingState::PendingContextFork
+    };
     Ok(ForkAgentReport {
         source_agent_id: source_agent_id.clone(),
         new_agent_id: as_agent_id.clone(),
@@ -481,5 +489,6 @@ pub fn fork_agent_with_transport(
             coordinator_started,
         },
         session_id: context_proof.map(|proof| proof.new_session_id),
+        backing_state,
     })
 }
