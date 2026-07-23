@@ -69,9 +69,11 @@ pub(super) fn parse_candidate_files(
     let mut out = Vec::new();
     for candidate in candidates {
         let path = candidate.path;
-        let Ok(text) = read_head_text(&path, CAPTURE_HEAD_BYTES) else {
+        let Ok(head_bytes) = read_head_bytes(&path, CAPTURE_HEAD_BYTES) else {
             continue;
         };
+        let text = complete_head_text(&head_bytes);
+        let identity_text = String::from_utf8_lossy(&head_bytes);
         let records = parse_session_records(&text);
         if records.is_empty() {
             continue;
@@ -98,7 +100,7 @@ pub(super) fn parse_candidate_files(
         } else {
             Confidence::Low
         };
-        let embedded_agent_id = embedded_team_agent_worker_id_from_text(&text);
+        let embedded_agent_id = embedded_team_agent_worker_id_from_text(&identity_text);
         if embedded_agent_id
             .as_deref()
             .is_some_and(|id| id != context.agent_id.as_str())
@@ -241,15 +243,23 @@ fn cap_candidates_by_mtime(out: &mut Vec<SessionCandidate>, cap: usize) {
 }
 
 pub(super) fn read_head_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    read_head_bytes(path, max_bytes).map(|bytes| complete_head_text(&bytes))
+}
+
+fn read_head_bytes(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(max_bytes).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn complete_head_text(bytes: &[u8]) -> String {
     let complete = match bytes.iter().rposition(|byte| *byte == b'\n') {
         Some(last_newline) => &bytes[..=last_newline],
         None => &bytes[..],
     };
-    Ok(String::from_utf8_lossy(complete).into_owned())
+    String::from_utf8_lossy(complete).into_owned()
 }
 
 fn collect_optional_candidate_files(
