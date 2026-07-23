@@ -52,6 +52,8 @@ pub enum MessageStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("event log: {0}")]
+    EventLog(#[from] crate::event_log::EventLogError),
     #[error("delivery receipt missing for message: {0}")]
     DeliveryReceiptMissing(String),
     #[error("invalid message transition from {from} to {to}")]
@@ -374,31 +376,8 @@ impl MessageStore {
         error: Option<&str>,
     ) -> Result<(), MessageStoreError> {
         let conn = crate::db::schema::open_db(&self.path)?;
-        let prior: Option<String> = conn
-            .query_row(
-                "select status from messages where message_id = ?1",
-                params![message_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if prior.as_deref() == Some(MessageRowStatus::Acknowledged.as_str())
-            || prior.as_deref() == Some(MessageRowStatus::Consumed.as_str())
-            || (prior.as_deref() == Some(MessageRowStatus::Delivered.as_str())
-                && status != MessageRowStatus::Acknowledged.as_str()
-                && status != MessageRowStatus::Delivered.as_str())
-        {
-            return Ok(());
-        }
-        if status == MessageRowStatus::Acknowledged.as_str()
-            && prior.as_deref() != Some(MessageRowStatus::Delivered.as_str())
-        {
-            return Err(MessageStoreError::InvalidTransition {
-                from: prior.unwrap_or_else(|| "missing".to_string()),
-                to: status.to_string(),
-            });
-        }
         let now = now_ts();
-        conn.execute(
+        let changed = conn.execute(
             "update messages
              set status = case
                  when status = 'acknowledged'
@@ -414,9 +393,55 @@ impl MessageStore {
              end,
              acknowledged_at = case when ?2 = 'acknowledged' then ?3 else acknowledged_at end,
              error = case when ?2 = 'delivered' then null else coalesce(?4, error) end
-             where message_id = ?1",
+             where message_id = ?1
+               and status not in ('acknowledged', 'consumed', 'submitted_pending_acceptance')
+               and (status != 'delivered' or ?2 in ('delivered', 'acknowledged'))
+               and (?2 != 'acknowledged' or status = 'delivered')",
             params![message_id, status, now, error],
         )?;
+        if changed == 0 {
+            let prior: Option<String> = conn
+                .query_row(
+                    "select status from messages where message_id = ?1",
+                    params![message_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let workspace = self
+                .path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .unwrap_or(Path::new("."));
+            if status == MessageRowStatus::Acknowledged.as_str()
+                && prior.as_deref() != Some(MessageRowStatus::Delivered.as_str())
+            {
+                crate::event_log::EventLog::new(workspace).write(
+                    "message.mark_refused",
+                    serde_json::json!({
+                        "message_id": message_id,
+                        "prior_status": prior,
+                        "requested_status": status,
+                        "reason": "invalid_acknowledgement_transition",
+                    }),
+                )?;
+                return Err(MessageStoreError::InvalidTransition {
+                    from: prior.unwrap_or_else(|| "missing".to_string()),
+                    to: status.to_string(),
+                });
+            }
+            let event_log = crate::event_log::EventLog::new(workspace);
+            event_log.write(
+                "message.mark_refused",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "prior_status": prior,
+                    "requested_status": status,
+                    "reason": "protected_prior_state",
+                }),
+            )?;
+            return Ok(());
+        }
         Ok(())
     }
 
