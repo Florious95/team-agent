@@ -88,16 +88,65 @@ pub enum MessageRowStatus {
     StoredOnly,
     QueuedUntilLeaderAttach,
     QueuedCoordinatorUnavailable,
+    QueuedPaneMissing,
+    TargetResolved,
+    SubmittedAwaitingReceipt,
+    SubmittedUnverified,
+    Delivered,
+    Acknowledged,
+    Consumed,
+    Failed,
+    BlockedLeaderUnbound,
+    BlockedWorkerPaneMissing,
 }
 
 impl MessageRowStatus {
+    pub const ALL: [Self; 14] = [
+        Self::Accepted,
+        Self::StoredOnly,
+        Self::QueuedUntilLeaderAttach,
+        Self::QueuedCoordinatorUnavailable,
+        Self::QueuedPaneMissing,
+        Self::TargetResolved,
+        Self::SubmittedAwaitingReceipt,
+        Self::SubmittedUnverified,
+        Self::Delivered,
+        Self::Acknowledged,
+        Self::Consumed,
+        Self::Failed,
+        Self::BlockedLeaderUnbound,
+        Self::BlockedWorkerPaneMissing,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
             Self::StoredOnly => "stored_only",
             Self::QueuedUntilLeaderAttach => "queued_until_leader_attach",
             Self::QueuedCoordinatorUnavailable => "queued_coordinator_unavailable",
+            Self::QueuedPaneMissing => "queued_pane_missing",
+            Self::TargetResolved => "target_resolved",
+            Self::SubmittedAwaitingReceipt => "submitted_pending_acceptance",
+            Self::SubmittedUnverified => "submitted_unverified",
+            Self::Delivered => "delivered",
+            Self::Acknowledged => "acknowledged",
+            Self::Consumed => "consumed",
+            Self::Failed => "failed",
+            Self::BlockedLeaderUnbound => "blocked_leader_unbound",
+            Self::BlockedWorkerPaneMissing => "queued_pane_missing",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlockedLeaderRequeueCounts {
+    pub blocked_leader_unbound: usize,
+    pub queued_until_leader_attach: usize,
+}
+
+impl BlockedLeaderRequeueCounts {
+    pub const fn total(self) -> usize {
+        self.blocked_leader_unbound + self.queued_until_leader_attach
     }
 }
 
@@ -395,6 +444,91 @@ impl MessageStore {
             ],
         )?;
         Ok(rows == 1)
+    }
+
+    pub fn requeue_blocked_leader_messages(
+        &self,
+        owner_team_id: &str,
+    ) -> Result<BlockedLeaderRequeueCounts, MessageStoreError> {
+        let mut conn = crate::db::schema::open_db(&self.path)?;
+        let tx = conn.transaction()?;
+        let now = now_ts();
+        let blocked_leader_unbound = tx.execute(
+            "update messages
+             set status = ?1, error = null, updated_at = ?2
+             where recipient = 'leader'
+               and owner_team_id = ?3
+               and status = ?4
+               and error = 'leader_not_attached'",
+            params![
+                MessageRowStatus::Accepted.as_str(),
+                now,
+                owner_team_id,
+                MessageRowStatus::Failed.as_str()
+            ],
+        )?;
+        let queued_until_leader_attach = tx.execute(
+            "update messages
+             set status = ?1, error = null, updated_at = ?2
+             where recipient = 'leader'
+               and owner_team_id = ?3
+               and status = ?4",
+            params![
+                MessageRowStatus::Accepted.as_str(),
+                now,
+                owner_team_id,
+                MessageRowStatus::QueuedUntilLeaderAttach.as_str()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(BlockedLeaderRequeueCounts {
+            blocked_leader_unbound,
+            queued_until_leader_attach,
+        })
+    }
+
+    pub fn recover_worker_pane_available(
+        &self,
+        agent_id: &str,
+        owner_team_id: Option<&str>,
+    ) -> Result<Vec<String>, MessageStoreError> {
+        let mut conn = crate::db::schema::open_db(&self.path)?;
+        let tx = conn.transaction()?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "select message_id from messages
+                 where recipient = ?1
+                   and status = ?2
+                   and error = 'tmux_target_missing'
+                   and (
+                       (?3 is null and owner_team_id is null)
+                       or owner_team_id = ?3
+                   )
+                 order by created_at, message_id",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        agent_id,
+                        MessageRowStatus::QueuedPaneMissing.as_str(),
+                        owner_team_id
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let now = now_ts();
+        for message_id in &ids {
+            tx.execute(
+                "update messages
+                 set status = ?1, error = null, updated_at = ?2
+                 where message_id = ?3",
+                params![MessageRowStatus::Accepted.as_str(), now, message_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids)
     }
 
     /// Read inbox rows for an agent. This projection intentionally has no owner-team

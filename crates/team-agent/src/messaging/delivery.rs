@@ -848,35 +848,7 @@ pub fn requeue_worker_target_missing_messages(
     recipient: &str,
     owner_team_id: Option<&str>,
 ) -> Result<Vec<String>, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut stmt = conn.prepare(
-        "select message_id from messages
-         where recipient = ?1
-           and status = 'queued_pane_missing'
-           and error = 'tmux_target_missing'
-           and (
-               (?2 is null and owner_team_id is null)
-               or owner_team_id = ?2
-           )
-         order by created_at, message_id",
-    )?;
-    let ids = stmt
-        .query_map(params![recipient, owner_team_id], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    for message_id in &ids {
-        conn.execute(
-            "update messages
-             set status = 'accepted',
-                 error = null,
-                 updated_at = ?2
-             where message_id = ?1",
-            params![message_id, now.as_str()],
-        )?;
-    }
+    let ids = store.recover_worker_pane_available(recipient, owner_team_id)?;
     if !ids.is_empty() {
         event_log.write(
             "worker_receiver.blocked_messages_requeued",
@@ -2446,10 +2418,8 @@ fn save_scoped_state(
     state: &serde_json::Value,
     owner_team_id: Option<&str>,
 ) -> Result<(), MessagingError> {
-    let scoped_owner_team_id = owner_team_id
-        .filter(|team| !team.is_empty())
-        .filter(|_| {
-            state
+    let scoped_owner_team_id = owner_team_id.filter(|team| !team.is_empty()).filter(|_| {
+        state
             .get("teams")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|teams| {
@@ -2461,7 +2431,7 @@ fn save_scoped_state(
                     })
                     .is_some_and(|team| teams.contains_key(&team))
             })
-        });
+    });
     crate::state::repository::StateRepository::new(workspace).save(
         crate::state::repository::StateWriteIntent::MessagingDeliveryState {
             owner_team_id: scoped_owner_team_id,
@@ -2480,10 +2450,8 @@ fn save_scoped_state_reapplying_after_conflict<F>(
 where
     F: FnOnce(&mut serde_json::Value),
 {
-    let scoped_owner_team_id = owner_team_id
-        .filter(|team| !team.is_empty())
-        .filter(|_| {
-            state
+    let scoped_owner_team_id = owner_team_id.filter(|team| !team.is_empty()).filter(|_| {
+        state
             .get("teams")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|teams| {
@@ -2495,7 +2463,7 @@ where
                     })
                     .is_some_and(|team| teams.contains_key(&team))
             })
-        });
+    });
     crate::state::repository::StateRepository::new(workspace).save_reapplying(
         crate::state::repository::StateWriteIntent::MessagingDeliveryState {
             owner_team_id: scoped_owner_team_id,

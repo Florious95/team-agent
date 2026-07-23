@@ -460,7 +460,7 @@ pub fn requeue_after_claim_leader(
         )?;
     }
     let requeued_blocked =
-        requeue_blocked_leader_messages(&conn, event_log, owner_team_id, claimed_pane_id)?;
+        requeue_blocked_leader_messages(store, event_log, owner_team_id, claimed_pane_id)?;
     if !out.is_empty() || requeued_blocked > 0 {
         let _ = retry_result_deliveries(workspace, event_log)?;
     }
@@ -477,7 +477,7 @@ pub fn requeue_after_claim_leader(
 /// already crossed the transport boundary and is claim-immutable. Any future
 /// retry belongs to a separate typed recovery arm, not attach/claim convergence.
 pub(crate) fn requeue_blocked_leader_messages(
-    conn: &rusqlite::Connection,
+    store: &MessageStore,
     event_log: &EventLog,
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
@@ -492,19 +492,8 @@ pub(crate) fn requeue_blocked_leader_messages(
     // could not have churned while the leader was unattached.
     // `submitted_pending_acceptance` remains parked and claim-immutable; a
     // future typed recovery arm must own any deliberate retry.
-    let requeued = conn.execute(
-        "update messages
-         set status = 'accepted',
-             error = null,
-             updated_at = ?2
-         where recipient = 'leader'
-           and owner_team_id = ?1
-           and (
-             (status = 'failed' and error = 'leader_not_attached')
-             or status = 'queued_until_leader_attach'
-           )",
-        params![owner_team_id.as_str(), chrono::Utc::now().to_rfc3339()],
-    )?;
+    let counts = store.requeue_blocked_leader_messages(owner_team_id.as_str())?;
+    let requeued = counts.total();
     if requeued > 0 {
         event_log.write(
             "leader_receiver.blocked_messages_requeued",
@@ -512,6 +501,10 @@ pub(crate) fn requeue_blocked_leader_messages(
                 "team_id": owner_team_id.as_str(),
                 "claimed_pane_id": claimed_pane_id.as_str(),
                 "count": requeued,
+                "by_prior_state": {
+                    "blocked_leader_unbound": counts.blocked_leader_unbound,
+                    "queued_until_leader_attach": counts.queued_until_leader_attach,
+                },
             }),
         )?;
     }
@@ -573,7 +566,7 @@ pub fn requeue_delivery_exhausted_watchers(
         )?;
     }
     drop(stmt);
-    let _ = requeue_blocked_leader_messages(&conn, event_log, owner_team_id, claimed_pane_id)?;
+    let _ = requeue_blocked_leader_messages(store, event_log, owner_team_id, claimed_pane_id)?;
     Ok(out)
 }
 
