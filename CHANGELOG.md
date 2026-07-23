@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.56
+
+- **P0 fix: claiming a leader no longer replays historical parked messages.** `submitted_pending_acceptance` rows have already crossed the physical transport boundary and are now claim-immutable: `claim-leader` and `attach-leader` requeue only genuinely blocked `failed/leader_not_attached` or `queued_until_leader_attach` rows. This stops an unbounded historical replay storm while preserving stable message ids and the existing recovery funnel for messages that were never physically submitted.
+
+- **Release advisory: 0.5.55 is deprecated and must not be used.** Users who installed 0.5.55 should downgrade to 0.5.54 or upgrade directly to 0.5.56.
+
+- **Correction to the 0.5.55 changelog:** its statement that rows already submitted without a provider receipt participate in claim-time at-least-once recovery was incorrect. Those parked `submitted_pending_acceptance` rows are claim-immutable; claim-time recovery applies only to genuinely blocked rows that have not crossed the physical submit boundary.
+
 ## 0.5.55
 
 - **Fix: successful `claim-leader` convergence flushes stranded leader-mailbox messages.** The `already_bound` branch now routes through the same mailbox requeue and delivery funnel as a newly claimed leader, so N31/N32 result notifications and direct leader messages cannot remain stranded after receiver convergence. Rows already submitted without a provider receipt participate in explicit at-least-once recovery: the stable message id and receipt token are preserved while a same-pane claim may repeat the physical submit to favor eventual delivery.
