@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.55
+
+- **Fix: successful `claim-leader` convergence flushes stranded leader-mailbox messages.** The `already_bound` branch now routes through the same mailbox requeue and delivery funnel as a newly claimed leader, so N31/N32 result notifications and direct leader messages cannot remain stranded after receiver convergence. Rows already submitted without a provider receipt participate in explicit at-least-once recovery: the stable message id and receipt token are preserved while a same-pane claim may repeat the physical submit to favor eventual delivery.
+
 ## 0.5.54
 
 - **Feature: sink-aware customized message transport.** `send` and `report_result` now route presentation by destination sink instead of flattening every delivery through one generic rendering path. The C6 source-aware contract preserves the frozen MUST-8 amendment semantics, keeps physical delivery separate from presentation, and carries `case_id` fail-closed so missing or mismatched evidence cannot be credited to another delivery case.
