@@ -474,9 +474,8 @@ pub fn requeue_after_claim_leader(
 /// to `accepted` so `deliver_pending_messages` replays it through the SAME
 /// pipeline. The `leader_notification_log` PK prevents a second notification
 /// row for watcher-backed messages. A `submitted_pending_acceptance` row has
-/// already crossed the transport boundary, so its recovery is intentionally
-/// at-least-once: the stable message id/receipt token is preserved, but a replay
-/// can repeat the physical submit if a same-pane claim races the receipt window.
+/// already crossed the transport boundary and is claim-immutable. Any future
+/// retry belongs to a separate typed recovery arm, not attach/claim convergence.
 pub(crate) fn requeue_blocked_leader_messages(
     conn: &rusqlite::Connection,
     event_log: &EventLog,
@@ -490,10 +489,9 @@ pub(crate) fn requeue_blocked_leader_messages(
     // `deliver_pending_messages` picks them up as `accepted` and injects
     // exactly once. status `queued_until_leader_attach` is deliberately NOT
     // in the `claim_for_delivery` eligible set (see message_store.rs) so it
-    // could not have churned while the leader was unattached. In contrast,
-    // `submitted_pending_acceptance` is an explicit at-least-once recovery arm:
-    // claim convergence favors an eventual receipt over preserving an
-    // unobservable in-flight submit.
+    // could not have churned while the leader was unattached.
+    // `submitted_pending_acceptance` remains parked and claim-immutable; a
+    // future typed recovery arm must own any deliberate retry.
     let requeued = conn.execute(
         "update messages
          set status = 'accepted',
