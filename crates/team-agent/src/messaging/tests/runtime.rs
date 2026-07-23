@@ -3209,6 +3209,59 @@ fn gate054_rebind_replay_requeues_failed_leader_message_on_attach() {
 }
 
 #[test]
+fn claim_requeues_pending_acceptance_for_leader_only() {
+    let ws = tmp_ws("claim-pending-acceptance");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let team_id = "mailbox-team";
+    let leader_message = store
+        .create_message(
+            None,
+            "worker",
+            "leader",
+            "leader canary",
+            None,
+            false,
+            Some(team_id),
+        )
+        .unwrap();
+    let worker_message = store
+        .create_message(
+            None,
+            "worker",
+            "worker-b",
+            "worker canary",
+            None,
+            false,
+            Some(team_id),
+        )
+        .unwrap();
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    for message_id in [&leader_message, &worker_message] {
+        conn.execute(
+            "update messages set status = 'submitted_pending_acceptance' where message_id = ?1",
+            [message_id],
+        )
+        .unwrap();
+    }
+
+    let team = TeamKey::new(team_id);
+    let pane = PaneId::new("%leader");
+    requeue_after_claim_leader(&ws, &store, &log, &team, &pane, None).unwrap();
+
+    let status = |message_id: &str| {
+        conn.query_row(
+            "select status from messages where message_id = ?1",
+            [message_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(status(&leader_message), "accepted");
+    assert_eq!(status(&worker_message), "submitted_pending_acceptance");
+}
+
+#[test]
 fn gate054_status_surfaces_pending_leader_notifications() {
     // Round-2: user-facing visibility — status must show the blocked leader
     // notification as pending, not just as `messages.failed=1`.
