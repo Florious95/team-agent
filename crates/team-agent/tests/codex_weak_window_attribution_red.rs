@@ -22,6 +22,21 @@
 //! Collision handling stays fail-closed — never steal a positively or durably
 //! claimed foreign session.
 //!
+//! CONTRACT LINEAGE (frozen-SHA evolution, leader ruling msg_ab2a1fecc308):
+//! - 484d593c…afee7 = short-record form, four assertions (w1-w4), frozen at
+//!   9c41975 on baseline a909876.
+//! - THIS revision (re-frozen, same file, new SHA) adds w5/w5b/w5c after the
+//!   Gate-4 ROUND-2 real-machine ground truth (gate4-round2-evidence.md +
+//!   locate Round 2 addendum): the real worker rollout carries its embedded
+//!   identity inside a 44357-byte record whose terminating newline lands past
+//!   the CAPTURE_HEAD_BYTES=65536 head cap; `read_head_text` truncates to the
+//!   last complete newline, so the WHOLE record is discarded and the rollout
+//!   scans as weak forever — 00d63cc's shared-candidate deferral then never
+//!   converges (both agents terminally ambiguous, nobody binds). The w1
+//!   short-record fixture was a false premise for that real shape (sister
+//!   discipline: contract fixture data shapes must take real-machine samples
+//!   as ground truth). w1-w4 assertion semantics are byte-untouched.
+//!
 //! DETERMINISTIC TIMING SEAM (no real-provider race, no sleeps, no waiting):
 //! scan visibility/order is pinned by fixture-controlled rollout FILE CONTENT
 //! between explicit one-shot `capture_missing_provider_sessions_once` calls —
@@ -426,4 +441,243 @@ fn w4_restart_must_preserve_worker_session_after_weak_window() {
              is the other face of the same defect). decision={decision:?}"
         );
     }
+}
+
+// ===========================================================================
+// w5 family — LONG-RECORD ground truth (Gate-4 round 2). Fixture byte shape is
+// modelled 1:1 on the real rollout sample (gate4-round2-evidence.md): line1 =
+// 22068B session_meta, line2 = 233B, line3 = 44357B carrying the embedded
+// identity, line3's newline past the 65536B head cap. The fixture SELF-ASSERTS
+// its byte invariants so the shape can never silently drift.
+// ===========================================================================
+
+/// Head cap observed at the locate surface (`common.rs CAPTURE_HEAD_BYTES`).
+/// The contract pins BEHAVIOR relative to this boundary, not the constant
+/// itself: identity bytes inside the first HEAD_CAP raw bytes must be seen;
+/// identity bytes entirely beyond it must not be (bounded I/O red line —
+/// no whole-file reads, no unbounded cap growth).
+const HEAD_CAP: u64 = 65_536;
+
+fn marker_text(agent_id: &str) -> String {
+    format!("You are Team Agent worker `{agent_id}` with role `fixture`.")
+}
+
+fn padded_record(pad_before: usize, marker: Option<&str>, pad_after: usize) -> String {
+    let text = format!(
+        "{}{}{}",
+        "x".repeat(pad_before),
+        marker.unwrap_or(""),
+        "x".repeat(pad_after)
+    );
+    serde_json::to_string(&json!({
+        "type": "response_item",
+        "payload": {"content": [{"type": "input_text", "text": text}]}
+    }))
+    .unwrap()
+}
+
+impl Fixture {
+    /// Write the round-2 real-machine rollout shape. Returns (path,
+    /// marker_start_offset, line3_end_offset) with the invariants asserted:
+    /// line1+line2 complete under the cap; line3's terminating newline beyond
+    /// the cap; marker (when inside_cap) strictly under the cap.
+    fn write_long_record_rollout(
+        &self,
+        session_id: &str,
+        marker: Option<&str>,
+        marker_inside_cap: bool,
+    ) -> PathBuf {
+        // line1: session_meta padded to ~22068 bytes (real sample size).
+        let meta_core = json!({
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "cwd": self.spawn_cwd.to_string_lossy().to_string(),
+                "pad": ""
+            }
+        });
+        let overhead = serde_json::to_string(&meta_core).unwrap().len();
+        let line1 = serde_json::to_string(&json!({
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "cwd": self.spawn_cwd.to_string_lossy().to_string(),
+                "pad": "x".repeat(22_068usize.saturating_sub(overhead))
+            }
+        }))
+        .unwrap();
+        // line2: small complete conversation record (~233B real sample).
+        let line2 = padded_record(160, None, 0);
+        // line3: ~44357B record. marker_inside_cap=true → marker ~500B into
+        // the record (real sample: col 548 / absolute 22848); false → marker
+        // at the record tail, starting beyond the cap.
+        let line3 = match (marker, marker_inside_cap) {
+            (Some(m), true) => padded_record(500, Some(m), 43_800 - m.len()),
+            (Some(m), false) => padded_record(44_300 - m.len(), Some(m), 40),
+            (None, _) => padded_record(500, None, 43_800),
+        };
+        let body = format!("{line1}\n{line2}\n{line3}\n");
+
+        // Self-asserted byte invariants (ground-truth shape can never drift):
+        let line3_start = line1.len() + 1 + line2.len() + 1;
+        let line3_end = line3_start + line3.len() + 1;
+        assert!(
+            (line3_start as u64) < HEAD_CAP,
+            "fixture invariant: lines 1-2 must be complete under the head cap; line3_start={line3_start}"
+        );
+        assert!(
+            (line3_end as u64) > HEAD_CAP,
+            "fixture invariant: line3's newline must land beyond the head cap; line3_end={line3_end}"
+        );
+        if let Some(m) = marker {
+            let marker_start = line3_start + body[line3_start..].find(m).expect("marker present");
+            if marker_inside_cap {
+                assert!(
+                    (marker_start as u64) < HEAD_CAP,
+                    "fixture invariant: marker must START under the cap (real sample offset 22848); \
+                     marker_start={marker_start}"
+                );
+            } else {
+                assert!(
+                    (marker_start as u64) > HEAD_CAP,
+                    "fixture invariant: marker must start BEYOND the cap; marker_start={marker_start}"
+                );
+            }
+        }
+
+        let path = self.rollout_path(session_id);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+}
+
+/// w5 (RED core, round 2) — an embedded identity whose BYTES lie inside the
+/// bounded head window must remain visible even when its RECORD's terminating
+/// newline lands beyond the cap. Real-machine ground truth: the only rollout
+/// carries `worker_a` at absolute offset 22848 inside a 44357-byte record
+/// ending at byte 66658; the head parser discards the incomplete record, the
+/// rollout scans weak forever, and 00d63cc's shared-candidate deferral makes
+/// BOTH cohort agents terminally ambiguous — nobody binds, restart loses the
+/// session (run release-054-preship-fixed-20260723T001516Z).
+///
+/// Post-fix: the worker converges to its exact tuple within the bounded
+/// window; the parent never binds it; zero residual ambiguity. The structural
+/// JSONL parser may still consume complete lines only (session_meta from
+/// line1 remains authoritative for the session id) — this assertion passes
+/// exactly when the identity is honored AND the tuple is intact.
+#[test]
+#[serial(env)]
+fn w5_identity_inside_cap_within_cross_cap_record_must_converge() {
+    let fx = Fixture::new("w5");
+    let rollout = fx.write_long_record_rollout(WORKER_SESSION, Some(&marker_text(WORKER)), true);
+    let mut state = fx.cohort_state();
+
+    let _ = capture_tick(&mut state);
+    let _ = capture_tick(&mut state);
+    let final_report = capture_tick(&mut state);
+
+    assert_ne!(
+        agent_field(&state, PARENT, "session_id"),
+        Some(WORKER_SESSION),
+        "the parent must never commit the worker's session (unchanged w1 invariant). state={state}"
+    );
+    assert_eq!(
+        agent_field(&state, WORKER, "session_id"),
+        Some(WORKER_SESSION),
+        "`{WORKER}` must converge although its embedded identity sits inside a record whose \
+         newline lands beyond the {HEAD_CAP}-byte head cap — the identity BYTES are inside the \
+         bounded window (real sample: offset 22848) and must not be discarded with the \
+         incomplete record. Baseline 00d63cc: rollout scans weak forever, deferral never \
+         converges, nobody binds. state={state}"
+    );
+    assert_eq!(
+        agent_field(&state, WORKER, "rollout_path"),
+        Some(rollout.to_string_lossy().as_ref()),
+        "exact tuple (structural parser stays line-complete: session_meta on line1 is \
+         authoritative). state={state}"
+    );
+    assert!(
+        !final_report
+            .ambiguous
+            .iter()
+            .any(|entry| entry.agent_id == WORKER),
+        "zero residual ambiguity for `{WORKER}` after convergence. ambiguous={:?}",
+        final_report.ambiguous
+    );
+}
+
+/// w5b (bounded-read face — must stay green) — an identity whose bytes start
+/// ENTIRELY BEYOND the head cap must NOT be extracted: the scan stays weak,
+/// the shared-candidate deferral holds, and nobody binds. This pins the
+/// OTHER face of "bounded read without identity loss": a fix that reads the
+/// whole file (or grows the cap unboundedly) to find this marker turns this
+/// form red. (Bounded per-file I/O is the locate's stated design intent;
+/// heuristic attribution — cwd/nearest-spawn/newest — is refused elsewhere.)
+#[test]
+#[serial(env)]
+fn w5b_identity_entirely_beyond_cap_stays_weak_and_deferred() {
+    let fx = Fixture::new("w5b");
+    let _rollout = fx.write_long_record_rollout(WORKER_SESSION, Some(&marker_text(WORKER)), false);
+    let mut state = fx.cohort_state();
+
+    let _ = capture_tick(&mut state);
+    let report = capture_tick(&mut state);
+
+    assert_eq!(
+        agent_field(&state, PARENT, "session_id"),
+        None,
+        "bounded-read face: beyond-cap identity is invisible; the shared weak candidate must \
+         not be bound to the parent. state={state}"
+    );
+    assert_eq!(
+        agent_field(&state, WORKER, "session_id"),
+        None,
+        "bounded-read face: the worker must not be POSITIVELY bound off identity bytes that \
+         live beyond the bounded head window (whole-file reads are forbidden). state={state}"
+    );
+    assert!(
+        report
+            .ambiguous
+            .iter()
+            .any(|entry| entry.agent_id == WORKER),
+        "the shared weak candidate stays deferred (ambiguous), not silently dropped. \
+         ambiguous={:?}",
+        report.ambiguous
+    );
+}
+
+/// w5c (fail-closed negative control — must stay green) — a cross-cap long
+/// rollout with NO embedded identity anywhere must keep the shared-candidate
+/// deferral: nobody binds, the worker stays deferred. Guards against a fix
+/// that treats "record unreadable/truncated" as a positive identity signal.
+#[test]
+#[serial(env)]
+fn w5c_no_identity_cross_cap_rollout_stays_deferred_for_cohort() {
+    let fx = Fixture::new("w5c");
+    let _rollout = fx.write_long_record_rollout(WORKER_SESSION, None, true);
+    let mut state = fx.cohort_state();
+
+    let _ = capture_tick(&mut state);
+    let report = capture_tick(&mut state);
+
+    assert_eq!(
+        agent_field(&state, PARENT, "session_id"),
+        None,
+        "fail-closed: no identity anywhere → the shared weak candidate binds nobody. state={state}"
+    );
+    assert_eq!(
+        agent_field(&state, WORKER, "session_id"),
+        None,
+        "fail-closed: truncation/absence of identity must never be treated as positive proof. \
+         state={state}"
+    );
+    assert!(
+        report
+            .ambiguous
+            .iter()
+            .any(|entry| entry.agent_id == WORKER),
+        "the cohort deferral holds (worker stays ambiguous for bounded convergence). \
+         ambiguous={:?}",
+        report.ambiguous
+    );
 }
