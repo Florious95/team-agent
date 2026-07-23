@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.57
+
+- **Feature: typed message-state recovery with explicit ownership and bounded transitions.** Durable message dispositions now share one typed state vocabulary, and recovery is owned by the matching blocked condition instead of generic status rewriting. Leader and worker recovery paths are attempt- and age-bounded, preserve stable message identity, and fail closed across foreign owner epochs or ineligible prior states.
+
+- **Hardening: inventory-safe recovery and auditable state transitions.** Historical parked, delivered, acknowledged, consumed, and unrelated rows remain immutable during leader claim; only genuinely blocked rows enter recovery. Claim audit events report typed `by_prior_state` counts, including zero-count slots, and the generic message-mark guard is atomic so concurrent terminal or parked transitions cannot be overwritten by a stale read.
+
 ## 0.5.56
 
 - **P0 fix: claiming a leader no longer replays historical parked messages.** `submitted_pending_acceptance` rows have already crossed the physical transport boundary and are now claim-immutable: `claim-leader` and `attach-leader` requeue only genuinely blocked `failed/leader_not_attached` or `queued_until_leader_attach` rows. This stops an unbounded historical replay storm while preserving stable message ids and the existing recovery funnel for messages that were never physically submitted.
