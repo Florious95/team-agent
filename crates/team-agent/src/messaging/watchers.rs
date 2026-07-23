@@ -415,7 +415,7 @@ pub fn requeue_after_claim_leader(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let mut stmt = conn.prepare(
         "select watcher_id, result_id, status, coalesce(completed_at, created_at) from result_watchers
-         where owner_team_id = ?1 and notified_message_id is null
+         where owner_team_id = ?1 and result_id is not null and notified_message_id is null
          order by created_at, watcher_id",
     )?;
     let rows = stmt.query_map(params![owner_team_id.as_str()], |row| {
@@ -504,7 +504,6 @@ pub(crate) fn requeue_blocked_leader_messages(
            and (
              (status = 'failed' and error = 'leader_not_attached')
              or status = 'queued_until_leader_attach'
-             or status = 'submitted_pending_acceptance'
            )",
         params![owner_team_id.as_str(), chrono::Utc::now().to_rfc3339()],
     )?;
