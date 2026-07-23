@@ -85,6 +85,7 @@ pub(crate) fn verify_context_fork(
             plan,
             before,
             expected_backing_path,
+            spawn_cwd,
             deadline,
         );
     }
@@ -99,6 +100,7 @@ fn verify_claude_fork(
     plan: &CommandPlan,
     before: &ContextBackingSnapshot,
     expected_backing_path: Option<&Path>,
+    spawn_cwd: &Path,
     deadline: Duration,
 ) -> Result<ContextForkProof, ProviderError> {
     let expected = plan.expected_session_id.as_ref().ok_or_else(|| {
@@ -131,6 +133,27 @@ fn verify_claude_fork(
                     source_session_id: source_session_id.clone(),
                     new_session_id: expected.clone(),
                     backing_path: path.to_path_buf(),
+                    captured_via: "context_fork_verified".to_string(),
+                    attribution_confidence: "high".to_string(),
+                    managed_backing_root: None,
+                });
+            }
+        }
+        if let Some(provider_path) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .and_then(|home| {
+                crate::provider::session_scan::claude::projects_dir_for_cwd(&home, spawn_cwd)
+            })
+            .map(|root| root.join(&expected_name))
+        {
+            let observed_matches = session_id_from_jsonl(&provider_path)
+                .is_some_and(|observed| observed == expected.as_str());
+            if readable_jsonl(&provider_path) && observed_matches && expected != source_session_id {
+                return Ok(ContextForkProof {
+                    provider,
+                    source_session_id: source_session_id.clone(),
+                    new_session_id: expected.clone(),
+                    backing_path: provider_path,
                     captured_via: "context_fork_verified".to_string(),
                     attribution_confidence: "high".to_string(),
                     managed_backing_root: None,

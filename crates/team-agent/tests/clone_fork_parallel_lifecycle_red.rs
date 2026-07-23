@@ -260,7 +260,11 @@ fn write_team_docs(workspace: &Path) {
 }
 
 /// Success-path shim that produces a DISTINCT NEW backing per fork. Each fork
-/// spawn carries a predetermined `--session-id <uuid>` on argv (adapter.rs:478);
+/// spawn carries `--resume <expected>` on argv (adapter.rs:875-889 —
+/// leader ruling msg_8f9411befb90 A 案: current product uses --resume, not
+/// --session-id; the pre-A shim scanned only --session-id, matched nothing,
+/// produced no backing, and thereby collapsed R4 into A 案 R3's input
+/// domain "no backing must Pending" — mutually exclusive contracts.);
 /// the shim writes a claude transcript at the exact path the session scanner reads
 /// (`$HOME/.claude/projects/<encoded-cwd>/<uuid>.jsonl`, encoding per
 /// session_scan/claude.rs: every non-alphanumeric char → '-'), keyed to that
@@ -277,10 +281,16 @@ fn write_claude_shim(workspace: &Path) -> PathBuf {
     std::fs::write(
         &shim,
         r#"#!/bin/sh
+# Parse `--resume <expected>` (current claude fork argv shape, adapter.rs:875-889).
+# Also accept `--session-id <expected>` as a defensive fallback so any future
+# argv rewrite that reintroduces --session-id does not silently kill backing
+# emission (defense-in-depth per A 案 return-issue防线).
 sid=""
 prev=""
 for a in "$@"; do
-  if [ "$prev" = "--session-id" ]; then sid="$a"; fi
+  case "$prev" in
+    --resume|--session-id) sid="$a" ;;
+  esac
   prev="$a"
 done
 if [ -n "$sid" ]; then

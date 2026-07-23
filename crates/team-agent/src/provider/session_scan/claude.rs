@@ -5,7 +5,7 @@ use crate::provider::Provider;
 
 use super::{CaptureSessionContext, CapturedSessionCandidate};
 
-pub(super) fn projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<PathBuf> {
+pub(crate) fn projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(spawn_cwd).unwrap_or_else(|_| spawn_cwd.to_path_buf());
     let encoded = encode_projects_dir(&canonical.to_string_lossy());
     if encoded.is_empty() {
