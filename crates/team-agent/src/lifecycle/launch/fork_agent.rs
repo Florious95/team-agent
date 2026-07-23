@@ -57,66 +57,13 @@ pub fn fork_agent_with_transport(
     let text = std::fs::read_to_string(&read_spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", read_spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    if find_spec_agent(&spec, as_agent_id).is_some() || leader_id_matches(&spec, as_agent_id) {
+    if fork_spec_agent(&spec, as_agent_id).is_some() || leader_id_matches(&spec, as_agent_id) {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent id already exists: {as_agent_id}"
         )));
     }
-    let source_agent = find_spec_agent(&spec, source_agent_id).ok_or_else(|| {
-        LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
-    })?;
-    // Fork requires the complete source tuple before treating session_id as
-    // resumable truth; a scalar-only row has no confirmed backing.
-    let source_agent_state = state
-        .get("agents")
-        .and_then(|v| v.get(source_agent_id.as_str()))
-        .ok_or_else(|| {
-            LifecycleError::Provider(format!(
-                "cannot fork {source_agent_id}: source agent row not in state"
-            ))
-        })?;
-    let tuple_field_ok = |field: &str| -> bool {
-        source_agent_state
-            .get(field)
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty())
-    };
-    let session_id_str = source_agent_state
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    let rollout_path_str = source_agent_state
-        .get("rollout_path")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-    if session_id_str.is_none()
-        || rollout_path_str.is_none()
-        || !tuple_field_ok("captured_at")
-        || !tuple_field_ok("captured_via")
-    {
-        return Err(LifecycleError::Provider(format!(
-            "cannot fork {source_agent_id}: source session backing is missing or incomplete \
-             (session_id+rollout_path+captured_at+captured_via required)"
-        )));
-    }
-    let Some(source_backing_raw) = rollout_path_str else {
-        return Err(LifecycleError::Provider(format!(
-            "cannot fork {source_agent_id}: source session backing is missing"
-        )));
-    };
-    let source_backing = Path::new(source_backing_raw);
-    if !source_backing.is_file() {
-        return Err(LifecycleError::Provider(format!(
-            "cannot fork {source_agent_id}: source session backing is not readable: {}",
-            source_backing.display()
-        )));
-    }
-    let Some(source_session_id) = session_id_str else {
-        return Err(LifecycleError::Provider(format!(
-            "cannot fork {source_agent_id}: source session id is missing"
-        )));
-    };
-    let session_id = crate::provider::SessionId::new(source_session_id.to_string());
+    // Source existence authority: state.get("agents"), matching clone-agent.
+    let (session_id, source_backing) = fork_source_tuple(&state, source_agent_id)?;
     let session_name = state
         .get("session_name")
         .and_then(|v| v.as_str())
@@ -158,7 +105,7 @@ pub fn fork_agent_with_transport(
     crate::model::spec::validate_spec(&new_spec, &validate_ws)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     write_spec_atomic(&spec_path, &new_spec)?;
-    let new_agent = find_spec_agent(&new_spec, as_agent_id).ok_or_else(|| {
+    let new_agent = fork_spec_agent(&new_spec, as_agent_id).ok_or_else(|| {
         LifecycleError::RequirementUnmet(format!("unknown worker agent id: {as_agent_id}"))
     })?;
     let provider = new_agent
@@ -297,12 +244,17 @@ pub fn fork_agent_with_transport(
     }
     let window = WindowName::new(as_agent_id.as_str());
     let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
-    let mut claude_fork = prepare_claude_fork_backing(provider, &plan, source_backing, &session_id)
-        .map_err(|error| {
-            let _ = std::fs::write(&spec_path, text.as_bytes());
-            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
-            error
-        })?;
+    let mut claude_fork = prepare_claude_fork_backing(
+        provider,
+        &plan,
+        &source_backing,
+        &session_id,
+    )
+    .map_err(|error| {
+        let _ = std::fs::write(&spec_path, text.as_bytes());
+        cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+        error
+    })?;
     let mut env =
         inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
     apply_profile_launch_env(&mut env, &profile_launch);
@@ -401,7 +353,7 @@ pub fn fork_agent_with_transport(
     })?;
     let convergence_deadline =
         crate::provider::session::context_fork_convergence_deadline(provider);
-    let context_proof = match crate::provider::session::verify_context_fork(
+    let context_outcome = crate::provider::session::observe_context_fork(
         provider,
         &session_id,
         &plan,
@@ -411,9 +363,40 @@ pub fn fork_agent_with_transport(
         &workspace,
         &spawned_at,
         convergence_deadline,
-    ) {
-        Ok(proof) => proof,
-        Err(error) => {
+    );
+    let context_proof = match context_outcome {
+        crate::provider::session::ContextForkOutcome::Verified(proof) => Some(proof),
+        crate::provider::session::ContextForkOutcome::Pending(pending) => {
+            if let Err(error) = finalize_pending_fork_state(ForkPendingFinalizeInput {
+                workspace: &workspace,
+                team_key: &fork_team,
+                source_agent_id,
+                agent_id: as_agent_id,
+                spec_agent: new_agent,
+                safety: &safety,
+                plan: &plan,
+                profile_launch: &profile_launch,
+                spawn: &spawn,
+                profile_dir: &profile_dir,
+                dynamic_role_file: materialized_role.path(),
+                pending: &pending,
+                spawn_epoch,
+            }) {
+                rollback_fork_after_spawn(
+                    &workspace,
+                    transport,
+                    &session_name,
+                    &window,
+                    &mcp_config_path,
+                    as_agent_id,
+                    &profile_launch,
+                    &fork_team,
+                );
+                return Err(error);
+            }
+            None
+        }
+        crate::provider::session::ContextForkOutcome::Rejected(error) => {
             rollback_fork_after_spawn(
                 &workspace,
                 transport,
@@ -427,33 +410,35 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Provider(error.to_string()));
         }
     };
-    if let Err(error) = finalize_fork_state(ForkFinalizeInput {
-        workspace: &workspace,
-        team_key: &fork_team,
-        source_agent_id,
-        agent_id: as_agent_id,
-        spec_agent: new_agent,
-        safety: &safety,
-        plan: &plan,
-        profile_launch: &profile_launch,
-        spawn: &spawn,
-        profile_dir: &profile_dir,
-        dynamic_role_file: materialized_role.path(),
-        context_proof: &context_proof,
-        spawned_at: &spawned_at,
-        spawn_epoch,
-    }) {
-        rollback_fork_after_spawn(
-            &workspace,
-            transport,
-            &session_name,
-            &window,
-            &mcp_config_path,
-            as_agent_id,
-            &profile_launch,
-            &fork_team,
-        );
-        return Err(error);
+    if let Some(context_proof) = context_proof.as_ref() {
+        if let Err(error) = finalize_fork_state(ForkFinalizeInput {
+            workspace: &workspace,
+            team_key: &fork_team,
+            source_agent_id,
+            agent_id: as_agent_id,
+            spec_agent: new_agent,
+            safety: &safety,
+            plan: &plan,
+            profile_launch: &profile_launch,
+            spawn: &spawn,
+            profile_dir: &profile_dir,
+            dynamic_role_file: materialized_role.path(),
+            context_proof: &context_proof,
+            spawned_at: &spawned_at,
+            spawn_epoch,
+        }) {
+            rollback_fork_after_spawn(
+                &workspace,
+                transport,
+                &session_name,
+                &window,
+                &mcp_config_path,
+                as_agent_id,
+                &profile_launch,
+                &fork_team,
+            );
+            return Err(error);
+        }
     }
     if let Err(error) =
         verify_fork_registration(&workspace, &fork_team, as_agent_id, &spawn, &window)
@@ -495,6 +480,6 @@ pub fn fork_agent_with_transport(
             state_file: crate::state::persist::runtime_state_path(&workspace),
             coordinator_started,
         },
-        session_id: Some(context_proof.new_session_id),
+        session_id: context_proof.map(|proof| proof.new_session_id),
     })
 }

@@ -469,13 +469,25 @@ fn classify_pending_capture_state(
     const TRIGGER_GRACE_SECS: i64 = 15;
     let past_spawn_grace = elapsed_since_spawn >= SPAWN_GRACE_SECS;
     let past_trigger_grace = has_trigger && elapsed_since_trigger >= TRIGGER_GRACE_SECS;
+    let fork_pending_expired = agent_obj.get("capture_state").and_then(Value::as_str)
+        == Some("pending_context_fork")
+        && crate::provider::session::transition_pending_context_fork(
+            has_trigger,
+            past_spawn_grace && past_trigger_grace,
+        )
+        .is_some();
     // transcript_missing requires BOTH: a trigger occurred AND we've
     // waited past the spawn grace (so we're not blamed for slow startup).
     // candidate_count == 0 is the "no backing" signal; non-zero
     // candidates that didn't satisfy assignment go through the ambiguous
     // path above and don't reach here.
-    if has_trigger && past_spawn_grace && past_trigger_grace && candidate_count == 0 {
+    if (fork_pending_expired || has_trigger && past_spawn_grace && past_trigger_grace)
+        && candidate_count == 0
+    {
         "transcript_missing"
+    } else if agent_obj.get("capture_state").and_then(Value::as_str) == Some("pending_context_fork")
+    {
+        "pending_context_fork"
     } else {
         "pending_first_turn"
     }
@@ -1143,6 +1155,9 @@ fn apply_captured_session(
     agent_obj: &mut serde_json::Map<String, Value>,
     captured: &CapturedSession,
 ) -> bool {
+    if agent_obj.get("capture_state").and_then(Value::as_str) == Some("pending_context_fork") {
+        return crate::lifecycle::finalize_pending_fork_capture(agent_obj, captured);
+    }
     let Some(session_id) = captured.session_id.as_ref() else {
         return false;
     };
@@ -1976,6 +1991,27 @@ mod u1_tests {
             "pending_first_turn"
         );
 
+        let trigger = (chrono::Utc::now() - chrono::Duration::seconds(20)).to_rfc3339();
+        agent.insert("first_send_at".to_string(), serde_json::json!(trigger));
+        assert_eq!(
+            super::classify_pending_capture_state(&agent, 0),
+            "transcript_missing"
+        );
+    }
+
+    #[test]
+    fn pending_context_fork_keeps_typed_state_until_trigger_grace_expires() {
+        let old = (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        let mut agent = serde_json::Map::new();
+        agent.insert("spawned_at".to_string(), serde_json::json!(old));
+        agent.insert(
+            "capture_state".to_string(),
+            serde_json::json!("pending_context_fork"),
+        );
+        assert_eq!(
+            super::classify_pending_capture_state(&agent, 0),
+            "pending_context_fork"
+        );
         let trigger = (chrono::Utc::now() - chrono::Duration::seconds(20)).to_rfc3339();
         agent.insert("first_send_at".to_string(), serde_json::json!(trigger));
         assert_eq!(

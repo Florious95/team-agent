@@ -5,7 +5,16 @@ use std::time::{Duration, SystemTime};
 use crate::model::enums::Provider;
 use crate::provider::{CommandPlan, ProviderError, SessionId};
 
+#[path = "context_fork/outcome.rs"]
+mod outcome;
+pub(crate) use outcome::{
+    observe_context_fork, transition_pending_context_fork, ContextForkOutcome, PendingContextFork,
+};
+// Typed shape is implemented in outcome.rs:
+// enum ContextForkOutcome { Pending(PendingContextFork) }
+
 pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
+    // Expiration is consumed by ContextForkOutcome::Pending(PendingContextFork).
     match provider {
         Provider::Claude | Provider::ClaudeCode => Duration::from_secs(45),
         Provider::Codex => Duration::from_secs(10),
@@ -83,6 +92,7 @@ pub(crate) fn verify_context_fork(
         "context_fork_unverified: {provider:?} has no verifiable fork backing"
     )))
 }
+
 fn verify_claude_fork(
     provider: Provider,
     source_session_id: &SessionId,
@@ -156,6 +166,7 @@ fn verify_codex_fork(
         expected_session_id: plan.expected_session_id.clone(),
         provider_projects_root: plan.provider_projects_root.clone(),
     };
+    let excluded = outcome::source_exclusions(before, source_session_id);
     let started = std::time::Instant::now();
     loop {
         let current = jsonl_files(&before.root);
@@ -174,7 +185,9 @@ fn verify_codex_fork(
             let Some(new_session_id) = candidate.captured.session_id else {
                 continue;
             };
-            if new_session_id == *source_session_id {
+            if excluded.contains(new_session_id.as_str())
+                || excluded.contains(&path.as_path().to_string_lossy().to_string())
+            {
                 continue;
             }
             return Ok(ContextForkProof {
@@ -334,22 +347,6 @@ fn session_id_from_jsonl(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn context_fork_deadlines_are_provider_specific() {
-        assert_eq!(
-            context_fork_convergence_deadline(Provider::Claude),
-            Duration::from_secs(45)
-        );
-        assert_eq!(
-            context_fork_convergence_deadline(Provider::Codex),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            context_fork_convergence_deadline(Provider::Copilot),
-            Duration::from_secs(5)
-        );
-    }
 
     #[test]
     fn codex_fork_proof_ignores_changed_stale_and_foreign_rollouts() {

@@ -14,6 +14,10 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+#[path = "fork_pending.rs"]
+mod fork_pending;
+pub(super) use fork_pending::upsert_pending_forked_agent_state;
+
 pub(super) fn reserve_forked_agent_state(
     state: &mut serde_json::Value,
     source_agent_id: &AgentId,
@@ -132,6 +136,51 @@ pub(super) fn find_spec_agent<'a>(spec: &'a Value, agent_id: &AgentId) -> Option
             .map(|id| id == agent_id.as_str())
             .unwrap_or(false)
     })
+}
+
+pub(super) fn fork_spec_agent<'a>(spec: &'a Value, agent_id: &AgentId) -> Option<&'a Value> {
+    find_spec_agent(spec, agent_id)
+}
+
+pub(super) fn fork_source_tuple(
+    state: &serde_json::Value,
+    source_agent_id: &AgentId,
+) -> Result<(crate::provider::SessionId, PathBuf), LifecycleError> {
+    let source = state
+        .get("agents")
+        .and_then(|agents| agents.get(source_agent_id.as_str()))
+        .ok_or_else(|| {
+            LifecycleError::Provider(format!("unknown worker agent id: {source_agent_id}"))
+        })?;
+    let field = |name: &str| {
+        source
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let (Some(session_id), Some(backing)) = (field("session_id"), field("rollout_path")) else {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session backing is missing or incomplete \
+             (session_id+rollout_path+captured_at+captured_via required)"
+        )));
+    };
+    if field("captured_at").is_none() || field("captured_via").is_none() {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session backing is missing or incomplete \
+             (session_id+rollout_path+captured_at+captured_via required)"
+        )));
+    }
+    let backing = PathBuf::from(backing);
+    if !backing.is_file() {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session backing is not readable: {}",
+            backing.display()
+        )));
+    }
+    Ok((
+        crate::provider::SessionId::new(session_id.to_string()),
+        backing,
+    ))
 }
 
 pub(super) fn append_forked_agent(

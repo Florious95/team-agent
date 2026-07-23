@@ -172,6 +172,100 @@ pub(super) fn finalize_fork_state(input: ForkFinalizeInput<'_>) -> Result<(), Li
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))
 }
 
+pub(super) struct ForkPendingFinalizeInput<'a> {
+    pub workspace: &'a Path,
+    pub team_key: &'a str,
+    pub source_agent_id: &'a AgentId,
+    pub agent_id: &'a AgentId,
+    pub spec_agent: &'a Value,
+    pub safety: &'a DangerousApproval,
+    pub plan: &'a crate::provider::CommandPlan,
+    pub profile_launch: &'a crate::provider::ProviderProfileLaunch,
+    pub spawn: &'a crate::transport::SpawnResult,
+    pub profile_dir: &'a Path,
+    pub dynamic_role_file: &'a Path,
+    pub pending: &'a crate::provider::session::PendingContextFork,
+    pub spawn_epoch: u64,
+}
+
+pub(super) fn finalize_pending_fork_state(
+    input: ForkPendingFinalizeInput<'_>,
+) -> Result<(), LifecycleError> {
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: input.workspace,
+        operation: "fork-agent-pending",
+        team: Some(input.team_key),
+        agent_id: Some(input.agent_id),
+    })?;
+    let mut next_state = crate::state::selector::resolve_active_team(
+        input.workspace,
+        Some(input.team_key),
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?
+    .state;
+    upsert_pending_forked_agent_state(
+        &mut next_state,
+        input.source_agent_id,
+        input.agent_id,
+        input.spec_agent,
+        input.safety,
+        input.plan,
+        input.profile_launch,
+        input.spawn,
+        Some(input.profile_dir),
+        input.dynamic_role_file,
+        input.pending,
+        input.spawn_epoch,
+    )?;
+    maybe_fail_fork_after_spawn("save_runtime_state")?;
+    crate::state::repository::StateRepository::new(input.workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::ForkAgent {
+                team_key: input.team_key,
+                agent_id: input.agent_id.as_str(),
+            },
+            &next_state,
+        )
+        .map_err(|error| LifecycleError::StatePersist(error.to_string()))
+}
+
+pub(crate) fn finalize_pending_fork_capture(
+    agent: &mut serde_json::Map<String, serde_json::Value>,
+    captured: &crate::provider::CapturedSession,
+) -> bool {
+    let Some(session_id) = captured.session_id.as_ref() else {
+        return false;
+    };
+    let Some(rollout_path) = captured.rollout_path.as_ref() else {
+        return false;
+    };
+    agent.insert(
+        "session_id".to_string(),
+        serde_json::json!(session_id.as_str()),
+    );
+    agent.insert(
+        "rollout_path".to_string(),
+        serde_json::json!(rollout_path.as_path().to_string_lossy()),
+    );
+    agent.insert(
+        "captured_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    agent.insert(
+        "captured_via".to_string(),
+        serde_json::to_value(captured.captured_via).unwrap_or(serde_json::Value::Null),
+    );
+    agent.insert(
+        "attribution_confidence".to_string(),
+        serde_json::to_value(captured.attribution_confidence).unwrap_or(serde_json::Value::Null),
+    );
+    agent.remove("_pending_session_id");
+    agent.remove("attribution_ambiguous");
+    agent.insert("capture_state".to_string(), serde_json::json!("captured"));
+    true
+}
+
 pub(super) fn verify_fork_registration(
     workspace: &Path,
     team_key: &str,

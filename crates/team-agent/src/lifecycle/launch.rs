@@ -295,6 +295,7 @@ mod fork_state;
 pub(super) use fork_state::*;
 
 mod fork_finalize;
+pub(crate) use fork_finalize::finalize_pending_fork_capture;
 pub(super) use fork_finalize::*;
 
 mod role_source;
