@@ -76,6 +76,7 @@ use crate::state::StateError;
 
 // ── submodules(by responsibility) ──────────────────────────────────────────
 mod helpers;
+pub mod incident;
 pub mod inject;
 pub mod lease;
 pub mod owner_bind;
@@ -87,6 +88,7 @@ pub mod takeover;
 pub mod types;
 
 // ── RE-EXPORT INVARIANT:每个先前 root-visible 项原路径不变 ────────────────────
+pub use incident::*;
 pub use inject::*;
 pub use lease::*;
 pub use owner_bind::*;

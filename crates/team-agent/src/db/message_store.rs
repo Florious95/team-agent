@@ -54,6 +54,10 @@ pub enum MessageStoreError {
     Io(#[from] std::io::Error),
     #[error("delivery receipt missing for message: {0}")]
     DeliveryReceiptMissing(String),
+    #[error("invalid message transition from {from} to {to}")]
+    InvalidTransition { from: String, to: String },
+    #[error("submitted recovery refused: {0}")]
+    RecoveryRefused(&'static str),
 }
 
 /// Outcome of [`MessageStore::claim_leader_notification_delivery`]
@@ -101,7 +105,7 @@ pub enum MessageRowStatus {
 }
 
 impl MessageRowStatus {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: &[Self] = &[
         Self::Accepted,
         Self::StoredOnly,
         Self::QueuedUntilLeaderAttach,
@@ -142,6 +146,34 @@ impl MessageRowStatus {
 pub struct BlockedLeaderRequeueCounts {
     pub blocked_leader_unbound: usize,
     pub queued_until_leader_attach: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryBudget {
+    pub attempt_budget: u32,
+    pub max_age_seconds: u64,
+    pub owner_epoch: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneAvailable {
+    pub agent_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedisplayKind {
+    FrameworkReplay,
+    ProviderRerender,
+}
+
+impl RedisplayKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FrameworkReplay => "framework_replay",
+            Self::ProviderRerender => "provider_rerender",
+        }
+    }
 }
 
 impl BlockedLeaderRequeueCounts {
@@ -342,6 +374,29 @@ impl MessageStore {
         error: Option<&str>,
     ) -> Result<(), MessageStoreError> {
         let conn = crate::db::schema::open_db(&self.path)?;
+        let prior: Option<String> = conn
+            .query_row(
+                "select status from messages where message_id = ?1",
+                params![message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if prior.as_deref() == Some(MessageRowStatus::Acknowledged.as_str())
+            || prior.as_deref() == Some(MessageRowStatus::Consumed.as_str())
+            || (prior.as_deref() == Some(MessageRowStatus::Delivered.as_str())
+                && status != MessageRowStatus::Acknowledged.as_str()
+                && status != MessageRowStatus::Delivered.as_str())
+        {
+            return Ok(());
+        }
+        if status == MessageRowStatus::Acknowledged.as_str()
+            && prior.as_deref() != Some(MessageRowStatus::Delivered.as_str())
+        {
+            return Err(MessageStoreError::InvalidTransition {
+                from: prior.unwrap_or_else(|| "missing".to_string()),
+                to: status.to_string(),
+            });
+        }
         let now = now_ts();
         conn.execute(
             "update messages
@@ -455,26 +510,20 @@ impl MessageStore {
         let now = now_ts();
         let blocked_leader_unbound = tx.execute(
             "update messages
-             set status = ?1, error = null, updated_at = ?2
+             set status = 'accepted', error = null, updated_at = ?1
              where recipient = 'leader'
-               and owner_team_id = ?3
-               and status = ?4
+               and owner_team_id = ?2
+               and status = ?3
                and error = 'leader_not_attached'",
-            params![
-                MessageRowStatus::Accepted.as_str(),
-                now,
-                owner_team_id,
-                MessageRowStatus::Failed.as_str()
-            ],
+            params![now, owner_team_id, MessageRowStatus::Failed.as_str()],
         )?;
         let queued_until_leader_attach = tx.execute(
             "update messages
-             set status = ?1, error = null, updated_at = ?2
+             set status = 'accepted', error = null, updated_at = ?1
              where recipient = 'leader'
-               and owner_team_id = ?3
-               and status = ?4",
+               and owner_team_id = ?2
+               and status = ?3",
             params![
-                MessageRowStatus::Accepted.as_str(),
                 now,
                 owner_team_id,
                 MessageRowStatus::QueuedUntilLeaderAttach.as_str()
@@ -529,6 +578,74 @@ impl MessageStore {
         }
         tx.commit()?;
         Ok(ids)
+    }
+
+    pub fn retry_submitted_explicit(
+        &self,
+        message_id: &str,
+        incident_id: &str,
+        operator_reason: &str,
+        budget: RecoveryBudget,
+    ) -> Result<bool, MessageStoreError> {
+        if incident_id.trim().is_empty() || operator_reason.trim().is_empty() {
+            return Err(MessageStoreError::RecoveryRefused(
+                "incident_id_and_operator_reason_required",
+            ));
+        }
+        if budget.attempt_budget == 0 || budget.max_age_seconds == 0 || budget.owner_epoch <= 0 {
+            return Err(MessageStoreError::RecoveryRefused(
+                "invalid_recovery_budget",
+            ));
+        }
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let row: Option<(String, i64, String)> = conn
+            .query_row(
+                "select status, delivery_attempts, updated_at
+                 from messages where message_id = ?1",
+                params![message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((status, attempts, updated_at)) = row else {
+            return Ok(false);
+        };
+        if status != MessageRowStatus::SubmittedAwaitingReceipt.as_str()
+            && status != MessageRowStatus::SubmittedUnverified.as_str()
+        {
+            return Err(MessageStoreError::RecoveryRefused(
+                "message_not_submitted_recoverable",
+            ));
+        }
+        if attempts >= i64::from(budget.attempt_budget) {
+            return Err(MessageStoreError::RecoveryRefused(
+                "attempt_budget_exhausted",
+            ));
+        }
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at)
+            .map_err(|_| MessageStoreError::RecoveryRefused("invalid_updated_at"))?;
+        let age = chrono::Utc::now()
+            .signed_duration_since(updated_at.with_timezone(&chrono::Utc))
+            .num_seconds();
+        if age < 0 || u64::try_from(age).unwrap_or(u64::MAX) > budget.max_age_seconds {
+            return Err(MessageStoreError::RecoveryRefused("message_too_old"));
+        }
+        let changed = conn.execute(
+            "update messages
+             set status = ?1, error = ?2, updated_at = ?3
+             where message_id = ?4
+               and status in (?5, ?6)
+               and delivery_attempts < ?7",
+            params![
+                MessageRowStatus::Accepted.as_str(),
+                format!("explicit_recovery:{incident_id}:{operator_reason}"),
+                now_ts(),
+                message_id,
+                MessageRowStatus::SubmittedAwaitingReceipt.as_str(),
+                MessageRowStatus::SubmittedUnverified.as_str(),
+                budget.attempt_budget
+            ],
+        )?;
+        Ok(changed == 1)
     }
 
     /// Read inbox rows for an agent. This projection intentionally has no owner-team

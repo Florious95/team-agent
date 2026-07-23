@@ -9,6 +9,12 @@ use crate::message_store::{MessageStore, NotificationClaimParams};
 use crate::model::ids::{TaskId, TeamKey};
 use crate::transport::PaneId;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryIncident {
+    pub incident_id: String,
+    pub occurred_at: String,
+}
+
 use super::{MessagingError, WatcherNotice, RESULT_DELIVERY_MAX_ATTEMPTS};
 
 /// `notify_result_watchers` (`result_delivery.py:38`):匹配 + 去重 + (有界) 投递 result 给 leader
@@ -465,6 +471,24 @@ pub fn requeue_after_claim_leader(
         let _ = retry_result_deliveries(workspace, event_log)?;
     }
     Ok(out)
+}
+
+pub fn recover_watchers_for_incident(
+    workspace: &Path,
+    store: &MessageStore,
+    event_log: &EventLog,
+    owner_team_id: &TeamKey,
+    claimed_pane_id: &PaneId,
+    incident: &RecoveryIncident,
+) -> Result<Vec<WatcherNotice>, MessagingError> {
+    requeue_after_claim_leader(
+        workspace,
+        store,
+        event_log,
+        owner_team_id,
+        claimed_pane_id,
+        Some(&incident.occurred_at),
+    )
 }
 
 /// 0.5.5 gate054 round-2: attach-leader (and claim-leader) requeue for leader messages
