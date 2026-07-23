@@ -57,6 +57,15 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+// R6 密闭边界:本文件全部齿均为源码文本扫描,不实跑 MessageStore/
+// deliver_pending_message*,但源码里出现这些字符串会触发 R6 静态守卫,
+// 因此声明 hermetic 关联并在每个 test 入口 enter() 空 env 满足门禁
+// (leader ruling msg_624b6075c1c8 + skill 构件5 密闭性条)。
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

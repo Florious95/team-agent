@@ -63,6 +63,11 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,6 +138,7 @@ fn bound_state() -> serde_json::Value {
 }
 
 struct InventoryCase {
+    _env: hermetic_guard::HermeticTestEnv,
     workspace: PathBuf,
     store: MessageStore,
     event_log: EventLog,
@@ -141,15 +147,15 @@ struct InventoryCase {
 impl InventoryCase {
     fn new(tag: &str) -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        let workspace = std::env::temp_dir().join(format!(
-            "ta-057c-inv-{tag}-{}-{}",
-            std::process::id(),
+        let env = hermetic_guard::HermeticTestEnv::enter(tag);
+        let workspace = env.workspace(&format!(
+            "057c-inv-{tag}-{}",
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&workspace).unwrap();
         let store = MessageStore::open(&workspace).unwrap();
         let event_log = EventLog::new(&workspace);
         Self {
+            _env: env,
             workspace,
             store,
             event_log,
