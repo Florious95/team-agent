@@ -3249,16 +3249,29 @@ fn claim_requeues_pending_acceptance_for_leader_only() {
     let pane = PaneId::new("%leader");
     requeue_after_claim_leader(&ws, &store, &log, &team, &pane, None).unwrap();
 
-    let status = |message_id: &str| {
+    let row = |message_id: &str| {
         conn.query_row(
-            "select status from messages where message_id = ?1",
+            "select status, delivered_at, error from messages where message_id = ?1",
             [message_id],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .unwrap()
     };
-    assert_eq!(status(&leader_message), "accepted");
-    assert_eq!(status(&worker_message), "submitted_pending_acceptance");
+    assert_eq!(row(&leader_message), ("accepted".to_string(), None, None));
+    assert_eq!(
+        row(&worker_message),
+        (
+            "submitted_pending_acceptance".to_string(),
+            None,
+            None
+        )
+    );
 }
 
 #[test]

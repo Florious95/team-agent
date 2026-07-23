@@ -470,12 +470,13 @@ pub fn requeue_after_claim_leader(
 /// 0.5.5 gate054 round-2: attach-leader (and claim-leader) requeue for leader messages
 /// that were refused with `rebind_required` while no leader pane was attached.
 ///
-/// #231 C-5 semantics: same row, same message_id — flip `status` back from
-/// `failed`/`leader_not_attached` to `accepted` so `deliver_pending_messages`
-/// replays it through the SAME pipeline. The `leader_notification_log` PK is
-/// already there (primitive wrote it before the unbound check), so this replay
-/// cannot create a duplicate notification — exactly-once across rebind, no new
-/// send/notify rows and no second replay mechanism.
+/// #231 C-5 semantics: same row, same message_id — flip an eligible status back
+/// to `accepted` so `deliver_pending_messages` replays it through the SAME
+/// pipeline. The `leader_notification_log` PK prevents a second notification
+/// row for watcher-backed messages. A `submitted_pending_acceptance` row has
+/// already crossed the transport boundary, so its recovery is intentionally
+/// at-least-once: the stable message id/receipt token is preserved, but a replay
+/// can repeat the physical submit if a same-pane claim races the receipt window.
 pub(crate) fn requeue_blocked_leader_messages(
     conn: &rusqlite::Connection,
     event_log: &EventLog,
@@ -489,7 +490,10 @@ pub(crate) fn requeue_blocked_leader_messages(
     // `deliver_pending_messages` picks them up as `accepted` and injects
     // exactly once. status `queued_until_leader_attach` is deliberately NOT
     // in the `claim_for_delivery` eligible set (see message_store.rs) so it
-    // could not have churned while the leader was unattached.
+    // could not have churned while the leader was unattached. In contrast,
+    // `submitted_pending_acceptance` is an explicit at-least-once recovery arm:
+    // claim convergence favors an eventual receipt over preserving an
+    // unobservable in-flight submit.
     let requeued = conn.execute(
         "update messages
          set status = 'accepted',
