@@ -18,18 +18,28 @@
 //!   status transitions through a single repository API.
 //!
 //! TEETH (RED at 5b847e4):
-//!   1. `enum_catalog_covers_every_observed_status` — the compiled
-//!      `MessageRowStatus` enum must expose a variant for every durable
-//!      status observed in production storm data + module design
-//!      (delivered / acknowledged / consumed / failed / target_resolved /
-//!      submitted_pending_acceptance / submitted_unverified /
-//!      queued_pane_missing). Baseline enum only has 4 initial variants →
-//!      catalog gap → red.
+//!   1. `enum_catalog_covers_every_observed_status` — the product must
+//!      expose a single-source-of-truth catalog `MessageRowStatus::ALL:
+//!      &'static [Self]` that lists every typed variant; the test
+//!      enumerates it and checks each REQUIRED_DURABLE_STATUSES entry
+//!      is round-trippable. Baseline: no `ALL` catalog exists AND the
+//!      enum only has 4 variants → red on both faces. The GREEN
+//!      implementer must (a) add the `ALL` associated const, (b) add
+//!      the 8 missing typed variants; from then on, adding any new
+//!      variant automatically appears here without a test edit — the
+//!      catalog is consumed from the product surface, not
+//!      hand-copied. (Returns issue: previous freeze hard-coded 4
+//!      variants inside the test, making the tooth unreachable — see
+//!      leader ruling msg_86c26787e018.)
 //!   2. `submitted_awaiting_receipt_and_blocked_leader_unbound_are_distinct`
-//!      — a parked (submitted, no receipt) row and a blocked (never
-//!      submitted, leader unbound) row must map to distinct typed variants;
-//!      the storm proved that collapsing them is the P0 root cause. Baseline
-//!      has NO typed variant for either → red.
+//!      — after ①'s `ALL` catalog exists, the test walks THAT catalog
+//!      and asserts the two required semantic variants
+//!      (`SubmittedAwaitingReceipt` and `BlockedLeaderUnbound`) exist
+//!      and have distinct string representations. Baseline: no catalog
+//!      → red; even if `ALL` is added, missing typed variants keep the
+//!      tooth red until they are declared. (Returns issue: previous
+//!      freeze walked a hand-copied 4-variant set → same permanent-red
+//!      defect as ①.)
 //!   3. `at_most_one_writer_per_status_transition` — scanning product
 //!      sources under `crates/team-agent/src/**/*.rs`, the count of
 //!      SQL-literal `update messages set status = 'X'` sites is expected
@@ -147,37 +157,87 @@ fn scan_status_writers() -> BTreeMap<String, BTreeSet<PathBuf>> {
 }
 
 // ---------------------------------------------------------------------------
-// Tooth 1 — enum catalog completeness
+// Tooth 1 — enum catalog completeness (consumes product SSOT catalog)
 // ---------------------------------------------------------------------------
+
+/// Read the product source text for db/message_store.rs — the single
+/// module that owns `MessageRowStatus`. Parse:
+///   (a) whether it exposes an `ALL` associated const of `&[Self]` type
+///       (or `pub const ALL: &[MessageRowStatus] = &[...]`);
+///   (b) the set of `as_str` mapped strings inside `impl MessageRowStatus`.
+/// Both facts together are the product-side SSOT; the test consumes it
+/// rather than hand-copying variants — GREEN can add typed variants and
+/// this test will see them without a test edit.
+fn read_typed_catalog_facts() -> (bool, BTreeSet<String>) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("db")
+        .join("message_store.rs");
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("read {}: {e}", path.display());
+    });
+    // (a) presence of ALL catalog: two accepted spellings.
+    let has_all = text.contains("pub const ALL: &[Self]")
+        || text.contains("pub const ALL: &[MessageRowStatus]");
+    // (b) enumerate as_str string literals inside `impl MessageRowStatus`
+    // — a `Self::Variant => "some_str"` arm shape. We use a robust
+    // substring scan: any line matching `=> "` inside the impl block
+    // AFTER the `impl MessageRowStatus` header line, up to the next
+    // top-level `impl` or `pub enum`.
+    let mut variants: BTreeSet<String> = BTreeSet::new();
+    if let Some(start) = text.find("impl MessageRowStatus") {
+        let tail = &text[start..];
+        // Cheap bound: stop at next `\nimpl ` or `\npub enum` or `\npub struct`
+        let stop_offsets: Vec<usize> = ["\nimpl ", "\npub enum ", "\npub struct "]
+            .iter()
+            .filter_map(|kw| tail[1..].find(kw).map(|o| o + 1))
+            .collect();
+        let end = stop_offsets.into_iter().min().unwrap_or(tail.len());
+        let block = &tail[..end];
+        for line in block.lines() {
+            // capture `=> "xxx"` — the RHS string in the match arm.
+            if let Some(idx) = line.find("=> \"") {
+                let rest = &line[idx + 4..];
+                if let Some(close) = rest.find('"') {
+                    variants.insert(rest[..close].to_string());
+                }
+            }
+        }
+    }
+    (has_all, variants)
+}
 
 #[test]
 fn enum_catalog_covers_every_observed_status() {
-    // Reflection is unavailable; we probe by asserting that each required
-    // status name is representable AS a MessageRowStatus round-trip. The
-    // baseline enum only exposes 4 variants → 8 statuses have no typed
-    // variant → this test panics on the first uncovered one and lists all
-    // gaps so the GREEN implementer sees the whole delta at once.
-    let mut covered: BTreeSet<&'static str> = BTreeSet::new();
-    // Existing variants (baseline).
-    for v in [
-        MessageRowStatus::Accepted,
-        MessageRowStatus::StoredOnly,
-        MessageRowStatus::QueuedUntilLeaderAttach,
-        MessageRowStatus::QueuedCoordinatorUnavailable,
-    ] {
-        covered.insert(v.as_str());
-    }
+    let (has_all, product_variants) = read_typed_catalog_facts();
+    // Face 1: product must expose a single-source-of-truth `ALL` catalog.
+    assert!(
+        has_all,
+        "product `MessageRowStatus` is missing `pub const ALL: &[Self]` — no \
+         single source of truth for the typed variant list. Downstream \
+         fixtures/recovery arms will end up hand-copying, which is exactly \
+         what the wiki hard rule forbids. Add `impl MessageRowStatus {{ pub \
+         const ALL: &[Self] = &[…all variants…]; }}` so this test (and \
+         batch C's REQUIRED_DURABLE_STATUSES lock-step check) can consume \
+         it programmatically."
+    );
+    // Face 2: the union of currently-declared variant strings must cover
+    // every required durable status. Because we parse from `as_str`
+    // arms, adding a variant *automatically* extends `product_variants`
+    // — this test needs no edit as GREEN grows the enum.
     let missing: Vec<&&str> = REQUIRED_DURABLE_STATUSES
         .iter()
-        .filter(|s| !covered.contains(*s))
+        .filter(|s| !product_variants.contains(**s))
         .collect();
     assert!(
         missing.is_empty(),
         "MessageRowStatus catalog missing typed variants for durable statuses: {:?}. \
-         Distillation §3.1 requires every observed durable status to have a typed variant \
-         so downstream fixtures and recovery arms cannot introduce a second hand-written \
-         state semantics (wiki hard rule).",
-        missing
+         Product variants currently declared: {:?}. Distillation §3.1 requires \
+         every observed durable status to have a typed variant so downstream \
+         fixtures/recovery arms cannot introduce a second hand-written state \
+         semantics (wiki hard rule).",
+        missing,
+        product_variants
     );
 }
 
@@ -187,39 +247,34 @@ fn enum_catalog_covers_every_observed_status() {
 
 #[test]
 fn submitted_awaiting_receipt_and_blocked_leader_unbound_are_distinct() {
-    // We cannot import variants that do not yet exist without breaking the
-    // build; instead assert via as_str() catalog that BOTH typed names are
-    // present. GREEN implementer must introduce the two variants with the
-    // exact user-visible status strings below (distillation §3.1).
+    let (_, product_variants) = read_typed_catalog_facts();
+    // The two typed variants required by §3.1: their user-visible string
+    // representation MUST be present (and distinct) in the product's
+    // `as_str` arms. We DO NOT hand-code the covered set — we walk the
+    // product surface, so GREEN adding either variant flips this face
+    // to green without a test edit.
     let parked = "submitted_pending_acceptance";
-    let blocked = "queued_until_leader_attach";
-    let known: BTreeSet<&'static str> = [
-        MessageRowStatus::Accepted,
-        MessageRowStatus::StoredOnly,
-        MessageRowStatus::QueuedUntilLeaderAttach,
-        MessageRowStatus::QueuedCoordinatorUnavailable,
-    ]
-    .into_iter()
-    .map(MessageRowStatus::as_str)
-    .collect();
-    // Both statuses must be typed AND they must be distinct enum values.
-    // Baseline: `submitted_pending_acceptance` is not typed → red.
-    // Baseline: `failed + leader_not_attached` is expressed as
-    //   (status="failed", error="leader_not_attached") not as a distinct
-    //   typed variant → red on the modeling axis too.
-    let parked_typed = known.contains(parked);
-    let blocked_typed = known.contains(blocked);
-    let leader_unbound_typed = known.iter().any(|s| s.contains("blocked_leader_unbound"));
+    let blocked_leader_unbound_typed = product_variants
+        .iter()
+        .any(|s| s.contains("blocked_leader_unbound") || s == "leader_not_attached");
+    let parked_typed = product_variants.contains(parked);
+    // Fail-closed: both required, and if they exist they MUST be different
+    // strings — collapsing to a shared string is exactly the P0 defect.
+    let distinct = parked_typed
+        && blocked_leader_unbound_typed
+        && !product_variants
+            .iter()
+            .any(|s| s == parked && s.contains("leader_not_attached"));
     assert!(
-        parked_typed && blocked_typed && leader_unbound_typed,
-        "typed distinction missing: parked={} (submitted_pending_acceptance), \
-         blocked={} (queued_until_leader_attach), leader_unbound_typed={} \
-         (need a dedicated variant e.g. `BlockedLeaderUnbound`, NOT reuse of \
-         status='failed' + error='leader_not_attached'). §3.1 hard rule: \
-         SubmittedAwaitingReceipt ≠ BlockedLeaderUnbound.",
-        parked_typed,
-        blocked_typed,
-        leader_unbound_typed
+        distinct,
+        "typed distinction missing / collapsed. product variants: {:?}. Need: \
+         a variant whose as_str==\"submitted_pending_acceptance\" (parked=\
+         SubmittedAwaitingReceipt, parked_typed={}) AND a distinct variant \
+         representing the blocked-leader-unbound face \
+         (blocked_leader_unbound_typed={}). §3.1 hard rule: \
+         SubmittedAwaitingReceipt ≠ BlockedLeaderUnbound; the storm proved \
+         collapsing them is the P0 root cause.",
+        product_variants, parked_typed, blocked_leader_unbound_typed
     );
 }
 

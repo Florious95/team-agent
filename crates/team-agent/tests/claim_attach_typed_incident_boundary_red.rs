@@ -50,7 +50,12 @@
 //!   5. `unrelated_functions_are_not_matched_by_the_scanner` — the SQL
 //!      scanner does not match arbitrary code that merely mentions
 //!      "messages" (e.g. log strings, comments); it only counts actual
-//!      SQL literal writes.
+//!      SQL literal writes. Uses INDEPENDENT synthesized canaries
+//!      (positive + negative) so the sanity check stays valid AFTER
+//!      the typed refactor removes the real SQL from
+//!      watchers.rs / delivery.rs (leader ruling msg_86c26787e018 —
+//!      previous version was product-state-locked and would go red
+//!      once tooth 1's target was reached).
 //!
 //! FROZEN by verifier — do NOT modify without a new SHA256 signature.
 
@@ -80,10 +85,15 @@ fn read_src(rel: &str) -> String {
 /// modules, so any occurrence is a red).
 fn contains_status_write_sql(rel: &str) -> bool {
     let text = read_src(rel);
-    // Look for the exact multi-line pattern used by rusqlite `execute` calls,
-    // which always has `update messages` and `set status = '<literal>'`
-    // within a few lines of each other. A simple substring check is enough
-    // because production code uses this exact phrasing.
+    scanner_matches_text(&text)
+}
+
+/// Pure-text scanner — same detection logic as `contains_status_write_sql`
+/// but taking arbitrary text so tooth 5 can feed it a synthetic canary
+/// independent of any product source path. If the scanner logic changes
+/// here, both helpers change together and the sanity-canary keeps
+/// working regardless of what the product currently does.
+fn scanner_matches_text(text: &str) -> bool {
     text.contains("update messages")
         && text
             .lines()
@@ -266,11 +276,25 @@ fn unrelated_functions_are_not_matched_by_the_scanner() {
         "scanner root drift: expected .../src, got {}",
         src_root.display()
     );
-    // Confirm the scanner would still flag delivery.rs' known SQL — if
-    // this baseline check fails, tooth 1's failure would be vacuous.
+    // Independent canary: feed the scanner a synthesized SQL block that
+    // matches the target pattern, plus one that shouldn't. Anchoring on
+    // an independent artifact (not the product's current SQL) means the
+    // sanity check stays valid AFTER the typed refactor removes the
+    // real SQL from watchers.rs / delivery.rs — the previous version
+    // was locked to product state and would go red once tooth 1's
+    // target was reached (leader ruling msg_86c26787e018).
+    let positive_canary = "update messages\n    set status = 'accepted',\n    error = null";
+    let negative_canary =
+        "-- update messages set delivered_at = null (comment, not a status write)";
     assert!(
-        contains_status_write_sql("messaging/delivery.rs"),
-        "scanner failed to detect known baseline SQL in messaging/delivery.rs; \
-         tooth 1 would be vacuously green — scanner is broken."
+        scanner_matches_text(positive_canary),
+        "sanity canary failed: scanner did not detect a synthesized \
+         `update messages … set status = 'X'` block; tooth 1 would be \
+         vacuously green — scanner logic broke."
+    );
+    assert!(
+        !scanner_matches_text(negative_canary),
+        "sanity canary failed: scanner falsely matched a benign string; \
+         its heuristic is too loose."
     );
 }
