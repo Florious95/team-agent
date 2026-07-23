@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.54
+
+- **Feature: sink-aware customized message transport.** `send` and `report_result` now route presentation by destination sink instead of flattening every delivery through one generic rendering path. The C6 source-aware contract preserves the frozen MUST-8 amendment semantics, keeps physical delivery separate from presentation, and carries `case_id` fail-closed so missing or mismatched evidence cannot be credited to another delivery case.
+
+- **Fix: Codex weak-window session attribution across allocator and scanner layers.** When multiple same-team workers can see the same weak candidate, the allocator defers weak binding rather than letting an earlier parent consume a worker rollout, while embedded identity remains the preferred positive signal. The scanner now inspects identity in a bounded raw prefix even when a long JSONL record crosses the complete-line cap, allowing the intended worker to capture and preserve its exact session without weakening collision or foreign-session guards.
+
 ## 0.5.53
 
 - **Feature: verified agent clone/fork lifecycle.** `clone-agent` copies the latest role into a fresh session, while `fork-agent` preserves verified provider context for Codex, Claude, and Copilot. Per-agent spawn boundaries are captured before transport spawn, backing attribution is provider-scoped and convergence-bounded, concurrent forks require unique backing, and failed operations roll back their own panes, state, and generated artifacts.
