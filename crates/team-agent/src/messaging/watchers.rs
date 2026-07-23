@@ -500,6 +500,7 @@ pub(crate) fn requeue_blocked_leader_messages(
            and (
              (status = 'failed' and error = 'leader_not_attached')
              or status = 'queued_until_leader_attach'
+             or status = 'submitted_pending_acceptance'
            )",
         params![owner_team_id.as_str(), chrono::Utc::now().to_rfc3339()],
     )?;
