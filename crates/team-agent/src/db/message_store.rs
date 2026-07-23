@@ -1114,6 +1114,7 @@ mod tests {
         let mid = s
             .create_message(Some("t"), "s", "r", "c", None, true, None)
             .unwrap();
+        s.mark(&mid, "delivered", None).unwrap();
         s.mark(&mid, "acknowledged", None).unwrap();
         assert_eq!(status_of(&read(&s), &mid), "acknowledged");
         assert!(col_str(&read(&s), &mid, "acknowledged_at").is_some());
@@ -1133,15 +1134,15 @@ mod tests {
     }
 
     #[test]
-    fn mark_acknowledged_then_failed_overwrites() {
-        // 'failed' is NOT in the guarded delivery set → it overwrites acknowledged.
+    fn mark_acknowledged_then_failed_stays_terminal() {
         let s = store();
         let mid = s
             .create_message(Some("t"), "s", "r", "c", None, true, None)
             .unwrap();
+        s.mark(&mid, "delivered", None).unwrap();
         s.mark(&mid, "acknowledged", None).unwrap();
         s.mark(&mid, "failed", Some("x")).unwrap();
-        assert_eq!(status_of(&read(&s), &mid), "failed");
+        assert_eq!(status_of(&read(&s), &mid), "acknowledged");
     }
 
     #[test]

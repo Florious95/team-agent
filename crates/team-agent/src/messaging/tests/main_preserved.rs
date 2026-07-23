@@ -23,6 +23,7 @@ fn stuck_cancel_snapshot_delivered_message_ids_uses_golden_status_set() {
     let m_ack = store
         .create_message(None, "leader", "w1", "ack-me", None, true, Some("teamX"))
         .unwrap();
+    store.mark(&m_ack, "delivered", None).unwrap();
     store.mark(&m_ack, "acknowledged", None).unwrap();
     let m_vis = store
         .create_message(None, "leader", "w1", "vis", None, true, Some("teamX"))
