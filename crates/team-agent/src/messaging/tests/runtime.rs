@@ -771,7 +771,7 @@ fn requeue_after_claim_leader_skips_already_notified() {
     // watchers, one already notified (notified_message_id set), one un-notified.
     // requeue must return ONLY the un-notified watcher; the notified one is NOT
     // requeued and its notified_message_id SURVIVES (clearing it would cause a
-    // second injection). Probed golden: requeued == [w_un] (result_id null,
+    // second injection). Probed golden: requeued == [w_un] (result_id present,
     // prior_state "pending"); notified watcher keeps notified_message_id.
     let ws = tmp_ws("requeue");
     let store = store_for(&ws);
@@ -786,7 +786,7 @@ fn requeue_after_claim_leader_skips_already_notified() {
         "t1",
         "alice",
         "pending",
-        None,
+        Some("res_retryable"),
         None,
     );
     let w_notified = seed_watcher(
@@ -3209,7 +3209,7 @@ fn gate054_rebind_replay_requeues_failed_leader_message_on_attach() {
 }
 
 #[test]
-fn claim_requeues_pending_acceptance_for_leader_only() {
+fn claim_preserves_pending_acceptance_for_all_recipients() {
     let ws = tmp_ws("claim-pending-acceptance");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
@@ -3263,7 +3263,14 @@ fn claim_requeues_pending_acceptance_for_leader_only() {
         )
         .unwrap()
     };
-    assert_eq!(row(&leader_message), ("accepted".to_string(), None, None));
+    assert_eq!(
+        row(&leader_message),
+        (
+            "submitted_pending_acceptance".to_string(),
+            None,
+            None
+        )
+    );
     assert_eq!(
         row(&worker_message),
         (
