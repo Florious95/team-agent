@@ -21,7 +21,7 @@ pub(crate) enum ContextForkTermination {
 mod claude;
 mod codex;
 mod outcome;
-pub(crate) use codex::{materialize_codex_fork, CodexForkMaterialization};
+pub(crate) use codex::materialize_codex_fork;
 pub(crate) use outcome::{
     observe_context_fork, transition_pending_context_fork, ContextForkOutcome, PendingContextFork,
 };
