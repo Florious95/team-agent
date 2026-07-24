@@ -357,6 +357,7 @@ pub(crate) fn normalize_tests(value: Option<&Value>) -> Vec<NormalizedTest> {
                         .or_else(|| obj.get("stderr"))
                         .or_else(|| obj.get("summary"))
                         .or_else(|| obj.get("message"))
+                        .or_else(|| obj.get("log_path"))
                         .and_then(text_of_value),
                 })
             }
