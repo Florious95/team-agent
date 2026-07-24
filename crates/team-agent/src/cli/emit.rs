@@ -3,7 +3,7 @@
 
 use super::spec::{command_spec, CommandKind, CommandTier, ALL_DISPATCH_KINDS, COMMAND_SPECS};
 use super::*;
-use std::io::Write as _;
+use std::io::{ErrorKind, Write as _};
 
 /// `emit`(`helpers.py:12-23`):`--json`→`json.dumps(indent=2, ensure_ascii=False, sort_keys=True)`;
 /// 否则 dict 逐键 `key: value`(嵌套 dict/list 内联 compact json,`ensure_ascii=False`)、非 dict 直接 print。
@@ -45,11 +45,11 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         };
     }
     if matches!(command, "-h" | "--help" | "help") {
-        println!("{}", command_help(None));
+        let _ = write_stdout_line(&command_help(None));
         return ExitCode::Ok;
     }
     if matches!(command, "-V" | "--version") {
-        println!("team-agent {}", env!("CARGO_PKG_VERSION"));
+        let _ = write_stdout_line(&format!("team-agent {}", env!("CARGO_PKG_VERSION")));
         return ExitCode::Ok;
     }
     // CR-063/G4: every registered subcommand's `--help` must short-circuit before dispatch,
@@ -65,7 +65,7 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
             .skip(1)
             .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
     {
-        println!("{}", command_help(Some(command)));
+        let _ = write_stdout_line(&command_help(Some(command)));
         return ExitCode::Ok;
     }
     match dispatch(command, &argv[1..], cwd) {
@@ -77,10 +77,38 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
 /// Print a handler's CmdResult to stdout (emit formats json/human), then surface its exit code.
 /// (parser.py: `print(emit(result, as_json))` then the ok→exit mapping.)
 fn emit_result(r: CmdResult) -> ExitCode {
+    let persisted_message_id = match &r.output {
+        CmdOutput::Json(value) => value
+            .get("message_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        _ => None,
+    };
     if let Some(text) = emit(&r.output, r.as_json) {
-        println!("{text}");
+        if let Err(error) = write_stdout_line(&text) {
+            if let Some(message_id) = persisted_message_id {
+                let stderr = std::io::stderr();
+                let mut stderr = stderr.lock();
+                let _ = writeln!(
+                    stderr,
+                    "stdout unavailable after durable send; persisted_message_id={message_id}"
+                );
+            }
+            return if error.kind() == ErrorKind::BrokenPipe {
+                r.exit
+            } else {
+                ExitCode::Error
+            };
+        }
     }
     r.exit
+}
+
+fn write_stdout_line(text: &str) -> std::io::Result<()> {
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.write_all(b"\n")
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
