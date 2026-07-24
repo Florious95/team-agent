@@ -239,6 +239,30 @@ pub fn fork_agent_with_transport(
         as_agent_id.as_str(),
         Some(&fork_team),
     );
+    let spawned_at = spawn_timestamp_for_agent(1);
+    let mut codex_fork = if provider == Provider::Codex {
+        Some(
+            crate::provider::session::materialize_codex_fork(
+                &source_backing,
+                &session_id,
+                source_agent_id.as_str(),
+                as_agent_id.as_str(),
+                &mut plan,
+            )
+            .map_err(|error| {
+                let _ = std::fs::write(&spec_path, text.as_bytes());
+                cleanup_fork_mcp_artifacts(
+                    &workspace,
+                    as_agent_id,
+                    &mcp_config_path,
+                    &profile_launch,
+                );
+                LifecycleError::Provider(error.to_string())
+            })?,
+        )
+    } else {
+        None
+    };
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         plan.provider_projects_root = source_backing.parent().map(Path::to_path_buf);
     }
@@ -309,7 +333,6 @@ pub fn fork_agent_with_transport(
     // Release the metadata lock before per-seat provider convergence; finalize reacquires it.
     drop(_lock);
     let spawn_epoch = 1_u64;
-    let spawned_at = spawn_timestamp_for_agent(u32::try_from(spawn_epoch).unwrap_or(u32::MAX));
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
             &session_name,
@@ -345,6 +368,9 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
+    if let Some(materialized) = codex_fork.as_mut() {
+        materialized.handoff();
+    }
     ensure_fork_spawn_live(ForkPostSpawnInput {
         workspace: &workspace,
         transport,
@@ -363,7 +389,10 @@ pub fn fork_agent_with_transport(
         &session_id,
         &plan,
         &backing_before,
-        claude_fork.as_ref().map(|materialized| materialized.path()),
+        codex_fork
+            .as_ref()
+            .map(|materialized| materialized.path())
+            .or_else(|| claude_fork.as_ref().map(|materialized| materialized.path())),
         source_agent_id.as_str(),
         as_agent_id.as_str(),
         &workspace,

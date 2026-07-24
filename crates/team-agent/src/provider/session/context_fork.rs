@@ -21,6 +21,7 @@ pub(crate) enum ContextForkTermination {
 mod claude;
 mod codex;
 mod outcome;
+pub(crate) use codex::{materialize_codex_fork, CodexForkMaterialization};
 pub(crate) use outcome::{
     observe_context_fork, transition_pending_context_fork, ContextForkOutcome, PendingContextFork,
 };
@@ -47,7 +48,6 @@ pub struct ContextForkProof {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContextBackingSnapshot {
-    root: PathBuf,
     files: BTreeMap<PathBuf, FileStamp>,
 }
 
@@ -61,7 +61,7 @@ impl ContextBackingSnapshot {
     pub(crate) fn capture(provider: Provider, plan: &CommandPlan) -> Self {
         let root = provider_backing_root(provider, plan);
         let files = jsonl_files(&root);
-        Self { root, files }
+        Self { files }
     }
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn verify_context_fork(
     plan: &CommandPlan,
     before: &ContextBackingSnapshot,
     expected_backing_path: Option<&Path>,
-    source_agent_id: &str,
+    _source_agent_id: &str,
     agent_id: &str,
     spawn_cwd: &Path,
     spawned_at: &str,
@@ -85,7 +85,7 @@ pub(crate) fn verify_context_fork(
             source_session_id,
             plan,
             before,
-            source_agent_id,
+            expected_backing_path,
             agent_id,
             spawn_cwd,
             spawned_at,

@@ -1,18 +1,4 @@
 use super::*;
-use std::collections::BTreeSet;
-
-pub(super) fn source_exclusions(
-    before: &ContextBackingSnapshot,
-    source_session_id: &SessionId,
-) -> BTreeSet<String> {
-    let mut excluded = BTreeSet::from([source_session_id.as_str().to_string()]);
-    for path in before.files.keys() {
-        if session_id_from_jsonl(path).as_deref() == Some(source_session_id.as_str()) {
-            excluded.insert(path.to_string_lossy().to_string());
-        }
-    }
-    excluded
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingContextFork {

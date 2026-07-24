@@ -10,8 +10,9 @@ pub mod resume;
 
 pub use context_fork::ContextForkProof;
 pub(crate) use context_fork::{
-    context_fork_convergence_deadline, observe_context_fork, transition_pending_context_fork,
-    ContextBackingSnapshot, ContextForkOutcome, PendingContextFork,
+    context_fork_convergence_deadline, materialize_codex_fork, observe_context_fork,
+    transition_pending_context_fork, ContextBackingSnapshot, ContextForkOutcome,
+    PendingContextFork,
 };
 
 pub use resume::{
