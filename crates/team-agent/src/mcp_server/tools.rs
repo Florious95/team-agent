@@ -27,7 +27,7 @@ use super::helpers::{
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
-    report_result_integrity_warnings,
+    report_result_integrity_warnings, validate_test_evidence_schema,
 };
 use super::types::{
     Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers,
@@ -521,6 +521,13 @@ impl TeamOrchestratorTools {
             normalize_result_status_observed(base.get("status").and_then(Value::as_str)).1
         {
             self.note_unknown_result_status(&raw);
+        }
+        if let Err(error) = validate_test_evidence_schema(base.get("tests")) {
+            return Err(ToolError::new(
+                ToolErrorReason::InvalidToolArguments,
+                error,
+                "UnsupportedTestEvidenceSchema",
+            ));
         }
         let normalized = normalize_report_envelope(&base);
         if let Some(error) = normalized.presentation_error.as_deref() {

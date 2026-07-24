@@ -336,9 +336,20 @@ pub(crate) fn normalize_tests(value: Option<&Value>) -> Vec<NormalizedTest> {
                     .or_else(|| obj.get("name"))
                     .or_else(|| obj.get("test"))
                     .and_then(text_of_value)?;
+                let status =
+                    match normalize_token(obj.get("status").and_then(Value::as_str)).as_str() {
+                        "executed" => {
+                            if obj.get("exit_code").and_then(Value::as_i64) == Some(0) {
+                                TestStatus::Passed
+                            } else {
+                                TestStatus::Failed
+                            }
+                        }
+                        _ => normalize_test_status(obj.get("status").and_then(Value::as_str)),
+                    };
                 Some(NormalizedTest {
                     command,
-                    status: normalize_test_status(obj.get("status").and_then(Value::as_str)),
+                    status,
                     detail: obj
                         .get("detail")
                         .or_else(|| obj.get("output"))
@@ -356,6 +367,46 @@ pub(crate) fn normalize_tests(value: Option<&Value>) -> Vec<NormalizedTest> {
             }),
         })
         .collect()
+}
+
+pub(crate) fn validate_test_evidence_schema(value: Option<&Value>) -> Result<(), String> {
+    const ALLOWED: &str = r#"allowed schema: {"status":"executed","command":string,"exit_code":integer,"log_path":string}"#;
+    for (index, item) in items_from_value(value).iter().enumerate() {
+        let Value::Object(obj) = item else {
+            continue;
+        };
+        let status = normalize_token(obj.get("status").and_then(Value::as_str));
+        if status == "executed" {
+            let valid = obj.get("command").and_then(Value::as_str).is_some()
+                && obj.get("exit_code").and_then(Value::as_i64).is_some()
+                && obj.get("log_path").and_then(Value::as_str).is_some();
+            if !valid {
+                return Err(format!(
+                    "unsupported_test_evidence_schema at tests[{index}]; {ALLOWED}"
+                ));
+            }
+        } else if !status.is_empty()
+            && !matches!(
+                status.as_str(),
+                "passed"
+                    | "pass"
+                    | "ok"
+                    | "success"
+                    | "failed"
+                    | "fail"
+                    | "error"
+                    | "skipped"
+                    | "skip"
+                    | "not_run"
+                    | "notrun"
+            )
+        {
+            return Err(format!(
+                "unsupported_test_evidence_schema at tests[{index}]; {ALLOWED}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn normalize_risks(value: Option<&Value>) -> Vec<NormalizedRisk> {
