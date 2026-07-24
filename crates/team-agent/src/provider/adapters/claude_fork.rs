@@ -30,6 +30,8 @@ pub(crate) fn materialize_claude_fork(
     source_path: &Path,
     source_session_id: &SessionId,
     target_session_id: &SessionId,
+    source_agent_id: &str,
+    target_agent_id: &str,
 ) -> Result<ClaudeForkMaterialization, ProviderError> {
     let parent = source_path.parent().ok_or_else(|| {
         ProviderError::Io(format!(
@@ -46,7 +48,12 @@ pub(crate) fn materialize_claude_fork(
     }
     let source = std::fs::read_to_string(source_path)
         .map_err(|error| ProviderError::Io(error.to_string()))?;
-    let rewritten = source.replace(source_session_id.as_str(), target_session_id.as_str());
+    let rewritten = source
+        .replace(source_session_id.as_str(), target_session_id.as_str())
+        .replace(
+            &format!("You are Team Agent worker `{source_agent_id}`"),
+            &format!("You are Team Agent worker `{target_agent_id}`"),
+        );
     validate_jsonl(&rewritten)?;
     let temp = parent.join(format!(
         ".{}.tmp-{}",
@@ -108,7 +115,8 @@ mod tests {
         std::fs::write(&source_path, &source).unwrap();
 
         let mut materialized =
-            materialize_claude_fork(&source_path, &source_id, &target_id).unwrap();
+            materialize_claude_fork(&source_path, &source_id, &target_id, "source", "target")
+                .unwrap();
         let target_path = dir.join(format!("{}.jsonl", target_id.as_str()));
         let target = std::fs::read_to_string(&target_path).unwrap();
         assert!(!target.contains(source_id.as_str()));

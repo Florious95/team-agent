@@ -248,6 +248,8 @@ pub fn fork_agent_with_transport(
         &plan,
         &source_backing,
         &session_id,
+        source_agent_id,
+        as_agent_id,
     )
     .map_err(|error| {
         let _ = std::fs::write(&spec_path, text.as_bytes());
@@ -362,6 +364,7 @@ pub fn fork_agent_with_transport(
         &plan,
         &backing_before,
         claude_fork.as_ref().map(|materialized| materialized.path()),
+        source_agent_id.as_str(),
         as_agent_id.as_str(),
         &workspace,
         &spawned_at,

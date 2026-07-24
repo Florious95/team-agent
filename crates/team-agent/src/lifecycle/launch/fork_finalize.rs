@@ -44,6 +44,8 @@ pub(super) fn prepare_claude_fork_backing(
     plan: &crate::provider::CommandPlan,
     source_backing: &Path,
     source_session_id: &crate::provider::SessionId,
+    source_agent_id: &AgentId,
+    target_agent_id: &AgentId,
 ) -> Result<Option<crate::provider::adapters::claude_fork::ClaudeForkMaterialization>, LifecycleError>
 {
     if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
@@ -56,6 +58,8 @@ pub(super) fn prepare_claude_fork_backing(
         source_backing,
         source_session_id,
         target_session_id,
+        source_agent_id.as_str(),
+        target_agent_id.as_str(),
     )
     .map(Some)
     .map_err(|error| {
