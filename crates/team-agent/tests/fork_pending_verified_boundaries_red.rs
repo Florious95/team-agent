@@ -12,7 +12,9 @@
 //!         shim 未写字节即返 Verified。红齿探源码:context_fork.rs 分支 2
 //!         若持有 "readable && id_match && id_ne_source" 三条件放行 且无
 //!         baseline/changed/mutation 判据 → 红。GREEN 必须让分支 2 也复用
-//!         baseline mutation 守卫或等价判据。
+//!         baseline mutation 守卫或等价判据。预生成且只读交接的 backing
+//!         若同时锁定 exact path、expected session id 与 agent identity，
+//!         亦是合法的等价判据。
 //!   齿2 (C1 error 字符串嗅探) — outcome.rs 用
 //!         `error.to_string().contains("produced no readable NEW session backing")`
 //!         区分 Pending vs Rejected(stringly typed)。verify_* 必须返回
@@ -23,8 +25,9 @@
 //!         PendingContextFork state seed 一个 `fork_source_session_id=SRC`
 //!         的 agent row,调 `finalize_pending_fork_capture` 传入
 //!         `captured.session_id == SRC`,必须**拒 finalize**(return false 或
-//!         typed error);且合法 captured(id != SRC)finalize 后清三 pending
-//!         字段 `fork_source_session_id` / `pending_target_agent` / `pending_grace_secs`。
+//!         typed error);且合法 captured(id != SRC)finalize 后保留血源字段
+//!         `fork_source_session_id`，只清运行态 pending 字段
+//!         `pending_target_agent` / `pending_grace_secs`。
 //!         正控:合法 captured 正常 finalize + capture_state=captured。
 //!
 //! LINEAGE:
@@ -139,7 +142,9 @@ fn synthetic_branch_without_guard() -> &'static str {
 /// and within a 30-line pre-window check whether it is guarded by one
 /// of the accepted baseline judgments (`baseline`, `changed`,
 /// `mutation`, `pre_snapshot`, `snapshot_changed`,
-/// `differs_from_baseline`). Returns (n_verified_sites, n_unguarded).
+/// `differs_from_baseline`), or proves a pre-spawn materialized backing by
+/// exact path + expected session id + agent identity. Returns
+/// (n_verified_sites, n_unguarded).
 fn scan_verified_sites_and_guards(text: &str) -> (usize, usize) {
     let lines: Vec<&str> = text.lines().collect();
     let mut n_sites = 0usize;
@@ -183,17 +188,28 @@ fn scan_verified_sites_and_guards(text: &str) -> (usize, usize) {
         // 含 emit 行:分派器面 `Ok(proof) => ContextForkOutcome::Verified(proof)`
         // 豁免关键字与 emit 同行,需含入 window.
         let window: String = lines[start..=i].join("\n");
-        // 合法 baseline/changed 守卫关键字;也豁免明标 "synchronous
+        // 合法 baseline/changed 守卫关键字;pre-spawn materialized backing
+        // 仅在 exact path + expected session id + agent identity 四项同时
+        // 存在时放行，其他 fail-closed 判据不放宽。也豁免明标 "synchronous
         // proof" 语义分支(Copilot DB row 存在即 fork proof,不需要
         // pre-spawn snapshot mutation);以及分派器面
         // (outcome.rs 的 Ok(proof) => Verified(proof) 分发,proof 由
         // 上游 verify_* 已带 guard 保证).
+        let exact_materialized_handoff = window.contains("expected_backing_path")
+            && window.contains("path.as_path() != expected_path")
+            && window.contains("&new_session_id != expected")
+            && window.contains("positive_agent_id_match")
+            && window.contains("embedded_agent_id");
+        let direct_baseline_comparison =
+            window.contains("before.files.get") && window.contains("Some(stamp)");
         let has_guard = window.contains("baseline")
             || window.contains("changed")
             || window.contains("mutation")
             || window.contains("pre_snapshot")
             || window.contains("snapshot_changed")
             || window.contains("differs_from_baseline")
+            || direct_baseline_comparison
+            || exact_materialized_handoff
             || window.contains("synchronous fork proof")
             || window.contains("Ok(proof) => ContextForkOutcome::Verified");
         if !has_guard {
@@ -239,12 +255,13 @@ fn verified_emit_sites_all_guarded_by_baseline_mutation() {
     assert_eq!(
         n_unguarded, 0,
         "B1: context_fork module tree has {n_unguarded}/{n_sites} Verified \
-         emit sites that lack a baseline/changed/mutation guard in the \
-         30-line pre-window. Real-machine layout (source rollout placed at \
+         emit sites that lack a baseline/changed/mutation guard or an exact \
+         pre-spawn materialized handoff proof. Real-machine layout (source rollout placed at \
          `$HOME/.claude/projects/<encode(cwd)>/<expected>.jsonl` by \
          framework materialization) makes an unguarded branch return \
          Verified for spawn-only providers. Every Verified emit MUST be \
-         guarded by a post-materialization baseline/changed judgment."
+         guarded by a post-materialization baseline/changed judgment, or \
+         lock exact backing path + expected session id + agent identity."
     );
 }
 
@@ -303,8 +320,8 @@ fn outcome_module_forbids_error_string_sniffing() {
 // integration tests without an in-crate helper. We probe SOURCE shape:
 // (a) function body must contain a source-id refusal predicate
 //     comparing captured.session_id to fork_source_session_id;
-// (b) function body must remove three pending scaffold fields
-//     (`fork_source_session_id` / `pending_target_agent` /
+// (b) function body must preserve `fork_source_session_id` as lineage while
+//     removing the runtime pending fields (`pending_target_agent` /
 //     `pending_grace_secs`) via `agent.remove(...)` calls.
 // (c) positive-control source shape: the function still returns `bool`
 //     and writes `session_id`/`rollout_path`/`capture_state` on the
@@ -330,6 +347,7 @@ fn finalize_pending_fork_capture_refuses_source_id_and_clears_pending_fields() {
     let mentions_source_field = body.contains("fork_source_session_id");
     let has_refusal_shape = mentions_source_field
         && (body.contains("return false")
+            || body.contains("return None")
             || body.contains("return Ok(false)")
             || body.contains("return Err")
             || body.contains("MasqueradeRefused"));
@@ -337,17 +355,20 @@ fn finalize_pending_fork_capture_refuses_source_id_and_clears_pending_fields() {
         has_refusal_shape,
         "C4: finalize_pending_fork_capture body has no source-id refusal \
          predicate. Must add `if captured.session_id == agent.fork_source_session_id \
-         {{ return false; }}` (or typed error) BEFORE writing the tuple. \
+         {{ return None; }}` (or false/typed error) BEFORE writing the tuple. \
          mentions_source_field={mentions_source_field}. body head:\n{}",
         body.chars().take(600).collect::<String>()
     );
 
-    // Face (b): three pending scaffold fields removed.
-    for field in [
-        "fork_source_session_id",
-        "pending_target_agent",
-        "pending_grace_secs",
-    ] {
+    // Face (b): lineage remains queryable after capture; only runtime pending
+    // scaffold is removed.
+    assert!(
+        !body.contains("remove(\"fork_source_session_id\")"),
+        "C4: finalize_pending_fork_capture removes `fork_source_session_id`. \
+         Captured rows must preserve this lineage field; its only finalize \
+         use is source-session exclusion, not reopening pending state."
+    );
+    for field in ["pending_target_agent", "pending_grace_secs"] {
         let needle_a = format!("remove(\"{field}\")");
         let needle_b = format!("remove(\"{field}\".");
         assert!(
@@ -360,21 +381,20 @@ fn finalize_pending_fork_capture_refuses_source_id_and_clears_pending_fields() {
     }
 
     // Face (c) positive control: function still marks capture_state as captured
-    // and still returns a `bool` / `Result` (shape unchanged; refusal path is
-    // additive, not destructive).
+    // and still returns an explicit success/failure result.
     assert!(
         body.contains("capture_state")
             && (body.contains("\"captured\"") || body.contains(":captured")),
         "PC: legitimate finalize path must still mark capture_state as \
          `captured`; guard hardening should not delete the happy-path write."
     );
-    // Signature must still return bool (matches baseline shape); if refactor
-    // switched to Result<bool,_> it's still admissible (bool present as the
-    // Ok type).
+    // The audited path returns the finalized lineage fact in `Some` and
+    // refusal as `None`; legacy bool / typed Result shapes remain admissible.
     assert!(
         src[start..(start + 200)].contains("-> bool")
-            || src[start..(start + 300)].contains("Result<bool"),
+            || src[start..(start + 300)].contains("Result<bool")
+            || src[start..(start + 300)].contains("Option<ContextForkFinalized>"),
         "PC: finalize_pending_fork_capture signature drifted; expected \
-         `-> bool` or `-> Result<bool, _>`."
+         `-> Option<ContextForkFinalized>`, `-> bool`, or `-> Result<bool, _>`."
     );
 }
