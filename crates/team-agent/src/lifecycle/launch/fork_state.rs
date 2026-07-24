@@ -355,6 +355,11 @@ pub(super) fn upsert_forked_agent_state(
         serde_json::json!(source_agent_id.as_str()),
     );
     entry.insert(
+        "fork_source_session_id".to_string(),
+        serde_json::json!(context_proof.source_session_id.as_str()),
+    );
+    entry.insert("capture_state".to_string(), serde_json::json!("captured"));
+    entry.insert(
         "dynamic_role_file".to_string(),
         serde_json::json!(dynamic_role_file.to_string_lossy().to_string()),
     );

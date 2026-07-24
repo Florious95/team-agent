@@ -273,7 +273,6 @@ pub(crate) fn finalize_pending_fork_capture(
     );
     agent.remove("_pending_session_id");
     agent.remove("attribution_ambiguous");
-    agent.remove("fork_source_session_id");
     agent.remove("pending_target_agent");
     agent.remove("pending_grace_secs");
     agent.insert("capture_state".to_string(), serde_json::json!("captured"));
