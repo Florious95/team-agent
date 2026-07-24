@@ -126,7 +126,75 @@ pub(super) struct ForkFinalizeInput<'a> {
     pub spawn_epoch: u64,
 }
 
-pub(super) fn finalize_fork_state(input: ForkFinalizeInput<'_>) -> Result<(), LifecycleError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextForkFinalized {
+    source_agent_id: String,
+    agent_id: String,
+    session_id: String,
+    rollout_path: String,
+    captured_via: String,
+    attribution_confidence: String,
+}
+
+impl ContextForkFinalized {
+    fn new(
+        source_agent_id: &str,
+        agent_id: &str,
+        session_id: &str,
+        rollout_path: &Path,
+        captured_via: &str,
+        attribution_confidence: &str,
+    ) -> Self {
+        Self {
+            source_agent_id: source_agent_id.to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            rollout_path: rollout_path.to_string_lossy().to_string(),
+            captured_via: captured_via.to_string(),
+            attribution_confidence: attribution_confidence.to_string(),
+        }
+    }
+
+    fn from_captured(
+        source_agent_id: &str,
+        agent_id: &str,
+        captured: &crate::provider::CapturedSession,
+    ) -> Option<Self> {
+        let captured_via = serde_json::to_value(captured.captured_via).ok()?;
+        let attribution_confidence = serde_json::to_value(captured.attribution_confidence).ok()?;
+        Some(Self::new(
+            source_agent_id,
+            agent_id,
+            captured.session_id.as_ref()?.as_str(),
+            captured.rollout_path.as_ref()?.as_path(),
+            captured_via.as_str()?,
+            attribution_confidence.as_str()?,
+        ))
+    }
+
+    pub(crate) fn write_audit(
+        &self,
+        event_log: &crate::event_log::EventLog,
+    ) -> Result<(), crate::event_log::EventLogError> {
+        event_log
+            .write(
+                crate::lifecycle::types::event_names::CONTEXT_FORK,
+                serde_json::json!({
+                    "source_agent_id": self.source_agent_id,
+                    "agent_id": self.agent_id,
+                    "session_id": self.session_id,
+                    "rollout_path": self.rollout_path,
+                    "captured_via": self.captured_via,
+                    "attribution_confidence": self.attribution_confidence,
+                }),
+            )
+            .map(|_| ())
+    }
+}
+
+pub(super) fn finalize_fork_state(
+    input: ForkFinalizeInput<'_>,
+) -> Result<ContextForkFinalized, LifecycleError> {
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: input.workspace,
         operation: "fork-agent-finalize",
@@ -173,7 +241,15 @@ pub(super) fn finalize_fork_state(input: ForkFinalizeInput<'_>) -> Result<(), Li
             },
             &next_state,
         )
-        .map_err(|error| LifecycleError::StatePersist(error.to_string()))
+        .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    Ok(ContextForkFinalized::new(
+        input.source_agent_id.as_str(),
+        input.agent_id.as_str(),
+        input.context_proof.new_session_id.as_str(),
+        &input.context_proof.backing_path,
+        &input.context_proof.captured_via,
+        &input.context_proof.attribution_confidence,
+    ))
 }
 
 pub(super) struct ForkPendingFinalizeInput<'a> {
@@ -237,20 +313,36 @@ pub(super) fn finalize_pending_fork_state(
 pub(crate) fn finalize_pending_fork_capture(
     agent: &mut serde_json::Map<String, serde_json::Value>,
     captured: &crate::provider::CapturedSession,
-) -> bool {
+) -> Option<ContextForkFinalized> {
     let Some(session_id) = captured.session_id.as_ref() else {
-        return false;
+        return None;
     };
     let Some(rollout_path) = captured.rollout_path.as_ref() else {
-        return false;
+        return None;
     };
     if agent
         .get("fork_source_session_id")
         .and_then(serde_json::Value::as_str)
         == Some(session_id.as_str())
     {
-        return false;
+        return None;
     }
+    let finalized = ContextForkFinalized::from_captured(
+        agent
+            .get("forked_from")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        agent
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                agent
+                    .get("pending_target_agent")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .unwrap_or_default(),
+        captured,
+    )?;
     agent.insert(
         "session_id".to_string(),
         serde_json::json!(session_id.as_str()),
@@ -276,7 +368,52 @@ pub(crate) fn finalize_pending_fork_capture(
     agent.remove("pending_target_agent");
     agent.remove("pending_grace_secs");
     agent.insert("capture_state".to_string(), serde_json::json!("captured"));
-    true
+    Some(finalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_fork_finalized_writes_catalog_event_and_canonical_fields() {
+        let workspace = std::env::temp_dir().join(format!(
+            "team-agent-context-fork-audit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("create audit workspace");
+        let event_log = crate::event_log::EventLog::new(&workspace);
+        ContextForkFinalized::new(
+            "source",
+            "target",
+            "target-session",
+            Path::new("/tmp/target.jsonl"),
+            "context_fork_verified",
+            "high",
+        )
+        .write_audit(&event_log)
+        .expect("write context fork audit");
+
+        let events = event_log.tail(0).expect("read context fork audit");
+        let event = events.last().expect("context fork audit event");
+        assert_eq!(
+            event.get("event").and_then(serde_json::Value::as_str),
+            Some(crate::lifecycle::types::event_names::CONTEXT_FORK)
+        );
+        assert_eq!(
+            event
+                .get("source_agent_id")
+                .and_then(serde_json::Value::as_str),
+            Some("source")
+        );
+        assert_eq!(
+            event.get("agent_id").and_then(serde_json::Value::as_str),
+            Some("target")
+        );
+        assert!(event.get("prompt").is_none());
+        let _ = std::fs::remove_dir_all(workspace);
+    }
 }
 
 pub(super) fn verify_fork_registration(

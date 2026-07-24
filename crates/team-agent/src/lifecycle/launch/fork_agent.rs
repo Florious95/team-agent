@@ -446,7 +446,7 @@ pub fn fork_agent_with_transport(
         }
     };
     if let Some(context_proof) = context_proof.as_ref() {
-        if let Err(error) = finalize_fork_state(ForkFinalizeInput {
+        let finalized = match finalize_fork_state(ForkFinalizeInput {
             workspace: &workspace,
             team_key: &fork_team,
             source_agent_id,
@@ -462,18 +462,24 @@ pub fn fork_agent_with_transport(
             spawned_at: &spawned_at,
             spawn_epoch,
         }) {
-            rollback_fork_after_spawn(
-                &workspace,
-                transport,
-                &session_name,
-                &window,
-                &mcp_config_path,
-                as_agent_id,
-                &profile_launch,
-                &fork_team,
-            );
-            return Err(error);
-        }
+            Ok(finalized) => finalized,
+            Err(error) => {
+                rollback_fork_after_spawn(
+                    &workspace,
+                    transport,
+                    &session_name,
+                    &window,
+                    &mcp_config_path,
+                    as_agent_id,
+                    &profile_launch,
+                    &fork_team,
+                );
+                return Err(error);
+            }
+        };
+        finalized
+            .write_audit(&crate::event_log::EventLog::new(&workspace))
+            .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
     }
     if let Err(error) =
         verify_fork_registration(&workspace, &fork_team, as_agent_id, &spawn, &window)

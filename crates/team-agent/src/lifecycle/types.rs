@@ -36,6 +36,7 @@ pub mod event_names {
     pub const ADD_FAILED: &str = "lifecycle.add_failed";
     pub const REMOVE_STEP_COMPLETED: &str = "lifecycle.remove_step_completed";
     pub const REMOVE_ROLLED_BACK: &str = "lifecycle.remove_rolled_back";
+    pub const CONTEXT_FORK: &str = "context_fork";
     // restart 决策事件(Route B audit 契约必发)。
     pub const RESTART_RESUME_DECISION: &str = "restart.resume_decision";
     pub const RESTART_ATOMIC_REFUSAL: &str = "restart.atomic_refusal";

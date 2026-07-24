@@ -29,6 +29,7 @@ pub struct CapturePassReport {
     /// (coordinator tick) emits a throttled
     /// `provider.session.transcript_missing` event for each entry.
     pub transcript_missing: Vec<TranscriptMissing>,
+    pub(crate) context_forks: Vec<crate::lifecycle::launch::ContextForkFinalized>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,9 +307,12 @@ where
             // partial candidates (no session_id or no rollout_path). When
             // it returns false, the row stays unchanged; capture re-runs
             // on the next coordinator tick.
-            if apply_captured_session(agent_obj, &candidate.captured) {
+            if let Some(applied) = apply_captured_session(agent_obj, &candidate.captured) {
                 report.changed = true;
                 report.assigned.push(item.agent_id);
+                if let AppliedCapture::ContextFork(context_fork) = applied {
+                    report.context_forks.push(context_fork);
+                }
             }
             continue;
         }
@@ -1144,6 +1148,11 @@ fn candidate_key(owner: &PendingSessionCapture, candidate: &CapturedSessionCandi
         .join("|")
 }
 
+enum AppliedCapture {
+    Session,
+    ContextFork(crate::lifecycle::launch::ContextForkFinalized),
+}
+
 /// 0.4.6 tuple-atomic contract (audit §Capture 修改清单, line 111): writes
 /// the authoritative session tuple if and only if the candidate carries
 /// BOTH `session_id` and `rollout_path`. A partial candidate (e.g.
@@ -1154,15 +1163,16 @@ fn candidate_key(owner: &PendingSessionCapture, candidate: &CapturedSessionCandi
 fn apply_captured_session(
     agent_obj: &mut serde_json::Map<String, Value>,
     captured: &CapturedSession,
-) -> bool {
+) -> Option<AppliedCapture> {
     if agent_obj.get("capture_state").and_then(Value::as_str) == Some("pending_context_fork") {
-        return crate::lifecycle::finalize_pending_fork_capture(agent_obj, captured);
+        return crate::lifecycle::finalize_pending_fork_capture(agent_obj, captured)
+            .map(AppliedCapture::ContextFork);
     }
     let Some(session_id) = captured.session_id.as_ref() else {
-        return false;
+        return None;
     };
     let Some(rollout_path) = captured.rollout_path.as_ref() else {
-        return false;
+        return None;
     };
     agent_obj.insert(
         "session_id".to_string(),
@@ -1192,7 +1202,7 @@ fn apply_captured_session(
     // diagnose/status observability.
     agent_obj.remove("_pending_session_id");
     agent_obj.insert("capture_state".to_string(), serde_json::json!("captured"));
-    true
+    Some(AppliedCapture::Session)
 }
 
 fn claimed_provider_session_keys(
@@ -2621,7 +2631,7 @@ mod u1_tests {
             spawn_cwd: PathBuf::from("/tmp/cwd"),
         };
         let written = super::apply_captured_session(&mut agent, &captured);
-        assert!(written, "apply must return true for valid captured");
+        assert!(written.is_some(), "apply must accept valid captured");
         assert!(
             agent.get("_pending_session_id").is_none(),
             "S1-CAPTURE-001: _pending_session_id must be removed after capture \

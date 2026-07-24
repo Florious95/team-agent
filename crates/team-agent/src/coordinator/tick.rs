@@ -548,6 +548,9 @@ impl Coordinator {
                 )?;
             }
         }
+        for context_fork in &report.context_forks {
+            context_fork.write_audit(event_log)?;
+        }
         // Bug 2 (0.3.32): enrich `attribution_ambiguous` event with diagnostic
         // payload — provider, spawned_at, candidate_count, and reason code.
         // Pre-fix the event carried only agent_id + spawn_cwd, leaving
