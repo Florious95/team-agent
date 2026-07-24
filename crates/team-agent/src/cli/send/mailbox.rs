@@ -37,8 +37,8 @@ pub(super) fn maybe_enqueue_offline_leader_mailbox(
         Ok(s) => s,
         Err(_) => return Ok(None),
     };
-    let team_alive = target_team_is_alive_for_mailbox(&state, &team_key);
-    if !team_alive {
+    let attachment_history = target_team_mailbox_history(&state, &team_key);
+    if attachment_history == MailboxAttachmentHistory::NotEligible {
         return Ok(None);
     }
     let event_log = crate::event_log::EventLog::new(&target_workspace);
@@ -53,47 +53,90 @@ pub(super) fn maybe_enqueue_offline_leader_mailbox(
     )
     .map_err(|e| CliError::Runtime(e.to_string()))?;
     let message_id = outcome.message_id.clone().unwrap_or_else(|| "".to_string());
-    Ok(Some(json!({
-        "ok": true,
-        "status": "queued_until_leader_attach",
-        "message_status": "queued_until_leader_attach",
-        "channel": "leader_mailbox",
-        "delivered": false,
-        "to_name": to_name,
-        "target_workspace": target_workspace.display().to_string(),
-        "team_key": team_key,
-        "recipient": "leader",
-        "leader_attached": false,
-        "message_id": message_id,
-    })))
+    let receipt = match attachment_history {
+        MailboxAttachmentHistory::NeverAttached => json!({
+            "ok": true,
+            "status": "deferred",
+            "deferred_reason": "never_attached",
+            "message_status": "queued_until_leader_attach",
+            "channel": "leader_mailbox",
+            "delivered": false,
+            "to_name": to_name,
+            "target_workspace": target_workspace.display().to_string(),
+            "team_key": team_key,
+            "recipient": "leader",
+            "leader_attached": false,
+            "message_id": message_id,
+        }),
+        MailboxAttachmentHistory::PreviouslyAttached => json!({
+            "ok": true,
+            "status": "queued_until_leader_attach",
+            "deferred_reason": "leader_currently_unattached",
+            "message_status": "queued_until_leader_attach",
+            "channel": "leader_mailbox",
+            "delivered": false,
+            "to_name": to_name,
+            "target_workspace": target_workspace.display().to_string(),
+            "team_key": team_key,
+            "recipient": "leader",
+            "leader_attached": false,
+            "message_id": message_id,
+        }),
+        MailboxAttachmentHistory::NotEligible => unreachable!("refused before persistence"),
+    };
+    Ok(Some(receipt))
 }
 
-/// Positive-source liveness heuristic per offline-mailbox-toname-design.md §4:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MailboxAttachmentHistory {
+    PreviouslyAttached,
+    NeverAttached,
+    NotEligible,
+}
+
+/// Positive-source mailbox eligibility per offline-mailbox-toname-design.md §4:
 /// - target workspace has state and the team key is present + not archived/down;
-/// - AND at least one live tmux fact — a persisted `session_name` OR any
-///   agent with a recorded pane on the recorded socket.
+/// - AND a persisted session name establishes a durable replay target;
+/// - a persisted receiver attachment timestamp distinguishes previously attached
+///   teams from teams whose first successful leader attachment is still pending.
 ///
 /// We deliberately do NOT poll coordinator health here — enqueuing is
 /// safe even when the coordinator is transiently down; attach-leader
 /// itself replays via `requeue_blocked_leader_messages` regardless.
-pub(super) fn target_team_is_alive_for_mailbox(state: &Value, team_key: &str) -> bool {
+fn target_team_mailbox_history(state: &Value, team_key: &str) -> MailboxAttachmentHistory {
     let team = state
         .get("teams")
         .and_then(|v| v.as_object())
         .and_then(|teams| teams.get(team_key));
     let Some(team) = team else {
-        return false;
+        return MailboxAttachmentHistory::NotEligible;
     };
     let status = team
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("alive");
     if matches!(status, "archived" | "down" | "stopped") {
-        return false;
+        return MailboxAttachmentHistory::NotEligible;
     }
-    // A recorded session_name is enough — target's coordinator/attach
-    // path will re-verify tmux presence when the replay fires.
-    team.get("session_name")
+    let has_session = team
+        .get("session_name")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
+        .is_some_and(|s| !s.is_empty());
+    if !has_session {
+        return MailboxAttachmentHistory::NotEligible;
+    }
+    let previously_attached = team
+        .get("leader_receiver")
+        .and_then(Value::as_object)
+        .is_some_and(|receiver| {
+            receiver
+                .get("attached_at")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        });
+    if previously_attached {
+        MailboxAttachmentHistory::PreviouslyAttached
+    } else {
+        MailboxAttachmentHistory::NeverAttached
+    }
 }
