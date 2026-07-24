@@ -45,11 +45,11 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         };
     }
     if matches!(command, "-h" | "--help" | "help") {
-        let _ = write_stdout_line(&command_help(None));
+        println!("{}", command_help(None));
         return ExitCode::Ok;
     }
     if matches!(command, "-V" | "--version") {
-        let _ = write_stdout_line(&format!("team-agent {}", env!("CARGO_PKG_VERSION")));
+        println!("team-agent {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::Ok;
     }
     // CR-063/G4: every registered subcommand's `--help` must short-circuit before dispatch,
@@ -65,7 +65,7 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
             .skip(1)
             .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
     {
-        let _ = write_stdout_line(&command_help(Some(command)));
+        println!("{}", command_help(Some(command)));
         return ExitCode::Ok;
     }
     match dispatch(command, &argv[1..], cwd) {
