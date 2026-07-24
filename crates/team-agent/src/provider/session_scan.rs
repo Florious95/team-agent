@@ -72,6 +72,9 @@ pub(crate) fn scan_session_candidates_once(
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         return claude::apply_expected_session_filter(context, out);
     }
+    if matches!(provider, Provider::Codex) {
+        out = codex::apply_expected_session_filter(context, out);
+    }
 
     common::apply_spawn_time_window_if_unique(provider, context, &mut out);
     common::sort_expected_first_if_needed(context, &mut out);

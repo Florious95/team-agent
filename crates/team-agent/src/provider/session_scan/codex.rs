@@ -4,10 +4,38 @@ pub(super) fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
         .map(|dt| std::time::SystemTime::from(dt.with_timezone(&chrono::Utc)))
 }
 
+pub(super) fn truncate_to_uuid_precision(
+    timestamp: std::time::SystemTime,
+) -> Option<std::time::SystemTime> {
+    let since_epoch = timestamp
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()?;
+    std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(
+        u64::try_from(since_epoch.as_millis()).ok()?,
+    ))
+}
+
 pub(super) fn rollout_created_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
     created_at_from_rollout_uuid(path)
         .or_else(|| created_at_from_rollout_head(path))
         .or_else(|| created_at_from_rollout_filename(path))
+}
+
+pub(super) fn apply_expected_session_filter(
+    context: &super::CaptureSessionContext,
+    mut out: Vec<super::CapturedSessionCandidate>,
+) -> Vec<super::CapturedSessionCandidate> {
+    let Some(expected) = context.expected_session_id.as_ref() else {
+        return out;
+    };
+    out.retain(|candidate| {
+        candidate
+            .captured
+            .session_id
+            .as_ref()
+            .is_some_and(|session| session.as_str() == expected.as_str())
+    });
+    out
 }
 
 pub(super) fn retain_spawn_cwd(

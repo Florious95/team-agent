@@ -680,6 +680,17 @@ where
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let expected_session_id = agent
+        .get("_pending_session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(SessionId::new);
+    if matches!(provider, Provider::Codex)
+        && agent.get("capture_state").and_then(Value::as_str) == Some("pending_context_fork")
+        && expected_session_id.is_none()
+    {
+        return None;
+    }
     Some(PendingSessionCapture {
         agent_id: agent_id.to_string(),
         provider,
@@ -703,15 +714,7 @@ where
                 .and_then(Value::as_u64)
                 .and_then(|pid| u32::try_from(pid).ok()),
             spawned_at,
-            expected_session_id: if matches!(provider, Provider::Codex) {
-                None
-            } else {
-                agent
-                    .get("_pending_session_id")
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.is_empty())
-                    .map(SessionId::new)
-            },
+            expected_session_id,
             provider_projects_root: agent
                 .get("claude_projects_root")
                 .and_then(Value::as_str)

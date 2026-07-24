@@ -146,13 +146,23 @@ pub(super) fn apply_spawned_at_filter(
         out.clear();
         return;
     };
+    let codex_spawned_at = if matches!(provider, Provider::Codex) {
+        let Some(timestamp) = super::codex::truncate_to_uuid_precision(spawned_at) else {
+            out.clear();
+            return;
+        };
+        Some(timestamp)
+    } else {
+        None
+    };
     out.retain(|candidate| {
         let Some(path) = candidate.captured.rollout_path.as_ref() else {
             return false;
         };
         if matches!(provider, Provider::Codex) {
             return super::codex::rollout_created_at(path.as_path())
-                .is_some_and(|created_at| created_at >= spawned_at);
+                .zip(codex_spawned_at)
+                .is_some_and(|(created_at, boundary)| created_at >= boundary);
         }
         candidate_mtime(path.as_path()).is_some_and(|mtime| mtime >= spawned_at)
     });
