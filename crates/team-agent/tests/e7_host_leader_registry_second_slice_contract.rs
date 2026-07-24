@@ -463,8 +463,18 @@ fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
     );
     assert_eq!(
         body.get("status").and_then(Value::as_str),
+        Some("deferred"),
+        "E7 RED: team live + leader never attached must report deferred presenter status; output={body}"
+    );
+    assert_eq!(
+        body.get("deferred_reason").and_then(Value::as_str),
+        Some("never_attached"),
+        "E7 RED: deferred presenter status must explain the never-attached reason; output={body}"
+    );
+    assert_eq!(
+        body.get("message_status").and_then(Value::as_str),
         Some("queued_until_leader_attach"),
-        "E7 RED: team live + leader unattached must reuse E6 offline mailbox status; output={body}"
+        "E7 RED: durable message status must remain queued until leader attach; output={body}"
     );
     assert_eq!(
         body.get("delivered").and_then(Value::as_bool),
