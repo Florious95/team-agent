@@ -20,7 +20,6 @@ pub(crate) struct PendingContextFork {
     pub target_agent: String,
     pub spawned_at: String,
     pub scanner_context: crate::provider::session_scan::CaptureSessionContext,
-    pub grace_deadline: Duration,
 }
 
 #[derive(Debug)]
@@ -65,14 +64,7 @@ pub(crate) fn observe_context_fork(
         deadline,
     ) {
         Ok(proof) => ContextForkOutcome::Verified(proof),
-        Err(error)
-            if matches!(
-                provider,
-                Provider::Codex | Provider::Claude | Provider::ClaudeCode
-            ) && error
-                .to_string()
-                .contains("produced no readable NEW session backing") =>
-        {
+        Err(ContextForkTermination::Timeout { .. }) => {
             ContextForkOutcome::Pending(PendingContextFork {
                 source_session_id: source_session_id.clone(),
                 target_agent: agent_id.to_string(),
@@ -86,10 +78,9 @@ pub(crate) fn observe_context_fork(
                     expected_session_id: plan.expected_session_id.clone(),
                     provider_projects_root: plan.provider_projects_root.clone(),
                 },
-                grace_deadline: deadline,
             })
         }
-        Err(error) => ContextForkOutcome::Rejected(error),
+        Err(ContextForkTermination::Rejected(error)) => ContextForkOutcome::Rejected(error),
     }
 }
 

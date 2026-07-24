@@ -76,10 +76,6 @@ pub(crate) fn upsert_pending_forked_agent_state(
         serde_json::json!(pending.spawned_at),
     );
     entry.insert("spawn_epoch".to_string(), serde_json::json!(spawn_epoch));
-    entry.insert(
-        "pending_grace_secs".to_string(),
-        serde_json::json!(pending.grace_deadline.as_secs()),
-    );
     if let Some(pid) = spawn.child_pid {
         entry.insert("pane_pid".to_string(), serde_json::json!(pid));
     }

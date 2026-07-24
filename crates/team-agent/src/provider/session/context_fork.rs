@@ -5,6 +5,19 @@ use std::time::{Duration, SystemTime};
 use crate::model::enums::Provider;
 use crate::provider::{CommandPlan, ProviderError, SessionId};
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ContextForkTermination {
+    #[error(
+        "context_fork_unverified: {provider:?} produced no readable NEW session backing within {deadline_ms}ms"
+    )]
+    Timeout {
+        provider: Provider,
+        deadline_ms: u128,
+    },
+    #[error(transparent)]
+    Rejected(#[from] ProviderError),
+}
+
 #[path = "context_fork/outcome.rs"]
 mod outcome;
 pub(crate) use outcome::{
@@ -63,9 +76,9 @@ pub(crate) fn verify_context_fork(
     spawn_cwd: &Path,
     spawned_at: &str,
     deadline: Duration,
-) -> Result<ContextForkProof, ProviderError> {
+) -> Result<ContextForkProof, ContextForkTermination> {
     if provider == Provider::Copilot {
-        return verify_copilot_fork(source_session_id, plan);
+        return verify_copilot_fork(source_session_id, plan).map_err(Into::into);
     }
     if provider == Provider::Codex {
         return verify_codex_fork(
@@ -91,7 +104,8 @@ pub(crate) fn verify_context_fork(
     }
     Err(ProviderError::CaptureFailed(format!(
         "context_fork_unverified: {provider:?} has no verifiable fork backing"
-    )))
+    ))
+    .into())
 }
 
 fn verify_claude_fork(
@@ -102,7 +116,7 @@ fn verify_claude_fork(
     expected_backing_path: Option<&Path>,
     spawn_cwd: &Path,
     deadline: Duration,
-) -> Result<ContextForkProof, ProviderError> {
+) -> Result<ContextForkProof, ContextForkTermination> {
     let expected = plan.expected_session_id.as_ref().ok_or_else(|| {
         ProviderError::CaptureFailed(
             "context_fork_unverified: Claude plan has no expected session id".to_string(),
@@ -118,7 +132,8 @@ fn verify_claude_fork(
         return Err(ProviderError::CaptureFailed(format!(
             "context_fork_unverified: Claude snapshot backing does not match expected session {}",
             expected.as_str()
-        )));
+        ))
+        .into());
     }
     let started = std::time::Instant::now();
     loop {
@@ -148,7 +163,13 @@ fn verify_claude_fork(
         {
             let observed_matches = session_id_from_jsonl(&provider_path)
                 .is_some_and(|observed| observed == expected.as_str());
-            if readable_jsonl(&provider_path) && observed_matches && expected != source_session_id {
+            let changed = file_stamp(&provider_path)
+                .is_some_and(|stamp| before.files.get(&provider_path) != Some(&stamp));
+            if changed
+                && readable_jsonl(&provider_path)
+                && observed_matches
+                && expected != source_session_id
+            {
                 return Ok(ContextForkProof {
                     provider,
                     source_session_id: source_session_id.clone(),
@@ -165,10 +186,10 @@ fn verify_claude_fork(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err(ProviderError::CaptureFailed(format!(
-        "context_fork_unverified: {provider:?} produced no readable NEW session backing within {}ms",
-        deadline.as_millis()
-    )))
+    Err(ContextForkTermination::Timeout {
+        provider,
+        deadline_ms: deadline.as_millis(),
+    })
 }
 
 fn verify_codex_fork(
@@ -179,7 +200,7 @@ fn verify_codex_fork(
     spawn_cwd: &Path,
     spawned_at: &str,
     deadline: Duration,
-) -> Result<ContextForkProof, ProviderError> {
+) -> Result<ContextForkProof, ContextForkTermination> {
     let context = crate::provider::session_scan::CaptureSessionContext {
         agent_id: agent_id.to_string(),
         spawn_cwd: spawn_cwd.to_path_buf(),
@@ -202,7 +223,8 @@ fn verify_codex_fork(
             let Some(stamp) = current.get(path.as_path()) else {
                 continue;
             };
-            if before.files.get(path.as_path()) == Some(stamp) {
+            let snapshot_changed = before.files.get(path.as_path()) != Some(stamp);
+            if !snapshot_changed {
                 continue;
             }
             let Some(new_session_id) = candidate.captured.session_id else {
@@ -228,10 +250,10 @@ fn verify_codex_fork(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Err(ProviderError::CaptureFailed(format!(
-        "context_fork_unverified: Codex produced no readable NEW session backing within {}ms",
-        deadline.as_millis()
-    )))
+    Err(ContextForkTermination::Timeout {
+        provider: Provider::Codex,
+        deadline_ms: deadline.as_millis(),
+    })
 }
 
 fn verify_copilot_fork(
@@ -278,6 +300,8 @@ fn verify_copilot_fork(
             "context_fork_unverified: copilot NEW session is absent from session-store".to_string(),
         ));
     }
+    // Copilot's isolated database row is its synchronous fork proof; the
+    // pre-spawn materialization baseline is never accepted by transcript scan.
     Ok(ContextForkProof {
         provider: Provider::Copilot,
         source_session_id: source_session_id.clone(),

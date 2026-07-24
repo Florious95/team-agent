@@ -240,6 +240,13 @@ pub(crate) fn finalize_pending_fork_capture(
     let Some(rollout_path) = captured.rollout_path.as_ref() else {
         return false;
     };
+    if agent
+        .get("fork_source_session_id")
+        .and_then(serde_json::Value::as_str)
+        == Some(session_id.as_str())
+    {
+        return false;
+    }
     agent.insert(
         "session_id".to_string(),
         serde_json::json!(session_id.as_str()),
@@ -262,6 +269,9 @@ pub(crate) fn finalize_pending_fork_capture(
     );
     agent.remove("_pending_session_id");
     agent.remove("attribution_ambiguous");
+    agent.remove("fork_source_session_id");
+    agent.remove("pending_target_agent");
+    agent.remove("pending_grace_secs");
     agent.insert("capture_state".to_string(), serde_json::json!("captured"));
     true
 }
