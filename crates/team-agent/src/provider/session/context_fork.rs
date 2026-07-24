@@ -18,13 +18,12 @@ pub(crate) enum ContextForkTermination {
     Rejected(#[from] ProviderError),
 }
 
-#[path = "context_fork/outcome.rs"]
+mod claude;
+mod codex;
 mod outcome;
 pub(crate) use outcome::{
     observe_context_fork, transition_pending_context_fork, ContextForkOutcome, PendingContextFork,
 };
-// Typed shape is implemented in outcome.rs:
-// enum ContextForkOutcome { Pending(PendingContextFork) }
 
 pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
     // Expiration is consumed by ContextForkOutcome::Pending(PendingContextFork).
@@ -81,7 +80,7 @@ pub(crate) fn verify_context_fork(
         return verify_copilot_fork(source_session_id, plan).map_err(Into::into);
     }
     if provider == Provider::Codex {
-        return verify_codex_fork(
+        return codex::verify_codex_fork(
             source_session_id,
             plan,
             before,
@@ -92,7 +91,7 @@ pub(crate) fn verify_context_fork(
         );
     }
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        return verify_claude_fork(
+        return claude::verify_claude_fork(
             provider,
             source_session_id,
             plan,
@@ -106,154 +105,6 @@ pub(crate) fn verify_context_fork(
         "context_fork_unverified: {provider:?} has no verifiable fork backing"
     ))
     .into())
-}
-
-fn verify_claude_fork(
-    provider: Provider,
-    source_session_id: &SessionId,
-    plan: &CommandPlan,
-    before: &ContextBackingSnapshot,
-    expected_backing_path: Option<&Path>,
-    spawn_cwd: &Path,
-    deadline: Duration,
-) -> Result<ContextForkProof, ContextForkTermination> {
-    let expected = plan.expected_session_id.as_ref().ok_or_else(|| {
-        ProviderError::CaptureFailed(
-            "context_fork_unverified: Claude plan has no expected session id".to_string(),
-        )
-    })?;
-    let path = expected_backing_path.ok_or_else(|| {
-        ProviderError::CaptureFailed(
-            "context_fork_unverified: Claude plan has no exact snapshot backing".to_string(),
-        )
-    })?;
-    let expected_name = format!("{}.jsonl", expected.as_str());
-    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
-        return Err(ProviderError::CaptureFailed(format!(
-            "context_fork_unverified: Claude snapshot backing does not match expected session {}",
-            expected.as_str()
-        ))
-        .into());
-    }
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(stamp) = file_stamp(path) {
-            let changed = before.files.get(path).is_none_or(|old| *old != stamp);
-            let observed_matches =
-                session_id_from_jsonl(path).is_none_or(|observed| observed == expected.as_str());
-            if changed && readable_jsonl(path) && observed_matches && expected != source_session_id
-            {
-                return Ok(ContextForkProof {
-                    provider,
-                    source_session_id: source_session_id.clone(),
-                    new_session_id: expected.clone(),
-                    backing_path: path.to_path_buf(),
-                    captured_via: "context_fork_verified".to_string(),
-                    attribution_confidence: "high".to_string(),
-                    managed_backing_root: None,
-                });
-            }
-        }
-        if let Some(provider_path) = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .and_then(|home| {
-                crate::provider::session_scan::claude::projects_dir_for_cwd(&home, spawn_cwd)
-            })
-            .map(|root| root.join(&expected_name))
-        {
-            let observed_matches = session_id_from_jsonl(&provider_path)
-                .is_some_and(|observed| observed == expected.as_str());
-            let changed = file_stamp(&provider_path)
-                .is_some_and(|stamp| before.files.get(&provider_path) != Some(&stamp));
-            if changed
-                && readable_jsonl(&provider_path)
-                && observed_matches
-                && expected != source_session_id
-            {
-                return Ok(ContextForkProof {
-                    provider,
-                    source_session_id: source_session_id.clone(),
-                    new_session_id: expected.clone(),
-                    backing_path: provider_path,
-                    captured_via: "context_fork_verified".to_string(),
-                    attribution_confidence: "high".to_string(),
-                    managed_backing_root: None,
-                });
-            }
-        }
-        if started.elapsed() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Err(ContextForkTermination::Timeout {
-        provider,
-        deadline_ms: deadline.as_millis(),
-    })
-}
-
-fn verify_codex_fork(
-    source_session_id: &SessionId,
-    plan: &CommandPlan,
-    before: &ContextBackingSnapshot,
-    agent_id: &str,
-    spawn_cwd: &Path,
-    spawned_at: &str,
-    deadline: Duration,
-) -> Result<ContextForkProof, ContextForkTermination> {
-    let context = crate::provider::session_scan::CaptureSessionContext {
-        agent_id: agent_id.to_string(),
-        spawn_cwd: spawn_cwd.to_path_buf(),
-        pane_id: None,
-        pane_pid: None,
-        spawned_at: Some(spawned_at.to_string()),
-        expected_session_id: plan.expected_session_id.clone(),
-        provider_projects_root: plan.provider_projects_root.clone(),
-    };
-    let excluded = outcome::source_exclusions(before, source_session_id);
-    let started = std::time::Instant::now();
-    loop {
-        let current = jsonl_files(&before.root);
-        for candidate in
-            crate::provider::session_scan::scan_session_candidates_once(Provider::Codex, &context)?
-        {
-            let Some(path) = candidate.captured.rollout_path.as_ref() else {
-                continue;
-            };
-            let Some(stamp) = current.get(path.as_path()) else {
-                continue;
-            };
-            let snapshot_changed = before.files.get(path.as_path()) != Some(stamp);
-            if !snapshot_changed {
-                continue;
-            }
-            let Some(new_session_id) = candidate.captured.session_id else {
-                continue;
-            };
-            if excluded.contains(new_session_id.as_str())
-                || excluded.contains(&path.as_path().to_string_lossy().to_string())
-            {
-                continue;
-            }
-            return Ok(ContextForkProof {
-                provider: Provider::Codex,
-                source_session_id: source_session_id.clone(),
-                new_session_id,
-                backing_path: path.as_path().to_path_buf(),
-                captured_via: "context_fork_verified".to_string(),
-                attribution_confidence: "high".to_string(),
-                managed_backing_root: None,
-            });
-        }
-        if started.elapsed() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Err(ContextForkTermination::Timeout {
-        provider: Provider::Codex,
-        deadline_ms: deadline.as_millis(),
-    })
 }
 
 fn verify_copilot_fork(
