@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.58
+
+- **Feature: bounded, state-authoritative provider context forks.** `fork-agent` no longer treats a 10-second backing-observation window as a hard business failure: cold forks return typed `pending_context_fork` while canonical provider backing converges, preserve the source nonce and source session byte-for-byte, exclude source/foreign candidates, and finalize only a verified distinct target tuple. Five bounded real-subscription gate iterations exercised the fork boundary from setup through first-turn delivery, confirming the typed pending path, nonce inheritance, source safety, and fail-closed attribution.
+
+### Known Limitations
+
+**fork-agent session attribution stays pending** — after `team-agent fork-agent SOURCE --as TARGET`, the forked agent starts correctly, consumes messages sent to it, and responds via its own MCP sender. However, the fork target's Codex rollout inherits the source agent's identity in its `developer_instructions` block, so it never publishes a target-specific identity marker in its transcript. The framework's session scanner (fail-closed by design, guarding against source masquerade attribution — see the 2026-07 replay-storm lineage) correctly refuses to attribute these rollouts, and the target agent remains in `capture_state=pending_context_fork` with `session_id=null` and `rollout_path=null`.
+
+**In-session use is unaffected**: forked agents can be sent messages, execute turns, and produce replies for the entire duration of the current session. Only session-resume (restart/reattach) is affected — because the framework never captured a target-specific session tuple, resuming an existing forked agent from persisted state is not supported. A fresh fork or a fresh clone recovers the seat.
+
+**Root cause and next steps**: fix scheduled for the 0.5.59 fork-identity car (inject target-specific identity into fork spawn's developer_instructions, matching the normal spawn path). RED contract already frozen at commit `b874c1c1` SHA256 `6eb0fc0306b57d6de7070d64ab82b1d8a0d4307edfcf3e20b1e8ac667b0cea2c`. Scanner fail-closed logic (`crates/team-agent/src/provider/session/scanner/common.rs:103-108`) is correct and will remain unchanged; the fix is on the spawn-side identity injection.
+
 ## 0.5.57
 
 - **Feature: typed message-state recovery with explicit ownership and bounded transitions.** Durable message dispositions now share one typed state vocabulary, and recovery is owned by the matching blocked condition instead of generic status rewriting. Leader and worker recovery paths are attempt- and age-bounded, preserve stable message identity, and fail closed across foreign owner epochs or ineligible prior states.
