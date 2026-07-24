@@ -274,18 +274,24 @@ fn codex_session_v7() -> String {
 pub(super) fn verify_codex_fork(
     source_session_id: &SessionId,
     plan: &CommandPlan,
-    _before: &ContextBackingSnapshot,
+    before: &ContextBackingSnapshot,
     expected_backing_path: Option<&Path>,
     agent_id: &str,
     spawn_cwd: &Path,
     spawned_at: &str,
     deadline: Duration,
 ) -> Result<ContextForkProof, ContextForkTermination> {
-    let expected = plan.expected_session_id.as_ref().ok_or_else(|| {
-        ProviderError::CaptureFailed(
-            "context_fork_unverified: codex plan has no expected target session id".to_string(),
-        )
-    })?;
+    let Some(expected) = plan.expected_session_id.as_ref() else {
+        return verify_legacy_codex_fork(
+            source_session_id,
+            plan,
+            before,
+            agent_id,
+            spawn_cwd,
+            spawned_at,
+            deadline,
+        );
+    };
     if expected == source_session_id {
         return Err(ProviderError::CaptureFailed(
             "context_fork_unverified: codex target session equals source".to_string(),
@@ -333,6 +339,70 @@ pub(super) fn verify_codex_fork(
                 source_session_id: source_session_id.clone(),
                 new_session_id,
                 backing_path: path.as_path().to_path_buf(),
+                captured_via: "context_fork_verified".to_string(),
+                attribution_confidence: "high".to_string(),
+                managed_backing_root: None,
+            });
+        }
+        if started.elapsed() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(ContextForkTermination::Timeout {
+        provider: Provider::Codex,
+        deadline_ms: deadline.as_millis(),
+    })
+}
+
+fn verify_legacy_codex_fork(
+    source_session_id: &SessionId,
+    plan: &CommandPlan,
+    before: &ContextBackingSnapshot,
+    agent_id: &str,
+    spawn_cwd: &Path,
+    spawned_at: &str,
+    deadline: Duration,
+) -> Result<ContextForkProof, ContextForkTermination> {
+    let context = crate::provider::session_scan::CaptureSessionContext {
+        agent_id: agent_id.to_string(),
+        spawn_cwd: spawn_cwd.to_path_buf(),
+        pane_id: None,
+        pane_pid: None,
+        spawned_at: Some(spawned_at.to_string()),
+        expected_session_id: None,
+        provider_projects_root: plan.provider_projects_root.clone(),
+    };
+    let started = std::time::Instant::now();
+    loop {
+        let current = jsonl_files(&provider_backing_root(Provider::Codex, plan));
+        let mut matches = Vec::new();
+        for candidate in
+            crate::provider::session_scan::scan_session_candidates_once(Provider::Codex, &context)?
+        {
+            let Some(path) = candidate.captured.rollout_path.as_ref() else {
+                continue;
+            };
+            let Some(stamp) = current.get(path.as_path()) else {
+                continue;
+            };
+            if before.files.get(path.as_path()) == Some(stamp) {
+                continue;
+            }
+            let Some(session_id) = candidate.captured.session_id else {
+                continue;
+            };
+            if &session_id == source_session_id {
+                continue;
+            }
+            matches.push((session_id, path.as_path().to_path_buf()));
+        }
+        if let [(new_session_id, backing_path)] = matches.as_slice() {
+            return Ok(ContextForkProof {
+                provider: Provider::Codex,
+                source_session_id: source_session_id.clone(),
+                new_session_id: new_session_id.clone(),
+                backing_path: backing_path.clone(),
                 captured_via: "context_fork_verified".to_string(),
                 attribution_confidence: "high".to_string(),
                 managed_backing_root: None,
