@@ -72,6 +72,15 @@
 //!     (§7#4): tooth 2.
 //!
 //! FROZEN by verifier — do NOT modify without a new SHA256 signature.
+//!
+//! REVISION LINEAGE:
+//! - 7f97919c (V1) — teeth 1/3 scanned single file provider/session/context_fork.rs.
+//! - THIS revision (V2, A 案 msg_ef0fa4adad80) — teeth 1/3 aggregate
+//!   context_fork.rs + context_fork/ 子模块树(claude.rs / codex.rs /
+//!   outcome.rs) after d8 refactor abb0ccf. Semantic asserts unchanged.
+//!   B 案(留死字面注释喂扫描)驳回=注释欺骗扫描器。
+//!   台账新增 §二·补4:源码扫描齿禁锚单文件路径,应锚模块树(文件拆分=
+//!   常规重构,不该震碎契约)。
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -122,6 +131,36 @@ fn synthetic_pending_arm() -> &'static str {
     "enum ContextForkOutcome {\n  Verified(ContextForkProof),\n  Pending(PendingContextFork),\n  Rejected(ProviderError),\n}"
 }
 
+/// Read `context_fork.rs` PLUS every `*.rs` under the sibling
+/// `context_fork/` submodule tree, concatenated into one aggregate text.
+/// leader ruling msg_ef0fa4adad80 A 案:module refactor (splitting
+/// context_fork.rs into outcome.rs / claude.rs / codex.rs) MUST NOT
+/// shatter contract-side textual scans — the semantic invariants live
+/// in the module TREE, not a single file. Anchoring on a single file
+/// path is now台账-forbidden(§二·补4).
+fn read_context_fork_module_text() -> String {
+    let mut aggregate = String::new();
+    // Main file (kept post-split as the module head).
+    let main_path = crate_src()
+        .join("provider")
+        .join("session")
+        .join("context_fork.rs");
+    if let Ok(t) = fs::read_to_string(&main_path) {
+        aggregate.push_str(&t);
+        aggregate.push('\n');
+    }
+    // Sibling submodule tree.
+    let sub_root = crate_src()
+        .join("provider")
+        .join("session")
+        .join("context_fork");
+    for (_, t) in walk_texts(&sub_root) {
+        aggregate.push_str(&t);
+        aggregate.push('\n');
+    }
+    aggregate
+}
+
 // ---------------------------------------------------------------------------
 // Tooth 1 — slow start produces typed Pending, not immediate rollback
 // ---------------------------------------------------------------------------
@@ -129,7 +168,11 @@ fn synthetic_pending_arm() -> &'static str {
 #[test]
 #[serial(env)]
 fn slow_start_produces_typed_pending_not_immediate_rollback() {
-    let src = read_src("provider/session/context_fork.rs");
+    // A 案(msg_ef0fa4adad80):read context_fork.rs PLUS the
+    // context_fork/ submodule tree. Splitting into outcome.rs /
+    // claude.rs / codex.rs is a normal refactor and MUST NOT
+    // invalidate the contract.
+    let src = read_context_fork_module_text();
     // Sanity canary: the shape we're looking for is parseable — locks
     // the scanner semantics independently of product state.
     assert!(
@@ -149,8 +192,8 @@ fn slow_start_produces_typed_pending_not_immediate_rollback() {
         && (src.contains("spawned_at") || src.contains("spawn_boundary"));
     assert!(
         has_pending_variant && has_pending_struct,
-        "context_fork.rs missing typed Pending outcome. locate §5.1: return \
-         Verified(ContextForkProof) | Pending(PendingContextFork) | \
+        "context_fork module tree missing typed Pending outcome. locate §5.1: \
+         return Verified(ContextForkProof) | Pending(PendingContextFork) | \
          Rejected(ProviderError). Baseline synchronously errors when the \
          10s deadline elapses. has_pending_variant={} has_pending_struct={}",
         has_pending_variant,
@@ -160,19 +203,20 @@ fn slow_start_produces_typed_pending_not_immediate_rollback() {
     // threshold; keep it as a fast-path budget only. We assert that the
     // deadline-consumption site no longer returns an error variant on
     // expiration (rough source scan: presence of a `Pending(` in the
-    // deadline block).
+    // deadline block). Same skip-until search works over concatenated
+    // module text (deadline & Pending sites end up in the same aggregate).
     let deadline_block_returns_pending = src
         .lines()
         .skip_while(|l| !l.contains("context_fork_convergence_deadline"))
-        .take(200)
+        .take(400)
         .collect::<Vec<_>>()
         .join("\n")
         .contains("Pending(");
     assert!(
         deadline_block_returns_pending,
-        "context_fork.rs deadline path still short-circuits to a hard error \
-         instead of a typed Pending. locate §5.1 requires the deadline to be \
-         a fast-path budget, not a business rejection."
+        "context_fork module tree deadline path still short-circuits to a hard \
+         error instead of a typed Pending. locate §5.1 requires the deadline \
+         to be a fast-path budget, not a business rejection."
     );
 }
 
@@ -221,7 +265,9 @@ fn pending_seat_has_bounded_grace_then_typed_failure() {
 #[test]
 #[serial(env)]
 fn source_rollout_cannot_masquerade_as_new_backing() {
-    let src = read_src("provider/session/context_fork.rs");
+    // A 案(msg_ef0fa4adad80):read context_fork.rs PLUS submodule
+    // tree (source_exclusions/claimed_set 现 codex.rs/outcome.rs 消费).
+    let src = read_context_fork_module_text();
     // Face 1 — canonical scanner call site must explicitly build a
     // `claimed` / `excluded` set containing source_session_id AND its
     // backing_path AND (per locate §5.1#5) sibling agents.
@@ -229,7 +275,7 @@ fn source_rollout_cannot_masquerade_as_new_backing() {
     let excludes_source_id =
         src.contains("source_session_id") && (src.contains("insert") || src.contains("push"));
     // Face 2 — scanner MUST NOT be relaxed to cwd-latest / mtime-latest.
-    // We assert on the negative: no source line inside context_fork.rs
+    // We assert on the negative: no source line inside the module tree
     // may contain `cwd_latest` or `mtime_latest` as a scanner mode.
     let has_relaxation = src.contains("cwd_latest")
         || src.contains("mtime_latest")
@@ -243,9 +289,9 @@ fn source_rollout_cannot_masquerade_as_new_backing() {
     let only_neq = !excludes_source && src.contains("!= source") || src.contains("!= self.source");
     assert!(
         excludes_source && excludes_source_id && !has_relaxation && !only_neq,
-        "canonical scanner claim/excluded set incomplete. locate §5.1+§7#3: \
-         source_session_id + backing_path + sibling agents must be in a \
-         programmatic excluded set; scanner must NOT relax to \
+        "canonical scanner claim/excluded set incomplete (module tree). \
+         locate §5.1+§7#3: source_session_id + backing_path + sibling agents \
+         must be in a programmatic excluded set; scanner must NOT relax to \
          cwd-latest/mtime-latest. excludes_source={} excludes_source_id={} \
          has_relaxation={} only_neq={}",
         excludes_source,
