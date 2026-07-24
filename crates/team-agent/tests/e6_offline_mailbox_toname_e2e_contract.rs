@@ -127,8 +127,13 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     );
     assert_eq!(
         body.get("status").and_then(Value::as_str),
-        Some("queued_until_leader_attach"),
-        "E6 e2e RED: unattached leader send must return status=queued_until_leader_attach; output={body}"
+        Some("deferred"),
+        "E6 e2e RED: unattached leader send must return presenter status=deferred; output={body}"
+    );
+    assert_eq!(
+        body.get("deferred_reason").and_then(Value::as_str),
+        Some("never_attached"),
+        "E6 e2e RED: unattached leader send must explain deferred_reason=never_attached; output={body}"
     );
     assert_eq!(
         body.get("message_status").and_then(Value::as_str),
