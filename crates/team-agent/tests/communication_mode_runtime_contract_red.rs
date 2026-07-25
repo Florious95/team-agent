@@ -121,6 +121,81 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
 }
 
 #[test]
+fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestrated() {
+    let root = fixture("negative-boundary", None);
+    let transport = RecordingTransport::default();
+    quick_start_with_transport_in_workspace(
+        &root,
+        &root,
+        None,
+        true,
+        Some("communication-contract-negative-boundary"),
+        &transport,
+    )
+    .expect("official modes must assemble");
+    let spawns = transport.spawns.lock().unwrap();
+    let orchestrated = spawns
+        .iter()
+        .find(|spawn| {
+            spawn
+                .window
+                .as_str()
+                .contains(CommunicationMode::Orchestrated.as_str())
+        })
+        .map(|spawn| flag_value(&spawn.argv, "--append-system-prompt"))
+        .expect("T07/orchestrated: missing recorded spawn");
+
+    for required in [
+        "All communication must go through Team Agent MCP tools.",
+        "If blocked or waiting, send_message to the leader. Do not wait silently.",
+        "report_result exactly once",
+    ] {
+        assert!(
+            orchestrated.contains(required),
+            "T07/orchestrated positive control: removing unconditional duties must preserve common MCP, blocked-reporting, and exact-once obligations; missing {required:?}; prompt={orchestrated:?}"
+        );
+    }
+
+    let default_root = default_fixture("leader-centric-positive-control");
+    let default_transport = RecordingTransport::default();
+    quick_start_with_transport_in_workspace(
+        &default_root,
+        &default_root,
+        None,
+        true,
+        Some("communication-contract-default-positive-control"),
+        &default_transport,
+    )
+    .expect("omitted communication_mode must assemble as leader_centric");
+    let default_spawns = default_transport.spawns.lock().unwrap();
+    let default_prompt = default_spawns
+        .first()
+        .map(|spawn| flag_value(&spawn.argv, "--append-system-prompt"))
+        .expect("T07/leader_centric positive control: missing recorded default spawn");
+    for required in [
+        "Progress, blockers, questions:",
+        "When you receive a message from the leader or a teammate, you MUST respond",
+    ] {
+        assert!(
+            default_prompt.contains(required),
+            "T07/leader_centric positive control: omitted mode must retain {required:?}; prompt={default_prompt:?}"
+        );
+    }
+
+    let leaked = [
+        "Progress, blockers, questions:",
+        "When you receive a message from the leader or a teammate, you MUST respond",
+    ]
+    .into_iter()
+    .filter(|forbidden| orchestrated.contains(forbidden))
+    .collect::<Vec<_>>();
+    assert!(
+        leaked.is_empty(),
+        "T07/orchestrated: assembled final prompt leaks unconditional leader_centric obligations {leaked:?}; prompt={orchestrated:?}"
+    );
+}
+
+#[test]
 fn t06_third_mode_is_rejected_before_any_worker_command_is_assembled() {
     let root = fixture("unknown", Some("synthetic_third_mode"));
     let transport = RecordingTransport::default();
@@ -176,6 +251,23 @@ fn fixture(tag: &str, team_mode: Option<&str>) -> PathBuf {
         )
         .unwrap();
     }
+    root
+}
+
+fn default_fixture(tag: &str) -> PathBuf {
+    let root = fixture(tag, None);
+    for mode in CommunicationMode::ALL {
+        std::fs::remove_file(
+            root.join("agents")
+                .join(format!("worker_{}.md", mode.as_str())),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        root.join("agents").join("worker_default.md"),
+        "---\nname: worker_default\nrole: Communication Worker\nprovider: claude\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL default\n",
+    )
+    .unwrap();
     root
 }
 
