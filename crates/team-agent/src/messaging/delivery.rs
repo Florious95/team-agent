@@ -2071,11 +2071,14 @@ pub(crate) fn observe_leader_receipt(
     let Some(path) = leader_rollout_path(state) else {
         return LeaderReceiptObservation::SourceUnavailable;
     };
-    if rollout_tail_contains(
+    let Ok(observed) = rollout_tail_contains_result(
         &path,
         &format!("[team-agent-token:{message_id}]"),
         64 * 1024,
-    ) {
+    ) else {
+        return LeaderReceiptObservation::SourceUnavailable;
+    };
+    if observed {
         LeaderReceiptObservation::TokenObserved
     } else {
         LeaderReceiptObservation::TokenAbsent
@@ -2802,22 +2805,22 @@ fn claude_recipient_rollout(
 /// Silent on read errors — callers treat missing/unreadable as "token not
 /// present" which forces the unverified path.
 fn rollout_tail_contains(path: &std::path::Path, needle: &str, tail_bytes: u64) -> bool {
+    rollout_tail_contains_result(path, needle, tail_bytes).unwrap_or(false)
+}
+
+fn rollout_tail_contains_result(
+    path: &std::path::Path,
+    needle: &str,
+    tail_bytes: u64,
+) -> std::io::Result<bool> {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let Ok(metadata) = file.metadata() else {
-        return false;
-    };
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
     let len = metadata.len();
     let start = len.saturating_sub(tail_bytes);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return false;
-    }
+    file.seek(SeekFrom::Start(start))?;
     let mut buf = Vec::with_capacity(tail_bytes.min(len) as usize);
-    if file.take(tail_bytes).read_to_end(&mut buf).is_err() {
-        return false;
-    }
+    file.take(tail_bytes).read_to_end(&mut buf)?;
     let haystack = String::from_utf8_lossy(&buf);
-    haystack.contains(needle)
+    Ok(haystack.contains(needle))
 }

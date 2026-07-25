@@ -393,12 +393,16 @@ pub(super) fn count_undelivered_backlog(
     conn: &rusqlite::Connection,
     owner_team_id: Option<&str>,
 ) -> Result<i64, CliError> {
-    // Backlog statuses chosen to mirror what `deliver_pending` would pick up.
+    // Delivery debt is broader than requeue eligibility: a physically injected
+    // row awaiting a future receipt remains undelivered even though it must not
+    // be claimed or injected again.
     let sql = match owner_team_id {
             Some(_) => "select count(*) from messages
-                       where owner_team_id = ?1 and status in ('accepted','pending','queued','queued_until_trust')",
+                       where owner_team_id = ?1 and status in
+                       ('accepted','pending','queued','queued_until_trust','injected_awaiting_receipt')",
             None => "select count(*) from messages
-                     where status in ('accepted','pending','queued','queued_until_trust')",
+                     where status in
+                     ('accepted','pending','queued','queued_until_trust','injected_awaiting_receipt')",
         };
     let count: i64 = match owner_team_id {
         Some(team) => conn
