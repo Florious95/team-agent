@@ -355,6 +355,30 @@ fn send_message_leader_recipient_is_direct_not_accepted() {
     );
 }
 
+#[test]
+fn send_message_mailbox_is_durable_without_live_injection() {
+    let tools = TeamOrchestratorTools::with_identity(
+        &unique_ws("send-leader-mailbox"),
+        Some(AgentId::new("worker-1")),
+        Some(TeamKey::new("teamA")),
+    );
+    let mailbox = json!(true);
+    let outcome = tools
+        .send_message_with_presentation(
+            &MessageTarget::Single("leader".to_string()),
+            "stored update",
+            None,
+            None,
+            None,
+            Some(&mailbox),
+            None,
+        )
+        .expect("mailbox send persists");
+    let value = outcome.to_value();
+    assert_eq!(value.get("status"), Some(&json!("stored_only")));
+    assert!(value.get("message_id").and_then(Value::as_str).is_some());
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // CROSS-TEAM PRE-REFUSAL (C23) — refuse_cross_team_peer (tools.py:185-213)
 // ════════════════════════════════════════════════════════════════════════

@@ -2100,8 +2100,14 @@ mod tests {
     }
 
     #[test]
-    fn send_presentation_flags_map_to_the_typed_request() {
+    fn send_mailbox_and_legacy_progress_map_to_the_one_bit_request() {
         let cwd = tmp_workspace();
+        let mailbox = send_args(&cli_argv(&["leader", "progress", "--mailbox"]), &cwd).unwrap();
+        assert_eq!(
+            mailbox.presentation.sink,
+            crate::messaging::presentation::PresentationSink::Casefile
+        );
+
         let args = send_args(
             &cli_argv(&[
                 "leader",
@@ -2122,9 +2128,9 @@ mod tests {
         );
         assert_eq!(
             args.presentation.class,
-            crate::messaging::presentation::PresentationClass::Progress
+            crate::messaging::presentation::PresentationClass::Message
         );
-        assert_eq!(args.presentation.case_id.as_deref(), Some("case-9"));
+        assert_eq!(args.presentation.case_id, None);
     }
 
     #[test]
@@ -2137,7 +2143,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            CliError::Usage(message) if message == "invalid presentation: missing_class"
+            CliError::Usage(message) if message == "invalid send routing: missing_class"
         ));
     }
 
