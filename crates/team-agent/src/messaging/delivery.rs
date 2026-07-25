@@ -220,7 +220,12 @@ pub fn deliver_pending_message(
         }
         _ => state,
     };
-    if message.recipient == "leader" && message.status == "submitted_pending_acceptance" {
+    if message.recipient == "leader"
+        && matches!(
+            message.status.as_str(),
+            "submitted_pending_acceptance" | "injected_awaiting_receipt"
+        )
+    {
         return observe_pending_leader_acceptance(store, event_log, state, message_id);
     }
     if message.recipient == "leader" && message.status == "queued_until_leader_attach" {
@@ -711,19 +716,30 @@ pub fn deliver_pending_message(
     }
     if is_leader_recipient {
         store.record_delivery_submission(message_id, readback_verified)?;
-        if !leader_transcript_has_token(state, message_id) {
-            store.mark(message_id, "submitted_pending_acceptance", None)?;
-            event_log.write(
-                "leader_receiver.acceptance_pending",
-                serde_json::json!({
-                    "message_id": message_id,
-                    "reason": "provider_receipt_not_observed",
-                }),
-            )?;
-            return Ok(leader_acceptance_pending_outcome(
-                message_id,
-                "submitted_pending_acceptance",
-            ));
+        match observe_leader_receipt(state, message_id) {
+            LeaderReceiptObservation::SourceUnavailable => {
+                store.mark_injected_awaiting_receipt(message_id)?;
+                event_log.write(
+                    "leader_receiver.receipt_source_unavailable",
+                    serde_json::json!({"message_id": message_id}),
+                )?;
+                return Ok(leader_receipt_source_unavailable_outcome(message_id));
+            }
+            LeaderReceiptObservation::TokenAbsent => {
+                store.mark(message_id, "submitted_pending_acceptance", None)?;
+                event_log.write(
+                    "leader_receiver.acceptance_pending",
+                    serde_json::json!({
+                        "message_id": message_id,
+                        "reason": "provider_receipt_not_observed",
+                    }),
+                )?;
+                return Ok(leader_acceptance_pending_outcome(
+                    message_id,
+                    "submitted_pending_acceptance",
+                ));
+            }
+            LeaderReceiptObservation::TokenObserved => {}
         }
         store.mark_delivered_with_receipt(message_id)?;
     } else {
@@ -2041,15 +2057,33 @@ fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> 
         .map(std::path::PathBuf::from)
 }
 
-pub(crate) fn leader_transcript_has_token(state: &serde_json::Value, message_id: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeaderReceiptObservation {
+    SourceUnavailable,
+    TokenAbsent,
+    TokenObserved,
+}
+
+pub(crate) fn observe_leader_receipt(
+    state: &serde_json::Value,
+    message_id: &str,
+) -> LeaderReceiptObservation {
     let Some(path) = leader_rollout_path(state) else {
-        return false;
+        return LeaderReceiptObservation::SourceUnavailable;
     };
-    rollout_tail_contains(
+    if rollout_tail_contains(
         &path,
         &format!("[team-agent-token:{message_id}]"),
         64 * 1024,
-    )
+    ) {
+        LeaderReceiptObservation::TokenObserved
+    } else {
+        LeaderReceiptObservation::TokenAbsent
+    }
+}
+
+pub(crate) fn leader_transcript_has_token(state: &serde_json::Value, message_id: &str) -> bool {
+    observe_leader_receipt(state, message_id) == LeaderReceiptObservation::TokenObserved
 }
 
 fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> DeliveryOutcome {
@@ -2065,17 +2099,41 @@ fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> Delivery
     }
 }
 
+pub(crate) fn leader_receipt_source_unavailable_outcome(message_id: &str) -> DeliveryOutcome {
+    DeliveryOutcome {
+        ok: true,
+        status: DeliveryStatus::Blocked,
+        message_status: MessageStatusShadow("injected_awaiting_receipt".to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: Some("leader_receipt_source_unavailable".to_string()),
+        stage: Some(DeliveryStage::Submit),
+        reason: None,
+        channel: Some("leader_receipt_source_unavailable".to_string()),
+    }
+}
+
 fn observe_pending_leader_acceptance(
     store: &MessageStore,
     event_log: &EventLog,
     state: &serde_json::Value,
     message_id: &str,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    if !leader_transcript_has_token(state, message_id) {
-        return Ok(leader_acceptance_pending_outcome(
-            message_id,
-            "submitted_pending_acceptance",
-        ));
+    match observe_leader_receipt(state, message_id) {
+        LeaderReceiptObservation::SourceUnavailable => {
+            store.mark_injected_awaiting_receipt(message_id)?;
+            event_log.write(
+                "leader_receiver.receipt_source_unavailable",
+                serde_json::json!({"message_id": message_id}),
+            )?;
+            return Ok(leader_receipt_source_unavailable_outcome(message_id));
+        }
+        LeaderReceiptObservation::TokenAbsent => {
+            return Ok(leader_acceptance_pending_outcome(
+                message_id,
+                "submitted_pending_acceptance",
+            ));
+        }
+        LeaderReceiptObservation::TokenObserved => {}
     }
     store.mark_delivered_with_receipt(message_id)?;
     event_log.write(

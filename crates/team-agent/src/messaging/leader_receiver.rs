@@ -397,29 +397,46 @@ pub fn deliver_to_leader_fallback_pane(
             let readback_ok = super::delivery::pane_readback_verified(&report);
             if submit_ok {
                 store.record_delivery_submission(message_id, readback_ok)?;
-                if !super::delivery::leader_transcript_has_token(state, message_id) {
-                    store.mark(message_id, "submitted_pending_acceptance", None)?;
-                    event_log.write(
-                        "leader_receiver.acceptance_pending",
-                        serde_json::json!({
-                            "message_id": message_id,
-                            "result_id": result_id,
-                            "reason": "provider_receipt_not_observed",
-                            "channel": "fallback_pane",
-                        }),
-                    )?;
-                    return Ok(DeliveryOutcome {
-                        ok: true,
-                        status: DeliveryStatus::RetryScheduled,
-                        message_status: MessageStatusShadow(
-                            "submitted_pending_acceptance".to_string(),
-                        ),
-                        message_id: Some(message_id.to_string()),
-                        verification: Some("provider_receipt_not_observed".to_string()),
-                        stage: Some(DeliveryStage::Submit),
-                        reason: None,
-                        channel: Some("leader_acceptance_pending".to_string()),
-                    });
+                match super::delivery::observe_leader_receipt(state, message_id) {
+                    super::delivery::LeaderReceiptObservation::SourceUnavailable => {
+                        store.mark_injected_awaiting_receipt(message_id)?;
+                        event_log.write(
+                            "leader_receiver.receipt_source_unavailable",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "result_id": result_id,
+                                "channel": "fallback_pane",
+                            }),
+                        )?;
+                        return Ok(super::delivery::leader_receipt_source_unavailable_outcome(
+                            message_id,
+                        ));
+                    }
+                    super::delivery::LeaderReceiptObservation::TokenAbsent => {
+                        store.mark(message_id, "submitted_pending_acceptance", None)?;
+                        event_log.write(
+                            "leader_receiver.acceptance_pending",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "result_id": result_id,
+                                "reason": "provider_receipt_not_observed",
+                                "channel": "fallback_pane",
+                            }),
+                        )?;
+                        return Ok(DeliveryOutcome {
+                            ok: true,
+                            status: DeliveryStatus::RetryScheduled,
+                            message_status: MessageStatusShadow(
+                                "submitted_pending_acceptance".to_string(),
+                            ),
+                            message_id: Some(message_id.to_string()),
+                            verification: Some("provider_receipt_not_observed".to_string()),
+                            stage: Some(DeliveryStage::Submit),
+                            reason: None,
+                            channel: Some("leader_acceptance_pending".to_string()),
+                        });
+                    }
+                    super::delivery::LeaderReceiptObservation::TokenObserved => {}
                 }
                 store.mark_delivered_with_receipt(message_id)?;
                 event_log.write(

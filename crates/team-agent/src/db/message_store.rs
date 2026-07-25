@@ -97,6 +97,7 @@ pub enum MessageRowStatus {
     QueuedPaneMissing,
     TargetResolved,
     SubmittedAwaitingReceipt,
+    InjectedAwaitingReceipt,
     SubmittedUnverified,
     Delivered,
     Acknowledged,
@@ -115,6 +116,7 @@ impl MessageRowStatus {
         Self::QueuedPaneMissing,
         Self::TargetResolved,
         Self::SubmittedAwaitingReceipt,
+        Self::InjectedAwaitingReceipt,
         Self::SubmittedUnverified,
         Self::Delivered,
         Self::Acknowledged,
@@ -133,6 +135,7 @@ impl MessageRowStatus {
             Self::QueuedPaneMissing => "queued_pane_missing",
             Self::TargetResolved => "target_resolved",
             Self::SubmittedAwaitingReceipt => "submitted_pending_acceptance",
+            Self::InjectedAwaitingReceipt => "injected_awaiting_receipt",
             Self::SubmittedUnverified => "submitted_unverified",
             Self::Delivered => "delivered",
             Self::Acknowledged => "acknowledged",
@@ -394,7 +397,10 @@ impl MessageStore {
              acknowledged_at = case when ?2 = 'acknowledged' then ?3 else acknowledged_at end,
              error = case when ?2 = 'delivered' then null else coalesce(?4, error) end
              where message_id = ?1
-               and status not in ('acknowledged', 'consumed', 'submitted_pending_acceptance')
+               and status not in (
+                   'acknowledged', 'consumed', 'submitted_pending_acceptance',
+                   'injected_awaiting_receipt'
+               )
                and (status != 'delivered' or ?2 in ('delivered', 'acknowledged'))
                and (?2 != 'acknowledged' or status = 'delivered')",
             params![message_id, status, now, error],
@@ -465,6 +471,44 @@ impl MessageStore {
                  failure_reason = null",
             params![message_id, now, visible.then_some(now_ts())],
         )?;
+        Ok(())
+    }
+
+    /// Persist a verified leader transport submission when no provider receipt
+    /// source is available. This state is claim/requeue-ineligible but does not
+    /// clear the delivery obligation; `consumed_at` remains unset until a
+    /// provider-side receipt reaches `mark_delivered_with_receipt`.
+    pub fn mark_injected_awaiting_receipt(
+        &self,
+        message_id: &str,
+    ) -> Result<(), MessageStoreError> {
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let changed = conn.execute(
+            "update messages
+             set status = ?2,
+                 updated_at = ?3,
+                 error = 'leader_receipt_source_unavailable'
+             where message_id = ?1
+               and status in (?4, ?5, ?6)
+               and exists (
+                   select 1 from delivery_tokens
+                   where delivery_tokens.message_id = messages.message_id
+                     and delivery_tokens.injected_at is not null
+               )",
+            params![
+                message_id,
+                MessageRowStatus::InjectedAwaitingReceipt.as_str(),
+                now_ts(),
+                MessageRowStatus::TargetResolved.as_str(),
+                MessageRowStatus::SubmittedAwaitingReceipt.as_str(),
+                MessageRowStatus::InjectedAwaitingReceipt.as_str(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(MessageStoreError::DeliveryReceiptMissing(
+                message_id.to_string(),
+            ));
+        }
         Ok(())
     }
 

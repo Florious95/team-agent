@@ -968,6 +968,8 @@ fn report_result_for_owner_team_inner(
     let leader_notified = matches!(outcome.status, crate::messaging::DeliveryStatus::Delivered);
     let notification_status_wire = if leader_notified {
         "delivered"
+    } else if outcome.channel.as_deref() == Some("leader_receipt_source_unavailable") {
+        "injected_awaiting_receipt"
     } else if outcome.channel.as_deref() == Some("leader_acceptance_pending") {
         "submitted_pending_acceptance"
     } else if outcome.channel.as_deref() == Some("rebind_required")
