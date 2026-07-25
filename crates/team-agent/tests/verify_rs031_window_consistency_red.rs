@@ -535,7 +535,7 @@ fn assert_bound_reachable_leader_send_message_injects(
     // Injection-case revision (MUST-10 boundary): the single delivery
     // authority must physically inject into the claimed leader pane exactly
     // once, but a transport submit is not a provider receipt — the row parks
-    // as submitted_pending_acceptance and must NOT be reported delivered.
+    // as injected_awaiting_receipt and must NOT be reported delivered.
     assert!(
         targets
             .iter()
@@ -551,9 +551,9 @@ fn assert_bound_reachable_leader_send_message_injects(
          mark the row delivered. delivered={delivered:?} events={events}"
     );
     assert_eq!(
-        status, "submitted_pending_acceptance",
+        status, "injected_awaiting_receipt",
         "BUG-4 single-authority contract: the injected row parks as \
-         submitted_pending_acceptance until a provider receipt. status={status:?} events={events}"
+         injected_awaiting_receipt until a provider receipt. status={status:?} events={events}"
     );
     assert!(
         !events.contains("\"reason\":\"leader_not_attached\""),

@@ -228,17 +228,17 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
 
     // Injection-case revision (MUST-10 boundary): attach must wake the mailbox
     // and physically inject, but a physical submit is not a provider receipt —
-    // the SAME row parks as submitted_pending_acceptance, never jumps straight
+    // the SAME row parks as injected_awaiting_receipt, never jumps straight
     // to delivered on transport success alone.
     let accepted = wait_for_message_status(
         case.target_workspace(),
         &message_id,
-        "submitted_pending_acceptance",
+        "injected_awaiting_receipt",
     );
     assert!(
         accepted,
         "E6 e2e RED: attach-leader must requeue the same message_id={message_id} and park it as \
-         submitted_pending_acceptance after the physical inject; rows={:?}",
+         injected_awaiting_receipt after the physical inject; rows={:?}",
         message_rows(case.target_workspace(), &token)
     );
     let pane_text = wait_for_pane_token(&tmux_socket, &pane, &token);
