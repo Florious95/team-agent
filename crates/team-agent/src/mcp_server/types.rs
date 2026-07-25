@@ -322,6 +322,7 @@ pub enum SendOutcome {
         message_id: String,
         /// Byte-stable `"team-agent inbox <message_id>"`.
         poll_via: String,
+        warning: Option<String>,
     },
     /// Compacted delegate result (leader / `*` / broadcast / fanout).
     Direct(ToolOk),
@@ -335,12 +336,16 @@ impl SendOutcome {
             SendOutcome::WorkerAccepted {
                 message_id,
                 poll_via,
+                warning,
             } => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("status".to_string(), Value::String("accepted".to_string()));
                 obj.insert("delivery_pending".to_string(), Value::Bool(true));
                 obj.insert("poll_via".to_string(), Value::String(poll_via.clone()));
                 obj.insert("message_id".to_string(), Value::String(message_id.clone()));
+                if let Some(warning) = warning {
+                    obj.insert("warning".to_string(), Value::String(warning.clone()));
+                }
                 Value::Object(obj)
             }
             SendOutcome::Direct(ok) => Value::Object(ok.fields.clone()),

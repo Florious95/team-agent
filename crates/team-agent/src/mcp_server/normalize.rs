@@ -260,6 +260,7 @@ pub fn compact_tool_result(result: &Value) -> ToolResult {
             "notification_channel",
             "notification_event_id",
             "warnings",
+            "warning",
         ]
     };
     for key in keys {

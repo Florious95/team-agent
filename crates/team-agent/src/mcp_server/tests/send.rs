@@ -78,6 +78,7 @@ fn send_outcome_worker_accepted_envelope_byte_stable() {
     let outcome = SendOutcome::WorkerAccepted {
         message_id: "42".to_string(),
         poll_via: "team-agent inbox 42".to_string(),
+        warning: None,
     };
     let v = outcome.to_value();
     assert_eq!(
@@ -160,6 +161,7 @@ fn send_message_worker_recipient_returns_accepted_with_poll_hint() {
         Ok(SendOutcome::WorkerAccepted {
             message_id,
             poll_via,
+            ..
         }) => {
             assert!(!message_id.is_empty());
             assert_eq!(poll_via, format!("team-agent inbox {message_id}"));

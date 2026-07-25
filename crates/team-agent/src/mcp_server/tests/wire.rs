@@ -79,7 +79,7 @@ fn tools_contract_has_thirteen_tools_in_order() {
         .unwrap();
     assert_eq!(
             send["description"],
-            json!("Send a message to a teammate, the leader, or '*' for all other team members. Team Agent fills identity and delivery metadata; optional presentation routing is durable and never drops the message.")
+            json!("Send a message to a teammate, the leader, or '*' for all other team members. mailbox=true stores durably without live injection; the default is live delivery.")
         );
     assert_eq!(send["inputSchema"]["additionalProperties"], json!(false));
     assert_eq!(send["inputSchema"]["required"], json!(["to", "content"]));

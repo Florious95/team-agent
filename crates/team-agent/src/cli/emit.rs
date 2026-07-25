@@ -346,10 +346,10 @@ fn command_help(command: Option<&str>) -> String {
         Some("send") => concat!(
             "usage: team-agent send TO MESSAGE... ",
             "[--workspace WORKSPACE] [--team TEAM] ",
-            "[--presentation-sink leader|casefile|silent --message-class CLASS [--case-id CASE]] ",
+            "[--mailbox] ",
             "[--json]\n\n",
             "TO is a logical recipient; send returns after the message is persisted. ",
-            "Presentation changes live display only; every sink remains durable."
+            "--mailbox stores durably without live injection; omitted sends to the live conversation."
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
@@ -806,6 +806,7 @@ struct ParsedArgs {
     socket: Option<String>,
     thread_id: Option<String>,
     message_id: Option<String>,
+    mailbox: bool,
     presentation_sink: Option<String>,
     message_class: Option<String>,
     case_id: Option<String>,
@@ -899,6 +900,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--socket" => parsed.socket = next_arg(args, &mut i),
             "--thread-id" => parsed.thread_id = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
+            "--mailbox" => parsed.mailbox = true,
             "--presentation-sink" => parsed.presentation_sink = next_arg(args, &mut i),
             "--message-class" => parsed.message_class = next_arg(args, &mut i),
             "--case-id" => parsed.case_id = next_arg(args, &mut i),
@@ -1089,10 +1091,14 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     } else {
         None
     };
-    let (presentation, presentation_error) =
-        crate::messaging::presentation::normalize_presentation(presentation_value.as_ref());
-    if let Some(error) = presentation_error {
-        return Err(CliError::Usage(format!("invalid presentation: {error}")));
+    let mailbox_value = parsed.mailbox.then(|| serde_json::json!(true));
+    let normalized = crate::messaging::presentation::normalize_send_presentation(
+        mailbox_value.as_ref(),
+        presentation_value.as_ref(),
+    )
+    .map_err(|error| CliError::Usage(format!("invalid send routing: {error}")))?;
+    if let Some(deprecation) = normalized.deprecation {
+        eprintln!("warning: {deprecation}");
     }
     Ok(SendArgs {
         target,
@@ -1114,7 +1120,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         confirm_human: false,
         json: parsed.json,
         message_id: None,
-        presentation,
+        presentation: normalized.request,
         pane: parsed.pane.clone(),
         to_name: parsed.to_name.clone(),
         to_leader: parsed.to_leader.clone(),
@@ -1177,6 +1183,7 @@ fn validate_send_flags(args: &[String]) -> Result<(), CliError> {
         "--timeout",
         "--confirm-human",
         "--message-id",
+        "--mailbox",
         "--presentation-sink",
         "--message-class",
         "--case-id",

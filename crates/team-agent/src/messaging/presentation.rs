@@ -98,6 +98,12 @@ pub struct PresentationDecision {
     pub policy_version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendPresentationInput {
+    pub request: PresentationRequest,
+    pub deprecation: Option<String>,
+}
+
 impl Default for PresentationRequest {
     fn default() -> Self {
         Self {
@@ -175,6 +181,79 @@ pub fn normalize_report_presentation(
         return (request, Some("missing_case_id".to_string()));
     }
     (request, None)
+}
+
+/// Normalize the one-bit send surface and the temporary S-011 compatibility
+/// input into the existing presentation disposition primitive.
+///
+/// S-011 sensitive: if the compatibility period is ended by a hard-cut
+/// decision, replace this table with one uniform legacy-input refusal.
+pub fn normalize_send_presentation(
+    mailbox: Option<&Value>,
+    legacy_presentation: Option<&Value>,
+) -> Result<SendPresentationInput, String> {
+    if mailbox.is_some() && legacy_presentation.is_some() {
+        return Err("mailbox_conflicts_with_deprecated_presentation".to_string());
+    }
+    if let Some(mailbox) = mailbox {
+        let Some(mailbox) = mailbox.as_bool() else {
+            return Err("mailbox_must_be_boolean".to_string());
+        };
+        return Ok(SendPresentationInput {
+            request: PresentationRequest {
+                sink: if mailbox {
+                    PresentationSink::Casefile
+                } else {
+                    PresentationSink::Leader
+                },
+                class: PresentationClass::Message,
+                case_id: None,
+            },
+            deprecation: None,
+        });
+    }
+    let Some(legacy) = legacy_presentation else {
+        return Ok(SendPresentationInput {
+            request: PresentationRequest::default(),
+            deprecation: None,
+        });
+    };
+    let Some(object) = legacy.as_object() else {
+        return Err("malformed_presentation".to_string());
+    };
+    let Some(class) = object.get("class").and_then(Value::as_str) else {
+        return Err("missing_class".to_string());
+    };
+    let Some(class) = PresentationClass::parse(class) else {
+        return Err(format!("unknown_class:{class}"));
+    };
+    let sink = match class {
+        PresentationClass::Message | PresentationClass::Blocking | PresentationClass::Timeout => {
+            PresentationSink::Leader
+        }
+        PresentationClass::Progress => PresentationSink::Casefile,
+        PresentationClass::StageResult
+        | PresentationClass::StagePass
+        | PresentationClass::Bounce
+        | PresentationClass::FinalReview => {
+            return Err(format!(
+                "deprecated_message_class:{}_requires_result_route",
+                class.as_str()
+            ));
+        }
+    };
+    Ok(SendPresentationInput {
+        request: PresentationRequest {
+            sink,
+            class: PresentationClass::Message,
+            case_id: None,
+        },
+        deprecation: Some(format!(
+            "message-class={} is deprecated; use mailbox={} instead",
+            class.as_str(),
+            sink != PresentationSink::Leader
+        )),
+    })
 }
 
 pub fn normalize_presentation(value: Option<&Value>) -> (PresentationRequest, Option<String>) {
@@ -303,5 +382,35 @@ mod tests {
             None,
             "send normalization remains unchanged"
         );
+    }
+
+    #[test]
+    fn send_mailbox_and_s011_compatibility_map_to_one_bit() {
+        let mailbox = normalize_send_presentation(Some(&json!(true)), None).unwrap();
+        assert_eq!(mailbox.request.sink, PresentationSink::Casefile);
+        assert_eq!(mailbox.deprecation, None);
+
+        for (class, sink) in [
+            ("message", PresentationSink::Leader),
+            ("progress", PresentationSink::Casefile),
+            ("blocking", PresentationSink::Leader),
+            ("timeout", PresentationSink::Leader),
+        ] {
+            let legacy = json!({"sink": "silent", "class": class});
+            let mapped = normalize_send_presentation(None, Some(&legacy)).unwrap();
+            assert_eq!(mapped.request.sink, sink, "{class}");
+            assert!(mapped.deprecation.is_some(), "{class}");
+        }
+    }
+
+    #[test]
+    fn s011_stage_classes_require_result_route() {
+        for class in ["stage_result", "stage_pass", "bounce", "final_review"] {
+            let legacy = json!({"sink": "leader", "class": class});
+            assert_eq!(
+                normalize_send_presentation(None, Some(&legacy)).unwrap_err(),
+                format!("deprecated_message_class:{class}_requires_result_route")
+            );
+        }
     }
 }

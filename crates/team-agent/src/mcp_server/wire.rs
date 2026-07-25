@@ -369,7 +369,7 @@ fn python_repr(value: &str) -> String {
 fn tool_contract(tool: McpTool) -> Value {
     let (description, required) = match tool {
         McpTool::SendMessage => (
-            "Send a message to a teammate, the leader, or '*' for all other team members. Team Agent fills identity and delivery metadata; optional presentation routing is durable and never drops the message.",
+            "Send a message to a teammate, the leader, or '*' for all other team members. mailbox=true stores durably without live injection; the default is live delivery.",
             vec!["to", "content"],
         ),
         McpTool::AssignTask => ("Assign or update a task in the team graph and deliver it to its assignee.", vec!["task"]),
@@ -424,8 +424,10 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
             insert_property(&mut properties, "content", string_property("Message body."));
             insert_property(
                 &mut properties,
-                "presentation",
-                presentation_property("Optional durable presentation routing."),
+                "mailbox",
+                boolean_property(
+                    "Set true to store durably without live injection; omit for default live delivery.",
+                ),
             );
         }
         McpTool::ReportResult => {
@@ -646,6 +648,7 @@ pub(crate) fn dispatch_tool(
                 None,
                 None,
                 None,
+                args.get("mailbox"),
                 args.get("presentation"),
             )?;
             match outcome {

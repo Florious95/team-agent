@@ -185,6 +185,7 @@ impl TeamOrchestratorTools {
             requires_ack,
             scope_override,
             None,
+            None,
         )
     }
 
@@ -195,17 +196,20 @@ impl TeamOrchestratorTools {
         task_id: Option<&str>,
         requires_ack: Option<bool>,
         scope_override: Option<Scope>,
+        mailbox: Option<&Value>,
         presentation: Option<&Value>,
     ) -> Result<SendOutcome, ToolError> {
-        let (presentation, presentation_error) =
-            crate::messaging::presentation::normalize_presentation(presentation);
-        if let Some(error) = presentation_error {
-            return Err(ToolError::new(
-                ToolErrorReason::InvalidToolArguments,
-                format!("invalid presentation: {error}"),
-                "PresentationError",
-            ));
-        }
+        let normalized =
+            crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
+                .map_err(|error| {
+                    ToolError::new(
+                        ToolErrorReason::InvalidToolArguments,
+                        format!("invalid send routing: {error}"),
+                        "PresentationError",
+                    )
+                })?;
+        let presentation = normalized.request;
+        let deprecation = normalized.deprecation;
         let canonical_owner_team = self.canonical_owner_team_key()?;
         if matches!(scope_override, Some(Scope::Workspace)) {
             return Err(self.rpc_scope_refused(
@@ -276,12 +280,17 @@ impl TeamOrchestratorTools {
             return Ok(SendOutcome::WorkerAccepted {
                 poll_via: format!("team-agent inbox {message_id}"),
                 message_id,
+                warning: deprecation,
             });
         }
         let out = messaging::send_message(&self.workspace, to, content, &opts)
             .map_err(tool_runtime_error)?;
         let value = delivery_outcome_value(&out);
-        let ok = compact_tool_result(&value)?;
+        let mut ok = compact_tool_result(&value)?;
+        if let Some(deprecation) = deprecation {
+            ok.fields
+                .insert("warning".to_string(), Value::String(deprecation));
+        }
         Ok(SendOutcome::Direct(ok))
     }
 
