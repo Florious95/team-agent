@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.59
+
+- **Fix: honest delivery receipts for agents that never attached.** Durable sends now report `deferred_reason=never_attached` through the accepted, deferred, and terminal receipt states instead of implying pane delivery. The signed E6/E7 contracts were reanchored together so offline mailbox and host-leader registry paths share the same typed truth.
+
+- **Fix: `report_result` accepts executed evidence without accepting unknown shapes.** The result ingress recognizes the canonical executed-test evidence schema used by workers, while malformed or unknown evidence structures still fail closed. Honest reports are no longer rejected merely because they carry execution proof.
+
+- **Feature: equal send addressing for short and fully logical names.** Within a selected team, a short agent id and its fully logical name are both first-class documented selectors and converge on the same persisted send contract.
+
+- **Fix: BrokenPipe no longer masks an already-persisted send.** CLI stdout failure is separated from the durable message fact, so a closed output consumer cannot turn a successfully stored message into an unexplained delivery failure.
+
+### Independent test debt
+
+`perf_tick_red::p7_orphaned_coordinator_self_terminates_after_workspace_delete` remains a pre-existing orphan-event capture race, not a 0.5.59 regression. Same-condition whole-binary sampling produced candidate `F P P P F P F P P P F P P P P` (4/15) and released 0.5.58 `P P P P P P P P F P P P P F P` (2/15), with the identical `coordinator.exit reason=stop` signature in every failure.
+
 ## 0.5.58
 
 - **Feature: bounded, state-authoritative provider context forks.** `fork-agent` no longer treats a 10-second backing-observation window as a hard business failure: cold forks return typed `pending_context_fork` while canonical provider backing converges, preserve the source nonce and source session byte-for-byte, exclude source/foreign candidates, and finalize only a verified distinct target tuple. Five bounded real-subscription gate iterations exercised the fork boundary from setup through first-turn delivery, confirming the typed pending path, nonce inheritance, source safety, and fail-closed attribution.
