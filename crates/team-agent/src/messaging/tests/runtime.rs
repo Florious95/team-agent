@@ -2976,9 +2976,8 @@ fn gate054_attached_status_still_accepts_when_pane_is_live() {
     // Injection-case revision: transport submit success is NOT a provider
     // receipt, so the old `delivered` pin was a false-positive lock
     // (MUST-10: physical submit is the framework's fact; acceptance is the
-    // provider's). The un-refused path now parks the SAME row in
-    // submitted_pending_acceptance until a provider receipt or retry
-    // schedule advances it.
+    // provider's). The un-refused path now records the SAME row in the typed
+    // post-injection fact state until a provider receipt advances it.
     let ws = tmp_ws("gate054ok");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
@@ -3012,10 +3011,18 @@ fn gate054_attached_status_still_accepts_when_pane_is_live() {
         1,
         "gate054: exactly one physical inject must have happened (MUST-10 anchor)"
     );
+    let injected_awaiting_receipt = crate::db::message_store::MessageRowStatus::ALL
+        .iter()
+        .map(|status| status.as_str())
+        .find(|status| *status == "injected_awaiting_receipt")
+        .expect(
+            "gate054 signed reanchor: typed status directory must expose \
+             injected_awaiting_receipt",
+        );
     assert_eq!(
-        out.message_status.0, "submitted_pending_acceptance",
-        "gate054 (injection-case revision): a successful physical submit without a provider \
-         receipt must park as submitted_pending_acceptance, never claim delivered: {out:?}"
+        out.message_status.0, injected_awaiting_receipt,
+        "gate054 signed reanchor: a successful physical inject without a provider receipt \
+         must remain non-delivered as injected_awaiting_receipt, never claim delivered: {out:?}"
     );
 }
 
