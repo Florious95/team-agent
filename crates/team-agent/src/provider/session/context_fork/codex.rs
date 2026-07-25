@@ -13,8 +13,18 @@ impl CodexForkMaterialization {
         &self.path
     }
 
-    pub(crate) fn handoff(&mut self) {
+    fn mark_handoff(&mut self) {
         self.keep = true;
+    }
+}
+
+impl crate::provider::adapter::ForkBackingMaterialization for CodexForkMaterialization {
+    fn path(&self) -> &Path {
+        self.path()
+    }
+
+    fn handoff(&mut self) {
+        self.mark_handoff();
     }
 }
 

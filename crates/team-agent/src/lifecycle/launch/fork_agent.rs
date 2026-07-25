@@ -240,29 +240,19 @@ pub fn fork_agent_with_transport(
         Some(&fork_team),
     );
     let spawned_at = spawn_timestamp_for_agent(1);
-    let mut codex_fork = if provider == Provider::Codex {
-        Some(
-            crate::provider::session::materialize_codex_fork(
-                &source_backing,
-                &session_id,
-                source_agent_id.as_str(),
-                as_agent_id.as_str(),
-                &mut plan,
-            )
-            .map_err(|error| {
-                let _ = std::fs::write(&spec_path, text.as_bytes());
-                cleanup_fork_mcp_artifacts(
-                    &workspace,
-                    as_agent_id,
-                    &mcp_config_path,
-                    &profile_launch,
-                );
-                LifecycleError::Provider(error.to_string())
-            })?,
+    let mut codex_fork = adapter
+        .materialize_fork_backing(
+            &source_backing,
+            &session_id,
+            source_agent_id.as_str(),
+            as_agent_id.as_str(),
+            &mut plan,
         )
-    } else {
-        None
-    };
+        .map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            LifecycleError::Provider(error.to_string())
+        })?;
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         plan.provider_projects_root = source_backing.parent().map(Path::to_path_buf);
     }

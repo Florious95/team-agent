@@ -12,6 +12,11 @@ use super::{AuthMode, Provider};
 
 pub use crate::provider::session_scan::{CaptureSessionContext, CapturedSessionCandidate};
 
+pub trait ForkBackingMaterialization {
+    fn path(&self) -> &Path;
+    fn handoff(&mut self);
+}
+
 // ===========================================================================
 // TRAIT: ProviderAdapter (method SIGNATURES only — 无 body)
 // ===========================================================================
@@ -185,6 +190,24 @@ pub trait ProviderAdapter {
             ctx.tools,
         )
         .map(CommandPlan::argv_only)
+    }
+
+    fn materialize_fork_backing(
+        &self,
+        source_path: &Path,
+        source_session_id: &SessionId,
+        source_agent_id: &str,
+        target_agent_id: &str,
+        plan: &mut CommandPlan,
+    ) -> Result<Option<Box<dyn ForkBackingMaterialization>>, ProviderError> {
+        let _ = (
+            source_path,
+            source_session_id,
+            source_agent_id,
+            target_agent_id,
+            plan,
+        );
+        Ok(None)
     }
 
     /// 计算本 provider 该用的 MCP server 配置(`adapter.py` mcp_config;claude
@@ -546,6 +569,29 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.tools,
                 )
                 .map(CommandPlan::argv_only),
+        }
+    }
+
+    fn materialize_fork_backing(
+        &self,
+        source_path: &Path,
+        source_session_id: &SessionId,
+        source_agent_id: &str,
+        target_agent_id: &str,
+        plan: &mut CommandPlan,
+    ) -> Result<Option<Box<dyn ForkBackingMaterialization>>, ProviderError> {
+        match self.provider {
+            Provider::Codex => crate::provider::session::materialize_codex_fork(
+                source_path,
+                source_session_id,
+                source_agent_id,
+                target_agent_id,
+                plan,
+            )
+            .map(|materialized| {
+                Some(Box::new(materialized) as Box<dyn ForkBackingMaterialization>)
+            }),
+            _ => Ok(None),
         }
     }
 
