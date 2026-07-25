@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
@@ -374,6 +375,14 @@ fn verify_legacy_codex_fork(
     spawned_at: &str,
     deadline: Duration,
 ) -> Result<ContextForkProof, ContextForkTermination> {
+    let mut excluded_session_ids = BTreeSet::new();
+    excluded_session_ids.insert(source_session_id.as_str().to_string());
+    let mut excluded_backing_paths = BTreeSet::new();
+    for path in before.files.keys() {
+        if session_id_from_jsonl(path).as_deref() == Some(source_session_id.as_str()) {
+            excluded_backing_paths.insert(path.clone());
+        }
+    }
     let context = crate::provider::session_scan::CaptureSessionContext {
         agent_id: agent_id.to_string(),
         spawn_cwd: spawn_cwd.to_path_buf(),
@@ -393,6 +402,9 @@ fn verify_legacy_codex_fork(
             let Some(path) = candidate.captured.rollout_path.as_ref() else {
                 continue;
             };
+            if excluded_backing_paths.contains(path.as_path()) {
+                continue;
+            }
             let Some(stamp) = current.get(path.as_path()) else {
                 continue;
             };
@@ -402,7 +414,7 @@ fn verify_legacy_codex_fork(
             let Some(session_id) = candidate.captured.session_id else {
                 continue;
             };
-            if &session_id == source_session_id {
+            if excluded_session_ids.contains(session_id.as_str()) {
                 continue;
             }
             matches.push((session_id, path.as_path().to_path_buf()));
