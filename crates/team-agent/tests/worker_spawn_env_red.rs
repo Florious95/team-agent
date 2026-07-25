@@ -386,8 +386,28 @@ fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
 
 fn seed_forkable_source_state(team: &Path, agent_id: &str) {
     let workspace = team_agent::model::paths::team_workspace(team).unwrap();
-    let rollout = workspace.join(format!("{agent_id}-rollout.jsonl"));
-    std::fs::write(&rollout, "{\"session_id\":\"sess-worker-a\"}\n").unwrap();
+    let rollout_root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
+        .join(".codex/sessions/worker-spawn-source");
+    std::fs::create_dir_all(&rollout_root).unwrap();
+    let rollout = rollout_root.join("rollout-sess-worker-a.jsonl");
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {"id": "sess-worker-a", "cwd": workspace}
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {"content": [{
+                    "type": "input_text",
+                    "text": format!("You are Team Agent worker `{agent_id}` with role `fixture`.")
+                }]}
+            })
+        ),
+    )
+    .unwrap();
     team_agent::state::persist::save_runtime_state(
         &workspace,
         &json!({

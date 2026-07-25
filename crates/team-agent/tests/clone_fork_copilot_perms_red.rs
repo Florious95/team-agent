@@ -335,13 +335,41 @@ fn write_copilot_team_docs(workspace: &Path) -> PathBuf {
 /// gate. Mirrors the old refusal contract's `seed_session_id`.
 fn seed_source_tuple_in_state(workspace: &Path, agent: &str) {
     let mut state = load_runtime_state(workspace).expect("load runtime state");
-    let rollout = workspace.join("fixture-source-rollout.jsonl");
-    let _ = std::fs::write(&rollout, "{\"type\":\"fixture-source\"}\n");
+    let source_session_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+    let copilot_home =
+        PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME")).join(".copilot");
+    let source_dir = copilot_home.join("session-state").join(source_session_id);
+    std::fs::create_dir_all(&source_dir).expect("create Copilot source state");
+    std::fs::write(
+        source_dir.join("context.json"),
+        format!("{{\"session_id\":\"{source_session_id}\"}}\n"),
+    )
+    .expect("write Copilot source state");
+    let store = rusqlite::Connection::open(copilot_home.join("session-store.db"))
+        .expect("open Copilot source store");
+    store
+        .execute_batch(
+            "create table sessions (id text primary key);
+             create table turns (session_id text);
+             create table checkpoints (session_id text);
+             create table session_files (session_id text);
+             create table session_refs (session_id text);
+             create table forge_trajectory_events (session_id text);
+             create table search_index (session_id text);",
+        )
+        .expect("create Copilot source schema");
+    store
+        .execute(
+            "insert into sessions(id) values (?1)",
+            rusqlite::params![source_session_id],
+        )
+        .expect("seed Copilot source session");
+    drop(store);
     let tuple = json!({
         "status": "running",
         "provider": "copilot",
-        "session_id": "99999999-aaaa-4bbb-8ccc-dddddddddddd",
-        "rollout_path": rollout.to_string_lossy(),
+        "session_id": source_session_id,
+        "rollout_path": copilot_home.join("session-store.db").to_string_lossy(),
         "captured_at": "2026-07-21T00:00:00Z",
         "captured_via": "contract-fixture",
     });

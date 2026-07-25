@@ -712,8 +712,28 @@ fn team_dir_with_running_workspace(tag: &str) -> PathBuf {
 fn team_dir_with_forkable_source(tag: &str) -> PathBuf {
     let team = compiled_team_dir(tag, false, &[("worker_a", "Worker A")]);
     let ws = team_workspace(&team);
-    let rollout = ws.join("worker_a-rollout.jsonl");
-    std::fs::write(&rollout, "{\"session_id\":\"sess-worker-a\"}\n").unwrap();
+    let rollout_root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
+        .join(".codex/sessions/approval-source");
+    std::fs::create_dir_all(&rollout_root).unwrap();
+    let rollout = rollout_root.join("rollout-sess-worker-a.jsonl");
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {"id": "sess-worker-a", "cwd": ws}
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {"content": [{
+                    "type": "input_text",
+                    "text": "You are Team Agent worker `worker_a` with role `fixture`."
+                }]}
+            })
+        ),
+    )
+    .unwrap();
     team_agent::state::persist::save_runtime_state(
         &ws,
         &json!({

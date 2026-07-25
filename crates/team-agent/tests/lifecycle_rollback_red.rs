@@ -257,9 +257,31 @@ impl RollbackFixture {
             "fixture must compile agent ids alpha/bravo before lifecycle calls; spec={yaml}"
         );
         std::fs::write(self.team.join("team.spec.yaml"), yaml).unwrap();
-        // 0.4.6: seed real rollout files so fork tuple guard passes.
-        std::fs::write(self.team.join("alpha-rollout.jsonl"), b"{}\n").unwrap();
-        std::fs::write(self.team.join("bravo-rollout.jsonl"), b"{}\n").unwrap();
+        // Seed identity-complete Codex source backings so rollback tests reach
+        // their post-spawn failure injection instead of stopping at materialization.
+        let rollout_root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
+            .join(".codex/sessions/rollback-source");
+        std::fs::create_dir_all(&rollout_root).unwrap();
+        for (agent, session) in [("alpha", "sess-alpha"), ("bravo", "sess-bravo")] {
+            std::fs::write(
+                rollout_root.join(format!("rollout-{session}.jsonl")),
+                format!(
+                    "{}\n{}\n",
+                    json!({
+                        "type": "session_meta",
+                        "payload": {"id": session, "cwd": self.team}
+                    }),
+                    json!({
+                        "type": "response_item",
+                        "payload": {"content": [{
+                            "type": "input_text",
+                            "text": format!("You are Team Agent worker `{agent}` with role `fixture`.")
+                        }]}
+                    })
+                ),
+            )
+            .unwrap();
+        }
         save_runtime_state(
             &self.team,
             &json!({
@@ -276,7 +298,7 @@ impl RollbackFixture {
                         "auth_mode": "subscription",
                         "window": "alpha",
                         "session_id": "sess-alpha",
-                        "rollout_path": self.team.join("alpha-rollout.jsonl").to_string_lossy(),
+                        "rollout_path": rollout_root.join("rollout-sess-alpha.jsonl").to_string_lossy(),
                         "captured_at": "2026-06-25T10:00:00+00:00",
                         "captured_via": "session.captured",
                         "owner_team_id": "rollbackteam"
@@ -287,7 +309,7 @@ impl RollbackFixture {
                         "auth_mode": "subscription",
                         "window": "bravo",
                         "session_id": "sess-bravo",
-                        "rollout_path": self.team.join("bravo-rollout.jsonl").to_string_lossy(),
+                        "rollout_path": rollout_root.join("rollout-sess-bravo.jsonl").to_string_lossy(),
                         "captured_at": "2026-06-25T10:00:00+00:00",
                         "captured_via": "session.captured",
                         "owner_team_id": "rollbackteam"
