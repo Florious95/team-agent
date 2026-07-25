@@ -1244,3 +1244,14 @@ pub(crate) fn next_session_token() -> String {
         bytes[15],
     )
 }
+
+#[cfg(test)]
+mod fork_materialization_source_guard {
+    #[test]
+    fn lifecycle_uses_provider_neutral_fork_materialization_dispatch() {
+        let source = include_str!("../lifecycle/launch/fork_agent.rs");
+        assert!(source.contains(".materialize_fork_backing("));
+        assert!(!source.contains("materialize_codex_fork"));
+        assert!(!source.contains("codex_fork"));
+    }
+}

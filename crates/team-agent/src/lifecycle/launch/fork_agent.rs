@@ -240,7 +240,7 @@ pub fn fork_agent_with_transport(
         Some(&fork_team),
     );
     let spawned_at = spawn_timestamp_for_agent(1);
-    let mut codex_fork = adapter
+    let mut fork_backing = adapter
         .materialize_fork_backing(
             &source_backing,
             &session_id,
@@ -253,6 +253,9 @@ pub fn fork_agent_with_transport(
             cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
             LifecycleError::Provider(error.to_string())
         })?;
+    let mut expected_backing_path = fork_backing
+        .as_ref()
+        .map(|materialized| materialized.path().to_path_buf());
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         plan.provider_projects_root = source_backing.parent().map(Path::to_path_buf);
     }
@@ -270,6 +273,11 @@ pub fn fork_agent_with_transport(
         cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
         error
     })?;
+    if expected_backing_path.is_none() {
+        expected_backing_path = claude_fork
+            .as_ref()
+            .map(|materialized| materialized.path().to_path_buf());
+    }
     // The framework-created Claude snapshot is only fork input, not provider
     // proof. Observe changes made after materialization so a spawn-only
     // provider cannot turn the copied source backing into a Verified result.
@@ -358,7 +366,7 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
-    if let Some(materialized) = codex_fork.as_mut() {
+    if let Some(materialized) = fork_backing.as_mut() {
         materialized.handoff();
     }
     ensure_fork_spawn_live(ForkPostSpawnInput {
@@ -379,10 +387,7 @@ pub fn fork_agent_with_transport(
         &session_id,
         &plan,
         &backing_before,
-        codex_fork
-            .as_ref()
-            .map(|materialized| materialized.path())
-            .or_else(|| claude_fork.as_ref().map(|materialized| materialized.path())),
+        expected_backing_path.as_deref(),
         source_agent_id.as_str(),
         as_agent_id.as_str(),
         &workspace,
