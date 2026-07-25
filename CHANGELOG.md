@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.60
+
+- **Fix: `fork-agent` now carries a safe, resumable target identity through the full provider lifecycle.** Fork targets receive their own identity at spawn, and their provider backing is materialized offline before launch without touching the active source rollout. Completion projects the persisted finalize audit, preserves source nonce/session bytes, wires the expected pending id, treats an exact miss as empty instead of guessing, and excludes both the source session id and backing path. UUIDv7 freshness comparisons now use millisecond precision and only exact authority can finalize a pending fork.
+
+- **The 0.5.58 fork-session limitation is closed.** Two authorized V6 real-subscription runs completed 6/6: fork targets acquired distinct captured session tuples while remaining live, message-addressable, restartable, and source-safe. Scanner attribution remains fail-closed for foreign or source-masquerading candidates.
+
+### Independent debt
+
+Three follow-ups remain outside this release: converge the three provider implementations on one materialization authority, replace the current `SystemTime` precision representation with an explicit type, and remove the redundant sort helper.
+
 ## 0.5.59
 
 - **Fix: honest delivery receipts for agents that never attached.** Durable sends now report `deferred_reason=never_attached` through the accepted, deferred, and terminal receipt states instead of implying pane delivery. The signed E6/E7 contracts were reanchored together so offline mailbox and host-leader registry paths share the same typed truth.
