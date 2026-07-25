@@ -1,16 +1,7 @@
 use super::*;
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 use crate::lifecycle::profile_launch::parse_provider;
-use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, Provider, ProviderEffort};
-use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
-use crate::model::yaml::{self, Value};
-use crate::state::persist::load_runtime_state;
-use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+
+mod completion;
 
 pub fn fork_agent_with_transport(
     workspace: &Path,
@@ -476,38 +467,20 @@ pub fn fork_agent_with_transport(
             .write_audit(&crate::event_log::EventLog::new(&workspace))
             .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
     }
-    if let Err(error) =
-        verify_fork_registration(&workspace, &fork_team, as_agent_id, &spawn, &window)
-    {
-        rollback_fork_after_spawn(
-            &workspace,
-            transport,
-            &session_name,
-            &window,
-            &mcp_config_path,
-            as_agent_id,
-            &profile_launch,
-            &fork_team,
-        );
-        return Err(error);
-    }
-    let coordinator_started = start_fork_coordinator(ForkCoordinatorInput {
+    let coordinator_started = completion::complete_fork(completion::CompleteForkInput {
         workspace: &workspace,
         team_key: &fork_team,
         agent_id: as_agent_id,
+        spawn: &spawn,
+        window: &window,
         transport,
         session_name: &session_name,
-        window: &window,
         mcp_config_path: &mcp_config_path,
         profile_launch: &profile_launch,
+        materialized_role: &mut materialized_role,
+        claude_fork: &mut claude_fork,
+        copilot_fork: &mut copilot_fork,
     })?;
-    materialized_role.keep();
-    if let Some(materialized) = claude_fork.as_mut() {
-        materialized.keep();
-    }
-    if let Some(materialized) = copilot_fork.as_mut() {
-        materialized.keep();
-    }
     let backing_state = if context_proof.is_some() {
         ForkBackingState::Verified
     } else {
