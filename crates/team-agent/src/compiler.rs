@@ -26,6 +26,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::communication_mode::CommunicationMode;
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
 use crate::model::{paths, spec, yaml, ModelError};
@@ -133,6 +134,8 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
     }
 
     let (team_meta, team_body) = read_front_matter(&team_md)?;
+    let team_communication_mode =
+        communication_mode_field(&team_meta, &team_md)?.unwrap_or_default();
     let mut role_paths = Vec::new();
     if agents_dir.is_dir() {
         for entry in fs::read_dir(&agents_dir)
@@ -170,7 +173,8 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
     let mut agents = Vec::new();
     let mut agent_ids = Vec::new();
     for path in role_paths {
-        let compiled = compile_role_agent(&path, &team_meta, &workspace_s)?;
+        let compiled =
+            compile_role_agent_with_mode(&path, &team_meta, &workspace_s, team_communication_mode)?;
         agent_ids.push(compiled.id);
         agents.push(compiled.agent);
     }
@@ -372,7 +376,20 @@ pub fn compile_role_agent(
     team_meta: &Value,
     workspace_s: &str,
 ) -> Result<CompiledRole, ModelError> {
+    let team_communication_mode =
+        communication_mode_field(team_meta, role_path)?.unwrap_or_default();
+    compile_role_agent_with_mode(role_path, team_meta, workspace_s, team_communication_mode)
+}
+
+fn compile_role_agent_with_mode(
+    role_path: &Path,
+    team_meta: &Value,
+    workspace_s: &str,
+    team_communication_mode: CommunicationMode,
+) -> Result<CompiledRole, ModelError> {
     let (meta, body) = read_front_matter(role_path)?;
+    let communication_mode =
+        communication_mode_field(&meta, role_path)?.unwrap_or(team_communication_mode);
     let id = required_string(&meta, role_path, "name")?;
     let role = required_string(&meta, role_path, "role")?;
     let provider = required_string(&meta, role_path, "provider")?;
@@ -404,6 +421,10 @@ pub fn compile_role_agent(
         ),
         ("tools", list_str(tools)),
         ("permission_mode", Value::Str("restricted".to_string())),
+        (
+            "communication_mode",
+            Value::Str(communication_mode.as_str().to_string()),
+        ),
         ("preferred_for", list_str(vec![id.clone(), role.clone()])),
         ("avoid_for", Value::List(Vec::new())),
         (
@@ -466,6 +487,27 @@ pub fn compile_role_agent(
         id,
         role,
         agent: map(agent_items),
+    })
+}
+
+fn communication_mode_field(
+    meta: &Value,
+    path: &Path,
+) -> Result<Option<CommunicationMode>, ModelError> {
+    let Some(raw) = string_field(meta, "communication_mode") else {
+        return Ok(None);
+    };
+    let value = raw.trim();
+    CommunicationMode::parse(value).map(Some).ok_or_else(|| {
+        ModelError::Validation(format!(
+            "{}: unknown communication_mode '{value}' (allowed: {})",
+            path.display(),
+            CommunicationMode::ALL
+                .iter()
+                .map(|mode| mode.as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        ))
     })
 }
 

@@ -400,6 +400,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "preferred_for",
         "avoid_for",
         "output_contract",
+        "communication_mode",
         "paused",
         "auth_mode",
         "profile",
@@ -411,6 +412,13 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
     check_keys_y(Some(agent), path, req, allowed, errors);
     if !agent.is_map() {
         return;
+    }
+    if let Some(raw) = agent.get("communication_mode").and_then(Yaml::as_str) {
+        if crate::communication_mode::CommunicationMode::parse(raw).is_none() {
+            errors.push(format!(
+                "{path}/communication_mode: unknown communication_mode '{raw}'"
+            ));
+        }
     }
     // 0.4.x provider effort MVP step 3: effort syntactic + semantic validation.
     if let Some(raw) = agent.get("effort").and_then(Yaml::as_str) {
