@@ -413,11 +413,19 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
     if !agent.is_map() {
         return;
     }
-    if let Some(raw) = agent.get("communication_mode").and_then(Yaml::as_str) {
-        if crate::communication_mode::CommunicationMode::parse(raw).is_none() {
-            errors.push(format!(
-                "{path}/communication_mode: unknown communication_mode '{raw}'"
-            ));
+    if let Some(value) = agent.get("communication_mode") {
+        match value.as_str() {
+            Some(raw) if crate::communication_mode::CommunicationMode::parse(raw).is_none() => {
+                errors.push(format!(
+                    "{path}/communication_mode: unknown communication_mode '{raw}'"
+                ));
+            }
+            None => {
+                errors.push(format!(
+                    "{path}/communication_mode: unknown communication_mode"
+                ));
+            }
+            Some(_) => {}
         }
     }
     // 0.4.x provider effort MVP step 3: effort syntactic + semantic validation.

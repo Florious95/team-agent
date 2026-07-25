@@ -494,10 +494,20 @@ fn communication_mode_field(
     meta: &Value,
     path: &Path,
 ) -> Result<Option<CommunicationMode>, ModelError> {
-    let Some(raw) = string_field(meta, "communication_mode") else {
+    let Some(raw) = meta.get("communication_mode") else {
         return Ok(None);
     };
-    let value = raw.trim();
+    let Some(value) = raw.as_str() else {
+        return Err(ModelError::Validation(format!(
+            "{}: unknown communication_mode (allowed: {})",
+            path.display(),
+            CommunicationMode::ALL
+                .iter()
+                .map(|mode| mode.as_str())
+                .collect::<Vec<_>>()
+                .join("|")
+        )));
+    };
     CommunicationMode::parse(value).map(Some).ok_or_else(|| {
         ModelError::Validation(format!(
             "{}: unknown communication_mode '{value}' (allowed: {})",
