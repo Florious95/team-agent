@@ -99,6 +99,77 @@ fn attached_leader_mailbox_is_rechecked_by_the_normal_delivery_tick() {
     assert!(case.events().contains("leader_receiver.mailbox_requeued"));
 }
 
+#[test]
+fn leader_submit_without_receipt_source_cannot_park_forever_without_a_completion_writer() {
+    let case = Case::new_without_rollout("missing-receipt-source");
+    let transport = RecordingTransport::new("");
+    let message_id = case.seed_message("missing receipt source canary");
+
+    let first = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .expect("verified leader transport submission");
+
+    assert_ne!(
+        case.message_status(&message_id),
+        "submitted_pending_acceptance",
+        "F4 acceptance-stall: a verified leader transport submit with no reachable \
+         receipt source must not enter submitted_pending_acceptance, because that \
+         protected state has no completion writer. The runtime may close the \
+         transport-acceptance fact or expose a provider-session receipt writer, \
+         but it must not report an indefinitely retryable fact-terminal. outcome={first:?}"
+    );
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "the acceptance repair must not obtain progress by physically injecting twice"
+    );
+
+    let _ = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    );
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "a second coordinator observation must not replay the already-submitted leader message"
+    );
+}
+
+#[test]
+fn worker_consumption_writer_remains_a_positive_control() {
+    let case = Case::new("worker-positive-control");
+    let message_id = case
+        .store
+        .create_message(
+            None,
+            "leader",
+            "worker",
+            "worker consume canary",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+    case.store.mark(&message_id, "consumed", None).unwrap();
+
+    assert_eq!(
+        case.message_status(&message_id),
+        "consumed",
+        "positive control: the independent worker consumption writer must remain reachable"
+    );
+}
+
 struct Case {
     workspace: PathBuf,
     rollout: PathBuf,
@@ -120,6 +191,30 @@ impl Case {
                 "status": "attached",
                 "provider": "claude",
                 "rollout_path": rollout,
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let store = MessageStore::open(&workspace).unwrap();
+        let event_log = EventLog::new(&workspace);
+        Self {
+            workspace,
+            rollout,
+            store,
+            event_log,
+            state,
+        }
+    }
+
+    fn new_without_rollout(tag: &str) -> Self {
+        let workspace = tmp_ws(&format!("leader-inject-acceptance-{tag}"));
+        let rollout = workspace.join("absent-leader.jsonl");
+        let state = serde_json::json!({
+            "active_team_key": "acceptance-team",
+            "session_name": "team-acceptance",
+            "leader_receiver": {
+                "pane_id": "%leader",
+                "status": "attached",
+                "provider": "claude"
             }
         });
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
