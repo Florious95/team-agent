@@ -14,10 +14,9 @@
 //!   51 `failed/send_unverified_exhausted` (of which 23 recipient=leader) +
 //!   5 `queued_pane_missing` + 108 null-result historical watchers +
 //!   delivered rows preserved.
-//! - Wiki hard rule: fixture predicates MUST derive from the typed enum
-//!   catalog (batch A REQUIRED_DURABLE_STATUSES). We import that constant
-//!   from batch A and use it to enumerate expected transition slots so
-//!   no hand-written second state semantics can exist.
+//! - Wiki hard rule: fixture predicates MUST derive from the product typed
+//!   enum catalog (`MessageRowStatus::ALL`), so no hand-written second state
+//!   semantics can exist.
 //!
 //! TEETH (RED at 5b847e4):
 //!   1. `upgrade_gate_only_blocked_rows_flip` — with a full storm-shape
@@ -42,18 +41,20 @@
 //!      pointed to a NAMED typed recovery incident, not left in
 //!      undefined-owner limbo. Baseline: no such surface exists → red.
 //!   5. `upgrade_inventory_covers_full_enum` — the fixture itself
-//!      exercises every status the typed catalog claims to cover. If a
-//!      new status is added to REQUIRED_DURABLE_STATUSES (batch A) but
-//!      not seeded here, this tooth fails — forcing the two contracts
-//!      to stay in lock-step (wiki hard rule: single source of truth).
+//!      exercises every status in `MessageRowStatus::ALL`. A new product
+//!      status is therefore seeded automatically rather than copied into
+//!      a test-side list.
+//!   6. `injected_awaiting_receipt_is_open_debt_but_not_requeueable` —
+//!      the typed parked row remains visible in the undelivered inventory,
+//!      while the same row cannot win a delivery claim.
 //!
 //! POSITIVE CONTROL:
-//!   6. `newly_bound_leader_still_flushes_queued_row` — the legitimate
+//!   7. `newly_bound_leader_still_flushes_queued_row` — the legitimate
 //!      recovery path (blocked leader row → accepted → delivered) is
 //!      preserved through the upgrade gate.
 //!
 //! NEGATIVE CONTROL:
-//!   7. `non_leader_parked_rows_are_never_flipped_by_leader_claim` — a
+//!   8. `non_leader_parked_rows_are_never_flipped_by_leader_claim` — a
 //!      worker-recipient parked row (recipient!=leader, status=
 //!      submitted_pending_acceptance) is unaffected by any leader
 //!      claim; scope of blocked-leader recovery stays leader-only.
@@ -84,25 +85,12 @@ use team_agent::model::ids::TeamKey;
 use team_agent::state::owner_gate::PaneLivenessProbe;
 use team_agent::transport::PaneId;
 
-/// Single source of truth for the storm-shape inventory: copied VERBATIM
-/// from batch A's `REQUIRED_DURABLE_STATUSES` (see contract SHA256
-/// 7dee72b8… in weakwin-frozen.txt "0.5.57 typed-state car" section).
-/// Tooth 5 enforces that if batch A grows this list, this fixture
-/// grows too — no hand-written second catalog is tolerated.
-const REQUIRED_DURABLE_STATUSES: &[&str] = &[
-    "accepted",
-    "stored_only",
-    "queued_until_leader_attach",
-    "queued_coordinator_unavailable",
-    "queued_pane_missing",
-    "target_resolved",
-    "submitted_pending_acceptance",
-    "submitted_unverified",
-    "delivered",
-    "acknowledged",
-    "consumed",
-    "failed",
-];
+fn durable_status_catalog() -> BTreeSet<&'static str> {
+    MessageRowStatus::ALL
+        .iter()
+        .map(|status| status.as_str())
+        .collect()
+}
 
 const TEAM: &str = "current";
 const PANE: &str = "%leader";
@@ -230,6 +218,18 @@ impl InventoryCase {
         .unwrap()
     }
 
+    fn distinct_message_statuses(&self) -> BTreeSet<String> {
+        let conn = team_agent::db::schema::open_db(self.store.db_path()).unwrap();
+        let mut statement = conn
+            .prepare("select distinct status from messages order by status")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
     fn last_blocked_requeue_event(&self) -> Option<serde_json::Value> {
         let path = self
             .workspace
@@ -347,6 +347,21 @@ fn seed_full_inventory(case: &InventoryCase) -> std::collections::BTreeMap<Strin
     m.entry("accepted".into())
         .or_default()
         .push(case.seed_leader_row("just accepted", "accepted", None));
+    // Drive the historical fixture from the product's unique typed directory.
+    // Any new durable wire status is seeded automatically, without a copied
+    // test-side list that can silently lag the product catalog.
+    let already_seeded = case.distinct_message_statuses();
+    for status in durable_status_catalog() {
+        if !already_seeded.contains(status) {
+            m.entry(status.to_string())
+                .or_default()
+                .push(case.seed_leader_row(
+                    &format!("catalog-derived historical {status}"),
+                    status,
+                    None,
+                ));
+        }
+    }
     m
 }
 
@@ -520,53 +535,55 @@ fn worker_recipient_parked_rows_have_typed_recovery_owner() {
 #[serial(env)]
 fn upgrade_inventory_covers_full_enum() {
     let case = InventoryCase::new("catalog-lockstep");
-    let map = seed_full_inventory(&case);
-    // Every REQUIRED_DURABLE_STATUSES value must be represented by at
-    // least one row in the fixture (as a prior state, possibly as a
-    // worker-recipient face). If A batch adds a status, this red forces
-    // C to add fixture coverage too.
-    let seeded: BTreeSet<String> = map
-        .keys()
-        .flat_map(|k| {
-            let mut variants = vec![k.clone()];
-            if let Some(idx) = k.find(':') {
-                variants.push(k[..idx].to_string());
-                variants.push(k[idx + 1..].to_string());
-            }
-            variants
-        })
+    let _map = seed_full_inventory(&case);
+    let seeded = case.distinct_message_statuses();
+    let catalog: BTreeSet<String> = durable_status_catalog()
+        .into_iter()
+        .map(str::to_string)
         .collect();
-    let missing: Vec<&&str> = REQUIRED_DURABLE_STATUSES
-        .iter()
-        .filter(|s| !seeded.iter().any(|k| k.contains(**s)))
-        .collect();
-    // Also verify against the compiled MessageRowStatus catalog exposed
-    // by batch A — reachable via runtime string enumeration through
-    // known variants.
-    let compiled: BTreeSet<&'static str> = [
-        MessageRowStatus::Accepted,
-        MessageRowStatus::StoredOnly,
-        MessageRowStatus::QueuedUntilLeaderAttach,
-        MessageRowStatus::QueuedCoordinatorUnavailable,
-    ]
-    .iter()
-    .map(|v| v.as_str())
-    .collect();
-    // Assert both surfaces converge: fixture covers the doc list AND any
-    // future compiled variant is auto-checked (soft — we just report if
-    // compiled diverges from doc).
-    assert!(
-        missing.is_empty(),
-        "fixture missing coverage for statuses: {:?}. Wiki hard rule: fixture \
-         judgment derives from typed state contract; if batch A grew the \
-         catalog, this fixture must grow too. Compiled catalog snapshot: {:?}",
-        missing,
-        compiled
+    assert_eq!(
+        seeded, catalog,
+        "historical fixture status coverage must be exactly the product \
+         MessageRowStatus::ALL wire catalog; no hand-copied subset may drift"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Tooth 6 — positive control: legitimate recovery path preserved
+// Tooth 6 — parked delivery debt remains open but cannot requeue
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial(env)]
+fn injected_awaiting_receipt_is_open_debt_but_not_requeueable() {
+    let case = InventoryCase::new("injected-open-debt");
+    let status = durable_status_catalog()
+        .into_iter()
+        .find(|status| *status == "injected_awaiting_receipt")
+        .expect("product MessageRowStatus::ALL must expose injected_awaiting_receipt");
+    let message_id = case.seed_leader_row("receipt still owed", status, None);
+
+    let runtime_status =
+        team_agent::cli::status_port::status(&case.workspace, false, true).unwrap();
+    let undelivered = runtime_status
+        .pointer("/runtime/undelivered")
+        .and_then(serde_json::Value::as_i64);
+    let claim_won = case.store.claim_for_delivery(&message_id).unwrap();
+    assert!(
+        undelivered == Some(1) && !claim_won,
+        "injected_awaiting_receipt must be classified in two directions at once: \
+         nonterminal-for-delivery (runtime undelivered inventory=1) and \
+         terminal-for-requeue (claim_won=false). observed \
+         undelivered={undelivered:?} claim_won={claim_won}"
+    );
+    assert_eq!(
+        case.row_status(&message_id),
+        "injected_awaiting_receipt",
+        "a rejected claim must leave the typed parked fact unchanged"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tooth 7 — positive control: legitimate recovery path preserved
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -589,7 +606,7 @@ fn newly_bound_leader_still_flushes_queued_row() {
 }
 
 // ---------------------------------------------------------------------------
-// Tooth 7 — negative control: non-leader parked rows unaffected
+// Tooth 8 — negative control: non-leader parked rows unaffected
 // ---------------------------------------------------------------------------
 
 #[test]

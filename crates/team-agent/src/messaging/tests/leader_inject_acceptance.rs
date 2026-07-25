@@ -146,6 +146,70 @@ fn leader_submit_without_receipt_source_cannot_park_forever_without_a_completion
 }
 
 #[test]
+fn nonempty_missing_receipt_source_is_not_token_absent() {
+    assert_unavailable_rollout_converges(
+        "missing-rollout",
+        PathBuf::from("definitely-missing-leader-rollout.jsonl"),
+        false,
+    );
+}
+
+#[test]
+fn nonempty_unreadable_receipt_source_is_not_token_absent() {
+    assert_unavailable_rollout_converges(
+        "unreadable-rollout",
+        PathBuf::from("leader-rollout-is-a-directory"),
+        true,
+    );
+}
+
+fn assert_unavailable_rollout_converges(tag: &str, rollout: PathBuf, directory: bool) {
+    let case = Case::new_with_unavailable_rollout(tag, rollout, directory);
+    let transport = RecordingTransport::new("");
+    let message_id = case.seed_message("unavailable receipt source canary");
+
+    let first = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    )
+    .expect("verified leader transport submission");
+
+    assert_eq!(
+        case.message_status(&message_id),
+        "injected_awaiting_receipt",
+        "F4 receipt observation must distinguish an unreadable nonempty rollout_path \
+         from a readable rollout that lacks the token. The former is \
+         receipt-source-unavailable and must converge to the typed parked state, \
+         not remain submitted_pending_acceptance. shape={tag} outcome={first:?}"
+    );
+    assert_eq!(
+        first.verification.as_deref(),
+        Some("leader_receipt_source_unavailable"),
+        "the outcome must expose read-unavailable rather than TokenAbsent; shape={tag}"
+    );
+    assert_eq!(transport.inject_count(), 1);
+
+    let _ = deliver_pending_message(
+        &case.workspace,
+        &case.store,
+        &transport,
+        &message_id,
+        &case.event_log,
+        &case.state,
+    );
+    assert_eq!(
+        transport.inject_count(),
+        1,
+        "read-unavailable convergence must not obtain progress by a second physical \
+         injection; shape={tag}"
+    );
+}
+
+#[test]
 fn worker_consumption_writer_remains_a_positive_control() {
     let case = Case::new("worker-positive-control");
     let message_id = case
@@ -215,6 +279,34 @@ impl Case {
                 "pane_id": "%leader",
                 "status": "attached",
                 "provider": "claude"
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let store = MessageStore::open(&workspace).unwrap();
+        let event_log = EventLog::new(&workspace);
+        Self {
+            workspace,
+            rollout,
+            store,
+            event_log,
+            state,
+        }
+    }
+
+    fn new_with_unavailable_rollout(tag: &str, relative: PathBuf, directory: bool) -> Self {
+        let workspace = tmp_ws(&format!("leader-inject-acceptance-{tag}"));
+        let rollout = workspace.join(relative);
+        if directory {
+            std::fs::create_dir_all(&rollout).unwrap();
+        }
+        let state = serde_json::json!({
+            "active_team_key": "acceptance-team",
+            "session_name": "team-acceptance",
+            "leader_receiver": {
+                "pane_id": "%leader",
+                "status": "attached",
+                "provider": "claude",
+                "rollout_path": rollout,
             }
         });
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
