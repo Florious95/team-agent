@@ -1178,7 +1178,29 @@ pub(super) fn fork_ws(alpha_role: &str) -> PathBuf {
         std::process::id(),
         n
     ));
-    std::fs::write(&rollout, b"{}\n").expect("seed fork source rollout");
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            json!({
+                "type": "session_meta",
+                "payload": {
+                    "id": "sess-a",
+                    "cwd": ws,
+                }
+            }),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "content": [{
+                        "type": "input_text",
+                        "text": "You are Team Agent worker `alpha` with role `fixture`."
+                    }]
+                }
+            })
+        ),
+    )
+    .expect("seed identity-complete fork source rollout");
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
@@ -1669,6 +1691,18 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
 fn lanea_fork_report_session_id_is_not_pane_id() {
     let _home = LaneHomeGuard::enter("fork-report");
     let ws = fork_ws(DELEG_ROLE_ALPHA); // codex+subscription -> native fork supported -> full success path
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let source = PathBuf::from(state["agents"]["alpha"]["rollout_path"].as_str().unwrap());
+    let codex_root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap()
+        .join(".codex/sessions/lane-fixture");
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let discoverable_source = codex_root.join("rollout-sess-a.jsonl");
+    std::fs::copy(source, &discoverable_source).unwrap();
+    state["agents"]["alpha"]["rollout_path"] =
+        json!(discoverable_source.to_string_lossy().to_string());
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
     let tx = LaneTransport::new("team-laneateam", &[]);
     let report =
         fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx)
