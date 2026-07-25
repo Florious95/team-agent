@@ -346,17 +346,24 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
     for required in [
         "logical recipient",
         "returns after the message is persisted",
-        "--presentation-sink",
-        "--message-class",
-        "--case-id",
-        "every sink remains durable",
+        "--mailbox",
+        "stores durably without live injection",
+        "omitted sends to the live conversation",
     ] {
         assert!(
             help.contains(required),
             "RED-4: send help missing `{required}`; help={help}"
         );
     }
-    for hidden_alias in ["--to-name", "--to-leader", "--targets", "--pane"] {
+    for hidden_alias in [
+        "--presentation-sink",
+        "--message-class",
+        "--case-id",
+        "--to-name",
+        "--to-leader",
+        "--targets",
+        "--pane",
+    ] {
         assert!(
             !help.contains(hidden_alias),
             "RED-4: public send help leaked compatibility alias `{hidden_alias}`; help={help}"
