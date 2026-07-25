@@ -13,14 +13,9 @@ output. All communication must go through Team Agent MCP tools.
 
 ## Communication (mandatory)
 
-- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')
 - Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')
 - Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')
 - Task complete: team_orchestrator.report_result(summary='...') — call exactly once
-
-When you receive a message from the leader or a teammate, you MUST respond
-through MCP tools. Writing a reply in your terminal does nothing — the sender
-will never see it.
 
 ## Rules
 
