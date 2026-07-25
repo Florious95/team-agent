@@ -7,6 +7,18 @@ pub enum CommunicationMode {
     Orchestrated,
 }
 
+const LEADER_CENTRIC_RUNTIME_CONTRACT: &str = r#"# Team Agent communication contract: leader_centric
+
+- Send Progress updates, blockers, and questions to the leader with
+  team_orchestrator.send_message.
+- Respond to messages from the leader or a teammate through Team Agent MCP tools."#;
+
+const ORCHESTRATED_RUNTIME_CONTRACT: &str = r#"# Team Agent communication contract: orchestrated
+
+- Send progress only through the declared channel for the assigned task.
+- Respond to task-related messages through Team Agent MCP tools.
+- A pure ACK, unrelated status, or non-task message does not require a response."#;
+
 impl CommunicationMode {
     pub const ALL: &[Self] = &[Self::LeaderCentric, Self::Orchestrated];
 
@@ -22,6 +34,13 @@ impl CommunicationMode {
             .iter()
             .copied()
             .find(|mode| mode.as_str() == value)
+    }
+
+    pub const fn runtime_contract(self) -> &'static str {
+        match self {
+            Self::LeaderCentric => LEADER_CENTRIC_RUNTIME_CONTRACT,
+            Self::Orchestrated => ORCHESTRATED_RUNTIME_CONTRACT,
+        }
     }
 }
 

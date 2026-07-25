@@ -220,7 +220,7 @@ pub(super) fn spawn_agent_window(
         agent,
         Some(agent_id.as_str()),
         provider,
-    );
+    )?;
     let system_prompt =
         crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
     let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::communication_mode::CommunicationMode;
 use crate::lifecycle::types::{DangerousApproval, LifecycleError};
 use crate::model::enums::{Enforcement, Provider};
 use crate::model::ids::AgentId;
@@ -45,6 +46,7 @@ pub(crate) struct WorkerCommandAgent {
     system_prompt_inline: Option<String>,
     system_prompt_file: Option<String>,
     output_contract_format: Option<String>,
+    communication_mode: CommunicationMode,
 }
 
 impl WorkerCommandAgent {
@@ -52,9 +54,9 @@ impl WorkerCommandAgent {
         agent: &crate::model::yaml::Value,
         fallback_id: Option<&str>,
         provider: Provider,
-    ) -> Self {
+    ) -> Result<Self, LifecycleError> {
         let system_prompt = agent.get("system_prompt");
-        Self {
+        Ok(Self {
             id: agent
                 .get("id")
                 .and_then(crate::model::yaml::Value::as_str)
@@ -90,16 +92,21 @@ impl WorkerCommandAgent {
                 .and_then(|contract| contract.get("format"))
                 .and_then(crate::model::yaml::Value::as_str)
                 .map(str::to_string),
-        }
+            communication_mode: communication_mode(
+                agent
+                    .get("communication_mode")
+                    .and_then(crate::model::yaml::Value::as_str),
+            )?,
+        })
     }
 
     pub(crate) fn from_json(
         agent: &serde_json::Value,
         fallback_id: Option<&str>,
         provider: Provider,
-    ) -> Self {
+    ) -> Result<Self, LifecycleError> {
         let system_prompt = agent.get("system_prompt");
-        Self {
+        Ok(Self {
             id: agent
                 .get("id")
                 .and_then(serde_json::Value::as_str)
@@ -135,7 +142,12 @@ impl WorkerCommandAgent {
                 .and_then(|contract| contract.get("format"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-        }
+            communication_mode: communication_mode(
+                agent
+                    .get("communication_mode")
+                    .and_then(serde_json::Value::as_str),
+            )?,
+        })
     }
 }
 
@@ -149,6 +161,7 @@ pub(crate) fn compile_worker_system_prompt(
     let mut chunks = vec![
         identity_section(agent),
         runtime_contract_section(),
+        agent.communication_mode.runtime_contract().to_string(),
         role_body(agent)?,
     ];
     if let Some(contract) = output_contract(agent) {
@@ -195,6 +208,14 @@ fn resolve_agent_permissions(
 
 fn runtime_contract_section() -> String {
     RUNTIME_CONTRACT_SECTION.to_string()
+}
+
+fn communication_mode(value: Option<&str>) -> Result<CommunicationMode, LifecycleError> {
+    let Some(value) = value else {
+        return Ok(CommunicationMode::default());
+    };
+    CommunicationMode::parse(value)
+        .ok_or_else(|| LifecycleError::Compile(format!("unknown communication_mode {value:?}")))
 }
 
 fn identity_section(agent: &WorkerCommandAgent) -> String {
@@ -291,6 +312,7 @@ mod tests {
             system_prompt_inline: None,
             system_prompt_file: None,
             output_contract_format: None,
+            communication_mode: CommunicationMode::default(),
         };
         let tools =
             resolved_tool_strings_for_command(&agent, Provider::ClaudeCode, &disabled_safety())
@@ -335,6 +357,7 @@ mod tests {
             system_prompt_inline: Some("Implement the assigned slice.".to_string()),
             system_prompt_file: None,
             output_contract_format: Some("result_envelope_v1".to_string()),
+            communication_mode: CommunicationMode::default(),
         };
         let prompt = compile_worker_system_prompt(&agent).unwrap();
         assert!(
