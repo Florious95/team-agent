@@ -80,6 +80,14 @@ impl McpSimHarness {
         &self.workspace
     }
 
+    pub fn prepare_collect(&self) {
+        std::fs::write(
+            self.workspace.join("team.spec.yaml"),
+            "version: 1\nteam:\n  name: mcp-sim\n",
+        )
+        .expect("seed collect spec in the existing MCP simulation fixture");
+    }
+
     pub fn workspace_display(&self) -> String {
         self.workspace.to_string_lossy().to_string()
     }
