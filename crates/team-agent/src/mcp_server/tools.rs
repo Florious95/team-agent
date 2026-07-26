@@ -17,7 +17,7 @@ use crate::state::persist::{
 };
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
-use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
+use crate::messaging::{self, DeliveryStatus, MessageTarget, SendOptions, TrustedSender};
 
 use super::helpers::{
     current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
@@ -265,6 +265,21 @@ impl TeamOrchestratorTools {
         if is_worker_recipient(to) {
             let out = messaging::send_message(&self.workspace, to, content, &opts)
                 .map_err(tool_runtime_error)?;
+            if matches!(out.status, DeliveryStatus::StoredOnly) {
+                let value = delivery_outcome_value(&out);
+                let mut ok = compact_tool_result(&value)?;
+                if let Some(verification) = out.verification.as_deref() {
+                    ok.fields.insert(
+                        "verification".to_string(),
+                        Value::String(verification.to_string()),
+                    );
+                }
+                if let Some(deprecation) = deprecation {
+                    ok.fields
+                        .insert("warning".to_string(), Value::String(deprecation));
+                }
+                return Ok(SendOutcome::Direct(ok));
+            }
             // tools.py:175-181 — accepted+poll_via ONLY for a REAL message_id; any other
             // outcome falls back to the compacted direct result. Never invent an
             // `mcp_<timestamp>` id: it does not exist in the store and makes the
@@ -287,6 +302,14 @@ impl TeamOrchestratorTools {
             .map_err(tool_runtime_error)?;
         let value = delivery_outcome_value(&out);
         let mut ok = compact_tool_result(&value)?;
+        if matches!(out.status, DeliveryStatus::StoredOnly) {
+            if let Some(verification) = out.verification.as_deref() {
+                ok.fields.insert(
+                    "verification".to_string(),
+                    Value::String(verification.to_string()),
+                );
+            }
+        }
         if let Some(deprecation) = deprecation {
             ok.fields
                 .insert("warning".to_string(), Value::String(deprecation));

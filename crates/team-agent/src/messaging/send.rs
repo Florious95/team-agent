@@ -9,9 +9,10 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
-use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_presentation};
+use super::leader_receiver::send_to_leader_receiver_with_presentation;
 use super::presentation::{
-    decide_presentation, PresentationRequest, PresentationSink, PresentationSource,
+    decide_presentation, PresentationDecision, PresentationRequest, PresentationSink,
+    PresentationSource,
 };
 use super::{
     persist_resolved_send, DeliveryBlocker, DeliveryOutcome, DeliveryRefusal, DeliveryStatus,
@@ -125,49 +126,14 @@ pub fn send_message(
         MessageTarget::Single(target) if target == "leader" => {
             let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
             if presentation.effective_sink != PresentationSink::Leader {
-                let mut intent = ResolvedSendIntent::accepted(
-                    opts.origin,
+                return persist_stored_only_send(
                     workspace,
-                    opts.team.clone(),
                     LogicalRecipient::Leader,
-                    opts.sender.clone(),
-                    opts.task_id.clone(),
                     content,
-                    None,
-                    false,
-                    opts.message_id.clone(),
+                    opts,
+                    &presentation,
+                    &event_log,
                 );
-                intent.initial_disposition = InitialDisposition::StoredOnly;
-                intent.presentation = presentation.clone();
-                let persisted = match persist_resolved_send(&intent)? {
-                    PersistResolution::Persisted(persisted) => persisted,
-                    PersistResolution::Duplicate(message_id) => {
-                        return Ok(refused_outcome_with_id(
-                            DeliveryRefusal::Duplicate,
-                            Some(message_id),
-                        ));
-                    }
-                };
-                event_log.write(
-                    "presentation.stored_without_live_inject",
-                    serde_json::json!({
-                        "message_id": persisted.message_id,
-                        "requested_sink": presentation.requested_sink,
-                        "effective_sink": presentation.effective_sink,
-                        "class": presentation.class,
-                        "policy_reason": presentation.policy_reason,
-                    }),
-                )?;
-                return Ok(DeliveryOutcome {
-                    ok: true,
-                    status: DeliveryStatus::StoredOnly,
-                    message_status: MessageStatusShadow("stored_only".to_string()),
-                    message_id: Some(persisted.message_id),
-                    verification: Some("durable_without_live_inject".to_string()),
-                    stage: None,
-                    reason: None,
-                    channel: Some(presentation.effective_sink.as_str().to_string()),
-                });
             }
             let outcome = send_to_leader_receiver_with_presentation(
                 workspace,
@@ -201,15 +167,7 @@ pub fn send_message(
         MessageTarget::Single(target) => target,
         MessageTarget::Broadcast => {
             let recipients = broadcast_recipients(&state, opts.sender.as_str(), opts.team.as_ref());
-            return fanout_send(
-                workspace,
-                &state,
-                &recipients,
-                content,
-                opts,
-                &event_log,
-                "*",
-            );
+            return fanout_send(workspace, &recipients, content, opts, "*");
         }
         MessageTarget::Fanout(recipients) if recipients.is_empty() => {
             // swallow batch 3 ②: a failed send carries its reason (Python send error
@@ -226,9 +184,7 @@ pub fn send_message(
             });
         }
         MessageTarget::Fanout(recipients) => {
-            return fanout_send(
-                workspace, &state, recipients, content, opts, &event_log, "fanout",
-            );
+            return fanout_send(workspace, recipients, content, opts, "fanout");
         }
     };
     // send.py:259-261 — a non-leader target that is NOT a known team agent is refused
@@ -239,6 +195,17 @@ pub fn send_message(
         .is_some_and(|a| a.contains_key(recipient.as_str()));
     if !in_team {
         return Ok(refused_outcome(DeliveryRefusal::TargetNotInTeam));
+    }
+    let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
+    if presentation.effective_sink != PresentationSink::Leader {
+        return persist_stored_only_send(
+            workspace,
+            LogicalRecipient::from_resolved(recipient),
+            content,
+            opts,
+            &presentation,
+            &event_log,
+        );
     }
     if let Some(outcome) = session_drift_refusal(
         &state,
@@ -351,6 +318,59 @@ pub fn send_message(
         stage: None,
         reason: None,
         channel: None,
+    })
+}
+
+fn persist_stored_only_send(
+    workspace: &Path,
+    recipient: LogicalRecipient,
+    content: &str,
+    opts: &SendOptions,
+    presentation: &PresentationDecision,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let mut intent = ResolvedSendIntent::accepted(
+        opts.origin,
+        workspace,
+        opts.team.clone(),
+        recipient,
+        opts.sender.clone(),
+        opts.task_id.clone(),
+        content,
+        None,
+        opts.requires_ack,
+        opts.message_id.clone(),
+    );
+    intent.initial_disposition = InitialDisposition::StoredOnly;
+    intent.presentation = presentation.clone();
+    let persisted = match persist_resolved_send(&intent)? {
+        PersistResolution::Persisted(persisted) => persisted,
+        PersistResolution::Duplicate(message_id) => {
+            return Ok(refused_outcome_with_id(
+                DeliveryRefusal::Duplicate,
+                Some(message_id),
+            ));
+        }
+    };
+    event_log.write(
+        "presentation.stored_without_live_inject",
+        serde_json::json!({
+            "message_id": persisted.message_id,
+            "requested_sink": presentation.requested_sink,
+            "effective_sink": presentation.effective_sink,
+            "class": presentation.class,
+            "policy_reason": presentation.policy_reason,
+        }),
+    )?;
+    Ok(DeliveryOutcome {
+        ok: true,
+        status: DeliveryStatus::StoredOnly,
+        message_status: MessageStatusShadow("stored_only".to_string()),
+        message_id: Some(persisted.message_id),
+        verification: Some("durable_without_live_inject".to_string()),
+        stage: None,
+        reason: None,
+        channel: Some(presentation.effective_sink.as_str().to_string()),
     })
 }
 
@@ -804,11 +824,9 @@ fn broadcast_recipients(
 
 fn fanout_send(
     workspace: &Path,
-    state: &serde_json::Value,
     recipients: &[String],
     content: &str,
     opts: &SendOptions,
-    event_log: &EventLog,
     channel_label: &str,
 ) -> Result<DeliveryOutcome, MessagingError> {
     let mut last_message_id: Option<String> = None;
@@ -821,30 +839,17 @@ fn fanout_send(
             continue;
         }
         attempted_count = attempted_count.saturating_add(1);
-        let outcome = if recipient == "leader" {
-            send_to_leader_receiver(
-                workspace,
-                state,
-                recipient,
-                content,
-                opts.task_id.as_ref(),
-                opts.sender.as_str(),
-                opts.requires_ack,
-                None,
-                event_log,
-            )?
-        } else {
-            // single-recipient re-entry — strip fanout metadata to avoid recursion + ensure
-            // each row gets its own caller-supplied message_id (none) so SQLite PK doesn't clash.
-            let mut inner_opts = opts.clone();
-            inner_opts.message_id = None;
-            super::send::send_message(
-                workspace,
-                &MessageTarget::Single(recipient.clone()),
-                content,
-                &inner_opts,
-            )?
-        };
+        // Every expanded recipient re-enters the same presentation-aware send
+        // funnel. Strip the caller idempotency key so each durable fanout row
+        // receives its own stable message id.
+        let mut inner_opts = opts.clone();
+        inner_opts.message_id = None;
+        let outcome = super::send::send_message(
+            workspace,
+            &MessageTarget::Single(recipient.clone()),
+            content,
+            &inner_opts,
+        )?;
         if outcome.ok {
             delivered_count = delivered_count.saturating_add(1);
             if let Some(mid) = outcome.message_id.clone() {
@@ -862,8 +867,12 @@ fn fanout_send(
             return Ok(outcome);
         }
     }
+    let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
+    let stored_only = presentation.effective_sink != PresentationSink::Leader;
     let status = if any_failure {
         DeliveryStatus::FanoutPartial
+    } else if delivered_count > 0 && stored_only {
+        DeliveryStatus::StoredOnly
     } else if delivered_count > 0 {
         DeliveryStatus::FanoutDelivered
     } else {
@@ -874,9 +883,13 @@ fn fanout_send(
         status,
         message_status: MessageStatusShadow(status_wire(status).to_string()),
         message_id: last_message_id,
-        verification: None,
+        verification: stored_only.then(|| "durable_without_live_inject".to_string()),
         stage: None,
         reason: None,
-        channel: Some(channel_label.to_string()),
+        channel: Some(if stored_only {
+            presentation.effective_sink.as_str().to_string()
+        } else {
+            channel_label.to_string()
+        }),
     })
 }
