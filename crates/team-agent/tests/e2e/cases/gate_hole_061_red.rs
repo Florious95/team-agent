@@ -242,8 +242,9 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
 }
 
 #[test]
-fn tooth_3_every_skill_command_has_a_machine_checked_e2e_mapping() {
+fn tooth_3a_every_skill_command_is_recorded_losslessly() {
     assert_command_extractor_canary();
+    assert_coverage_closed_world_canary();
 
     let skill = std::fs::read_to_string(repo_root().join("skills/team-agent/SKILL.md"))
         .expect("read product Team Agent SKILL.md");
@@ -275,9 +276,27 @@ fn tooth_3_every_skill_command_has_a_machine_checked_e2e_mapping() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         listed, documented,
-        "TOOTH-3 RED: SKILL.md executable commands and the machine coverage manifest drifted"
+        "TOOTH-3A RED: SKILL.md executable commands and the machine coverage manifest drifted; \
+         commands must be recorded byte-for-byte after whitespace normalization, including a \
+         legal final argv token `.`"
     );
+}
 
+#[test]
+fn tooth_3b_every_mapping_executes_equivalent_argv_in_its_e2e_case() {
+    let manifest_path = repo_root().join(COVERAGE_MANIFEST);
+    let raw = std::fs::read_to_string(&manifest_path).unwrap_or_else(|_| {
+        panic!(
+            "TOOTH-3B RED: machine-readable documented-command coverage manifest is missing: \
+             {COVERAGE_MANIFEST}"
+        )
+    });
+    let manifest: CoverageManifest = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("TOOTH-3B RED: invalid {COVERAGE_MANIFEST}: {e}"));
+    assert_eq!(
+        manifest.schema_version, "team-agent-skill-command-coverage-v1",
+        "TOOTH-3B RED: unsupported command coverage manifest schema"
+    );
     let e2e_tests = source_tree(&["tests/e2e/main.rs", "tests/e2e/cases"]);
     for entry in &manifest.commands {
         assert!(
@@ -289,6 +308,26 @@ fn tooth_3_every_skill_command_has_a_machine_checked_e2e_mapping() {
             assert!(
                 !case.starts_with("tooth_") && e2e_tests.contains(&format!("fn {case}(")),
                 "TOOTH-3 RED: documented command {:?} maps to missing/non-test E2E case {:?}",
+                entry.command,
+                case
+            );
+            let body = test_function_body(&e2e_tests, case).unwrap_or_else(|| {
+                panic!(
+                    "TOOTH-3B RED: could not inspect mapped E2E case {case:?} for documented \
+                     command {:?}",
+                    entry.command
+                )
+            });
+            let actual_argv = literal_run_ta_argvs(body);
+            assert!(
+                actual_argv
+                    .iter()
+                    .any(|actual| documented_command_matches_argv(&entry.command, actual)),
+                "TOOTH-3B RED: documented command {:?} maps to E2E case {:?}, but that case \
+                 never passes equivalent literal argv to `run_ta`; observed argv={actual_argv:?}. \
+                 Equivalence is exact token-for-token except `<name>` matches exactly one \
+                 non-empty token and `[name]` matches the literal representative `name`; a \
+                 final `.` is an ordinary argv token and must match exactly.",
                 entry.command,
                 case
             );
@@ -480,16 +519,57 @@ fn assert_command_extractor_canary() {
     let markdown = r#"
 ```bash
 team-agent quick-start .team/current
+team-agent profile show codex-default --workspace .
 ```
 Use `team-agent status --json`; prose only.
+The prose sentence team-agent verifier-prose-canary --json. is not executable Markdown.
 "#;
+    let commands = extract_team_agent_commands(markdown);
     assert_eq!(
-        extract_team_agent_commands(markdown),
+        commands,
         BTreeSet::from([
+            "team-agent profile show codex-default --workspace .".to_string(),
             "team-agent quick-start .team/current".to_string(),
             "team-agent status --json".to_string(),
-        ])
+        ]),
+        "TOOTH-3A harness canary: command extraction must preserve a legal final `.` argv \
+         while excluding prose outside executable Markdown"
     );
+    assert_eq!(
+        normalize_team_agent_command("team-agent status --json."),
+        Some("team-agent status --json".to_string()),
+        "TOOTH-3A harness canary: prose punctuation attached to the final argv token must be removed"
+    );
+}
+
+fn assert_coverage_closed_world_canary() {
+    let base = BTreeSet::from(["team-agent status --json".to_string()]);
+    assert!(command_set_drift(&base, &base).is_none());
+
+    let mut documented = base.clone();
+    documented.insert("team-agent verifier-meta-canary --json".to_string());
+    let drift = command_set_drift(&documented, &base)
+        .expect("TOOTH-3A harness canary: an added SKILL command must make coverage drift red");
+    assert!(
+        drift.contains("team-agent verifier-meta-canary --json"),
+        "TOOTH-3A harness canary: drift must name the uncovered SKILL command; drift={drift}"
+    );
+
+    let mut restored = base;
+    restored.insert("team-agent verifier-meta-canary --json".to_string());
+    assert!(
+        command_set_drift(&documented, &restored).is_none(),
+        "TOOTH-3A harness canary: adding the matching manifest entry must restore closure"
+    );
+}
+
+fn command_set_drift(documented: &BTreeSet<String>, listed: &BTreeSet<String>) -> Option<String> {
+    if documented == listed {
+        return None;
+    }
+    let missing = documented.difference(listed).cloned().collect::<Vec<_>>();
+    let stale = listed.difference(documented).cloned().collect::<Vec<_>>();
+    Some(format!("missing={missing:?} stale={stale:?}"))
 }
 
 fn extract_team_agent_commands(markdown: &str) -> BTreeSet<String> {
@@ -528,12 +608,190 @@ fn extract_team_agent_commands(markdown: &str) -> BTreeSet<String> {
 fn normalize_team_agent_command(raw: &str) -> Option<String> {
     let raw = raw.trim();
     let start = raw.find("team-agent ")?;
-    let command = raw[start..]
-        .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':'))
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let command = raw[start..].trim();
+    let command = if command.ends_with(" .") {
+        command
+    } else {
+        command.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':'))
+    };
+    let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
     Some(command)
+}
+
+fn documented_command_matches_argv(command: &str, actual: &[String]) -> bool {
+    let Some(mut expected) = shell_tokens(command) else {
+        return false;
+    };
+    if expected.first().is_none_or(|token| token != "team-agent") {
+        return false;
+    }
+    expected.remove(0);
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            if expected.starts_with('<') && expected.ends_with('>') {
+                !actual.is_empty()
+            } else if expected.starts_with('[') && expected.ends_with(']') {
+                actual == &expected[1..expected.len() - 1]
+            } else {
+                expected == actual
+            }
+        })
+}
+
+fn shell_tokens(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in command.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            } else {
+                token.push(ch);
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(ch);
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    Some(tokens)
+}
+
+fn test_function_body<'a>(source: &'a str, case: &str) -> Option<&'a str> {
+    let signature = format!("fn {case}(");
+    let start = source.find(&signature)?;
+    let open = source[start..].find('{')? + start;
+    let close = matching_delimiter(source, open, b'{', b'}')?;
+    Some(&source[open + 1..close])
+}
+
+fn literal_run_ta_argvs(body: &str) -> Vec<Vec<String>> {
+    let mut argv = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = body[offset..].find("run_ta") {
+        let call_start = offset + found;
+        let Some(open) = body[call_start..].find('(').map(|i| call_start + i) else {
+            break;
+        };
+        let Some(close) = matching_delimiter(body, open, b'(', b')') else {
+            break;
+        };
+        let call = &body[open + 1..close];
+        if let Some(array_start) = call.find("&[").map(|i| i + 1) {
+            if let Some(array_end) = matching_delimiter(call, array_start, b'[', b']') {
+                if let Some(parsed) = parse_literal_string_array(&call[array_start + 1..array_end])
+                {
+                    argv.push(parsed);
+                }
+            }
+        }
+        offset = close + 1;
+    }
+    argv
+}
+
+fn parse_literal_string_array(raw: &str) -> Option<Vec<String>> {
+    let mut values = Vec::new();
+    let mut rest = raw.trim();
+    while !rest.is_empty() {
+        if !rest.starts_with('"') {
+            return None;
+        }
+        let bytes = rest.as_bytes();
+        let mut escaped = false;
+        let mut close = None;
+        for (index, byte) in bytes.iter().enumerate().skip(1) {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                close = Some(index);
+                break;
+            }
+        }
+        let close = close?;
+        values.push(serde_json::from_str::<String>(&rest[..=close]).ok()?);
+        rest = rest[close + 1..].trim_start();
+        if rest.is_empty() {
+            break;
+        }
+        rest = rest.strip_prefix(',')?.trim_start();
+    }
+    Some(values)
+}
+
+fn matching_delimiter(source: &str, open: usize, left: u8, right: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut string = false;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if line_comment {
+            if byte == b'\n' {
+                line_comment = false;
+            }
+        } else if block_comment > 0 {
+            if byte == b'/' && next == Some(b'*') {
+                block_comment += 1;
+                index += 1;
+            } else if byte == b'*' && next == Some(b'/') {
+                block_comment -= 1;
+                index += 1;
+            }
+        } else if string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+        } else if byte == b'/' && next == Some(b'/') {
+            line_comment = true;
+            index += 1;
+        } else if byte == b'/' && next == Some(b'*') {
+            block_comment = 1;
+            index += 1;
+        } else if byte == b'"' {
+            string = true;
+        } else if byte == left {
+            depth += 1;
+        } else if byte == right {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 fn repo_root() -> PathBuf {
