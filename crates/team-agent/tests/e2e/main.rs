@@ -45,6 +45,7 @@ mod cases {
     mod dirty_004_stale_session_id_missing_backing;
     mod dirty_005_cross_team_binding_pollution;
     mod dirty_006_message_stuck_in_accepted;
+    mod gate_hole_061_red;
     mod inbox_001_delivery_status_visible;
     mod lnch_001_quick_start_basic;
     mod lnch_002_duplicate_session;
