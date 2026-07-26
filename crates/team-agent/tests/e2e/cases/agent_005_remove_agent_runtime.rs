@@ -45,8 +45,6 @@ fn agent_005_remove_agent_runtime() {
         "removed worker window b should be absent"
     );
 
-    let _ = run_ta(&ws, &["remove-agent", "a", "--workspace", ".", "--confirm"]);
-
     let _ = run_ta(
         &ws,
         &[

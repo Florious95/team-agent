@@ -73,8 +73,6 @@ fn rest_014_restart_team_selector_targets_named_team() {
         "restart --team {team_a} should target session {expected}; got {session_name:?} (json={j})"
     );
 
-    let _ = run_ta(&ws, &["restart", ".", "--team", "rest014-a"]);
-
     // Cleanup
     let _ = run_ta(
         &ws,

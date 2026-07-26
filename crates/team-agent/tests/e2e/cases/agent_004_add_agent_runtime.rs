@@ -57,19 +57,6 @@ fn agent_004_add_agent_runtime() {
         "add-agent should create worker window b"
     );
 
-    let _ = run_ta(&ws, &["add-agent", "b", "--role-file", "roles/b.md"]);
-    let _ = run_ta(
-        &ws,
-        &[
-            "add-agent",
-            "reviewer",
-            "--role-file",
-            ".team/current/agents/reviewer.md",
-            "--workspace",
-            ".",
-        ],
-    );
-
     let _ = run_ta(
         &ws,
         &[

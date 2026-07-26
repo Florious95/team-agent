@@ -46,8 +46,6 @@ fn rest_013_restart_allow_fresh_succeeds_for_fake_team() {
         "agents array should include 'a'; got {agents:?}"
     );
 
-    let _ = run_ta(&ws, &["restart", ".", "--allow-fresh"]);
-
     let _ = run_ta(
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],

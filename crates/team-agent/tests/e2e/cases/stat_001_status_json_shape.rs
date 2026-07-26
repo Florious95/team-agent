@@ -73,11 +73,6 @@ fn stat_001_status_json_shape() {
         "--detail must still include boolean tmux_session_present: {d}"
     );
 
-    let _ = run_ta(&ws, &["status"]);
-    let _ = run_ta(&ws, &["status", "--detail", "--json"]);
-    let _ = run_ta(&ws, &["status", "--json"]);
-    let _ = run_ta(&ws, &["status", "coder"]);
-
     let _ = run_ta(
         &ws,
         &[
