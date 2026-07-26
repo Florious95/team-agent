@@ -220,30 +220,54 @@ got {status:?}"
     );
 }
 
-/// T3-1 event arm (cr: must emit `provider.result.unknown_status_normalized` with the
-/// original value): the MCP report_result tool — where normalize_report_envelope runs
-/// (tools.rs:324) — must emit the event so the swallow is observable. Driven through
-/// the real mcp-server stdio so the runtime normalize+log path is exercised.
+/// T3-1 ingress arm, re-signed for the 0.5.61 B06/C12 result contract:
+/// task-local business status is opaque transport. The real MCP report_result
+/// entrypoint must preserve an unknown value in the durable result and must not emit
+/// the historical `provider.result.unknown_status_normalized` event. The pure
+/// `normalize_result_status` compatibility locks above remain separate from this
+/// public business-status input domain.
 #[test]
 #[serial(t3_event)]
-fn t3_unknown_status_emits_normalized_event() {
+fn t3_unknown_business_status_is_preserved_without_normalized_event() {
     let harness = McpSimHarness::new();
     let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
-    let _ = worker.call_tool(
+    let status = "garbage-status-xyz";
+    let call = worker.call_tool(
         "report_result",
         serde_json::json!({
             "task_id": "task_mcp",
             "agent_id": "worker_a",
-            "status": "garbage-status-xyz",
+            "status": status,
             "summary": "did a thing",
         }),
     );
+    assert!(
+        !call.is_error,
+        "T3-1 ingress: an opaque business status must be accepted; body={} raw={}",
+        call.body, call.raw
+    );
+    let result_id = call.body["result_id"]
+        .as_str()
+        .expect("T3-1 ingress must return the durable result_id");
+    let row = harness
+        .result_row(result_id)
+        .unwrap_or_else(|| panic!("T3-1 ingress missing durable result {result_id}"));
+    let envelope: serde_json::Value =
+        serde_json::from_str(&row.envelope).expect("T3-1 durable envelope JSON");
+    assert_eq!(
+        row.status, status,
+        "T3-1 ingress: results.status must preserve the task-local value byte-for-byte"
+    );
+    assert_eq!(
+        envelope["status"],
+        serde_json::json!(status),
+        "T3-1 ingress: canonical envelope status must preserve the same value"
+    );
     let events = harness.events_text();
     assert!(
-        events.contains("unknown_status_normalized") && events.contains("garbage-status-xyz"),
-        "T3-1 event: an unknown status normalized at the MCP report_result tool must emit \
-provider.result.unknown_status_normalized carrying the original value (observable \
-swallow, MUST-NOT-13); events tail={}",
+        !events.contains("provider.result.unknown_status_normalized"),
+        "T3-1 ingress: opaque business status must not produce the historical \
+provider.result.unknown_status_normalized event; events tail={}",
         events.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
     );
 }
