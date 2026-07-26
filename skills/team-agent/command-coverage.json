@@ -1,189 +1,323 @@
 {
-  "schema_version": "team-agent-skill-command-coverage-v1",
+  "schema_version": "team-agent-skill-command-coverage-v2",
   "commands": [
     {
       "command": "team-agent add-agent <agent> --role-file <file>",
-      "cases": ["agent_004_add_agent_runtime"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute the documented argv in an isolated add-agent fixture and bind assertions to the CLI result and created roster/window."
     },
     {
       "command": "team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .",
-      "cases": ["agent_004_add_agent_runtime"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute the exact reviewer argv in an isolated fixture and assert the reviewer state, role provenance, and worker window."
     },
     {
       "command": "team-agent approvals",
-      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:approvals",
+      "plan": "Execute the default approvals view and bind assertions to its exit and approval-list output."
     },
     {
       "command": "team-agent approvals <agent_id>",
-      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:approvals",
+      "plan": "Execute a representative agent_id filter and assert the bound CLI result contains only that agent's approvals."
     },
     {
       "command": "team-agent approvals [coder]",
-      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:approvals",
+      "plan": "Execute the literal coder representative and assert the bound CLI result's target-filter behavior."
     },
     {
       "command": "team-agent attach-leader",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:leader-channel",
+      "plan": "Execute in a hermetic caller-pane fixture and bind assertions to either the persisted receiver binding or the precise zero-write refusal."
     },
     {
       "command": "team-agent claim-leader",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:leader-channel",
+      "plan": "Execute in a hermetic leader fixture and bind assertions to owner/receiver persistence or a precise zero-write refusal."
     },
     {
       "command": "team-agent claude",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-launcher",
+      "plan": "Use a per-call hermetic PATH shim for claude, then assert the shim's exact provider argv log and the bound CLI exit/output."
     },
     {
       "command": "team-agent clone-agent <source> --as <new>",
-      "cases": ["agent_006_fork_agent_reports_success_or_explicit_refusal"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-lifecycle",
+      "plan": "Use an isolated provider/session fixture or authorized subscription gate and bind assertions to clone success or its exact rollback refusal."
     },
     {
       "command": "team-agent codex",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-launcher",
+      "plan": "Use a per-call hermetic PATH shim for codex, then assert the shim's exact provider argv log and the bound CLI exit/output."
     },
     {
       "command": "team-agent codex --dangerously-bypass-approvals-and-sandbox",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-launcher",
+      "plan": "Use a per-call hermetic codex PATH shim and assert the exact dangerous flag argv log plus the bound CLI exit/output without invoking a real provider."
     },
     {
       "command": "team-agent collect",
-      "cases": ["send_001_delivers_to_fake_worker"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:results",
+      "plan": "Execute the exact human collect argv after a worker result and bind assertions to presentation and consumption of that same result."
     },
     {
       "command": "team-agent doctor",
-      "cases": ["rec_002_doctor_checks"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:diagnostics",
+      "plan": "Execute the exact human doctor argv and bind assertions to its exit and key diagnostic checks."
     },
     {
       "command": "team-agent fork-agent <source> --as <new>",
-      "cases": ["agent_006_fork_agent_reports_success_or_explicit_refusal"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-lifecycle",
+      "plan": "Use an isolated provider/session fixture or authorized subscription gate and bind assertions to fork success or its exact rollback refusal."
     },
     {
       "command": "team-agent inbox",
-      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the exact default inbox argv and bind assertions to its selected recipient and message or empty-state output."
     },
     {
       "command": "team-agent inbox coder",
-      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the exact coder inbox argv and bind assertions to recipient filtering and delivery fields."
     },
     {
       "command": "team-agent profile doctor <name> --workspace . --json",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Execute a representative local profile doctor argv and bind assertions to its JSON validation result and write isolation."
     },
     {
       "command": "team-agent profile init <name> --auth-mode subscription --workspace .",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Execute a representative local profile init and assert the bound result plus persisted profile identity and subscription auth mode."
     },
     {
       "command": "team-agent profile init claude-default --auth-mode subscription --workspace .",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Execute the exact local init argv and assert the bound result plus claude-default subscription profile fields without launching Claude."
     },
     {
       "command": "team-agent profile init codex-default --auth-mode subscription --workspace .",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Execute the exact local init argv and assert the bound result plus codex-default subscription profile fields without launching Codex."
     },
     {
       "command": "team-agent profile init deepseek --auth-mode compatible_api --workspace .",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Execute the exact local init argv and assert the bound result plus compatible_api profile schema without network access."
     },
     {
       "command": "team-agent profile show <name> --workspace . --json",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Show a profile created in the same fixture and bind field-by-field round-trip assertions to the CLI result."
     },
     {
       "command": "team-agent profile show deepseek --workspace . --json",
-      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:profiles",
+      "plan": "Show the isolated deepseek profile and bind exact identity/auth-mode assertions to the CLI result."
     },
     {
       "command": "team-agent quick-start",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute the exact argv from a hermetic project root and bind assertions to canonical runtime, team, and session identity."
     },
     {
       "command": "team-agent quick-start ./roles --team-id alpha",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute against an isolated legacy roles fixture and bind assertions to the alpha team identity and unique runtime."
     },
     {
       "command": "team-agent quick-start .team/alpha",
-      "cases": ["lnch_001_quick_start_basic"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute against an isolated team directory and bind assertions proving the directory literal cannot split canonical team identity."
     },
     {
       "command": "team-agent quick-start .team/current",
+      "bucket": "covered",
       "cases": ["lnch_001_quick_start_basic"]
     },
     {
       "command": "team-agent quick-start <dir>",
+      "bucket": "covered",
       "cases": ["lnch_001_quick_start_basic"]
     },
     {
       "command": "team-agent remove-agent <agent> --workspace . --confirm",
-      "cases": ["agent_005_remove_agent_runtime"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute the exact argv in a dedicated hermetic lifecycle fixture and bind assertions to roster/window removal and sibling preservation."
     },
     {
       "command": "team-agent reset-agent <agent> --discard-session",
-      "cases": ["agent_003_reset_agent_discard_session_reports_reset"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute the exact argv in a dedicated hermetic fixture and bind assertions to session discard and worker state."
     },
     {
       "command": "team-agent restart",
-      "cases": ["rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:restart",
+      "plan": "Execute from an isolated single-team cwd and bind assertions to the restarted session and roster."
     },
     {
       "command": "team-agent restart .",
-      "cases": ["rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:restart",
+      "plan": "Execute the exact argv including final dot and bind assertions to canonical team selection and restart outcome."
     },
     {
       "command": "team-agent restart . --allow-fresh",
-      "cases": ["rest_013_restart_allow_fresh_succeeds_for_fake_team"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:restart",
+      "plan": "Execute in a dedicated hermetic rebuild fixture and bind assertions to the new session, agent state, and allow-fresh audit."
     },
     {
       "command": "team-agent restart . --team <session_name_or_team_name>",
-      "cases": ["rest_014_restart_team_selector_targets_named_team"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:restart",
+      "plan": "Execute a representative team selector and bind assertions to selected-team restart and sibling preservation."
     },
     {
       "command": "team-agent send --task task_initial \"Start\"",
-      "cases": ["send_003_send_json_shape_locks_public_keys"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the exact task argv in an isolated task fixture and bind assertions to task/message attribution and durable row state."
     },
     {
       "command": "team-agent send --watch-result",
-      "cases": ["send_008_watch_result_missing_worker_window_blocks_before_watch"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the exact incomplete argv and bind assertions to its nonzero usage error and zero message/result writes."
     },
     {
       "command": "team-agent send --watch-result coder \"Do the bounded task\"",
-      "cases": ["send_008_watch_result_missing_worker_window_blocks_before_watch"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the exact argv in an isolated coder fixture and bind assertions to blocked-before-watch or the same-message result closure."
     },
     {
       "command": "team-agent send reviewer \"Review this change\"",
-      "cases": ["send_001_delivers_to_fake_worker"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the exact argv against a fake reviewer and bind recipient, delivered, original result, and collect assertions."
     },
     {
       "command": "team-agent shutdown --workspace . --keep-logs",
-      "cases": ["shut_001_clean_shutdown_kills_worker_session"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:shutdown",
+      "plan": "Execute the exact argv only in a dedicated hermetic fixture and bind assertions to scoped session removal, kept logs, and sibling preservation."
     },
     {
       "command": "team-agent start-agent <agent>",
-      "cases": ["agent_001_start_agent_repairs_missing_window"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute a representative exact argv for a stopped fake agent and bind assertions to status, pane, and window creation."
     },
     {
       "command": "team-agent start-agent <agent_id> --workspace .",
-      "cases": ["agent_001_start_agent_repairs_missing_window"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute a representative exact workspace-dot argv and bind assertions to the same agent's lifecycle result."
     },
     {
       "command": "team-agent start-agent coder --workspace .",
-      "cases": ["agent_001_start_agent_repairs_missing_window"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute in an isolated coder fixture and bind assertions that the selected coder, not a sibling namesake, starts."
     },
     {
       "command": "team-agent status",
-      "cases": ["stat_001_status_json_shape"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:status",
+      "plan": "Execute the exact human status argv and bind assertions to selected team and agent output."
     },
     {
       "command": "team-agent status --detail --json",
-      "cases": ["stat_001_status_json_shape"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:status",
+      "plan": "Execute the exact argv and bind assertions to detail-only coordinator, readiness, and tmux fields."
     },
     {
       "command": "team-agent status --json",
-      "cases": ["stat_001_status_json_shape"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:status",
+      "plan": "Execute the exact argv and bind assertions to the compact status schema and absence of detail-only fields."
     },
     {
       "command": "team-agent status coder",
-      "cases": ["stat_001_status_json_shape"]
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:status",
+      "plan": "Execute the exact coder status argv and bind assertions to coder-only presentation without sibling leakage."
     }
   ]
 }

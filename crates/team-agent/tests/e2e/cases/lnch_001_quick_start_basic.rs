@@ -75,7 +75,7 @@ fn lnch_001_quick_start_basic() {
     );
 
     // Cleanup the worker session so we don't leak state into other tests.
-    let _ = run_ta(
+    let cleanup = run_ta(
         &ws,
         &[
             "shutdown",
@@ -84,6 +84,13 @@ fn lnch_001_quick_start_basic() {
             "--keep-logs",
             "--json",
         ],
+    );
+    assert!(
+        cleanup.is_success(),
+        "documented launch cleanup failed: exit={} stdout={} stderr={}",
+        cleanup.exit_code,
+        cleanup.stdout,
+        cleanup.stderr
     );
 
     // Sanity: state must be valid JSON
