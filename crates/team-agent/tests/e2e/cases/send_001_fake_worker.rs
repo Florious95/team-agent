@@ -56,6 +56,7 @@ fn send_001_delivers_to_fake_worker() {
         .pointer("/message_id")
         .and_then(|v| v.as_str())
         .expect("send must return message_id");
+    let fake_worker_summary = format!("Fake worker handled message {message_id}");
     assert_json_field_eq_str(&j, "/target", "a");
     assert_json_field_eq_str(&j, "/sender", "leader");
 
@@ -72,8 +73,18 @@ fn send_001_delivers_to_fake_worker() {
     );
     wait_for_or_panic(
         "fake worker received message and reported result",
-        || result_summary_for_message(ws.path(), message_id).is_some(),
+        || {
+            result_truth_for_message(ws.path(), message_id).is_some_and(|truth| {
+                truth.task_id == message_id && truth.summary == fake_worker_summary
+            })
+        },
         Duration::from_secs(10),
+    );
+    let fake_worker_result = result_truth_for_message(ws.path(), message_id)
+        .expect("spawned fake worker result must remain queryable before collect");
+    assert_ne!(
+        fake_worker_result.task_id, "manual",
+        "fake worker must preserve production message-scope attribution"
     );
 
     let owner_team_id = ws.read_state()["active_team_key"]
@@ -105,10 +116,20 @@ fn send_001_delivers_to_fake_worker() {
         .expect("collect must expose collected_results");
     assert!(
         rows.iter().any(|row| {
+            row["result_id"] == Value::String(fake_worker_result.result_id.clone())
+                && row["task_id"] == Value::String(message_id.to_string())
+                && row["agent_id"] == Value::String("a".to_string())
+                && row["scope"] == Value::String("message".to_string())
+                && row["summary"] == Value::String(fake_worker_summary.clone())
+        }),
+        "collect did not return spawned fake worker a's result: {collected}"
+    );
+    assert!(
+        rows.iter().any(|row| {
             row["agent_id"] == Value::String("a".to_string())
                 && row["summary"] == Value::String(report_summary.clone())
         }),
-        "collect did not return worker a's MCP result: {collected}"
+        "collect did not return worker a's explicit stdio MCP result: {collected}"
     );
 
     // cleanup
@@ -146,19 +167,37 @@ fn message_truth(workspace: &Path, message_id: &str) -> Option<MessageTruth> {
     .ok()
 }
 
-fn result_summary_for_message(workspace: &Path, message_id: &str) -> Option<String> {
+struct ResultTruth {
+    result_id: String,
+    task_id: String,
+    summary: String,
+}
+
+fn result_truth_for_message(workspace: &Path, message_id: &str) -> Option<ResultTruth> {
     let conn = Connection::open(workspace.join(".team/runtime/team.db")).ok()?;
     let mut stmt = conn
-        .prepare("select envelope from results order by created_at desc")
+        .prepare("select result_id, task_id, envelope from results order by created_at desc")
         .ok()?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?;
-    let found = rows.filter_map(Result::ok).find_map(|raw| {
-        let envelope: Value = serde_json::from_str(&raw).ok()?;
-        envelope["summary"]
-            .as_str()
-            .filter(|summary| summary.contains(message_id))
-            .map(str::to_string)
-    });
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .ok()?;
+    let found = rows
+        .filter_map(Result::ok)
+        .find_map(|(result_id, task_id, raw)| {
+            let envelope: Value = serde_json::from_str(&raw).ok()?;
+            let summary = envelope["summary"].as_str()?.to_string();
+            summary.contains(message_id).then_some(ResultTruth {
+                result_id,
+                task_id,
+                summary,
+            })
+        });
     found
 }
 

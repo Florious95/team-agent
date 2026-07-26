@@ -153,7 +153,7 @@ fn fake_envelope(
 ) -> serde_json::Value {
     serde_json::json!({
         "schema_version": "result_envelope_v1",
-        "task_id": task_id.unwrap_or("manual"),
+        "task_id": task_id.unwrap_or(message_id),
         "agent_id": agent_id,
         "status": "success",
         "summary": format!("Fake worker handled message {message_id}"),
@@ -278,6 +278,26 @@ mod tests {
         assert!(
             printed.contains("TEAM_AGENT_FAKE_WORKING agent=w1"),
             "rendered form prints WORKING per line; got {printed}"
+        );
+    }
+
+    #[test]
+    fn fake_worker_direct_message_uses_message_scope_instead_of_manual() {
+        let ws = fake_ws();
+        let input = "Team Agent message from leader:\nplease do X\n[team-agent-token:m1]\n";
+        let mut out: Vec<u8> = Vec::new();
+        run(&ws, "w1", Cursor::new(input.as_bytes()), &mut out).expect("fake worker run");
+
+        let (task_id, agent_id, status, envelope) = stored_result(&ws);
+        assert_eq!(
+            (task_id.as_str(), agent_id.as_str(), status.as_str()),
+            ("m1", "w1", "success"),
+            "a direct-message result must use its message id for message-scope collection"
+        );
+        assert_ne!(
+            envelope["task_id"],
+            serde_json::json!("manual"),
+            "the fake worker must not emit the production-impossible manual fallback"
         );
     }
 }
