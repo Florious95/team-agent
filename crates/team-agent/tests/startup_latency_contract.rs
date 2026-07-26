@@ -6,7 +6,8 @@
 //! User-visible contract:
 //! - Restart/launch expose structured phase timing before optimizing latency.
 //! - Restart may spawn independent workers concurrently, but persisted topology
-//!   stays deterministic and failure aggregation remains equivalent to serial.
+//!   matches transport identity regardless of completion order, and failure
+//!   aggregation remains equivalent to serial.
 //! - Readiness still waits on session, worker panes, and coordinator truth.
 
 #![cfg(unix)]
@@ -44,6 +45,8 @@ use team_agent::transport::{
 const TEAM: &str = "current";
 const TEAM_SESSION: &str = "team-current";
 const TMUX_ENDPOINT: &str = "/Volumes/nvme/tmp/ta-0538-startup-latency.sock";
+const WRONG_INDEX_INJECTION: &str = "TEAM_AGENT_TEST_INJECT_WRONG_OUTCOME_INDEX";
+const FAILURE_SNAPSHOT: &str = "TEAM_AGENT_STARTUP_FAILURE_SNAPSHOT";
 
 #[test]
 #[serial(env)]
@@ -69,7 +72,11 @@ fn restart_records_parallel_spawn_overlap_and_deterministic_state() {
         .iter()
         .filter(|call| call.kind == "spawn_into")
         .collect::<Vec<_>>();
-    let state = case.read_state();
+    let mut state = case.read_state();
+    if std::env::var_os(WRONG_INDEX_INJECTION).is_some() {
+        inject_wrong_outcome_index(&mut state, "w1", "w2");
+    }
+    let panes = transport.pane_snapshot();
     let mut violations = Vec::new();
     if !has_overlap(&new_windows) {
         violations.push(format!(
@@ -87,7 +94,7 @@ fn restart_records_parallel_spawn_overlap_and_deterministic_state() {
             "persisted agents must stay sorted/stable in plan order; got={agent_keys:?}"
         ));
     }
-    for (index, worker) in expected_agents.iter().enumerate() {
+    for worker in &expected_agents {
         let agent = state
             .pointer(&format!("/agents/{worker}"))
             .unwrap_or_else(|| panic!("R1 setup: missing {worker}; state={state}"));
@@ -99,21 +106,21 @@ fn restart_records_parallel_spawn_overlap_and_deterministic_state() {
                 "{worker}: persisted window mismatch; agent={agent}"
             ));
         }
-        if agent.get("pane_id").and_then(Value::as_str) != Some(format!("%{}", index + 1).as_str())
-        {
-            violations.push(format!(
-                "{worker}: persisted pane_id mismatch; agent={agent}"
-            ));
-        }
         if agent.get("spawn_epoch").and_then(Value::as_u64) != Some(1) {
             violations.push(format!(
                 "{worker}: respawn must persist spawn_epoch=1, not leave the old/missing value; agent={agent}"
             ));
         }
     }
+    violations.extend(identity_tuple_violations(&state, &panes, &expected_agents));
+    let failure_snapshot =
+        (!violations.is_empty()).then(|| case.write_failure_snapshot(&state, &panes, &violations));
     assert!(
         violations.is_empty(),
-        "R1: parallel restart must overlap independent new-window spawns while keeping deterministic persisted topology:\n{}",
+        "R1: parallel restart must overlap while preserving persisted↔transport identity tuples; failure_snapshot={}:\n{}",
+        failure_snapshot
+            .as_deref()
+            .map_or_else(|| "<none>".to_string(), |path| path.display().to_string()),
         violations.join("\n")
     );
 }
@@ -390,6 +397,43 @@ impl RestartLatencyCase {
     fn events(&self) -> Vec<Value> {
         EventLog::new(&self.workspace).tail(0).expect("read events")
     }
+
+    fn write_failure_snapshot(
+        &self,
+        state: &Value,
+        panes: &[Value],
+        violations: &[String],
+    ) -> PathBuf {
+        let path = std::env::var_os(FAILURE_SNAPSHOT)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                self._env
+                    .root()
+                    .parent()
+                    .expect("hermetic root parent")
+                    .join(format!(
+                        "startup-latency-r1-failure-{}.json",
+                        std::process::id()
+                    ))
+            });
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create R1 failure snapshot parent");
+        }
+        let snapshot = json!({
+            "wrong_index_injected": std::env::var_os(WRONG_INDEX_INJECTION).is_some(),
+            "workspace": self.workspace,
+            "persisted_session": state.get("session_name"),
+            "persisted_agents": state.get("agents"),
+            "transport_panes": panes,
+            "violations": violations,
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&snapshot).expect("serialize R1 failure snapshot"),
+        )
+        .expect("write R1 failure snapshot before unwind");
+        path
+    }
 }
 
 struct LaunchLatencyCase {
@@ -575,6 +619,22 @@ impl StartupLatencyTransport {
 
     fn spawn_calls(&self) -> Vec<SpawnCall> {
         self.state.lock().unwrap().calls.clone()
+    }
+
+    fn pane_snapshot(&self) -> Vec<Value> {
+        self.state
+            .lock()
+            .unwrap()
+            .panes
+            .values()
+            .map(|pane| {
+                json!({
+                    "pane_id": pane.pane_id.as_str(),
+                    "session": pane.session.as_str(),
+                    "window": pane.window_name.as_ref().map(WindowName::as_str),
+                })
+            })
+            .collect()
     }
 
     fn spawn(
@@ -771,6 +831,122 @@ fn has_overlap(calls: &[&SpawnCall]) -> bool {
             .skip(index + 1)
             .any(|right| left.start < right.end && right.start < left.end)
     })
+}
+
+fn inject_wrong_outcome_index(state: &mut Value, left: &str, right: &str) {
+    swap_persisted_pane_ids(
+        state
+            .get_mut("agents")
+            .and_then(Value::as_object_mut)
+            .expect("wrong-index injection requires persisted agents"),
+        left,
+        right,
+    );
+    swap_persisted_pane_ids(
+        state
+            .pointer_mut(&format!("/teams/{TEAM}/agents"))
+            .and_then(Value::as_object_mut)
+            .expect("wrong-index injection requires team projection agents"),
+        left,
+        right,
+    );
+}
+
+fn swap_persisted_pane_ids(agents: &mut serde_json::Map<String, Value>, left: &str, right: &str) {
+    let left_pane = agents
+        .get(left)
+        .and_then(|agent| agent.get("pane_id"))
+        .cloned()
+        .expect("wrong-index injection left pane");
+    let right_pane = agents
+        .get(right)
+        .and_then(|agent| agent.get("pane_id"))
+        .cloned()
+        .expect("wrong-index injection right pane");
+    agents
+        .get_mut(left)
+        .and_then(Value::as_object_mut)
+        .expect("wrong-index injection left agent")
+        .insert("pane_id".to_string(), right_pane);
+    agents
+        .get_mut(right)
+        .and_then(Value::as_object_mut)
+        .expect("wrong-index injection right agent")
+        .insert("pane_id".to_string(), left_pane);
+}
+
+fn identity_tuple_violations(
+    state: &Value,
+    panes: &[Value],
+    expected_agents: &[String],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let persisted_session = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing-session>");
+    let persisted_tuples = expected_agents
+        .iter()
+        .filter_map(|worker| {
+            let agent = state.pointer(&format!("/agents/{worker}"))?;
+            Some((
+                worker.clone(),
+                agent
+                    .get("pane_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing-pane>")
+                    .to_string(),
+                persisted_session.to_string(),
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    let transport_tuples = panes
+        .iter()
+        .map(|pane| {
+            (
+                pane.get("window")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing-window>")
+                    .to_string(),
+                pane.get("pane_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing-pane>")
+                    .to_string(),
+                pane.get("session")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing-session>")
+                    .to_string(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let transport_windows = transport_tuples
+        .iter()
+        .map(|(window, _, _)| window.clone())
+        .collect::<BTreeSet<_>>();
+    let transport_pane_ids = transport_tuples
+        .iter()
+        .map(|(_, pane_id, _)| pane_id.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_set = expected_agents.iter().cloned().collect::<BTreeSet<_>>();
+
+    if transport_windows != expected_set {
+        violations.push(format!(
+            "transport worker set incomplete or duplicated; expected={expected_set:?} got={transport_windows:?}"
+        ));
+    }
+    if transport_pane_ids.len() != expected_agents.len() {
+        violations.push(format!(
+            "transport pane_id values must be globally unique; expected={} got={} panes={transport_pane_ids:?}",
+            expected_agents.len(),
+            transport_pane_ids.len()
+        ));
+    }
+    if persisted_tuples != transport_tuples {
+        violations.push(format!(
+            "persisted↔transport identity tuple mismatch (worker/window, pane_id, session); persisted={persisted_tuples:?} transport={transport_tuples:?}"
+        ));
+    }
+    violations
 }
 
 fn assert_phase_events(events: &[Value], event_kind: &str, expected_phases: &[&str]) {
