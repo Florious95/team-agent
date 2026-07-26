@@ -14,6 +14,37 @@ use super::MessagingError;
 use crate::model::ids::TaskId;
 use crate::state::projection::OwnerTeamResolution;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultRoute {
+    Leader,
+    Pipeline,
+}
+
+impl ResultRoute {
+    pub const ALL: [Self; 2] = [Self::Leader, Self::Pipeline];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Leader => "leader",
+            Self::Pipeline => "pipeline",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "leader" => Some(Self::Leader),
+            "pipeline" => Some(Self::Pipeline),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ResultRoute {
+    fn default() -> Self {
+        Self::Leader
+    }
+}
+
 /// `collect` (`results.py:45`):投递 pending、捞 uncollected results、校验 envelope、更新任务态、
 /// 写 team_state、ensure coordinator。CLI `collect` + coordinator tick 调。
 pub fn collect(
@@ -627,18 +658,12 @@ fn report_result_for_owner_team_inner(
     explicit_owner_team: Option<&str>,
     fallback_primary_error: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
-    validate_result_envelope(envelope)?;
-    let (presentation_request, presentation_error) =
-        super::presentation::normalize_report_presentation(envelope.get("presentation"));
-    if let Some(error) = presentation_error {
-        return Err(MessagingError::Validation(format!(
-            "invalid presentation: {error}"
-        )));
+    if envelope.get("result_route").is_some() {
+        return Err(MessagingError::Validation(
+            "report_result result_route is task-owned and cannot be set by a worker".to_string(),
+        ));
     }
-    let presentation = super::presentation::decide_presentation(
-        &presentation_request,
-        super::presentation::PresentationSource::ReportResult,
-    );
+    validate_result_envelope(envelope)?;
     let store = MessageStore::open(workspace)?;
     let result_id = envelope
         .get("result_id")
@@ -656,12 +681,6 @@ fn report_result_for_owner_team_inner(
             );
         }
     }
-    if let Some(obj) = stored.as_object_mut() {
-        obj.insert(
-            "presentation".to_string(),
-            serde_json::to_value(&presentation)?,
-        );
-    }
     let conn = crate::db::schema::open_db(store.db_path())?;
     let state_for_owner =
         crate::state::persist::load_runtime_state(workspace).unwrap_or(serde_json::json!({}));
@@ -669,6 +688,42 @@ fn report_result_for_owner_team_inner(
         .filter(|team| !team.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| super::leader_receiver::active_team_key(workspace, &state_for_owner));
+    let (result_route, route_declared) = task_result_route(&state_for_owner, &owner_team, task_id)?;
+    let presentation = if route_declared {
+        let request = super::presentation::PresentationRequest {
+            sink: match result_route {
+                ResultRoute::Leader => super::presentation::PresentationSink::Leader,
+                ResultRoute::Pipeline => super::presentation::PresentationSink::Casefile,
+            },
+            class: match result_route {
+                ResultRoute::Leader => super::presentation::PresentationClass::Message,
+                ResultRoute::Pipeline => super::presentation::PresentationClass::StageResult,
+            },
+            case_id: (result_route == ResultRoute::Pipeline).then(|| task_id.to_string()),
+        };
+        super::presentation::decide_presentation(
+            &request,
+            super::presentation::PresentationSource::ReportResult,
+        )
+    } else {
+        let (request, error) =
+            super::presentation::normalize_report_presentation(envelope.get("presentation"));
+        if let Some(error) = error {
+            return Err(MessagingError::Validation(format!(
+                "invalid presentation: {error}"
+            )));
+        }
+        super::presentation::decide_presentation(
+            &request,
+            super::presentation::PresentationSource::ReportResult,
+        )
+    };
+    if let Some(obj) = stored.as_object_mut() {
+        obj.insert(
+            "presentation".to_string(),
+            serde_json::to_value(&presentation)?,
+        );
+    }
     let inserted = insert_result_if_absent(
         &conn,
         &result_id,
@@ -1045,6 +1100,39 @@ fn report_result_for_owner_team_inner(
         );
     }
     Ok(serde_json::Value::Object(out))
+}
+
+fn task_result_route(
+    state: &serde_json::Value,
+    owner_team: &str,
+    task_id: &str,
+) -> Result<(ResultRoute, bool), MessagingError> {
+    let scoped_tasks = state
+        .get("teams")
+        .and_then(|teams| teams.get(owner_team))
+        .and_then(|team| team.get("tasks"))
+        .and_then(serde_json::Value::as_array);
+    let top_level_tasks = state.get("tasks").and_then(serde_json::Value::as_array);
+    let task = scoped_tasks
+        .into_iter()
+        .flatten()
+        .chain(top_level_tasks.into_iter().flatten())
+        .find(|task| task.get("id").and_then(serde_json::Value::as_str) == Some(task_id));
+    let Some(route) = task.and_then(|task| task.get("result_route")) else {
+        return Ok((ResultRoute::default(), false));
+    };
+    let route = route.as_str().ok_or_else(|| {
+        MessagingError::Validation(format!(
+            "task {task_id} has non-string result_route and cannot accept results"
+        ))
+    })?;
+    ResultRoute::parse(route)
+        .map(|route| (route, true))
+        .ok_or_else(|| {
+            MessagingError::Validation(format!(
+                "task {task_id} has unknown result_route {route:?} and cannot accept results"
+            ))
+        })
 }
 
 fn copy_report_attribution_fields(

@@ -116,6 +116,22 @@ impl TeamOrchestratorTools {
                 "ValueError",
             ));
         };
+        if let Some(route) = task.get("result_route") {
+            let Some(route) = route.as_str() else {
+                return Err(ToolError::new(
+                    ToolErrorReason::InvalidToolArguments,
+                    "assign_task task.result_route must be 'leader' or 'pipeline'",
+                    "ValueError",
+                ));
+            };
+            if crate::messaging::results::ResultRoute::parse(route).is_none() {
+                return Err(ToolError::new(
+                    ToolErrorReason::InvalidToolArguments,
+                    format!("assign_task task.result_route has unknown value: {route}"),
+                    "ValueError",
+                ));
+            }
+        }
 
         let task_value = Value::Object(task_obj.clone());
         let recovery = task_recovery_marker(&task_value);

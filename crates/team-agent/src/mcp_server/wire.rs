@@ -404,11 +404,7 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
     let mut properties = serde_json::Map::new();
     match tool {
         McpTool::AssignTask => {
-            insert_property(
-                &mut properties,
-                "task",
-                object_property("Task object to add or update."),
-            );
+            insert_property(&mut properties, "task", task_property());
             insert_property(
                 &mut properties,
                 "message",
@@ -603,6 +599,25 @@ fn boolean_property(description: &str) -> Value {
 
 fn object_property(description: &str) -> Value {
     serde_json::json!({"type": "object", "description": description, "additionalProperties": true})
+}
+
+fn task_property() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Task object to add or update.",
+        "properties": {
+            "result_route": {
+                "type": "string",
+                "enum": crate::messaging::results::ResultRoute::ALL
+                    .iter()
+                    .map(|route| route.as_str())
+                    .collect::<Vec<_>>(),
+                "default": crate::messaging::results::ResultRoute::default().as_str(),
+                "description": "Result destination chosen by the task assigner."
+            }
+        },
+        "additionalProperties": true
+    })
 }
 
 fn presentation_property(description: &str) -> Value {
