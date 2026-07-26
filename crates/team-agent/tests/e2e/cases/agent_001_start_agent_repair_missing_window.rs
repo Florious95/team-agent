@@ -68,6 +68,10 @@ fn agent_001_start_agent_repairs_missing_window() {
         "start-agent should write a pane_id; agent={agent}"
     );
 
+    let _ = run_ta(&ws, &["start-agent", "a"]);
+    let _ = run_ta(&ws, &["start-agent", "a", "--workspace", "."]);
+    let _ = run_ta(&ws, &["start-agent", "coder", "--workspace", "."]);
+
     let _ = run_ta(
         &ws,
         &[

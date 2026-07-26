@@ -26,6 +26,8 @@ fn rec_002_doctor_checks() {
     assert_json_field_eq_bool(&j, "/tmux/installed", true);
     assert_json_field_eq_bool(&j, "/profile_smoke/ok", true);
 
+    let _ = run_ta(&ws, &["doctor"]);
+
     let _ = run_ta(
         &ws,
         &[

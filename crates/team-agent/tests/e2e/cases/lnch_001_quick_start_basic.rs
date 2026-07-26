@@ -74,6 +74,18 @@ fn lnch_001_quick_start_basic() {
         "documented launch must create one canonical team identity"
     );
 
+    let _ = run_ta(&ws, &["attach-leader"]);
+    let _ = run_ta(&ws, &["claim-leader"]);
+    let _ = run_ta(&ws, &["claude"]);
+    let _ = run_ta(&ws, &["codex"]);
+    let _ = run_ta(
+        &ws,
+        &["codex", "--dangerously-bypass-approvals-and-sandbox"],
+    );
+    let _ = run_ta(&ws, &["quick-start"]);
+    let _ = run_ta(&ws, &["quick-start", "./roles", "--team-id", "alpha"]);
+    let _ = run_ta(&ws, &["quick-start", ".team/alpha"]);
+
     // Cleanup the worker session so we don't leak state into other tests.
     let _ = run_ta(
         &ws,

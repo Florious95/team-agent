@@ -51,4 +51,7 @@ fn rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume() {
         "0.4.7 partial-resume: never-captured fake team must auto-fresh \
          (no context to lose); got status={status:?}; json={j}"
     );
+
+    let _ = run_ta(&ws, &["restart"]);
+    let _ = run_ta(&ws, &["restart", "."]);
 }

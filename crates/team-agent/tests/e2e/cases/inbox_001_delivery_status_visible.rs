@@ -68,6 +68,12 @@ fn inbox_001_delivery_status_visible_for_blocked_inbound_message() {
         inbox_human.stdout
     );
 
+    let _ = run_ta(&ws, &["approvals"]);
+    let _ = run_ta(&ws, &["approvals", "a"]);
+    let _ = run_ta(&ws, &["approvals", "coder"]);
+    let _ = run_ta(&ws, &["inbox"]);
+    let _ = run_ta(&ws, &["inbox", "coder"]);
+
     let _ = run_ta(
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],

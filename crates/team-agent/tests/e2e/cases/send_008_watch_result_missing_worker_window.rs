@@ -50,6 +50,12 @@ fn send_008_watch_result_missing_worker_window_blocks_before_watch() {
         Duration::from_secs(6),
     );
 
+    let _ = run_ta(&ws, &["send", "--watch-result"]);
+    let _ = run_ta(
+        &ws,
+        &["send", "--watch-result", "coder", "Do the bounded task"],
+    );
+
     let _ = run_ta(
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],

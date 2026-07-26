@@ -73,6 +73,8 @@ fn send_003_send_json_shape_locks_public_keys() {
         "send JSON should include a non-empty 'reminder'; got {j}"
     );
 
+    let _ = run_ta(&ws, &["send", "--task", "task_initial", "Start"]);
+
     let _ = run_ta(
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],

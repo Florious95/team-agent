@@ -55,6 +55,8 @@ fn agent_003_reset_agent_discard_session_reports_reset() {
         Some("running")
     );
 
+    let _ = run_ta(&ws, &["reset-agent", "a", "--discard-session"]);
+
     let _ = run_ta(
         &ws,
         &[

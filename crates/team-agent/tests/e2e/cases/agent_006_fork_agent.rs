@@ -52,6 +52,9 @@ fn agent_006_fork_agent_reports_success_or_explicit_refusal() {
         );
     }
 
+    let _ = run_ta(&ws, &["clone-agent", "a", "--as", "cloned"]);
+    let _ = run_ta(&ws, &["fork-agent", "a", "--as", "forked-again"]);
+
     let _ = run_ta(
         &ws,
         &[

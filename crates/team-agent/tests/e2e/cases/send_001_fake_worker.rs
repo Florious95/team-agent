@@ -132,6 +132,9 @@ fn send_001_delivers_to_fake_worker() {
         "collect did not return worker a's explicit stdio MCP result: {collected}"
     );
 
+    let _ = run_ta(&ws, &["collect"]);
+    let _ = run_ta(&ws, &["send", "reviewer", "Review this change"]);
+
     // cleanup
     let _ = run_ta(
         &ws,

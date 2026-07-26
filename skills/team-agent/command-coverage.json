@@ -6,7 +6,7 @@
       "cases": ["agent_004_add_agent_runtime"]
     },
     {
-      "command": "team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace",
+      "command": "team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .",
       "cases": ["agent_004_add_agent_runtime"]
     },
     {
@@ -70,19 +70,19 @@
       "cases": ["lnch_003_quick_start_refuses_missing_profile"]
     },
     {
-      "command": "team-agent profile init <name> --auth-mode subscription --workspace",
+      "command": "team-agent profile init <name> --auth-mode subscription --workspace .",
       "cases": ["lnch_003_quick_start_refuses_missing_profile"]
     },
     {
-      "command": "team-agent profile init claude-default --auth-mode subscription --workspace",
+      "command": "team-agent profile init claude-default --auth-mode subscription --workspace .",
       "cases": ["lnch_003_quick_start_refuses_missing_profile"]
     },
     {
-      "command": "team-agent profile init codex-default --auth-mode subscription --workspace",
+      "command": "team-agent profile init codex-default --auth-mode subscription --workspace .",
       "cases": ["lnch_003_quick_start_refuses_missing_profile"]
     },
     {
-      "command": "team-agent profile init deepseek --auth-mode compatible_api --workspace",
+      "command": "team-agent profile init deepseek --auth-mode compatible_api --workspace .",
       "cases": ["lnch_003_quick_start_refuses_missing_profile"]
     },
     {
@@ -126,6 +126,10 @@
       "cases": ["rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume"]
     },
     {
+      "command": "team-agent restart .",
+      "cases": ["rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume"]
+    },
+    {
       "command": "team-agent restart . --allow-fresh",
       "cases": ["rest_013_restart_allow_fresh_succeeds_for_fake_team"]
     },
@@ -158,11 +162,11 @@
       "cases": ["agent_001_start_agent_repairs_missing_window"]
     },
     {
-      "command": "team-agent start-agent <agent_id> --workspace",
+      "command": "team-agent start-agent <agent_id> --workspace .",
       "cases": ["agent_001_start_agent_repairs_missing_window"]
     },
     {
-      "command": "team-agent start-agent coder --workspace",
+      "command": "team-agent start-agent coder --workspace .",
       "cases": ["agent_001_start_agent_repairs_missing_window"]
     },
     {

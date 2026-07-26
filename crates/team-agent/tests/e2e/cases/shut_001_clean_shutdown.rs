@@ -70,4 +70,6 @@ fn shut_001_clean_shutdown_kills_worker_session() {
         !tmux_session_exists_for_workspace(&ws, &session),
         "worker session {session} should be absent after shutdown"
     );
+
+    let _ = run_ta(&ws, &["shutdown", "--workspace", ".", "--keep-logs"]);
 }
