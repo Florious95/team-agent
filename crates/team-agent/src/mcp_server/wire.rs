@@ -9,7 +9,6 @@ use crate::event_log::EventLog;
 use crate::messaging::MessageTarget;
 
 use super::helpers::{json_dumps_default, object_fields};
-use super::normalize::normalize_result_status;
 use super::tools::TeamOrchestratorTools;
 use super::types::{
     McpError, McpTool, RpcError, RpcId, RpcMethod, RpcResponse, Scope, SendOutcome,
@@ -676,18 +675,7 @@ pub(crate) fn dispatch_tool(
         McpTool::ReportResult => tools.report_result_with_presentation(
             args.get("envelope"),
             args.get("summary").and_then(Value::as_str),
-            // cr verdict (T3-1 refined): an unknown status literal normalizes to
-            // Partial and is OBSERVABLE at this ingestion boundary, never silent.
-            {
-                let (status, unknown) =
-                    crate::mcp_server::normalize::normalize_result_status_observed(
-                        args.get("status").and_then(Value::as_str),
-                    );
-                if let Some(raw) = unknown {
-                    tools.note_unknown_result_status(&raw);
-                }
-                status
-            },
+            args.get("status").and_then(Value::as_str),
             args.get("changes")
                 .and_then(Value::as_array)
                 .map(Vec::as_slice),

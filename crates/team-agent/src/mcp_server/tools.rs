@@ -21,13 +21,13 @@ use crate::messaging::{self, DeliveryStatus, MessageTarget, SendOptions, Trusted
 
 use super::helpers::{
     current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
-    ensure_object, enum_value, insert_array, is_worker_recipient, json_dumps_default,
-    latest_task_for_assignee, non_empty_string, normalized_envelope_value, object_fields,
-    requires_ack_for_target, tool_runtime_error, DirectMessageAttribution,
+    ensure_object, enum_value, is_worker_recipient, json_dumps_default, latest_task_for_assignee,
+    non_empty_string, object_fields, requires_ack_for_target, tool_runtime_error,
+    DirectMessageAttribution,
 };
 use super::normalize::{
-    compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
-    report_result_integrity_warnings, validate_test_evidence_schema,
+    compact_tool_result, normalize_report_envelope, report_result_integrity_warnings,
+    validate_test_evidence_schema,
 };
 use super::types::{
     Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers,
@@ -400,10 +400,11 @@ impl TeamOrchestratorTools {
         task_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> ToolResult {
+        let status = enum_value(status);
         self.report_result_with_presentation(
             envelope,
             summary,
-            status,
+            status.as_str(),
             changes,
             tests,
             risks,
@@ -420,7 +421,7 @@ impl TeamOrchestratorTools {
         &self,
         envelope: Option<&Value>,
         summary: Option<&str>,
-        status: ResultStatus,
+        status: Option<&str>,
         changes: Option<&[Value]>,
         tests: Option<&[Value]>,
         risks: Option<&[Value]>,
@@ -452,7 +453,10 @@ impl TeamOrchestratorTools {
                 );
             }
             if !obj.contains_key("status") {
-                obj.insert("status".to_string(), enum_value(status));
+                obj.insert(
+                    "status".to_string(),
+                    Value::String(status.unwrap_or("success").to_string()),
+                );
             }
             if !obj.contains_key("task_id") {
                 // Blocker-1 (prerelease 0.4.0): scoped-team task inference +
@@ -547,28 +551,35 @@ impl TeamOrchestratorTools {
                 obj.insert("agent_id".to_string(), Value::String(resolved));
             }
             if !obj.contains_key("changes") {
-                insert_array(obj, "changes", changes);
+                obj.insert(
+                    "changes".to_string(),
+                    Value::Array(changes.unwrap_or(&[]).to_vec()),
+                );
             }
             if !obj.contains_key("tests") {
-                insert_array(obj, "tests", tests);
+                obj.insert(
+                    "tests".to_string(),
+                    Value::Array(tests.unwrap_or(&[]).to_vec()),
+                );
             }
             if !obj.contains_key("risks") {
-                insert_array(obj, "risks", risks);
+                obj.insert(
+                    "risks".to_string(),
+                    Value::Array(risks.unwrap_or(&[]).to_vec()),
+                );
             }
             if !obj.contains_key("artifacts") {
-                insert_array(obj, "artifacts", artifacts);
+                obj.insert(
+                    "artifacts".to_string(),
+                    Value::Array(artifacts.unwrap_or(&[]).to_vec()),
+                );
             }
             if !obj.contains_key("next_actions") {
-                insert_array(obj, "next_actions", next_actions);
+                obj.insert(
+                    "next_actions".to_string(),
+                    Value::Array(next_actions.unwrap_or(&[]).to_vec()),
+                );
             }
-        }
-        // T3-1 cr verdict (refined): an unknown non-empty status literal normalizes to
-        // Partial and must be OBSERVABLE at this ingestion boundary (the envelope-borne
-        // path; the wire `status` arg path emits at dispatch). Never a silent swallow.
-        if let Some(raw) =
-            normalize_result_status_observed(base.get("status").and_then(Value::as_str)).1
-        {
-            self.note_unknown_result_status(&raw);
         }
         if let Err(error) = validate_test_evidence_schema(base.get("tests")) {
             return Err(ToolError::new(
@@ -586,8 +597,15 @@ impl TeamOrchestratorTools {
             ));
         }
         let warnings = report_result_integrity_warnings(&base, &normalized);
-        let mut env_value = normalized_envelope_value(&normalized);
-        copy_report_attribution_fields(&base, &mut env_value);
+        let mut env_value = base;
+        if let Some(obj) = env_value.as_object_mut() {
+            obj.entry("schema_version")
+                .or_insert_with(|| Value::String("result_envelope_v1".to_string()));
+            obj.insert(
+                "presentation".to_string(),
+                serde_json::to_value(&normalized.presentation).unwrap_or(Value::Null),
+            );
+        }
         if !warnings.is_empty() {
             if let Some(obj) = env_value.as_object_mut() {
                 obj.insert("warnings".to_string(), Value::Array(warnings));
@@ -601,20 +619,6 @@ impl TeamOrchestratorTools {
         )
         .map_err(tool_runtime_error)
         .and_then(|value| compact_tool_result(&value))
-    }
-
-    /// T3-1 cr verdict: the observable record of an unknown→Partial status
-    /// normalization (`provider.result.unknown_status_normalized`, raw literal
-    /// included) — MUST-NOT-13: the swallow is never silent.
-    pub(crate) fn note_unknown_result_status(&self, raw: &str) {
-        let _ = EventLog::new(&self.workspace).write(
-            "provider.result.unknown_status_normalized",
-            serde_json::json!({
-                "agent_id": self.agent_id.as_ref().map(AgentId::as_str),
-                "raw_status": raw,
-                "normalized": "partial",
-            }),
-        );
     }
 
     /// `update_state` (`tools.py:316-325`): delegated through the lifecycle tools
@@ -1224,24 +1228,6 @@ fn merge_object_fields(existing: &mut Value, incoming: &Value) {
     };
     for (key, value) in incoming_obj {
         existing_obj.insert(key.clone(), value.clone());
-    }
-}
-
-fn copy_report_attribution_fields(source: &Value, target: &mut Value) {
-    let Some(src) = source.as_object() else {
-        return;
-    };
-    let Some(dst) = target.as_object_mut() else {
-        return;
-    };
-    for key in [
-        "attributed_message_id",
-        "attribution_scope",
-        "task_id_source",
-    ] {
-        if let Some(value) = src.get(key) {
-            dst.entry(key.to_string()).or_insert(value.clone());
-        }
     }
 }
 
