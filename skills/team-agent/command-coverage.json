@@ -1,0 +1,185 @@
+{
+  "schema_version": "team-agent-skill-command-coverage-v1",
+  "commands": [
+    {
+      "command": "team-agent add-agent <agent> --role-file <file>",
+      "cases": ["agent_004_add_agent_runtime"]
+    },
+    {
+      "command": "team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace",
+      "cases": ["agent_004_add_agent_runtime"]
+    },
+    {
+      "command": "team-agent approvals",
+      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+    },
+    {
+      "command": "team-agent approvals <agent_id>",
+      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+    },
+    {
+      "command": "team-agent approvals [coder]",
+      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+    },
+    {
+      "command": "team-agent attach-leader",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent claim-leader",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent claude",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent clone-agent <source> --as <new>",
+      "cases": ["agent_006_fork_agent_reports_success_or_explicit_refusal"]
+    },
+    {
+      "command": "team-agent codex",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent codex --dangerously-bypass-approvals-and-sandbox",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent collect",
+      "cases": ["send_001_delivers_to_fake_worker"]
+    },
+    {
+      "command": "team-agent doctor",
+      "cases": ["rec_002_doctor_checks"]
+    },
+    {
+      "command": "team-agent fork-agent <source> --as <new>",
+      "cases": ["agent_006_fork_agent_reports_success_or_explicit_refusal"]
+    },
+    {
+      "command": "team-agent inbox",
+      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+    },
+    {
+      "command": "team-agent inbox coder",
+      "cases": ["inbox_001_delivery_status_visible_for_blocked_inbound_message"]
+    },
+    {
+      "command": "team-agent profile doctor <name> --workspace . --json",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent profile init <name> --auth-mode subscription --workspace",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent profile init claude-default --auth-mode subscription --workspace",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent profile init codex-default --auth-mode subscription --workspace",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent profile init deepseek --auth-mode compatible_api --workspace",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent profile show <name> --workspace . --json",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent profile show deepseek --workspace . --json",
+      "cases": ["lnch_003_quick_start_refuses_missing_profile"]
+    },
+    {
+      "command": "team-agent quick-start",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent quick-start ./roles --team-id alpha",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent quick-start .team/alpha",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent quick-start .team/current",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent quick-start <dir>",
+      "cases": ["lnch_001_quick_start_basic"]
+    },
+    {
+      "command": "team-agent remove-agent <agent> --workspace . --confirm",
+      "cases": ["agent_005_remove_agent_runtime"]
+    },
+    {
+      "command": "team-agent reset-agent <agent> --discard-session",
+      "cases": ["agent_003_reset_agent_discard_session_reports_reset"]
+    },
+    {
+      "command": "team-agent restart",
+      "cases": ["rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume"]
+    },
+    {
+      "command": "team-agent restart . --allow-fresh",
+      "cases": ["rest_013_restart_allow_fresh_succeeds_for_fake_team"]
+    },
+    {
+      "command": "team-agent restart . --team <session_name_or_team_name>",
+      "cases": ["rest_014_restart_team_selector_targets_named_team"]
+    },
+    {
+      "command": "team-agent send --task task_initial \"Start\"",
+      "cases": ["send_003_send_json_shape_locks_public_keys"]
+    },
+    {
+      "command": "team-agent send --watch-result",
+      "cases": ["send_008_watch_result_missing_worker_window_blocks_before_watch"]
+    },
+    {
+      "command": "team-agent send --watch-result coder \"Do the bounded task\"",
+      "cases": ["send_008_watch_result_missing_worker_window_blocks_before_watch"]
+    },
+    {
+      "command": "team-agent send reviewer \"Review this change\"",
+      "cases": ["send_001_delivers_to_fake_worker"]
+    },
+    {
+      "command": "team-agent shutdown --workspace . --keep-logs",
+      "cases": ["shut_001_clean_shutdown_kills_worker_session"]
+    },
+    {
+      "command": "team-agent start-agent <agent>",
+      "cases": ["agent_001_start_agent_repairs_missing_window"]
+    },
+    {
+      "command": "team-agent start-agent <agent_id> --workspace",
+      "cases": ["agent_001_start_agent_repairs_missing_window"]
+    },
+    {
+      "command": "team-agent start-agent coder --workspace",
+      "cases": ["agent_001_start_agent_repairs_missing_window"]
+    },
+    {
+      "command": "team-agent status",
+      "cases": ["stat_001_status_json_shape"]
+    },
+    {
+      "command": "team-agent status --detail --json",
+      "cases": ["stat_001_status_json_shape"]
+    },
+    {
+      "command": "team-agent status --json",
+      "cases": ["stat_001_status_json_shape"]
+    },
+    {
+      "command": "team-agent status coder",
+      "cases": ["stat_001_status_json_shape"]
+    }
+  ]
+}
