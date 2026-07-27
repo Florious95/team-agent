@@ -160,17 +160,22 @@ macro_rules! unavailable_causes {
 
 unavailable_causes!(AmbientTmuxEndpointUnavailableCause {
     TmuxValueNotUnicode => "tmux_value_not_unicode",
-    TmuxTupleMalformed => "tmux_tuple_malformed",
+    TmuxTupleFieldCountInvalid => "tmux_tuple_field_count_invalid",
     EndpointMissing => "endpoint_missing",
+    EndpointNotAbsolute => "endpoint_not_absolute",
+    ServerPidInvalid => "server_pid_invalid",
+    SessionIndexInvalid => "session_index_invalid",
 });
 
 unavailable_causes!(AmbientPaneIdUnavailableCause {
     EnvironmentValueMissing => "environment_value_missing",
     EnvironmentValueEmpty => "environment_value_empty",
+    EnvironmentValueNotUnicode => "environment_value_not_unicode",
 });
 
 unavailable_causes!(AmbientPaneWorkspaceUnavailableCause {
     PaneQueryFailed => "pane_query_failed",
+    PaneNotFound => "pane_not_found",
     CurrentPathMissing => "current_path_missing",
 });
 
