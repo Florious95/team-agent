@@ -1,5 +1,5 @@
 {
-  "schema_version": "team-agent-skill-command-coverage-v2",
+  "schema_version": "team-agent-skill-command-coverage-v3",
   "commands": [
     {
       "command": "team-agent add-agent <agent> --role-file <file>",
@@ -186,12 +186,68 @@
     {
       "command": "team-agent quick-start .team/current",
       "bucket": "covered",
-      "cases": ["lnch_001_quick_start_basic"]
+      "cases": ["lnch_001_quick_start_basic"],
+      "evidence": {
+        "case": "lnch_001_quick_start_basic",
+        "source_file": "crates/team-agent/tests/e2e/cases/lnch_001_quick_start_basic.rs",
+        "invocation": {
+          "runner": "run_ta",
+          "line": 30,
+          "documented_argv": ["team-agent", "quick-start", ".team/current"],
+          "literal_argv": ["quick-start", ".team/current"]
+        },
+        "binding": {
+          "name": "out",
+          "line": 30
+        },
+        "assertion": {
+          "macro_name": "assert",
+          "line": 41,
+          "operand": "condition",
+          "behavior_fact": "stdout",
+          "failure_marker": "quick-start did not launch the team"
+        },
+        "negative_twin": {
+          "env_key": "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN",
+          "env_value": "quick-start-status",
+          "operation": "remove_text_literal",
+          "remove_literal": "status: leader_receiver_unbound",
+          "replacement": "negative_twin_removed"
+        }
+      }
     },
     {
       "command": "team-agent quick-start <dir>",
       "bucket": "covered",
-      "cases": ["lnch_001_quick_start_basic"]
+      "cases": ["lnch_001_quick_start_basic"],
+      "evidence": {
+        "case": "lnch_001_quick_start_basic",
+        "source_file": "crates/team-agent/tests/e2e/cases/lnch_001_quick_start_basic.rs",
+        "invocation": {
+          "runner": "run_ta",
+          "line": 30,
+          "documented_argv": ["team-agent", "quick-start", "<dir>"],
+          "literal_argv": ["quick-start", ".team/current"]
+        },
+        "binding": {
+          "name": "out",
+          "line": 30
+        },
+        "assertion": {
+          "macro_name": "assert",
+          "line": 69,
+          "operand": "condition",
+          "behavior_fact": "stdout",
+          "failure_marker": "public output must expose the canonical session name"
+        },
+        "negative_twin": {
+          "env_key": "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN",
+          "env_value": "quick-start-session-name",
+          "operation": "remove_text_literal",
+          "remove_literal": "session_name: ",
+          "replacement": "negative_twin_removed"
+        }
+      }
     },
     {
       "command": "team-agent remove-agent <agent> --workspace . --confirm",

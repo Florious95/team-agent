@@ -27,10 +27,17 @@ fn lnch_001_quick_start_basic() {
     std::fs::rename(ws.path().join("agents"), documented_team_dir.join("agents"))
         .expect("move agents into .team/current");
 
-    let out = run_ta(&ws, &["quick-start", ".team/current"]);
+    let mut out = run_ta(&ws, &["quick-start", ".team/current"]);
 
     // Diagnostics if it fails — quick-start can degrade for non-bug reasons
     // (no tmux, sandbox), but in our test env it should succeed.
+    if std::env::var("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN").as_deref() == Ok("quick-start-status") {
+        out.stdout = out.stdout.replacen(
+            "status: leader_receiver_unbound",
+            "negative_twin_removed",
+            1,
+        );
+    }
     assert!(
         out.stdout.contains("status: leader_receiver_unbound")
             && out.stdout.contains("\"all_workers_spawned\": true"),
@@ -52,6 +59,13 @@ fn lnch_001_quick_start_basic() {
         .join(team_id)
         .join("team.spec.yaml");
     assert_file_exists(&spec_path);
+    if std::env::var("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN").as_deref()
+        == Ok("quick-start-session-name")
+    {
+        out.stdout = out
+            .stdout
+            .replacen("session_name: ", "negative_twin_removed", 1);
+    }
     assert!(
         out.stdout
             .contains(&format!("session_name: {}", worker_session_name(team_id))),
