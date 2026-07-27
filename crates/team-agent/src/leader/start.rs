@@ -5,10 +5,15 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
+use std::ffi::CStr;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::{
-    PaneId, PaneLiveness, SessionName, SpawnResult, Target, Transport, WindowName,
+    PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, WindowName,
 };
 
 use super::helpers::{
@@ -188,6 +193,11 @@ pub fn start_leader(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<(), LeaderError> {
+    if let Some(reason) = ambient_pane_authority_refusal_reason(workspace) {
+        return Err(LeaderError::Validation(format!(
+            "{reason}; run `team-agent attach-leader` from the intended workspace pane or retry from a clean terminal"
+        )));
+    }
     let plan = leader_start_plan(
         provider,
         provider_args,
@@ -216,6 +226,24 @@ pub fn execute_leader_plan(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
+    let ambient_authority = if plan.mode == LeaderStartMode::ExecProvider {
+        let Some(authority) = verified_ambient_pane_authority(workspace) else {
+            let reason =
+                crate::messaging::leader_channel::LeaderChannelUnbound::PaneWorkspaceMismatch;
+            return Ok(LeaderLaunchOutcome::not_started(format!("{reason:?}")));
+        };
+        Some(authority)
+    } else {
+        None
+    };
+    execute_leader_plan_after_ambient_authority(plan, workspace, ambient_authority.as_ref())
+}
+
+fn execute_leader_plan_after_ambient_authority(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+    ambient_authority: Option<&VerifiedAmbientPaneAuthority>,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
     if plan.mode == LeaderStartMode::ManagedTmuxClient {
         return execute_managed_leader_plan(plan, workspace);
     }
@@ -224,20 +252,23 @@ pub fn execute_leader_plan(
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
     if plan.mode == LeaderStartMode::ExecProvider && !plan.is_external_leader {
+        let authority = ambient_authority.ok_or_else(|| {
+            LeaderError::Validation("exec provider ambient pane authority missing".to_string())
+        })?;
         // 0.5.35 (`.team/artifacts/managed-leader-provider-reentry-locate.md`
         // §5/§6): three-way classify BEFORE persist. Same physical pane =
         // provider process replacement (refresh only). Different pane with
         // an existing canonical binding = no canonical rewrite (claim /
         // takeover is the recovery path, §7). Unbound = first-time write.
-        match classify_exec_provider_binding(workspace, plan)? {
+        match classify_exec_provider_binding(workspace, plan, authority)? {
             ExecProviderBinding::ManagedReentry => {
-                refresh_managed_leader_provider_binding(plan, workspace)?;
+                refresh_managed_leader_provider_binding(plan, workspace, authority)?;
             }
             ExecProviderBinding::DifferentPaneAlreadyBound => {
                 // No canonical state write. Provider still runs below.
             }
             ExecProviderBinding::Unbound => {
-                persist_exec_provider_leader_binding(plan, workspace)?;
+                persist_exec_provider_leader_binding(plan, workspace, authority)?;
             }
         }
     } else if plan.is_external_leader {
@@ -264,6 +295,74 @@ pub fn execute_leader_plan(
             reason: None,
         })
     }
+}
+
+struct VerifiedAmbientPaneAuthority {
+    pane_id: PaneId,
+    observed: PaneInfo,
+    endpoint: String,
+}
+
+pub(crate) fn ambient_pane_authority_refusal_reason(workspace: &Path) -> Option<&'static str> {
+    if std::env::var_os("TMUX").is_none() || verified_ambient_pane_authority(workspace).is_some() {
+        None
+    } else {
+        Some("PaneWorkspaceMismatch")
+    }
+}
+
+fn verified_ambient_pane_authority(workspace: &Path) -> Option<VerifiedAmbientPaneAuthority> {
+    let tmux = std::env::var("TMUX").ok()?;
+    let mut tuple = tmux.split(',');
+    let endpoint = tuple.next()?.trim();
+    let server_pid = tuple.next()?.trim();
+    let session_index = tuple.next()?.trim();
+    if endpoint.is_empty()
+        || server_pid.parse::<u32>().is_err()
+        || session_index.parse::<u32>().is_err()
+        || tuple.next().is_some()
+    {
+        return None;
+    }
+    let endpoint = crate::tmux_backend::socket_name_from_tmux_env()?;
+    let pane_id = PaneId::new(
+        std::env::var("TMUX_PANE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?,
+    );
+    let observed = current_tmux_pane_info(&pane_id)?;
+    let caller_tty = caller_controlling_tty()?;
+    if observed.tty.as_deref() != Some(caller_tty.as_str()) {
+        return None;
+    }
+    let pane_workspace = observed.current_path.as_deref()?;
+    if !crate::messaging::leader_channel::path_is_in_workspace(pane_workspace, workspace) {
+        return None;
+    }
+    Some(VerifiedAmbientPaneAuthority {
+        pane_id,
+        observed,
+        endpoint,
+    })
+}
+
+#[cfg(unix)]
+fn caller_controlling_tty() -> Option<String> {
+    let stdin = std::io::stdin();
+    let mut buffer = [0 as libc::c_char; 256];
+    let result = unsafe { libc::ttyname_r(stdin.as_raw_fd(), buffer.as_mut_ptr(), buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+    unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_str()
+        .ok()
+        .map(str::to_string)
+}
+
+#[cfg(not(unix))]
+fn caller_controlling_tty() -> Option<String> {
+    None
 }
 
 /// B5: the deterministic leader-session naming prefix IS the ownership truth source —
@@ -821,17 +920,14 @@ fn persist_managed_leader_binding(
 fn persist_exec_provider_leader_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
+    authority: &VerifiedAmbientPaneAuthority,
 ) -> Result<(), LeaderError> {
     let identity = plan
         .identity
         .as_ref()
         .ok_or_else(|| LeaderError::Start("exec provider leader identity missing".to_string()))?;
-    let pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| LeaderError::Start("exec provider leader pane missing".to_string()))?;
-    let pane_id = PaneId::new(pane.clone());
-    let target = current_tmux_pane_info(&pane_id);
+    let pane = authority.pane_id.as_str();
+    let target = &authority.observed;
     let mut state = crate::state::persist::load_runtime_state(workspace)
         .unwrap_or_else(|_| serde_json::json!({}));
     let owner_epoch = state
@@ -846,7 +942,7 @@ fn persist_exec_provider_leader_binding(
         .unwrap_or(0)
         .saturating_add(1);
     let now = chrono::Utc::now().to_rfc3339();
-    let socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let socket = authority.endpoint.as_str();
     let provider = serde_json::to_value(plan.provider)?;
     let mut receiver = serde_json::json!({
         "mode": "direct_tmux",
@@ -859,24 +955,18 @@ fn persist_exec_provider_leader_binding(
         "attached_at": now,
         "discovery": "current_pane",
     });
-    if let Some(target) = target.as_ref() {
-        if let Some(obj) = receiver.as_object_mut() {
+    if let Some(obj) = receiver.as_object_mut() {
+        obj.insert(
+            "session_name".to_string(),
+            serde_json::json!(target.session.as_str()),
+        );
+        if let Some(window_name) = target.window_name.as_ref() {
             obj.insert(
-                "session_name".to_string(),
-                serde_json::json!(target.session.as_str()),
+                "window_name".to_string(),
+                serde_json::json!(window_name.as_str()),
             );
-            if let Some(window_name) = target.window_name.as_ref() {
-                obj.insert(
-                    "window_name".to_string(),
-                    serde_json::json!(window_name.as_str()),
-                );
-            }
         }
-    }
-    if let Some(socket) = socket.as_ref() {
-        if let Some(obj) = receiver.as_object_mut() {
-            obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
-        }
+        obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
     }
     let owner = serde_json::json!({
         "pane_id": pane,
@@ -893,16 +983,12 @@ fn persist_exec_provider_leader_binding(
             "active_team_key".to_string(),
             serde_json::json!(identity.team_id.as_str()),
         );
-        if let Some(target) = target.as_ref() {
-            obj.insert(
-                "session_name".to_string(),
-                serde_json::json!(target.session.as_str()),
-            );
-        }
-        if let Some(socket) = socket.as_ref() {
-            obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
-            obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
-        }
+        obj.insert(
+            "session_name".to_string(),
+            serde_json::json!(target.session.as_str()),
+        );
+        obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
+        obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
         obj.insert("is_external_leader".to_string(), serde_json::json!(false));
         obj.insert(
             "leader_client".to_string(),
@@ -954,13 +1040,9 @@ enum ExecProviderBinding {
 fn classify_exec_provider_binding(
     workspace: &Path,
     plan: &LeaderStartPlan,
+    authority: &VerifiedAmbientPaneAuthority,
 ) -> Result<ExecProviderBinding, LeaderError> {
-    let Some(pane) = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(ExecProviderBinding::Unbound);
-    };
+    let pane = authority.pane_id.as_str();
     let state = match crate::state::persist::load_runtime_state(workspace) {
         Ok(state) => state,
         Err(_) => return Ok(ExecProviderBinding::Unbound),
@@ -996,12 +1078,11 @@ fn classify_exec_provider_binding(
     if receiver_pane != pane {
         return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
     }
-    let pane_id = PaneId::new(pane.clone());
-    let target = current_tmux_pane_info(&pane_id);
-    let leader_prefixed_session = target
-        .as_ref()
-        .map(|t| t.session.as_str().starts_with(LEADER_SESSION_PREFIX))
-        .unwrap_or(false);
+    let leader_prefixed_session = authority
+        .observed
+        .session
+        .as_str()
+        .starts_with(LEADER_SESSION_PREFIX);
     if !leader_prefixed_session {
         return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
     }
@@ -1010,8 +1091,7 @@ fn classify_exec_provider_binding(
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty());
     if let Some(recorded_socket) = recorded_socket {
-        let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
-        if caller_socket.as_deref() != Some(recorded_socket) {
+        if authority.endpoint != recorded_socket {
             return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
         }
     }
@@ -1027,16 +1107,13 @@ fn classify_exec_provider_binding(
 fn refresh_managed_leader_provider_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
+    authority: &VerifiedAmbientPaneAuthority,
 ) -> Result<(), LeaderError> {
     let identity = plan.identity.as_ref().ok_or_else(|| {
         LeaderError::Start("managed leader re-entry identity missing".to_string())
     })?;
-    let pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| LeaderError::Start("managed leader re-entry pane missing".to_string()))?;
-    let pane_id = PaneId::new(pane.clone());
-    let target = current_tmux_pane_info(&pane_id);
+    let pane = authority.pane_id.as_str();
+    let target = &authority.observed;
     let mut state = crate::state::persist::load_runtime_state(workspace)
         .unwrap_or_else(|_| serde_json::json!({}));
     let team_key = identity.team_id.as_str();
@@ -1078,20 +1155,18 @@ fn refresh_managed_leader_provider_binding(
         obj.insert("owner_epoch".to_string(), serde_json::json!(existing_epoch));
         obj.entry("leader_session_uuid".to_string())
             .or_insert_with(|| serde_json::json!(identity.leader_session_uuid.as_str()));
-        if let Some(target) = target.as_ref() {
+        obj.insert(
+            "session_name".to_string(),
+            serde_json::json!(target.session.as_str()),
+        );
+        if let Some(window_name) = target.window_name.as_ref() {
             obj.insert(
-                "session_name".to_string(),
-                serde_json::json!(target.session.as_str()),
+                "window_name".to_string(),
+                serde_json::json!(window_name.as_str()),
             );
-            if let Some(window_name) = target.window_name.as_ref() {
-                obj.insert(
-                    "window_name".to_string(),
-                    serde_json::json!(window_name.as_str()),
-                );
-            }
-            if let Some(pane_pid) = target.pane_pid {
-                obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
-            }
+        }
+        if let Some(pane_pid) = target.pane_pid {
+            obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
         }
     }
     let mut owner = match existing_owner.as_object() {
@@ -1543,9 +1618,10 @@ mod tests {
     };
 
     use super::{
-        ensure_managed_provider_live_after_attach, execute_leader_plan, format_launcher_failure,
+        ensure_managed_provider_live_after_attach, execute_leader_plan,
+        execute_leader_plan_after_ambient_authority, format_launcher_failure,
         handle_exec_provider_startup_prompts, push_bounded_stderr, shlex_quote,
-        LEADER_STDERR_LIMIT,
+        VerifiedAmbientPaneAuthority, LEADER_STDERR_LIMIT,
     };
 
     struct ScriptedTransport {
@@ -1857,7 +1933,7 @@ mod tests {
             detached: false,
         };
 
-        let outcome = execute_leader_plan(&plan, &workspace)
+        let outcome = execute_leader_plan_after_ambient_authority(&plan, &workspace, None)
             .expect("external marker must be present before provider argv runs");
 
         assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
@@ -1914,8 +1990,26 @@ mod tests {
             detached: false,
         };
 
-        let outcome = execute_leader_plan(&plan, &workspace)
-            .expect("current pane binding must be present before provider argv runs");
+        let authority = VerifiedAmbientPaneAuthority {
+            pane_id: PaneId::new("%77"),
+            observed: PaneInfo {
+                pane_id: PaneId::new("%77"),
+                session: SessionName::new("team-agent-leader-current"),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("codex")),
+                pane_index: Some(0),
+                tty: Some("/dev/ttys077".to_string()),
+                current_command: Some("codex".to_string()),
+                current_path: Some(workspace.clone()),
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+            endpoint: "/private/tmp/tmux-501/default".to_string(),
+        };
+        let outcome =
+            execute_leader_plan_after_ambient_authority(&plan, &workspace, Some(&authority))
+                .expect("current pane binding must be present before provider argv runs");
 
         assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
         let state = crate::state::persist::load_runtime_state(&workspace).unwrap();

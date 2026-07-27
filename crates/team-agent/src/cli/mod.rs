@@ -147,6 +147,24 @@ pub mod lifecycle_port {
         cwd: &Path,
         attach: &LeaderLauncherArgs,
     ) -> Result<Value, CliError> {
+        if let Some(reason) = crate::leader::start::ambient_pane_authority_refusal_reason(cwd) {
+            return Ok(json!({
+                "ok": false,
+                "provider": provider,
+                "mode": "exec_provider",
+                "leader_topology": if attach.external_leader { "external" } else { "managed" },
+                "is_external_leader": attach.external_leader,
+                "leader_window": null,
+                "leader_attach_command": "team-agent attach-leader",
+                "status": "not_started",
+                "exit_code": null,
+                "reason": reason,
+                "attach_existing": attach.attach_existing,
+                "confirm_attach": attach.confirm_attach,
+                "attach_session": attach.attach_session,
+                "session_name": null,
+            }));
+        }
         let attach_session = attach
             .attach_session
             .as_ref()
@@ -168,7 +186,11 @@ pub mod lifecycle_port {
             crate::leader::LeaderLaunchStatus::Detached => true,
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
-        let leader_attach_command = leader_attach_command_for_plan(cwd, &plan);
+        let leader_attach_command = if outcome.reason.as_deref() == Some("PaneWorkspaceMismatch") {
+            Some("team-agent attach-leader".to_string())
+        } else {
+            leader_attach_command_for_plan(cwd, &plan)
+        };
         Ok(json!({
             "ok": ok,
             "provider": provider,
