@@ -169,7 +169,7 @@ pub mod lifecycle_port {
             .attach_session
             .as_ref()
             .map(|name| crate::transport::SessionName::new(name.clone()));
-        let plan = crate::leader::start::leader_start_plan(
+        let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
             provider,
             provider_args,
             cwd,

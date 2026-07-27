@@ -38,6 +38,31 @@ pub fn leader_start_plan(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
+    if let Some(reason) = ambient_pane_authority_refusal_reason(workspace) {
+        return Err(LeaderError::Validation(format!(
+            "{reason}; run `team-agent attach-leader` from the intended workspace pane or retry from a clean terminal"
+        )));
+    }
+    leader_start_plan_after_ambient_authority_check(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+    )
+}
+
+pub(crate) fn leader_start_plan_after_ambient_authority_check(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
             "--attach-session requires --confirm".to_string(),
@@ -193,11 +218,6 @@ pub fn start_leader(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<(), LeaderError> {
-    if let Some(reason) = ambient_pane_authority_refusal_reason(workspace) {
-        return Err(LeaderError::Validation(format!(
-            "{reason}; run `team-agent attach-leader` from the intended workspace pane or retry from a clean terminal"
-        )));
-    }
     let plan = leader_start_plan(
         provider,
         provider_args,
