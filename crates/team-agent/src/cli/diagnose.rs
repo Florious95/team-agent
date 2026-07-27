@@ -284,8 +284,9 @@ fn live_leader_workspace_mismatch(
         .filter(|provider| !provider.is_empty())
         .unwrap_or("claude");
     let action = format!(
-        "run `team-agent attach-leader --team {team} --provider {provider} --confirm --json` \
-         from a corrected leader terminal whose current directory is the requested workspace, \
+        "open a new terminal window outside the current tmux/pane, change directory to the \
+         requested workspace, then run \
+         `team-agent attach-leader --team {team} --provider {provider} --confirm --json`; \
          then rerun `team-agent diagnose --team {team} --json`"
     );
     let facts = json!({
