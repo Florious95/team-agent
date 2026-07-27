@@ -10,6 +10,7 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 
+use crate::model::pane_authority_refusal as pane_refusal;
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::{
@@ -39,18 +40,18 @@ impl PreparedLeaderStart {
 }
 
 pub(crate) enum PrepareLeaderStartError {
-    PaneWorkspaceMismatch,
+    PaneAuthorityRefused(pane_refusal::PaneAuthorityRefusal),
     Leader(LeaderError),
 }
 
 impl PrepareLeaderStartError {
     fn into_leader_error(self) -> LeaderError {
         match self {
-            Self::PaneWorkspaceMismatch => LeaderError::Validation(
-                "PaneWorkspaceMismatch; run `team-agent attach-leader` from the intended \
-                 workspace pane or retry from a clean terminal"
-                    .to_string(),
-            ),
+            Self::PaneAuthorityRefused(refusal) => LeaderError::Validation(format!(
+                "{}; open a new terminal outside the current tmux/pane or run \
+                 `team-agent attach-leader` from the intended workspace pane",
+                refusal.reason().as_str()
+            )),
             Self::Leader(error) => error,
         }
     }
@@ -330,10 +331,13 @@ pub fn execute_leader_plan(
     let ambient_authority = if plan.mode == LeaderStartMode::ExecProvider {
         match ambient_pane_authority_preflight(workspace) {
             Ok(Some(authority)) => Some(authority),
-            Ok(None) | Err(PrepareLeaderStartError::PaneWorkspaceMismatch) => {
-                let reason =
-                    crate::messaging::leader_channel::LeaderChannelUnbound::PaneWorkspaceMismatch;
-                return Ok(LeaderLaunchOutcome::not_started(format!("{reason:?}")));
+            Ok(None) => {
+                return Err(LeaderError::Validation(
+                    "exec provider ambient pane authority missing".to_string(),
+                ));
+            }
+            Err(PrepareLeaderStartError::PaneAuthorityRefused(refusal)) => {
+                return Ok(LeaderLaunchOutcome::not_started(refusal.reason().as_str()));
             }
             Err(PrepareLeaderStartError::Leader(error)) => return Err(error),
         }
@@ -416,61 +420,233 @@ struct VerifiedAmbientPaneAuthority {
     pane_id: PaneId,
     observed: PaneInfo,
     endpoint: String,
+    tmux: String,
 }
 
 fn ambient_pane_authority_preflight(
     workspace: &Path,
 ) -> Result<Option<VerifiedAmbientPaneAuthority>, PrepareLeaderStartError> {
-    if std::env::var_os("TMUX").is_none() {
+    let Some(tmux) = std::env::var_os("TMUX") else {
         return Ok(None);
-    }
-    verified_ambient_pane_authority(workspace)
+    };
+    let tmux = tmux.into_string().map_err(|_| {
+        PrepareLeaderStartError::PaneAuthorityRefused(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::TmuxValueNotUnicode,
+        ))
+    })?;
+    verified_ambient_pane_authority(workspace, &tmux)
         .map(Some)
-        .ok_or(PrepareLeaderStartError::PaneWorkspaceMismatch)
+        .map_err(PrepareLeaderStartError::PaneAuthorityRefused)
 }
 
-fn verified_ambient_pane_authority(workspace: &Path) -> Option<VerifiedAmbientPaneAuthority> {
-    let tmux = std::env::var("TMUX").ok()?;
-    let mut tuple = tmux.split(',');
-    let endpoint = tuple.next()?.trim();
-    let server_pid = tuple.next()?.trim();
-    let session_index = tuple.next()?.trim();
-    if endpoint.is_empty()
-        || server_pid.parse::<u32>().is_err()
-        || session_index.parse::<u32>().is_err()
-        || tuple.next().is_some()
-    {
-        return None;
+fn verified_ambient_pane_authority(
+    workspace: &Path,
+    tmux: &str,
+) -> Result<VerifiedAmbientPaneAuthority, pane_refusal::PaneAuthorityRefusal> {
+    let requested_workspace = resolve_workspace_for_hash(workspace);
+    let tuple = tmux.split(',').map(str::trim).collect::<Vec<_>>();
+    let [endpoint, server_pid, session_index] = tuple.as_slice() else {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::TmuxTupleFieldCountInvalid,
+        ));
+    };
+    if endpoint.is_empty() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::EndpointMissing,
+        ));
     }
-    let endpoint = crate::tmux_backend::socket_name_from_tmux_env()?;
-    let pane_id = PaneId::new(
-        std::env::var("TMUX_PANE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())?,
-    );
-    let observed = current_tmux_pane_info(&pane_id)?;
-    let caller_tty = caller_controlling_tty()?;
-    let pane_tty = pane_tty_device(observed.tty.as_deref()?)?;
+    if !Path::new(endpoint).is_absolute() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::EndpointNotAbsolute,
+        ));
+    }
+    if server_pid.parse::<u32>().is_err() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::ServerPidInvalid,
+        ));
+    }
+    if session_index.parse::<u32>().is_err() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::SessionIndexInvalid,
+        ));
+    }
+    let endpoint = (*endpoint).to_string();
+    let pane_id = match std::env::var_os("TMUX_PANE") {
+        None => {
+            return Err(pane_refusal::PaneAuthorityRefusal::new(
+                pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(
+                    pane_refusal::AmbientPaneIdUnavailableFacts {
+                        requested_workspace,
+                        observed_pane_id: pane_refusal::UnavailablePaneAuthorityFact::new(
+                            pane_refusal::AmbientPaneIdUnavailableCause::EnvironmentValueMissing,
+                        ),
+                        endpoint,
+                    },
+                ),
+            ));
+        }
+        Some(value) => match value.into_string() {
+            Ok(value) if value.trim().is_empty() => {
+                return Err(pane_refusal::PaneAuthorityRefusal::new(
+                    pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(
+                        pane_refusal::AmbientPaneIdUnavailableFacts {
+                            requested_workspace,
+                            observed_pane_id: pane_refusal::UnavailablePaneAuthorityFact::new(
+                                pane_refusal::AmbientPaneIdUnavailableCause::EnvironmentValueEmpty,
+                            ),
+                            endpoint,
+                        },
+                    ),
+                ));
+            }
+            Ok(value) => PaneId::new(value.trim().to_string()),
+            Err(_) => {
+                return Err(pane_refusal::PaneAuthorityRefusal::new(
+                    pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(
+                        pane_refusal::AmbientPaneIdUnavailableFacts {
+                            requested_workspace,
+                            observed_pane_id: pane_refusal::UnavailablePaneAuthorityFact::new(
+                                pane_refusal::AmbientPaneIdUnavailableCause::EnvironmentValueNotUnicode,
+                            ),
+                            endpoint,
+                        },
+                    ),
+                ));
+            }
+        },
+    };
+    let observed = current_tmux_pane_info(&pane_id, &endpoint).map_err(|error| {
+        let cause = match error {
+            CurrentTmuxPaneInfoError::QueryFailed => {
+                pane_refusal::AmbientPaneWorkspaceUnavailableCause::PaneQueryFailed
+            }
+            CurrentTmuxPaneInfoError::PaneNotFound => {
+                pane_refusal::AmbientPaneWorkspaceUnavailableCause::PaneNotFound
+            }
+        };
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneWorkspaceUnavailable(
+                pane_refusal::AmbientPaneWorkspaceUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    observed_pane_workspace: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+                    endpoint: endpoint.clone(),
+                },
+            ),
+        )
+    })?;
+    let pane_workspace = observed.current_path.clone().ok_or_else(|| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneWorkspaceUnavailable(
+                pane_refusal::AmbientPaneWorkspaceUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    observed_pane_workspace: pane_refusal::UnavailablePaneAuthorityFact::new(
+                        pane_refusal::AmbientPaneWorkspaceUnavailableCause::CurrentPathMissing,
+                    ),
+                    endpoint: endpoint.clone(),
+                },
+            ),
+        )
+    })?;
+    let caller_tty = caller_controlling_tty().map_err(|cause| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::CallerControllingTtyUnavailable(
+                pane_refusal::CallerControllingTtyUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint: endpoint.clone(),
+                    caller_controlling_tty: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+                },
+            ),
+        )
+    })?;
+    let pane_tty_path = observed.tty.as_deref().ok_or_else(|| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::ObservedPaneTtyUnavailable(
+                pane_refusal::ObservedPaneTtyUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint: endpoint.clone(),
+                    observed_pane_tty: pane_refusal::UnavailablePaneAuthorityFact::new(
+                        pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyMissing,
+                    ),
+                },
+            ),
+        )
+    })?;
+    let pane_tty = pane_tty_device(pane_tty_path).map_err(|cause| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::ObservedPaneTtyUnavailable(
+                pane_refusal::ObservedPaneTtyUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint: endpoint.clone(),
+                    observed_pane_tty: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+                },
+            ),
+        )
+    })?;
     if caller_tty != pane_tty {
-        return None;
+        return Err(pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::PaneTtyMismatch(
+                pane_refusal::PaneTtyMismatchFacts {
+                    requested_workspace,
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint,
+                    caller_controlling_tty: caller_tty,
+                    observed_pane_tty: pane_tty,
+                },
+            ),
+        ));
     }
-    let pane_workspace = observed.current_path.as_deref()?;
-    if !crate::messaging::leader_channel::path_is_in_workspace(pane_workspace, workspace) {
-        return None;
+    if !crate::messaging::leader_channel::path_is_in_workspace(&pane_workspace, workspace) {
+        return Err(pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(
+                pane_refusal::PaneWorkspaceMismatchFacts {
+                    requested_workspace,
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    observed_pane_workspace: pane_workspace,
+                    endpoint,
+                },
+            ),
+        ));
     }
-    Some(VerifiedAmbientPaneAuthority {
+    Ok(VerifiedAmbientPaneAuthority {
         pane_id,
         observed,
         endpoint,
+        tmux: tmux.to_string(),
     })
 }
 
+fn ambient_tmux_endpoint_refusal(
+    workspace: &Path,
+    cause: pane_refusal::AmbientTmuxEndpointUnavailableCause,
+) -> pane_refusal::PaneAuthorityRefusal {
+    pane_refusal::PaneAuthorityRefusal::new(
+        pane_refusal::PaneAuthorityRefusalFacts::AmbientTmuxEndpointUnavailable(
+            pane_refusal::AmbientTmuxEndpointUnavailableFacts {
+                requested_workspace: resolve_workspace_for_hash(workspace),
+                endpoint: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+            },
+        ),
+    )
+}
+
 #[cfg(target_os = "macos")]
-fn caller_controlling_tty() -> Option<u64> {
+fn caller_controlling_tty() -> Result<u64, pane_refusal::CallerControllingTtyUnavailableCause> {
     // `/dev/tty` proves that this process has a controlling terminal, but its
     // own path and rdev remain the generic alias. Query the process table for
     // the actual controlling device identity.
-    let _controlling_tty = std::fs::File::open("/dev/tty").ok()?;
+    let _controlling_tty = std::fs::File::open("/dev/tty")
+        .map_err(|_| pane_refusal::CallerControllingTtyUnavailableCause::NoControllingTty)?;
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let info_size = std::mem::size_of::<libc::proc_bsdinfo>();
     let read = unsafe {
@@ -483,45 +659,50 @@ fn caller_controlling_tty() -> Option<u64> {
         )
     };
     if read != info_size as libc::c_int {
-        return None;
+        return Err(pane_refusal::CallerControllingTtyUnavailableCause::DeviceIdentityUnresolvable);
     }
-    Some(u64::from(unsafe { info.assume_init() }.e_tdev))
+    Ok(u64::from(unsafe { info.assume_init() }.e_tdev))
 }
 
 #[cfg(target_os = "linux")]
-fn caller_controlling_tty() -> Option<u64> {
+fn caller_controlling_tty() -> Result<u64, pane_refusal::CallerControllingTtyUnavailableCause> {
     let controlling_tty = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
         .open("/dev/tty")
-        .ok()?;
+        .map_err(|_| pane_refusal::CallerControllingTtyUnavailableCause::NoControllingTty)?;
     let mut device = 0 as libc::c_uint;
     let result = unsafe { libc::ioctl(controlling_tty.as_raw_fd(), libc::TIOCGDEV, &mut device) };
-    (result == 0).then_some(u64::from(device))
+    if result != 0 {
+        return Err(pane_refusal::CallerControllingTtyUnavailableCause::DeviceIdentityUnresolvable);
+    }
+    Ok(u64::from(device))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn caller_controlling_tty() -> Option<u64> {
-    None
+fn caller_controlling_tty() -> Result<u64, pane_refusal::CallerControllingTtyUnavailableCause> {
+    Err(pane_refusal::CallerControllingTtyUnavailableCause::PlatformUnsupported)
 }
 
 #[cfg(unix)]
-fn pane_tty_device(path: &str) -> Option<u64> {
+fn pane_tty_device(path: &str) -> Result<u64, pane_refusal::ObservedPaneTtyUnavailableCause> {
     let pane_tty = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(path)
-        .ok()?;
-    let metadata = pane_tty.metadata().ok()?;
-    metadata
-        .file_type()
-        .is_char_device()
-        .then_some(metadata.rdev())
+        .map_err(|_| pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyUnresolvable)?;
+    let metadata = pane_tty
+        .metadata()
+        .map_err(|_| pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyUnresolvable)?;
+    if !metadata.file_type().is_char_device() {
+        return Err(pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyNotCharacterDevice);
+    }
+    Ok(metadata.rdev())
 }
 
 #[cfg(not(unix))]
-fn pane_tty_device(_path: &str) -> Option<u64> {
-    None
+fn pane_tty_device(_path: &str) -> Result<u64, pane_refusal::ObservedPaneTtyUnavailableCause> {
+    Err(pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyUnresolvable)
 }
 
 /// B5: the deterministic leader-session naming prefix IS the ownership truth source —
@@ -1154,7 +1335,7 @@ fn persist_exec_provider_leader_binding(
             serde_json::json!({
                 "diagnostic_only": true,
                 "attach_mode": "exec-provider",
-                "tmux": std::env::var("TMUX").ok(),
+                "tmux": authority.tmux.as_str(),
             }),
         );
     }
@@ -1352,7 +1533,7 @@ fn refresh_managed_leader_provider_binding(
             serde_json::json!({
                 "diagnostic_only": true,
                 "attach_mode": "exec-provider",
-                "tmux": std::env::var("TMUX").ok(),
+                "tmux": authority.tmux.as_str(),
                 "reentry": true,
             }),
         );
@@ -1372,12 +1553,21 @@ fn refresh_managed_leader_provider_binding(
     Ok(())
 }
 
-fn current_tmux_pane_info(pane_id: &PaneId) -> Option<crate::transport::PaneInfo> {
-    tmux_transport_for_current_pane()
+enum CurrentTmuxPaneInfoError {
+    QueryFailed,
+    PaneNotFound,
+}
+
+fn current_tmux_pane_info(
+    pane_id: &PaneId,
+    endpoint: &str,
+) -> Result<crate::transport::PaneInfo, CurrentTmuxPaneInfoError> {
+    crate::transport_factory::tmux_endpoint_transport(endpoint)
         .list_targets()
-        .ok()?
+        .map_err(|_| CurrentTmuxPaneInfoError::QueryFailed)?
         .into_iter()
         .find(|target| target.pane_id == *pane_id)
+        .ok_or(CurrentTmuxPaneInfoError::PaneNotFound)
 }
 
 fn persist_external_leader_topology_marker(
@@ -2165,6 +2355,7 @@ mod tests {
                 leader_env: BTreeMap::new(),
             },
             endpoint: "/private/tmp/tmux-501/default".to_string(),
+            tmux: "/private/tmp/tmux-501/default,123,0".to_string(),
         };
         let outcome =
             execute_leader_plan_after_ambient_authority(&plan, &workspace, Some(&authority))
