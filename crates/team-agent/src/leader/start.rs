@@ -5,10 +5,10 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-#[cfg(unix)]
-use std::ffi::CStr;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
@@ -450,7 +450,8 @@ fn verified_ambient_pane_authority(workspace: &Path) -> Option<VerifiedAmbientPa
     );
     let observed = current_tmux_pane_info(&pane_id)?;
     let caller_tty = caller_controlling_tty()?;
-    if observed.tty.as_deref() != Some(caller_tty.as_str()) {
+    let pane_tty = pane_tty_device(observed.tty.as_deref()?)?;
+    if caller_tty != pane_tty {
         return None;
     }
     let pane_workspace = observed.current_path.as_deref()?;
@@ -464,28 +465,62 @@ fn verified_ambient_pane_authority(workspace: &Path) -> Option<VerifiedAmbientPa
     })
 }
 
-#[cfg(unix)]
-fn caller_controlling_tty() -> Option<String> {
-    let controlling_tty = std::fs::File::open("/dev/tty").ok()?;
-    let mut buffer = [0 as libc::c_char; 256];
-    let result = unsafe {
-        libc::ttyname_r(
-            controlling_tty.as_raw_fd(),
-            buffer.as_mut_ptr(),
-            buffer.len(),
+#[cfg(target_os = "macos")]
+fn caller_controlling_tty() -> Option<u64> {
+    // `/dev/tty` proves that this process has a controlling terminal, but its
+    // own path and rdev remain the generic alias. Query the process table for
+    // the actual controlling device identity.
+    let _controlling_tty = std::fs::File::open("/dev/tty").ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let info_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let read = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info_size as libc::c_int,
         )
     };
-    if result != 0 {
+    if read != info_size as libc::c_int {
         return None;
     }
-    unsafe { CStr::from_ptr(buffer.as_ptr()) }
-        .to_str()
-        .ok()
-        .map(str::to_string)
+    Some(u64::from(unsafe { info.assume_init() }.e_tdev))
+}
+
+#[cfg(target_os = "linux")]
+fn caller_controlling_tty() -> Option<u64> {
+    let controlling_tty = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open("/dev/tty")
+        .ok()?;
+    let mut device = 0 as libc::c_uint;
+    let result = unsafe { libc::ioctl(controlling_tty.as_raw_fd(), libc::TIOCGDEV, &mut device) };
+    (result == 0).then_some(u64::from(device))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn caller_controlling_tty() -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn pane_tty_device(path: &str) -> Option<u64> {
+    let pane_tty = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let metadata = pane_tty.metadata().ok()?;
+    metadata
+        .file_type()
+        .is_char_device()
+        .then_some(metadata.rdev())
 }
 
 #[cfg(not(unix))]
-fn caller_controlling_tty() -> Option<String> {
+fn pane_tty_device(_path: &str) -> Option<u64> {
     None
 }
 
