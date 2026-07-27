@@ -96,7 +96,7 @@ pub(crate) fn prepare_leader_start(
     external_leader: bool,
 ) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
     let ambient_authority = ambient_pane_authority_preflight(workspace)?;
-    let plan = leader_start_plan_after_ambient_authority_check(
+    let plan = leader_start_plan_with_ambient_authority(
         provider,
         provider_args,
         workspace,
@@ -104,6 +104,7 @@ pub(crate) fn prepare_leader_start(
         confirm_attach,
         attach_session,
         external_leader,
+        ambient_authority.is_some(),
     )?;
     Ok(PreparedLeaderStart {
         plan,
@@ -119,6 +120,28 @@ pub(crate) fn leader_start_plan_after_ambient_authority_check(
     confirm_attach: bool,
     attach_session: Option<&SessionName>,
     external_leader: bool,
+) -> Result<LeaderStartPlan, LeaderError> {
+    leader_start_plan_with_ambient_authority(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+        std::env::var_os("TMUX").is_some(),
+    )
+}
+
+fn leader_start_plan_with_ambient_authority(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+    in_tmux: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
@@ -163,7 +186,6 @@ pub(crate) fn leader_start_plan_after_ambient_authority_check(
     } else {
         Some(managed_leader_session_name(provider, workspace))
     };
-    let in_tmux = std::env::var_os("TMUX").is_some();
     if !in_tmux {
         ensure_tmux_installed()?;
     }
