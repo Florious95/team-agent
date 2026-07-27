@@ -312,6 +312,7 @@ pub(super) fn delivery_refusal_wire(reason: DeliveryRefusal) -> &'static str {
         DeliveryRefusal::TmuxTargetMissing => "tmux_target_missing",
         DeliveryRefusal::MessageAlreadyClaimed => "message_already_claimed",
         DeliveryRefusal::LeaderNotAttached => "leader_not_attached",
+        DeliveryRefusal::PaneWorkspaceMismatch => "PaneWorkspaceMismatch",
         DeliveryRefusal::CoordinatorUnavailable => "coordinator_unavailable",
         DeliveryRefusal::NoCallerPane => "no_caller_pane",
         DeliveryRefusal::TeamOwnerMismatch => "team_owner_mismatch",

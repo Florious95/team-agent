@@ -54,6 +54,10 @@ pub(crate) struct NamedAddressError {
     pub action: String,
     pub log: String,
     pub candidates: Vec<Value>,
+    /// A typed live-channel refusal retained separately from the broader
+    /// address error (for example `PaneWorkspaceMismatch` while the address
+    /// remains a leader-not-attached refusal).
+    pub channel_reason: Option<String>,
     // E6: when the caller supplied a `<team>/leader` name that isn't a runtime
     // team_key, echo the requested value + the canonical alternatives so
     // spec/display-name confusion is visibly diagnosed. Empty for other
@@ -76,6 +80,7 @@ impl NamedAddressError {
             action: "inspect team-agent status and use an explicit workspace/team name".to_string(),
             log: "named-address resolver refused before injection".to_string(),
             candidates: Vec::new(),
+            channel_reason: None,
             requested_team: None,
             available_team_keys: Vec::new(),
             suggested_name: None,
@@ -237,6 +242,12 @@ impl NamedAddressError {
             "candidates".to_string(),
             Value::Array(self.candidates.clone()),
         );
+        if let Some(channel_reason) = self.channel_reason.as_deref() {
+            obj.insert(
+                "channel_reason".to_string(),
+                Value::String(channel_reason.to_string()),
+            );
+        }
         if let Some(requested) = self.requested_team.as_deref() {
             obj.insert(
                 "requested_team".to_string(),
@@ -987,6 +998,7 @@ fn resolve_leader(
                 window,
                 socket,
             );
+            err.channel_reason = Some(format!("{reason:?}"));
             err.log = format!("{} channel_unbound={reason:?}", err.log);
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
