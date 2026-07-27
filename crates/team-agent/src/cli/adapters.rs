@@ -1485,7 +1485,24 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     } else if args.fix_schema {
         diagnose_port::fix_schema(&args.workspace)?
     } else {
-        diagnose_port::doctor(&args.workspace, args.spec.as_deref())?
+        let mut value = diagnose_port::doctor(&args.workspace, args.spec.as_deref())?;
+        if let Some((issue, repair)) = crate::cli::diagnose::selected_live_leader_workspace_mismatch(
+            &args.workspace,
+            args.team.as_deref(),
+        ) {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("issues".to_string(), Value::Array(vec![issue]));
+                object.insert("suggested_repairs".to_string(), Value::Array(vec![repair]));
+                object.insert("ok".to_string(), Value::Bool(false));
+                if object.get("error").is_none_or(Value::is_null) {
+                    object.insert(
+                        "error".to_string(),
+                        Value::String("PaneWorkspaceMismatch".to_string()),
+                    );
+                }
+            }
+        }
+        value
     };
     Ok(CmdResult::from_json(value, args.json))
 }

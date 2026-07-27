@@ -195,10 +195,160 @@ pub(crate) fn diagnose_runtime_for_workspace(
     backend: &dyn Transport,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
+    append_live_leader_workspace_mismatch_issue(
+        workspace,
+        state,
+        backend,
+        &mut issues,
+        &mut repairs,
+    );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
+}
+
+fn append_live_leader_workspace_mismatch_issue(
+    workspace: &std::path::Path,
+    state: &Value,
+    backend: &dyn Transport,
+    issues: &mut Value,
+    repairs: &mut Value,
+) {
+    let Some((issue, repair)) = live_leader_workspace_mismatch(workspace, state, backend) else {
+        return;
+    };
+    if let Some(items) = issues.as_array_mut() {
+        items.push(issue);
+    }
+    if let Some(items) = repairs.as_array_mut() {
+        items.push(repair);
+    }
+}
+
+fn live_leader_workspace_mismatch(
+    workspace: &std::path::Path,
+    state: &Value,
+    backend: &dyn Transport,
+) -> Option<(Value, Value)> {
+    let receiver = state.get("leader_receiver")?;
+    if !matches!(
+        crate::messaging::resolve_live_leader_channel(workspace, receiver, backend),
+        crate::messaging::LeaderChannelResolution::Unbound(
+            crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch
+        )
+    ) {
+        return None;
+    }
+
+    let observed_pane_id = receiver
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .filter(|pane| !pane.is_empty())?;
+    let observed_pane_workspace = backend
+        .query(
+            &crate::transport::Target::Pane(crate::transport::PaneId::new(observed_pane_id)),
+            crate::transport::PaneField::PaneCurrentPath,
+        )
+        .ok()
+        .flatten()
+        .or_else(|| {
+            backend
+                .list_targets()
+                .ok()?
+                .into_iter()
+                .find(|pane| pane.pane_id.as_str() == observed_pane_id)?
+                .current_path
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+    let endpoint = backend.tmux_endpoint().or_else(|| {
+        receiver
+            .get("tmux_socket")
+            .and_then(Value::as_str)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(str::to_string)
+    });
+    let requested_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let team = state
+        .get("team_key")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty())
+        .unwrap_or("current");
+    let provider = receiver
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or("claude");
+    let action = format!(
+        "run `team-agent attach-leader --team {team} --provider {provider} --confirm --json` \
+         from a corrected leader terminal whose current directory is the requested workspace, \
+         then rerun `team-agent diagnose --team {team} --json`"
+    );
+    let facts = json!({
+        "reason": "PaneWorkspaceMismatch",
+        "requested_workspace": requested_workspace,
+        "observed_pane_id": observed_pane_id,
+        "observed_pane_workspace": observed_pane_workspace,
+        "endpoint": endpoint,
+    });
+    let mut issue = facts.clone();
+    if let Some(object) = issue.as_object_mut() {
+        object.insert(
+            "id".to_string(),
+            Value::String("leader_channel_workspace_mismatch".to_string()),
+        );
+    }
+    let mut repair = facts;
+    if let Some(object) = repair.as_object_mut() {
+        object.insert(
+            "issue".to_string(),
+            Value::String("leader_channel_workspace_mismatch".to_string()),
+        );
+        object.insert("action_required".to_string(), Value::Bool(true));
+        object.insert("advisory".to_string(), Value::Bool(true));
+        object.insert(
+            "broken_class".to_string(),
+            Value::String("leader_channel_workspace_mismatch".to_string()),
+        );
+        object.insert(
+            "hint_action".to_string(),
+            Value::String("team-agent attach-leader".to_string()),
+        );
+        object.insert(
+            "dedupe_key".to_string(),
+            Value::String(format!("{team}:leader_channel_workspace_mismatch")),
+        );
+        object.insert("action".to_string(), Value::String(action));
+    }
+    Some((issue, repair))
+}
+
+pub(crate) fn selected_live_leader_workspace_mismatch(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+) -> Option<(Value, Value)> {
+    let selected = crate::state::selector::resolve_active_team(
+        workspace,
+        team,
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .ok()?;
+    let backend: Box<dyn crate::transport::Transport> =
+        match crate::transport_factory::resolve_read_only_transport(
+            &selected.run_workspace,
+            Some(&selected.state),
+            crate::transport_factory::TransportPurpose::Diagnose,
+        ) {
+            Ok(resolved) => resolved.backend,
+            Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
+                &selected.run_workspace,
+            )),
+        };
+    live_leader_workspace_mismatch(&selected.run_workspace, &selected.state, backend.as_ref())
 }
 
 /// 0.5.41 Slice 1 (fault-invisibility-locate.md §5/§6.2): read the
