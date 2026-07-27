@@ -147,29 +147,11 @@ pub mod lifecycle_port {
         cwd: &Path,
         attach: &LeaderLauncherArgs,
     ) -> Result<Value, CliError> {
-        if let Some(reason) = crate::leader::start::ambient_pane_authority_refusal_reason(cwd) {
-            return Ok(json!({
-                "ok": false,
-                "provider": provider,
-                "mode": "exec_provider",
-                "leader_topology": if attach.external_leader { "external" } else { "managed" },
-                "is_external_leader": attach.external_leader,
-                "leader_window": null,
-                "leader_attach_command": "team-agent attach-leader",
-                "status": "not_started",
-                "exit_code": null,
-                "reason": reason,
-                "attach_existing": attach.attach_existing,
-                "confirm_attach": attach.confirm_attach,
-                "attach_session": attach.attach_session,
-                "session_name": null,
-            }));
-        }
         let attach_session = attach
             .attach_session
             .as_ref()
             .map(|name| crate::transport::SessionName::new(name.clone()));
-        let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+        let prepared = match crate::leader::start::prepare_leader_start(
             provider,
             provider_args,
             cwd,
@@ -177,10 +159,33 @@ pub mod lifecycle_port {
             attach.confirm_attach,
             attach_session.as_ref(),
             attach.external_leader,
-        )
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let outcome = crate::leader::start::execute_leader_plan(&plan, cwd)
+        ) {
+            Ok(prepared) => prepared,
+            Err(crate::leader::start::PrepareLeaderStartError::PaneWorkspaceMismatch) => {
+                return Ok(json!({
+                    "ok": false,
+                    "provider": provider,
+                    "mode": "exec_provider",
+                    "leader_topology": if attach.external_leader { "external" } else { "managed" },
+                    "is_external_leader": attach.external_leader,
+                    "leader_window": null,
+                    "leader_attach_command": "team-agent attach-leader",
+                    "status": "not_started",
+                    "exit_code": null,
+                    "reason": "PaneWorkspaceMismatch",
+                    "attach_existing": attach.attach_existing,
+                    "confirm_attach": attach.confirm_attach,
+                    "attach_session": attach.attach_session,
+                    "session_name": null,
+                }));
+            }
+            Err(crate::leader::start::PrepareLeaderStartError::Leader(error)) => {
+                return Err(CliError::Runtime(error.to_string()));
+            }
+        };
+        let outcome = crate::leader::start::execute_prepared_leader_start(&prepared, cwd)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let plan = prepared.plan();
         let ok = match outcome.status {
             crate::leader::LeaderLaunchStatus::Exited => outcome.exit_code == Some(0),
             crate::leader::LeaderLaunchStatus::Detached => true,

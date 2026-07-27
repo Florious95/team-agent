@@ -27,6 +27,41 @@ use super::{
 
 // ── leader::start — leader_start_plan / start_leader / session 名 ──
 
+pub(crate) struct PreparedLeaderStart {
+    plan: LeaderStartPlan,
+    ambient_authority: Option<VerifiedAmbientPaneAuthority>,
+}
+
+impl PreparedLeaderStart {
+    pub(crate) fn plan(&self) -> &LeaderStartPlan {
+        &self.plan
+    }
+}
+
+pub(crate) enum PrepareLeaderStartError {
+    PaneWorkspaceMismatch,
+    Leader(LeaderError),
+}
+
+impl PrepareLeaderStartError {
+    fn into_leader_error(self) -> LeaderError {
+        match self {
+            Self::PaneWorkspaceMismatch => LeaderError::Validation(
+                "PaneWorkspaceMismatch; run `team-agent attach-leader` from the intended \
+                 workspace pane or retry from a clean terminal"
+                    .to_string(),
+            ),
+            Self::Leader(error) => error,
+        }
+    }
+}
+
+impl From<LeaderError> for PrepareLeaderStartError {
+    fn from(error: LeaderError) -> Self {
+        Self::Leader(error)
+    }
+}
+
 /// `leader_start_plan`(card §46;`__init__.py:82`)。计算 leader 启动计划
 /// (exec in-TMUX / new tmux session / attach existing)。provider 未安装 → `Err(Start)`。
 pub fn leader_start_plan(
@@ -38,12 +73,7 @@ pub fn leader_start_plan(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
-    if let Some(reason) = ambient_pane_authority_refusal_reason(workspace) {
-        return Err(LeaderError::Validation(format!(
-            "{reason}; run `team-agent attach-leader` from the intended workspace pane or retry from a clean terminal"
-        )));
-    }
-    leader_start_plan_after_ambient_authority_check(
+    prepare_leader_start(
         provider,
         provider_args,
         workspace,
@@ -52,6 +82,33 @@ pub fn leader_start_plan(
         attach_session,
         external_leader,
     )
+    .map(|prepared| prepared.plan)
+    .map_err(PrepareLeaderStartError::into_leader_error)
+}
+
+pub(crate) fn prepare_leader_start(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
+    let ambient_authority = ambient_pane_authority_preflight(workspace)?;
+    let plan = leader_start_plan_after_ambient_authority_check(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+    )?;
+    Ok(PreparedLeaderStart {
+        plan,
+        ambient_authority,
+    })
 }
 
 pub(crate) fn leader_start_plan_after_ambient_authority_check(
@@ -218,7 +275,7 @@ pub fn start_leader(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<(), LeaderError> {
-    let plan = leader_start_plan(
+    let prepared = prepare_leader_start(
         provider,
         provider_args,
         workspace,
@@ -226,7 +283,9 @@ pub fn start_leader(
         confirm_attach,
         attach_session,
         external_leader,
-    )?;
+    )
+    .map_err(PrepareLeaderStartError::into_leader_error)?;
+    let plan = prepared.plan();
     crate::event_log::EventLog::new(workspace).write(
         super::LeaderEvent::LeaderStart.name(),
         serde_json::json!({
@@ -235,7 +294,7 @@ pub fn start_leader(
             "session_name": plan.session_name.as_ref().map(|s| s.as_str().to_string()),
         }),
     )?;
-    execute_leader_plan(&plan, workspace).map(|_| ())
+    execute_prepared_leader_start(&prepared, workspace).map(|_| ())
 }
 
 /// Execute a precomputed leader launch plan.
@@ -247,16 +306,30 @@ pub fn execute_leader_plan(
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
     let ambient_authority = if plan.mode == LeaderStartMode::ExecProvider {
-        let Some(authority) = verified_ambient_pane_authority(workspace) else {
-            let reason =
-                crate::messaging::leader_channel::LeaderChannelUnbound::PaneWorkspaceMismatch;
-            return Ok(LeaderLaunchOutcome::not_started(format!("{reason:?}")));
-        };
-        Some(authority)
+        match ambient_pane_authority_preflight(workspace) {
+            Ok(Some(authority)) => Some(authority),
+            Ok(None) | Err(PrepareLeaderStartError::PaneWorkspaceMismatch) => {
+                let reason =
+                    crate::messaging::leader_channel::LeaderChannelUnbound::PaneWorkspaceMismatch;
+                return Ok(LeaderLaunchOutcome::not_started(format!("{reason:?}")));
+            }
+            Err(PrepareLeaderStartError::Leader(error)) => return Err(error),
+        }
     } else {
         None
     };
     execute_leader_plan_after_ambient_authority(plan, workspace, ambient_authority.as_ref())
+}
+
+pub(crate) fn execute_prepared_leader_start(
+    prepared: &PreparedLeaderStart,
+    workspace: &Path,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
+    execute_leader_plan_after_ambient_authority(
+        &prepared.plan,
+        workspace,
+        prepared.ambient_authority.as_ref(),
+    )
 }
 
 fn execute_leader_plan_after_ambient_authority(
@@ -323,12 +396,15 @@ struct VerifiedAmbientPaneAuthority {
     endpoint: String,
 }
 
-pub(crate) fn ambient_pane_authority_refusal_reason(workspace: &Path) -> Option<&'static str> {
-    if std::env::var_os("TMUX").is_none() || verified_ambient_pane_authority(workspace).is_some() {
-        None
-    } else {
-        Some("PaneWorkspaceMismatch")
+fn ambient_pane_authority_preflight(
+    workspace: &Path,
+) -> Result<Option<VerifiedAmbientPaneAuthority>, PrepareLeaderStartError> {
+    if std::env::var_os("TMUX").is_none() {
+        return Ok(None);
     }
+    verified_ambient_pane_authority(workspace)
+        .map(Some)
+        .ok_or(PrepareLeaderStartError::PaneWorkspaceMismatch)
 }
 
 fn verified_ambient_pane_authority(workspace: &Path) -> Option<VerifiedAmbientPaneAuthority> {
@@ -368,9 +444,15 @@ fn verified_ambient_pane_authority(workspace: &Path) -> Option<VerifiedAmbientPa
 
 #[cfg(unix)]
 fn caller_controlling_tty() -> Option<String> {
-    let stdin = std::io::stdin();
+    let controlling_tty = std::fs::File::open("/dev/tty").ok()?;
     let mut buffer = [0 as libc::c_char; 256];
-    let result = unsafe { libc::ttyname_r(stdin.as_raw_fd(), buffer.as_mut_ptr(), buffer.len()) };
+    let result = unsafe {
+        libc::ttyname_r(
+            controlling_tty.as_raw_fd(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        )
+    };
     if result != 0 {
         return None;
     }
