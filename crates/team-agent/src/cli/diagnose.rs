@@ -1,5 +1,10 @@
 //! diagnose/preflight/wait-ready CLI helpers.
 use super::*;
+use crate::model::pane_authority_refusal::{
+    PaneAuthorityRecoveryAction, PaneAuthorityRecoveryHint, PaneAuthorityRefusal,
+    PaneAuthorityRefusalFacts, PaneAuthorityRefusalField, PaneWorkspaceMismatchFacts, ACTION_FIELD,
+    ACTION_REQUIRED_FIELD, HINT_ACTION_FIELD, REASON_FIELD,
+};
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
@@ -252,6 +257,7 @@ fn live_leader_workspace_mismatch(
         )
         .ok()
         .flatten()
+        .map(std::path::PathBuf::from)
         .or_else(|| {
             backend
                 .list_targets()
@@ -259,7 +265,6 @@ fn live_leader_workspace_mismatch(
                 .into_iter()
                 .find(|pane| pane.pane_id.as_str() == observed_pane_id)?
                 .current_path
-                .map(|path| path.to_string_lossy().into_owned())
         });
     let endpoint = backend.tmux_endpoint().or_else(|| {
         receiver
@@ -270,9 +275,7 @@ fn live_leader_workspace_mismatch(
     });
     let requested_workspace = workspace
         .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
+        .unwrap_or_else(|_| workspace.to_path_buf());
     let team = state
         .get("team_key")
         .and_then(Value::as_str)
@@ -283,47 +286,93 @@ fn live_leader_workspace_mismatch(
         .and_then(Value::as_str)
         .filter(|provider| !provider.is_empty())
         .unwrap_or("claude");
-    let action = format!(
-        "open a new terminal window outside the current tmux/pane, change directory to the \
-         requested workspace, then run \
-         `team-agent attach-leader --team {team} --provider {provider} --confirm --json`; \
-         then rerun `team-agent diagnose --team {team} --json`"
+    let refusal = PaneAuthorityRefusal::new(PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(
+        PaneWorkspaceMismatchFacts {
+            requested_workspace,
+            observed_pane_id: observed_pane_id.to_string(),
+            observed_pane_workspace: observed_pane_workspace?,
+            endpoint: endpoint?,
+        },
+    ));
+    let PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts) = &refusal.facts else {
+        return None;
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        REASON_FIELD.to_string(),
+        Value::String(refusal.reason().as_str().to_string()),
     );
-    let facts = json!({
-        "reason": "PaneWorkspaceMismatch",
-        "requested_workspace": requested_workspace,
-        "observed_pane_id": observed_pane_id,
-        "observed_pane_workspace": observed_pane_workspace,
-        "endpoint": endpoint,
-    });
-    let mut issue = facts.clone();
+    fields.insert(
+        PaneAuthorityRefusalField::RequestedWorkspace
+            .as_str()
+            .to_string(),
+        Value::String(facts.requested_workspace.to_string_lossy().into_owned()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::ObservedPaneId
+            .as_str()
+            .to_string(),
+        Value::String(facts.observed_pane_id.clone()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::ObservedPaneWorkspace
+            .as_str()
+            .to_string(),
+        Value::String(facts.observed_pane_workspace.to_string_lossy().into_owned()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::Endpoint.as_str().to_string(),
+        Value::String(facts.endpoint.clone()),
+    );
+    let mut issue = Value::Object(fields.clone());
     if let Some(object) = issue.as_object_mut() {
         object.insert(
             "id".to_string(),
             Value::String("leader_channel_workspace_mismatch".to_string()),
         );
     }
-    let mut repair = facts;
+    let mut repair = Value::Object(fields);
     if let Some(object) = repair.as_object_mut() {
         object.insert(
             "issue".to_string(),
             Value::String("leader_channel_workspace_mismatch".to_string()),
         );
-        object.insert("action_required".to_string(), Value::Bool(true));
+        object.insert(
+            ACTION_REQUIRED_FIELD.to_string(),
+            Value::Bool(refusal.recovery.action_required),
+        );
         object.insert("advisory".to_string(), Value::Bool(true));
         object.insert(
             "broken_class".to_string(),
             Value::String("leader_channel_workspace_mismatch".to_string()),
         );
         object.insert(
-            "hint_action".to_string(),
-            Value::String("team-agent attach-leader".to_string()),
+            HINT_ACTION_FIELD.to_string(),
+            Value::String(
+                match refusal.recovery.hint_action {
+                    PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+                }
+                .to_string(),
+            ),
         );
         object.insert(
             "dedupe_key".to_string(),
             Value::String(format!("{team}:leader_channel_workspace_mismatch")),
         );
-        object.insert("action".to_string(), Value::String(action));
+        object.insert(
+            ACTION_FIELD.to_string(),
+            Value::String(match refusal.recovery.action {
+                PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
+                    format!(
+                        "open a new terminal window outside the current tmux/pane, change \
+                         directory to the requested workspace, then run \
+                         `team-agent attach-leader --team {team} --provider {provider} \
+                         --confirm --json`; then rerun \
+                         `team-agent diagnose --team {team} --json`"
+                    )
+                }
+            }),
+        );
     }
     Some((issue, repair))
 }
