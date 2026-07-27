@@ -18,6 +18,7 @@ pub mod ids;
 // cli/send.rs (positional adapter), mcp_server/tools.rs (owner-scoped
 // peer suggestions). Never a routing authority — advisory only.
 pub(crate) mod name_similarity;
+pub mod pane_authority_refusal;
 pub mod paths;
 pub mod permissions;
 pub mod routing;
