@@ -740,6 +740,28 @@ fn verifier_covered_canary() {
         "COVERED-BINDING-ASSERTION",
     );
 
+    let diagnostic_only_bound_output = r#"
+fn verifier_covered_canary() {
+    let out = run_ta(&ws, &["status", "--json"]);
+    assert!(true, "diagnostic-only stdout={}", out.stdout);
+}
+"#;
+    assert_failure_signature(
+        validate_covered_evidence(&honest, diagnostic_only_bound_output),
+        "COVERED-BINDING-ASSERTION",
+    );
+
+    let comparison_operand_bound_output = r#"
+fn verifier_covered_canary() {
+    let out = run_ta(&ws, &["status", "--json"]);
+    assert_eq!(out.exit_code, 0, "status failed");
+}
+"#;
+    assert!(
+        validate_covered_evidence(&honest, comparison_operand_bound_output).is_ok(),
+        "TOOTH-3B harness canary: a run_ta result referenced by a comparison operand must count"
+    );
+
     let unshimmed_launcher = r#"
 fn verifier_unmapped_launcher_canary() {
     let out = run_ta(&ws, &["codex"]);
@@ -1456,11 +1478,14 @@ fn run_ta_binding(prefix: &str) -> Option<String> {
 }
 
 fn binding_has_behavior_assertion(body: &str, binding: &str) -> bool {
-    assertion_macros(body).iter().any(|(_, assertion)| {
-        if !identifier_occurs(assertion, binding) {
+    assertion_macros(body).iter().any(|(kind, assertion)| {
+        let Some(behavior_operands) = assertion_behavior_operands(kind, assertion) else {
+            return false;
+        };
+        if !identifier_occurs(behavior_operands, binding) {
             return false;
         }
-        let compact = compact(assertion);
+        let compact = compact(behavior_operands);
         [
             format!("{binding}.is_success("),
             format!("{binding}.exit_code"),
@@ -1472,6 +1497,126 @@ fn binding_has_behavior_assertion(body: &str, binding: &str) -> bool {
         .iter()
         .any(|marker| compact.contains(marker))
     })
+}
+
+/// Returns only operands that decide whether a supported assertion passes.
+///
+/// Machine boundary: `assert!` stops at its first top-level comma; `assert_eq!` and
+/// `assert_ne!` stop at their second. Later format strings and diagnostic arguments
+/// therefore cannot qualify a binding as behavior evidence. This is intentionally a
+/// lexical gate over these three literal macro spellings, not a full Rust parser: it
+/// does not recognize custom assertion wrappers or prove that a syntactically bound
+/// predicate is semantically reachable (for example, constant-folded `true || ...`).
+fn assertion_behavior_operands<'a>(kind: &str, assertion: &'a str) -> Option<&'a str> {
+    let arguments = assertion
+        .strip_prefix(kind)?
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    let diagnostic_comma = match kind {
+        "assert!" => top_level_comma(arguments, 1),
+        "assert_eq!" | "assert_ne!" => top_level_comma(arguments, 2),
+        _ => return None,
+    };
+    Some(&arguments[..diagnostic_comma.unwrap_or(arguments.len())])
+}
+
+fn top_level_comma(source: &str, ordinal: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut delimiters = Vec::new();
+    let mut index = 0;
+    let mut seen = 0;
+    let mut line_comment = false;
+    let mut block_comment = 0usize;
+    let mut string = false;
+    let mut escaped = false;
+    let mut raw_hashes = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if line_comment {
+            if byte == b'\n' {
+                line_comment = false;
+            }
+        } else if block_comment > 0 {
+            if byte == b'/' && next == Some(b'*') {
+                block_comment += 1;
+                index += 1;
+            } else if byte == b'*' && next == Some(b'/') {
+                block_comment -= 1;
+                index += 1;
+            }
+        } else if let Some(hashes) = raw_hashes {
+            if byte == b'"'
+                && bytes
+                    .get(index + 1..index + 1 + hashes)
+                    .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
+            {
+                raw_hashes = None;
+                index += hashes;
+            }
+        } else if string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                string = false;
+            }
+        } else if byte == b'/' && next == Some(b'/') {
+            line_comment = true;
+            index += 1;
+        } else if byte == b'/' && next == Some(b'*') {
+            block_comment = 1;
+            index += 1;
+        } else if byte == b'r' {
+            let mut cursor = index + 1;
+            while bytes.get(cursor) == Some(&b'#') {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'"') {
+                raw_hashes = Some(cursor - index - 1);
+                index = cursor;
+            }
+        } else if byte == b'"' {
+            string = true;
+        } else if byte == b'\'' {
+            if let Some(close) = rust_char_literal_end(source, index) {
+                index = close;
+            }
+        } else if let Some(close) = match byte {
+            b'(' => Some(b')'),
+            b'[' => Some(b']'),
+            b'{' => Some(b'}'),
+            _ => None,
+        } {
+            delimiters.push(close);
+        } else if delimiters.last() == Some(&byte) {
+            delimiters.pop();
+        } else if byte == b',' && delimiters.is_empty() {
+            seen += 1;
+            if seen == ordinal {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn rust_char_literal_end(source: &str, open: usize) -> Option<usize> {
+    let tail = source.get(open + 1..)?;
+    let bytes = tail.as_bytes();
+    if bytes.first() != Some(&b'\\') {
+        let ch = tail.chars().next()?;
+        let close = open + 1 + ch.len_utf8();
+        return (source.as_bytes().get(close) == Some(&b'\'')).then_some(close);
+    }
+    let close_in_tail = match bytes.get(1)? {
+        b'x' => 4,
+        b'u' => bytes.iter().position(|byte| *byte == b'}')? + 1,
+        _ => 2,
+    };
+    (bytes.get(close_in_tail) == Some(&b'\'')).then_some(open + 1 + close_in_tail)
 }
 
 fn assertion_macros(body: &str) -> Vec<(&'static str, String)> {
