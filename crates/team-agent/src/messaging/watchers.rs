@@ -529,6 +529,11 @@ pub(crate) fn requeue_blocked_leader_messages(
                     "blocked_leader_unbound": counts.blocked_leader_unbound,
                     "queued_until_leader_attach": counts.queued_until_leader_attach,
                 },
+                "attach_window_failures": {
+                    "reason": "leader_not_attached",
+                    "count": counts.blocked_leader_unbound,
+                    "status": "requeued_pending_physical_retry",
+                },
             }),
         )?;
     }
