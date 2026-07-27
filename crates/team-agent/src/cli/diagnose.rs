@@ -327,7 +327,29 @@ fn live_leader_workspace_mismatch(
     Some((issue, repair))
 }
 
-pub(crate) fn selected_live_leader_workspace_mismatch(
+pub(crate) fn append_selected_live_leader_workspace_mismatch(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    report: &mut Value,
+) {
+    let Some((issue, repair)) = selected_live_leader_workspace_mismatch(workspace, team) else {
+        return;
+    };
+    let Some(object) = report.as_object_mut() else {
+        return;
+    };
+    object.insert("issues".to_string(), Value::Array(vec![issue]));
+    object.insert("suggested_repairs".to_string(), Value::Array(vec![repair]));
+    object.insert("ok".to_string(), Value::Bool(false));
+    if object.get("error").is_none_or(Value::is_null) {
+        object.insert(
+            "error".to_string(),
+            Value::String("PaneWorkspaceMismatch".to_string()),
+        );
+    }
+}
+
+fn selected_live_leader_workspace_mismatch(
     workspace: &std::path::Path,
     team: Option<&str>,
 ) -> Option<(Value, Value)> {
