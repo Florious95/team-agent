@@ -135,6 +135,17 @@ fn assert_kind(
     assert!(n38.contains("Log: "), "{n38}");
 }
 
+fn assert_broad_leader_not_attached(err: NamedAddressError) {
+    assert_eq!(err.kind, NamedAddressErrorKind::LeaderNotAttached);
+    assert_eq!(err.channel_reason, None);
+    let value = err.to_json();
+    assert_eq!(value["reason"], json!("leader_not_attached"));
+    assert!(
+        value.get("channel_reason").is_none(),
+        "broad refusal must not expose a typed channel reason: {value}"
+    );
+}
+
 fn named_send_args(
     ws: &Path,
     to_name: Option<&str>,
@@ -369,6 +380,60 @@ fn resolve_leader_name_not_live() {
         !n38.contains("takeover"),
         "third-party copy must not suggest takeover: {n38}"
     );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn resolve_leader_receiver_not_attached_stays_broad() {
+    let ws = named_ws("leader-receiver-not-attached");
+    let mut team = leader_team("alpha-session", "%leader", "/tmp/leader.sock");
+    team["leader_receiver"]["status"] = json!("rebind_required");
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "alpha": team
+        })),
+    );
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint("/tmp/leader.sock")
+        .with_targets(vec![pane("alpha-session-leader", "codex", "%leader")]);
+
+    let err = resolve_name_with_transport(&ws, "alpha/leader", &transport).unwrap_err();
+    assert_broad_leader_not_attached(err);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn resolve_leader_pane_not_live_stays_broad() {
+    let ws = named_ws("leader-pane-not-live");
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "alpha": leader_team("alpha-session", "%missing", "/tmp/leader.sock")
+        })),
+    );
+    let transport = OfflineTransport::new().with_tmux_endpoint("/tmp/leader.sock");
+
+    let err = resolve_name_with_transport(&ws, "alpha/leader", &transport).unwrap_err();
+    assert_broad_leader_not_attached(err);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn resolve_leader_probe_failure_stays_broad() {
+    let ws = named_ws("leader-probe-failed");
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "alpha": leader_team("alpha-session", "%leader", "/tmp/leader.sock")
+        })),
+    );
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint("/tmp/leader.sock")
+        .with_list_targets_error("injected leader pane probe failure");
+
+    let err = resolve_name_with_transport(&ws, "alpha/leader", &transport).unwrap_err();
+    assert_broad_leader_not_attached(err);
     let _ = std::fs::remove_dir_all(&ws);
 }
 

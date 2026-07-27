@@ -998,7 +998,9 @@ fn resolve_leader(
                 window,
                 socket,
             );
-            err.channel_reason = Some(format!("{reason:?}"));
+            if reason == crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch {
+                err.channel_reason = Some(format!("{reason:?}"));
+            }
             err.log = format!("{} channel_unbound={reason:?}", err.log);
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
