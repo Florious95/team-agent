@@ -11,9 +11,12 @@
 //! - `collect` must contain both the spawned fake-worker's original message-scoped result and
 //!   the independent stdio MCP supplemental result; the latter cannot mask loss of the former.
 //! - command coverage is an honest A-covered / B-declared-gap / C-last-resort-exemption catalog.
-//!   A requires exact documented argv plus an assertion bound to that invocation. Provider
-//!   launchers may graduate to A only through a per-call hermetic PATH shim with exact argv-log
-//!   and CLI exit/output evidence; invoke-and-ignore and unshimmed launchers are forbidden.
+//!   Each A entry explicitly declares one source/test function, literal invocation, binding,
+//!   literal assertion node, behavior operand, and executable negative twin. The authority
+//!   resolves those declarations through Rust token trees (never substring/character-position
+//!   inference), requires every node exactly once, and admits A only when the normal mapped case
+//!   passes while the one-field twin fails at that declared assertion. Provider launchers retain
+//!   their additional hermetic PATH shim and exact argv-log obligations.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -298,14 +301,25 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
 #[test]
 fn tooth_3b_three_bucket_claims_are_honest_and_launcher_safe() {
     assert_three_bucket_validator_canary();
+    assert_negative_twin_executor_canary();
 
     let manifest = load_coverage_manifest("TOOTH-3B");
     let e2e_tests = source_tree(&["tests/e2e/main.rs", "tests/e2e/cases"]);
     validate_bucket_fields(&manifest)
+        .and_then(|_| validate_expected_bucket_totals(&manifest, 2, 44, 0))
         .and_then(|_| validate_covered_case_registration(&manifest))
         .and_then(|_| validate_covered_evidence(&manifest, &e2e_tests))
         .and_then(|_| validate_no_unshimmed_launcher_calls(&manifest, &e2e_tests))
         .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+#[test]
+fn gate_hole_negative_twin_execution_canary_case() {
+    match std::env::var("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN_EXECUTOR_CANARY").as_deref() {
+        Ok("target") => panic!("NEGATIVE-TWIN-TARGET-ASSERTION-CANARY"),
+        Ok("setup") => panic!("NEGATIVE-TWIN-SETUP-CANARY"),
+        _ => {}
+    }
 }
 
 #[derive(Debug)]
@@ -343,6 +357,8 @@ enum CoverageEntry {
         command: String,
         #[serde(default)]
         cases: Vec<String>,
+        #[serde(default)]
+        evidence: Option<CoveredEvidenceDeclaration>,
         #[serde(default)]
         launcher_shim_evidence: Option<LauncherShimEvidence>,
     },
@@ -387,12 +403,93 @@ struct LauncherShimEvidence {
     cli_result_binding: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoveredEvidenceDeclaration {
+    case: String,
+    source_file: String,
+    invocation: InvocationDeclaration,
+    binding: BindingDeclaration,
+    assertion: AssertionDeclaration,
+    negative_twin: NegativeTwinDeclaration,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvocationDeclaration {
+    runner: String,
+    line: usize,
+    documented_argv: Vec<String>,
+    literal_argv: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindingDeclaration {
+    name: String,
+    line: usize,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssertionDeclaration {
+    macro_name: String,
+    line: usize,
+    operand: String,
+    behavior_fact: String,
+    failure_marker: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NegativeTwinDeclaration {
+    env_key: String,
+    env_value: String,
+    operation: String,
+    remove_literal: String,
+    replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RustTokenKind {
+    Ident(String),
+    StringLiteral(String),
+    Number(String),
+    CharLiteral,
+    Punct(char),
+    Group {
+        delimiter: char,
+        tokens: Vec<RustToken>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RustToken {
+    kind: RustTokenKind,
+    line: usize,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionNode {
+    body: Vec<RustToken>,
+}
+
+#[derive(Debug, Clone)]
 struct RunTaCall {
     runner: String,
     binding: Option<String>,
+    binding_line: Option<usize>,
+    line: usize,
     argv: Vec<String>,
-    source: String,
+    has_path_override: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AssertionNode {
+    name: String,
+    line: usize,
+    path_qualified: bool,
+    arguments: Vec<RustToken>,
 }
 
 fn documented_fake_team(tag: &str, agent_id: &str) -> TestWorkspace {
@@ -647,12 +744,14 @@ fn assert_coverage_closed_world_canary() {
 }
 
 fn assert_three_bucket_validator_canary() {
+    let honest_evidence = canary_evidence("assert", "condition", "stdout", 7);
     let honest = CoverageManifest {
-        schema_version: "team-agent-skill-command-coverage-v2".to_string(),
+        schema_version: "team-agent-skill-command-coverage-v3".to_string(),
         commands: vec![
             CoverageEntry::Covered {
                 command: "team-agent status --json".to_string(),
                 cases: vec!["verifier_covered_canary".to_string()],
+                evidence: Some(honest_evidence.clone()),
                 launcher_shim_evidence: None,
             },
             CoverageEntry::DeclaredGap {
@@ -663,17 +762,62 @@ fn assert_three_bucket_validator_canary() {
             },
         ],
     };
-    let honest_source = r#"
-fn verifier_covered_canary() {
-    let out = run_ta(&ws, &["status", "--json"]);
-    assert!(out.is_success(), "status failed: {}", out.stderr);
-}
-"#;
+    let honest_source =
+        canary_source(r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#);
     assert!(
         validate_bucket_fields(&honest).is_ok()
-            && validate_covered_evidence(&honest, honest_source).is_ok()
-            && validate_no_unshimmed_launcher_calls(&honest, honest_source).is_ok(),
+            && validate_declared_evidence_syntax(
+                "team-agent status --json",
+                &honest_evidence,
+                &honest_source,
+            )
+            .is_ok()
+            && validate_no_unshimmed_launcher_calls(&honest, &honest_source).is_ok(),
         "TOOTH-3B harness canary: an honest A=1/B=1/C=0 catalog must be green"
+    );
+
+    let mut mismatched_argv = honest_evidence.clone();
+    mismatched_argv.invocation.literal_argv = vec!["doctor".to_string()];
+    assert_syntax_failure(
+        "team-agent status --json",
+        &mismatched_argv,
+        &honest_source,
+        "COVERED-EXACT-ARGV",
+    );
+
+    let mut trailing_dot = honest_evidence.clone();
+    trailing_dot.invocation.documented_argv = vec![
+        "team-agent".to_string(),
+        "status".to_string(),
+        ".".to_string(),
+    ];
+    trailing_dot.invocation.literal_argv = vec!["status".to_string(), ".".to_string()];
+    let trailing_dot_source = canary_source_with_invocation(
+        r#"let mut out = run_ta(&ws, &["status", "."]);"#,
+        r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#,
+    );
+    assert!(
+        validate_declared_evidence_syntax(
+            "team-agent status .",
+            &trailing_dot,
+            &trailing_dot_source
+        )
+        .is_ok(),
+        "TOOTH-3B A1 canary: final `.` must remain an independent declared and literal argv token"
+    );
+    let mut missing_trailing_dot = trailing_dot;
+    missing_trailing_dot.invocation.documented_argv.pop();
+    assert_syntax_failure(
+        "team-agent status .",
+        &missing_trailing_dot,
+        &trailing_dot_source,
+        "COVERED-EXACT-ARGV",
+    );
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        "#[test]\nfn verifier_covered_canary() {\n",
+        "COVERED-SYNTAX-PARSE",
     );
 
     let missing_owner = CoverageManifest {
@@ -702,64 +846,207 @@ fn verifier_covered_canary() {
         "EXEMPT-CATEGORY",
     );
 
-    let discarded_source = r#"
-fn verifier_covered_canary() {
-    let _ = run_ta(&ws, &["status", "--json"]);
-}
-"#;
-    assert_failure_signature(
-        validate_covered_evidence(&honest, discarded_source),
+    let discarded_source = canary_source_with_invocation(
+        r#"let _ = run_ta(&ws, &["status", "--json"]);"#,
+        r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#,
+    );
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        &discarded_source,
         "MAPPED-DISCARDED-RUN",
     );
 
-    let mapped_launcher_source = r#"
-fn verifier_covered_canary() {
-    let out = run_ta(&ws, &["status", "--json"]);
-    assert!(out.is_success());
-    let launcher = run_ta_env(
-        &ws,
-        &["claude"],
-        &[("PATH", shim_path.as_str())],
+    let mapped_launcher_source = format!(
+        "{honest_source}\nfn verifier_extra() {{\n\
+         let launcher = run_ta_env(&ws, &[\"claude\"], &[(\"PATH\", shim_path.as_str())]);\n\
+         assert!(launcher.is_success());\n}}\n"
     );
-    assert!(launcher.is_success());
-}
-"#;
-    assert_failure_signature(
-        validate_covered_evidence(&honest, mapped_launcher_source),
+    let mapped_case_launcher = canary_source_with_extra(
+        r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#,
+        r#"let launcher = run_ta_env(&ws, &["claude"], &[("PATH", shim_path.as_str())]);
+    assert!(launcher.is_success());"#,
+    );
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        &mapped_case_launcher,
         "MAPPED-LAUNCHER-ARGV",
     );
 
-    let missing_bound_assertion = r#"
-fn verifier_covered_canary() {
-    let out = run_ta(&ws, &["status", "--json"]);
-    assert_eq!(out.argv, vec!["team-agent", "status", "--json"]);
-}
-"#;
-    assert_failure_signature(
-        validate_covered_evidence(&honest, missing_bound_assertion),
+    let missing_bound_assertion = canary_source(
+        r#"assert_eq!(out.argv, vec!["team-agent", "status", "--json"], "argv only");"#,
+    );
+    let mut missing_bound_evidence = honest_evidence.clone();
+    missing_bound_evidence.assertion.macro_name = "assert_eq".to_string();
+    missing_bound_evidence.assertion.operand = "left".to_string();
+    assert_red_then_restored_green(
+        "team-agent status --json",
+        &missing_bound_evidence,
+        &missing_bound_assertion,
+        &canary_source(r#"assert_eq!(out.stdout.contains("ready"), true, "status failed");"#),
         "COVERED-BINDING-ASSERTION",
     );
 
-    let diagnostic_only_bound_output = r#"
-fn verifier_covered_canary() {
-    let out = run_ta(&ws, &["status", "--json"]);
-    assert!(true, "diagnostic-only stdout={}", out.stdout);
-}
-"#;
-    assert_failure_signature(
-        validate_covered_evidence(&honest, diagnostic_only_bound_output),
+    let diagnostic_only_bound_output =
+        canary_source(r#"assert!(true, "diagnostic-only stdout={}", out.stdout);"#);
+    assert_red_then_restored_green(
+        "team-agent status --json",
+        &honest_evidence,
+        &diagnostic_only_bound_output,
+        &honest_source,
         "COVERED-BINDING-ASSERTION",
     );
 
-    let comparison_operand_bound_output = r#"
-fn verifier_covered_canary() {
-    let out = run_ta(&ws, &["status", "--json"]);
-    assert_eq!(out.exit_code, 0, "status failed");
-}
-"#;
+    let mut comparison_evidence = honest_evidence.clone();
+    comparison_evidence.assertion.macro_name = "assert_eq".to_string();
+    comparison_evidence.assertion.operand = "left".to_string();
+    comparison_evidence.assertion.behavior_fact = "exit_code".to_string();
+    comparison_evidence.assertion.failure_marker = "status failed".to_string();
+    let comparison_operand_bound_output =
+        canary_source(r#"assert_eq!(out.exit_code, 0, "status failed");"#);
     assert!(
-        validate_covered_evidence(&honest, comparison_operand_bound_output).is_ok(),
+        validate_declared_evidence_nodes(
+            "team-agent status --json",
+            &comparison_evidence,
+            &comparison_operand_bound_output,
+        )
+        .is_ok(),
         "TOOTH-3B harness canary: a run_ta result referenced by a comparison operand must count"
+    );
+
+    for (assertion, macro_name, signature) in [
+        (
+            r#"assert_eq!(1, 1, "diagnostic-only stdout={}", out.stdout);"#,
+            "assert_eq",
+            "COVERED-BINDING-ASSERTION",
+        ),
+        (
+            r#"panic!("diagnostic-only stdout={}", out.stdout);"#,
+            "assert",
+            "COVERED-ASSERTION-MACRO",
+        ),
+        (
+            r#"assert!(true, "diagnostic-only nested={}", (((out.stdout))));"#,
+            "assert",
+            "COVERED-BINDING-ASSERTION",
+        ),
+        (
+            r#"check!(out.stdout.contains("ready"));"#,
+            "assert",
+            "COVERED-ASSERTION-MACRO",
+        ),
+        (
+            r#"custom_assert!(out.stdout.contains("ready"));"#,
+            "assert",
+            "COVERED-ASSERTION-MACRO",
+        ),
+        (
+            r#"custom_assert_eq!(out.stdout, "ready");"#,
+            "assert_eq",
+            "COVERED-ASSERTION-MACRO",
+        ),
+        (
+            r#"std::assert!(out.stdout.contains("ready"));"#,
+            "assert",
+            "COVERED-ASSERTION-MACRO",
+        ),
+    ] {
+        let mut evidence = honest_evidence.clone();
+        evidence.assertion.macro_name = macro_name.to_string();
+        if macro_name == "assert_eq" {
+            evidence.assertion.operand = "left".to_string();
+        }
+        let invalid = canary_source(assertion);
+        let restored = if macro_name == "assert_eq" {
+            canary_source(r#"assert_eq!(out.stdout.contains("ready"), true, "status failed");"#)
+        } else {
+            honest_source.clone()
+        };
+        assert_red_then_restored_green(
+            "team-agent status --json",
+            &evidence,
+            &invalid,
+            &restored,
+            signature,
+        );
+    }
+
+    let mut function_zero = honest_evidence.clone();
+    function_zero.case = "missing_verifier_case".to_string();
+    assert_syntax_failure(
+        "team-agent status --json",
+        &function_zero,
+        &honest_source,
+        "COVERED-FUNCTION-NODE-ZERO",
+    );
+    let function_multiple = format!("{honest_source}\n{honest_source}");
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        &function_multiple,
+        "COVERED-FUNCTION-NODE-MULTIPLE",
+    );
+
+    let mut invocation_zero = honest_evidence.clone();
+    invocation_zero.invocation.line = 99;
+    assert_syntax_failure(
+        "team-agent status --json",
+        &invocation_zero,
+        &honest_source,
+        "COVERED-INVOCATION-NODE-ZERO",
+    );
+    let invocation_multiple = canary_source_with_invocation(
+        r#"let mut out = run_ta(&ws, &["status", "--json"]); let other = run_ta(&ws, &["status", "--json"]);"#,
+        r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#,
+    );
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        &invocation_multiple,
+        "COVERED-INVOCATION-NODE-MULTIPLE",
+    );
+
+    let mut binding_zero = honest_evidence.clone();
+    binding_zero.binding.name = "other".to_string();
+    assert_syntax_failure(
+        "team-agent status --json",
+        &binding_zero,
+        &honest_source,
+        "COVERED-BINDING-NODE-ZERO",
+    );
+    let binding_multiple = canary_source_with_invocation(
+        r#"let mut out = run_ta(&ws, &["status", "--json"]); let out = 1;"#,
+        r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#,
+    );
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        &binding_multiple,
+        "COVERED-BINDING-NODE-MULTIPLE",
+    );
+
+    let mut assertion_zero = honest_evidence.clone();
+    assertion_zero.assertion.line = 99;
+    assert_syntax_failure(
+        "team-agent status --json",
+        &assertion_zero,
+        &honest_source,
+        "COVERED-ASSERTION-NODE-ZERO",
+    );
+    let assertion_multiple = canary_source(
+        r#"assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr); assert!(out.stdout.contains("ready"), "status failed: {}", out.stderr);"#,
+    );
+    assert_syntax_failure(
+        "team-agent status --json",
+        &honest_evidence,
+        &assertion_multiple,
+        "COVERED-ASSERTION-NODE-MULTIPLE",
+    );
+
+    assert_failure_signature(
+        validate_negative_twin_hook(&comparison_evidence, &comparison_operand_bound_output),
+        "NEGATIVE-TWIN-MUTATION",
     );
 
     let unshimmed_launcher = r#"
@@ -788,38 +1075,110 @@ fn verifier_undeclared_path_launcher_canary() {
         "UNSHIMMED-LAUNCHER-EXECUTION",
     );
 
-    let shimmed_launcher = CoverageManifest {
-        schema_version: honest.schema_version,
-        commands: vec![CoverageEntry::Covered {
-            command: "team-agent codex".to_string(),
-            cases: vec!["verifier_shimmed_launcher_canary".to_string()],
-            launcher_shim_evidence: Some(LauncherShimEvidence {
-                case: "verifier_shimmed_launcher_canary".to_string(),
-                provider: "codex".to_string(),
-                argv_log_binding: "shim_argv".to_string(),
-                cli_result_binding: "out".to_string(),
-            }),
-        }],
-    };
-    let shimmed_source = r#"
-fn verifier_shimmed_launcher_canary() {
-    let shim_argv = std::fs::read_to_string(&shim_log).unwrap();
-    let out = run_ta_env(
-        &ws,
-        &["codex"],
-        &[("PATH", shim_path.as_str())],
-    );
-    assert_eq!(shim_argv, "codex\n");
-    assert!(out.is_success() && out.stdout.contains("shim"));
-}
-"#;
     assert!(
-        validate_bucket_fields(&shimmed_launcher).is_ok()
-            && validate_covered_evidence(&shimmed_launcher, shimmed_source).is_ok()
-            && validate_no_unshimmed_launcher_calls(&shimmed_launcher, shimmed_source).is_ok(),
-        "TOOTH-3B harness canary: a launcher entry with hermetic PATH shim argv evidence \
-         and bound CLI behavior assertions must be eligible to graduate into A"
+        mapped_launcher_source.contains("verifier_extra"),
+        "TOOTH-3B harness canary: mapped launcher fixture must remain independent"
     );
+    eprintln!(
+        "TOOTH-3B AUTHORITY CANARIES GREEN: exact-one function/invocation/binding/assertion; \
+         diagnostic-only assert/assert_eq; panic; nested diagnostic; check/custom_assert/\
+         custom_assert_eq/path-qualified macros all conservative RED; literal assert_eq \
+         comparison operand GREEN; unsupported exit-code twin conservative RED"
+    );
+}
+
+fn canary_evidence(
+    macro_name: &str,
+    operand: &str,
+    behavior_fact: &str,
+    assertion_line: usize,
+) -> CoveredEvidenceDeclaration {
+    CoveredEvidenceDeclaration {
+        case: "verifier_covered_canary".to_string(),
+        source_file: "__synthetic_canary__.rs".to_string(),
+        invocation: InvocationDeclaration {
+            runner: "run_ta".to_string(),
+            line: 3,
+            documented_argv: vec![
+                "team-agent".to_string(),
+                "status".to_string(),
+                "--json".to_string(),
+            ],
+            literal_argv: vec!["status".to_string(), "--json".to_string()],
+        },
+        binding: BindingDeclaration {
+            name: "out".to_string(),
+            line: 3,
+        },
+        assertion: AssertionDeclaration {
+            macro_name: macro_name.to_string(),
+            line: assertion_line,
+            operand: operand.to_string(),
+            behavior_fact: behavior_fact.to_string(),
+            failure_marker: "status failed".to_string(),
+        },
+        negative_twin: NegativeTwinDeclaration {
+            env_key: "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN".to_string(),
+            env_value: "verifier-status-ready".to_string(),
+            operation: "remove_text_literal".to_string(),
+            remove_literal: "ready".to_string(),
+            replacement: "__negative_twin_removed__".to_string(),
+        },
+    }
+}
+
+fn canary_source(assertion: &str) -> String {
+    canary_source_with_invocation(
+        r#"let mut out = run_ta(&ws, &["status", "--json"]);"#,
+        assertion,
+    )
+}
+
+fn canary_source_with_invocation(invocation: &str, assertion: &str) -> String {
+    format!(
+        "#[test]\nfn verifier_covered_canary() {{\n    {invocation}\n\
+         if std::env::var(\"TEAM_AGENT_COVERAGE_NEGATIVE_TWIN\").as_deref() == \
+         Ok(\"verifier-status-ready\") {{\n\
+         out.stdout = out.stdout.replacen(\"ready\", \"__negative_twin_removed__\", 1);\n\
+         }}\n    {assertion}\n}}\n"
+    )
+}
+
+fn canary_source_with_extra(assertion: &str, extra: &str) -> String {
+    let mut source = canary_source(assertion);
+    source.insert_str(
+        source.rfind('}').expect("canary closing brace"),
+        &format!("    {extra}\n"),
+    );
+    source
+}
+
+fn assert_syntax_failure(
+    command: &str,
+    evidence: &CoveredEvidenceDeclaration,
+    source: &str,
+    signature: &str,
+) {
+    assert_failure_signature(
+        validate_declared_evidence_syntax(command, evidence, source),
+        signature,
+    );
+}
+
+fn assert_red_then_restored_green(
+    command: &str,
+    evidence: &CoveredEvidenceDeclaration,
+    invalid: &str,
+    restored: &str,
+    signature: &str,
+) {
+    assert_syntax_failure(command, evidence, invalid, signature);
+    if let Err(failure) = validate_declared_evidence_syntax(command, evidence, restored) {
+        panic!(
+            "TOOTH-3B harness restore canary: {signature} negative must turn green after \
+             restoring the supported literal assertion; got {failure}"
+        );
+    }
 }
 
 fn assert_failure_signature(result: Result<(), String>, signature: &str) {
@@ -840,12 +1199,6 @@ fn load_coverage_manifest(tooth: &str) -> CoverageManifest {
     });
     let value: Value = serde_json::from_str(&raw)
         .unwrap_or_else(|e| panic!("{tooth} RED: invalid {COVERAGE_MANIFEST}: {e}"));
-    assert_eq!(
-        value["schema_version"],
-        Value::String("team-agent-skill-command-coverage-v2".to_string()),
-        "{tooth} THREE-BUCKET-SCHEMA RED: expected \
-         team-agent-skill-command-coverage-v2"
-    );
     serde_json::from_value(value).unwrap_or_else(|e| panic!("{tooth} THREE-BUCKET-SCHEMA RED: {e}"))
 }
 
@@ -871,11 +1224,21 @@ fn validate_bucket_fields(manifest: &CoverageManifest) -> Result<(), String> {
             CoverageEntry::Covered {
                 command,
                 cases,
+                evidence,
                 launcher_shim_evidence,
             } => {
-                if cases.is_empty() {
+                let Some(evidence) = evidence else {
                     return Err(format!(
-                        "TOOTH-3B COVERED-CASE RED: A entry {command:?} has no E2E case"
+                        "TOOTH-3B COVERED-EVIDENCE-DECLARATION RED: A entry {command:?} must \
+                         explicitly declare its unique function, invocation, binding, assertion \
+                         node, and executable negative twin"
+                    ));
+                };
+                if cases != &[evidence.case.clone()] {
+                    return Err(format!(
+                        "TOOTH-3B COVERED-CASE RED: A entry {command:?} must name exactly the \
+                         one evidence case {:?}",
+                        evidence.case
                     ));
                 }
                 if launcher_provider_from_command(command).is_some()
@@ -946,132 +1309,151 @@ fn validate_bucket_fields(manifest: &CoverageManifest) -> Result<(), String> {
             }
         }
     }
+    if manifest.schema_version != "team-agent-skill-command-coverage-v3" {
+        return Err(
+            "TOOTH-3B THREE-BUCKET-SCHEMA RED: syntax-declared evidence + executable negative \
+             twin require team-agent-skill-command-coverage-v3"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
-fn validate_covered_evidence(manifest: &CoverageManifest, e2e_tests: &str) -> Result<(), String> {
+fn validate_expected_bucket_totals(
+    manifest: &CoverageManifest,
+    expected_a: usize,
+    expected_b: usize,
+    expected_c: usize,
+) -> Result<(), String> {
+    let (mut actual_a, mut actual_b, mut actual_c) = (0, 0, 0);
+    for entry in &manifest.commands {
+        match entry {
+            CoverageEntry::Covered { .. } => actual_a += 1,
+            CoverageEntry::DeclaredGap { .. } => actual_b += 1,
+            CoverageEntry::Exempt { .. } => actual_c += 1,
+        }
+    }
+    if (actual_a, actual_b, actual_c) != (expected_a, expected_b, expected_c) {
+        return Err(format!(
+            "TOOTH-3B THREE-BUCKET-TOTALS RED: manifest must explicitly remain \
+             A={expected_a}/B={expected_b}/C={expected_c}; observed \
+             A={actual_a}/B={actual_b}/C={actual_c}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_covered_evidence(manifest: &CoverageManifest, _e2e_tests: &str) -> Result<(), String> {
+    let mut positive_cases = BTreeSet::new();
     for entry in &manifest.commands {
         let CoverageEntry::Covered {
             command,
-            cases,
+            evidence: Some(evidence),
             launcher_shim_evidence,
+            ..
         } = entry
         else {
             continue;
         };
-        let launcher_provider = launcher_provider_from_command(command);
-        for case in cases {
-            if case.starts_with("tooth_") {
-                return Err(format!(
-                    "TOOTH-3B COVERED-CASE RED: A entry {command:?} self-maps to verifier \
-                     case {case:?}"
-                ));
-            }
-            let body = test_function_body(e2e_tests, case).ok_or_else(|| {
+        if evidence.case.starts_with("tooth_") {
+            return Err(format!(
+                "TOOTH-3B COVERED-CASE RED: A entry {command:?} self-maps to verifier case {:?}",
+                evidence.case
+            ));
+        }
+        let source =
+            std::fs::read_to_string(repo_root().join(&evidence.source_file)).map_err(|error| {
                 format!(
-                    "TOOTH-3B COVERED-CASE RED: A entry {command:?} maps to missing/non-test \
-                     E2E case {case:?}"
+                    "TOOTH-3B COVERED-SOURCE-FILE RED: declared source {:?} is unreadable: \
+                     {error}",
+                    evidence.source_file
                 )
             })?;
-            let calls = literal_run_ta_calls(body);
-            if let Some(call) = calls
-                .iter()
-                .find(|call| call.binding.as_deref() == Some("_"))
-            {
-                return Err(format!(
-                    "TOOTH-3B MAPPED-DISCARDED-RUN RED: mapped case {case:?} contains \
-                     `let _ = {}(...)` for argv {:?}; invoke-and-ignore cannot prove behavior",
-                    call.runner, call.argv
-                ));
-            }
-            let launcher_calls = calls
-                .iter()
-                .filter(|call| launcher_provider_from_argv(&call.argv).is_some())
-                .collect::<Vec<_>>();
-            if launcher_provider.is_none() && !launcher_calls.is_empty() {
-                return Err(format!(
-                    "TOOTH-3B MAPPED-LAUNCHER-ARGV RED: non-launcher A entry {command:?} maps \
-                     to case {case:?}, which also executes provider launcher argv {:?}; launcher \
-                     coverage must use its own declared hermetic-shim evidence",
-                    launcher_calls
-                        .iter()
-                        .map(|call| &call.argv)
-                        .collect::<Vec<_>>()
-                ));
-            }
-            let matching = calls
-                .iter()
-                .filter(|call| documented_command_matches_argv(command, &call.argv))
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                return Err(format!(
-                    "TOOTH-3B COVERED-EXACT-ARGV RED: A entry {command:?} case {case:?} has no \
-                     token-equivalent literal run_ta invocation; observed={:?}",
-                    calls.iter().map(|call| &call.argv).collect::<Vec<_>>()
-                ));
-            }
-            if !matching.iter().any(|call| {
-                call.binding.as_deref().is_some_and(|binding| {
-                    binding != "_" && binding_has_behavior_assertion(body, binding)
-                })
-            }) {
-                return Err(format!(
-                    "TOOTH-3B COVERED-BINDING-ASSERTION RED: A entry {command:?} case {case:?} \
-                     does not bind the matching run_ta return value to a behavior assertion; \
-                     argv-only or adjacent state assertions do not prove that invocation"
-                ));
-            }
+        validate_declared_evidence_syntax(command, evidence, &source)?;
+        positive_cases.insert((evidence.source_file.clone(), evidence.case.clone()));
+        if let (Some(provider), Some(launcher_evidence)) = (
+            launcher_provider_from_command(command),
+            launcher_shim_evidence.as_ref(),
+        ) {
+            validate_launcher_shim_evidence(
+                command,
+                &provider,
+                evidence,
+                launcher_evidence,
+                &source,
+            )?;
         }
-        if let (Some(provider), Some(evidence)) =
-            (launcher_provider, launcher_shim_evidence.as_ref())
-        {
-            validate_launcher_shim_evidence(command, &provider, cases, evidence, e2e_tests)?;
-        }
+    }
+    for (source_file, case) in positive_cases {
+        assert_mapped_case_positive(&source_file, &case)?;
+    }
+    for entry in &manifest.commands {
+        let CoverageEntry::Covered {
+            command,
+            evidence: Some(evidence),
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        assert_mapped_case_negative_twin(command, evidence)?;
     }
     Ok(())
 }
 
 fn validate_covered_case_registration(manifest: &CoverageManifest) -> Result<(), String> {
-    let e2e_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e");
-    let main = std::fs::read_to_string(e2e_dir.join("main.rs"))
+    let main_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/main.rs");
+    let main = std::fs::read_to_string(&main_path)
         .map_err(|error| format!("TOOTH-3B COVERED-CASE-REGISTRATION RED: {error}"))?;
-    let case_files = std::fs::read_dir(e2e_dir.join("cases"))
-        .map_err(|error| format!("TOOTH-3B COVERED-CASE-REGISTRATION RED: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("TOOTH-3B COVERED-CASE-REGISTRATION RED: {error}"))?;
+    let main_tokens = rust_syntax_tokens(&main)?;
     for entry in &manifest.commands {
-        let CoverageEntry::Covered { command, cases, .. } = entry else {
+        let CoverageEntry::Covered {
+            command,
+            evidence: Some(evidence),
+            ..
+        } = entry
+        else {
             continue;
         };
-        for case in cases {
-            let signature = format!("fn {case}(");
-            let mut modules = case_files
-                .iter()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    (path.extension().is_some_and(|extension| extension == "rs")
-                        && std::fs::read_to_string(&path)
-                            .is_ok_and(|source| source.contains(&signature)))
-                    .then(|| {
-                        path.file_stem()
-                            .expect("Rust case file has stem")
-                            .to_string_lossy()
-                            .to_string()
-                    })
-                })
-                .collect::<Vec<_>>();
-            modules.sort();
-            modules.dedup();
-            let registered = modules
-                .first()
-                .is_some_and(|module| main.contains(&format!("mod {module};")));
-            if modules.len() != 1 || !registered {
-                return Err(format!(
-                    "TOOTH-3B COVERED-CASE-REGISTRATION RED: A entry {command:?} case {case:?} \
-                     must occur in exactly one `tests/e2e/cases/*.rs` module registered by \
-                     tests/e2e/main.rs; observed_modules={modules:?}"
-                ));
-            }
+        let source_path = Path::new(&evidence.source_file);
+        let safe_components = source_path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        });
+        let expected_prefix = Path::new("crates/team-agent/tests/e2e/cases");
+        if !safe_components
+            || !source_path.starts_with(expected_prefix)
+            || source_path
+                .extension()
+                .is_none_or(|extension| extension != "rs")
+        {
+            return Err(format!(
+                "TOOTH-3B COVERED-SOURCE-FILE RED: A entry {command:?} must declare one \
+                 repository-relative tests/e2e/cases/*.rs source file"
+            ));
+        }
+        let source = std::fs::read_to_string(repo_root().join(source_path)).map_err(|error| {
+            format!("TOOTH-3B COVERED-SOURCE-FILE RED: declared source is unreadable: {error}")
+        })?;
+        let functions = test_function_nodes(&rust_syntax_tokens(&source)?, &evidence.case);
+        if functions.len() != 1 {
+            return Err(node_count_failure(
+                "FUNCTION",
+                functions.len(),
+                &evidence.case,
+            ));
+        }
+        let module = source_path
+            .file_stem()
+            .expect("validated source file stem")
+            .to_string_lossy();
+        if module_declaration_count(&main_tokens, &module) != 1 {
+            return Err(format!(
+                "TOOTH-3B COVERED-CASE-REGISTRATION RED: A entry {command:?} source module \
+                 must be registered exactly once by tests/e2e/main.rs"
+            ));
         }
     }
     Ok(())
@@ -1080,11 +1462,11 @@ fn validate_covered_case_registration(manifest: &CoverageManifest) -> Result<(),
 fn validate_launcher_shim_evidence(
     command: &str,
     provider: &str,
-    cases: &[String],
+    covered: &CoveredEvidenceDeclaration,
     evidence: &LauncherShimEvidence,
-    e2e_tests: &str,
+    source: &str,
 ) -> Result<(), String> {
-    if evidence.provider != provider || !cases.contains(&evidence.case) {
+    if evidence.provider != provider || evidence.case != covered.case {
         return Err(format!(
             "TOOTH-3B LAUNCHER-SHIM-DECLARATION RED: launcher {command:?} evidence must name \
              provider {provider:?} and one of its mapped cases; evidence={evidence:?}"
@@ -1096,42 +1478,53 @@ fn validate_launcher_shim_evidence(
             "TOOTH-3B LAUNCHER-SHIM-EVIDENCE RED: launcher {command:?} has empty evidence bindings"
         ));
     }
-    let body = test_function_body(e2e_tests, &evidence.case).ok_or_else(|| {
-        format!(
-            "TOOTH-3B LAUNCHER-SHIM-EVIDENCE RED: missing evidence case {:?}",
-            evidence.case
-        )
+    let functions = test_function_nodes(&rust_syntax_tokens(source)?, &evidence.case);
+    let function = functions.first().ok_or_else(|| {
+        format!("TOOTH-3B LAUNCHER-SHIM-EVIDENCE RED: missing declared evidence case")
     })?;
-    let matching = literal_run_ta_calls(body)
-        .into_iter()
+    let calls = run_ta_calls(&function.body);
+    let matching = calls
+        .iter()
         .filter(|call| documented_command_matches_argv(command, &call.argv))
         .collect::<Vec<_>>();
     let Some(call) = matching.iter().find(|call| {
         call.runner == "run_ta_env"
             && call.binding.as_deref() == Some(evidence.cli_result_binding.as_str())
-            && compact(&call.source).contains("(\"PATH\",")
+            && call.has_path_override
     }) else {
         return Err(format!(
             "TOOTH-3B UNSHIMMED-LAUNCHER-EXECUTION RED: launcher {command:?} must execute via \
              bound run_ta_env with a per-call PATH override; observed={matching:?}"
         ));
     };
-    let body_compact = compact(body);
-    let log_read_prefix = format!("let{}=", evidence.argv_log_binding);
-    if !body_compact.contains(&log_read_prefix) || !body_compact.contains("read_to_string(") {
+    if !binding_assigned_named_call(&function.body, &evidence.argv_log_binding, "read_to_string") {
         return Err(format!(
             "TOOTH-3B LAUNCHER-SHIM-ARGV RED: launcher {command:?} does not read the hermetic \
              shim argv log into binding {:?}",
             evidence.argv_log_binding
         ));
     }
-    let assertions = assertion_macros(body);
-    let expected = shell_tokens(command).unwrap_or_default();
-    let provider_argv = expected.into_iter().skip(1).collect::<Vec<_>>();
-    let exact_log_asserted = assertions.iter().any(|(kind, assertion)| {
-        *kind == "assert_eq!"
-            && identifier_occurs(assertion, &evidence.argv_log_binding)
-            && provider_argv.iter().all(|token| assertion.contains(token))
+    let assertions = assertion_nodes(&function.body);
+    let provider_argv = shell_tokens(command)
+        .unwrap_or_default()
+        .into_iter()
+        .skip(1)
+        .collect::<Vec<_>>();
+    let exact_log_asserted = assertions.iter().any(|assertion| {
+        assertion.name == "assert_eq"
+            && !assertion.path_qualified
+            && assertion_operands(assertion).is_some_and(|operands| {
+                operands
+                    .iter()
+                    .take(2)
+                    .any(|operand| identifier_in_tokens(operand, &evidence.argv_log_binding))
+                    && provider_argv.iter().all(|expected| {
+                        operands
+                            .iter()
+                            .take(2)
+                            .any(|operand| string_literal_in_tokens(operand, expected))
+                    })
+            })
     });
     if !exact_log_asserted {
         return Err(format!(
@@ -1140,7 +1533,7 @@ fn validate_launcher_shim_evidence(
             evidence.argv_log_binding, provider_argv
         ));
     }
-    if !binding_has_behavior_assertion(body, &evidence.cli_result_binding) {
+    if evidence.cli_result_binding != covered.binding.name {
         return Err(format!(
             "TOOTH-3B LAUNCHER-SHIM-CLI-RESULT RED: launcher {command:?} must assert exit/output \
              from CLI result binding {:?}",
@@ -1158,12 +1551,13 @@ fn validate_no_unshimmed_launcher_calls(
     manifest: &CoverageManifest,
     e2e_tests: &str,
 ) -> Result<(), String> {
-    let launcher_calls = literal_run_ta_calls(e2e_tests)
+    let tokens = rust_syntax_tokens(e2e_tests)?;
+    let launcher_calls = run_ta_calls(&tokens)
         .into_iter()
         .filter(|call| launcher_provider_from_argv(&call.argv).is_some())
         .collect::<Vec<_>>();
     for call in &launcher_calls {
-        if call.runner != "run_ta_env" || !compact(&call.source).contains("(\"PATH\",") {
+        if call.runner != "run_ta_env" || !call.has_path_override {
             return Err(format!(
                 "TOOTH-3B UNSHIMMED-LAUNCHER-EXECUTION RED: E2E source executes provider \
                  launcher argv {:?} via {} without an inline per-call hermetic PATH shim",
@@ -1176,19 +1570,26 @@ fn validate_no_unshimmed_launcher_calls(
         let CoverageEntry::Covered {
             command,
             launcher_shim_evidence: Some(evidence),
+            evidence: Some(covered),
             ..
         } = entry
         else {
             continue;
         };
-        let Some(body) = test_function_body(e2e_tests, &evidence.case) else {
+        let source = std::fs::read_to_string(repo_root().join(&covered.source_file))
+            .unwrap_or_else(|_| String::new());
+        let functions = rust_syntax_tokens(&source)
+            .ok()
+            .map(|tokens| test_function_nodes(&tokens, &evidence.case))
+            .unwrap_or_default();
+        let Some(function) = functions.first() else {
             continue;
         };
-        authorized += literal_run_ta_calls(body)
-            .iter()
+        authorized += run_ta_calls(&function.body)
+            .into_iter()
             .filter(|call| {
                 call.runner == "run_ta_env"
-                    && compact(&call.source).contains("(\"PATH\",")
+                    && call.has_path_override
                     && documented_command_matches_argv(command, &call.argv)
             })
             .count();
@@ -1336,401 +1737,1212 @@ fn shell_tokens(command: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
-fn test_function_body<'a>(source: &'a str, case: &str) -> Option<&'a str> {
-    let signature = format!("fn {case}(");
-    let start = source.find(&signature)?;
-    let open = source[start..].find('{')? + start;
-    let close = matching_delimiter(source, open, b'{', b'}')?;
-    Some(&source[open + 1..close])
+fn validate_declared_evidence_syntax(
+    command: &str,
+    evidence: &CoveredEvidenceDeclaration,
+    source: &str,
+) -> Result<(), String> {
+    validate_declared_evidence_nodes(command, evidence, source)?;
+    validate_negative_twin_hook(evidence, source)
 }
 
-fn literal_run_ta_calls(body: &str) -> Vec<RunTaCall> {
-    let mut calls = Vec::new();
-    let mut positions = code_token_positions(body, "run_ta");
-    positions.extend(code_token_positions(body, "run_ta_env"));
-    positions.sort_unstable();
-    for call_start in positions {
-        let suffix = &body[call_start..];
-        let runner = if suffix.starts_with("run_ta_env(") {
-            "run_ta_env"
-        } else if suffix.starts_with("run_ta(") {
-            "run_ta"
-        } else {
-            continue;
-        };
-        let Some(open) = body[call_start..].find('(').map(|i| call_start + i) else {
-            continue;
-        };
-        let Some(close) = matching_delimiter(body, open, b'(', b')') else {
-            continue;
-        };
-        let call = &body[open + 1..close];
-        if let Some(array_start) = call.find("&[").map(|i| i + 1) {
-            if let Some(array_end) = matching_delimiter(call, array_start, b'[', b']') {
-                if let Some(parsed) = parse_literal_string_array(&call[array_start + 1..array_end])
+fn validate_declared_evidence_nodes(
+    command: &str,
+    evidence: &CoveredEvidenceDeclaration,
+    source: &str,
+) -> Result<(), String> {
+    let syntax = rust_syntax_tokens(source)?;
+    let functions = test_function_nodes(&syntax, &evidence.case);
+    if functions.len() != 1 {
+        return Err(node_count_failure(
+            "FUNCTION",
+            functions.len(),
+            &evidence.case,
+        ));
+    }
+    let function = &functions[0];
+    let calls = run_ta_calls(&function.body);
+    if let Some(discarded) = calls
+        .iter()
+        .find(|call| call.binding.as_deref() == Some("_"))
+    {
+        return Err(format!(
+            "TOOTH-3B MAPPED-DISCARDED-RUN RED: mapped case {:?} contains discarded {} argv {:?}",
+            evidence.case, discarded.runner, discarded.argv
+        ));
+    }
+    let launcher_calls = calls
+        .iter()
+        .filter(|call| launcher_provider_from_argv(&call.argv).is_some())
+        .collect::<Vec<_>>();
+    if launcher_provider_from_command(command).is_none() && !launcher_calls.is_empty() {
+        return Err(format!(
+            "TOOTH-3B MAPPED-LAUNCHER-ARGV RED: non-launcher A entry maps a case that also \
+             executes provider launcher argv"
+        ));
+    }
+
+    let expected_documented = shell_tokens(command).ok_or_else(|| {
+        "TOOTH-3B COVERED-EXACT-ARGV RED: documented command is not valid shell tokens".to_string()
+    })?;
+    if expected_documented != evidence.invocation.documented_argv {
+        return Err(
+            "TOOTH-3B COVERED-EXACT-ARGV RED: normalized documented argv and the explicit \
+             declaration are not token-identical"
+                .to_string(),
+        );
+    }
+    if evidence
+        .invocation
+        .documented_argv
+        .last()
+        .is_some_and(|token| token == ".")
+        != shell_tokens(command)
+            .and_then(|tokens| tokens.last().cloned())
+            .is_some_and(|token| token == ".")
+    {
+        return Err(
+            "TOOTH-3B COVERED-EXACT-ARGV RED: final `.` must remain an independent argv token"
+                .to_string(),
+        );
+    }
+    if !documented_command_matches_argv(command, &evidence.invocation.literal_argv) {
+        return Err(
+            "TOOTH-3B COVERED-EXACT-ARGV RED: declared literal invocation is not a valid \
+             token-for-token instance of the documented argv"
+                .to_string(),
+        );
+    }
+
+    let invocations = calls
+        .iter()
+        .filter(|call| {
+            call.runner == evidence.invocation.runner
+                && call.line == evidence.invocation.line
+                && call.argv == evidence.invocation.literal_argv
+        })
+        .collect::<Vec<_>>();
+    if invocations.len() != 1 {
+        return Err(node_count_failure(
+            "INVOCATION",
+            invocations.len(),
+            &evidence.case,
+        ));
+    }
+    let bindings = binding_nodes(&function.body)
+        .into_iter()
+        .filter(|(name, line)| name == &evidence.binding.name && *line == evidence.binding.line)
+        .collect::<Vec<_>>();
+    if bindings.len() != 1 {
+        return Err(node_count_failure(
+            "BINDING",
+            bindings.len(),
+            &evidence.binding.name,
+        ));
+    }
+    let invocation = invocations[0];
+    if invocation.binding.as_deref() != Some(evidence.binding.name.as_str())
+        || invocation.binding_line != Some(evidence.binding.line)
+    {
+        return Err(
+            "TOOTH-3B COVERED-BINDING-NODE-ZERO RED: declared binding does not receive the \
+             declared invocation"
+                .to_string(),
+        );
+    }
+
+    let allowed_macros = ["assert", "assert_eq", "assert_ne"];
+    if !allowed_macros.contains(&evidence.assertion.macro_name.as_str()) {
+        return Err(
+            "TOOTH-3B COVERED-ASSERTION-MACRO RED: legal literal macros are \
+             assert|assert_eq|assert_ne"
+                .to_string(),
+        );
+    }
+    let assertions = assertion_nodes(&function.body);
+    let at_line = assertions
+        .iter()
+        .filter(|node| node.line == evidence.assertion.line)
+        .collect::<Vec<_>>();
+    let exact = at_line
+        .iter()
+        .filter(|node| node.name == evidence.assertion.macro_name && !node.path_qualified)
+        .collect::<Vec<_>>();
+    if exact.is_empty() && !at_line.is_empty() {
+        return Err(
+            "TOOTH-3B COVERED-ASSERTION-MACRO RED: declared node is not one literal \
+             assert|assert_eq|assert_ne macro; path/suffix/custom wrappers are unsupported"
+                .to_string(),
+        );
+    }
+    if exact.len() != 1 {
+        return Err(node_count_failure(
+            "ASSERTION",
+            exact.len(),
+            &evidence.assertion.macro_name,
+        ));
+    }
+    let assertion = exact[0];
+    let operands = assertion_operands(assertion).ok_or_else(|| {
+        "TOOTH-3B COVERED-ASSERTION-MACRO RED: assertion token tree has no supported operand shape"
+            .to_string()
+    })?;
+    let operand_index = match (
+        evidence.assertion.macro_name.as_str(),
+        evidence.assertion.operand.as_str(),
+    ) {
+        ("assert", "condition") | ("assert_eq" | "assert_ne", "left") => 0,
+        ("assert_eq" | "assert_ne", "right") => 1,
+        _ => {
+            return Err(
+                "TOOTH-3B COVERED-ASSERTION-OPERAND RED: legal operands are \
+                 assert.condition|assert_eq.left|assert_eq.right|assert_ne.left|assert_ne.right"
+                    .to_string(),
+            )
+        }
+    };
+    let operand = operands.get(operand_index).ok_or_else(|| {
+        "TOOTH-3B COVERED-ASSERTION-OPERAND RED: declared comparison operand is missing".to_string()
+    })?;
+    if !behavior_fact_in_tokens(
+        operand,
+        &evidence.binding.name,
+        &evidence.assertion.behavior_fact,
+    )? {
+        return Err(
+            "TOOTH-3B COVERED-BINDING-ASSERTION RED: declared binding behavior fact is absent \
+             from the literal assertion condition/comparison operand"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_negative_twin_hook(
+    evidence: &CoveredEvidenceDeclaration,
+    source: &str,
+) -> Result<(), String> {
+    if evidence.negative_twin.operation != "remove_text_literal"
+        || !matches!(
+            evidence.assertion.behavior_fact.as_str(),
+            "stdout" | "stderr"
+        )
+        || evidence.negative_twin.remove_literal.is_empty()
+        || evidence
+            .negative_twin
+            .replacement
+            .contains(&evidence.negative_twin.remove_literal)
+    {
+        return Err(
+            "TOOTH-3B NEGATIVE-TWIN-MUTATION RED: v3 legal mutation set is \
+             remove_text_literal on stdout|stderr with a non-empty removed literal and \
+             non-preserving replacement"
+                .to_string(),
+        );
+    }
+    if evidence.negative_twin.env_key != "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN"
+        || evidence.negative_twin.env_value.trim().is_empty()
+    {
+        return Err(
+            "TOOTH-3B NEGATIVE-TWIN-ENV RED: the isolated twin must use \
+             TEAM_AGENT_COVERAGE_NEGATIVE_TWIN and a non-empty entry-specific value"
+                .to_string(),
+        );
+    }
+    let syntax = rust_syntax_tokens(source)?;
+    let functions = test_function_nodes(&syntax, &evidence.case);
+    if functions.len() != 1 {
+        return Err(node_count_failure(
+            "FUNCTION",
+            functions.len(),
+            &evidence.case,
+        ));
+    }
+    let assertions = assertion_nodes(&functions[0].body);
+    let target = assertions
+        .iter()
+        .filter(|node| {
+            node.line == evidence.assertion.line
+                && node.name == evidence.assertion.macro_name
+                && !node.path_qualified
+        })
+        .collect::<Vec<_>>();
+    if target.len() != 1 {
+        return Err(node_count_failure(
+            "ASSERTION",
+            target.len(),
+            &evidence.assertion.macro_name,
+        ));
+    }
+    let operands = assertion_operands(target[0]).ok_or_else(|| {
+        "TOOTH-3B NEGATIVE-TWIN-TARGET RED: target assertion has no supported operand tree"
+            .to_string()
+    })?;
+    let operand_index = match (
+        evidence.assertion.macro_name.as_str(),
+        evidence.assertion.operand.as_str(),
+    ) {
+        ("assert", "condition") | ("assert_eq" | "assert_ne", "left") => 0,
+        ("assert_eq" | "assert_ne", "right") => 1,
+        _ => {
+            return Err(
+                "TOOTH-3B NEGATIVE-TWIN-TARGET RED: target assertion operand declaration is \
+                 unsupported"
+                    .to_string(),
+            )
+        }
+    };
+    if !operands.get(operand_index).is_some_and(|operand| {
+        string_literal_contains(operand, &evidence.negative_twin.remove_literal)
+    }) {
+        return Err(
+            "TOOTH-3B NEGATIVE-TWIN-FACT RED: the declared mutation literal is not part of \
+             the target behavior operand"
+                .to_string(),
+        );
+    }
+    if !string_literal_contains(&target[0].arguments, &evidence.assertion.failure_marker) {
+        return Err(
+            "TOOTH-3B NEGATIVE-TWIN-TARGET RED: target assertion does not contain its declared \
+             failure marker"
+                .to_string(),
+        );
+    }
+    let hooks = negative_twin_hook_lines(&functions[0].body, evidence);
+    if hooks.len() != 1 {
+        return Err(node_count_failure(
+            "NEGATIVE-TWIN-HOOK",
+            hooks.len(),
+            &evidence.negative_twin.env_value,
+        ));
+    }
+    if hooks[0] >= evidence.assertion.line {
+        return Err(
+            "TOOTH-3B NEGATIVE-TWIN-HOOK-ORDER RED: the one-field mutation must occur before \
+             the declared target assertion"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn node_count_failure(kind: &str, count: usize, _declared: &str) -> String {
+    let cardinality = if count == 0 { "ZERO" } else { "MULTIPLE" };
+    format!(
+        "TOOTH-3B COVERED-{kind}-NODE-{cardinality} RED: explicit declaration must resolve \
+         to exactly one Rust syntax node"
+    )
+}
+
+fn assert_mapped_case_positive(source_file: &str, case: &str) -> Result<(), String> {
+    let output = run_exact_e2e_case(source_file, case, None)?;
+    let observed = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() || !observed.contains("running 1 test") {
+        return Err(format!(
+            "TOOTH-3B POSITIVE-CONTROL RED: declared A case must execute exactly once and pass \
+             without a negative twin; exit={:?}",
+            output.status.code()
+        ));
+    }
+    Ok(())
+}
+
+fn assert_mapped_case_negative_twin(
+    command: &str,
+    evidence: &CoveredEvidenceDeclaration,
+) -> Result<(), String> {
+    let twin = &evidence.negative_twin;
+    let output = run_exact_e2e_case(
+        &evidence.source_file,
+        &evidence.case,
+        Some((&twin.env_key, &twin.env_value)),
+    )?;
+    if output.status.success() {
+        return Err(format!(
+            "TOOTH-3B NEGATIVE-TWIN-NOT-RED RED: A entry {command:?} stayed green after its \
+             declared key behavior fact was removed"
+        ));
+    }
+    let observed = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let file = Path::new(&evidence.source_file)
+        .file_name()
+        .expect("validated evidence source filename")
+        .to_string_lossy();
+    let location = format!("{file}:{}:", evidence.assertion.line);
+    if !observed.contains(&location) || !observed.contains(&evidence.assertion.failure_marker) {
+        return Err(
+            "TOOTH-3B NEGATIVE-TWIN-WRONG-FAILURE-SITE RED: twin must fail at the declared \
+             assertion line and marker, never in setup/parse/launcher"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn run_exact_e2e_case(
+    source_file: &str,
+    case: &str,
+    twin: Option<(&str, &str)>,
+) -> Result<std::process::Output, String> {
+    let module = Path::new(source_file)
+        .file_stem()
+        .ok_or_else(|| {
+            "TOOTH-3B NEGATIVE-TWIN-EXECUTOR RED: source has no module stem".to_string()
+        })?
+        .to_string_lossy();
+    let mut command = Command::new(
+        std::env::current_exe()
+            .map_err(|error| format!("TOOTH-3B NEGATIVE-TWIN-EXECUTOR RED: {error}"))?,
+    );
+    command
+        .arg(format!("cases::{module}::{case}"))
+        .arg("--exact")
+        .arg("--nocapture")
+        .env_remove("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN")
+        .env_remove("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN_EXECUTOR_CANARY")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    if let Some((key, value)) = twin {
+        command.env(key, value);
+    }
+    command
+        .output()
+        .map_err(|error| format!("TOOTH-3B NEGATIVE-TWIN-EXECUTOR RED: {error}"))
+}
+
+fn assert_negative_twin_executor_canary() {
+    let source_file = "crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs";
+    let source = std::fs::read_to_string(repo_root().join(source_file))
+        .expect("read negative twin executor canary source");
+    let syntax = rust_syntax_tokens(&source).expect("parse executor canary source");
+    let functions = test_function_nodes(&syntax, "gate_hole_negative_twin_execution_canary_case");
+    let assertions = assertion_nodes(&functions[0].body);
+    let line_for = |marker: &str| {
+        assertions
+            .iter()
+            .find(|node| string_literal_contains(&node.arguments, marker))
+            .map(|node| node.line)
+            .expect("executor canary panic marker")
+    };
+    let target_line = line_for("NEGATIVE-TWIN-TARGET-ASSERTION-CANARY");
+    let setup_line = line_for("NEGATIVE-TWIN-SETUP-CANARY");
+    let canary_evidence = CoveredEvidenceDeclaration {
+        case: "gate_hole_negative_twin_execution_canary_case".to_string(),
+        source_file: source_file.to_string(),
+        invocation: InvocationDeclaration {
+            runner: "run_ta".to_string(),
+            line: 0,
+            documented_argv: Vec::new(),
+            literal_argv: Vec::new(),
+        },
+        binding: BindingDeclaration {
+            name: "out".to_string(),
+            line: 0,
+        },
+        assertion: AssertionDeclaration {
+            macro_name: "assert".to_string(),
+            line: target_line,
+            operand: "condition".to_string(),
+            behavior_fact: "stdout".to_string(),
+            failure_marker: "NEGATIVE-TWIN-TARGET-ASSERTION-CANARY".to_string(),
+        },
+        negative_twin: NegativeTwinDeclaration {
+            env_key: "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN_EXECUTOR_CANARY".to_string(),
+            env_value: "target".to_string(),
+            operation: "remove_text_literal".to_string(),
+            remove_literal: "canary".to_string(),
+            replacement: "removed".to_string(),
+        },
+    };
+    assert!(
+        assert_mapped_case_negative_twin("executor-canary", &canary_evidence).is_ok(),
+        "TOOTH-3B harness canary: target assertion exit must be accepted"
+    );
+    let mut wrong_site = canary_evidence.clone();
+    wrong_site.negative_twin.env_value = "setup".to_string();
+    assert_failure_signature(
+        assert_mapped_case_negative_twin("executor-canary", &wrong_site),
+        "NEGATIVE-TWIN-WRONG-FAILURE-SITE",
+    );
+    let mut no_red = canary_evidence;
+    no_red.negative_twin.env_value = "not-triggered".to_string();
+    assert_failure_signature(
+        assert_mapped_case_negative_twin("executor-canary", &no_red),
+        "NEGATIVE-TWIN-NOT-RED",
+    );
+    assert_ne!(target_line, setup_line);
+}
+
+fn rust_syntax_tokens(source: &str) -> Result<Vec<RustToken>, String> {
+    RustTokenParser {
+        source,
+        index: 0,
+        line: 1,
+    }
+    .parse_sequence(None)
+    .map_err(|failure| format!("TOOTH-3B COVERED-SYNTAX-PARSE RED: {failure}"))
+}
+
+struct RustTokenParser<'a> {
+    source: &'a str,
+    index: usize,
+    line: usize,
+}
+
+impl RustTokenParser<'_> {
+    fn parse_sequence(&mut self, closing: Option<u8>) -> Result<Vec<RustToken>, String> {
+        let mut tokens = Vec::new();
+        while self.index < self.source.len() {
+            self.skip_space_and_comments()?;
+            if self.index >= self.source.len() {
+                break;
+            }
+            let byte = self.source.as_bytes()[self.index];
+            if Some(byte) == closing {
+                self.index += 1;
+                return Ok(tokens);
+            }
+            if matches!(byte, b')' | b']' | b'}') {
+                return Err(format!(
+                    "unexpected closing delimiter on line {}",
+                    self.line
+                ));
+            }
+            let line = self.line;
+            if let Some((delimiter, close)) = match byte {
+                b'(' => Some(('(', b')')),
+                b'[' => Some(('[', b']')),
+                b'{' => Some(('{', b'}')),
+                _ => None,
+            } {
+                self.index += 1;
+                let nested = self.parse_sequence(Some(close))?;
+                tokens.push(RustToken {
+                    kind: RustTokenKind::Group {
+                        delimiter,
+                        tokens: nested,
+                    },
+                    line,
+                });
+                continue;
+            }
+            if let Some(value) = self.take_raw_string()? {
+                tokens.push(RustToken {
+                    kind: RustTokenKind::StringLiteral(value),
+                    line,
+                });
+                continue;
+            }
+            if byte == b'"' {
+                tokens.push(RustToken {
+                    kind: RustTokenKind::StringLiteral(self.take_string()?),
+                    line,
+                });
+                continue;
+            }
+            if byte == b'\'' {
+                if self.take_char_literal()? {
+                    tokens.push(RustToken {
+                        kind: RustTokenKind::CharLiteral,
+                        line,
+                    });
+                } else {
+                    self.index += 1;
+                    tokens.push(RustToken {
+                        kind: RustTokenKind::Punct('\''),
+                        line,
+                    });
+                }
+                continue;
+            }
+            if byte.is_ascii_alphabetic() || byte == b'_' {
+                let start = self.index;
+                self.index += 1;
+                while self
+                    .source
+                    .as_bytes()
+                    .get(self.index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
                 {
+                    self.index += 1;
+                }
+                tokens.push(RustToken {
+                    kind: RustTokenKind::Ident(self.source[start..self.index].to_string()),
+                    line,
+                });
+                continue;
+            }
+            if byte.is_ascii_digit() {
+                let start = self.index;
+                self.index += 1;
+                while self
+                    .source
+                    .as_bytes()
+                    .get(self.index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    self.index += 1;
+                }
+                tokens.push(RustToken {
+                    kind: RustTokenKind::Number(self.source[start..self.index].to_string()),
+                    line,
+                });
+                continue;
+            }
+            if byte.is_ascii() {
+                self.index += 1;
+                tokens.push(RustToken {
+                    kind: RustTokenKind::Punct(byte as char),
+                    line,
+                });
+                continue;
+            }
+            return Err(format!(
+                "unsupported non-ASCII syntax token on line {}",
+                self.line
+            ));
+        }
+        if closing.is_some() {
+            Err("unclosed delimiter".to_string())
+        } else {
+            Ok(tokens)
+        }
+    }
+
+    fn skip_space_and_comments(&mut self) -> Result<(), String> {
+        loop {
+            while let Some(byte) = self.source.as_bytes().get(self.index) {
+                if !byte.is_ascii_whitespace() {
+                    break;
+                }
+                if *byte == b'\n' {
+                    self.line += 1;
+                }
+                self.index += 1;
+            }
+            if self.source.as_bytes().get(self.index..self.index + 2) == Some(b"//") {
+                while let Some(byte) = self.source.as_bytes().get(self.index) {
+                    self.index += 1;
+                    if *byte == b'\n' {
+                        self.line += 1;
+                        break;
+                    }
+                }
+                continue;
+            }
+            if self.source.as_bytes().get(self.index..self.index + 2) == Some(b"/*") {
+                self.index += 2;
+                let mut depth = 1usize;
+                while self.index < self.source.len() && depth > 0 {
+                    if self.source.as_bytes().get(self.index..self.index + 2) == Some(b"/*") {
+                        depth += 1;
+                        self.index += 2;
+                    } else if self.source.as_bytes().get(self.index..self.index + 2) == Some(b"*/")
+                    {
+                        depth -= 1;
+                        self.index += 2;
+                    } else {
+                        if self.source.as_bytes()[self.index] == b'\n' {
+                            self.line += 1;
+                        }
+                        self.index += 1;
+                    }
+                }
+                if depth != 0 {
+                    return Err("unclosed block comment".to_string());
+                }
+                continue;
+            }
+            return Ok(());
+        }
+    }
+
+    fn take_raw_string(&mut self) -> Result<Option<String>, String> {
+        let start = self.index;
+        let bytes = self.source.as_bytes();
+        let prefix = if bytes.get(start..start + 2) == Some(b"br") {
+            2
+        } else if bytes.get(start) == Some(&b'r') {
+            1
+        } else {
+            return Ok(None);
+        };
+        let mut cursor = start + prefix;
+        while bytes.get(cursor) == Some(&b'#') {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'"') {
+            return Ok(None);
+        }
+        let hashes = cursor - start - prefix;
+        let content_start = cursor + 1;
+        cursor = content_start;
+        loop {
+            let Some(byte) = bytes.get(cursor) else {
+                return Err("unclosed raw string".to_string());
+            };
+            if *byte == b'\n' {
+                self.line += 1;
+            }
+            if *byte == b'"'
+                && bytes
+                    .get(cursor + 1..cursor + 1 + hashes)
+                    .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
+            {
+                let value = self.source[content_start..cursor].to_string();
+                self.index = cursor + 1 + hashes;
+                return Ok(Some(value));
+            }
+            cursor += 1;
+        }
+    }
+
+    fn take_string(&mut self) -> Result<String, String> {
+        let start = self.index;
+        self.index += 1;
+        let mut escaped = false;
+        while self.index < self.source.len() {
+            let byte = self.source.as_bytes()[self.index];
+            if byte == b'\n' {
+                self.line += 1;
+            }
+            self.index += 1;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                let raw = &self.source[start..self.index];
+                return decode_rust_string(raw);
+            }
+        }
+        Err("unclosed string literal".to_string())
+    }
+
+    fn take_char_literal(&mut self) -> Result<bool, String> {
+        let start = self.index;
+        let bytes = self.source.as_bytes();
+        let Some(first) = bytes.get(start + 1) else {
+            return Ok(false);
+        };
+        let mut cursor = start + 1;
+        if *first == b'\\' {
+            cursor += 2;
+            if *bytes.get(start + 2).unwrap_or(&0) == b'u' {
+                while bytes.get(cursor) != Some(&b'}') {
+                    cursor += 1;
+                    if cursor >= bytes.len() {
+                        return Err("unclosed unicode char literal".to_string());
+                    }
+                }
+                cursor += 1;
+            } else if *bytes.get(start + 2).unwrap_or(&0) == b'x' {
+                cursor = start + 5;
+            }
+        } else {
+            let ch = self.source[start + 1..]
+                .chars()
+                .next()
+                .ok_or_else(|| "unclosed char literal".to_string())?;
+            cursor += ch.len_utf8();
+        }
+        if bytes.get(cursor) != Some(&b'\'') {
+            return Ok(false);
+        }
+        self.index = cursor + 1;
+        Ok(true)
+    }
+}
+
+fn decode_rust_string(raw: &str) -> Result<String, String> {
+    let content = raw
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| "invalid quoted Rust string".to_string())?;
+    let mut chars = content.chars().peekable();
+    let mut decoded = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            decoded.push(ch);
+            continue;
+        }
+        let escaped = chars
+            .next()
+            .ok_or_else(|| "trailing Rust string escape".to_string())?;
+        match escaped {
+            '\\' => decoded.push('\\'),
+            '"' => decoded.push('"'),
+            '\'' => decoded.push('\''),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '0' => decoded.push('\0'),
+            'x' => {
+                let hex = [chars.next(), chars.next()];
+                let digits = hex
+                    .into_iter()
+                    .collect::<Option<String>>()
+                    .ok_or_else(|| "short \\x escape".to_string())?;
+                let value = u8::from_str_radix(&digits, 16)
+                    .map_err(|_| "invalid \\x escape".to_string())?;
+                decoded.push(value as char);
+            }
+            'u' => {
+                if chars.next() != Some('{') {
+                    return Err("invalid unicode escape".to_string());
+                }
+                let mut digits = String::new();
+                for digit in chars.by_ref() {
+                    if digit == '}' {
+                        break;
+                    }
+                    digits.push(digit);
+                }
+                let value = u32::from_str_radix(&digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| "invalid unicode escape".to_string())?;
+                decoded.push(value);
+            }
+            '\n' => {
+                while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            other => return Err(format!("unsupported Rust string escape \\{other}")),
+        }
+    }
+    Ok(decoded)
+}
+
+fn test_function_nodes(tokens: &[RustToken], case: &str) -> Vec<FunctionNode> {
+    let mut functions = Vec::new();
+    collect_test_function_nodes(tokens, case, &mut functions);
+    functions
+}
+
+fn collect_test_function_nodes(
+    tokens: &[RustToken],
+    case: &str,
+    functions: &mut Vec<FunctionNode>,
+) {
+    for index in 0..tokens.len() {
+        if token_ident(tokens.get(index)) == Some("fn")
+            && token_ident(tokens.get(index + 1)) == Some(case)
+            && has_test_attribute(tokens, index)
+        {
+            let body = tokens[index + 2..]
+                .iter()
+                .find_map(|token| match &token.kind {
+                    RustTokenKind::Group {
+                        delimiter: '{',
+                        tokens,
+                    } => Some(tokens.clone()),
+                    _ => None,
+                });
+            if let Some(body) = body {
+                functions.push(FunctionNode { body });
+            }
+        }
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            collect_test_function_nodes(nested, case, functions);
+        }
+    }
+}
+
+fn has_test_attribute(tokens: &[RustToken], fn_index: usize) -> bool {
+    fn_index >= 2
+        && matches!(tokens[fn_index - 2].kind, RustTokenKind::Punct('#'))
+        && matches!(
+            &tokens[fn_index - 1].kind,
+            RustTokenKind::Group {
+                delimiter: '[',
+                tokens
+            } if tokens.len() == 1 && token_ident(tokens.first()) == Some("test")
+        )
+}
+
+fn module_declaration_count(tokens: &[RustToken], module: &str) -> usize {
+    let mut count = 0;
+    for index in 0..tokens.len() {
+        if token_ident(tokens.get(index)) == Some("mod")
+            && token_ident(tokens.get(index + 1)) == Some(module)
+        {
+            count += 1;
+        }
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            count += module_declaration_count(nested, module);
+        }
+    }
+    count
+}
+
+fn run_ta_calls(tokens: &[RustToken]) -> Vec<RunTaCall> {
+    let mut calls = Vec::new();
+    collect_run_ta_calls(tokens, &mut calls);
+    calls
+}
+
+fn collect_run_ta_calls(tokens: &[RustToken], calls: &mut Vec<RunTaCall>) {
+    for index in 0..tokens.len() {
+        let Some(runner) = token_ident(tokens.get(index)) else {
+            if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+                collect_run_ta_calls(nested, calls);
+            }
+            continue;
+        };
+        if matches!(runner, "run_ta" | "run_ta_env") {
+            if let Some(arguments) = token_group(tokens.get(index + 1), '(') {
+                if let Some(argv) = literal_argv(arguments) {
+                    let binding = binding_before(tokens, index);
                     calls.push(RunTaCall {
                         runner: runner.to_string(),
-                        binding: run_ta_binding(&body[..call_start]),
-                        argv: parsed,
-                        source: body[call_start..=close].to_string(),
+                        binding: binding.as_ref().map(|(name, _)| name.clone()),
+                        binding_line: binding.map(|(_, line)| line),
+                        line: tokens[index].line,
+                        argv,
+                        has_path_override: string_literal_in_tokens(arguments, "PATH"),
                     });
                 }
             }
         }
-    }
-    calls
-}
-
-fn code_token_positions(source: &str, token: &str) -> Vec<usize> {
-    let bytes = source.as_bytes();
-    let mut positions = Vec::new();
-    let mut index = 0;
-    let mut line_comment = false;
-    let mut block_comment = 0usize;
-    let mut string = false;
-    let mut escaped = false;
-    let mut raw_hashes = None;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let next = bytes.get(index + 1).copied();
-        if line_comment {
-            if byte == b'\n' {
-                line_comment = false;
-            }
-        } else if block_comment > 0 {
-            if byte == b'/' && next == Some(b'*') {
-                block_comment += 1;
-                index += 1;
-            } else if byte == b'*' && next == Some(b'/') {
-                block_comment -= 1;
-                index += 1;
-            }
-        } else if let Some(hashes) = raw_hashes {
-            if byte == b'"'
-                && bytes
-                    .get(index + 1..index + 1 + hashes)
-                    .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
-            {
-                raw_hashes = None;
-                index += hashes;
-            }
-        } else if string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                string = false;
-            }
-        } else if byte == b'/' && next == Some(b'/') {
-            line_comment = true;
-            index += 1;
-        } else if byte == b'/' && next == Some(b'*') {
-            block_comment = 1;
-            index += 1;
-        } else if byte == b'r' {
-            let mut cursor = index + 1;
-            while bytes.get(cursor) == Some(&b'#') {
-                cursor += 1;
-            }
-            if bytes.get(cursor) == Some(&b'"') {
-                raw_hashes = Some(cursor - index - 1);
-                index = cursor;
-            } else if source[index..].starts_with(token)
-                && identifier_boundary(source, index, token.len())
-            {
-                positions.push(index);
-                index += token.len() - 1;
-            }
-        } else if byte == b'"' {
-            string = true;
-        } else if source[index..].starts_with(token)
-            && identifier_boundary(source, index, token.len())
-        {
-            positions.push(index);
-            index += token.len() - 1;
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            collect_run_ta_calls(nested, calls);
         }
-        index += 1;
     }
-    positions
 }
 
-fn identifier_boundary(source: &str, start: usize, len: usize) -> bool {
-    let before = source[..start].chars().next_back();
-    let after = source[start + len..].chars().next();
-    before.is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        && after.is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
-}
-
-fn run_ta_binding(prefix: &str) -> Option<String> {
-    let statement = prefix
-        .rsplit_once(';')
-        .map_or(prefix, |(_, statement)| statement)
-        .trim();
-    let declaration = statement.strip_prefix("let ")?.trim();
-    let (binding, _) = declaration.split_once('=')?;
-    let binding = binding
-        .trim()
-        .strip_prefix("mut ")
-        .unwrap_or(binding.trim());
-    (!binding.is_empty()).then(|| binding.to_string())
-}
-
-fn binding_has_behavior_assertion(body: &str, binding: &str) -> bool {
-    assertion_macros(body).iter().any(|(kind, assertion)| {
-        let Some(behavior_operands) = assertion_behavior_operands(kind, assertion) else {
-            return false;
-        };
-        if !identifier_occurs(behavior_operands, binding) {
-            return false;
-        }
-        let compact = compact(behavior_operands);
-        [
-            format!("{binding}.is_success("),
-            format!("{binding}.exit_code"),
-            format!("{binding}.stdout"),
-            format!("{binding}.stderr"),
-            format!("{binding}.json("),
-            format!("quick_start_launched(&{binding})"),
-        ]
+fn binding_before(tokens: &[RustToken], call_index: usize) -> Option<(String, usize)> {
+    let start = tokens[..call_index]
         .iter()
-        .any(|marker| compact.contains(marker))
-    })
+        .rposition(|token| matches!(token.kind, RustTokenKind::Punct(';')))
+        .map_or(0, |index| index + 1);
+    let statement = &tokens[start..call_index];
+    let let_index = statement
+        .iter()
+        .position(|token| token_ident(Some(token)) == Some("let"))?;
+    let mut binding_index = let_index + 1;
+    if token_ident(statement.get(binding_index)) == Some("mut") {
+        binding_index += 1;
+    }
+    let binding = token_ident(statement.get(binding_index))?;
+    statement[binding_index + 1..]
+        .iter()
+        .any(|token| matches!(token.kind, RustTokenKind::Punct('=')))
+        .then(|| (binding.to_string(), statement[binding_index].line))
 }
 
-/// Returns only operands that decide whether a supported assertion passes.
-///
-/// Machine boundary: `assert!` stops at its first top-level comma; `assert_eq!` and
-/// `assert_ne!` stop at their second. Later format strings and diagnostic arguments
-/// therefore cannot qualify a binding as behavior evidence. This is intentionally a
-/// lexical gate over these three literal macro spellings, not a full Rust parser: it
-/// does not recognize custom assertion wrappers or prove that a syntactically bound
-/// predicate is semantically reachable (for example, constant-folded `true || ...`).
-fn assertion_behavior_operands<'a>(kind: &str, assertion: &'a str) -> Option<&'a str> {
-    let arguments = assertion
-        .strip_prefix(kind)?
-        .strip_prefix('(')?
-        .strip_suffix(')')?;
-    let diagnostic_comma = match kind {
-        "assert!" => top_level_comma(arguments, 1),
-        "assert_eq!" | "assert_ne!" => top_level_comma(arguments, 2),
-        _ => return None,
-    };
-    Some(&arguments[..diagnostic_comma.unwrap_or(arguments.len())])
-}
-
-fn top_level_comma(source: &str, ordinal: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut delimiters = Vec::new();
-    let mut index = 0;
-    let mut seen = 0;
-    let mut line_comment = false;
-    let mut block_comment = 0usize;
-    let mut string = false;
-    let mut escaped = false;
-    let mut raw_hashes = None;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let next = bytes.get(index + 1).copied();
-        if line_comment {
-            if byte == b'\n' {
-                line_comment = false;
+fn binding_nodes(tokens: &[RustToken]) -> Vec<(String, usize)> {
+    let mut nodes = Vec::new();
+    for index in 0..tokens.len() {
+        if token_ident(tokens.get(index)) == Some("let") {
+            let mut binding_index = index + 1;
+            if token_ident(tokens.get(binding_index)) == Some("mut") {
+                binding_index += 1;
             }
-        } else if block_comment > 0 {
-            if byte == b'/' && next == Some(b'*') {
-                block_comment += 1;
-                index += 1;
-            } else if byte == b'*' && next == Some(b'/') {
-                block_comment -= 1;
-                index += 1;
-            }
-        } else if let Some(hashes) = raw_hashes {
-            if byte == b'"'
-                && bytes
-                    .get(index + 1..index + 1 + hashes)
-                    .is_some_and(|tail| tail.iter().all(|byte| *byte == b'#'))
-            {
-                raw_hashes = None;
-                index += hashes;
-            }
-        } else if string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                string = false;
-            }
-        } else if byte == b'/' && next == Some(b'/') {
-            line_comment = true;
-            index += 1;
-        } else if byte == b'/' && next == Some(b'*') {
-            block_comment = 1;
-            index += 1;
-        } else if byte == b'r' {
-            let mut cursor = index + 1;
-            while bytes.get(cursor) == Some(&b'#') {
-                cursor += 1;
-            }
-            if bytes.get(cursor) == Some(&b'"') {
-                raw_hashes = Some(cursor - index - 1);
-                index = cursor;
-            }
-        } else if byte == b'"' {
-            string = true;
-        } else if byte == b'\'' {
-            if let Some(close) = rust_char_literal_end(source, index) {
-                index = close;
-            }
-        } else if let Some(close) = match byte {
-            b'(' => Some(b')'),
-            b'[' => Some(b']'),
-            b'{' => Some(b'}'),
-            _ => None,
-        } {
-            delimiters.push(close);
-        } else if delimiters.last() == Some(&byte) {
-            delimiters.pop();
-        } else if byte == b',' && delimiters.is_empty() {
-            seen += 1;
-            if seen == ordinal {
-                return Some(index);
+            if let Some(binding) = token_ident(tokens.get(binding_index)) {
+                nodes.push((binding.to_string(), tokens[binding_index].line));
             }
         }
-        index += 1;
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            nodes.extend(binding_nodes(nested));
+        }
+    }
+    nodes
+}
+
+fn literal_argv(tokens: &[RustToken]) -> Option<Vec<String>> {
+    for index in 0..tokens.len().saturating_sub(1) {
+        if matches!(tokens[index].kind, RustTokenKind::Punct('&')) {
+            if let Some(array) = token_group(tokens.get(index + 1), '[') {
+                if let Some(argv) = literal_string_array(array) {
+                    return Some(argv);
+                }
+            }
+        }
     }
     None
 }
 
-fn rust_char_literal_end(source: &str, open: usize) -> Option<usize> {
-    let tail = source.get(open + 1..)?;
-    let bytes = tail.as_bytes();
-    if bytes.first() != Some(&b'\\') {
-        let ch = tail.chars().next()?;
-        let close = open + 1 + ch.len_utf8();
-        return (source.as_bytes().get(close) == Some(&b'\'')).then_some(close);
-    }
-    let close_in_tail = match bytes.get(1)? {
-        b'x' => 4,
-        b'u' => bytes.iter().position(|byte| *byte == b'}')? + 1,
-        _ => 2,
-    };
-    (bytes.get(close_in_tail) == Some(&b'\'')).then_some(open + 1 + close_in_tail)
-}
-
-fn assertion_macros(body: &str) -> Vec<(&'static str, String)> {
-    let mut assertions = Vec::new();
-    for kind in ["assert!", "assert_eq!", "assert_ne!"] {
-        let needle = format!("{kind}(");
-        let mut offset = 0;
-        while let Some(found) = body[offset..].find(&needle) {
-            let start = offset + found;
-            let open = start + kind.len();
-            let Some(close) = matching_delimiter(body, open, b'(', b')') else {
-                break;
-            };
-            assertions.push((kind, body[start..=close].to_string()));
-            offset = close + 1;
+fn literal_string_array(tokens: &[RustToken]) -> Option<Vec<String>> {
+    let mut values = Vec::new();
+    for token in tokens {
+        match &token.kind {
+            RustTokenKind::StringLiteral(value) => values.push(value.clone()),
+            RustTokenKind::Punct(',') => {}
+            _ => return None,
         }
     }
+    (!values.is_empty()).then_some(values)
+}
+
+fn assertion_nodes(tokens: &[RustToken]) -> Vec<AssertionNode> {
+    let mut assertions = Vec::new();
+    collect_assertion_nodes(tokens, &mut assertions);
     assertions
 }
 
-fn identifier_occurs(source: &str, identifier: &str) -> bool {
-    source.match_indices(identifier).any(|(index, _)| {
-        let before = source[..index].chars().next_back();
-        let after = source[index + identifier.len()..].chars().next();
-        before.is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
-            && after.is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+fn collect_assertion_nodes(tokens: &[RustToken], assertions: &mut Vec<AssertionNode>) {
+    for index in 0..tokens.len() {
+        if let (Some(name), Some(arguments)) = (
+            token_ident(tokens.get(index)),
+            (matches!(
+                tokens.get(index + 1).map(|token| &token.kind),
+                Some(RustTokenKind::Punct('!'))
+            ))
+            .then(|| token_group(tokens.get(index + 2), '('))
+            .flatten(),
+        ) {
+            let path_qualified = index >= 2
+                && matches!(tokens[index - 1].kind, RustTokenKind::Punct(':'))
+                && matches!(tokens[index - 2].kind, RustTokenKind::Punct(':'));
+            assertions.push(AssertionNode {
+                name: name.to_string(),
+                line: tokens[index].line,
+                path_qualified,
+                arguments: arguments.to_vec(),
+            });
+        }
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            collect_assertion_nodes(nested, assertions);
+        }
+    }
+}
+
+fn assertion_operands(assertion: &AssertionNode) -> Option<Vec<&[RustToken]>> {
+    let mut operands = Vec::new();
+    let mut start = 0;
+    for (index, token) in assertion.arguments.iter().enumerate() {
+        if matches!(token.kind, RustTokenKind::Punct(',')) {
+            operands.push(&assertion.arguments[start..index]);
+            start = index + 1;
+        }
+    }
+    operands.push(&assertion.arguments[start..]);
+    match assertion.name.as_str() {
+        "assert" if !operands.is_empty() => Some(operands),
+        "assert_eq" | "assert_ne" if operands.len() >= 2 => Some(operands),
+        _ => None,
+    }
+}
+
+fn behavior_fact_in_tokens(
+    tokens: &[RustToken],
+    binding: &str,
+    fact: &str,
+) -> Result<bool, String> {
+    if !matches!(
+        fact,
+        "stdout" | "stderr" | "exit_code" | "is_success" | "json" | "quick_start_launched"
+    ) {
+        return Err("TOOTH-3B COVERED-BEHAVIOR-FACT RED: legal facts are \
+             stdout|stderr|exit_code|is_success|json|quick_start_launched"
+            .to_string());
+    }
+    if fact == "quick_start_launched" {
+        return Ok(tokens.windows(2).any(|window| {
+            token_ident(window.first()) == Some("quick_start_launched")
+                && token_group(window.get(1), '(')
+                    .is_some_and(|arguments| identifier_in_tokens(arguments, binding))
+        }));
+    }
+    if tokens.windows(3).any(|window| {
+        token_ident(window.first()) == Some(binding)
+            && matches!(window[1].kind, RustTokenKind::Punct('.'))
+            && token_ident(window.get(2)) == Some(fact)
+    }) {
+        return Ok(true);
+    }
+    Ok(tokens.iter().any(|token| match &token.kind {
+        RustTokenKind::Group { tokens, .. } => {
+            behavior_fact_in_tokens(tokens, binding, fact).unwrap_or(false)
+        }
+        _ => false,
+    }))
+}
+
+fn negative_twin_hook_lines(
+    tokens: &[RustToken],
+    evidence: &CoveredEvidenceDeclaration,
+) -> Vec<usize> {
+    let mut lines = Vec::new();
+    collect_negative_twin_hook_lines(tokens, evidence, &mut lines);
+    lines
+}
+
+fn collect_negative_twin_hook_lines(
+    tokens: &[RustToken],
+    evidence: &CoveredEvidenceDeclaration,
+    lines: &mut Vec<usize>,
+) {
+    for index in 0..tokens.len() {
+        if token_ident(tokens.get(index)) == Some("if") {
+            if let Some((body_index, body)) =
+                tokens[index + 1..]
+                    .iter()
+                    .enumerate()
+                    .find_map(|(offset, token)| {
+                        token_group(Some(token), '{').map(|body| (index + 1 + offset, body))
+                    })
+            {
+                let condition = &tokens[index + 1..body_index];
+                if negative_twin_condition_matches(condition, &evidence.negative_twin)
+                    && negative_twin_body_matches(body, evidence)
+                {
+                    lines.push(tokens[index].line);
+                }
+            }
+        }
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            collect_negative_twin_hook_lines(nested, evidence, lines);
+        }
+    }
+}
+
+fn negative_twin_condition_matches(tokens: &[RustToken], twin: &NegativeTwinDeclaration) -> bool {
+    syntax_atoms(tokens)
+        == vec![
+            "i:std".to_string(),
+            "p::".to_string(),
+            "p::".to_string(),
+            "i:env".to_string(),
+            "p::".to_string(),
+            "p::".to_string(),
+            "i:var".to_string(),
+            "g:(".to_string(),
+            format!("s:{}", twin.env_key),
+            "g:)".to_string(),
+            "p:.".to_string(),
+            "i:as_deref".to_string(),
+            "g:(".to_string(),
+            "g:)".to_string(),
+            "p:=".to_string(),
+            "p:=".to_string(),
+            "i:Ok".to_string(),
+            "g:(".to_string(),
+            format!("s:{}", twin.env_value),
+            "g:)".to_string(),
+        ]
+}
+
+fn negative_twin_body_matches(tokens: &[RustToken], evidence: &CoveredEvidenceDeclaration) -> bool {
+    let field = evidence.assertion.behavior_fact.as_str();
+    let expected = vec![
+        format!("i:{}", evidence.binding.name),
+        "p:.".to_string(),
+        format!("i:{field}"),
+        "p:=".to_string(),
+        format!("i:{}", evidence.binding.name),
+        "p:.".to_string(),
+        format!("i:{field}"),
+        "p:.".to_string(),
+        "i:replacen".to_string(),
+        "g:(".to_string(),
+        format!("s:{}", evidence.negative_twin.remove_literal),
+        "p:,".to_string(),
+        format!("s:{}", evidence.negative_twin.replacement),
+        "p:,".to_string(),
+        "n:1".to_string(),
+        "g:)".to_string(),
+        "p:;".to_string(),
+    ];
+    let mut expected_with_trailing_comma = expected.clone();
+    expected_with_trailing_comma.insert(expected.len() - 2, "p:,".to_string());
+    let observed = syntax_atoms(tokens);
+    observed == expected || observed == expected_with_trailing_comma
+}
+
+fn syntax_atoms(tokens: &[RustToken]) -> Vec<String> {
+    let mut atoms = Vec::new();
+    for token in tokens {
+        match &token.kind {
+            RustTokenKind::Ident(value) => atoms.push(format!("i:{value}")),
+            RustTokenKind::StringLiteral(value) => atoms.push(format!("s:{value}")),
+            RustTokenKind::Number(value) => atoms.push(format!("n:{value}")),
+            RustTokenKind::CharLiteral => atoms.push("char".to_string()),
+            RustTokenKind::Punct(value) => atoms.push(format!("p:{value}")),
+            RustTokenKind::Group { delimiter, tokens } => {
+                atoms.push(format!("g:{delimiter}"));
+                atoms.extend(syntax_atoms(tokens));
+                atoms.push(format!(
+                    "g:{}",
+                    match delimiter {
+                        '(' => ')',
+                        '[' => ']',
+                        '{' => '}',
+                        _ => '?',
+                    }
+                ));
+            }
+        }
+    }
+    atoms
+}
+
+fn binding_assigned_named_call(tokens: &[RustToken], binding: &str, function: &str) -> bool {
+    for index in 0..tokens.len() {
+        if token_ident(tokens.get(index)) == Some(function)
+            && token_group(tokens.get(index + 1), '(').is_some()
+            && binding_before(tokens, index).is_some_and(|(observed, _)| observed == binding)
+        {
+            return true;
+        }
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            if binding_assigned_named_call(nested, binding, function) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn identifier_in_tokens(tokens: &[RustToken], identifier: &str) -> bool {
+    tokens.iter().any(|token| match &token.kind {
+        RustTokenKind::Ident(value) => value == identifier,
+        RustTokenKind::Group { tokens, .. } => identifier_in_tokens(tokens, identifier),
+        _ => false,
     })
 }
 
-fn compact(source: &str) -> String {
-    source.split_whitespace().collect()
+fn string_literal_in_tokens(tokens: &[RustToken], expected: &str) -> bool {
+    tokens.iter().any(|token| match &token.kind {
+        RustTokenKind::StringLiteral(value) => value == expected,
+        RustTokenKind::Group { tokens, .. } => string_literal_in_tokens(tokens, expected),
+        _ => false,
+    })
 }
 
-fn parse_literal_string_array(raw: &str) -> Option<Vec<String>> {
-    let mut values = Vec::new();
-    let mut rest = raw.trim();
-    while !rest.is_empty() {
-        if !rest.starts_with('"') {
-            return None;
-        }
-        let bytes = rest.as_bytes();
-        let mut escaped = false;
-        let mut close = None;
-        for (index, byte) in bytes.iter().enumerate().skip(1) {
-            if escaped {
-                escaped = false;
-            } else if *byte == b'\\' {
-                escaped = true;
-            } else if *byte == b'"' {
-                close = Some(index);
-                break;
-            }
-        }
-        let close = close?;
-        values.push(serde_json::from_str::<String>(&rest[..=close]).ok()?);
-        rest = rest[close + 1..].trim_start();
-        if rest.is_empty() {
-            break;
-        }
-        rest = rest.strip_prefix(',')?.trim_start();
-    }
-    Some(values)
+fn string_literal_contains(tokens: &[RustToken], expected: &str) -> bool {
+    tokens.iter().any(|token| match &token.kind {
+        RustTokenKind::StringLiteral(value) => value.contains(expected),
+        RustTokenKind::Group { tokens, .. } => string_literal_contains(tokens, expected),
+        _ => false,
+    })
 }
 
-fn matching_delimiter(source: &str, open: usize, left: u8, right: u8) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut depth = 0usize;
-    let mut index = open;
-    let mut string = false;
-    let mut escaped = false;
-    let mut line_comment = false;
-    let mut block_comment = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        let next = bytes.get(index + 1).copied();
-        if line_comment {
-            if byte == b'\n' {
-                line_comment = false;
-            }
-        } else if block_comment > 0 {
-            if byte == b'/' && next == Some(b'*') {
-                block_comment += 1;
-                index += 1;
-            } else if byte == b'*' && next == Some(b'/') {
-                block_comment -= 1;
-                index += 1;
-            }
-        } else if string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                string = false;
-            }
-        } else if byte == b'/' && next == Some(b'/') {
-            line_comment = true;
-            index += 1;
-        } else if byte == b'/' && next == Some(b'*') {
-            block_comment = 1;
-            index += 1;
-        } else if byte == b'"' {
-            string = true;
-        } else if byte == left {
-            depth += 1;
-        } else if byte == right {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-        index += 1;
+fn token_ident(token: Option<&RustToken>) -> Option<&str> {
+    match token.map(|token| &token.kind) {
+        Some(RustTokenKind::Ident(value)) => Some(value),
+        _ => None,
     }
-    None
+}
+
+fn token_group(token: Option<&RustToken>, delimiter: char) -> Option<&[RustToken]> {
+    match token.map(|token| &token.kind) {
+        Some(RustTokenKind::Group {
+            delimiter: observed,
+            tokens,
+        }) if *observed == delimiter => Some(tokens),
+        _ => None,
+    }
 }
 
 fn repo_root() -> PathBuf {
