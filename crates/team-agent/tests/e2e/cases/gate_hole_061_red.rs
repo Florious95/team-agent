@@ -34,6 +34,7 @@ use serde_json::Value;
 const LNCH_CASE: &str = "lnch_001_quick_start_basic";
 const SEND_CASE: &str = "send_001_delivers_to_fake_worker";
 const COVERAGE_MANIFEST: &str = "skills/team-agent/command-coverage.json";
+const TOOTH_3B_VERDICT_ARTIFACT: &str = "gate-hole-061-tooth-3b-verdict.json";
 
 #[test]
 fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
@@ -302,6 +303,17 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
 
 #[test]
 fn tooth_3b_three_bucket_claims_are_honest_and_launcher_safe() {
+    let verdict = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(evaluate_tooth_3b)) {
+        Ok(result) => GateVerdict::from_validation(result),
+        Err(payload) => GateVerdict::red(format!(
+            "TOOTH-3B HARNESS RED: {}",
+            panic_payload_message(payload.as_ref())
+        )),
+    };
+    finalize_gate_verdict(verdict);
+}
+
+fn evaluate_tooth_3b() -> Result<TwinDiscriminationOutcome, String> {
     assert_three_bucket_validator_canary();
     assert_global_evidence_identity_canary();
     assert_negative_twin_executor_canary();
@@ -313,8 +325,9 @@ fn tooth_3b_three_bucket_claims_are_honest_and_launcher_safe() {
         .and_then(|_| validate_expected_bucket_totals(&manifest, 2, 44, 0))
         .and_then(|_| validate_covered_case_registration(&manifest))
         .and_then(|_| validate_covered_evidence(&manifest, &e2e_tests))
-        .and_then(|_| validate_no_unshimmed_launcher_calls(&manifest, &e2e_tests))
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        .and_then(|outcome| {
+            validate_no_unshimmed_launcher_calls(&manifest, &e2e_tests).map(|_| outcome)
+        })
 }
 
 #[test]
@@ -509,6 +522,139 @@ struct AssertionNode {
     line: usize,
     path_qualified: bool,
     arguments: Vec<RustToken>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateTerminalStatus {
+    Green,
+    Pending,
+    Red,
+}
+
+impl GateTerminalStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Green => "GREEN",
+            Self::Pending => "PENDING",
+            Self::Red => "RED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct PendingTwinCell {
+    row: usize,
+    column: usize,
+    outcome: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TwinDiscriminationOutcome {
+    Complete,
+    Pending(Vec<PendingTwinCell>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GateVerdict {
+    status: GateTerminalStatus,
+    reason: Option<String>,
+    pending_cells: Vec<PendingTwinCell>,
+}
+
+impl GateVerdict {
+    fn from_validation(result: Result<TwinDiscriminationOutcome, String>) -> Self {
+        match result {
+            Ok(TwinDiscriminationOutcome::Complete) => Self {
+                status: GateTerminalStatus::Green,
+                reason: None,
+                pending_cells: Vec::new(),
+            },
+            Ok(TwinDiscriminationOutcome::Pending(pending_cells)) => Self {
+                status: GateTerminalStatus::Pending,
+                reason: Some(
+                    "one or more twin-discrimination cells lack a positive observation".to_string(),
+                ),
+                pending_cells,
+            },
+            Err(reason) => Self::red(reason),
+        }
+    }
+
+    fn red(reason: String) -> Self {
+        Self {
+            status: GateTerminalStatus::Red,
+            reason: Some(reason),
+            pending_cells: Vec::new(),
+        }
+    }
+
+    fn allows_success(&self) -> bool {
+        self.status == GateTerminalStatus::Green
+    }
+}
+
+fn verdict_artifact_path() -> PathBuf {
+    std::env::var_os("TEAM_AGENT_TEST_TMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("team-agent-gate-verdicts"))
+        .join(TOOTH_3B_VERDICT_ARTIFACT)
+}
+
+fn gate_verdict_value(verdict: &GateVerdict) -> Value {
+    serde_json::json!({
+        "schema_version": "team-agent-gate-verdict-v1",
+        "status": verdict.status.as_str(),
+        "allows_success": verdict.allows_success(),
+        "reason": verdict.reason,
+        "pending_cells": verdict.pending_cells,
+    })
+}
+
+fn write_gate_verdict(verdict: &GateVerdict) -> Result<PathBuf, String> {
+    let path = verdict_artifact_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| "TOOTH-3B VERDICT-ARTIFACT RED: artifact path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("TOOTH-3B VERDICT-ARTIFACT RED: {error}"))?;
+    let encoded = serde_json::to_vec_pretty(&gate_verdict_value(verdict))
+        .map_err(|error| format!("TOOTH-3B VERDICT-ARTIFACT RED: {error}"))?;
+    std::fs::write(&path, encoded)
+        .map_err(|error| format!("TOOTH-3B VERDICT-ARTIFACT RED: {error}"))?;
+    Ok(path)
+}
+
+fn finalize_gate_verdict(verdict: GateVerdict) {
+    let path = write_gate_verdict(&verdict).unwrap_or_else(|failure| panic!("{failure}"));
+    match verdict.status {
+        GateTerminalStatus::Green => {}
+        GateTerminalStatus::Pending => panic!(
+            "TOOTH-3B GATE-PENDING NON-GREEN: unresolved observation cells remain; \
+             verdict_artifact={}",
+            path.display()
+        ),
+        GateTerminalStatus::Red => panic!(
+            "{}\nTOOTH-3B GATE-RED verdict_artifact={}",
+            verdict
+                .reason
+                .as_deref()
+                .unwrap_or("TOOTH-3B RED: no reason supplied"),
+            path.display()
+        ),
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|value| value.to_string())
+        })
+        .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
 fn documented_fake_team(tag: &str, agent_id: &str) -> TestWorkspace {
@@ -1488,7 +1634,10 @@ fn validate_expected_bucket_totals(
     Ok(())
 }
 
-fn validate_covered_evidence(manifest: &CoverageManifest, _e2e_tests: &str) -> Result<(), String> {
+fn validate_covered_evidence(
+    manifest: &CoverageManifest,
+    _e2e_tests: &str,
+) -> Result<TwinDiscriminationOutcome, String> {
     validate_assertion_twin_pair_uniqueness(manifest)?;
     let mut positive_cases = BTreeSet::new();
     for entry in &manifest.commands {
@@ -2227,7 +2376,9 @@ fn emit_twin_cell_raw(row: usize, column: usize, outcome: &str, observed: &str) 
     );
 }
 
-fn validate_observable_twin_discrimination(manifest: &CoverageManifest) -> Result<(), String> {
+fn validate_observable_twin_discrimination(
+    manifest: &CoverageManifest,
+) -> Result<TwinDiscriminationOutcome, String> {
     // Observable closure:
     // - diagonal: the applied twin fails at its declared assertion;
     // - same node: that positive failure coordinate also proves a non-diagonal collision;
@@ -2236,6 +2387,7 @@ fn validate_observable_twin_discrimination(manifest: &CoverageManifest) -> Resul
     // A later assertion is not observable after an earlier panic. That distinct
     // twin-overflow risk stays explicitly pending rather than being inferred from silence.
     let entries = covered_evidence_entries(manifest);
+    let mut pending_cells = Vec::new();
     for (row, (command, applied)) in entries.iter().enumerate() {
         let (success, observed) = run_negative_twin_raw(applied)?;
         if success {
@@ -2315,6 +2467,14 @@ fn validate_observable_twin_discrimination(manifest: &CoverageManifest) -> Resul
                      outcome=PENDING-TWIN-OVERFLOW-INTO-LATER-ASSERTION: panic at the applied \
                      node stops the case before the later assertion can emit positive evidence"
                 );
+                pending_cells.push(PendingTwinCell {
+                    row,
+                    column,
+                    outcome: "PENDING-TWIN-OVERFLOW-INTO-LATER-ASSERTION".to_string(),
+                    detail: "panic at the applied node stops the case before the later assertion \
+                             can emit positive evidence"
+                        .to_string(),
+                });
             } else {
                 return Err(
                     "TOOTH-3B NEGATIVE-TWIN-SEQUENCE-OBSERVABILITY RED: distinct declarations \
@@ -2324,7 +2484,11 @@ fn validate_observable_twin_discrimination(manifest: &CoverageManifest) -> Resul
             }
         }
     }
-    Ok(())
+    if pending_cells.is_empty() {
+        Ok(TwinDiscriminationOutcome::Complete)
+    } else {
+        Ok(TwinDiscriminationOutcome::Pending(pending_cells))
+    }
 }
 
 fn assert_mapped_case_positive(source_file: &str, case: &str) -> Result<(), String> {
@@ -2522,11 +2686,35 @@ fn assert_twin_discrimination_canary() {
             covered_canary_entry("team-agent matrix-second", second),
         ],
     };
-    assert!(
-        validate_observable_twin_discrimination(&honest).is_ok(),
-        "TOOTH-3B twin discrimination canary: diagonal failure plus prior top-level pass \
-         must satisfy the observable matrix"
+    let honest_outcome = validate_observable_twin_discrimination(&honest)
+        .expect("TOOTH-3B twin discrimination canary: recorded matrix must be evaluable");
+    let TwinDiscriminationOutcome::Pending(pending_cells) = honest_outcome.clone() else {
+        panic!("TOOTH-3B direction canary: the recorded later-assertion cell must remain PENDING");
+    };
+    assert_eq!(
+        pending_cells
+            .iter()
+            .map(|cell| (cell.row, cell.column, cell.outcome.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, 1, "PENDING-TWIN-OVERFLOW-INTO-LATER-ASSERTION")],
+        "TOOTH-3B direction canary: the recorded upper cell must be identified positively"
     );
+    let pending_verdict = GateVerdict::from_validation(Ok(honest_outcome));
+    assert_eq!(pending_verdict.status, GateTerminalStatus::Pending);
+    assert!(
+        !pending_verdict.allows_success(),
+        "TOOTH-3B direction canary: PENDING must select the non-green terminal branch"
+    );
+    assert_eq!(
+        gate_verdict_value(&pending_verdict)["status"],
+        Value::String("PENDING".to_string()),
+        "TOOTH-3B direction canary: PENDING must survive in the structured verdict"
+    );
+    let green_verdict = GateVerdict::from_validation(Ok(TwinDiscriminationOutcome::Complete));
+    assert!(green_verdict.allows_success());
+    let red_verdict = GateVerdict::from_validation(Err("direction-canary-red".to_string()));
+    assert_eq!(red_verdict.status, GateTerminalStatus::Red);
+    assert!(!red_verdict.allows_success());
 
     let collision = CoverageManifest {
         schema_version: honest.schema_version.clone(),
@@ -2536,7 +2724,7 @@ fn assert_twin_discrimination_canary() {
         ],
     };
     assert_failure_signature(
-        validate_observable_twin_discrimination(&collision),
+        validate_observable_twin_discrimination(&collision).map(|_| ()),
         "NEGATIVE-TWIN-NONINDEPENDENT-ASSERTION",
     );
 }
