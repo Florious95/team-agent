@@ -20,7 +20,7 @@
 //!   behavior evidence merely by containing the binding tokens. Provider launchers retain their
 //!   additional hermetic PATH shim and exact argv-log obligations.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,6 +35,9 @@ const LNCH_CASE: &str = "lnch_001_quick_start_basic";
 const SEND_CASE: &str = "send_001_delivers_to_fake_worker";
 const COVERAGE_MANIFEST: &str = "skills/team-agent/command-coverage.json";
 const TOOTH_3B_VERDICT_ARTIFACT: &str = "gate-hole-061-tooth-3b-verdict.json";
+const TWIN_OBSERVATION_NONCE_ENV: &str = "TEAM_AGENT_TWIN_OBSERVATION_NONCE";
+const TWIN_OBSERVATION_PREFIX: &str = "TEAM_AGENT_TWIN-OBSERVATION-V1";
+const TWIN_OBSERVATION_SCENARIO_ENV: &str = "TEAM_AGENT_TWIN_OBSERVATION_SCENARIO";
 
 #[test]
 fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
@@ -553,6 +556,12 @@ struct PendingTwinCell {
 enum TwinDiscriminationOutcome {
     Complete,
     Pending(Vec<PendingTwinCell>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TwinObservationResult {
+    Pass,
+    Fail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2376,6 +2385,104 @@ fn emit_twin_cell_raw(row: usize, column: usize, outcome: &str, observed: &str) 
     );
 }
 
+fn parse_twin_observations(
+    observed: &str,
+    expected_nonce: &str,
+    expected_cells: &BTreeSet<String>,
+) -> Result<BTreeMap<String, TwinObservationResult>, String> {
+    let mut parsed = BTreeMap::new();
+    for line in observed.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains(TWIN_OBSERVATION_PREFIX) {
+            continue;
+        }
+        let payload = trimmed
+            .strip_prefix(TWIN_OBSERVATION_PREFIX)
+            .ok_or_else(|| {
+                "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-PROTOCOL RED: marker prefix must begin \
+                 the machine observation line"
+                    .to_string()
+            })?
+            .trim();
+        let fields = payload.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err(
+                "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-PROTOCOL RED: marker must contain exactly \
+                 nonce, cell, and result fields"
+                    .to_string(),
+            );
+        }
+        let nonce = fields[0].strip_prefix("nonce=").ok_or_else(|| {
+            "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-PROTOCOL RED: first marker field must be nonce"
+                .to_string()
+        })?;
+        let cell = fields[1].strip_prefix("cell=").ok_or_else(|| {
+            "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-PROTOCOL RED: second marker field must be cell"
+                .to_string()
+        })?;
+        let result = fields[2].strip_prefix("result=").ok_or_else(|| {
+            "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-PROTOCOL RED: third marker field must be result"
+                .to_string()
+        })?;
+        if nonce != expected_nonce {
+            return Err(format!(
+                "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-NONCE RED: stale or unrelated marker \
+                 nonce {nonce:?} does not match this validator execution"
+            ));
+        }
+        if !expected_cells.contains(cell) {
+            return Err(format!(
+                "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-CELL RED: marker names undeclared cell \
+                 {cell:?}; cells must come from the coverage manifest negative-twin catalog"
+            ));
+        }
+        let result = match result {
+            "PASS" => TwinObservationResult::Pass,
+            "FAIL" => TwinObservationResult::Fail,
+            other => {
+                return Err(format!(
+                    "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-PROTOCOL RED: marker result \
+                     {other:?} is neither PASS nor FAIL"
+                ));
+            }
+        };
+        if parsed.insert(cell.to_string(), result).is_some() {
+            return Err(format!(
+                "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-DUPLICATE RED: cell {cell:?} emitted more \
+                 than one marker for the same validator execution"
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+fn complete_twin_observations(
+    observed: &str,
+    expected_nonce: &str,
+    expected_cells: &BTreeSet<String>,
+) -> Result<Option<BTreeMap<String, TwinObservationResult>>, String> {
+    let parsed = parse_twin_observations(observed, expected_nonce, expected_cells)?;
+    if parsed.is_empty() {
+        return Ok(None);
+    }
+    if parsed.len() != expected_cells.len() {
+        let missing = expected_cells
+            .iter()
+            .filter(|cell| !parsed.contains_key(cell.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-CELLSET RED: observation emitted only a partial \
+             declared cell set; missing={missing:?}"
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+fn twin_observation_nonce(row: usize) -> String {
+    format!("tooth-3b-{}-{row}", std::process::id())
+}
+
 fn validate_observable_twin_discrimination(
     manifest: &CoverageManifest,
 ) -> Result<TwinDiscriminationOutcome, String> {
@@ -2384,9 +2491,14 @@ fn validate_observable_twin_discrimination(
     // - same node: that positive failure coordinate also proves a non-diagonal collision;
     // - earlier top-level assertion: reaching the later failure coordinate proves sequence
     //   advanced through the earlier assertion without panic.
-    // A later assertion is not observable after an earlier panic. That distinct
-    // twin-overflow risk stays explicitly pending rather than being inferred from silence.
+    // A later assertion is not observable after an earlier panic unless the mapped case
+    // implements the nonce-bound per-assertion observation protocol. Silence stays explicitly
+    // pending rather than being inferred as a pass.
     let entries = covered_evidence_entries(manifest);
+    let expected_cells = entries
+        .iter()
+        .map(|(_, evidence)| evidence.negative_twin.env_value.clone())
+        .collect::<BTreeSet<_>>();
     let mut pending_cells = Vec::new();
     for (row, (command, applied)) in entries.iter().enumerate() {
         let (success, observed) = run_negative_twin_raw(applied)?;
@@ -2422,6 +2534,22 @@ fn validate_observable_twin_discrimination(
             );
         }
         emit_twin_cell_raw(row, row, "DIAGONAL-FAILED-AT-DECLARED-NODE", &observed);
+        let observation_nonce = twin_observation_nonce(row);
+        let observation_raw = run_twin_observation_raw(applied, &observation_nonce)?;
+        let observations =
+            complete_twin_observations(&observation_raw, &observation_nonce, &expected_cells)?;
+        if let Some(cells) = observations.as_ref() {
+            match cells.get(&applied.negative_twin.env_value) {
+                Some(TwinObservationResult::Fail) => {}
+                Some(TwinObservationResult::Pass) => {
+                    return Err(format!(
+                        "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-APPLIED-CELL RED: A entry \
+                         {command:?} reports PASS for its own applied twin cell"
+                    ));
+                }
+                None => unreachable!("complete observation set contains every declared cell"),
+            }
+        }
 
         for (column, (_, other)) in entries.iter().enumerate() {
             if row == column {
@@ -2437,10 +2565,36 @@ fn validate_observable_twin_discrimination(
                         .to_string(),
                 );
             }
+            if let Some(cells) = observations.as_ref() {
+                match cells.get(&other.negative_twin.env_value) {
+                    Some(TwinObservationResult::Pass) => {
+                        emit_twin_cell_raw(
+                            row,
+                            column,
+                            "OFF-DIAGONAL-PASSED-BY-OBSERVATION-PROTOCOL",
+                            &observation_raw,
+                        );
+                        continue;
+                    }
+                    Some(TwinObservationResult::Fail) => {
+                        emit_twin_cell_raw(
+                            row,
+                            column,
+                            "OFF-DIAGONAL-FAILED-BY-OBSERVATION-PROTOCOL",
+                            &observation_raw,
+                        );
+                        return Err("TOOTH-3B NEGATIVE-TWIN-NONINDEPENDENT-ASSERTION RED: \
+                             nonce-bound observation reports that the applied twin also failed \
+                             a non-diagonal declared assertion"
+                            .to_string());
+                    }
+                    None => unreachable!("complete observation set contains every declared cell"),
+                }
+            }
             if applied.source_file != other.source_file || applied.case != other.case {
                 return Err(
                     "TOOTH-3B NEGATIVE-TWIN-SEQUENCE-OBSERVABILITY RED: legal non-diagonal \
-                     evidence currently requires two top-level assertions in one exact case"
+                     evidence across exact cases requires the nonce-bound observation protocol"
                         .to_string(),
                 );
             }
@@ -2538,10 +2692,10 @@ fn run_negative_twin_at_declared_assertion(
 
 fn run_negative_twin_raw(evidence: &CoveredEvidenceDeclaration) -> Result<(bool, String), String> {
     let twin = &evidence.negative_twin;
-    let output = run_exact_e2e_case(
+    let output = run_exact_e2e_case_with_envs(
         &evidence.source_file,
         &evidence.case,
-        Some((&twin.env_key, &twin.env_value)),
+        &[(&twin.env_key, &twin.env_value)],
     )?;
     let observed = format!(
         "{}\n{}",
@@ -2549,6 +2703,35 @@ fn run_negative_twin_raw(evidence: &CoveredEvidenceDeclaration) -> Result<(bool,
         String::from_utf8_lossy(&output.stderr)
     );
     Ok((output.status.success(), observed))
+}
+
+fn run_twin_observation_raw(
+    evidence: &CoveredEvidenceDeclaration,
+    nonce: &str,
+) -> Result<String, String> {
+    let twin = &evidence.negative_twin;
+    let scenario = std::env::var(TWIN_OBSERVATION_SCENARIO_ENV).ok();
+    let child_nonce = match scenario.as_deref() {
+        None => Some(nonce.to_string()),
+        Some("missing") => None,
+        Some("stale-nonce") => Some(format!("{nonce}-stale")),
+        Some(other) => {
+            return Err(format!(
+                "TOOTH-3B NEGATIVE-TWIN-OBSERVATION-SCENARIO RED: unsupported verifier \
+                 reachability scenario {other:?}"
+            ));
+        }
+    };
+    let mut envs = vec![(&twin.env_key[..], &twin.env_value[..])];
+    if let Some(child_nonce) = child_nonce.as_ref() {
+        envs.push((TWIN_OBSERVATION_NONCE_ENV, child_nonce));
+    }
+    let output = run_exact_e2e_case_with_envs(&evidence.source_file, &evidence.case, &envs)?;
+    Ok(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
 }
 
 fn observed_at_declared_assertion(evidence: &CoveredEvidenceDeclaration, observed: &str) -> bool {
@@ -2564,6 +2747,17 @@ fn run_exact_e2e_case(
     source_file: &str,
     case: &str,
     twin: Option<(&str, &str)>,
+) -> Result<std::process::Output, String> {
+    match twin {
+        Some(pair) => run_exact_e2e_case_with_envs(source_file, case, &[pair]),
+        None => run_exact_e2e_case_with_envs(source_file, case, &[]),
+    }
+}
+
+fn run_exact_e2e_case_with_envs(
+    source_file: &str,
+    case: &str,
+    envs: &[(&str, &str)],
 ) -> Result<std::process::Output, String> {
     let module = Path::new(source_file)
         .file_stem()
@@ -2581,9 +2775,10 @@ fn run_exact_e2e_case(
         .arg("--nocapture")
         .env_remove("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN")
         .env_remove("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN_EXECUTOR_CANARY")
+        .env_remove(TWIN_OBSERVATION_NONCE_ENV)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
-    if let Some((key, value)) = twin {
+    for (key, value) in envs {
         command.env(key, value);
     }
     command
@@ -2654,7 +2849,67 @@ fn assert_negative_twin_executor_canary() {
     assert_ne!(target_line, setup_line);
 }
 
+fn assert_twin_observation_protocol_canary() {
+    let nonce = "observation-canary";
+    let expected = ["canary-first", "canary-second"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    let first = format!("{TWIN_OBSERVATION_PREFIX} nonce={nonce} cell=canary-first result=FAIL");
+    let second = format!("{TWIN_OBSERVATION_PREFIX} nonce={nonce} cell=canary-second result=PASS");
+    let valid = complete_twin_observations(&format!("{first}\n{second}"), nonce, &expected)
+        .expect("TOOTH-3B observation canary: valid markers must parse")
+        .expect("TOOTH-3B observation canary: valid markers must not become PENDING");
+    assert_eq!(
+        valid.get("canary-first"),
+        Some(&TwinObservationResult::Fail)
+    );
+    assert_eq!(
+        valid.get("canary-second"),
+        Some(&TwinObservationResult::Pass)
+    );
+    assert_failure_signature(
+        complete_twin_observations(&first.replace(nonce, "stale-canary"), nonce, &expected)
+            .map(|_| ()),
+        "NEGATIVE-TWIN-OBSERVATION-NONCE",
+    );
+    assert_failure_signature(
+        complete_twin_observations(
+            &first.replace("canary-first", "undeclared-cell"),
+            nonce,
+            &expected,
+        )
+        .map(|_| ()),
+        "NEGATIVE-TWIN-OBSERVATION-CELL",
+    );
+    assert_failure_signature(
+        complete_twin_observations(&format!("{first}\n{first}"), nonce, &expected).map(|_| ()),
+        "NEGATIVE-TWIN-OBSERVATION-DUPLICATE",
+    );
+    assert_failure_signature(
+        complete_twin_observations(
+            &first.replace("result=FAIL", "result=UNKNOWN"),
+            nonce,
+            &expected,
+        )
+        .map(|_| ()),
+        "NEGATIVE-TWIN-OBSERVATION-PROTOCOL",
+    );
+    assert_failure_signature(
+        complete_twin_observations(&first, nonce, &expected).map(|_| ()),
+        "NEGATIVE-TWIN-OBSERVATION-CELLSET",
+    );
+    assert_eq!(
+        complete_twin_observations("no observation markers", nonce, &expected)
+            .expect("TOOTH-3B observation canary: marker absence must be evaluable"),
+        None,
+        "TOOTH-3B observation canary: marker absence must remain typed PENDING input"
+    );
+}
+
 fn assert_twin_discrimination_canary() {
+    assert_twin_observation_protocol_canary();
+
     let source_file = "crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs";
     let case = "gate_hole_twin_discrimination_canary_case";
     let source = std::fs::read_to_string(repo_root().join(source_file))
