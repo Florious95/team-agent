@@ -634,6 +634,179 @@ fn b2_doctor_independently_checks_live_workspace_even_when_state_says_attached()
 
 #[test]
 #[serial(env)]
+fn b2_diagnose_single_snapshot_rejects_reread_race() {
+    assert_single_snapshot_rejects_reread_race(
+        RecoverySurface::Diagnose,
+        "b2-diagnose-snapshot-race",
+    );
+}
+
+#[test]
+#[serial(env)]
+fn b2_doctor_single_snapshot_rejects_reread_race() {
+    assert_single_snapshot_rejects_reread_race(RecoverySurface::Doctor, "b2-doctor-snapshot-race");
+}
+
+#[test]
+#[serial(env)]
+fn b2_diagnose_single_snapshot_survives_later_read_failure() {
+    assert_single_snapshot_survives_later_read_failure(
+        RecoverySurface::Diagnose,
+        "b2-diagnose-snapshot-failure",
+    );
+}
+
+#[test]
+#[serial(env)]
+fn b2_doctor_single_snapshot_survives_later_read_failure() {
+    assert_single_snapshot_survives_later_read_failure(
+        RecoverySurface::Doctor,
+        "b2-doctor-snapshot-failure",
+    );
+}
+
+fn assert_single_snapshot_rejects_reread_race(surface: RecoverySurface, tag: &str) {
+    let case = Case::new(tag);
+    case.seed_foreign_attached_state();
+    case.set_mode("snapshot-reread-changes");
+
+    let output = surface.invoke(&case, AMBIENT_PANE);
+    let value = json_stdout_even_on_error(
+        &format!("{} single-snapshot reread race", surface.name()),
+        &output,
+    );
+    let reads = case.workspace_observation_trace();
+    assert_eq!(
+        reads.len(),
+        1,
+        "{} SNAPSHOT_MODE1_REREAD_RACE RED signature: the public presenter must consume the \
+         mismatch snapshot instead of observing pane workspace again; \
+         workspace_observation_read_count={} expected=1 trace={reads:?} output={value}",
+        surface.name(),
+        reads.len()
+    );
+    assert_catalog_refusal_payload(
+        &value,
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
+        None,
+        &format!("{} single-snapshot reread-race payload", surface.name()),
+    );
+    assert_workspace_mismatch_facts_match_case(
+        &value,
+        &case,
+        &format!("{} single-snapshot reread-race payload", surface.name()),
+    );
+}
+
+fn assert_single_snapshot_survives_later_read_failure(surface: RecoverySurface, tag: &str) {
+    let case = Case::new(tag);
+    case.seed_foreign_attached_state();
+    case.set_mode("snapshot-reread-fails");
+
+    let output = surface.invoke(&case, AMBIENT_PANE);
+    let value = json_stdout_even_on_error(
+        &format!("{} single-snapshot later-read failure", surface.name()),
+        &output,
+    );
+    let reads = case.workspace_observation_trace();
+    let payload_present = find_reason_object(
+        &value,
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
+    )
+    .is_some();
+    assert!(
+        reads.len() == 1 && payload_present,
+        "{} SNAPSHOT_MODE2_RESOLVED_MISMATCH_SURVIVES_REREAD_FAILURE RED signature: a failed \
+         presenter reread must not erase the already-observed mismatch payload; \
+         workspace_observation_read_count={} expected=1 payload_present={payload_present} \
+         trace={reads:?} output={value}",
+        surface.name(),
+        reads.len()
+    );
+    assert_catalog_refusal_payload(
+        &value,
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
+        None,
+        &format!("{} single-snapshot later-failure payload", surface.name()),
+    );
+    assert_workspace_mismatch_facts_match_case(
+        &value,
+        &case,
+        &format!("{} single-snapshot later-failure payload", surface.name()),
+    );
+}
+
+#[test]
+#[serial(env)]
+fn b2_single_snapshot_fixture_distinguishes_reread_race_and_later_failure() {
+    let race = Case::new("b2-snapshot-race-canary");
+    race.set_mode("snapshot-reread-changes");
+    let race_first = race.run_tmux_shim(&["list-panes"]);
+    let race_second = race.run_tmux_shim(&[
+        "display-message",
+        "-p",
+        "-t",
+        AMBIENT_PANE,
+        "#{pane_current_path}",
+    ]);
+    assert!(
+        race_first.status.success()
+            && String::from_utf8_lossy(&race_first.stdout)
+                .contains(&race.foreign_workspace.to_string_lossy().into_owned()),
+        "snapshot fixture canary: mode1 first observation must be a real foreign-workspace \
+         mismatch; stdout={} stderr={}",
+        String::from_utf8_lossy(&race_first.stdout),
+        String::from_utf8_lossy(&race_first.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&race_second.stdout).trim(),
+        race.workspace_str(),
+        "snapshot fixture canary: mode1 second observation must succeed with the changed matching \
+         workspace"
+    );
+    assert_eq!(
+        race.workspace_observation_trace().len(),
+        2,
+        "snapshot fixture canary: mode1 measurement must distinguish both observations"
+    );
+
+    let failure = Case::new("b2-snapshot-failure-canary");
+    failure.set_mode("snapshot-reread-fails");
+    let failure_first = failure.run_tmux_shim(&["list-panes"]);
+    let failure_second = failure.run_tmux_shim(&[
+        "display-message",
+        "-p",
+        "-t",
+        AMBIENT_PANE,
+        "#{pane_current_path}",
+    ]);
+    let failure_fallback = failure.run_tmux_shim(&["list-panes"]);
+    assert!(
+        failure_first.status.success()
+            && String::from_utf8_lossy(&failure_first.stdout)
+                .contains(&failure.foreign_workspace.to_string_lossy().into_owned()),
+        "snapshot fixture canary: mode2 first observation must be a real foreign-workspace \
+         mismatch; stdout={} stderr={}",
+        String::from_utf8_lossy(&failure_first.stdout),
+        String::from_utf8_lossy(&failure_first.stderr)
+    );
+    assert!(
+        !failure_second.status.success() && !failure_fallback.status.success(),
+        "snapshot fixture canary: mode2 later PaneCurrentPath and fallback list_targets reads \
+         must both fail; query_status={} fallback_status={}",
+        failure_second.status,
+        failure_fallback.status
+    );
+    assert_eq!(
+        failure.workspace_observation_trace().len(),
+        3,
+        "snapshot fixture canary: mode2 measurement must record the first observation plus both \
+         forbidden later attempts"
+    );
+}
+
+#[test]
+#[serial(env)]
 fn b2_matching_workspace_is_not_misdiagnosed_by_diagnose_or_doctor() {
     let case = Case::new("b2-public-positive");
     case.seed_foreign_attached_state();
@@ -1182,6 +1355,11 @@ impl Case {
         command.output().expect("run team-agent CLI")
     }
 
+    fn run_tmux_shim(&self, args: &[&str]) -> Output {
+        let mut command = self.command_for_program(&self.fake_bin.join("tmux"), args, None);
+        command.output().expect("run tmux observation fixture")
+    }
+
     fn run_with_fake_bin_only(&self, args: &[&str], ambient_pane: Option<&str>) -> Output {
         let mut command = self.command(args, ambient_pane);
         command.env("PATH", &self.fake_bin);
@@ -1408,6 +1586,17 @@ impl Case {
 
     fn tmux_log(&self) -> String {
         fs::read_to_string(&self.tmux_log_path).unwrap_or_default()
+    }
+
+    fn workspace_observation_trace(&self) -> Vec<String> {
+        self.tmux_log()
+            .lines()
+            .filter(|line| {
+                line.split_whitespace().any(|part| part == "list-panes")
+                    || line.contains("#{pane_current_path}")
+            })
+            .map(str::to_string)
+            .collect()
     }
 
     fn provider_launches(&self) -> usize {
@@ -2282,6 +2471,42 @@ fn assert_workspace_mismatch_facts(value: &Value, label: &str) {
     );
 }
 
+fn assert_workspace_mismatch_facts_match_case(value: &Value, case: &Case, label: &str) {
+    use refusal_catalog::{
+        PaneAuthorityRefusalField as Field, PaneAuthorityRefusalReason as Reason,
+    };
+
+    assert_workspace_mismatch_facts(value, label);
+    let object = find_reason_object(value, Reason::PaneWorkspaceMismatch)
+        .unwrap_or_else(|| panic!("{label}: workspace mismatch object missing; output={value}"));
+    let expected_requested = case
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| case.workspace.clone());
+    assert_eq!(
+        object[Field::RequestedWorkspace.as_str()].as_str(),
+        Some(expected_requested.to_string_lossy().as_ref()),
+        "{label}: requested workspace must come from the original mismatch snapshot; \
+         output={value}"
+    );
+    assert_eq!(
+        object[Field::ObservedPaneId.as_str()].as_str(),
+        Some(AMBIENT_PANE),
+        "{label}: observed pane must come from the original mismatch snapshot; output={value}"
+    );
+    assert_eq!(
+        object[Field::ObservedPaneWorkspace.as_str()].as_str(),
+        Some(case.foreign_workspace.to_string_lossy().as_ref()),
+        "{label}: observed pane workspace must come from the original mismatch snapshot; \
+         output={value}"
+    );
+    assert_eq!(
+        object[Field::Endpoint.as_str()].as_str(),
+        Some(case.endpoint.to_string_lossy().as_ref()),
+        "{label}: endpoint must come from the original mismatch snapshot; output={value}"
+    );
+}
+
 fn assert_tty_mismatch_facts(value: &Value, label: &str) {
     use refusal_catalog::{
         PaneAuthorityRefusalField as Field, PaneAuthorityRefusalReason as Reason,
@@ -2632,6 +2857,10 @@ case " $* " in
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$TEAM_AGENT_TEST_LIST_PANES_COUNT"
+    if [ "$mode" = "snapshot-reread-fails" ] && [ "$count" -gt 1 ]; then
+      printf 'fixture later list_targets read failed\n' >&2
+      exit 1
+    fi
     if [ "$mode" = "matching-slow" ]; then
       sleep 1
     fi
@@ -2642,7 +2871,9 @@ case " $* " in
     elif [ "$mode" = "matching-then-foreign" ]; then
       printf '%%ambient\thistorical-foreign-leader\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4102\t\n' \
         "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_FOREIGN_WORKSPACE"
-    elif [ "$mode" = "foreign-workspace" ]; then
+    elif [ "$mode" = "foreign-workspace" ] || \
+         [ "$mode" = "snapshot-reread-changes" ] || \
+         [ "$mode" = "snapshot-reread-fails" ]; then
       printf '%%ambient\thistorical-foreign-leader\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4102\t\n' \
         "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_FOREIGN_WORKSPACE"
     elif [ "$mode" = "current-path-missing" ]; then
@@ -2667,7 +2898,10 @@ case " $* " in
       '#{pane_id}') printf '%s\n' "${target:-%good}" ;;
       '#{pane_current_command}') printf 'codex\n' ;;
       '#{pane_current_path}')
-        if [ "$target" = "%ambient" ] && \
+        if [ "$target" = "%ambient" ] && [ "$mode" = "snapshot-reread-fails" ]; then
+          printf 'fixture later PaneCurrentPath read failed\n' >&2
+          exit 1
+        elif [ "$target" = "%ambient" ] && \
            { [ "$mode" = "foreign" ] || [ "$mode" = "foreign-workspace" ]; }; then
           printf '%s\n' "$TEAM_AGENT_TEST_FOREIGN_WORKSPACE"
         elif [ "$target" = "%ambient" ] && [ "$mode" = "current-path-missing" ]; then
