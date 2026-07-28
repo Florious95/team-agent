@@ -53,6 +53,11 @@ pub enum DeliveryRefusal {
     TmuxTargetMissing,
     MessageAlreadyClaimed,
     LeaderNotAttached,
+    /// The recorded leader pane is live but belongs to another workspace.
+    /// Keep this typed cause distinct from an actually unattached leader so
+    /// the send surface can return the existing recovery action.
+    #[serde(rename = "PaneWorkspaceMismatch")]
+    PaneWorkspaceMismatch,
     NoCallerPane,
     TeamOwnerMismatch,
     Ambiguous,

@@ -130,7 +130,7 @@ fn leader_start_plan_external_leader_keeps_exec_provider_in_tmux() {
     std::fs::create_dir_all(&ws).unwrap();
 
     let provider_args = vec!["--".to_string(), "--model".to_string(), "opus".to_string()];
-    let plan = leader_start_plan(
+    let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
         Provider::Fake,
         &provider_args,
         &ws,
@@ -210,7 +210,16 @@ fn in_tmux_default_leader_runs_provider_in_current_pane() {
     let endpoint = format!("/private/tmp/tmux-501/{socket},88432,187");
     let _e = EnvGuard::apply(&[("TMUX", Some(&endpoint)), ("TMUX_PANE", Some("%7"))]);
 
-    let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
+    let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+        Provider::Fake,
+        &[],
+        &ws,
+        false,
+        false,
+        None,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
     assert!(!plan.is_external_leader);
@@ -238,7 +247,16 @@ fn in_tmux_default_leader_does_not_refuse_different_tmux_server() {
     let ws = std::env::temp_dir().join(format!("ta_rs_lsp_refuse_{}", std::process::id()));
     std::fs::create_dir_all(&ws).unwrap();
 
-    let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
+    let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+        Provider::Fake,
+        &[],
+        &ws,
+        false,
+        false,
+        None,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
     assert!(!plan.is_external_leader);

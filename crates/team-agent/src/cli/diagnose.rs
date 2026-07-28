@@ -1,5 +1,10 @@
 //! diagnose/preflight/wait-ready CLI helpers.
 use super::*;
+use crate::model::pane_authority_refusal::{
+    PaneAuthorityRecoveryAction, PaneAuthorityRecoveryHint, PaneAuthorityRefusal,
+    PaneAuthorityRefusalFacts, PaneAuthorityRefusalField, ACTION_FIELD, ACTION_REQUIRED_FIELD,
+    HINT_ACTION_FIELD, REASON_FIELD,
+};
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
@@ -195,10 +200,188 @@ pub(crate) fn diagnose_runtime_for_workspace(
     backend: &dyn Transport,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
+    append_live_leader_workspace_mismatch_issue(
+        workspace,
+        state,
+        backend,
+        &mut issues,
+        &mut repairs,
+    );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
+}
+
+fn append_live_leader_workspace_mismatch_issue(
+    workspace: &std::path::Path,
+    state: &Value,
+    backend: &dyn Transport,
+    issues: &mut Value,
+    repairs: &mut Value,
+) {
+    let Some((issue, repair)) = live_leader_workspace_mismatch(workspace, state, backend) else {
+        return;
+    };
+    if let Some(items) = issues.as_array_mut() {
+        items.push(issue);
+    }
+    if let Some(items) = repairs.as_array_mut() {
+        items.push(repair);
+    }
+}
+
+fn live_leader_workspace_mismatch(
+    workspace: &std::path::Path,
+    state: &Value,
+    backend: &dyn Transport,
+) -> Option<(Value, Value)> {
+    let receiver = state.get("leader_receiver")?;
+    let facts = match crate::messaging::resolve_live_leader_channel(workspace, receiver, backend) {
+        crate::messaging::LeaderChannelResolution::Unbound(
+            crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(facts),
+        ) => facts,
+        _ => return None,
+    };
+    let team = state
+        .get("team_key")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty())
+        .unwrap_or("current");
+    let provider = receiver
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|provider| !provider.is_empty())
+        .unwrap_or("claude");
+    let refusal =
+        PaneAuthorityRefusal::new(PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts));
+    let PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts) = &refusal.facts else {
+        return None;
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        REASON_FIELD.to_string(),
+        Value::String(refusal.reason().as_str().to_string()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::RequestedWorkspace
+            .as_str()
+            .to_string(),
+        Value::String(facts.requested_workspace.to_string_lossy().into_owned()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::ObservedPaneId
+            .as_str()
+            .to_string(),
+        Value::String(facts.observed_pane_id.clone()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::ObservedPaneWorkspace
+            .as_str()
+            .to_string(),
+        Value::String(facts.observed_pane_workspace.to_string_lossy().into_owned()),
+    );
+    fields.insert(
+        PaneAuthorityRefusalField::Endpoint.as_str().to_string(),
+        Value::String(facts.endpoint.clone()),
+    );
+    let mut issue = Value::Object(fields.clone());
+    if let Some(object) = issue.as_object_mut() {
+        object.insert(
+            "id".to_string(),
+            Value::String("leader_channel_workspace_mismatch".to_string()),
+        );
+    }
+    let mut repair = Value::Object(fields);
+    if let Some(object) = repair.as_object_mut() {
+        object.insert(
+            "issue".to_string(),
+            Value::String("leader_channel_workspace_mismatch".to_string()),
+        );
+        object.insert(
+            ACTION_REQUIRED_FIELD.to_string(),
+            Value::Bool(refusal.recovery.action_required),
+        );
+        object.insert("advisory".to_string(), Value::Bool(true));
+        object.insert(
+            "broken_class".to_string(),
+            Value::String("leader_channel_workspace_mismatch".to_string()),
+        );
+        object.insert(
+            HINT_ACTION_FIELD.to_string(),
+            Value::String(
+                match refusal.recovery.hint_action {
+                    PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+                }
+                .to_string(),
+            ),
+        );
+        object.insert(
+            "dedupe_key".to_string(),
+            Value::String(format!("{team}:leader_channel_workspace_mismatch")),
+        );
+        object.insert(
+            ACTION_FIELD.to_string(),
+            Value::String(match refusal.recovery.action {
+                PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
+                    format!(
+                        "open a new terminal window outside the current tmux/pane, change \
+                         directory to the requested workspace, then run \
+                         `team-agent attach-leader --team {team} --provider {provider} \
+                         --confirm --json`; then rerun \
+                         `team-agent diagnose --team {team} --json`"
+                    )
+                }
+            }),
+        );
+    }
+    Some((issue, repair))
+}
+
+pub(crate) fn append_selected_live_leader_workspace_mismatch(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    report: &mut Value,
+) {
+    let Some((issue, repair)) = selected_live_leader_workspace_mismatch(workspace, team) else {
+        return;
+    };
+    let Some(object) = report.as_object_mut() else {
+        return;
+    };
+    object.insert("issues".to_string(), Value::Array(vec![issue]));
+    object.insert("suggested_repairs".to_string(), Value::Array(vec![repair]));
+    object.insert("ok".to_string(), Value::Bool(false));
+    if object.get("error").is_none_or(Value::is_null) {
+        object.insert(
+            "error".to_string(),
+            Value::String("PaneWorkspaceMismatch".to_string()),
+        );
+    }
+}
+
+fn selected_live_leader_workspace_mismatch(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+) -> Option<(Value, Value)> {
+    let selected = crate::state::selector::resolve_active_team(
+        workspace,
+        team,
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .ok()?;
+    let backend: Box<dyn crate::transport::Transport> =
+        match crate::transport_factory::resolve_read_only_transport(
+            &selected.run_workspace,
+            Some(&selected.state),
+            crate::transport_factory::TransportPurpose::Diagnose,
+        ) {
+            Ok(resolved) => resolved.backend,
+            Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
+                &selected.run_workspace,
+            )),
+        };
+    live_leader_workspace_mismatch(&selected.run_workspace, &selected.state, backend.as_ref())
 }
 
 /// 0.5.41 Slice 1 (fault-invisibility-locate.md §5/§6.2): read the

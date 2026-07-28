@@ -5,10 +5,16 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+
+use crate::model::pane_authority_refusal as pane_refusal;
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::{
-    PaneId, PaneLiveness, SessionName, SpawnResult, Target, Transport, WindowName,
+    PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, WindowName,
 };
 
 use super::helpers::{
@@ -22,6 +28,41 @@ use super::{
 
 // ── leader::start — leader_start_plan / start_leader / session 名 ──
 
+pub(crate) struct PreparedLeaderStart {
+    plan: LeaderStartPlan,
+    ambient_authority: Option<VerifiedAmbientPaneAuthority>,
+}
+
+impl PreparedLeaderStart {
+    pub(crate) fn plan(&self) -> &LeaderStartPlan {
+        &self.plan
+    }
+}
+
+pub(crate) enum PrepareLeaderStartError {
+    PaneAuthorityRefused(pane_refusal::PaneAuthorityRefusal),
+    Leader(LeaderError),
+}
+
+impl PrepareLeaderStartError {
+    fn into_leader_error(self) -> LeaderError {
+        match self {
+            Self::PaneAuthorityRefused(refusal) => LeaderError::Validation(format!(
+                "{}; open a new terminal outside the current tmux/pane or run \
+                 `team-agent attach-leader` from the intended workspace pane",
+                refusal.reason().as_str()
+            )),
+            Self::Leader(error) => error,
+        }
+    }
+}
+
+impl From<LeaderError> for PrepareLeaderStartError {
+    fn from(error: LeaderError) -> Self {
+        Self::Leader(error)
+    }
+}
+
 /// `leader_start_plan`(card §46;`__init__.py:82`)。计算 leader 启动计划
 /// (exec in-TMUX / new tmux session / attach existing)。provider 未安装 → `Err(Start)`。
 pub fn leader_start_plan(
@@ -32,6 +73,76 @@ pub fn leader_start_plan(
     confirm_attach: bool,
     attach_session: Option<&SessionName>,
     external_leader: bool,
+) -> Result<LeaderStartPlan, LeaderError> {
+    prepare_leader_start(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+    )
+    .map(|prepared| prepared.plan)
+    .map_err(PrepareLeaderStartError::into_leader_error)
+}
+
+pub(crate) fn prepare_leader_start(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
+    let ambient_authority = ambient_pane_authority_preflight(workspace)?;
+    let plan = leader_start_plan_with_ambient_authority(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+        ambient_authority.is_some(),
+    )?;
+    Ok(PreparedLeaderStart {
+        plan,
+        ambient_authority,
+    })
+}
+
+pub(crate) fn leader_start_plan_after_ambient_authority_check(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+) -> Result<LeaderStartPlan, LeaderError> {
+    leader_start_plan_with_ambient_authority(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+        std::env::var_os("TMUX").is_some(),
+    )
+}
+
+fn leader_start_plan_with_ambient_authority(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+    in_tmux: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
@@ -76,7 +187,6 @@ pub fn leader_start_plan(
     } else {
         Some(managed_leader_session_name(provider, workspace))
     };
-    let in_tmux = std::env::var_os("TMUX").is_some();
     if !in_tmux {
         ensure_tmux_installed()?;
     }
@@ -188,7 +298,7 @@ pub fn start_leader(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<(), LeaderError> {
-    let plan = leader_start_plan(
+    let prepared = prepare_leader_start(
         provider,
         provider_args,
         workspace,
@@ -196,7 +306,9 @@ pub fn start_leader(
         confirm_attach,
         attach_session,
         external_leader,
-    )?;
+    )
+    .map_err(PrepareLeaderStartError::into_leader_error)?;
+    let plan = prepared.plan();
     crate::event_log::EventLog::new(workspace).write(
         super::LeaderEvent::LeaderStart.name(),
         serde_json::json!({
@@ -205,7 +317,7 @@ pub fn start_leader(
             "session_name": plan.session_name.as_ref().map(|s| s.as_str().to_string()),
         }),
     )?;
-    execute_leader_plan(&plan, workspace).map(|_| ())
+    execute_prepared_leader_start(&prepared, workspace).map(|_| ())
 }
 
 /// Execute a precomputed leader launch plan.
@@ -216,6 +328,41 @@ pub fn execute_leader_plan(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
+    let ambient_authority = if plan.mode == LeaderStartMode::ExecProvider {
+        match ambient_pane_authority_preflight(workspace) {
+            Ok(Some(authority)) => Some(authority),
+            Ok(None) => {
+                return Err(LeaderError::Validation(
+                    "exec provider ambient pane authority missing".to_string(),
+                ));
+            }
+            Err(PrepareLeaderStartError::PaneAuthorityRefused(refusal)) => {
+                return Ok(LeaderLaunchOutcome::not_started(refusal.reason().as_str()));
+            }
+            Err(PrepareLeaderStartError::Leader(error)) => return Err(error),
+        }
+    } else {
+        None
+    };
+    execute_leader_plan_after_ambient_authority(plan, workspace, ambient_authority.as_ref())
+}
+
+pub(crate) fn execute_prepared_leader_start(
+    prepared: &PreparedLeaderStart,
+    workspace: &Path,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
+    execute_leader_plan_after_ambient_authority(
+        &prepared.plan,
+        workspace,
+        prepared.ambient_authority.as_ref(),
+    )
+}
+
+fn execute_leader_plan_after_ambient_authority(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+    ambient_authority: Option<&VerifiedAmbientPaneAuthority>,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
     if plan.mode == LeaderStartMode::ManagedTmuxClient {
         return execute_managed_leader_plan(plan, workspace);
     }
@@ -224,20 +371,23 @@ pub fn execute_leader_plan(
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
     if plan.mode == LeaderStartMode::ExecProvider && !plan.is_external_leader {
+        let authority = ambient_authority.ok_or_else(|| {
+            LeaderError::Validation("exec provider ambient pane authority missing".to_string())
+        })?;
         // 0.5.35 (`.team/artifacts/managed-leader-provider-reentry-locate.md`
         // §5/§6): three-way classify BEFORE persist. Same physical pane =
         // provider process replacement (refresh only). Different pane with
         // an existing canonical binding = no canonical rewrite (claim /
         // takeover is the recovery path, §7). Unbound = first-time write.
-        match classify_exec_provider_binding(workspace, plan)? {
+        match classify_exec_provider_binding(workspace, plan, authority)? {
             ExecProviderBinding::ManagedReentry => {
-                refresh_managed_leader_provider_binding(plan, workspace)?;
+                refresh_managed_leader_provider_binding(plan, workspace, authority)?;
             }
             ExecProviderBinding::DifferentPaneAlreadyBound => {
                 // No canonical state write. Provider still runs below.
             }
             ExecProviderBinding::Unbound => {
-                persist_exec_provider_leader_binding(plan, workspace)?;
+                persist_exec_provider_leader_binding(plan, workspace, authority)?;
             }
         }
     } else if plan.is_external_leader {
@@ -264,6 +414,295 @@ pub fn execute_leader_plan(
             reason: None,
         })
     }
+}
+
+struct VerifiedAmbientPaneAuthority {
+    pane_id: PaneId,
+    observed: PaneInfo,
+    endpoint: String,
+    tmux: String,
+}
+
+fn ambient_pane_authority_preflight(
+    workspace: &Path,
+) -> Result<Option<VerifiedAmbientPaneAuthority>, PrepareLeaderStartError> {
+    let Some(tmux) = std::env::var_os("TMUX") else {
+        return Ok(None);
+    };
+    let tmux = tmux.into_string().map_err(|_| {
+        PrepareLeaderStartError::PaneAuthorityRefused(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::TmuxValueNotUnicode,
+        ))
+    })?;
+    verified_ambient_pane_authority(workspace, &tmux)
+        .map(Some)
+        .map_err(PrepareLeaderStartError::PaneAuthorityRefused)
+}
+
+fn verified_ambient_pane_authority(
+    workspace: &Path,
+    tmux: &str,
+) -> Result<VerifiedAmbientPaneAuthority, pane_refusal::PaneAuthorityRefusal> {
+    let requested_workspace = resolve_workspace_for_hash(workspace);
+    let tuple = tmux.split(',').map(str::trim).collect::<Vec<_>>();
+    let [endpoint, server_pid, session_index] = tuple.as_slice() else {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::TmuxTupleFieldCountInvalid,
+        ));
+    };
+    if endpoint.is_empty() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::EndpointMissing,
+        ));
+    }
+    if !Path::new(endpoint).is_absolute() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::EndpointNotAbsolute,
+        ));
+    }
+    if server_pid.parse::<u32>().is_err() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::ServerPidInvalid,
+        ));
+    }
+    if session_index.parse::<u32>().is_err() {
+        return Err(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::SessionIndexInvalid,
+        ));
+    }
+    let endpoint = (*endpoint).to_string();
+    let pane_id = match std::env::var_os("TMUX_PANE") {
+        None => {
+            return Err(pane_refusal::PaneAuthorityRefusal::new(
+                pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(
+                    pane_refusal::AmbientPaneIdUnavailableFacts {
+                        requested_workspace,
+                        observed_pane_id: pane_refusal::UnavailablePaneAuthorityFact::new(
+                            pane_refusal::AmbientPaneIdUnavailableCause::EnvironmentValueMissing,
+                        ),
+                        endpoint,
+                    },
+                ),
+            ));
+        }
+        Some(value) => match value.into_string() {
+            Ok(value) if value.trim().is_empty() => {
+                return Err(pane_refusal::PaneAuthorityRefusal::new(
+                    pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(
+                        pane_refusal::AmbientPaneIdUnavailableFacts {
+                            requested_workspace,
+                            observed_pane_id: pane_refusal::UnavailablePaneAuthorityFact::new(
+                                pane_refusal::AmbientPaneIdUnavailableCause::EnvironmentValueEmpty,
+                            ),
+                            endpoint,
+                        },
+                    ),
+                ));
+            }
+            Ok(value) => PaneId::new(value.trim().to_string()),
+            Err(_) => {
+                return Err(pane_refusal::PaneAuthorityRefusal::new(
+                    pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(
+                        pane_refusal::AmbientPaneIdUnavailableFacts {
+                            requested_workspace,
+                            observed_pane_id: pane_refusal::UnavailablePaneAuthorityFact::new(
+                                pane_refusal::AmbientPaneIdUnavailableCause::EnvironmentValueNotUnicode,
+                            ),
+                            endpoint,
+                        },
+                    ),
+                ));
+            }
+        },
+    };
+    let observed = current_tmux_pane_info(&pane_id, &endpoint).map_err(|error| {
+        let cause = match error {
+            CurrentTmuxPaneInfoError::QueryFailed => {
+                pane_refusal::AmbientPaneWorkspaceUnavailableCause::PaneQueryFailed
+            }
+            CurrentTmuxPaneInfoError::PaneNotFound => {
+                pane_refusal::AmbientPaneWorkspaceUnavailableCause::PaneNotFound
+            }
+        };
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneWorkspaceUnavailable(
+                pane_refusal::AmbientPaneWorkspaceUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    observed_pane_workspace: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+                    endpoint: endpoint.clone(),
+                },
+            ),
+        )
+    })?;
+    let pane_workspace = observed.current_path.clone().ok_or_else(|| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::AmbientPaneWorkspaceUnavailable(
+                pane_refusal::AmbientPaneWorkspaceUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    observed_pane_workspace: pane_refusal::UnavailablePaneAuthorityFact::new(
+                        pane_refusal::AmbientPaneWorkspaceUnavailableCause::CurrentPathMissing,
+                    ),
+                    endpoint: endpoint.clone(),
+                },
+            ),
+        )
+    })?;
+    let caller_tty = caller_controlling_tty().map_err(|cause| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::CallerControllingTtyUnavailable(
+                pane_refusal::CallerControllingTtyUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint: endpoint.clone(),
+                    caller_controlling_tty: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+                },
+            ),
+        )
+    })?;
+    let pane_tty_path = observed.tty.as_deref().ok_or_else(|| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::ObservedPaneTtyUnavailable(
+                pane_refusal::ObservedPaneTtyUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint: endpoint.clone(),
+                    observed_pane_tty: pane_refusal::UnavailablePaneAuthorityFact::new(
+                        pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyMissing,
+                    ),
+                },
+            ),
+        )
+    })?;
+    let pane_tty = pane_tty_device(pane_tty_path).map_err(|cause| {
+        pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::ObservedPaneTtyUnavailable(
+                pane_refusal::ObservedPaneTtyUnavailableFacts {
+                    requested_workspace: requested_workspace.clone(),
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint: endpoint.clone(),
+                    observed_pane_tty: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+                },
+            ),
+        )
+    })?;
+    if caller_tty != pane_tty {
+        return Err(pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::PaneTtyMismatch(
+                pane_refusal::PaneTtyMismatchFacts {
+                    requested_workspace,
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    endpoint,
+                    caller_controlling_tty: caller_tty,
+                    observed_pane_tty: pane_tty,
+                },
+            ),
+        ));
+    }
+    if !crate::messaging::leader_channel::path_is_in_workspace(&pane_workspace, workspace) {
+        return Err(pane_refusal::PaneAuthorityRefusal::new(
+            pane_refusal::PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(
+                pane_refusal::PaneWorkspaceMismatchFacts {
+                    requested_workspace,
+                    observed_pane_id: pane_id.as_str().to_string(),
+                    observed_pane_workspace: pane_workspace,
+                    endpoint,
+                },
+            ),
+        ));
+    }
+    Ok(VerifiedAmbientPaneAuthority {
+        pane_id,
+        observed,
+        endpoint,
+        tmux: tmux.to_string(),
+    })
+}
+
+fn ambient_tmux_endpoint_refusal(
+    workspace: &Path,
+    cause: pane_refusal::AmbientTmuxEndpointUnavailableCause,
+) -> pane_refusal::PaneAuthorityRefusal {
+    pane_refusal::PaneAuthorityRefusal::new(
+        pane_refusal::PaneAuthorityRefusalFacts::AmbientTmuxEndpointUnavailable(
+            pane_refusal::AmbientTmuxEndpointUnavailableFacts {
+                requested_workspace: resolve_workspace_for_hash(workspace),
+                endpoint: pane_refusal::UnavailablePaneAuthorityFact::new(cause),
+            },
+        ),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn caller_controlling_tty() -> Result<u64, pane_refusal::CallerControllingTtyUnavailableCause> {
+    // `/dev/tty` proves that this process has a controlling terminal, but its
+    // own path and rdev remain the generic alias. Query the process table for
+    // the actual controlling device identity.
+    let _controlling_tty = std::fs::File::open("/dev/tty")
+        .map_err(|_| pane_refusal::CallerControllingTtyUnavailableCause::NoControllingTty)?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let info_size = std::mem::size_of::<libc::proc_bsdinfo>();
+    let read = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info_size as libc::c_int,
+        )
+    };
+    if read != info_size as libc::c_int {
+        return Err(pane_refusal::CallerControllingTtyUnavailableCause::DeviceIdentityUnresolvable);
+    }
+    Ok(u64::from(unsafe { info.assume_init() }.e_tdev))
+}
+
+#[cfg(target_os = "linux")]
+fn caller_controlling_tty() -> Result<u64, pane_refusal::CallerControllingTtyUnavailableCause> {
+    let controlling_tty = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open("/dev/tty")
+        .map_err(|_| pane_refusal::CallerControllingTtyUnavailableCause::NoControllingTty)?;
+    let mut device = 0 as libc::c_uint;
+    let result = unsafe { libc::ioctl(controlling_tty.as_raw_fd(), libc::TIOCGDEV, &mut device) };
+    if result != 0 {
+        return Err(pane_refusal::CallerControllingTtyUnavailableCause::DeviceIdentityUnresolvable);
+    }
+    Ok(u64::from(device))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn caller_controlling_tty() -> Result<u64, pane_refusal::CallerControllingTtyUnavailableCause> {
+    Err(pane_refusal::CallerControllingTtyUnavailableCause::PlatformUnsupported)
+}
+
+#[cfg(unix)]
+fn pane_tty_device(path: &str) -> Result<u64, pane_refusal::ObservedPaneTtyUnavailableCause> {
+    let pane_tty = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyUnresolvable)?;
+    let metadata = pane_tty
+        .metadata()
+        .map_err(|_| pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyUnresolvable)?;
+    if !metadata.file_type().is_char_device() {
+        return Err(pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyNotCharacterDevice);
+    }
+    Ok(metadata.rdev())
+}
+
+#[cfg(not(unix))]
+fn pane_tty_device(_path: &str) -> Result<u64, pane_refusal::ObservedPaneTtyUnavailableCause> {
+    Err(pane_refusal::ObservedPaneTtyUnavailableCause::PaneTtyUnresolvable)
 }
 
 /// B5: the deterministic leader-session naming prefix IS the ownership truth source —
@@ -821,17 +1260,14 @@ fn persist_managed_leader_binding(
 fn persist_exec_provider_leader_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
+    authority: &VerifiedAmbientPaneAuthority,
 ) -> Result<(), LeaderError> {
     let identity = plan
         .identity
         .as_ref()
         .ok_or_else(|| LeaderError::Start("exec provider leader identity missing".to_string()))?;
-    let pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| LeaderError::Start("exec provider leader pane missing".to_string()))?;
-    let pane_id = PaneId::new(pane.clone());
-    let target = current_tmux_pane_info(&pane_id);
+    let pane = authority.pane_id.as_str();
+    let target = &authority.observed;
     let mut state = crate::state::persist::load_runtime_state(workspace)
         .unwrap_or_else(|_| serde_json::json!({}));
     let owner_epoch = state
@@ -846,7 +1282,7 @@ fn persist_exec_provider_leader_binding(
         .unwrap_or(0)
         .saturating_add(1);
     let now = chrono::Utc::now().to_rfc3339();
-    let socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let socket = authority.endpoint.as_str();
     let provider = serde_json::to_value(plan.provider)?;
     let mut receiver = serde_json::json!({
         "mode": "direct_tmux",
@@ -859,24 +1295,18 @@ fn persist_exec_provider_leader_binding(
         "attached_at": now,
         "discovery": "current_pane",
     });
-    if let Some(target) = target.as_ref() {
-        if let Some(obj) = receiver.as_object_mut() {
+    if let Some(obj) = receiver.as_object_mut() {
+        obj.insert(
+            "session_name".to_string(),
+            serde_json::json!(target.session.as_str()),
+        );
+        if let Some(window_name) = target.window_name.as_ref() {
             obj.insert(
-                "session_name".to_string(),
-                serde_json::json!(target.session.as_str()),
+                "window_name".to_string(),
+                serde_json::json!(window_name.as_str()),
             );
-            if let Some(window_name) = target.window_name.as_ref() {
-                obj.insert(
-                    "window_name".to_string(),
-                    serde_json::json!(window_name.as_str()),
-                );
-            }
         }
-    }
-    if let Some(socket) = socket.as_ref() {
-        if let Some(obj) = receiver.as_object_mut() {
-            obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
-        }
+        obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
     }
     let owner = serde_json::json!({
         "pane_id": pane,
@@ -893,23 +1323,19 @@ fn persist_exec_provider_leader_binding(
             "active_team_key".to_string(),
             serde_json::json!(identity.team_id.as_str()),
         );
-        if let Some(target) = target.as_ref() {
-            obj.insert(
-                "session_name".to_string(),
-                serde_json::json!(target.session.as_str()),
-            );
-        }
-        if let Some(socket) = socket.as_ref() {
-            obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
-            obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
-        }
+        obj.insert(
+            "session_name".to_string(),
+            serde_json::json!(target.session.as_str()),
+        );
+        obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
+        obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
         obj.insert("is_external_leader".to_string(), serde_json::json!(false));
         obj.insert(
             "leader_client".to_string(),
             serde_json::json!({
                 "diagnostic_only": true,
                 "attach_mode": "exec-provider",
-                "tmux": std::env::var("TMUX").ok(),
+                "tmux": authority.tmux.as_str(),
             }),
         );
     }
@@ -954,13 +1380,9 @@ enum ExecProviderBinding {
 fn classify_exec_provider_binding(
     workspace: &Path,
     plan: &LeaderStartPlan,
+    authority: &VerifiedAmbientPaneAuthority,
 ) -> Result<ExecProviderBinding, LeaderError> {
-    let Some(pane) = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(ExecProviderBinding::Unbound);
-    };
+    let pane = authority.pane_id.as_str();
     let state = match crate::state::persist::load_runtime_state(workspace) {
         Ok(state) => state,
         Err(_) => return Ok(ExecProviderBinding::Unbound),
@@ -996,12 +1418,11 @@ fn classify_exec_provider_binding(
     if receiver_pane != pane {
         return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
     }
-    let pane_id = PaneId::new(pane.clone());
-    let target = current_tmux_pane_info(&pane_id);
-    let leader_prefixed_session = target
-        .as_ref()
-        .map(|t| t.session.as_str().starts_with(LEADER_SESSION_PREFIX))
-        .unwrap_or(false);
+    let leader_prefixed_session = authority
+        .observed
+        .session
+        .as_str()
+        .starts_with(LEADER_SESSION_PREFIX);
     if !leader_prefixed_session {
         return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
     }
@@ -1010,8 +1431,7 @@ fn classify_exec_provider_binding(
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty());
     if let Some(recorded_socket) = recorded_socket {
-        let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
-        if caller_socket.as_deref() != Some(recorded_socket) {
+        if authority.endpoint != recorded_socket {
             return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
         }
     }
@@ -1027,16 +1447,13 @@ fn classify_exec_provider_binding(
 fn refresh_managed_leader_provider_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
+    authority: &VerifiedAmbientPaneAuthority,
 ) -> Result<(), LeaderError> {
     let identity = plan.identity.as_ref().ok_or_else(|| {
         LeaderError::Start("managed leader re-entry identity missing".to_string())
     })?;
-    let pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| LeaderError::Start("managed leader re-entry pane missing".to_string()))?;
-    let pane_id = PaneId::new(pane.clone());
-    let target = current_tmux_pane_info(&pane_id);
+    let pane = authority.pane_id.as_str();
+    let target = &authority.observed;
     let mut state = crate::state::persist::load_runtime_state(workspace)
         .unwrap_or_else(|_| serde_json::json!({}));
     let team_key = identity.team_id.as_str();
@@ -1078,20 +1495,18 @@ fn refresh_managed_leader_provider_binding(
         obj.insert("owner_epoch".to_string(), serde_json::json!(existing_epoch));
         obj.entry("leader_session_uuid".to_string())
             .or_insert_with(|| serde_json::json!(identity.leader_session_uuid.as_str()));
-        if let Some(target) = target.as_ref() {
+        obj.insert(
+            "session_name".to_string(),
+            serde_json::json!(target.session.as_str()),
+        );
+        if let Some(window_name) = target.window_name.as_ref() {
             obj.insert(
-                "session_name".to_string(),
-                serde_json::json!(target.session.as_str()),
+                "window_name".to_string(),
+                serde_json::json!(window_name.as_str()),
             );
-            if let Some(window_name) = target.window_name.as_ref() {
-                obj.insert(
-                    "window_name".to_string(),
-                    serde_json::json!(window_name.as_str()),
-                );
-            }
-            if let Some(pane_pid) = target.pane_pid {
-                obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
-            }
+        }
+        if let Some(pane_pid) = target.pane_pid {
+            obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
         }
     }
     let mut owner = match existing_owner.as_object() {
@@ -1118,7 +1533,7 @@ fn refresh_managed_leader_provider_binding(
             serde_json::json!({
                 "diagnostic_only": true,
                 "attach_mode": "exec-provider",
-                "tmux": std::env::var("TMUX").ok(),
+                "tmux": authority.tmux.as_str(),
                 "reentry": true,
             }),
         );
@@ -1138,12 +1553,21 @@ fn refresh_managed_leader_provider_binding(
     Ok(())
 }
 
-fn current_tmux_pane_info(pane_id: &PaneId) -> Option<crate::transport::PaneInfo> {
-    tmux_transport_for_current_pane()
+enum CurrentTmuxPaneInfoError {
+    QueryFailed,
+    PaneNotFound,
+}
+
+fn current_tmux_pane_info(
+    pane_id: &PaneId,
+    endpoint: &str,
+) -> Result<crate::transport::PaneInfo, CurrentTmuxPaneInfoError> {
+    crate::transport_factory::tmux_endpoint_transport(endpoint)
         .list_targets()
-        .ok()?
+        .map_err(|_| CurrentTmuxPaneInfoError::QueryFailed)?
         .into_iter()
         .find(|target| target.pane_id == *pane_id)
+        .ok_or(CurrentTmuxPaneInfoError::PaneNotFound)
 }
 
 fn persist_external_leader_topology_marker(
@@ -1543,9 +1967,10 @@ mod tests {
     };
 
     use super::{
-        ensure_managed_provider_live_after_attach, execute_leader_plan, format_launcher_failure,
+        ensure_managed_provider_live_after_attach, execute_leader_plan,
+        execute_leader_plan_after_ambient_authority, format_launcher_failure,
         handle_exec_provider_startup_prompts, push_bounded_stderr, shlex_quote,
-        LEADER_STDERR_LIMIT,
+        VerifiedAmbientPaneAuthority, LEADER_STDERR_LIMIT,
     };
 
     struct ScriptedTransport {
@@ -1857,7 +2282,7 @@ mod tests {
             detached: false,
         };
 
-        let outcome = execute_leader_plan(&plan, &workspace)
+        let outcome = execute_leader_plan_after_ambient_authority(&plan, &workspace, None)
             .expect("external marker must be present before provider argv runs");
 
         assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
@@ -1914,8 +2339,27 @@ mod tests {
             detached: false,
         };
 
-        let outcome = execute_leader_plan(&plan, &workspace)
-            .expect("current pane binding must be present before provider argv runs");
+        let authority = VerifiedAmbientPaneAuthority {
+            pane_id: PaneId::new("%77"),
+            observed: PaneInfo {
+                pane_id: PaneId::new("%77"),
+                session: SessionName::new("team-agent-leader-current"),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("codex")),
+                pane_index: Some(0),
+                tty: Some("/dev/ttys077".to_string()),
+                current_command: Some("codex".to_string()),
+                current_path: Some(workspace.clone()),
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+            endpoint: "/private/tmp/tmux-501/default".to_string(),
+            tmux: "/private/tmp/tmux-501/default,123,0".to_string(),
+        };
+        let outcome =
+            execute_leader_plan_after_ambient_authority(&plan, &workspace, Some(&authority))
+                .expect("current pane binding must be present before provider argv runs");
 
         assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
         let state = crate::state::persist::load_runtime_state(&workspace).unwrap();

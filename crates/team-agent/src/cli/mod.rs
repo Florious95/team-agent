@@ -151,7 +151,7 @@ pub mod lifecycle_port {
             .attach_session
             .as_ref()
             .map(|name| crate::transport::SessionName::new(name.clone()));
-        let plan = crate::leader::start::leader_start_plan(
+        let prepared = match crate::leader::start::prepare_leader_start(
             provider,
             provider_args,
             cwd,
@@ -159,16 +159,28 @@ pub mod lifecycle_port {
             attach.confirm_attach,
             attach_session.as_ref(),
             attach.external_leader,
-        )
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let outcome = crate::leader::start::execute_leader_plan(&plan, cwd)
+        ) {
+            Ok(prepared) => prepared,
+            Err(crate::leader::start::PrepareLeaderStartError::PaneAuthorityRefused(refusal)) => {
+                return Ok(pane_authority_refusal_value(provider, attach, &refusal));
+            }
+            Err(crate::leader::start::PrepareLeaderStartError::Leader(error)) => {
+                return Err(CliError::Runtime(error.to_string()));
+            }
+        };
+        let outcome = crate::leader::start::execute_prepared_leader_start(&prepared, cwd)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let plan = prepared.plan();
         let ok = match outcome.status {
             crate::leader::LeaderLaunchStatus::Exited => outcome.exit_code == Some(0),
             crate::leader::LeaderLaunchStatus::Detached => true,
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
-        let leader_attach_command = leader_attach_command_for_plan(cwd, &plan);
+        let leader_attach_command = if outcome.reason.as_deref() == Some("PaneWorkspaceMismatch") {
+            Some("team-agent attach-leader".to_string())
+        } else {
+            leader_attach_command_for_plan(cwd, &plan)
+        };
         Ok(json!({
             "ok": ok,
             "provider": provider,
@@ -185,6 +197,251 @@ pub mod lifecycle_port {
             "attach_session": attach.attach_session,
             "session_name": plan.session_name.as_ref().map(|session| session.as_str().to_string()),
         }))
+    }
+
+    fn pane_authority_refusal_value(
+        provider: Provider,
+        attach: &LeaderLauncherArgs,
+        refusal: &crate::model::pane_authority_refusal::PaneAuthorityRefusal,
+    ) -> Value {
+        use crate::model::pane_authority_refusal::{
+            PaneAuthorityRecoveryAction, PaneAuthorityRecoveryHint, PaneAuthorityRefusalFacts,
+            PaneAuthorityRefusalField, ACTION_FIELD, ACTION_REQUIRED_FIELD, HINT_ACTION_FIELD,
+            REASON_FIELD,
+        };
+
+        let mut facts = Map::new();
+        facts.insert(
+            REASON_FIELD.to_string(),
+            Value::String(refusal.reason().as_str().to_string()),
+        );
+        match &refusal.facts {
+            PaneAuthorityRefusalFacts::AmbientTmuxEndpointUnavailable(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_unavailable_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    payload.endpoint.availability().as_str(),
+                    payload.endpoint.cause.as_str(),
+                );
+            }
+            PaneAuthorityRefusalFacts::AmbientPaneIdUnavailable(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_unavailable_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneId,
+                    payload.observed_pane_id.availability().as_str(),
+                    payload.observed_pane_id.cause.as_str(),
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    &payload.endpoint,
+                );
+            }
+            PaneAuthorityRefusalFacts::AmbientPaneWorkspaceUnavailable(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneId,
+                    &payload.observed_pane_id,
+                );
+                insert_unavailable_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneWorkspace,
+                    payload.observed_pane_workspace.availability().as_str(),
+                    payload.observed_pane_workspace.cause.as_str(),
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    &payload.endpoint,
+                );
+            }
+            PaneAuthorityRefusalFacts::CallerControllingTtyUnavailable(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneId,
+                    &payload.observed_pane_id,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    &payload.endpoint,
+                );
+                insert_unavailable_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::CallerControllingTty,
+                    payload.caller_controlling_tty.availability().as_str(),
+                    payload.caller_controlling_tty.cause.as_str(),
+                );
+            }
+            PaneAuthorityRefusalFacts::ObservedPaneTtyUnavailable(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneId,
+                    &payload.observed_pane_id,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    &payload.endpoint,
+                );
+                insert_unavailable_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneTty,
+                    payload.observed_pane_tty.availability().as_str(),
+                    payload.observed_pane_tty.cause.as_str(),
+                );
+            }
+            PaneAuthorityRefusalFacts::PaneTtyMismatch(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneId,
+                    &payload.observed_pane_id,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    &payload.endpoint,
+                );
+                facts.insert(
+                    PaneAuthorityRefusalField::CallerControllingTty
+                        .as_str()
+                        .to_string(),
+                    Value::from(payload.caller_controlling_tty),
+                );
+                facts.insert(
+                    PaneAuthorityRefusalField::ObservedPaneTty
+                        .as_str()
+                        .to_string(),
+                    Value::from(payload.observed_pane_tty),
+                );
+            }
+            PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(payload) => {
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::RequestedWorkspace,
+                    &payload.requested_workspace,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneId,
+                    &payload.observed_pane_id,
+                );
+                insert_path_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::ObservedPaneWorkspace,
+                    &payload.observed_pane_workspace,
+                );
+                insert_string_fact(
+                    &mut facts,
+                    PaneAuthorityRefusalField::Endpoint,
+                    &payload.endpoint,
+                );
+            }
+        }
+
+        let hint_action = match refusal.recovery.hint_action {
+            PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+        };
+        let action = match refusal.recovery.action {
+            PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
+                "open a new terminal window outside the current tmux/pane, confirm TMUX and \
+                 TMUX_PANE are absent, change directory to the requested workspace, and restart \
+                 the leader; alternatively enter the matching workspace pane and run \
+                 `team-agent attach-leader`"
+            }
+        };
+        facts.insert(
+            ACTION_REQUIRED_FIELD.to_string(),
+            Value::Bool(refusal.recovery.action_required),
+        );
+        facts.insert(
+            HINT_ACTION_FIELD.to_string(),
+            Value::String(hint_action.to_string()),
+        );
+        facts.insert(ACTION_FIELD.to_string(), Value::String(action.to_string()));
+
+        let mut value = json!({
+            "ok": false,
+            "provider": provider,
+            "mode": "exec_provider",
+            "leader_topology": if attach.external_leader { "external" } else { "managed" },
+            "is_external_leader": attach.external_leader,
+            "leader_window": null,
+            "leader_attach_command": hint_action,
+            "status": "not_started",
+            "exit_code": null,
+            "attach_existing": attach.attach_existing,
+            "confirm_attach": attach.confirm_attach,
+            "attach_session": attach.attach_session,
+            "session_name": null,
+        });
+        if let Some(object) = value.as_object_mut() {
+            object.extend(facts);
+        }
+        value
+    }
+
+    fn insert_path_fact(
+        facts: &mut Map<String, Value>,
+        field: crate::model::pane_authority_refusal::PaneAuthorityRefusalField,
+        value: &Path,
+    ) {
+        insert_string_fact(facts, field, &value.to_string_lossy());
+    }
+
+    fn insert_string_fact(
+        facts: &mut Map<String, Value>,
+        field: crate::model::pane_authority_refusal::PaneAuthorityRefusalField,
+        value: &str,
+    ) {
+        facts.insert(field.as_str().to_string(), Value::String(value.to_string()));
+    }
+
+    fn insert_unavailable_fact(
+        facts: &mut Map<String, Value>,
+        field: crate::model::pane_authority_refusal::PaneAuthorityRefusalField,
+        availability: &str,
+        cause: &str,
+    ) {
+        use crate::model::pane_authority_refusal::{AVAILABILITY_FIELD, CAUSE_FIELD};
+
+        let mut value = Map::new();
+        value.insert(
+            AVAILABILITY_FIELD.to_string(),
+            Value::String(availability.to_string()),
+        );
+        value.insert(CAUSE_FIELD.to_string(), Value::String(cause.to_string()));
+        facts.insert(field.as_str().to_string(), Value::Object(value));
     }
 
     pub(crate) fn leader_attach_command_for_plan(

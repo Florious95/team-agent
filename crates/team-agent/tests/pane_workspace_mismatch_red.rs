@@ -50,6 +50,7 @@ use serde_json::{json, Value};
 use team_agent::messaging::leader_channel::{
     resolve_live_leader_channel, LeaderChannelResolution, LeaderChannelUnbound,
 };
+use team_agent::model::pane_authority_refusal::PaneWorkspaceMismatchFacts;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
@@ -223,10 +224,86 @@ fn claimed_receiver(scope_authority: &str, binding_nonce: Option<&str>) -> Value
 }
 
 fn is_mismatch(res: &LeaderChannelResolution) -> bool {
-    matches!(
-        res,
-        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch)
-    )
+    mismatch_facts(res).is_some()
+}
+
+fn mismatch_facts(res: &LeaderChannelResolution) -> Option<&PaneWorkspaceMismatchFacts> {
+    match res {
+        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch(
+            facts @ PaneWorkspaceMismatchFacts {
+                requested_workspace,
+                observed_pane_id,
+                observed_pane_workspace,
+                endpoint,
+            },
+        )) => {
+            // Bind every field explicitly. Adding a catalog field must break compilation until
+            // this verifier-owned contract makes an explicit coverage decision.
+            let _ = (
+                requested_workspace,
+                observed_pane_id,
+                observed_pane_workspace,
+                endpoint,
+            );
+            Some(facts)
+        }
+        _ => None,
+    }
+}
+
+fn assert_mismatch_payload(
+    res: &LeaderChannelResolution,
+    expected_requested_workspace: &Path,
+    expected_observed_pane_workspace: &Path,
+    label: &str,
+) {
+    let facts = mismatch_facts(res).unwrap_or_else(|| {
+        panic!(
+            "{label} PANE_WORKSPACE_MISMATCH_PAYLOAD_MISSING: expected typed \
+             PaneWorkspaceMismatch payload; res={res:?}"
+        )
+    });
+    assert_eq!(
+        facts.requested_workspace.as_path(),
+        expected_requested_workspace,
+        "{label} PANE_WORKSPACE_MISMATCH_PAYLOAD_INCORRECT: requested workspace must come from \
+         the resolver observation; facts={facts:?}"
+    );
+    assert_eq!(
+        facts.observed_pane_id, PANE,
+        "{label} PANE_WORKSPACE_MISMATCH_PAYLOAD_INCORRECT: observed pane id must come from the \
+         resolver observation; facts={facts:?}"
+    );
+    assert_eq!(
+        facts.observed_pane_workspace.as_path(),
+        expected_observed_pane_workspace,
+        "{label} PANE_WORKSPACE_MISMATCH_PAYLOAD_INCORRECT: observed pane workspace must come \
+         from the resolver observation; facts={facts:?}"
+    );
+    assert_eq!(
+        facts.endpoint, SOCKET,
+        "{label} PANE_WORKSPACE_MISMATCH_PAYLOAD_INCORRECT: endpoint must come from the resolver \
+         observation; facts={facts:?}"
+    );
+    assert!(
+        !facts.requested_workspace.as_os_str().is_empty()
+            && !facts.observed_pane_id.is_empty()
+            && !facts.observed_pane_workspace.as_os_str().is_empty()
+            && !facts.endpoint.is_empty()
+            && !facts
+                .requested_workspace
+                .to_string_lossy()
+                .eq_ignore_ascii_case("unknown")
+            && !facts.observed_pane_id.eq_ignore_ascii_case("unknown")
+            && !facts
+                .observed_pane_workspace
+                .to_string_lossy()
+                .eq_ignore_ascii_case("unknown")
+            && !facts.endpoint.eq_ignore_ascii_case("unknown"),
+        "{label} PANE_WORKSPACE_MISMATCH_PAYLOAD_PLACEHOLDER_FORBIDDEN: mismatch facts are all \
+         observed and must not use empty/unknown placeholders; an unavailable fact requires its \
+         own catalog reason with typed unavailable+cause; facts={facts:?}"
+    );
 }
 fn is_live(res: &LeaderChannelResolution) -> bool {
     matches!(res, LeaderChannelResolution::Live(_))
@@ -270,27 +347,22 @@ fn form2_sibling_with_missing_or_wrong_live_nonce_stays_refused() {
 
     // (a) LIVE nonce DIFFERS from the receiver's recorded nonce (recycled %1).
     let wrong_live = PaneTransport::new(&sibling_cwd).with_live_nonce("nonce-DIFFERENT-recycled");
-    assert!(
-        is_mismatch(&resolve_live_leader_channel(
-            &workspace,
-            &receiver,
-            &wrong_live
-        )),
-        "positive control (WLEAK): a sibling whose LIVE pane-binding-nonce DIFFERS from the \
-         receiver's recorded nonce (recycled %1) must remain PaneWorkspaceMismatch; a fix must \
-         compare the live pane option, not blanket-accept on receiver.binding_nonce."
+    let wrong_live_resolution = resolve_live_leader_channel(&workspace, &receiver, &wrong_live);
+    assert_mismatch_payload(
+        &wrong_live_resolution,
+        &workspace,
+        &sibling_cwd,
+        "positive control (WLEAK): wrong live nonce",
     );
 
     // (b) LIVE nonce MISSING (no pane option projected).
     let missing_live = PaneTransport::new(&sibling_cwd);
-    assert!(
-        is_mismatch(&resolve_live_leader_channel(
-            &workspace,
-            &receiver,
-            &missing_live
-        )),
-        "positive control (WLEAK): a sibling with NO live binding nonce must remain \
-         PaneWorkspaceMismatch; a fix must not accept a sibling lacking a matching live nonce."
+    let missing_live_resolution = resolve_live_leader_channel(&workspace, &receiver, &missing_live);
+    assert_mismatch_payload(
+        &missing_live_resolution,
+        &workspace,
+        &sibling_cwd,
+        "positive control (WLEAK): missing live nonce",
     );
 }
 

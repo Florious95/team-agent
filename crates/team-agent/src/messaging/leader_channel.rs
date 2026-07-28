@@ -3,6 +3,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::codex_app_server::AppServerBinding;
+use crate::model::pane_authority_refusal::PaneWorkspaceMismatchFacts;
 use crate::transport::{PaneInfo, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,7 +27,7 @@ pub enum LeaderChannelResolution {
     ProbeFailed(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaderChannelUnbound {
     ReceiverNotAttached,
     TransportConflict,
@@ -34,8 +35,23 @@ pub enum LeaderChannelUnbound {
     NonCanonicalTmuxSocket,
     EndpointMismatch,
     PaneNotLive,
-    PaneWorkspaceMismatch,
+    PaneWorkspaceMismatch(PaneWorkspaceMismatchFacts),
     AppServerBindingInvalid,
+}
+
+impl LeaderChannelUnbound {
+    pub const fn reason_code(&self) -> &'static str {
+        match self {
+            Self::ReceiverNotAttached => "ReceiverNotAttached",
+            Self::TransportConflict => "TransportConflict",
+            Self::MissingPaneId => "MissingPaneId",
+            Self::NonCanonicalTmuxSocket => "NonCanonicalTmuxSocket",
+            Self::EndpointMismatch => "EndpointMismatch",
+            Self::PaneNotLive => "PaneNotLive",
+            Self::PaneWorkspaceMismatch(_) => "PaneWorkspaceMismatch",
+            Self::AppServerBindingInvalid => "AppServerBindingInvalid",
+        }
+    }
 }
 
 /// Resolve the canonical receiver's live physical channel without mutating
@@ -79,11 +95,12 @@ pub fn resolve_live_leader_channel(
         .get("tmux_socket")
         .and_then(Value::as_str)
         .filter(|socket| !socket.is_empty());
+    let transport_endpoint = transport.tmux_endpoint();
     if tmux_socket.is_some_and(|socket| !std::path::Path::new(socket).is_absolute()) {
         return LeaderChannelResolution::Unbound(LeaderChannelUnbound::NonCanonicalTmuxSocket);
     }
     if let Some(expected) = tmux_socket {
-        if transport.tmux_endpoint().as_deref() != Some(expected) {
+        if transport_endpoint.as_deref() != Some(expected) {
             return LeaderChannelResolution::Unbound(LeaderChannelUnbound::EndpointMismatch);
         }
     }
@@ -97,13 +114,19 @@ pub fn resolve_live_leader_channel(
     else {
         return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneNotLive);
     };
-    if observed
-        .current_path
-        .as_deref()
-        .is_some_and(|path| !path_is_in_workspace(path, workspace))
-        && !explicit_claim_authority_matches(workspace, receiver, &observed)
-    {
-        return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch);
+    if let Some(observed_pane_workspace) = observed.current_path.clone() {
+        if !path_is_in_workspace(&observed_pane_workspace, workspace)
+            && !explicit_claim_authority_matches(workspace, receiver, &observed)
+        {
+            return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch(
+                PaneWorkspaceMismatchFacts {
+                    requested_workspace: canonical_path(workspace),
+                    observed_pane_id: observed.pane_id.as_str().to_string(),
+                    observed_pane_workspace,
+                    endpoint: transport_endpoint.unwrap_or_else(|| "default".to_string()),
+                },
+            ));
+        }
     }
     let metadata_drift = receiver_metadata_drift(receiver, &observed);
     LeaderChannelResolution::Live(LiveLeaderChannel::DirectTmux(DirectTmuxLeaderChannel {
