@@ -2,8 +2,8 @@
 use super::*;
 use crate::model::pane_authority_refusal::{
     PaneAuthorityRecoveryAction, PaneAuthorityRecoveryHint, PaneAuthorityRefusal,
-    PaneAuthorityRefusalFacts, PaneAuthorityRefusalField, PaneWorkspaceMismatchFacts, ACTION_FIELD,
-    ACTION_REQUIRED_FIELD, HINT_ACTION_FIELD, REASON_FIELD,
+    PaneAuthorityRefusalFacts, PaneAuthorityRefusalField, ACTION_FIELD, ACTION_REQUIRED_FIELD,
+    HINT_ACTION_FIELD, REASON_FIELD,
 };
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
@@ -237,45 +237,12 @@ fn live_leader_workspace_mismatch(
     backend: &dyn Transport,
 ) -> Option<(Value, Value)> {
     let receiver = state.get("leader_receiver")?;
-    if !matches!(
-        crate::messaging::resolve_live_leader_channel(workspace, receiver, backend),
+    let facts = match crate::messaging::resolve_live_leader_channel(workspace, receiver, backend) {
         crate::messaging::LeaderChannelResolution::Unbound(
-            crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
-        )
-    ) {
-        return None;
-    }
-
-    let observed_pane_id = receiver
-        .get("pane_id")
-        .and_then(Value::as_str)
-        .filter(|pane| !pane.is_empty())?;
-    let observed_pane_workspace = backend
-        .query(
-            &crate::transport::Target::Pane(crate::transport::PaneId::new(observed_pane_id)),
-            crate::transport::PaneField::PaneCurrentPath,
-        )
-        .ok()
-        .flatten()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            backend
-                .list_targets()
-                .ok()?
-                .into_iter()
-                .find(|pane| pane.pane_id.as_str() == observed_pane_id)?
-                .current_path
-        });
-    let endpoint = backend.tmux_endpoint().or_else(|| {
-        receiver
-            .get("tmux_socket")
-            .and_then(Value::as_str)
-            .filter(|endpoint| !endpoint.is_empty())
-            .map(str::to_string)
-    });
-    let requested_workspace = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
+            crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(facts),
+        ) => facts,
+        _ => return None,
+    };
     let team = state
         .get("team_key")
         .and_then(Value::as_str)
@@ -286,14 +253,8 @@ fn live_leader_workspace_mismatch(
         .and_then(Value::as_str)
         .filter(|provider| !provider.is_empty())
         .unwrap_or("claude");
-    let refusal = PaneAuthorityRefusal::new(PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(
-        PaneWorkspaceMismatchFacts {
-            requested_workspace,
-            observed_pane_id: observed_pane_id.to_string(),
-            observed_pane_workspace: observed_pane_workspace?,
-            endpoint: endpoint?,
-        },
-    ));
+    let refusal =
+        PaneAuthorityRefusal::new(PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts));
     let PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts) = &refusal.facts else {
         return None;
     };

@@ -399,6 +399,9 @@ fn append_worker_pane_binding_issues(
     let Some(agents) = state.get("agents").and_then(Value::as_object) else {
         return;
     };
+    if agents.is_empty() {
+        return;
+    }
     let Ok(live_targets) = backend.list_targets() else {
         return;
     };
