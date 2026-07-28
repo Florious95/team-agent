@@ -15,8 +15,10 @@
 //!   literal assertion node, behavior operand, and executable negative twin. The authority
 //!   resolves those declarations through Rust token trees (never substring/character-position
 //!   inference), requires every node exactly once, and admits A only when the normal mapped case
-//!   passes while the one-field twin fails at that declared assertion. Provider launchers retain
-//!   their additional hermetic PATH shim and exact argv-log obligations.
+//!   passes while the one-field twin fails at that declared assertion. Cross-entry admission also
+//!   checks observable twin-discrimination cells; nested diagnostic/control subtrees do not become
+//!   behavior evidence merely by containing the binding tokens. Provider launchers retain their
+//!   additional hermetic PATH shim and exact argv-log obligations.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -301,7 +303,9 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
 #[test]
 fn tooth_3b_three_bucket_claims_are_honest_and_launcher_safe() {
     assert_three_bucket_validator_canary();
+    assert_global_evidence_identity_canary();
     assert_negative_twin_executor_canary();
+    assert_twin_discrimination_canary();
 
     let manifest = load_coverage_manifest("TOOTH-3B");
     let e2e_tests = source_tree(&["tests/e2e/main.rs", "tests/e2e/cases"]);
@@ -320,6 +324,21 @@ fn gate_hole_negative_twin_execution_canary_case() {
         Ok("setup") => panic!("NEGATIVE-TWIN-SETUP-CANARY"),
         _ => {}
     }
+}
+
+#[test]
+fn gate_hole_twin_discrimination_canary_case() {
+    let selected = std::env::var("TEAM_AGENT_COVERAGE_NEGATIVE_TWIN").unwrap_or_default();
+    assert_ne!(
+        selected, "matrix-first",
+        "NEGATIVE-TWIN-MATRIX-FIRST-CANARY"
+    );
+    eprintln!("NEGATIVE-TWIN-MATRIX-FIRST-PASS");
+    assert_ne!(
+        selected, "matrix-second",
+        "NEGATIVE-TWIN-MATRIX-SECOND-CANARY"
+    );
+    eprintln!("NEGATIVE-TWIN-MATRIX-SECOND-PASS");
 }
 
 #[derive(Debug)]
@@ -915,6 +934,37 @@ fn assert_three_bucket_validator_canary() {
         "TOOTH-3B harness canary: a run_ta result referenced by a comparison operand must count"
     );
 
+    for (assertion, signature) in [
+        (
+            r#"assert!(true || panic!("diagnostic stdout={}", out.stdout), "status failed");"#,
+            "COVERED-BINDING-NESTED-PANIC",
+        ),
+        (
+            r#"assert!(true || format!("{}", out.stdout).is_empty(), "status failed");"#,
+            "COVERED-BINDING-NESTED-FORMAT",
+        ),
+        (
+            r#"assert!(true || write!(&mut String::new(), "{}", out.stdout).is_ok(), "status failed");"#,
+            "COVERED-BINDING-NESTED-WRITE",
+        ),
+        (
+            r#"assert!(true || { debug_assert!(out.stdout.contains("ready")); false }, "status failed");"#,
+            "COVERED-BINDING-NESTED-DEBUG-ASSERT",
+        ),
+        (
+            r#"assert!(true || std::panic::catch_unwind(|| out.stdout.contains("ready")).is_ok(), "status failed");"#,
+            "COVERED-BINDING-NESTED-CLOSURE",
+        ),
+    ] {
+        assert_red_then_restored_green(
+            "team-agent status --json",
+            &honest_evidence,
+            &canary_source(assertion),
+            &honest_source,
+            signature,
+        );
+    }
+
     for (assertion, macro_name, signature) in [
         (
             r#"assert_eq!(1, 1, "diagnostic-only stdout={}", out.stdout);"#,
@@ -1127,6 +1177,53 @@ fn canary_evidence(
     }
 }
 
+fn covered_canary_entry(command: &str, evidence: CoveredEvidenceDeclaration) -> CoverageEntry {
+    CoverageEntry::Covered {
+        command: command.to_string(),
+        cases: vec![evidence.case.clone()],
+        evidence: Some(evidence),
+        launcher_shim_evidence: None,
+    }
+}
+
+fn assert_global_evidence_identity_canary() {
+    let first = canary_evidence("assert", "condition", "stdout", 7);
+    let duplicate_pair = CoverageManifest {
+        schema_version: "team-agent-skill-command-coverage-v3".to_string(),
+        commands: vec![
+            covered_canary_entry("team-agent status --json", first.clone()),
+            covered_canary_entry("team-agent status", first.clone()),
+        ],
+    };
+    assert!(
+        unique_manifest_commands(&duplicate_pair).is_ok(),
+        "TOOTH-3B global-identity canary: command identity must remain independent from \
+         assertion+twin evidence identity"
+    );
+    assert_failure_signature(
+        validate_assertion_twin_pair_uniqueness(&duplicate_pair),
+        "COVERED-ASSERTION-TWIN-PAIR-DUPLICATE",
+    );
+
+    let mut distinct_pair = first;
+    distinct_pair.assertion.line += 1;
+    distinct_pair.negative_twin.env_value = "verifier-status-distinct".to_string();
+    let restored = CoverageManifest {
+        schema_version: duplicate_pair.schema_version.clone(),
+        commands: vec![
+            covered_canary_entry(
+                "team-agent status --json",
+                canary_evidence("assert", "condition", "stdout", 7),
+            ),
+            covered_canary_entry("team-agent status", distinct_pair),
+        ],
+    };
+    assert!(
+        validate_assertion_twin_pair_uniqueness(&restored).is_ok(),
+        "TOOTH-3B global-identity restore canary: distinct assertion+twin pairs must be green"
+    );
+}
+
 fn canary_source(assertion: &str) -> String {
     canary_source_with_invocation(
         r#"let mut out = run_ta(&ws, &["status", "--json"]);"#,
@@ -1172,7 +1269,16 @@ fn assert_red_then_restored_green(
     restored: &str,
     signature: &str,
 ) {
-    assert_syntax_failure(command, evidence, invalid, signature);
+    let failure = validate_declared_evidence_syntax(command, evidence, invalid)
+        .expect_err("TOOTH-3B harness canary: invalid syntax shape must be red");
+    assert!(
+        failure.contains(signature),
+        "TOOTH-3B harness canary: expected red signature {signature:?}; got {failure}"
+    );
+    eprintln!(
+        "TOOTH-3B RED-THEN-RESTORE signature={signature} INVALID-RAW-BEGIN\n{failure}\n\
+         TOOTH-3B RED-THEN-RESTORE signature={signature} INVALID-RAW-END"
+    );
     if let Err(failure) = validate_declared_evidence_syntax(command, evidence, restored) {
         panic!(
             "TOOTH-3B harness restore canary: {signature} negative must turn green after \
@@ -1186,6 +1292,10 @@ fn assert_failure_signature(result: Result<(), String>, signature: &str) {
     assert!(
         failure.contains(signature),
         "TOOTH-3B harness canary: expected red signature {signature:?}; got {failure}"
+    );
+    eprintln!(
+        "TOOTH-3B FAILURE-SIGNATURE signature={signature} RAW-BEGIN\n{failure}\n\
+         TOOTH-3B FAILURE-SIGNATURE signature={signature} RAW-END"
     );
 }
 
@@ -1216,6 +1326,41 @@ fn unique_manifest_commands(manifest: &CoverageManifest) -> Result<BTreeSet<Stri
         );
     }
     Ok(listed)
+}
+
+fn validate_assertion_twin_pair_uniqueness(manifest: &CoverageManifest) -> Result<(), String> {
+    // Cheap structural screening only. Admission still depends on the executable
+    // discrimination cells in `validate_observable_twin_discrimination`.
+    let mut declared_pairs = BTreeSet::new();
+    for entry in &manifest.commands {
+        let CoverageEntry::Covered {
+            evidence: Some(evidence),
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let pair = (
+            evidence.source_file.as_str(),
+            evidence.case.as_str(),
+            evidence.assertion.macro_name.as_str(),
+            evidence.assertion.line,
+            evidence.assertion.operand.as_str(),
+            evidence.negative_twin.env_key.as_str(),
+            evidence.negative_twin.env_value.as_str(),
+            evidence.negative_twin.operation.as_str(),
+            evidence.negative_twin.remove_literal.as_str(),
+            evidence.negative_twin.replacement.as_str(),
+        );
+        if !declared_pairs.insert(pair) {
+            return Err(
+                "TOOTH-3B COVERED-ASSERTION-TWIN-PAIR-DUPLICATE RED: legal A evidence \
+                 requires each (assertion node, negative twin) pair to be distinct"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_bucket_fields(manifest: &CoverageManifest) -> Result<(), String> {
@@ -1344,6 +1489,7 @@ fn validate_expected_bucket_totals(
 }
 
 fn validate_covered_evidence(manifest: &CoverageManifest, _e2e_tests: &str) -> Result<(), String> {
+    validate_assertion_twin_pair_uniqueness(manifest)?;
     let mut positive_cases = BTreeSet::new();
     for entry in &manifest.commands {
         let CoverageEntry::Covered {
@@ -1387,18 +1533,7 @@ fn validate_covered_evidence(manifest: &CoverageManifest, _e2e_tests: &str) -> R
     for (source_file, case) in positive_cases {
         assert_mapped_case_positive(&source_file, &case)?;
     }
-    for entry in &manifest.commands {
-        let CoverageEntry::Covered {
-            command,
-            evidence: Some(evidence),
-            ..
-        } = entry
-        else {
-            continue;
-        };
-        assert_mapped_case_negative_twin(command, evidence)?;
-    }
-    Ok(())
+    validate_observable_twin_discrimination(manifest)
 }
 
 fn validate_covered_case_registration(manifest: &CoverageManifest) -> Result<(), String> {
@@ -2034,6 +2169,164 @@ fn node_count_failure(kind: &str, count: usize, _declared: &str) -> String {
     )
 }
 
+fn covered_evidence_entries(
+    manifest: &CoverageManifest,
+) -> Vec<(&str, &CoveredEvidenceDeclaration)> {
+    manifest
+        .commands
+        .iter()
+        .filter_map(|entry| match entry {
+            CoverageEntry::Covered {
+                command,
+                evidence: Some(evidence),
+                ..
+            } => Some((command.as_str(), evidence)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn same_assertion_node(
+    left: &CoveredEvidenceDeclaration,
+    right: &CoveredEvidenceDeclaration,
+) -> bool {
+    left.source_file == right.source_file
+        && left.case == right.case
+        && left.assertion.macro_name == right.assertion.macro_name
+        && left.assertion.line == right.assertion.line
+}
+
+fn declared_assertion_is_top_level(evidence: &CoveredEvidenceDeclaration) -> Result<bool, String> {
+    let source =
+        std::fs::read_to_string(repo_root().join(&evidence.source_file)).map_err(|_| {
+            "TOOTH-3B NEGATIVE-TWIN-SEQUENCE-OBSERVABILITY RED: legal sequence evidence \
+             requires a readable declared source"
+                .to_string()
+        })?;
+    let syntax = rust_syntax_tokens(&source)?;
+    let functions = test_function_nodes(&syntax, &evidence.case);
+    if functions.len() != 1 {
+        return Ok(false);
+    }
+    Ok(top_level_assertion_nodes(&functions[0].body)
+        .iter()
+        .filter(|node| {
+            node.line == evidence.assertion.line
+                && node.name == evidence.assertion.macro_name
+                && !node.path_qualified
+        })
+        .count()
+        == 1)
+}
+
+fn emit_twin_cell_raw(row: usize, column: usize, outcome: &str, observed: &str) {
+    eprintln!(
+        "TOOTH-3B TWIN-DISCRIMINATION-CELL row={row} column={column} outcome={outcome} \
+         RAW-BEGIN\n{observed}\nTOOTH-3B TWIN-DISCRIMINATION-CELL \
+         row={row} column={column} RAW-END"
+    );
+}
+
+fn validate_observable_twin_discrimination(manifest: &CoverageManifest) -> Result<(), String> {
+    // Observable closure:
+    // - diagonal: the applied twin fails at its declared assertion;
+    // - same node: that positive failure coordinate also proves a non-diagonal collision;
+    // - earlier top-level assertion: reaching the later failure coordinate proves sequence
+    //   advanced through the earlier assertion without panic.
+    // A later assertion is not observable after an earlier panic. That distinct
+    // twin-overflow risk stays explicitly pending rather than being inferred from silence.
+    let entries = covered_evidence_entries(manifest);
+    for (row, (command, applied)) in entries.iter().enumerate() {
+        let (success, observed) = run_negative_twin_raw(applied)?;
+        if success {
+            return Err(format!(
+                "TOOTH-3B NEGATIVE-TWIN-NOT-RED RED: A entry {command:?} stayed green after \
+                 its declared key behavior fact was removed"
+            ));
+        }
+        if !observed_at_declared_assertion(applied, &observed) {
+            if let Some((column, _)) = entries
+                .iter()
+                .enumerate()
+                .find(|(_, (_, other))| observed_at_declared_assertion(other, &observed))
+            {
+                emit_twin_cell_raw(
+                    row,
+                    column,
+                    "OFF-DIAGONAL-FAILED-BEFORE-DECLARED-NODE",
+                    &observed,
+                );
+                return Err(
+                    "TOOTH-3B NEGATIVE-TWIN-NONINDEPENDENT-ASSERTION RED: legal observable \
+                     cells require the applied twin to fail only at its own declared node; \
+                     a non-diagonal declared assertion failed instead"
+                        .to_string(),
+                );
+            }
+            return Err(
+                "TOOTH-3B NEGATIVE-TWIN-WRONG-FAILURE-SITE RED: twin must fail at the declared \
+                 assertion line and marker, never in setup/parse/launcher"
+                    .to_string(),
+            );
+        }
+        emit_twin_cell_raw(row, row, "DIAGONAL-FAILED-AT-DECLARED-NODE", &observed);
+
+        for (column, (_, other)) in entries.iter().enumerate() {
+            if row == column {
+                continue;
+            }
+            if same_assertion_node(applied, other) {
+                emit_twin_cell_raw(row, column, "OFF-DIAGONAL-FAILED-AT-SHARED-NODE", &observed);
+                return Err(
+                    "TOOTH-3B NEGATIVE-TWIN-NONINDEPENDENT-ASSERTION RED: legal observable \
+                     cells are diagonal failure at one declared node or prior top-level \
+                     assertion pass before that node; one failure coordinate resolved to \
+                     both the applied and a non-diagonal declaration"
+                        .to_string(),
+                );
+            }
+            if applied.source_file != other.source_file || applied.case != other.case {
+                return Err(
+                    "TOOTH-3B NEGATIVE-TWIN-SEQUENCE-OBSERVABILITY RED: legal non-diagonal \
+                     evidence currently requires two top-level assertions in one exact case"
+                        .to_string(),
+                );
+            }
+            if other.assertion.line < applied.assertion.line {
+                if !declared_assertion_is_top_level(applied)?
+                    || !declared_assertion_is_top_level(other)?
+                {
+                    return Err(
+                        "TOOTH-3B NEGATIVE-TWIN-SEQUENCE-OBSERVABILITY RED: legal sequence \
+                         advancement requires both declarations to resolve to top-level \
+                         assertions in the same exact case"
+                            .to_string(),
+                    );
+                }
+                emit_twin_cell_raw(
+                    row,
+                    column,
+                    "OFF-DIAGONAL-PASSED-BY-SEQUENCE-ADVANCEMENT",
+                    &observed,
+                );
+            } else if other.assertion.line > applied.assertion.line {
+                eprintln!(
+                    "TOOTH-3B TWIN-DISCRIMINATION-CELL row={row} column={column} \
+                     outcome=PENDING-TWIN-OVERFLOW-INTO-LATER-ASSERTION: panic at the applied \
+                     node stops the case before the later assertion can emit positive evidence"
+                );
+            } else {
+                return Err(
+                    "TOOTH-3B NEGATIVE-TWIN-SEQUENCE-OBSERVABILITY RED: distinct declarations \
+                     on one source line have no machine-ordered pass credential"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn assert_mapped_case_positive(source_file: &str, case: &str) -> Result<(), String> {
     let output = run_exact_e2e_case(source_file, case, None)?;
     let observed = format!(
@@ -2055,36 +2348,52 @@ fn assert_mapped_case_negative_twin(
     command: &str,
     evidence: &CoveredEvidenceDeclaration,
 ) -> Result<(), String> {
-    let twin = &evidence.negative_twin;
-    let output = run_exact_e2e_case(
-        &evidence.source_file,
-        &evidence.case,
-        Some((&twin.env_key, &twin.env_value)),
-    )?;
-    if output.status.success() {
+    run_negative_twin_at_declared_assertion(command, evidence).map(|_| ())
+}
+
+fn run_negative_twin_at_declared_assertion(
+    command: &str,
+    evidence: &CoveredEvidenceDeclaration,
+) -> Result<String, String> {
+    let (success, observed) = run_negative_twin_raw(evidence)?;
+    if success {
         return Err(format!(
             "TOOTH-3B NEGATIVE-TWIN-NOT-RED RED: A entry {command:?} stayed green after its \
              declared key behavior fact was removed"
         ));
     }
-    let observed = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let file = Path::new(&evidence.source_file)
-        .file_name()
-        .expect("validated evidence source filename")
-        .to_string_lossy();
-    let location = format!("{file}:{}:", evidence.assertion.line);
-    if !observed.contains(&location) || !observed.contains(&evidence.assertion.failure_marker) {
+    if !observed_at_declared_assertion(evidence, &observed) {
         return Err(
             "TOOTH-3B NEGATIVE-TWIN-WRONG-FAILURE-SITE RED: twin must fail at the declared \
              assertion line and marker, never in setup/parse/launcher"
                 .to_string(),
         );
     }
-    Ok(())
+    Ok(observed)
+}
+
+fn run_negative_twin_raw(evidence: &CoveredEvidenceDeclaration) -> Result<(bool, String), String> {
+    let twin = &evidence.negative_twin;
+    let output = run_exact_e2e_case(
+        &evidence.source_file,
+        &evidence.case,
+        Some((&twin.env_key, &twin.env_value)),
+    )?;
+    let observed = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok((output.status.success(), observed))
+}
+
+fn observed_at_declared_assertion(evidence: &CoveredEvidenceDeclaration, observed: &str) -> bool {
+    let file = Path::new(&evidence.source_file)
+        .file_name()
+        .expect("validated evidence source filename")
+        .to_string_lossy();
+    let location = format!("{file}:{}:", evidence.assertion.line);
+    observed.contains(&location) && observed.contains(&evidence.assertion.failure_marker)
 }
 
 fn run_exact_e2e_case(
@@ -2179,6 +2488,57 @@ fn assert_negative_twin_executor_canary() {
         "NEGATIVE-TWIN-NOT-RED",
     );
     assert_ne!(target_line, setup_line);
+}
+
+fn assert_twin_discrimination_canary() {
+    let source_file = "crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs";
+    let case = "gate_hole_twin_discrimination_canary_case";
+    let source = std::fs::read_to_string(repo_root().join(source_file))
+        .expect("read twin discrimination canary source");
+    let syntax = rust_syntax_tokens(&source).expect("parse twin discrimination canary source");
+    let functions = test_function_nodes(&syntax, case);
+    let assertions = assertion_nodes(&functions[0].body);
+    let line_for = |marker: &str| {
+        assertions
+            .iter()
+            .find(|node| string_literal_contains(&node.arguments, marker))
+            .map(|node| node.line)
+            .expect("twin discrimination canary marker")
+    };
+    let evidence_for = |marker: &str, twin: &str| {
+        let mut evidence = canary_evidence("assert_ne", "left", "stdout", line_for(marker));
+        evidence.case = case.to_string();
+        evidence.source_file = source_file.to_string();
+        evidence.assertion.failure_marker = marker.to_string();
+        evidence.negative_twin.env_value = twin.to_string();
+        evidence
+    };
+    let first = evidence_for("NEGATIVE-TWIN-MATRIX-FIRST-CANARY", "matrix-first");
+    let second = evidence_for("NEGATIVE-TWIN-MATRIX-SECOND-CANARY", "matrix-second");
+    let honest = CoverageManifest {
+        schema_version: "team-agent-skill-command-coverage-v3".to_string(),
+        commands: vec![
+            covered_canary_entry("team-agent matrix-first", first.clone()),
+            covered_canary_entry("team-agent matrix-second", second),
+        ],
+    };
+    assert!(
+        validate_observable_twin_discrimination(&honest).is_ok(),
+        "TOOTH-3B twin discrimination canary: diagonal failure plus prior top-level pass \
+         must satisfy the observable matrix"
+    );
+
+    let collision = CoverageManifest {
+        schema_version: honest.schema_version.clone(),
+        commands: vec![
+            covered_canary_entry("team-agent matrix-first", first.clone()),
+            covered_canary_entry("team-agent matrix-collision", first),
+        ],
+    };
+    assert_failure_signature(
+        validate_observable_twin_discrimination(&collision),
+        "NEGATIVE-TWIN-NONINDEPENDENT-ASSERTION",
+    );
 }
 
 fn rust_syntax_tokens(source: &str) -> Result<Vec<RustToken>, String> {
@@ -2690,7 +3050,16 @@ fn assertion_nodes(tokens: &[RustToken]) -> Vec<AssertionNode> {
     assertions
 }
 
-fn collect_assertion_nodes(tokens: &[RustToken], assertions: &mut Vec<AssertionNode>) {
+fn top_level_assertion_nodes(tokens: &[RustToken]) -> Vec<AssertionNode> {
+    let mut assertions = Vec::new();
+    collect_assertion_nodes_at_current_level(tokens, &mut assertions);
+    assertions
+}
+
+fn collect_assertion_nodes_at_current_level(
+    tokens: &[RustToken],
+    assertions: &mut Vec<AssertionNode>,
+) {
     for index in 0..tokens.len() {
         if let (Some(name), Some(arguments)) = (
             token_ident(tokens.get(index)),
@@ -2711,7 +3080,13 @@ fn collect_assertion_nodes(tokens: &[RustToken], assertions: &mut Vec<AssertionN
                 arguments: arguments.to_vec(),
             });
         }
-        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+    }
+}
+
+fn collect_assertion_nodes(tokens: &[RustToken], assertions: &mut Vec<AssertionNode>) {
+    collect_assertion_nodes_at_current_level(tokens, assertions);
+    for token in tokens {
+        if let RustTokenKind::Group { tokens: nested, .. } = &token.kind {
             collect_assertion_nodes(nested, assertions);
         }
     }
@@ -2747,26 +3122,173 @@ fn behavior_fact_in_tokens(
              stdout|stderr|exit_code|is_success|json|quick_start_launched"
             .to_string());
     }
-    if fact == "quick_start_launched" {
-        return Ok(tokens.windows(2).any(|window| {
+    let mut rejected_contexts = BTreeSet::new();
+    if behavior_fact_required_by_expression(tokens, binding, fact, &mut rejected_contexts) {
+        return Ok(true);
+    }
+    if let Some(context) = rejected_contexts.into_iter().next() {
+        return Err(format!(
+            "TOOTH-3B COVERED-BINDING-NESTED-{context} RED: legal behavior evidence must be \
+             required by the assertion condition/comparison expression; references confined \
+             to nested diagnostic macros or closure bodies are not admitted"
+        ));
+    }
+    Ok(false)
+}
+
+fn behavior_fact_required_by_expression(
+    tokens: &[RustToken],
+    binding: &str,
+    fact: &str,
+    rejected_contexts: &mut BTreeSet<&'static str>,
+) -> bool {
+    // This bounded semantic subset admits a direct binding fact (including transparent nested
+    // groups) only when every top-level `||` alternative still requires it. Macro argument trees
+    // and closure bodies are classified separately and never become behavior evidence merely
+    // because they contain the same tokens.
+    let or_branches = logical_or_branches(tokens);
+    if or_branches.len() > 1 {
+        let mut every_branch_requires_fact = true;
+        for branch in or_branches {
+            every_branch_requires_fact &=
+                behavior_fact_required_by_expression(branch, binding, fact, rejected_contexts);
+        }
+        return every_branch_requires_fact;
+    }
+
+    let mut found = false;
+    let mut index = 0;
+    while index < tokens.len() {
+        if let Some((macro_name, arguments)) = nested_macro_at(tokens, index) {
+            if raw_behavior_fact_in_tokens(arguments, binding, fact) {
+                rejected_contexts.insert(nested_macro_context(macro_name));
+            }
+            index += 3;
+            continue;
+        }
+        if let Some(body) = closure_body_at(tokens, index) {
+            if raw_behavior_fact_in_tokens(body, binding, fact) {
+                rejected_contexts.insert("CLOSURE");
+            }
+            break;
+        }
+        if fact == "quick_start_launched"
+            && token_ident(tokens.get(index)) == Some("quick_start_launched")
+            && token_group(tokens.get(index + 1), '(')
+                .is_some_and(|arguments| identifier_in_tokens(arguments, binding))
+        {
+            found = true;
+            index += 2;
+            continue;
+        }
+        if index + 2 < tokens.len()
+            && token_ident(tokens.get(index)) == Some(binding)
+            && matches!(tokens[index + 1].kind, RustTokenKind::Punct('.'))
+            && token_ident(tokens.get(index + 2)) == Some(fact)
+        {
+            found = true;
+            index += 3;
+            continue;
+        }
+        if let RustTokenKind::Group { tokens: nested, .. } = &tokens[index].kind {
+            found |= behavior_fact_required_by_expression(nested, binding, fact, rejected_contexts);
+        }
+        index += 1;
+    }
+    found
+}
+
+fn raw_behavior_fact_in_tokens(tokens: &[RustToken], binding: &str, fact: &str) -> bool {
+    if fact == "quick_start_launched"
+        && tokens.windows(2).any(|window| {
             token_ident(window.first()) == Some("quick_start_launched")
                 && token_group(window.get(1), '(')
                     .is_some_and(|arguments| identifier_in_tokens(arguments, binding))
-        }));
+        })
+    {
+        return true;
     }
     if tokens.windows(3).any(|window| {
         token_ident(window.first()) == Some(binding)
             && matches!(window[1].kind, RustTokenKind::Punct('.'))
             && token_ident(window.get(2)) == Some(fact)
     }) {
-        return Ok(true);
+        return true;
     }
-    Ok(tokens.iter().any(|token| match &token.kind {
-        RustTokenKind::Group { tokens, .. } => {
-            behavior_fact_in_tokens(tokens, binding, fact).unwrap_or(false)
+    tokens.iter().any(|token| match &token.kind {
+        RustTokenKind::Group { tokens: nested, .. } => {
+            raw_behavior_fact_in_tokens(nested, binding, fact)
         }
         _ => false,
-    }))
+    })
+}
+
+fn logical_or_branches(tokens: &[RustToken]) -> Vec<&[RustToken]> {
+    let mut branches = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index + 1 < tokens.len() {
+        let is_double_pipe = matches!(tokens[index].kind, RustTokenKind::Punct('|'))
+            && matches!(tokens[index + 1].kind, RustTokenKind::Punct('|'));
+        if is_double_pipe && !is_expression_start(tokens, index) {
+            branches.push(&tokens[start..index]);
+            start = index + 2;
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    if start == 0 {
+        vec![tokens]
+    } else {
+        branches.push(&tokens[start..]);
+        branches
+    }
+}
+
+fn is_expression_start(tokens: &[RustToken], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    matches!(
+        tokens[index - 1].kind,
+        RustTokenKind::Punct(',') | RustTokenKind::Punct('=') | RustTokenKind::Punct('>')
+    ) || token_ident(tokens.get(index - 1)) == Some("move")
+}
+
+fn nested_macro_at(tokens: &[RustToken], index: usize) -> Option<(&str, &[RustToken])> {
+    let name = token_ident(tokens.get(index))?;
+    matches!(
+        tokens.get(index + 1).map(|token| &token.kind),
+        Some(RustTokenKind::Punct('!'))
+    )
+    .then(|| token_group(tokens.get(index + 2), '('))
+    .flatten()
+    .map(|arguments| (name, arguments))
+}
+
+fn nested_macro_context(name: &str) -> &'static str {
+    match name {
+        "panic" => "PANIC",
+        "format" | "format_args" => "FORMAT",
+        "write" | "writeln" => "WRITE",
+        "debug_assert" | "debug_assert_eq" | "debug_assert_ne" => "DEBUG-ASSERT",
+        "assert" | "assert_eq" | "assert_ne" => "ASSERT",
+        _ => "MACRO",
+    }
+}
+
+fn closure_body_at(tokens: &[RustToken], index: usize) -> Option<&[RustToken]> {
+    if !matches!(tokens.get(index)?.kind, RustTokenKind::Punct('|'))
+        || !is_expression_start(tokens, index)
+    {
+        return None;
+    }
+    let closing = tokens[index + 1..]
+        .iter()
+        .position(|token| matches!(token.kind, RustTokenKind::Punct('|')))
+        .map(|offset| index + 1 + offset)?;
+    Some(&tokens[closing + 1..])
 }
 
 fn negative_twin_hook_lines(
