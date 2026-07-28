@@ -101,10 +101,10 @@ fn legacy_receiver_without_status_still_rejects_a_foreign_workspace() {
         .with_tmux_endpoint(socket)
         .with_targets(vec![observed]);
 
-    assert_eq!(
+    assert!(matches!(
         resolve_live_leader_channel(workspace, &receiver, &transport),
-        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch)
-    );
+        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch(_))
+    ));
 }
 
 #[test]
@@ -162,8 +162,8 @@ fn same_socket_and_pane_in_a_foreign_workspace_is_not_a_live_leader() {
         .with_tmux_endpoint(socket)
         .with_targets(vec![observed]);
 
-    assert_eq!(
+    assert!(matches!(
         resolve_live_leader_channel(workspace, &receiver(socket), &transport),
-        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch)
-    );
+        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch(_))
+    ));
 }

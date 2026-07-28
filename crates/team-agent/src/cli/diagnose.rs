@@ -240,7 +240,7 @@ fn live_leader_workspace_mismatch(
     if !matches!(
         crate::messaging::resolve_live_leader_channel(workspace, receiver, backend),
         crate::messaging::LeaderChannelResolution::Unbound(
-            crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch
+            crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
         )
     ) {
         return None;

@@ -998,10 +998,13 @@ fn resolve_leader(
                 window,
                 socket,
             );
-            if reason == crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch {
-                err.channel_reason = Some(format!("{reason:?}"));
+            if matches!(
+                &reason,
+                crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
+            ) {
+                err.channel_reason = Some(reason.reason_code().to_string());
             }
-            err.log = format!("{} channel_unbound={reason:?}", err.log);
+            err.log = format!("{} channel_unbound={}", err.log, reason.reason_code());
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
             Err(err)

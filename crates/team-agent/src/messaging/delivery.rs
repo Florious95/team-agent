@@ -346,8 +346,8 @@ pub fn deliver_pending_message(
                     .get("status")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("unbound");
-                let refusal = match reason {
-                    crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch => {
+                let refusal = match &reason {
+                    crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_) => {
                         DeliveryRefusal::PaneWorkspaceMismatch
                     }
                     _ => DeliveryRefusal::LeaderNotAttached,
@@ -360,7 +360,7 @@ pub fn deliver_pending_message(
                         "sender": message.sender,
                         "reason": "leader_receiver_not_attached",
                         "error": "leader_not_attached",
-                        "channel_reason": format!("{reason:?}"),
+                        "channel_reason": reason.reason_code(),
                         "channel": "rebind_required",
                         "action": "run team-agent attach-leader or team-agent takeover",
                         "status": receiver_status,
