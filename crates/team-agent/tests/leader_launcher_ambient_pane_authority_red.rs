@@ -45,6 +45,7 @@ use team_agent::transport::Transport;
 const TEAM: &str = "pane-authority";
 const AMBIENT_PANE: &str = "%ambient";
 const GOOD_PANE: &str = "%good";
+const RECOVERY_ACTION_DIRECTION_CANARY_ENV: &str = "TEAM_AGENT_TEST_BREAK_RECOVERY_ACTION_FOR";
 
 #[test]
 #[serial(env)]
@@ -729,6 +730,101 @@ fn b3_recovery_action_removes_the_same_typed_error() {
 
 #[test]
 #[serial(env)]
+fn b3_per_surface_launcher_recovery_action_closes_independently() {
+    assert_independent_surface_recovery_action_closes(RecoverySurface::Launcher);
+}
+
+#[test]
+#[serial(env)]
+fn b3_per_surface_diagnose_recovery_action_closes_independently() {
+    assert_independent_surface_recovery_action_closes(RecoverySurface::Diagnose);
+}
+
+#[test]
+#[serial(env)]
+fn b3_per_surface_doctor_recovery_action_closes_independently() {
+    assert_independent_surface_recovery_action_closes(RecoverySurface::Doctor);
+}
+
+// Per-surface expected state matrix:
+// - A+B2 product tip: launcher=GREEN, diagnose=GREEN, doctor=GREEN.
+// - A-only product tip: launcher=GREEN; diagnose=RED and doctor=RED at
+//   `<surface> independent recovery precondition: public surface must expose
+//   catalog reason PaneWorkspaceMismatch` because the B2 projection is absent.
+// - B2-only product tip: launcher=RED at `launcher independent recovery
+//   precondition: public surface must expose catalog reason
+//   PaneWorkspaceMismatch` because the A projection is absent; diagnose=GREEN
+//   and doctor=GREEN.
+// - Catalog-only boundary: all three are RED at that same surface-local
+//   independent recovery precondition.
+//
+// Direction canary protocol: record the three baseline states and RED
+// signatures, then set RECOVERY_ACTION_DIRECTION_CANARY_ENV to one surface.
+// The selected surface must turn RED from its owning product tip; both
+// non-selected surfaces must retain their baseline state and, when RED, their
+// exact reason/assertion-node/exit-code/field-identity signature.
+// The selected mutation RED signature is `<surface> independent recovery
+// precondition: catalog reason PaneWorkspaceMismatch must have an executable
+// recovery projection`.
+fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
+    let case = Case::new(surface.independent_tag());
+    case.seed_foreign_attached_state();
+    case.set_mode("foreign-workspace");
+
+    let before = surface.invoke(&case, AMBIENT_PANE);
+    let mut before_value =
+        json_stdout_even_on_error(&format!("{} before recovery", surface.name()), &before);
+    apply_surface_local_recovery_action_canary(surface, &mut before_value);
+    assert_catalog_refusal_payload(
+        &before_value,
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
+        None,
+        &format!("{} independent recovery precondition", surface.name()),
+    );
+    let recovery_argv = copyable_recovery_command(&before_value).unwrap_or_else(|| {
+        panic!(
+            "{} RED signature: its own refusal must contain an executable catalog recovery \
+             command; output={before_value}",
+            surface.name()
+        )
+    });
+    let recovery_args = recovery_argv
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    case.set_mode("recovery");
+    let attach = case.run(&recovery_args, Some(GOOD_PANE));
+    assert!(
+        attach.status.success(),
+        "{} RED signature: copying its advertised action after correcting the terminal/pane \
+         context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
+        surface.name(),
+        attach.status,
+        String::from_utf8_lossy(&attach.stdout),
+        String::from_utf8_lossy(&attach.stderr)
+    );
+
+    let after = surface.invoke(&case, GOOD_PANE);
+    let after_value =
+        json_stdout_even_on_error(&format!("{} after recovery", surface.name()), &after);
+    assert_no_reason(
+        &after_value,
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
+        &format!(
+            "{} RED signature: the copied action plus corrected context must remove the \
+             original refusal",
+            surface.name()
+        ),
+    );
+}
+
+#[test]
+#[serial(env)]
+// INTEGRATION-TIP TOOTH: intentionally retains the cross-surface consistency
+// check. Its prerequisite is an integration tip with the A launcher product
+// present; it is not used to attribute an A-only or B2-only slice failure.
 fn b3_each_public_surface_recovery_action_closes_its_original_refusal() {
     for surface in [
         RecoverySurface::Launcher,
@@ -886,6 +982,8 @@ enum RecoverySurface {
 }
 
 impl RecoverySurface {
+    const ALL: [Self; 3] = [Self::Launcher, Self::Diagnose, Self::Doctor];
+
     const fn name(self) -> &'static str {
         match self {
             Self::Launcher => "launcher",
@@ -899,6 +997,22 @@ impl RecoverySurface {
             Self::Launcher => "b3-launcher-action",
             Self::Diagnose => "b3-diagnose-action",
             Self::Doctor => "b3-doctor-action",
+        }
+    }
+
+    const fn independent_tag(self) -> &'static str {
+        match self {
+            Self::Launcher => "b3-independent-launcher-action",
+            Self::Diagnose => "b3-independent-diagnose-action",
+            Self::Doctor => "b3-independent-doctor-action",
+        }
+    }
+
+    const fn canary_key(self) -> &'static str {
+        match self {
+            Self::Launcher => "launcher",
+            Self::Diagnose => "diagnose",
+            Self::Doctor => "doctor",
         }
     }
 
@@ -930,6 +1044,59 @@ impl RecoverySurface {
                 Some(pane),
             ),
         }
+    }
+}
+
+fn apply_surface_local_recovery_action_canary(surface: RecoverySurface, value: &mut Value) {
+    let Some(target) = std::env::var_os(RECOVERY_ACTION_DIRECTION_CANARY_ENV) else {
+        return;
+    };
+    let target = target.to_string_lossy();
+    assert!(
+        RecoverySurface::ALL
+            .iter()
+            .any(|surface| surface.canary_key() == target),
+        "direction canary target must name exactly one public surface; \
+         env={RECOVERY_ACTION_DIRECTION_CANARY_ENV} value={target}"
+    );
+    if surface.canary_key() != target {
+        return;
+    }
+
+    let removed = strip_workspace_mismatch_recovery_action(value);
+    assert!(
+        removed > 0,
+        "{} direction canary setup must remove a real recovery action before the target \
+         assertion; output={value}",
+        surface.name()
+    );
+}
+
+fn strip_workspace_mismatch_recovery_action(value: &mut Value) -> usize {
+    match value {
+        Value::Array(values) => values
+            .iter_mut()
+            .map(strip_workspace_mismatch_recovery_action)
+            .sum(),
+        Value::Object(object) => {
+            let is_workspace_mismatch = object
+                .get(refusal_catalog::REASON_FIELD)
+                .and_then(Value::as_str)
+                == Some(
+                    refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch.as_str(),
+                );
+            let mut removed = 0;
+            if is_workspace_mismatch {
+                removed += usize::from(object.remove(refusal_catalog::ACTION_FIELD).is_some());
+                removed += usize::from(object.remove(refusal_catalog::HINT_ACTION_FIELD).is_some());
+            }
+            removed
+                + object
+                    .values_mut()
+                    .map(strip_workspace_mismatch_recovery_action)
+                    .sum::<usize>()
+        }
+        _ => 0,
     }
 }
 
