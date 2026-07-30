@@ -3,6 +3,7 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -152,6 +153,41 @@ fn report_result_tools_list_exposes_closed_typed_presentation_schema() {
             "presentation.{field} enum must be a non-empty string catalog; values={values:?}"
         );
     }
+    let sink_values = presentation_properties["sink"]["enum"]
+        .as_array()
+        .expect("presentation.sink publishes its typed enum")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_sink_values = ["leader", "casefile", "silent"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        sink_values, expected_sink_values,
+        "presentation.sink enum must exactly match the public catalog"
+    );
+    let class_values = presentation_properties["class"]["enum"]
+        .as_array()
+        .expect("presentation.class publishes its typed enum")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_class_values = [
+        "message",
+        "progress",
+        "stage_result",
+        "stage_pass",
+        "bounce",
+        "blocking",
+        "final_review",
+        "timeout",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        class_values, expected_class_values,
+        "presentation.class enum must exactly match the public catalog"
+    );
     let required = presentation["required"]
         .as_array()
         .expect("presentation publishes required fields");
@@ -161,4 +197,13 @@ fn report_result_tools_list_exposes_closed_typed_presentation_schema() {
             "presentation must require {field}; required={required:?}"
         );
     }
+    let required_fields = required
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_required_fields = ["sink", "class"].into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(
+        required_fields, expected_required_fields,
+        "presentation.required must contain exactly sink and class"
+    );
 }
