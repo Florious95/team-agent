@@ -349,6 +349,23 @@ pub struct McpClient {
 }
 
 pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) -> McpClient {
+    spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, true)
+}
+
+pub fn spawn_mcp_client_without_catalog_check(
+    workspace: &Path,
+    worker_id: &str,
+    owner_team_id: &str,
+) -> McpClient {
+    spawn_mcp_client_with_catalog_check(workspace, worker_id, owner_team_id, false)
+}
+
+fn spawn_mcp_client_with_catalog_check(
+    workspace: &Path,
+    worker_id: &str,
+    owner_team_id: &str,
+    check_catalog: bool,
+) -> McpClient {
     let program = env!("CARGO_BIN_EXE_team-agent").to_string();
     let args = vec![
         "mcp-server".to_string(),
@@ -416,7 +433,10 @@ pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) 
         spawn_spec: McpSpawnSpec { program, args, env },
         trace_path,
     };
-    client.assert_initialize_and_tools();
+    client.assert_initialize();
+    if check_catalog {
+        client.assert_tools_catalog();
+    }
     client
 }
 
@@ -461,15 +481,22 @@ impl McpClient {
         }
     }
 
-    fn assert_initialize_and_tools(&mut self) {
+    pub fn tools_list(&mut self) -> Value {
+        self.rpc("tools/list", json!({}))["result"]["tools"].clone()
+    }
+
+    fn assert_initialize(&mut self) {
         let init = self.rpc("initialize", json!({"protocolVersion": "2024-11-05"}));
         assert_eq!(
             init["result"]["serverInfo"]["name"],
             json!("team_orchestrator"),
             "MCP initialize must expose the Team Agent server identity; init={init}"
         );
-        let listed = self.rpc("tools/list", json!({}));
-        let tools = listed["result"]["tools"]
+    }
+
+    fn assert_tools_catalog(&mut self) {
+        let listed = self.tools_list();
+        let tools = listed
             .as_array()
             .unwrap_or_else(|| panic!("tools/list returned no tools array: {listed}"))
             .iter()
