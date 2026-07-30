@@ -391,30 +391,14 @@ fn r5_missing_case_is_a_successful_empty_set() {
 #[serial(case_results_cli)]
 fn r6_all_case_rows_are_returned_in_created_at_result_id_order() {
     let case_id = "case-r6-shared";
-    let tasks = [
-        task("task-r6-z", None),
-        task("task-r6-b", None),
-        task("task-r6-a", None),
-    ];
-    let case = Case::new("case-results-r6", &tasks);
-    let presentation = || {
-        Some(json!({
-            "sink": "casefile",
-            "class": "stage_result",
-            "case_id": case_id
-        }))
-    };
-    for (task_id, result_id) in [
-        ("task-r6-z", "res-r6-z"),
-        ("task-r6-b", "res-r6-b"),
-        ("task-r6-a", "res-r6-a"),
-    ] {
+    let case = Case::new("case-results-r6", &[task(case_id, Some("pipeline"))]);
+    for result_id in ["res-r6-z", "res-r6-b", "res-r6-a"] {
         case.report(
-            task_id,
+            case_id,
             result_id,
             "opaque",
             json!([{"path": format!("artifact://r6/{result_id}")}]),
-            presentation(),
+            None,
         );
     }
     let conn = case.conn();
