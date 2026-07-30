@@ -9,13 +9,25 @@ use std::io::{ErrorKind, Write as _};
 /// 否则 dict 逐键 `key: value`(嵌套 dict/list 内联 compact json,`ensure_ascii=False`)、非 dict 直接 print。
 /// 返回应打印到 stdout 的字符串(bin main 负责实际 println)。
 pub fn emit(output: &CmdOutput, as_json: bool) -> Option<String> {
+    emit_with_json_order(output, as_json, false)
+}
+
+fn emit_with_json_order(
+    output: &CmdOutput,
+    as_json: bool,
+    preserve_json_order: bool,
+) -> Option<String> {
     match output {
         CmdOutput::None => None,
         CmdOutput::Human(text) => Some(crate::redaction::redact_external_text(text)),
         CmdOutput::Json(value) => {
             let value = crate::redaction::redact_external_value(value);
             if as_json {
-                return serde_json::to_string_pretty(&sort_json(&value)).ok();
+                return if preserve_json_order {
+                    serde_json::to_string_pretty(&value).ok()
+                } else {
+                    serde_json::to_string_pretty(&sort_json(&value)).ok()
+                };
             }
             if let Value::Object(obj) = value {
                 let lines: Vec<String> = obj
@@ -84,7 +96,7 @@ fn emit_result(r: CmdResult) -> ExitCode {
             .map(ToString::to_string),
         _ => None,
     };
-    if let Some(text) = emit(&r.output, r.as_json) {
+    if let Some(text) = emit_with_json_order(&r.output, r.as_json, r.preserve_json_order) {
         if let Err(error) = write_stdout_line(&text) {
             if let Some(message_id) = persisted_message_id {
                 let stderr = std::io::stderr();
@@ -180,6 +192,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
             cmd_collect_for_team(&collect_args(args, cwd)?, parse_args(args).team.as_deref())
                 .map(emit_result)
         }
+        "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
         "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
@@ -226,6 +239,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "install-skill",
     "profile",
     "collect",
+    "results",
     "diagnose",
     "preflight",
     "wait-ready",
@@ -271,7 +285,7 @@ fn default_help() -> String {
     append_help_section(
         &mut out,
         "Core",
-        &["quick-start", "send", "status", "collect"],
+        &["quick-start", "send", "status", "collect", "results"],
     );
     append_help_section(
         &mut out,
@@ -383,6 +397,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("install-skill") => "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]".to_string(),
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
+        Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
         Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]".to_string(),
@@ -1597,6 +1612,27 @@ fn collect_args(args: &[String], cwd: &Path) -> Result<CollectArgs, CliError> {
         result_file: parsed.result_file,
         json: parsed.json,
         team: parsed.team,
+    })
+}
+
+fn results_args(args: &[String], cwd: &Path) -> Result<ResultsArgs, CliError> {
+    if args
+        .iter()
+        .any(|arg| arg == "--to" || arg.starts_with("--to="))
+    {
+        return Err(CliError::Usage(
+            "results does not accept --to; it is a read-only command".to_string(),
+        ));
+    }
+    let parsed = parse_args(args);
+    let case_id = option_value(args, "--case")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CliError::Usage("missing --case".to_string()))?;
+    Ok(ResultsArgs {
+        case_id,
+        workspace: workspace(&parsed, cwd),
+        team: parsed.team,
+        json: parsed.json,
     })
 }
 

@@ -169,6 +169,7 @@ pub(super) fn cmd_send_result(value: Value, as_json: bool) -> CmdResult {
             output: CmdOutput::Human(send_human_output(&value)),
             exit,
             as_json: false,
+            preserve_json_order: false,
         }
     }
 }
