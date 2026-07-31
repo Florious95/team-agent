@@ -216,12 +216,12 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         actual_commands, expected_commands,
-        "B car governance: visible command set must exactly match the v0.5.61@55a65f signed baseline; visible commands={commands:?}"
+        "B car governance: visible command set must exactly match resign@8df51ab9329a1f3ecd8ad847b3a960c701ec20b2; visible commands={commands:?}"
     );
     assert_eq!(
         commands.len(),
         BASELINE_VISIBLE_COMMANDS.len(),
-        "B car governance: visible command list must not contain duplicates relative to the v0.5.61@55a65f signed baseline; visible commands={commands:?}"
+        "B car governance: visible command list must not contain duplicates relative to resign@8df51ab9329a1f3ecd8ad847b3a960c701ec20b2; visible commands={commands:?}"
     );
     for forbidden in [
         "repair-provider",
