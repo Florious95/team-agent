@@ -61,6 +61,11 @@ pub(crate) fn scan_session_candidates_once(
     if matches!(provider, Provider::Copilot) {
         return Ok(copilot::scan_session_store(context));
     }
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode)
+        && context.expected_session_id.is_some()
+    {
+        return Ok(claude::scan_expected_session(context));
+    }
 
     let candidates = common::candidate_session_files(provider, context)?;
     let mut out = common::parse_candidate_files(provider, context, candidates);
