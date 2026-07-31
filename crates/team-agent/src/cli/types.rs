@@ -160,6 +160,8 @@ pub struct CmdResult {
     pub exit: ExitCode,
     /// `--json` 旗标(决定 `emit` 与 inbox 摘要落 stderr vs stdout,`parser.py:505-506`)。
     pub as_json: bool,
+    /// Preserve nested object insertion order for byte-faithful stored envelopes.
+    pub preserve_json_order: bool,
 }
 
 impl CmdResult {
@@ -174,6 +176,20 @@ impl CmdResult {
             output: CmdOutput::Json(value),
             exit,
             as_json,
+            preserve_json_order: false,
+        }
+    }
+    pub fn from_ordered_json(value: Value) -> Self {
+        let exit = if value.get("ok").and_then(Value::as_bool) == Some(false) {
+            ExitCode::Error
+        } else {
+            ExitCode::Ok
+        };
+        Self {
+            output: CmdOutput::Json(value),
+            exit,
+            as_json: true,
+            preserve_json_order: true,
         }
     }
     pub fn human(text: impl Into<String>) -> Self {
@@ -181,6 +197,7 @@ impl CmdResult {
             output: CmdOutput::Human(text.into()),
             exit: ExitCode::Ok,
             as_json: false,
+            preserve_json_order: false,
         }
     }
     pub fn none() -> Self {
@@ -188,6 +205,7 @@ impl CmdResult {
             output: CmdOutput::None,
             exit: ExitCode::Ok,
             as_json: false,
+            preserve_json_order: false,
         }
     }
 }
@@ -641,6 +659,15 @@ pub struct CollectArgs {
     /// envelopes); CLI dispatch refuses bare invocation in a
     /// multi-alive-team workspace.
     pub team: Option<String>,
+}
+
+/// Read-only lookup of all stored result envelopes for one case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultsArgs {
+    pub case_id: String,
+    pub workspace: PathBuf,
+    pub team: Option<String>,
+    pub json: bool,
 }
 
 /// `diagnose`(`parser.py:298`) runtime health report, distinct from `doctor`.

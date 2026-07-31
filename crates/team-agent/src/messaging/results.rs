@@ -45,6 +45,64 @@ impl Default for ResultRoute {
     }
 }
 
+pub fn results_for_case(
+    workspace: &Path,
+    case_id: &str,
+    owner_team_id: Option<&str>,
+    requested_owner_team_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>, MessagingError> {
+    let current_db = workspace.join(".team/runtime/team.db");
+    let legacy_db = workspace.join(".team/team.db");
+    if current_db.exists() {
+        return results_for_case_in_db(
+            &current_db,
+            case_id,
+            owner_team_id,
+            requested_owner_team_id,
+        );
+    }
+    if legacy_db.exists() {
+        return results_for_case_in_db(&legacy_db, case_id, owner_team_id, requested_owner_team_id);
+    }
+    Ok(Vec::new())
+}
+
+fn results_for_case_in_db(
+    db_path: &Path,
+    case_id: &str,
+    owner_team_id: Option<&str>,
+    requested_owner_team_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>, MessagingError> {
+    let conn = crate::db::schema::open_db(db_path)?;
+    // The second predicate works around
+    // `.team/bugs/BUG-caseid-writable-when-route-undeclared-20260730.md`;
+    // it is not design intent.
+    let case_predicate = "task_id = ?1 or json_extract(envelope,'$.presentation.case_id') = ?1";
+    let sql = match owner_team_id {
+        Some(_) => format!(
+            "select envelope from results where ({case_predicate}) \
+             and (owner_team_id = ?2 or owner_team_id = ?3) \
+             order by created_at, result_id"
+        ),
+        None => format!(
+            "select envelope from results where {case_predicate} order by created_at, result_id"
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let row_mapper = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+    let rows = match (owner_team_id, requested_owner_team_id) {
+        (Some(team), Some(requested_team)) => {
+            stmt.query_map(params![case_id, team, requested_team], row_mapper)
+        }
+        (Some(team), None) => stmt.query_map(params![case_id, team, team], row_mapper),
+        (None, _) => stmt.query_map(params![case_id], row_mapper),
+    }?
+    .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|envelope| serde_json::from_str(&envelope).map_err(MessagingError::from))
+        .collect()
+}
+
 /// `collect` (`results.py:45`):投递 pending、捞 uncollected results、校验 envelope、更新任务态、
 /// 写 team_state、ensure coordinator。CLI `collect` + coordinator tick 调。
 pub fn collect(

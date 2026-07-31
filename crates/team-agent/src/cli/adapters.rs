@@ -483,6 +483,43 @@ pub fn cmd_collect_for_team(args: &CollectArgs, team: Option<&str>) -> Result<Cm
     ))
 }
 
+pub fn cmd_results(args: &ResultsArgs) -> Result<CmdResult, CliError> {
+    let selected = match crate::state::selector::resolve_active_team(
+        &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    ) {
+        Ok(selected) => selected,
+        Err(error) => {
+            return Ok(CmdResult::from_json(
+                json!({
+                    "ok": false,
+                    "error": error.to_string(),
+                    "workspace": args.workspace.to_string_lossy().to_string(),
+                }),
+                args.json,
+            ));
+        }
+    };
+    let results = messaging::results::results_for_case(
+        &selected.run_workspace,
+        &args.case_id,
+        Some(selected.team_key.as_str()),
+        args.team.as_deref(),
+    )?;
+    let value = json!({
+        "ok": true,
+        "case_id": args.case_id,
+        "results": results,
+        "workspace": selected.run_workspace.to_string_lossy().to_string(),
+    });
+    Ok(if args.json {
+        CmdResult::from_ordered_json(value)
+    } else {
+        CmdResult::from_json(value, false)
+    })
+}
+
 /// `cmd_allow_peer_talk`(`parser.py allow-peer-talk`).
 pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliError> {
     if args.team.is_some() {
