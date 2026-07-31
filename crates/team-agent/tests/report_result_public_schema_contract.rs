@@ -133,6 +133,17 @@ fn report_result_tools_list_exposes_closed_typed_presentation_schema() {
         .get("properties")
         .and_then(Value::as_object)
         .expect("presentation declares typed child properties");
+    let presentation_property_names = presentation_properties
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_presentation_property_names = ["sink", "class", "case_id"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        presentation_property_names, expected_presentation_property_names,
+        "presentation.properties must contain exactly sink, class, and case_id"
+    );
     for field in ["sink", "class", "case_id"] {
         assert_eq!(
             presentation_properties
@@ -197,6 +208,10 @@ fn report_result_tools_list_exposes_closed_typed_presentation_schema() {
             "presentation must require {field}; required={required:?}"
         );
     }
+    assert!(
+        required.iter().all(Value::is_string),
+        "presentation.required must contain only string field names; required={required:?}"
+    );
     let required_fields = required
         .iter()
         .filter_map(Value::as_str)
@@ -205,5 +220,10 @@ fn report_result_tools_list_exposes_closed_typed_presentation_schema() {
     assert_eq!(
         required_fields, expected_required_fields,
         "presentation.required must contain exactly sink and class"
+    );
+    assert_eq!(
+        required.len(),
+        required_fields.len(),
+        "presentation.required must not contain duplicate field names; required={required:?}"
     );
 }
