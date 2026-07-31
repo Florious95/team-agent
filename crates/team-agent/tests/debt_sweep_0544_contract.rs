@@ -17,7 +17,7 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,7 +40,23 @@ const CALLER_PANE: &str = "%0";
 const STALE_OWNER_PANE: &str = "%9";
 const LIVE_LEADER_PID: u32 = 14_663;
 const STALE_OWNER_PID: u32 = 47_641;
-const BASELINE_VISIBLE_COMMAND_COUNT: usize = 14;
+const BASELINE_VISIBLE_COMMANDS: &[&str] = &[
+    "quick-start",
+    "send",
+    "status",
+    "collect",
+    "results",
+    "restart",
+    "shutdown",
+    "add-agent",
+    "start-agent",
+    "stop-agent",
+    "reset-agent",
+    "diagnose",
+    "claim-leader",
+    "takeover",
+    "attach-leader",
+];
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
@@ -193,10 +209,19 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
     );
     let help = String::from_utf8_lossy(&output.stdout);
     let commands = visible_commands(&help);
+    let actual_commands = commands.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected_commands = BASELINE_VISIBLE_COMMANDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_commands, expected_commands,
+        "B car governance: visible command set must exactly match the v0.5.61@55a65f signed baseline; visible commands={commands:?}"
+    );
     assert_eq!(
         commands.len(),
-        BASELINE_VISIBLE_COMMAND_COUNT,
-        "B car governance: expected new visible command count delta 0 from main@90f590b baseline {BASELINE_VISIBLE_COMMAND_COUNT}; visible commands={commands:?}"
+        BASELINE_VISIBLE_COMMANDS.len(),
+        "B car governance: visible command list must not contain duplicates relative to the v0.5.61@55a65f signed baseline; visible commands={commands:?}"
     );
     for forbidden in [
         "repair-provider",
