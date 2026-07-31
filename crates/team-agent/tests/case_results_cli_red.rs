@@ -29,7 +29,7 @@ use serial_test::serial;
 use team_agent::db::migration::MANAGED_TABLE_LAYOUTS;
 use team_agent::db::schema::{open_db, SCHEMA_VERSION};
 use team_agent::message_store::MessageStore;
-use team_agent::state::persist::save_runtime_state;
+use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const TEAM: &str = "teamA";
 const WORKER: &str = "worker_a";
@@ -580,6 +580,18 @@ fn r10_implicit_active_team_scope_hides_foreign_case_rows() {
         )
         .expect("seed same-case foreign-team result");
 
+    let mut state = load_runtime_state(&case.workspace).expect("load active-team fixture state");
+    state["teams"]["teamB"] = json!({
+        "status": "alive",
+        "session_name": "case-results-team-b",
+        "agents": {
+            "worker_b": {"status": "running", "provider": "fake"}
+        },
+        "tasks": [task(case_id, Some("pipeline"))]
+    });
+    save_runtime_state(&case.workspace, &state)
+        .expect("seed a second independently selectable active team");
+
     let inventory = case
         .conn()
         .prepare(
@@ -605,20 +617,34 @@ fn r10_implicit_active_team_scope_hides_foreign_case_rows() {
         "R10 positive control: both canonical-team and foreign-team rows must exist before the public read"
     );
 
-    let body = results_body(case.run_results_with_implicit_team(case_id), "R10");
-    let ids = result_ids(&body);
-    assert!(
-        ids.contains(&"res-r10-current-team".to_string()),
-        "R10 positive control: omitting --team must still return the active canonical team's row; ids={ids:?}"
-    );
-    assert!(
-        !ids.contains(&"res-r10-foreign-team".to_string()),
-        "R10 RED foreign_owner_team_visible: omitting --team must retain the resolved canonical team scope; ids={ids:?}"
-    );
+    let team_a_body = results_body(case.run_results_with_implicit_team(case_id), "R10");
+    let team_a_ids = result_ids(&team_a_body);
     assert_eq!(
-        ids,
+        team_a_ids,
         ["res-r10-current-team"],
-        "R10 RED implicit_team_scope_widened: the same-case result set must contain only rows owned by the resolved canonical team"
+        "R10 RED active_team_a_scope_not_consumed: omitting --team must return only rows owned by canonical active teamA; ids={team_a_ids:?}"
+    );
+
+    state["active_team_key"] = json!("teamB");
+    state["session_name"] = json!("case-results-team-b");
+    state["agents"] = state["teams"]["teamB"]["agents"].clone();
+    state["tasks"] = state["teams"]["teamB"]["tasks"].clone();
+    save_runtime_state(&case.workspace, &state)
+        .expect("switch the independent canonical active-team source to teamB");
+    let persisted =
+        load_runtime_state(&case.workspace).expect("reload switched active-team source");
+    assert_eq!(
+        persisted["active_team_key"],
+        json!("teamB"),
+        "R10 positive control: the canonical active-team source must independently switch to teamB"
+    );
+
+    let team_b_body = results_body(case.run_results_with_implicit_team(case_id), "R10");
+    let team_b_ids = result_ids(&team_b_body);
+    assert_eq!(
+        team_b_ids,
+        ["res-r10-foreign-team"],
+        "R10 RED active_team_b_scope_not_consumed: after the canonical active source switches, the same implicit public query must return only teamB rows; ids={team_b_ids:?}"
     );
 }
 
