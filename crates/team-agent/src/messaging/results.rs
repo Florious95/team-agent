@@ -64,13 +64,7 @@ pub fn results_for_case(
     if legacy_db.exists() {
         return results_for_case_in_db(&legacy_db, case_id, owner_team_id, requested_owner_team_id);
     }
-    let store = MessageStore::open(workspace)?;
-    results_for_case_in_db(
-        store.db_path(),
-        case_id,
-        owner_team_id,
-        requested_owner_team_id,
-    )
+    Ok(Vec::new())
 }
 
 fn results_for_case_in_db(
