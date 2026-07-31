@@ -33,6 +33,15 @@ pub(crate) struct PreparedLeaderStart {
     ambient_authority: Option<VerifiedAmbientPaneAuthority>,
 }
 
+#[derive(Clone, Copy)]
+enum ManagedClientAttachMode {
+    AttachSession,
+    SwitchClient,
+}
+
+const DIFFERENT_TMUX_SERVER_PREFIX: &str =
+    "managed launcher refuses a different ambient tmux server";
+
 impl PreparedLeaderStart {
     pub(crate) fn plan(&self) -> &LeaderStartPlan {
         &self.plan
@@ -96,7 +105,36 @@ pub(crate) fn prepare_leader_start(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
-    let ambient_authority = ambient_pane_authority_preflight(workspace)?;
+    prepare_leader_start_with_nested_attach(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing,
+        confirm_attach,
+        attach_session,
+        external_leader,
+        false,
+    )
+}
+
+pub(crate) fn prepare_leader_start_with_nested_attach(
+    provider: Provider,
+    provider_args: &[String],
+    workspace: &Path,
+    attach_existing: bool,
+    confirm_attach: bool,
+    attach_session: Option<&SessionName>,
+    external_leader: bool,
+    allow_nested_attach: bool,
+) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
+    let explicit_external_path = external_leader || attach_existing || attach_session.is_some();
+    let state_external_path = workspace_state_uses_external_leader(workspace);
+    let (ambient_authority, managed_client_attach_mode) =
+        if explicit_external_path || state_external_path {
+            (ambient_pane_authority_preflight(workspace)?, None)
+        } else {
+            managed_launcher_ambient_route(workspace, allow_nested_attach)?
+        };
     let plan = leader_start_plan_with_ambient_authority(
         provider,
         provider_args,
@@ -105,7 +143,8 @@ pub(crate) fn prepare_leader_start(
         confirm_attach,
         attach_session,
         external_leader,
-        ambient_authority.is_some(),
+        std::env::var_os("TMUX").is_some(),
+        managed_client_attach_mode,
     )?;
     Ok(PreparedLeaderStart {
         plan,
@@ -122,6 +161,13 @@ pub(crate) fn leader_start_plan_after_ambient_authority_check(
     attach_session: Option<&SessionName>,
     external_leader: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
+    let in_tmux = std::env::var_os("TMUX").is_some();
+    let explicit_external_path = external_leader || attach_existing || attach_session.is_some();
+    let managed_client_attach_mode = (!explicit_external_path).then_some(if in_tmux {
+        ManagedClientAttachMode::SwitchClient
+    } else {
+        ManagedClientAttachMode::AttachSession
+    });
     leader_start_plan_with_ambient_authority(
         provider,
         provider_args,
@@ -130,7 +176,8 @@ pub(crate) fn leader_start_plan_after_ambient_authority_check(
         confirm_attach,
         attach_session,
         external_leader,
-        std::env::var_os("TMUX").is_some(),
+        in_tmux,
+        managed_client_attach_mode,
     )
 }
 
@@ -143,6 +190,7 @@ fn leader_start_plan_with_ambient_authority(
     attach_session: Option<&SessionName>,
     external_leader: bool,
     in_tmux: bool,
+    managed_client_attach_mode: Option<ManagedClientAttachMode>,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
@@ -165,7 +213,12 @@ fn leader_start_plan_with_ambient_authority(
     }
     let state = crate::state::persist::load_runtime_state(workspace).ok();
     let identity = leader_identity_context(workspace, None, state.as_ref())?;
-    let external_path = external_leader || attach_existing || attach_session.is_some();
+    let external_path = external_leader
+        || attach_existing
+        || attach_session.is_some()
+        || state
+            .as_ref()
+            .is_some_and(crate::state::projection::state_is_external_leader);
     // 0.3.28 Step 2: managed mode now uses the SAME dedicated leader session
     // as the external path (`team-agent-leader-<provider>-<folder>-<sha1[:8]>`)
     // — Python parity. Pre-0.3.28 the managed branch used
@@ -199,9 +252,7 @@ fn leader_start_plan_with_ambient_authority(
         } else {
             false
         };
-    let mode = if !external_path && in_tmux {
-        LeaderStartMode::ExecProvider
-    } else if !external_path {
+    let mode = if !external_path {
         LeaderStartMode::ManagedTmuxClient
     } else if in_tmux {
         LeaderStartMode::ExecProvider
@@ -218,6 +269,7 @@ fn leader_start_plan_with_ambient_authority(
         workspace,
         session_name.as_ref(),
         &leader_env,
+        managed_client_attach_mode,
     )?;
     let plan_session_name = if mode == LeaderStartMode::ExecProvider && !external_path {
         None
@@ -423,6 +475,13 @@ struct VerifiedAmbientPaneAuthority {
     tmux: String,
 }
 
+fn workspace_state_uses_external_leader(workspace: &Path) -> bool {
+    crate::state::persist::load_runtime_state_without_migrations(workspace)
+        .ok()
+        .as_ref()
+        .is_some_and(crate::state::projection::state_is_external_leader)
+}
+
 fn ambient_pane_authority_preflight(
     workspace: &Path,
 ) -> Result<Option<VerifiedAmbientPaneAuthority>, PrepareLeaderStartError> {
@@ -440,11 +499,62 @@ fn ambient_pane_authority_preflight(
         .map_err(PrepareLeaderStartError::PaneAuthorityRefused)
 }
 
-fn verified_ambient_pane_authority(
+fn managed_launcher_ambient_route(
+    workspace: &Path,
+    allow_nested_attach: bool,
+) -> Result<
+    (
+        Option<VerifiedAmbientPaneAuthority>,
+        Option<ManagedClientAttachMode>,
+    ),
+    PrepareLeaderStartError,
+> {
+    let Some(tmux) = std::env::var_os("TMUX") else {
+        return Ok((None, Some(ManagedClientAttachMode::AttachSession)));
+    };
+    let tmux = tmux.into_string().map_err(|_| {
+        PrepareLeaderStartError::PaneAuthorityRefused(ambient_tmux_endpoint_refusal(
+            workspace,
+            pane_refusal::AmbientTmuxEndpointUnavailableCause::TmuxValueNotUnicode,
+        ))
+    })?;
+    let observed_endpoint = validated_ambient_tmux_endpoint(workspace, &tmux)
+        .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
+    let target_socket_name = TmuxBackend::for_workspace(workspace)
+        .tmux_endpoint()
+        .ok_or_else(|| LeaderError::Start("workspace tmux endpoint missing".to_string()))?;
+    let target_endpoint = crate::tmux_backend::socket_path_for_workspace(workspace);
+    let same_server = target_endpoint.as_ref().is_some_and(|target| {
+        let observed = Path::new(&observed_endpoint)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&observed_endpoint));
+        let target = target.canonicalize().unwrap_or_else(|_| target.clone());
+        observed == target
+    });
+    if same_server {
+        let authority = verified_ambient_pane_authority(workspace, &tmux)
+            .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
+        return Ok((Some(authority), Some(ManagedClientAttachMode::SwitchClient)));
+    }
+    if !allow_nested_attach {
+        return Err(LeaderError::Validation(format!(
+            "{DIFFERENT_TMUX_SERVER_PREFIX}: observed_endpoint={observed_endpoint}; \
+             requested_workspace_socket={target_socket_name}"
+        ))
+        .into());
+    }
+    let authority = verified_ambient_pane_authority(workspace, &tmux)
+        .map_err(PrepareLeaderStartError::PaneAuthorityRefused)?;
+    Ok((
+        Some(authority),
+        Some(ManagedClientAttachMode::AttachSession),
+    ))
+}
+
+fn validated_ambient_tmux_endpoint(
     workspace: &Path,
     tmux: &str,
-) -> Result<VerifiedAmbientPaneAuthority, pane_refusal::PaneAuthorityRefusal> {
-    let requested_workspace = resolve_workspace_for_hash(workspace);
+) -> Result<String, pane_refusal::PaneAuthorityRefusal> {
     let tuple = tmux.split(',').map(str::trim).collect::<Vec<_>>();
     let [endpoint, server_pid, session_index] = tuple.as_slice() else {
         return Err(ambient_tmux_endpoint_refusal(
@@ -476,7 +586,15 @@ fn verified_ambient_pane_authority(
             pane_refusal::AmbientTmuxEndpointUnavailableCause::SessionIndexInvalid,
         ));
     }
-    let endpoint = (*endpoint).to_string();
+    Ok((*endpoint).to_string())
+}
+
+fn verified_ambient_pane_authority(
+    workspace: &Path,
+    tmux: &str,
+) -> Result<VerifiedAmbientPaneAuthority, pane_refusal::PaneAuthorityRefusal> {
+    let requested_workspace = resolve_workspace_for_hash(workspace);
+    let endpoint = validated_ambient_tmux_endpoint(workspace, tmux)?;
     let pane_id = match std::env::var_os("TMUX_PANE") {
         None => {
             return Err(pane_refusal::PaneAuthorityRefusal::new(
@@ -768,6 +886,7 @@ fn start_argv(
     workspace: &Path,
     session_name: Option<&SessionName>,
     leader_env: &BTreeMap<String, String>,
+    managed_client_attach_mode: Option<ManagedClientAttachMode>,
 ) -> Result<Vec<String>, LeaderError> {
     let provider_cmd = provider_command_name(provider).to_string();
     match mode {
@@ -782,7 +901,10 @@ fn start_argv(
                     "managed leader session missing".to_string(),
                 ));
             };
-            managed_client_argv(workspace, session, provider)
+            let attach_mode = managed_client_attach_mode.ok_or_else(|| {
+                LeaderError::Start("managed client attach mode missing".to_string())
+            })?;
+            managed_client_argv(workspace, session, provider, attach_mode)
         }
         LeaderStartMode::AttachExisting => {
             let Some(session) = session_name else {
@@ -856,25 +978,25 @@ fn managed_client_argv(
     workspace: &Path,
     session: &SessionName,
     provider: Provider,
+    attach_mode: ManagedClientAttachMode,
 ) -> Result<Vec<String>, LeaderError> {
     // 0.3.28 Step 2: leader window inside the dedicated leader session is
     // named after `provider_wire(provider)` (e.g. `claude`, `codex`, `fake`),
     // never the literal `leader`. Pre-0.3.28 this hardcoded `:leader`.
     let target = format!("{}:{}", session.as_str(), provider_wire(provider));
-    let argv = if std::env::var_os("TMUX").is_some() {
-        vec![
+    let argv = match attach_mode {
+        ManagedClientAttachMode::SwitchClient => vec![
             "tmux".to_string(),
             "switch-client".to_string(),
             "-t".to_string(),
             target,
-        ]
-    } else {
-        vec![
+        ],
+        ManagedClientAttachMode::AttachSession => vec![
             "tmux".to_string(),
             "attach-session".to_string(),
             "-t".to_string(),
             target,
-        ]
+        ],
     };
     Ok(TmuxBackend::argv_for_workspace(workspace, &argv))
 }
@@ -1160,6 +1282,11 @@ fn persist_managed_leader_binding(
     let session = spawned.session.as_str().to_string();
     let window = spawned.window.as_str().to_string();
     let pane = spawned.pane_id.as_str().to_string();
+    let attach_mode = if plan.argv.iter().any(|arg| arg == "switch-client") {
+        "switch-client"
+    } else {
+        "attach-session"
+    };
     let receiver = serde_json::json!({
         "mode": "direct_tmux",
         "status": "attached",
@@ -1222,7 +1349,7 @@ fn persist_managed_leader_binding(
             "leader_client".to_string(),
             serde_json::json!({
                 "diagnostic_only": true,
-                "attach_mode": if std::env::var_os("TMUX").is_some() { "switch-client" } else { "attach-session" },
+                "attach_mode": attach_mode,
                 "tmux": std::env::var("TMUX").ok(),
             }),
         );
@@ -1667,6 +1794,12 @@ fn run_leader_argv(
     command.envs(env);
     for key in &env_unset {
         command.env_remove(key);
+    }
+    if plan.mode == LeaderStartMode::ManagedTmuxClient
+        && argv.iter().any(|arg| arg == "attach-session")
+    {
+        command.env_remove("TMUX");
+        command.env_remove("TMUX_PANE");
     }
     let mut child = command.spawn()?;
     let stderr_reader = child.stderr.take().map(|mut child_stderr| {

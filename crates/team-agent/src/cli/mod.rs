@@ -151,7 +151,7 @@ pub mod lifecycle_port {
             .attach_session
             .as_ref()
             .map(|name| crate::transport::SessionName::new(name.clone()));
-        let prepared = match crate::leader::start::prepare_leader_start(
+        let prepared = match crate::leader::start::prepare_leader_start_with_nested_attach(
             provider,
             provider_args,
             cwd,
@@ -159,6 +159,7 @@ pub mod lifecycle_port {
             attach.confirm_attach,
             attach_session.as_ref(),
             attach.external_leader,
+            attach.allow_nested_attach,
         ) {
             Ok(prepared) => prepared,
             Err(crate::leader::start::PrepareLeaderStartError::PaneAuthorityRefused(refusal)) => {

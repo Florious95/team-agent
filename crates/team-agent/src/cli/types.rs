@@ -107,6 +107,10 @@ impl CliError {
             payload.action = String::from(
                 "move the Team Agent launcher flag before `--`; only provider flags belong after `--`",
             );
+        } else if error.contains("managed launcher refuses a different ambient tmux server") {
+            payload.action = String::from(
+                "leave the current tmux client and retry, or pass `--allow-nested-attach` before `--` to opt in to a nested managed attach",
+            );
         }
         payload
     }
