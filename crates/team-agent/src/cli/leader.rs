@@ -39,6 +39,8 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
             out.confirm_attach = true;
         } else if token == "--external-leader" {
             out.external_leader = true;
+        } else if token == "--allow-nested-attach" {
+            out.allow_nested_attach = true;
         } else if token == "--attach-session" {
             let Some(value) = values.get(idx + 1) else {
                 return Err(CliError::Runtime(
@@ -60,7 +62,12 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
 fn is_leader_launcher_flag(value: &str) -> bool {
     matches!(
         value,
-        "--external-leader" | "--attach" | "--attach-existing" | "--confirm" | "--attach-session"
+        "--external-leader"
+            | "--allow-nested-attach"
+            | "--attach"
+            | "--attach-existing"
+            | "--confirm"
+            | "--attach-session"
     ) || value.starts_with("--attach-session=")
 }
 

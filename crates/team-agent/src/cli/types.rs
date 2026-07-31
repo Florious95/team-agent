@@ -228,6 +228,8 @@ pub struct LeaderLauncherArgs {
     pub attach_session: Option<String>,
     /// 0.3.16 topology opt-out: keep the old external/current-pane leader launcher path.
     pub external_leader: bool,
+    /// N41 explicit opt-in for attaching a managed leader from another tmux server.
+    pub allow_nested_attach: bool,
 }
 
 // =============================================================================
