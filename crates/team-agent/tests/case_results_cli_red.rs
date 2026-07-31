@@ -29,7 +29,7 @@ use serial_test::serial;
 use team_agent::db::migration::MANAGED_TABLE_LAYOUTS;
 use team_agent::db::schema::{open_db, SCHEMA_VERSION};
 use team_agent::message_store::MessageStore;
-use team_agent::state::persist::save_runtime_state;
+use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const TEAM: &str = "teamA";
 const WORKER: &str = "worker_a";
@@ -109,6 +109,20 @@ impl Case {
                 case_id,
                 "--team",
                 TEAM,
+                "--workspace",
+                self.workspace.to_str().expect("UTF-8 workspace"),
+                "--json",
+            ],
+        )
+    }
+
+    fn run_results_with_implicit_team(&self, case_id: &str) -> Output {
+        self.env.run_cli(
+            &self.workspace,
+            &[
+                "results",
+                "--case",
+                case_id,
                 "--workspace",
                 self.workspace.to_str().expect("UTF-8 workspace"),
                 "--json",
@@ -520,6 +534,117 @@ fn r9_results_has_no_to_option_and_never_sends() {
     assert_eq!(
         after, before,
         "R9 RED read_sent_message: results must not create message, schedule, token, or leader-notification rows"
+    );
+}
+
+#[test]
+#[serial(case_results_cli)]
+fn r10_implicit_active_team_scope_hides_foreign_case_rows() {
+    let case_id = "case-r10-owner-scope";
+    let case = Case::new("case-results-r10", &[task(case_id, Some("pipeline"))]);
+    case.report(
+        case_id,
+        "res-r10-current-team",
+        "ready",
+        json!([{"path": "artifact://r10/current-team"}]),
+        None,
+    );
+
+    let foreign_envelope = json!({
+        "schema_version": "result_envelope_v1",
+        "result_id": "res-r10-foreign-team",
+        "task_id": case_id,
+        "agent_id": "worker_b",
+        "status": "ready",
+        "summary": "R10_FOREIGN_TEAM_CANARY",
+        "changes": [],
+        "tests": [],
+        "risks": [],
+        "artifacts": [{"path": "artifact://r10/foreign-team"}],
+        "next_actions": []
+    });
+    case.conn()
+        .execute(
+            "insert into results(
+                result_id, owner_team_id, task_id, agent_id, envelope, status, created_at
+             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                "res-r10-foreign-team",
+                "teamB",
+                case_id,
+                "worker_b",
+                serde_json::to_string(&foreign_envelope).expect("serialize foreign result"),
+                "ready",
+                "2026-07-31T00:00:00Z"
+            ],
+        )
+        .expect("seed same-case foreign-team result");
+
+    let mut state = load_runtime_state(&case.workspace).expect("load active-team fixture state");
+    state["teams"]["teamB"] = json!({
+        "status": "alive",
+        "session_name": "case-results-team-b",
+        "agents": {
+            "worker_b": {"status": "running", "provider": "fake"}
+        },
+        "tasks": [task(case_id, Some("pipeline"))]
+    });
+    save_runtime_state(&case.workspace, &state)
+        .expect("seed a second independently selectable active team");
+
+    let inventory = case
+        .conn()
+        .prepare(
+            "select owner_team_id, result_id
+             from results
+             where task_id = ?1
+             order by owner_team_id, result_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([case_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("read complete same-case owner inventory");
+    assert_eq!(
+        inventory,
+        [
+            (TEAM.to_string(), "res-r10-current-team".to_string()),
+            ("teamB".to_string(), "res-r10-foreign-team".to_string()),
+        ],
+        "R10 positive control: both canonical-team and foreign-team rows must exist before the public read"
+    );
+
+    let team_a_body = results_body(case.run_results_with_implicit_team(case_id), "R10");
+    let team_a_ids = result_ids(&team_a_body);
+    assert_eq!(
+        team_a_ids,
+        ["res-r10-current-team"],
+        "R10 RED active_team_a_scope_not_consumed: omitting --team must return only rows owned by canonical active teamA; ids={team_a_ids:?}"
+    );
+
+    state["active_team_key"] = json!("teamB");
+    state["session_name"] = json!("case-results-team-b");
+    state["agents"] = state["teams"]["teamB"]["agents"].clone();
+    state["tasks"] = state["teams"]["teamB"]["tasks"].clone();
+    save_runtime_state(&case.workspace, &state)
+        .expect("switch the independent canonical active-team source to teamB");
+    let persisted =
+        load_runtime_state(&case.workspace).expect("reload switched active-team source");
+    assert_eq!(
+        persisted["active_team_key"],
+        json!("teamB"),
+        "R10 positive control: the canonical active-team source must independently switch to teamB"
+    );
+
+    let team_b_body = results_body(case.run_results_with_implicit_team(case_id), "R10");
+    let team_b_ids = result_ids(&team_b_body);
+    assert_eq!(
+        team_b_ids,
+        ["res-r10-foreign-team"],
+        "R10 RED active_team_b_scope_not_consumed: after the canonical active source switches, the same implicit public query must return only teamB rows; ids={team_b_ids:?}"
     );
 }
 
