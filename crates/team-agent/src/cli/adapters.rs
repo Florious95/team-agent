@@ -504,7 +504,7 @@ pub fn cmd_results(args: &ResultsArgs) -> Result<CmdResult, CliError> {
     let results = messaging::results::results_for_case(
         &selected.run_workspace,
         &args.case_id,
-        args.team.as_ref().map(|_| selected.team_key.as_str()),
+        Some(selected.team_key.as_str()),
         args.team.as_deref(),
     )?;
     let value = json!({
