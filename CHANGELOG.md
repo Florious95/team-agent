@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.61
+
+- **Feature: case-scoped result reads.** `results --case` adds the approved CLI-only case filter with independent team and case predicates; no result schema, MCP, or watcher behavior changes.
+
+- **Fix: deterministic Claude session addressing.** A preallocated session UUID is now used as an address instead of a scan hint, eliminating the unbounded candidate search path while retaining bounded failure behavior.
+
+- **Contract: exact `report_result` presentation schema.** The public MCP schema now pins the `presentation` object and its accepted fields and values so invalid presentation requests fail closed.
+
+- **Release identity:** all package and binary version surfaces are `0.5.61`. The candidate previously reported the same `0.5.60` version as the stable build, which made the tested artifact indistinguishable and contributed to two silent local-install misidentifications.
+
+### Pre-existing defects shipped with this release
+
+- `.team/bugs/BUG-collect-not-emitted-team-state-not-written-20260731.md`: `collect` does not emit `collect.result` or write `team_state.md`, despite the current product copy.
+- `.team/bugs/BUG-local-install-does-not-install-local-code-20260731.md`: the local installer can silently install a prebuilt package binary instead of the local source build.
+- `.team/bugs/BUG-caseid-writable-when-route-undeclared-20260731.md`: a producer can set `case_id` when `result_route` is undeclared.
+- `.team/bugs/BUG-control-plane-approval-not-auto-cleared-20260731.md`: control-plane approval is not automatically cleared; this is tracked as an observation.
+
+### Known residual unknowns
+
+- The `enum` ordering, duplicate-value behavior, and `description` dimension are not locked.
+- Claude-side real-subscription E2E was not run for this candidate.
+- Isolation gate R5 still has a harness debt that can report 5/6 for multi-seat runs by treating the test binary as the coordinator binary.
+
 ## 0.5.60
 
 - **Fix: `fork-agent` now carries a safe, resumable target identity through the full provider lifecycle.** Fork targets receive their own identity at spawn, and their provider backing is materialized offline before launch without touching the active source rollout. Completion projects the persisted finalize audit, preserves source nonce/session bytes, wires the expected pending id, treats an exact miss as empty instead of guessing, and excludes both the source session id and backing path. UUIDv7 freshness comparisons now use millisecond precision and only exact authority can finalize a pending fork.
