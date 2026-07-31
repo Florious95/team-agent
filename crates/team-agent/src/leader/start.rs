@@ -422,7 +422,9 @@ fn execute_leader_plan_after_ambient_authority(
     let detached = plan.mode == LeaderStartMode::NewTmuxSession
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
-    if plan.mode == LeaderStartMode::ExecProvider && !plan.is_external_leader {
+    let bind_verified_ambient = plan.mode == LeaderStartMode::ExecProvider
+        && (!plan.is_external_leader || workspace_state_uses_external_leader(workspace));
+    if bind_verified_ambient {
         let authority = ambient_authority.ok_or_else(|| {
             LeaderError::Validation("exec provider ambient pane authority missing".to_string())
         })?;
@@ -439,7 +441,12 @@ fn execute_leader_plan_after_ambient_authority(
                 // No canonical state write. Provider still runs below.
             }
             ExecProviderBinding::Unbound => {
-                persist_exec_provider_leader_binding(plan, workspace, authority)?;
+                persist_exec_provider_leader_binding(
+                    plan,
+                    workspace,
+                    authority,
+                    plan.is_external_leader,
+                )?;
             }
         }
     } else if plan.is_external_leader {
@@ -1388,6 +1395,7 @@ fn persist_exec_provider_leader_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
     authority: &VerifiedAmbientPaneAuthority,
+    is_external_leader: bool,
 ) -> Result<(), LeaderError> {
     let identity = plan
         .identity
@@ -1456,7 +1464,10 @@ fn persist_exec_provider_leader_binding(
         );
         obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
         obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
-        obj.insert("is_external_leader".to_string(), serde_json::json!(false));
+        obj.insert(
+            "is_external_leader".to_string(),
+            serde_json::json!(is_external_leader),
+        );
         obj.insert(
             "leader_client".to_string(),
             serde_json::json!({
