@@ -14,7 +14,8 @@
 //!
 //! The public CLI is executed by absolute Cargo binary path. No real provider
 //! or tmux server is used: a hermetic PATH shim records the physical route,
-//! and all fixture sockets live below TEAM_AGENT_TEST_TMP.
+//! and all fixture sockets live below an explicit test root or Cargo's
+//! package-owned target tmpdir.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -303,7 +304,7 @@ impl Case {
 
         let socket_base = std::env::var_os("TEAM_AGENT_TEST_TMP")
             .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
         let owned_socket_root = ShortSocketRoot::new(socket_base.join(format!(
             "t70n41-{}-{}",
             std::process::id(),
