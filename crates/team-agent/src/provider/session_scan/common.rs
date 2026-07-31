@@ -26,25 +26,36 @@ pub(super) fn candidate_session_files(
 ) -> Result<Vec<SessionCandidate>, ProviderError> {
     let mut out = Vec::new();
     if let Some(root) = context.provider_projects_root.as_ref() {
-        collect_optional_candidate_files(root, &context.agent_id, &mut out)?;
+        let allowed_team_root =
+            matches!(provider, Provider::Claude | Provider::ClaudeCode).then_some(root.as_path());
+        collect_optional_candidate_files(root, &context.agent_id, allowed_team_root, &mut out)?;
     }
-    collect_candidate_files(&context.spawn_cwd, &context.agent_id, 0, false, &mut out)?;
+    collect_candidate_files(
+        &context.spawn_cwd,
+        &context.agent_id,
+        0,
+        false,
+        None,
+        &mut out,
+    )?;
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         match provider {
             Provider::Codex => {
                 collect_optional_candidate_files(
                     &home.join(".codex").join("sessions"),
                     &context.agent_id,
+                    None,
                     &mut out,
                 )?;
             }
             Provider::Claude | Provider::ClaudeCode => {
                 if let Some(dir) = super::claude::projects_dir_for_cwd(&home, &context.spawn_cwd) {
-                    collect_optional_candidate_files(&dir, &context.agent_id, &mut out)?;
+                    collect_optional_candidate_files(&dir, &context.agent_id, None, &mut out)?;
                 }
                 collect_optional_candidate_files(
                     &home.join(".claude").join("projects"),
                     &context.agent_id,
+                    None,
                     &mut out,
                 )?;
             }
@@ -275,10 +286,11 @@ fn complete_head_text(bytes: &[u8]) -> String {
 fn collect_optional_candidate_files(
     dir: &Path,
     agent_id: &str,
+    allowed_team_root: Option<&Path>,
     out: &mut Vec<SessionCandidate>,
 ) -> Result<(), ProviderError> {
     if dir.exists() {
-        let _ = collect_candidate_files(dir, agent_id, 0, true, out);
+        let _ = collect_candidate_files(dir, agent_id, 0, true, allowed_team_root, out);
     }
     Ok(())
 }
@@ -288,6 +300,7 @@ fn collect_candidate_files(
     agent_id: &str,
     depth: usize,
     requires_cwd_match: bool,
+    allowed_team_root: Option<&Path>,
     out: &mut Vec<SessionCandidate>,
 ) -> Result<(), ProviderError> {
     if depth > 4 {
@@ -309,9 +322,10 @@ fn collect_candidate_files(
                 agent_id,
                 depth.saturating_add(1),
                 requires_cwd_match,
+                allowed_team_root,
                 out,
             )?;
-        } else if looks_like_session_file(&path, agent_id) {
+        } else if looks_like_session_file(&path, agent_id, allowed_team_root) {
             out.push(SessionCandidate {
                 path,
                 requires_cwd_match,
@@ -321,8 +335,10 @@ fn collect_candidate_files(
     Ok(())
 }
 
-fn looks_like_session_file(path: &Path, agent_id: &str) -> bool {
-    if path_is_under_team_runtime(path) {
+fn looks_like_session_file(path: &Path, agent_id: &str, allowed_team_root: Option<&Path>) -> bool {
+    if path_is_under_team_runtime(path)
+        && !allowed_team_root.is_some_and(|root| path.starts_with(root))
+    {
         return false;
     }
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {

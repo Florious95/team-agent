@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::provider::types::SessionId;
+use crate::provider::helpers::find_session_id;
+use crate::provider::types::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
 use crate::provider::Provider;
 
 use super::{CaptureSessionContext, CapturedSessionCandidate};
@@ -14,7 +15,7 @@ pub(crate) fn projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<Path
     Some(home.join(".claude").join("projects").join(encoded))
 }
 
-fn encode_projects_dir(path: &str) -> String {
+pub(super) fn encode_projects_dir(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
         if c.is_ascii_alphanumeric() {
@@ -24,6 +25,65 @@ fn encode_projects_dir(path: &str) -> String {
         }
     }
     out
+}
+
+pub(super) fn scan_expected_session(
+    context: &CaptureSessionContext,
+) -> Vec<CapturedSessionCandidate> {
+    let Some(expected) = context.expected_session_id.as_ref() else {
+        return Vec::new();
+    };
+    let Some(projects_root) = context.provider_projects_root.clone().or_else(|| {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".claude").join("projects"))
+    }) else {
+        return Vec::new();
+    };
+    let canonical =
+        std::fs::canonicalize(&context.spawn_cwd).unwrap_or_else(|_| context.spawn_cwd.clone());
+    let encoded = encode_projects_dir(&canonical.to_string_lossy());
+    if encoded.is_empty() {
+        return Vec::new();
+    }
+    let path = projects_root
+        .join(encoded)
+        .join(format!("{}.jsonl", expected.as_str()));
+    let Ok(text) = super::common::read_head_text(&path, super::common::CAPTURE_HEAD_BYTES) else {
+        return Vec::new();
+    };
+    let records = super::common::parse_session_records(&text);
+    let session_matches = records
+        .iter()
+        .find_map(find_session_id)
+        .is_some_and(|session_id| session_id == expected.as_str());
+    let has_lifecycle_record = records.iter().any(|record| {
+        matches!(
+            record.get("type").and_then(serde_json::Value::as_str),
+            Some("user" | "assistant")
+        )
+    });
+    if !session_matches
+        || !has_lifecycle_record
+        || records_have_leader_marker(&records)
+        || !records.iter().any(has_cwd_field)
+    {
+        return Vec::new();
+    }
+    let embedded_agent_id = super::common::embedded_team_agent_worker_id_from_text(&text);
+    let positive_agent_id_match = embedded_agent_id.as_deref() == Some(context.agent_id.as_str());
+    vec![CapturedSessionCandidate {
+        captured: CapturedSession {
+            session_id: Some(expected.clone()),
+            rollout_path: Some(RolloutPath::new(path)),
+            captured_via: CaptureVia::FsWatch,
+            attribution_confidence: Confidence::High,
+            spawn_cwd: context.spawn_cwd.clone(),
+        },
+        embedded_agent_id,
+        positive_agent_id_match,
+        agent_path_match: false,
+    }]
 }
 
 pub(crate) fn rollout_path_has_leader_marker(provider: Provider, rollout_path: &Path) -> bool {
@@ -112,11 +172,17 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let path = dir.join(format!("{uuid}.jsonl"));
         let line = serde_json::json!({
+            "type": "user",
             "sessionId": uuid,
             "cwd": cwd.to_string_lossy(),
         });
         std::fs::write(&path, format!("{line}\n")).unwrap();
         path
+    }
+
+    fn expected_transcript_dir(projects_root: &Path, cwd: &Path) -> PathBuf {
+        let canonical = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        projects_root.join(encode_projects_dir(&canonical.to_string_lossy()))
     }
 
     #[test]
@@ -205,7 +271,11 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let proj = base.join("projects");
         write_transcript(&proj, "11111111-1111-4111-8111-111111111111", &cwd);
-        write_transcript(&proj, "22222222-2222-4222-8222-222222222222", &cwd);
+        let expected = write_transcript(
+            &expected_transcript_dir(&proj, &cwd),
+            "22222222-2222-4222-8222-222222222222",
+            &cwd,
+        );
         let ctx = CaptureSessionContext {
             agent_id: "w1".to_string(),
             spawn_cwd: cwd.clone(),
@@ -220,6 +290,10 @@ mod tests {
         assert_eq!(
             out[0].captured.session_id.as_ref().unwrap().as_str(),
             "22222222-2222-4222-8222-222222222222"
+        );
+        assert_eq!(
+            out[0].captured.rollout_path.as_ref().unwrap().as_path(),
+            expected
         );
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -284,6 +358,21 @@ mod tests {
         let proj = base.join("projects");
         let leader = write_transcript(&proj, "11111111-1111-4111-8111-111111111111", &cwd);
         let stale = write_transcript(&proj, "22222222-2222-4222-8222-222222222222", &cwd);
+        let addressed =
+            expected_transcript_dir(&proj, &cwd).join("99999999-9999-4999-8999-999999999999.jsonl");
+        std::fs::create_dir_all(addressed.parent().unwrap()).unwrap();
+        std::fs::write(
+            &addressed,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "sessionId": "22222222-2222-4222-8222-222222222222",
+                    "cwd": cwd.to_string_lossy(),
+                })
+            ),
+        )
+        .unwrap();
         let _ = (leader, stale);
         let ctx = CaptureSessionContext {
             agent_id: "claude-worker".to_string(),

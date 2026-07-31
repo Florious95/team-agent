@@ -210,17 +210,9 @@ fn claude_capture_prefers_expected_session_id_under_provider_projects_root() {
     std::fs::create_dir_all(home.join(".claude").join("projects")).unwrap();
 
     let expected = "22222222-3333-4444-9555-666666666666";
-    write_claude_transcript(
-        &projects_root.join("target.jsonl"),
-        expected,
-        &spawn_cwd,
-        "target-agent-marker",
-    );
-    write_claude_transcript(
-        &home
-            .join(".claude")
-            .join("projects")
-            .join("distractor.jsonl"),
+    write_valid_claude_transcript(&projects_root, expected, &spawn_cwd, "target-agent-marker");
+    write_valid_claude_transcript(
+        &home.join(".claude").join("projects"),
         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         &spawn_cwd,
         "distractor-agent-marker",
@@ -331,18 +323,8 @@ fn claude_capture_expected_id_exact_match_still_wins() {
 
     let expected = "36dd1d1a-2766-4636-856c-03f14a4bb803";
     let sibling = "7d5f430a-00cd-42fa-986e-43296b90b8f4";
-    write_claude_transcript(
-        &projects_root.join("expected.jsonl"),
-        expected,
-        &spawn_cwd,
-        "reviewer-marker",
-    );
-    write_claude_transcript(
-        &projects_root.join("sibling.jsonl"),
-        sibling,
-        &spawn_cwd,
-        "frontend-marker",
-    );
+    write_valid_claude_transcript(&projects_root, expected, &spawn_cwd, "reviewer-marker");
+    write_valid_claude_transcript(&projects_root, sibling, &spawn_cwd, "frontend-marker");
 
     let _guard = EnvGuard::set_path_and_home(&home);
     let context = CaptureSessionContext {
@@ -470,6 +452,30 @@ fn write_claude_transcript(path: &Path, session_id: &str, cwd: &Path, marker: &s
         format!(
             "{{\"type\":\"system\",\"sessionId\":\"{session_id}\",\"cwd\":\"{}\",\"marker\":\"{marker}\"}}\n",
             cwd.display()
+        ),
+    )
+    .unwrap();
+}
+
+fn write_valid_claude_transcript(projects_root: &Path, session_id: &str, cwd: &Path, marker: &str) {
+    let canonical = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let slug: String = canonical
+        .to_string_lossy()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect();
+    let path = projects_root.join(slug).join(format!("{session_id}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "sessionId": session_id,
+                "cwd": cwd.to_string_lossy(),
+                "message": {"role": "user", "content": marker},
+            })
         ),
     )
     .unwrap();

@@ -284,12 +284,22 @@ where
                 .zip(candidate.captured.session_id.as_ref())
                 .is_some_and(|(expected, captured)| expected.as_str() != captured.as_str());
             if mismatch {
-                report.ambiguous.push(AmbiguousSessionCapture {
-                    agent_id: item.agent_id.clone(),
-                    spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
-                });
+                let ambiguity_changed = agent_obj
+                    .get("attribution_ambiguous")
+                    .and_then(Value::as_bool)
+                    != Some(true);
+                if !finalize_ambiguous || ambiguity_changed {
+                    report.ambiguous.push(AmbiguousSessionCapture {
+                        agent_id: item.agent_id.clone(),
+                        spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
+                    });
+                }
                 if finalize_ambiguous {
-                    agent_obj.insert("attribution_ambiguous".to_string(), serde_json::json!(true));
+                    if ambiguity_changed {
+                        agent_obj
+                            .insert("attribution_ambiguous".to_string(), serde_json::json!(true));
+                        report.changed = true;
+                    }
                     // 0.4.6 tuple-atomic contract (audit:93): do NOT write
                     // `captured_at` for ambiguity diagnostics. `captured_at`
                     // is part of the authoritative tuple and may only be
@@ -299,7 +309,6 @@ where
                     // "looks captured" rows. Ambiguity diagnostics live in
                     // the `attribution_ambiguous` flag + events; persist
                     // event log for the timestamp.
-                    report.changed = true;
                 }
                 continue;
             }
@@ -317,19 +326,29 @@ where
             continue;
         }
         if ambiguous_ids.contains(&item.agent_id) {
-            report.ambiguous.push(AmbiguousSessionCapture {
-                agent_id: item.agent_id.clone(),
-                spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
-            });
+            let ambiguity_changed = agent_obj
+                .get("attribution_ambiguous")
+                .and_then(Value::as_bool)
+                != Some(true)
+                || agent_obj.get("capture_state").and_then(Value::as_str)
+                    != Some("attribution_ambiguous");
+            if !finalize_ambiguous || ambiguity_changed {
+                report.ambiguous.push(AmbiguousSessionCapture {
+                    agent_id: item.agent_id.clone(),
+                    spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
+                });
+            }
             if finalize_ambiguous {
-                agent_obj.insert("attribution_ambiguous".to_string(), serde_json::json!(true));
-                agent_obj.insert(
-                    "capture_state".to_string(),
-                    serde_json::json!("attribution_ambiguous"),
-                );
-                // 0.4.6 tuple-atomic contract: see comment above. Removed
-                // `captured_at` ambiguity write.
-                report.changed = true;
+                if ambiguity_changed {
+                    agent_obj.insert("attribution_ambiguous".to_string(), serde_json::json!(true));
+                    agent_obj.insert(
+                        "capture_state".to_string(),
+                        serde_json::json!("attribution_ambiguous"),
+                    );
+                    // 0.4.6 tuple-atomic contract: see comment above. Removed
+                    // `captured_at` ambiguity write.
+                    report.changed = true;
+                }
             }
             continue;
         }
@@ -666,6 +685,9 @@ fn pending_session_capture<F>(
 where
     F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
 {
+    if agent.get("capture_state").and_then(Value::as_str) == Some("attribution_ambiguous") {
+        return None;
+    }
     let provider = incomplete_resumable_provider(agent, adapter_for)?;
     let spawn_cwd = agent
         .get("spawn_cwd")
