@@ -202,7 +202,7 @@ fn managed_leader_uses_dedicated_leader_session_independent_of_state_session_nam
 
 #[test]
 #[serial_test::serial(env)]
-fn in_tmux_default_leader_runs_provider_in_current_pane() {
+fn in_tmux_default_leader_uses_managed_client_and_external_opt_out_keeps_exec_provider() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let ws = std::env::temp_dir().join(format!("ta_rs_lsp_switch_{}", std::process::id()));
     std::fs::create_dir_all(&ws).unwrap();
@@ -210,7 +210,7 @@ fn in_tmux_default_leader_runs_provider_in_current_pane() {
     let endpoint = format!("/private/tmp/tmux-501/{socket},88432,187");
     let _e = EnvGuard::apply(&[("TMUX", Some(&endpoint)), ("TMUX_PANE", Some("%7"))]);
 
-    let plan = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+    let managed = crate::leader::start::leader_start_plan_after_ambient_authority_check(
         Provider::Fake,
         &[],
         &ws,
@@ -221,24 +221,54 @@ fn in_tmux_default_leader_runs_provider_in_current_pane() {
     )
     .unwrap();
 
-    assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
-    assert!(!plan.is_external_leader);
-    assert!(plan.session_name.is_none());
-    assert_eq!(plan.leader_window, None);
-    assert_eq!(plan.argv, vec!["fake".to_string()]);
+    assert_eq!(
+        managed.mode,
+        LeaderStartMode::ManagedTmuxClient,
+        "N41 managed default: an in-tmux caller on the workspace server must use the managed client path"
+    );
+    assert!(!managed.is_external_leader);
+    assert!(managed.session_name.is_some());
+    assert_eq!(
+        managed.leader_window.as_ref().map(WindowName::as_str),
+        Some("fake")
+    );
     assert!(
-        !plan
+        managed.argv.iter().any(|arg| arg == "switch-client")
+            && !managed.argv.iter().any(|arg| arg == "attach-session"),
+        "N41 managed default: same-server dispatch must switch the existing client, not nested-attach: {:?}",
+        managed.argv
+    );
+    assert_eq!(managed.provider_argv, vec!["fake".to_string()]);
+
+    let external = crate::leader::start::leader_start_plan_after_ambient_authority_check(
+        Provider::Fake,
+        &[],
+        &ws,
+        false,
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(external.mode, LeaderStartMode::ExecProvider);
+    assert!(external.is_external_leader);
+    assert_eq!(external.leader_window, None);
+    assert_eq!(external.argv, vec!["fake".to_string()]);
+    assert_eq!(external.provider_argv, vec!["fake".to_string()]);
+    assert!(
+        !external
             .argv
             .iter()
             .any(|arg| arg == "switch-client" || arg == "attach-session"),
-        "in-tmux default launch must not create or attach a background leader session: {:?}",
-        plan.argv
+        "N41 external opt-out: explicit external topology must remain a direct provider path: {:?}",
+        external.argv
     );
 }
 
 #[test]
 #[serial_test::serial(env)]
-fn in_tmux_default_leader_does_not_refuse_different_tmux_server() {
+fn in_tmux_external_opt_out_keeps_exec_provider_across_server_boundary() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let _e = EnvGuard::apply(&[
         ("TMUX", Some("/private/tmp/tmux-501/default,88432,187")),
@@ -254,14 +284,14 @@ fn in_tmux_default_leader_does_not_refuse_different_tmux_server() {
         false,
         false,
         None,
-        false,
+        true,
     )
     .unwrap();
 
     assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
-    assert!(!plan.is_external_leader);
-    assert!(plan.session_name.is_none());
+    assert!(plan.is_external_leader);
     assert_eq!(plan.argv, vec!["fake".to_string()]);
+    assert_eq!(plan.provider_argv, vec!["fake".to_string()]);
 }
 
 #[test]

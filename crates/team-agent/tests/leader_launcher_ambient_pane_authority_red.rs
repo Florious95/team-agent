@@ -82,6 +82,7 @@ fn a1_no_ambient_tuple_uses_workspace_derived_managed_path() {
 #[serial(env)]
 fn a2_complete_matching_tuple_allows_direct_provider_path() {
     let case = Case::new("a2-matching");
+    case.declare_external_topology();
     case.set_mode("matching");
 
     let output = case.run_with_controlling_tty(
@@ -116,7 +117,13 @@ fn a2_redirected_stdin_does_not_hide_a_matching_controlling_tty() {
     case.set_mode("matching");
 
     let probe = case.run_with_distinct_controlling_and_stdin_ttys(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
         PaneTtySource::Controlling,
     );
@@ -160,7 +167,13 @@ fn a3_redirected_stdin_tty_cannot_impersonate_the_controlling_tty() {
     case.set_mode("matching");
 
     let probe = case.run_with_distinct_controlling_and_stdin_ttys(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
         PaneTtySource::Stdin,
     );
@@ -237,7 +250,13 @@ fn a3_missing_controlling_tty_never_falls_back_to_redirected_stdin() {
     case.set_mode("matching-slow");
 
     let probe = case.run_with_stdin_tty_but_no_controlling_tty(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
     );
     let value = json_stdout_even_on_error("A3 missing controlling tty refusal", &probe.output);
@@ -272,7 +291,13 @@ fn a2_verified_ambient_authority_is_observed_once_and_then_reused() {
     case.set_mode("matching-then-foreign");
 
     let output = case.run_with_controlling_tty(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
     );
     let value = json_stdout_even_on_error("A2 single authority observation", &output);
@@ -308,7 +333,13 @@ fn a3_foreign_live_tuple_fails_with_typed_reason_and_copyable_action() {
     case.set_mode("foreign-workspace");
 
     let output = case.run_with_controlling_tty(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
     );
     let value = json_stdout_even_on_error("A3 foreign ambient refusal", &output);
@@ -329,7 +360,13 @@ fn a3_missing_pane_id_keeps_its_catalog_reason_and_cause() {
     let missing_pane = Case::new("a3-missing-pane-id");
     missing_pane.set_mode("matching");
     let missing_pane_output = missing_pane.run_with_ambient_tuple(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         Some(format!(
             "{},4242,0",
             missing_pane.endpoint.to_string_lossy()
@@ -356,7 +393,13 @@ fn a3_malformed_tmux_tuple_keeps_its_catalog_reason_and_cause() {
     let malformed_tuple = Case::new("a3-malformed-tuple");
     malformed_tuple.set_mode("matching");
     let malformed_tuple_output = malformed_tuple.run_with_ambient_tuple(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         Some("not-a-tmux-tuple".to_string()),
         Some(AMBIENT_PANE),
     );
@@ -382,7 +425,13 @@ fn a3_pane_query_failure_keeps_its_catalog_reason_and_cause() {
     query_failed.set_mode("query-failed");
     query_failed.make_tmux_query_unspawnable();
     let query_failed_output = query_failed.run_with_fake_bin_only(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         Some(AMBIENT_PANE),
     );
     let query_failed_value =
@@ -405,7 +454,13 @@ fn a3_pane_not_found_keeps_its_catalog_reason_and_cause() {
     let pane_not_found = Case::new("a3-pane-not-found");
     pane_not_found.set_mode("pane-not-found");
     let pane_not_found_output = pane_not_found.run(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         Some(AMBIENT_PANE),
     );
     let pane_not_found_value =
@@ -428,7 +483,13 @@ fn a3_missing_pane_current_path_keeps_its_catalog_reason_and_cause() {
     let current_path_missing = Case::new("a3-current-path-missing");
     current_path_missing.set_mode("current-path-missing");
     let current_path_missing_output = current_path_missing.run(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         Some(AMBIENT_PANE),
     );
     let current_path_missing_value =
@@ -489,7 +550,13 @@ fn a3_foreign_live_tuple_spawns_neither_provider_nor_managed_leader() {
     case.set_mode("foreign-workspace");
 
     let _ = case.run_with_controlling_tty(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
     );
     let tmux_log = case.tmux_log();
@@ -527,7 +594,13 @@ fn a3_foreign_live_tuple_leaves_state_and_leader_registry_byte_stable() {
     );
 
     let _ = case.run_with_controlling_tty(
-        &["codex", "--json", "--", "--contract-canary"],
+        &[
+            "codex",
+            "--external-leader",
+            "--json",
+            "--",
+            "--contract-canary",
+        ],
         AMBIENT_PANE,
     );
 
@@ -1191,9 +1264,16 @@ impl RecoverySurface {
 
     fn invoke(self, case: &Case, pane: &str) -> Output {
         match self {
-            Self::Launcher => {
-                case.run_with_controlling_tty(&["codex", "--json", "--", "--contract-canary"], pane)
-            }
+            Self::Launcher => case.run_with_controlling_tty(
+                &[
+                    "codex",
+                    "--external-leader",
+                    "--json",
+                    "--",
+                    "--contract-canary",
+                ],
+                pane,
+            ),
             Self::Diagnose => case.run(
                 &[
                     "diagnose",
@@ -1668,6 +1748,11 @@ impl Case {
         });
         save_runtime_state(&self.workspace, &state).expect("seed foreign attached state");
         MessageStore::open(&self.workspace).expect("initialize message store");
+    }
+
+    fn declare_external_topology(&self) {
+        save_runtime_state(&self.workspace, &json!({"is_external_leader": true}))
+            .expect("declare external leader topology");
     }
 
     fn seed_preexisting_state_and_registry(&self) {
