@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.63
+
+- **行为变更：`abnormal_exit` 不再自动重启席位。** worker 非正常退出仍会产生 `worker.abnormal_exit` 检测、结构化事件和 leader 通知；恢复改由手动命令或编排层决策。
+- **为什么删除自动恢复：** 一旦节点被判失败并自动重启，系统可能陷入无限重启，节点永远不可达，而 **leader 永远不知道它不可达**。
+- **恢复提示（已知缺陷 A-31）：** 先运行 `start-agent`；如果返回 `Noop` 但席位仍未修复，请改用 `restart`，或执行 remove+add 重建。A-31 计划在下一版修复。
+- **删除面与保留面：** 8 个文件 `-1359/+150`；删除 recovery 执行器、退避、重置上限及 7 类 recovery/backpressure 事件。保留 `worker.abnormal_exit` 检测与结构化事件，以及手动 `start-agent`、`reset-agent`、`restart` 的全部语义。
+
 ## 0.5.62
 
 - **Release integration:** R3-R5 T2 elimination, A-12/A-13, and launcher crash-family hardening across A-18/A-20/A-20b/A-21/A-22/A-22b.
