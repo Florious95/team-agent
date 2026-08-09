@@ -57,10 +57,6 @@ mod selection;
 mod team_state;
 
 pub(crate) use agent::start_agent_at_paths;
-// 0.5.36 supermarket api_error recovery: coordinator post-save step calls
-// this to replace a stuck provider process without going through the
-// public start-agent CLI path.
-pub(crate) use agent::start_agent_at_paths_for_recovery;
 pub use agent::{reset_agent, start_agent, stop_agent};
 pub(crate) use agent::{
     reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,

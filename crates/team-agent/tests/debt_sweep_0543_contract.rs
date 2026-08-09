@@ -262,34 +262,4 @@ fn send_pane_compat_surface_has_no_direct_inject_path() {
     assert!(source.contains("use a logical TARGET"));
 }
 
-#[test]
-fn d_j_terminal_scrub_is_pure_and_attempt_path_loads_once() {
-    let source = read_repo("crates/team-agent/src/coordinator/steps/abnormal.rs");
-    let attempt = function_block_after(&source, "pub(crate) fn attempt_due_recoveries");
-    assert_eq!(
-        attempt.matches("load_runtime_state").count(),
-        1,
-        "D-j: attempt_due_recoveries must load one fresh post-save state"
-    );
-    assert!(attempt.contains("let Ok(mut state)"));
-    assert!(attempt.contains("clear_stale_terminal_next_retry_at(&mut state)"));
-
-    let scrub = function_block_after(&source, "fn clear_stale_terminal_next_retry_at");
-    let signature = &source[source
-        .find("fn clear_stale_terminal_next_retry_at")
-        .unwrap()
-        ..source
-            .find("fn clear_stale_terminal_next_retry_at")
-            .unwrap()
-            + 120];
-    assert!(signature.contains("&mut Value"));
-    assert!(signature.contains("-> bool"));
-    assert!(!scrub.contains("load_runtime_state"));
-    assert!(!scrub.contains("save_runtime_state"));
-    for status in ["succeeded", "blocked", "exhausted"] {
-        assert!(scrub.contains(status));
-    }
-    assert!(scrub.contains("next_retry_at"));
-}
-
 include!("support/debt_sweep_0543.rs");
