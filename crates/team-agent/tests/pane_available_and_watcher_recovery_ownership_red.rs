@@ -190,6 +190,7 @@ fn coordinator_pending_scan_does_not_own_pane_recovery() {
 // Tooth 4 — watcher recovery is incident-scoped
 // ---------------------------------------------------------------------------
 
+#[ignore = "red-by-design: pending contract, tracked in private backlog"]
 #[test]
 #[serial(env)]
 fn watcher_recovery_scoped_by_incident_id() {

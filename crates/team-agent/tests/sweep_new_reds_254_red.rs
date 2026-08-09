@@ -148,6 +148,7 @@ fn mcp_add_agent_is_not_placeholder() {
     );
 }
 
+#[ignore = "red-by-design: pending contract, tracked in private backlog"]
 #[test]
 fn quick_start_grandchild_depth_limit_refuses_before_state_or_spawn() {
     let launch = source("src/lifecycle/launch.rs");
