@@ -312,25 +312,6 @@ tasks: []
     }
 
     #[test]
-    fn claude_env_unset_includes_claude_effort_in_provider_env_unsets() {
-        // Use the public leader_env_unset_for_provider helper which is a
-        // pub-facing wrapper around provider_env_unsets — single source of
-        // truth for the Claude/ClaudeCode env-unset block.
-        use team_agent::leader::leader_env_unset_for_provider;
-        use team_agent::provider::Provider;
-        let unsets = leader_env_unset_for_provider(Provider::Claude);
-        assert!(
-            unsets.iter().any(|k| k == "CLAUDE_EFFORT"),
-            "CLAUDE_EFFORT must be in Claude provider_env_unsets (single source); got {unsets:?}"
-        );
-        let cc_unsets = leader_env_unset_for_provider(Provider::ClaudeCode);
-        assert!(
-            cc_unsets.iter().any(|k| k == "CLAUDE_EFFORT"),
-            "CLAUDE_EFFORT must be in ClaudeCode provider_env_unsets; got {cc_unsets:?}"
-        );
-    }
-
-    #[test]
     fn leader_shell_wrapper_drops_env_keys_present_in_env_unset() {
         // Regression: the shell wrapper must SKIP env exports whose key is
         // in env_unset, otherwise inherited env carrying that key (e.g.

@@ -4,6 +4,7 @@
 // physical relocation (zero behavior change).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+//!
 //! step 7 · message_store — core message lifecycle over `team.db`.
 //!
 //! Truth source (READ-ONLY): `team-agent-public` @ v0.2.11,
@@ -205,7 +206,7 @@ pub struct PersistMessageInput<'a> {
 
 /// `leader_notification_log._legacy_epoch_from_uuid` (line 145-147):
 /// `int(zlib.crc32(str(uuid or "").encode("utf-8")) & 0x7FFFFFFF)`.
-pub fn legacy_epoch_from_uuid(leader_session_uuid: Option<&str>) -> i64 {
+fn legacy_epoch_from_uuid(leader_session_uuid: Option<&str>) -> i64 {
     let mut crc = 0xFFFF_FFFFu32;
     for byte in leader_session_uuid.unwrap_or("").as_bytes() {
         crc ^= u32::from(*byte);

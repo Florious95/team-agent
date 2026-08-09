@@ -1,3 +1,4 @@
+//!
 //! C1 command registry: one catalog for help visibility, known-command gates,
 //! suggestion candidates, and command-tier governance.
 

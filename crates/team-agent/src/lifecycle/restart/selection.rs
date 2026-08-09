@@ -37,7 +37,7 @@ pub(crate) fn resumable_provider_requires_backing(provider: &str) -> bool {
 
 /// `first_send_at` 严格分类(`_classify_first_send_at`,`orchestration.py:399`)。
 /// **绝不靠 truthiness**:`""`/`0`/`False`/`"null"`/非 ISO → `Corrupt`。
-pub fn classify_first_send_at(raw: &serde_json::Value) -> FirstSendAtState {
+pub(crate) fn classify_first_send_at(raw: &serde_json::Value) -> FirstSendAtState {
     match raw {
         serde_json::Value::Null => FirstSendAtState::Absent,
         serde_json::Value::String(s) => {
@@ -159,7 +159,7 @@ fn normalize_iso_separator(raw: &str) -> String {
 /// `0/123→"int"`、`false→"bool"`、`[]→"list"`、`{}→"dict"`、float→`"float"`。
 /// **绝不**用 Rust 的 `"null"/"string"/"number"/"boolean"/"array"/"object"`(serde 名)—— 必须是
 /// Python 名,否则 audit payload 与真相源不一致。
-pub fn python_type_name(value: &serde_json::Value) -> &'static str {
+pub(crate) fn python_type_name(value: &serde_json::Value) -> &'static str {
     match value {
         serde_json::Value::Null => "NoneType",
         serde_json::Value::String(_) => "str",
@@ -186,7 +186,7 @@ pub fn python_type_name(value: &serde_json::Value) -> &'static str {
 ///     进 `unresumable`。
 /// restart() **先**调它再 teardown;corrupt 非空 → `RefusedInvalidFirstSendAt`,unresumable
 /// 非空且 !allow_fresh → `RefusedResumeAtomicity`。**refuse 早于一切 teardown,nothing created**。
-pub fn classify_restart_plan(
+pub(crate) fn classify_restart_plan(
     state: &serde_json::Value,
     allow_fresh: bool,
 ) -> Result<RestartPlan, LifecycleError> {

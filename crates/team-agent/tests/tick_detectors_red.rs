@@ -14,7 +14,7 @@ use std::sync::{
 };
 
 use serde_json::{json, Value};
-use team_agent::coordinator::{Coordinator, ErrorLists, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::event_log::EventLog;
 use team_agent::provider::{Provider, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
@@ -201,10 +201,6 @@ impl ProviderRegistry for RegistryHandle {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         self.0.adapter_calls.fetch_add(1, Ordering::SeqCst);
         team_agent::provider::get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists::default()
     }
 }
 

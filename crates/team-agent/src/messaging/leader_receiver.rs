@@ -1,3 +1,4 @@
+//!
 //! leader.py — leader pane 注入边界 + 恰好一次去重门 (card §21/§72)。
 
 use std::path::Path;
@@ -59,7 +60,7 @@ pub fn send_to_leader_receiver(
 /// stable message id for transport-fallback retries. The public function above
 /// keeps the existing call surface unchanged.
 #[allow(clippy::too_many_arguments)]
-pub fn send_to_leader_receiver_with_message_id(
+pub(crate) fn send_to_leader_receiver_with_message_id(
     workspace: &Path,
     state: &serde_json::Value,
     leader_id: &str,

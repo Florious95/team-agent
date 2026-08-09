@@ -1,3 +1,4 @@
+//!
 //! identity:leader receiver identity 派生 / 迁移 / first-time binding(真相源 `state.py`)。
 //!
 //! Python 直接读 `os.environ`/`os.getcwd()`/`Path.resolve()`;此处把**环境变量**经
@@ -44,8 +45,9 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+///
 /// `_identity_os_user`(`state.py:275`):`USER` or `USERNAME` or `""`。
-pub fn identity_os_user(env: &dyn IdentityEnv) -> String {
+fn identity_os_user(env: &dyn IdentityEnv) -> String {
     let user = env_str(env, "USER");
     if !user.is_empty() {
         return user;
@@ -57,9 +59,10 @@ pub fn identity_os_user(env: &dyn IdentityEnv) -> String {
     String::new()
 }
 
+///
 /// `_identity_machine_fingerprint`(`state.py:279`):team_owner/leader_receiver 的非空
 /// machine_fingerprint 优先,否则 env `TEAM_AGENT_MACHINE_FINGERPRINT` or `""`。
-pub fn identity_machine_fingerprint(state: &Value, env: &dyn IdentityEnv) -> String {
+fn identity_machine_fingerprint(state: &Value, env: &dyn IdentityEnv) -> String {
     for key in ["team_owner", "leader_receiver"] {
         if let Some(fp) = state
             .get(key)
@@ -74,9 +77,10 @@ pub fn identity_machine_fingerprint(state: &Value, env: &dyn IdentityEnv) -> Str
     env_str(env, "TEAM_AGENT_MACHINE_FINGERPRINT")
 }
 
+///
 /// `_identity_workspace_abspath`(`state.py:264`):按 workspace→team_dir→spec_path→fallback
 /// 顺序派生 workspace 绝对路径(各分支先 `resolve()` 再做 parent 导航)。
-pub fn identity_workspace_abspath(
+fn identity_workspace_abspath(
     state: &Value,
     env: &dyn IdentityEnv,
     workspace: Option<&Path>,
@@ -157,9 +161,10 @@ fn leader_session_uuid_for_state(
     Ok(uuid.as_str().to_string())
 }
 
+///
 /// `_migrate_team_identity`(`state.py:295`):为缺 `leader_session_uuid` 的 team_owner /
 /// leader_receiver 填入派生 uuid。返回是否有改动。
-pub fn migrate_team_identity(
+fn migrate_team_identity(
     state: &mut Value,
     env: &dyn IdentityEnv,
     workspace: Option<&Path>,
@@ -189,6 +194,7 @@ pub fn migrate_team_identity(
     Ok(changed)
 }
 
+///
 /// `_migrate_state_identity`(`state.py:306`):顶层(有 session_name 时)+ 每个 team 子状态迁移。
 pub fn migrate_state_identity(
     state: &mut Value,
@@ -220,6 +226,7 @@ pub fn migrate_state_identity(
     Ok(changed)
 }
 
+///
 /// `_caller_identity_from_env`(`state.py:316`):env override/env/derived → 5 字段 caller 身份。
 pub fn caller_identity_from_env(
     state: Option<&Value>,
@@ -282,9 +289,10 @@ pub fn caller_identity_from_env(
     })
 }
 
+///
 /// `populate_team_owner_from_env`(`state.py:414`):已有 team_owner → 仅补迁移 uuid 后返回;
 /// 否则从 env caller 身份 seed team_owner(无 pane_id → `None`)。`now_iso` = claimed_at。
-pub fn populate_team_owner_from_env(
+fn populate_team_owner_from_env(
     state: &mut Value,
     source: &str,
     env: &dyn IdentityEnv,
@@ -320,6 +328,7 @@ pub fn populate_team_owner_from_env(
     Ok(Some(owner))
 }
 
+///
 /// `apply_first_time_leader_binding`(`state.py:434`):命令 + workspace realpath 双门后,
 /// 写入 team_owner / leader_receiver(owner_epoch=0)。拒绝 dict 字节对齐 Python(含 `pane` +
 /// `repr()` 错误串)。`command_looks_usable`(`_leader_command_looks_usable`,step 11)经闭包注入。
@@ -411,6 +420,7 @@ pub fn apply_first_time_leader_binding(
     json!({ "ok": true, "pane": pane_info, "warning": null, "first_time": true })
 }
 
+///
 /// `leader_env_exports`(`state.py:469`):receiver + identity → 6 个 leader env 导出(插入序)。
 pub fn leader_env_exports(receiver: &Value, identity: &Value) -> Vec<(String, String)> {
     vec![
@@ -441,6 +451,7 @@ pub fn leader_env_exports(receiver: &Value, identity: &Value) -> Vec<(String, St
     ]
 }
 
+///
 /// `validate_leader_uuid_from_targets`(`state.py:480`):fake provider 直过;否则核对 targets
 /// 扫描成功 + receiver.pane_id 在 targets 中存在。
 pub fn validate_leader_uuid_from_targets(receiver: &Value, targets: &Value) -> Value {

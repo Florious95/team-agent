@@ -1,3 +1,4 @@
+//!
 //! state.json 持久化(bug-084 韧性;真相源 `state.py:save_runtime_state` + `_self_heal_runtime_state`
 //! + `runtime.py:_runtime_lock`)。
 //!
@@ -71,6 +72,7 @@ static RUNTIME_STATE_CACHE: LazyLock<Mutex<HashMap<PathBuf, Value>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+///
 /// `state.py:41`。
 pub fn runtime_state_path(workspace: &Path) -> PathBuf {
     runtime_dir(workspace).join("state.json")
@@ -202,6 +204,7 @@ impl Drop for RuntimeLock {
     }
 }
 
+///
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
@@ -1135,10 +1138,11 @@ fn self_heal(
     }
 }
 
+///
 /// `load_runtime_state`(本 slice 最小:读+parse+缓存;normalize/migration 待 identity slice)。
 /// `normalize_agent_session_state`(`state.py:45`):为每个 agent dict 的 SESSION_STATE_FIELDS
 /// setdefault None(缺则末尾插)。
-pub fn normalize_agent_session_state(state: &mut Value) {
+fn normalize_agent_session_state(state: &mut Value) {
     let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
         return;
     };
@@ -1151,12 +1155,13 @@ pub fn normalize_agent_session_state(state: &mut Value) {
     }
 }
 
+///
 /// `_migrate_active_team_key`(`state.py:73`,0.2.6 Family B C6):legacy state 缺 active_team_key
 /// 时 seed 一次。返回是否有改动。
 ///
 /// 注:Python `seed if seed in teams or not teams else seed` 两支均为 `seed`(死三元),
 /// 此处直接 `= seed`,与可观测行为一致。
-pub fn migrate_active_team_key(state: &mut Value) -> bool {
+fn migrate_active_team_key(state: &mut Value) -> bool {
     if state
         .as_object()
         .is_some_and(|o| o.contains_key("active_team_key"))
@@ -1191,6 +1196,7 @@ pub fn migrate_active_team_key(state: &mut Value) -> bool {
     true
 }
 
+///
 /// RM-039-STAT-001 second-round compat normalizer (architect verdict
 /// 2026-06-22). When `active_team_key` names an existing `teams` entry
 /// but root `team_key` is missing, set root `team_key = active_team_key`
@@ -1210,7 +1216,7 @@ pub fn migrate_active_team_key(state: &mut Value) -> bool {
 ///   * Does NOT touch any other field (no generic deep merge).
 ///
 /// Returns `true` if state was mutated and the caller should persist.
-pub fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
+fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
     let Some(obj) = state.as_object() else {
         return false;
     };

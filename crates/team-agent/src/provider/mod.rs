@@ -1,3 +1,4 @@
+//!
 //! step 8 · provider — type + trait SKELETON (ROUND-0).
 //!
 //! Design doc: `docs/phase0/subsystems/08-provider.md`
@@ -37,7 +38,6 @@ pub mod adapter;
 pub(crate) mod adapters;
 pub mod approvals;
 pub mod classify;
-pub mod command;
 pub mod faults;
 pub mod session;
 pub mod session_scan;

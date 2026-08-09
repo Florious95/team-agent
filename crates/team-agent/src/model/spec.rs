@@ -1,3 +1,4 @@
+//!
 //! spec / result-envelope 校验(`spec.py`)。
 //!
 //! 本 module **操作解析后的 Value**(非 typed struct)——与 Python 一样校验 dict,

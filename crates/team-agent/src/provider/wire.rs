@@ -1,3 +1,4 @@
+//!
 //! Provider wire-format helpers — the single source of truth for converting
 //! `Provider` ↔ string forms used across state JSON, CLI args, log fields,
 //! and the workers we shell out to.

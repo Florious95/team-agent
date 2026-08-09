@@ -39,7 +39,7 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::cli::status::agent_summary_counts;
-use team_agent::coordinator::{Coordinator, ErrorLists, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::db::schema::open_db;
 use team_agent::message_store::MessageStore;
 use team_agent::model::enums::Provider;
@@ -931,13 +931,6 @@ struct RealAdapterRegistry;
 impl ProviderRegistry for RealAdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists {
-            whitelist: Vec::new(),
-            blacklist: Vec::new(),
-        }
     }
 }
 

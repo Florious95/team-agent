@@ -74,16 +74,23 @@ fn notification_abnormal_exit_requires_fresh_latest_explicit_error_before_notify
 }
 
 #[test]
-fn notification_abnormal_exit_contract_does_not_repurpose_generic_abnormal_fact_notifications() {
-    let orphan = source("src/coordinator/orphan.rs");
+fn notification_abnormal_exit_contract_is_owned_by_the_fresh_error_path() {
+    let abnormal = source("src/coordinator/steps/abnormal.rs");
     let mut failures = Vec::new();
 
-    if orphan.contains("process_abnormal_records")
-        && orphan.contains("notifications.push")
-        && !orphan.contains("worker.abnormal_exit")
-    {
+    for needle in [
+        "latest_explicit_error_fact",
+        "ErrorRecency",
+        "send_to_leader_receiver",
+        "worker.abnormal_exit",
+    ] {
+        if !abnormal.contains(needle) {
+            failures.push(format!("live fresh-error path missing anchor: {needle}"));
+        }
+    }
+    if abnormal.contains("process_abnormal_records") {
         failures.push(
-            "generic process_abnormal_records notifications are transcript-only; #236 worker.abnormal_exit needs the fresh latest-error gate"
+            "live worker.abnormal_exit path must not delegate to the retired generic abnormal processor"
                 .to_string(),
         );
     }

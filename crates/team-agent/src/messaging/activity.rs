@@ -1,3 +1,4 @@
+//!
 //! idle_alerts.py — idle/deadlock 检测 (team-scoped 抑制 + last-fire 节流;card §23) +
 //! activity_detector.py — classifier 产物 (card §24)。
 //! §11 IRON LAW (bug-071/077/085):无信号 → Uncertain,绝不 Idle。

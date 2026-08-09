@@ -1,3 +1,4 @@
+//!
 //! leader 数据层 — lease/owner/incident 枚举 + struct + 错误 + cross-lane 占位/trait + 锁名常量。
 
 use std::collections::BTreeMap;
@@ -470,34 +471,6 @@ pub enum LeaderError {
     MessageStore(#[from] crate::message_store::MessageStoreError),
     #[error("messaging: {0}")]
     Messaging(#[from] crate::messaging::MessagingError),
-}
-
-// ===========================================================================
-// CROSS-LANE PLACEHOLDERS — 其他并行 lane 的 typed 依赖,leader 集成时 reconcile。
-// (本骨架定义 MINIMAL 本地占位,不猜对方精确命名;见 cross_deps_or_placeholders。)
-// ===========================================================================
-
-/// 命名互斥锁句柄占位(step 11 messaging / runtime 的 `_runtime_lock(workspace, name)`)。
-/// `LEADER_OWNERSHIP_LOCK = "send"`:attach/claim/takeover/autobind 共享同一临界区。
-/// **PLACEHOLDER**:真锁类型(文件锁 / RAII guard)在 runtime/messaging lane 落地。
-pub struct RuntimeLockGuard {
-    pub _name: String,
-}
-
-/// MessageStore 占位引用(step 7 已有 `message_store::MessageStore`,但 requeue 方法
-/// `requeue_delivery_exhausted_watchers` / `requeue_after_claim_leader` 属 step 11 messaging)。
-/// **PLACEHOLDER**:claim/attach 后 requeue exhausted result watchers 的接口签名,
-/// 由 messaging lane 落地。
-pub struct RequeueOutcome {
-    pub watcher_ids: Vec<String>,
-}
-
-/// `_resolve_leader_pane` 返回的 pane 信息占位(step 9 transport `PaneInfo` 的相邻产物)。
-/// `__init__.py:276` 调 `runtime._resolve_leader_pane` 返 `(pane_info, discovery)`。
-/// **PLACEHOLDER**:实际 pane_info 字段映射到 `transport::PaneInfo`,resolve 逻辑在 step 9/11。
-pub struct ResolvedLeaderPane {
-    pub pane_info: Value,
-    pub discovery: Discovery,
 }
 
 // ===========================================================================

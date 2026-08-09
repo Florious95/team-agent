@@ -1,3 +1,4 @@
+//!
 use super::*;
 
 /// `team-agent attach-app-server-leader` writes a typed codex_app_server

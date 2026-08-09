@@ -1,3 +1,4 @@
+//!
 //! Concrete tmux `Transport` backend (SKELETON) — the real executor that runs `tmux <argv>`.
 //!
 //! step 9 shipped the [`crate::transport::Transport`] trait + the pure tmux argv-builders
@@ -76,6 +77,11 @@ pub struct RealCommandRunner;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_IDENTITY_TIMEOUT: Duration = Duration::from_millis(500);
 const SPAWN_IDENTITY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Keep the final tmux argv below the ~16 KiB command envelope observed on macOS.
+/// This is checked after shell quoting and socket arguments are applied, before
+/// the external tmux process is called.
+pub const TMUX_SPAWN_COMMAND_LIMIT_BYTES: usize = 16_000;
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
@@ -388,6 +394,27 @@ impl TmuxBackend {
     /// backend, and a "no server" failure is ignored.
     pub fn kill_server(&self) {
         if self.socket.is_none() {
+            return;
+        }
+        // A server-level kill is only safe after the caller has removed every
+        // resource it owns.  A non-empty server may carry a pre-existing team
+        // (or a leader owned by another launcher), so fail closed instead of
+        // turning an endpoint cleanup into a shared-server teardown.  An
+        // inconclusive probe is also not proof of ownership.
+        let server_is_empty = match self.list_targets() {
+            Ok(targets) => targets.is_empty(),
+            Err(_) => false,
+        };
+        if !server_is_empty {
+            if let Some(workspace) = &self.event_workspace {
+                let _ = crate::event_log::EventLog::new(workspace).write(
+                    "tmux.kill_server_skipped_nonempty_or_unknown",
+                    serde_json::json!({
+                        "reason": "server_ownership_not_proven",
+                        "endpoint": self.tmux_endpoint(),
+                    }),
+                );
+            }
             return;
         }
         let argv = self.tmux_argv(&["tmux".to_string(), "kill-server".to_string()]);
@@ -787,6 +814,16 @@ impl TmuxBackend {
         first: bool,
     ) -> Result<SpawnResult, TransportError> {
         let spawn_argv = tmux_spawn_argv(session, window, command, first);
+        self.validate_spawn_command(
+            &spawn_argv,
+            if first {
+                "tmux.new-session"
+            } else {
+                "tmux.new-window"
+            },
+            session,
+            window,
+        )?;
         let output = self.run_spawn(&spawn_argv)?;
         let pane = output.stdout.trim();
         if pane.is_empty() {
@@ -897,6 +934,7 @@ impl TmuxBackend {
             "-lc".to_string(),
             command,
         ];
+        self.validate_spawn_command(&split_argv, "tmux.split-window", session, window)?;
         let output = self.run_spawn(&split_argv)?;
         let pane = output.stdout.trim();
         if pane.is_empty() {
@@ -930,6 +968,31 @@ impl TmuxBackend {
         } else {
             Err(subprocess_error(argv, output))
         }
+    }
+
+    fn validate_spawn_command(
+        &self,
+        argv: &[String],
+        segment: &str,
+        session: &SessionName,
+        window: &WindowName,
+    ) -> Result<(), TransportError> {
+        let final_argv = self.tmux_argv(argv);
+        let actual_bytes = final_argv
+            .iter()
+            .map(|arg| arg.len().saturating_add(1))
+            .sum::<usize>();
+        if actual_bytes > TMUX_SPAWN_COMMAND_LIMIT_BYTES {
+            return Err(TransportError::CommandTooLong {
+                backend: BackendKind::Tmux,
+                segment: segment.to_string(),
+                session: session.as_str().to_string(),
+                window: window.as_str().to_string(),
+                actual_bytes,
+                limit_bytes: TMUX_SPAWN_COMMAND_LIMIT_BYTES,
+            });
+        }
+        Ok(())
     }
 
     fn run_spawn(&self, argv: &[String]) -> Result<CommandOutput, TransportError> {

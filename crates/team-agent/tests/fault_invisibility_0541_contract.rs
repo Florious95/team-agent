@@ -22,7 +22,7 @@ use serial_test::serial;
 use team_agent::cli::status::{agent_summary_counts, format_status_csv};
 use team_agent::coordinator::{
     coordinator_meta_path, coordinator_pid_path, start_coordinator_with_team, stop_coordinator,
-    Coordinator, ErrorLists, MetadataSource, Pid, ProviderRegistry, StartOutcome, WorkspacePath,
+    Coordinator, MetadataSource, Pid, ProviderRegistry, StartOutcome, WorkspacePath,
     PROTOCOL_VERSION,
 };
 use team_agent::db::schema::open_db;
@@ -697,13 +697,6 @@ struct RealAdapterRegistry;
 impl ProviderRegistry for RealAdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists {
-            whitelist: Vec::new(),
-            blacklist: Vec::new(),
-        }
     }
 }
 

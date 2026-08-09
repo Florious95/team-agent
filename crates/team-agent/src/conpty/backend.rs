@@ -1,3 +1,4 @@
+//!
 //! `ConPtyBackend` — implements the existing `Transport` trait using the
 //! named-pipe protocol in `super::protocol`.
 //!

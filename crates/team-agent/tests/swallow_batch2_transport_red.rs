@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
-use team_agent::coordinator::{Coordinator, ErrorLists, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::model::enums::Provider;
 use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
@@ -325,12 +325,6 @@ struct RealAdapterRegistry;
 impl ProviderRegistry for RealAdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
-    }
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists {
-            whitelist: Vec::new(),
-            blacklist: Vec::new(),
-        }
     }
 }
 

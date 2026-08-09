@@ -1,3 +1,4 @@
+//!
 //! unit-8 (Stage 3) — `lifecycle::launch::spawn` phase boundary.
 //!
 //! Dedicated home for the worker spawn executor. Future commits migrate
@@ -20,33 +21,6 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnPhase {
-    SpawnFirstWithEnvUnset,
-    SpawnIntoWithEnvUnset,
-}
-
-impl SpawnPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SpawnFirstWithEnvUnset => "launch.spawn.first_with_env_unset",
-            Self::SpawnIntoWithEnvUnset => "launch.spawn.into_with_env_unset",
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_labels_are_dotted_paths_under_launch_spawn() {
-        assert!(SpawnPhase::SpawnFirstWithEnvUnset
-            .as_str()
-            .starts_with("launch.spawn."));
-    }
-}
 
 pub(super) fn spawn_agents(
     workspace: &Path,

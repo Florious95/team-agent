@@ -35,6 +35,9 @@
 //! provider client crate,测试断言 mock 调用计数 = 0。
 
 // step 2 (model) — typed bedrock。其余 step 落地时在此挂载。
+#[cfg(test)]
+extern crate self as team_agent;
+
 pub mod model;
 
 // step 3 (db) — team.db SQLite schema/migration(rusqlite bundled)。

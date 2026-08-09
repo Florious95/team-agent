@@ -1,3 +1,4 @@
+//!
 //! 0.5.45 naming-addressing (design §3.2/§4.1) — shared pure name
 //! similarity ranking helper.
 //!

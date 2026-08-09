@@ -1,3 +1,4 @@
+//!
 //! cli · status — 五行 triage summary 渲染 + agent 分类计数(commands.py
 //! `_format_status_summary` / `_agent_summary_counts` / `_interaction_counts` /
 //! `_latest_result_line` + `cmd_status` 的 compact 不变量)。
@@ -100,7 +101,7 @@ fn stale_agent_bucket(agent: &Value) -> Option<SummaryBucket> {
 }
 
 /// `_interaction_counts`(`commands.py:292-306`):遍历 agents 的 `interacted` 字段。
-pub fn interaction_counts(agents: &Value) -> InteractionCounts {
+pub(super) fn interaction_counts(agents: &Value) -> InteractionCounts {
     let mut counts = InteractionCounts::default();
     let Some(agent_map) = agents.as_object() else {
         return counts;

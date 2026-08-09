@@ -1,3 +1,4 @@
+//!
 //! Shared doctor gate seams.
 
 use std::path::Path;

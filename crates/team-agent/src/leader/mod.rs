@@ -1,3 +1,4 @@
+//!
 //! step 10 · leader — ownership lease / leader-session binding / idle-takeover wiring
 //! (ROUND-0 SKELETON: types + fn/method SURFACE only, all bodies `unimplemented!()`).
 //!
@@ -10,7 +11,7 @@
 //!   - `leader_binding.py` (183) — Family A positive-source owner binding
 //!     (`bind_owner_from_caller_pane` / `derive_leader_session_uuid` / `emit_owner_bound_event`).
 //!   - `idle_takeover.py` (facade re-export) / `idle_takeover_wiring.py`
-//!     (`build_idle_nodes` / `push_idle_reminder`) / `wake.py`
+//!     (`build_idle_nodes`) / `wake.py`
 //!     (`should_reread` / `on_file_changed` / `take_pending`).
 //!   - `messaging/leader_panes.py` (`_leader_command_looks_usable` /
 //!     provider attribution / `_target_leader_session_uuid`).
@@ -77,7 +78,6 @@ use crate::state::StateError;
 // ── submodules(by responsibility) ──────────────────────────────────────────
 mod helpers;
 pub mod incident;
-pub mod inject;
 pub mod lease;
 pub mod owner_bind;
 pub mod provider_attribution;
@@ -89,7 +89,6 @@ pub mod types;
 
 // ── RE-EXPORT INVARIANT:每个先前 root-visible 项原路径不变 ────────────────────
 pub use incident::*;
-pub use inject::*;
 pub use lease::*;
 pub use owner_bind::*;
 pub(crate) use provider_attribution::*;

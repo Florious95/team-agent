@@ -36,21 +36,54 @@ pub enum MessageTarget {
 /// Public CLI/MCP inputs never construct this value from a caller-supplied
 /// string. The wrapper keeps that trust boundary visible throughout delivery
 /// instead of degrading the identity back to an untyped option field.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(transparent)]
-pub struct TrustedSender(AgentId);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSender {
+    agent_id: AgentId,
+    full_name: Option<String>,
+}
 
 impl TrustedSender {
     pub fn from_runtime_identity(agent_id: AgentId) -> Self {
-        Self(agent_id)
+        Self {
+            agent_id,
+            full_name: None,
+        }
+    }
+
+    pub fn from_runtime_identity_with_source(
+        agent_id: AgentId,
+        workspace: impl std::fmt::Display,
+        team: &str,
+    ) -> Self {
+        let full_name = format!("{}::{}/{}", workspace, team, agent_id.as_str());
+        Self {
+            agent_id,
+            full_name: Some(full_name),
+        }
     }
 
     pub fn leader() -> Self {
-        Self(AgentId::new("leader"))
+        Self {
+            agent_id: AgentId::new("leader"),
+            full_name: None,
+        }
     }
 
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        self.agent_id.as_str()
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.full_name.as_deref().unwrap_or_else(|| self.as_str())
+    }
+}
+
+impl serde::Serialize for TrustedSender {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.display_name())
     }
 }
 
@@ -141,7 +174,7 @@ pub fn send_message(
                 "leader",
                 content,
                 opts.task_id.as_ref(),
-                opts.sender.as_str(),
+                opts.sender.display_name(),
                 opts.requires_ack,
                 None,
                 opts.message_id.as_deref(),
@@ -742,7 +775,7 @@ pub fn apply_worker_sender_bypass(
 
 /// `session_drift_refusal` (`session_drift.py:69`):send 时检测会话漂移并拒绝。
 /// `None` = 无漂移 (放行);`Some` = 拒绝 [`DeliveryOutcome`] (reason=`SessionDrift`)。
-pub fn session_drift_refusal(
+pub(crate) fn session_drift_refusal(
     state: &serde_json::Value,
     target: &str,
     leader_id: &str,

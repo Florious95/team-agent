@@ -1,3 +1,4 @@
+//!
 //! step 14a · mcp_server — stdio MCP server (`team_orchestrator`) over JSON-RPC 2.0.
 //!
 //! Card: `docs/phase0/subsystems/14-mcp_cli.md` (MCP half).

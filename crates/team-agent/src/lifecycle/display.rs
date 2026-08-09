@@ -1,3 +1,4 @@
+//!
 //! lifecycle::display —— 能力门 / 后端解析 / 开关 / rebind 后重建。
 //!
 //! 0.5.39 Slice 1 (tmux-server-death-locate §7 Slice 1): all tmux
@@ -19,6 +20,7 @@ use super::*;
 
 // ── lifecycle::display —— 能力门 / 后端解析 / 开关 / rebind 后重建 ────────────
 
+///
 /// `resolve_display_backend(requested, recorded, source)`(`display/backend.py`)。默认
 /// adaptive;显式 none 是逃生口。
 pub fn resolve_display_backend(
@@ -32,6 +34,7 @@ pub fn resolve_display_backend(
     }
 }
 
+///
 /// `probe_display_capabilities(...)`(`display/adaptive.py:31`,C13)。能力探测,分支只看
 /// 结果不看 `cfg!(target_os)`;Windows/WSL → `NotImplementedThisPlatform`。
 pub fn probe_display_capabilities(_workspace: &Path) -> Result<DisplayProbe, LifecycleError> {
@@ -68,10 +71,11 @@ pub fn probe_display_capabilities(_workspace: &Path) -> Result<DisplayProbe, Lif
     })
 }
 
+///
 /// `open_worker_displays(workspace, session_name, jobs, backend, capability_probe)`
 /// (`display/worker_window.py`)。按后端分派 adaptive / ghostty_workspace / ghostty_window;
 /// 显示失败**不阻塞** team readiness(C14)。
-pub fn open_worker_displays(
+pub(crate) fn open_worker_displays(
     workspace: &Path,
     session_name: &SessionName,
     backend: DisplayBackend,
@@ -91,6 +95,7 @@ pub fn open_worker_displays(
     Ok(OpenDisplaysReport { backend, displays })
 }
 
+///
 /// `close_team_display_backends(state, event_log)`(`display/close.py`,C9)。按 state
 /// 记录的后端关显示;adaptive 只删带 team tag 的窗口(C2 leader pane 安全)+ orphan 清理。
 pub fn close_team_display_backends(
@@ -100,6 +105,7 @@ pub fn close_team_display_backends(
     close_adaptive_displays(workspace, session_name)
 }
 
+///
 /// `rebuild_adaptive_display_after_rebind(...)`(`display/rebuild.py`,C12)。restart 在
 /// leader rebind **之后**重建 adaptive 窗口(读 `leader_receiver.rebind_applied` 事件)。
 pub fn rebuild_adaptive_display_after_rebind(

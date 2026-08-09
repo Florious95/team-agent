@@ -18,7 +18,7 @@ use std::sync::Mutex;
 
 use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::coordinator::{Coordinator, ErrorLists, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::event_log::EventLog;
 use team_agent::message_store::MessageStore;
 use team_agent::messaging::deliver_pending_messages;
@@ -255,10 +255,6 @@ struct RealAdapterRegistry;
 impl ProviderRegistry for RealAdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists::default()
     }
 }
 

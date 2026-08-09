@@ -1,3 +1,4 @@
+//!
 //! step 14a · mcp_server::types — wire enums / envelopes / normalized-result carriers.
 
 use serde::{Deserialize, Serialize};
@@ -208,24 +209,6 @@ pub struct RpcResponse {
 pub struct RpcError {
     pub code: i64,
     pub message: String,
-}
-
-/// The `tools/call` result wrapper (`server.py:74-86`): `{content:[{type:"text",
-/// text:<json>}], isError:<bool>}`. `text` is the JSON-encoded [`ToolResult`]; the
-/// `is_error` flag mirrors `result.get("ok") is False`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolCallResult {
-    pub content: Vec<ToolCallContent>,
-    #[serde(rename = "isError")]
-    pub is_error: bool,
-}
-
-/// One `content[]` block — always `{type:"text", text:<json>}` here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolCallContent {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub text: String,
 }
 
 /// A successful tool result body — the compacted delegate result

@@ -1,3 +1,4 @@
+
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -212,7 +213,7 @@ fn verifies_json(check: &SelftestCheck) -> Value {
     serde_json::to_value(check.verifies).unwrap_or_else(|_| json!("unknown"))
 }
 
-pub fn receiver_binding_mismatches(
+fn receiver_binding_mismatches(
     owner_pane_id: &Value,
     caller_pane_id: &Value,
     pane_id: &Value,

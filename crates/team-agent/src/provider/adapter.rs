@@ -1,3 +1,4 @@
+//!
 //! ProviderAdapter trait(per-provider 命令构造 + 能力面)+ registry facade + 占位实现。
 
 use std::path::{Path, PathBuf};

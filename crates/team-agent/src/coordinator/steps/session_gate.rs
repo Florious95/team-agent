@@ -1,3 +1,4 @@
+//!
 //! unit-11 (Stage 4) — coordinator tick `session_gate` step group.
 //!
 //! Future home for the provider session-capture + readiness-gate steps

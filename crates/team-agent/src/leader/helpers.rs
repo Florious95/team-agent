@@ -1,3 +1,4 @@
+//!
 //! leader 内部 helper —— provider/turn-state wire 串、JSON path 取值、rollout 读、
 //! workspace 路径归一 / session 文件夹消毒、uuid 前缀、时间戳、sha1。
 

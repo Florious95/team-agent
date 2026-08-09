@@ -1,3 +1,4 @@
+//!
 //! Provider-local adapter implementations. Split from the monolithic
 //! `provider/adapter.rs` as 0.4.x decoupling step 2. Each file owns its
 //! provider's command builders, permission/sandbox/auth helpers, and

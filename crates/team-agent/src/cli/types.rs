@@ -1,3 +1,4 @@
+//!
 //! cli · types — 错误信封 / 退出码 / 命令结果载体 / leader passthrough 参数 /
 //! 每子命令的 clap-style arg 结构 / 五行 summary 计数桶。
 
@@ -13,7 +14,7 @@ use crate::transport::PaneId;
 /// `{ok:false, error, action, log, reason?, session_name?, next_actions?}`(字节级保留)。
 /// 人读时打 `error:`/`action:`/`log:` 三行到 stderr(`helpers.py:132-134`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CliErrorPayload {
+pub(crate) struct CliErrorPayload {
     /// 恒 `false`(错误信封)。
     pub ok: bool,
     pub error: String,
@@ -70,7 +71,7 @@ impl From<crate::messaging::MessagingError> for CliError {
 impl CliError {
     /// `_cli_error_payload`(`helpers.py:137-155`):落盘日志后构造稳定信封。tmux session
     /// 冲突时按 command 富化 reason/session_name/next_actions(`helpers.py:158-187`)。
-    pub fn to_payload(&self, log_path: &Path, command: &str) -> CliErrorPayload {
+    pub(crate) fn to_payload(&self, log_path: &Path, command: &str) -> CliErrorPayload {
         let error = self.to_string();
         let mut payload = CliErrorPayload {
             ok: false,

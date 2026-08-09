@@ -1,3 +1,4 @@
+//!
 //! step 6 · compiler — doc-driven team source → canonical `team.spec` dict.
 //!
 //! Truth source (READ-ONLY): `team-agent-public` @ v0.2.11, `team_agent/compiler.py`.

@@ -1,3 +1,4 @@
+//!
 //! Claude / ClaudeCode provider-local command builders + permission helpers.
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure

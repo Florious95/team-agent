@@ -1,4 +1,5 @@
-//! leader::start — leader_start_plan / start_leader / leader_session_name(派生 tmux session 名)。
+//!
+//! leader::start — leader_start_plan / leader_session_name(派生 tmux session 名)。
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
@@ -26,7 +27,7 @@ use super::{
     LeaderStartMode, LeaderStartPlan,
 };
 
-// ── leader::start — leader_start_plan / start_leader / session 名 ──
+// ── leader::start — leader_start_plan / session 名 ──
 
 pub(crate) struct PreparedLeaderStart {
     plan: LeaderStartPlan,
@@ -74,7 +75,7 @@ impl From<LeaderError> for PrepareLeaderStartError {
 
 /// `leader_start_plan`(card §46;`__init__.py:82`)。计算 leader 启动计划
 /// (exec in-TMUX / new tmux session / attach existing)。provider 未安装 → `Err(Start)`。
-pub fn leader_start_plan(
+pub(crate) fn leader_start_plan(
     provider: Provider,
     provider_args: &[String],
     workspace: &Path,
@@ -232,20 +233,16 @@ fn leader_start_plan_with_ambient_authority(
     // `managed_team_session_name(identity) = team-<team_id>` which is the
     // worker session — that co-location is the structural root of
     // E49/E51/E53/E57-3/E60.
-    // 0.4.10+ mirror-session fix v2 (option B): managed-mode session name
-    // gets a per-launch nonce so each `team-agent <provider>` entry in the
-    // same workspace creates its OWN tmux session — matching the user
-    // expectation that `tmux new-session + claude` is independent every
-    // time. Pre-fix the managed path used the workspace-keyed name (same
-    // session for every entry) and silently attached the second client →
-    // UI mirror. The external/attach paths keep the stable workspace-keyed
-    // name (per-launch nonce would break `--attach-session` reattach).
+    // A-22: managed mode reuses a live provider leader session by prefix;
+    // when no candidate exists, it falls back to a per-launch nonce. The
+    // external/attach paths keep the stable workspace-keyed name because a
+    // nonce would break `--attach-session` reattach.
     let session_name = if external_path {
         attach_session
             .cloned()
             .or_else(|| Some(leader_session_name(provider, workspace)))
     } else {
-        Some(managed_leader_session_name(provider, workspace))
+        Some(managed_leader_session_for_launch(provider, workspace))
     };
     if !in_tmux {
         ensure_tmux_installed()?;
@@ -346,66 +343,6 @@ pub(crate) fn leader_env_for_identity(
         );
     }
     leader_env
-}
-
-/// `start_leader`(card §46;`__init__.py:60`)。计算并执行 leader 启动计划(spawn + 信号处理)。
-/// 进程退出后 `Err`/退出码经 caller 处理(此处返 `Result` 替代 Python 的 `SystemExit`)。
-pub fn start_leader(
-    provider: Provider,
-    provider_args: &[String],
-    workspace: &Path,
-    attach_existing: bool,
-    confirm_attach: bool,
-    attach_session: Option<&SessionName>,
-    external_leader: bool,
-) -> Result<(), LeaderError> {
-    let prepared = prepare_leader_start(
-        provider,
-        provider_args,
-        workspace,
-        attach_existing,
-        confirm_attach,
-        attach_session,
-        external_leader,
-    )
-    .map_err(PrepareLeaderStartError::into_leader_error)?;
-    let plan = prepared.plan();
-    crate::event_log::EventLog::new(workspace).write(
-        super::LeaderEvent::LeaderStart.name(),
-        serde_json::json!({
-            "provider": super::helpers::provider_wire(plan.provider),
-            "mode": serde_json::to_value(plan.mode)?,
-            "session_name": plan.session_name.as_ref().map(|s| s.as_str().to_string()),
-        }),
-    )?;
-    execute_prepared_leader_start(&prepared, workspace).map(|_| ())
-}
-
-/// Execute a precomputed leader launch plan.
-///
-/// S0 exposes the seam and return model only. Lane 2 owns the real provider/tmux
-/// execution and workspace-socket enforcement.
-pub fn execute_leader_plan(
-    plan: &LeaderStartPlan,
-    workspace: &Path,
-) -> Result<LeaderLaunchOutcome, LeaderError> {
-    let ambient_authority = if plan.mode == LeaderStartMode::ExecProvider {
-        match ambient_pane_authority_preflight(workspace) {
-            Ok(Some(authority)) => Some(authority),
-            Ok(None) => {
-                return Err(LeaderError::Validation(
-                    "exec provider ambient pane authority missing".to_string(),
-                ));
-            }
-            Err(PrepareLeaderStartError::PaneAuthorityRefused(refusal)) => {
-                return Ok(LeaderLaunchOutcome::not_started(refusal.reason().as_str()));
-            }
-            Err(PrepareLeaderStartError::Leader(error)) => return Err(error),
-        }
-    } else {
-        None
-    };
-    execute_leader_plan_after_ambient_authority(plan, workspace, ambient_authority.as_ref())
 }
 
 pub(crate) fn execute_prepared_leader_start(
@@ -917,7 +854,7 @@ pub fn leader_session_name(provider: Provider, workspace: &Path) -> SessionName 
 /// External / attach paths keep the stable `leader_session_name` —
 /// per-launch nonce would break `--attach-session <name>` reattach
 /// semantics.
-pub fn managed_leader_session_name(provider: Provider, workspace: &Path) -> SessionName {
+fn managed_leader_session_name(provider: Provider, workspace: &Path) -> SessionName {
     let resolved = resolve_workspace_for_hash(workspace);
     let folder_raw = resolved
         .file_name()
@@ -934,6 +871,32 @@ pub fn managed_leader_session_name(provider: Provider, workspace: &Path) -> Sess
         "{LEADER_SESSION_PREFIX}{}-{folder}-{hash}-{pid:x}-{epoch_nanos:x}",
         provider_wire(provider)
     ))
+}
+
+fn managed_leader_session_for_launch(provider: Provider, workspace: &Path) -> SessionName {
+    let candidates = crate::transport_factory::tmux_workspace_transport(workspace)
+        .list_targets()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|target| target.session.as_str().to_string());
+    managed_leader_session_from_candidates(provider, workspace, candidates)
+}
+
+fn managed_leader_session_from_candidates(
+    provider: Provider,
+    workspace: &Path,
+    candidates: impl IntoIterator<Item = String>,
+) -> SessionName {
+    let prefix = format!("{LEADER_SESSION_PREFIX}{}-", provider_wire(provider));
+    let existing = candidates
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect::<std::collections::BTreeSet<_>>();
+    existing
+        .into_iter()
+        .next()
+        .map(SessionName::new)
+        .unwrap_or_else(|| managed_leader_session_name(provider, workspace))
 }
 
 fn start_argv(
@@ -1025,11 +988,10 @@ fn normalized_provider_args(provider_args: &[String]) -> impl Iterator<Item = St
         .cloned()
 }
 
-// 0.3.28 Step 2: `managed_team_session_name` deleted. Both managed and
-// external paths now compute the dedicated leader session via
-// `leader_session_name(provider, workspace)` directly. The old function
-// returned `team-<team_id>` which is the WORKER session — the structural
-// root of E49/E51/E53/E57-3/E60.
+// 0.3.28 Step 2: `managed_team_session_name` deleted. Both paths use the
+// dedicated leader-session namespace; managed launches select a live prefix
+// candidate before falling back to the nonce helper, while external/attach
+// launches use the stable `leader_session_name`.
 
 fn managed_client_argv(
     workspace: &Path,
@@ -1062,6 +1024,14 @@ fn execute_managed_leader_plan(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
+    execute_managed_leader_plan_attempt(plan, workspace, true)
+}
+
+fn execute_managed_leader_plan_attempt(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+    allow_attach_recovery: bool,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
     let Some(session) = plan.session_name.as_ref() else {
         return Err(LeaderError::Start(
             "managed leader session missing".to_string(),
@@ -1078,19 +1048,76 @@ fn execute_managed_leader_plan(
     // site. Semantics unchanged; managed leader hosting stays
     // tmux-only per design §Batch 6.
     let transport = crate::transport_factory::tmux_workspace_transport(workspace);
-    let spawned = ensure_managed_leader_pane(&transport, session, window, plan, workspace)?;
-    persist_managed_leader_binding(plan, workspace, &spawned)?;
+    let session_existed_before = transport.has_session(session).map_err(|error| {
+        LeaderError::Start(format!("managed leader session probe failed: {error}"))
+    })?;
+    let spawned = ensure_managed_leader_pane(
+        &transport,
+        session,
+        window,
+        plan,
+        workspace,
+        session_existed_before,
+    )?;
+    if let Err(error) = persist_managed_leader_binding(plan, workspace, &spawned) {
+        cleanup_managed_leader_resources(
+            &transport,
+            session,
+            &spawned,
+            session_existed_before,
+            workspace,
+            "binding_persist_failed",
+        );
+        return Err(error);
+    }
     spawn_managed_provider_startup_prompt_handler(
         plan.provider,
         workspace.to_path_buf(),
         spawned.pane_id.as_str().to_string(),
     );
-    let process = run_leader_argv(&plan.argv, &BTreeMap::new(), plan, workspace)?;
+    let process = match run_leader_argv(&plan.argv, &BTreeMap::new(), plan, workspace) {
+        Ok(process) => process,
+        Err(error) => {
+            cleanup_managed_leader_resources(
+                &transport,
+                session,
+                &spawned,
+                session_existed_before,
+                workspace,
+                "launcher_spawn_failed",
+            );
+            return Err(error);
+        }
+    };
     let code = process.status.code();
     if !process.status.success() {
-        return Err(LeaderError::Start(leader_launcher_failure(&process)));
+        cleanup_managed_leader_resources(
+            &transport,
+            session,
+            &spawned,
+            session_existed_before,
+            workspace,
+            "launcher_exit_failed",
+        );
+        let failure = LeaderError::Start(leader_launcher_failure(&process));
+        if allow_attach_recovery {
+            if let Ok(retry_plan) = managed_leader_attach_recovery_plan(plan, workspace) {
+                return execute_managed_leader_plan_attempt(&retry_plan, workspace, false);
+            }
+        }
+        return Err(failure);
     }
-    ensure_managed_provider_live_after_attach(&transport, &spawned)?;
+    if let Err(error) = ensure_managed_provider_live_after_attach(&transport, &spawned) {
+        cleanup_managed_leader_resources(
+            &transport,
+            session,
+            &spawned,
+            session_existed_before,
+            workspace,
+            "provider_not_live_after_attach",
+        );
+        return Err(error);
+    }
     Ok(LeaderLaunchOutcome {
         status: LeaderLaunchStatus::Exited,
         exit_code: code,
@@ -1099,21 +1126,36 @@ fn execute_managed_leader_plan(
     })
 }
 
+fn managed_leader_attach_recovery_plan(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<LeaderStartPlan, LeaderError> {
+    let session = managed_leader_session_for_launch(plan.provider, workspace);
+    let attach_mode = if plan.argv.iter().any(|arg| arg == "switch-client") {
+        ManagedClientAttachMode::SwitchClient
+    } else {
+        ManagedClientAttachMode::AttachSession
+    };
+    let argv = managed_client_argv(workspace, &session, plan.provider, attach_mode)?;
+    let mut retry_plan = plan.clone();
+    retry_plan.session_name = Some(session);
+    retry_plan.argv = argv;
+    Ok(retry_plan)
+}
+
 fn ensure_managed_leader_pane(
     transport: &dyn Transport,
     session: &SessionName,
     window: &WindowName,
     plan: &LeaderStartPlan,
     workspace: &Path,
+    session_existed_before: bool,
 ) -> Result<SpawnResult, LeaderError> {
-    // 0.4.10+ mirror-session fix v2 (option B): each managed launch gets
-    // its OWN session name (via `managed_leader_session_name`'s nonce).
-    // The historical "session already exists → reuse pane" branch is
-    // structurally unreachable now (the per-launch session never
-    // preexists). If a caller bypasses the nonce path and reuses a name,
-    // tmux's own duplicate-session error will surface — better than
-    // silently attaching a second client.
-    if transport.has_session(session).unwrap_or(false) {
+    // A-22: a managed launch may reuse an existing provider leader session;
+    // only a newly selected nonce session is absent before this probe.
+    // Reusing the existing session adds one pane; a new session uses the
+    // first-spawn path.
+    if session_existed_before {
         // 0.4.x (CR C-1 + C-2): leader env_unset reuses the worker
         // provider_env_unsets (single source of truth) + spawn through the
         // leader shell wrapper so provider exit returns to a shell, not
@@ -1148,6 +1190,45 @@ fn ensure_managed_leader_pane(
     }
 }
 
+fn cleanup_managed_leader_resources(
+    transport: &dyn Transport,
+    session: &SessionName,
+    spawned: &SpawnResult,
+    session_existed_before: bool,
+    workspace: &Path,
+    reason: &str,
+) {
+    let (action, result) = if session_existed_before {
+        (
+            "kill_pane",
+            transport
+                .kill_pane(&spawned.pane_id)
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| error.to_string()),
+        )
+    } else {
+        (
+            "kill_session",
+            transport
+                .kill_session(session)
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| error.to_string()),
+        )
+    };
+    write_leader_startup_prompt_event(
+        workspace,
+        "leader.launcher.rollback",
+        serde_json::json!({
+            "reason": reason,
+            "session": session.as_str(),
+            "pane_id": spawned.pane_id.as_str(),
+            "session_preexisted": session_existed_before,
+            "action": action,
+            "result": result,
+        }),
+    );
+}
+
 /// 0.4.x (CR C-1): leader provider env-unset list — SINGLE SOURCE OF TRUTH
 /// reused from worker spawn (`profile_launch::provider_env_unsets`).
 /// Audit grep guard: this function MUST be the only place in
@@ -1156,7 +1237,7 @@ fn ensure_managed_leader_pane(
 /// or the underlying `provider_env_unsets`. Use `AuthMode::Subscription` —
 /// the leader is the user's interactive provider, never CompatibleApi/
 /// OfficialApi which are worker-only auth modes today.
-pub fn leader_env_unset_for_provider(provider: Provider) -> Vec<String> {
+fn leader_env_unset_for_provider(provider: Provider) -> Vec<String> {
     crate::lifecycle::profile_launch::provider_env_unsets(
         provider,
         crate::model::enums::AuthMode::Subscription,
@@ -1270,7 +1351,7 @@ pub enum LeaderProviderHealth {
 /// common interactive shells; missing entries here are false negatives
 /// (shell looks like provider absent → health says Alive) which is the
 /// safe default per the CR R6 conservative-Alive rule.
-pub fn is_interactive_shell_basename(name: &str) -> bool {
+fn is_interactive_shell_basename(name: &str) -> bool {
     let trimmed = name.trim().to_ascii_lowercase();
     let basename = std::path::Path::new(&trimmed)
         .file_name()
@@ -1823,6 +1904,13 @@ fn run_leader_argv(
             "leader launch argv is empty".to_string(),
         ));
     };
+    let diagnostics_path = launcher_diagnostics_path(workspace);
+    if let Err(error) = write_launcher_diagnostics_header(&diagnostics_path, plan, argv) {
+        return Err(LeaderError::Start(format!(
+            "leader launcher diagnostics unavailable; startup_stage=diagnostics_create; launcher_diagnostics={}; error={error}",
+            diagnostics_path.display()
+        )));
+    }
     // 0.4.x regression fix (env-leak scenario 1, in-tmux ExecProvider path):
     // the managed-tmux path got the provider env-unset block via the shell
     // wrapper (cb9c217), but the ExecProvider in-tmux path here is a direct
@@ -1835,11 +1923,15 @@ fn run_leader_argv(
     // leader_env_unset_for_provider).
     let env_unset = leader_env_unset_for_provider(plan.provider);
     let mut command = Command::new(program);
-    command
-        .args(argv.iter().skip(1))
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit());
-    let capture_stderr = plan.mode != LeaderStartMode::ExecProvider;
+    command.args(argv.iter().skip(1)).stdin(Stdio::inherit());
+    let capture_stdout = !std::io::stdout().is_terminal();
+    command.stdout(if capture_stdout {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
+    let capture_stderr =
+        plan.mode != LeaderStartMode::ExecProvider || !std::io::stderr().is_terminal();
     command.stderr(if capture_stderr {
         Stdio::piped()
     } else {
@@ -1862,7 +1954,35 @@ fn run_leader_argv(
         command.env_remove("TMUX");
         command.env_remove("TMUX_PANE");
     }
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|error| {
+        LeaderError::Start(format!(
+            "leader launcher spawn failed; startup_stage=spawn; launcher_diagnostics={}; error={error}",
+            diagnostics_path.display()
+        ))
+    })?;
+    append_launcher_diagnostics(&diagnostics_path, "startup_stage=spawned\n").map_err(|error| {
+        LeaderError::Start(format!(
+            "leader launcher diagnostics write failed; startup_stage=spawned; launcher_diagnostics={}; error={error}",
+            diagnostics_path.display()
+        ))
+    })?;
+    let stdout_reader = child.stdout.take().map(|mut child_stdout| {
+        std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            let mut buf = [0_u8; 4096];
+            loop {
+                let Ok(read) = child_stdout.read(&mut buf) else {
+                    break;
+                };
+                if read == 0 {
+                    break;
+                }
+                let _ = std::io::stdout().write_all(&buf[..read]);
+                captured.extend_from_slice(&buf[..read]);
+            }
+            captured
+        })
+    });
     let stderr_reader = child.stderr.take().map(|mut child_stderr| {
         std::thread::spawn(move || {
             let mut captured = Vec::new();
@@ -1875,7 +1995,7 @@ fn run_leader_argv(
                     break;
                 }
                 let _ = std::io::stderr().write_all(&buf[..read]);
-                push_bounded_stderr(&mut captured, &buf[..read]);
+                captured.extend_from_slice(&buf[..read]);
             }
             captured
         })
@@ -1884,6 +2004,13 @@ fn run_leader_argv(
         spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());
     }
     let status = child.wait().map_err(LeaderError::Io)?;
+    let stdout = match stdout_reader {
+        Some(reader) => match reader.join() {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => String::new(),
+        },
+        None => String::new(),
+    };
     let stderr = match stderr_reader {
         Some(reader) => match reader.join() {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -1891,7 +2018,62 @@ fn run_leader_argv(
         },
         None => String::new(),
     };
-    Ok(LeaderProcessExit { status, stderr })
+    append_launcher_diagnostics(
+        &diagnostics_path,
+        &format!(
+            "startup_stage=exited\nexit_code={}\nchild_stdout={}\nchild_stderr={}\n",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+            crate::redaction::redact_external_text(&stdout),
+            crate::redaction::redact_external_text(&stderr),
+        ),
+    )
+    .map_err(|error| {
+        LeaderError::Start(format!(
+            "leader launcher diagnostics write failed; startup_stage=exited; launcher_diagnostics={}; error={error}",
+            diagnostics_path.display()
+        ))
+    })?;
+    Ok(LeaderProcessExit {
+        status,
+        stderr,
+        diagnostics_path,
+    })
+}
+
+fn launcher_diagnostics_path(workspace: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%.6f");
+    workspace.join(".team").join("logs").join(format!(
+        "launcher-diagnostics-{stamp}-{}.log",
+        std::process::id()
+    ))
+}
+
+fn write_launcher_diagnostics_header(
+    path: &Path,
+    plan: &LeaderStartPlan,
+    argv: &[String],
+) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        path,
+        format!(
+            "startup_stage=prepare\nmode={:?}\nprovider={}\nargv={}\n",
+            plan.mode,
+            provider_wire(plan.provider),
+            crate::redaction::redact_external_text(&argv.join(" ")),
+        ),
+    )
+}
+
+fn append_launcher_diagnostics(path: &Path, text: &str) -> Result<(), std::io::Error> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(text.as_bytes())
 }
 
 const LEADER_STDERR_LIMIT: usize = 8192;
@@ -1899,6 +2081,7 @@ const LEADER_STDERR_LIMIT: usize = 8192;
 struct LeaderProcessExit {
     status: std::process::ExitStatus,
     stderr: String,
+    diagnostics_path: PathBuf,
 }
 
 fn push_bounded_stderr(captured: &mut Vec<u8>, chunk: &[u8]) {
@@ -1923,7 +2106,11 @@ fn leader_launcher_failure(process: &LeaderProcessExit) -> String {
         .code()
         .map(|code| code.to_string())
         .unwrap_or_else(|| "signal".to_string());
-    format_launcher_failure(&status, process.status.code().is_none(), &process.stderr)
+    format!(
+        "{}; startup_stage=exited; launcher_diagnostics={}",
+        format_launcher_failure(&status, process.status.code().is_none(), &process.stderr),
+        process.diagnostics_path.display()
+    )
 }
 
 fn format_launcher_failure(status: &str, signaled: bool, raw_stderr: &str) -> String {
@@ -2017,7 +2204,7 @@ fn tmux_transport_for_current_pane() -> TmuxBackend {
         .unwrap_or_else(crate::transport_factory::tmux_default_transport)
 }
 
-pub fn handle_exec_provider_startup_prompts(
+fn handle_exec_provider_startup_prompts(
     provider: Provider,
     workspace: &Path,
     pane_id: &str,
@@ -2161,9 +2348,9 @@ mod tests {
     };
 
     use super::{
-        ensure_managed_provider_live_after_attach, execute_leader_plan,
-        execute_leader_plan_after_ambient_authority, format_launcher_failure,
-        handle_exec_provider_startup_prompts, push_bounded_stderr, shlex_quote,
+        ensure_managed_provider_live_after_attach, execute_leader_plan_after_ambient_authority,
+        format_launcher_failure, handle_exec_provider_startup_prompts,
+        is_interactive_shell_basename, push_bounded_stderr, shlex_quote,
         VerifiedAmbientPaneAuthority, LEADER_STDERR_LIMIT,
     };
 
@@ -2606,12 +2793,26 @@ mod tests {
         assert_eq!(sent[0].1, vec![Key::Enter]);
     }
 
+    #[test]
+    fn interactive_shell_basename_recognizes_supported_shells() {
+        let shells = [
+            "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh", "ash", "mksh", "yash",
+            "elvish", "nu", "nushell", "xonsh",
+        ];
+        for shell in shells {
+            assert!(is_interactive_shell_basename(shell));
+            assert!(is_interactive_shell_basename(&shell.to_uppercase()));
+        }
+        for provider in ["claude", "codex", "copilot", "gemini"] {
+            assert!(!is_interactive_shell_basename(provider));
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // 0.4.10+ mirror-session fix v2 (option B: independent session per launch).
     //
-    // managed_leader_session_name appends a per-launch nonce so each
-    // `team-agent <provider>` entry in the same workspace creates its own
-    // tmux session, matching `tmux new-session + claude` semantics.
+    // The managed selector reuses a live provider leader prefix when present;
+    // its no-candidate fallback appends a per-launch nonce.
     // ═══════════════════════════════════════════════════════════════════
 
     #[test]
@@ -2684,37 +2885,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
-    /// CR C-5 source grep guard: managed mode passes the nonce session
-    /// name through `leader_start_plan` so the per-launch independence
-    /// reaches `ensure_managed_leader_pane`. External/attach paths must
-    /// keep `leader_session_name`.
+    // Tombstone for `managed_path_uses_nonce_session_name_grep_guard`: A-22
+    // replaced that implementation-shape assertion with the contract guard
+    // below. Keep the old name here for audit/search provenance.
     #[test]
-    fn managed_path_uses_nonce_session_name_grep_guard() {
+    fn a22_launch_session_reuse_contract() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let start_rs = manifest.join("src").join("leader").join("start.rs");
         let contents = std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
-        // leader_start_plan must dispatch to managed_leader_session_name
-        // on the managed path.
         let start = contents
-            .find("pub fn leader_start_plan(")
-            .expect("leader_start_plan must exist");
+            .find("fn leader_start_plan_with_ambient_authority(")
+            .expect("leader_start_plan_with_ambient_authority must exist");
         let end = contents[start + 1..]
-            .find("\npub fn ")
-            .or_else(|| contents[start + 1..].find("\nfn "))
-            .map(|p| start + 1 + p)
+            .find("\nfn ")
+            .map(|offset| start + 1 + offset)
             .unwrap_or(contents.len());
         let body = &contents[start..end];
         assert!(
-            body.contains("managed_leader_session_name(provider, workspace)"),
-            "leader_start_plan must call managed_leader_session_name on \
-             the managed path (mirror-session fix v2); body excerpt: {body}"
+            body.contains("managed_leader_session_for_launch(provider, workspace)"),
+            "managed launch must select from the A-22 candidate contract; body excerpt: {body}"
         );
-        // The external_path branch must still use the stable name.
         assert!(
             body.contains("leader_session_name(provider, workspace)"),
             "leader_start_plan must keep leader_session_name on the \
              external/attach paths; body excerpt: {body}"
         );
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_a22_contract_{}", std::process::id()));
+        let reused = super::managed_leader_session_from_candidates(
+            Provider::ClaudeCode,
+            &workspace,
+            vec![
+                "team-worker-not-a-leader".to_string(),
+                "team-agent-leader-claude_code-z".to_string(),
+                "team-agent-leader-codex-other".to_string(),
+                "team-agent-leader-claude_code-a".to_string(),
+            ],
+        );
+        assert_eq!(
+            reused.as_str(),
+            "team-agent-leader-claude_code-a",
+            "managed launch must deterministically reuse a matching leader prefix session"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn a22_launch_session_without_candidate_gets_nonce() {
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_a22_nonce_{}", std::process::id()));
+        let fresh = super::managed_leader_session_from_candidates(
+            Provider::ClaudeCode,
+            &workspace,
+            std::iter::empty(),
+        );
+        assert!(
+            fresh.as_str().starts_with("team-agent-leader-claude_code-"),
+            "no candidate must create a leader-prefixed managed session: {}",
+            fresh.as_str()
+        );
+        assert_ne!(
+            fresh.as_str(),
+            super::leader_session_name(Provider::ClaudeCode, &workspace).as_str(),
+            "managed fallback must carry a per-launch nonce"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn a22_external_attach_session_name_remains_stable() {
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_a22_external_{}", std::process::id()));
+        let stable = super::leader_session_name(Provider::ClaudeCode, &workspace);
+        assert_eq!(
+            stable.as_str(),
+            super::leader_session_name(Provider::ClaudeCode, &workspace).as_str(),
+            "external/attach paths must keep the stable workspace-keyed session name"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

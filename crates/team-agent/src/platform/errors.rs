@@ -1,4 +1,3 @@
-//! Retryable OS error classifier + human-readable os_error_name.
 //!
 //! Batch 0 signature only. Batch 2 migrates the raw
 //! `libc::{EACCES, EPERM, EBUSY, ENOSPC}` matching in
@@ -8,6 +7,12 @@
 
 use std::io;
 
+///
+/// **本函数是单节点**:`#[cfg]` 在函数体内部分叉,只存在一个 `fn` 定义,
+/// 故不适用 SPEC §4「两份实现＝两个节点」——那条针对的是**多个独立 `fn` 定义**
+/// (如 `process.rs` 里 Unix/Windows 各定义一次)。
+/// `impl_notes` 只是实现说明,**不是节点身份**,不参与签名全等校验。
+///
 /// True when the OS error is a transient replace failure worth
 /// retrying (EACCES on Windows during antivirus scan, EBUSY on
 /// mounted filesystems, etc.). Batch 2 wires the callsite.
@@ -38,6 +43,10 @@ pub fn retryable_replace_error(error: &io::Error) -> bool {
     }
 }
 
+///
+/// 返回值是**对外稳定契约**:它会出现在诊断输出里被人和脚本读取,
+/// 因此已发布的名字不可改写,只可新增。
+///
 /// Human-readable name for a raw OS error code — used in diagnostics
 /// so operators see `EACCES` instead of `13`.
 #[allow(dead_code)]

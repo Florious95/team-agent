@@ -447,7 +447,6 @@ impl Drop for RecoveryCase {
 #[derive(Clone)]
 struct CounterState {
     adapter_calls: Arc<AtomicU32>,
-    error_list_calls: Arc<AtomicU32>,
 }
 
 struct CountingRegistry {
@@ -459,7 +458,6 @@ impl CountingRegistry {
         Self {
             counters: CounterState {
                 adapter_calls: Arc::new(AtomicU32::new(0)),
-                error_list_calls: Arc::new(AtomicU32::new(0)),
             },
         }
     }
@@ -473,13 +471,6 @@ impl ProviderRegistry for CountingRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         self.counters.adapter_calls.fetch_add(1, Ordering::SeqCst);
         crate::provider::get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        self.counters
-            .error_list_calls
-            .fetch_add(1, Ordering::SeqCst);
-        ErrorLists::default()
     }
 }
 

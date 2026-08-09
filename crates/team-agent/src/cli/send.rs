@@ -1,3 +1,4 @@
+//!
 //! cli · send — `cmd_send` + target 解析(`_send_target`)+ `SendArgs`→`SendOptions` 翻译
 //! (`send_options_from_args`,旗标取反语义)。
 
@@ -180,7 +181,7 @@ pub fn send_to_canonical_leader_target(
 }
 
 /// `_send_target`(`commands.py:181-184`):`--to` comma-split fanout / `target` 单值 / None。
-pub fn send_target(targets: Option<&str>, target: Option<&str>) -> MessageTarget {
+pub(super) fn send_target(targets: Option<&str>, target: Option<&str>) -> MessageTarget {
     if let Some(targets) = targets.filter(|s| !s.is_empty()) {
         let recipients: Vec<String> = targets
             .split(',')

@@ -1,3 +1,4 @@
+//!
 //! StateRepository facade.
 //!
 //! Ref:
@@ -73,16 +74,19 @@ pub struct StateRepository<'a> {
 }
 
 impl<'a> StateRepository<'a> {
+    ///
     /// Construct a repository bound to a workspace root.
     pub fn new(workspace: &'a Path) -> Self {
         Self { workspace }
     }
 
+    ///
     /// Load the raw workspace state document.
     pub fn load_workspace(&self) -> Result<Value, StateError> {
         helper_load_workspace(self.workspace)
     }
 
+    ///
     /// Load the canonical workspace document without running read-time
     /// migrations. `None` preserves the legacy raw-reader distinction between
     /// a missing file and a present empty/default document.
@@ -96,6 +100,7 @@ impl<'a> StateRepository<'a> {
         serde_json::from_str(&text).map(Some).map_err(StateError::from)
     }
 
+    ///
     /// Resolve a team-scoped projection using the existing projection selector.
     /// `team_key = None` selects the ambient team the same way as pre-S1a.
     pub fn load_team(&self, team_key: Option<&str>) -> Result<Value, StateError> {
@@ -110,6 +115,7 @@ impl<'a> StateRepository<'a> {
         })
     }
 
+    ///
     /// Persist `state` under the supplied intent. S1a dispatch is a pure
     /// forward call to the same legacy helper family that the caller used
     /// before S1a; the intent selects the family, not the merge semantics.
@@ -117,6 +123,7 @@ impl<'a> StateRepository<'a> {
         route_direct(self.workspace, intent, state)
     }
 
+    ///
     /// Persist `state` and let `reapply` re-materialize the write on
     /// SaveConflict, matching the pre-S1a `_reapplying_after_conflict` helper
     /// behavior for reapply-shaped intents.

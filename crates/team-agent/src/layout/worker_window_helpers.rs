@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 layout step 2 — small window grammar helper for layout-layer naming.
 //!
 //! Command/UI grammar, not provider identity parsing: leader window names
@@ -6,6 +7,7 @@
 
 use crate::model::enums::Provider;
 
+///
 /// Window name used inside the leader session. Mirrors
 /// Python's `leader_window_name = provider` (see
 /// `runtime/0.2.11/src/team_agent/leader/__init__.py:114-131`).

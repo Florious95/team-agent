@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 layout step 2 — leader placement.
 //!
 //! Public API for managed-mode leader placement. The runtime calls
@@ -34,6 +35,7 @@ pub enum LeaderPlacement {
     },
 }
 
+///
 /// Compute the placement for a leader given its identity, the desired
 /// `LeaderStartMode`, and the environment (used to detect `$TMUX`).
 ///
@@ -58,13 +60,6 @@ pub fn leader_placement(
     }
 }
 
-/// The leader session name for a given provider + workspace. `LeaderIdentity`
-/// in this codebase does not carry the provider field; the caller supplies it
-/// explicitly (matches how `leader_session_name` itself is shaped).
-pub fn leader_session_for_provider(provider: Provider, workspace: &Path) -> SessionName {
-    leader_session_name(provider, workspace)
-}
-
 #[allow(dead_code)]
 fn _unused_identity_marker(_id: &LeaderIdentity) {}
 
@@ -74,6 +69,7 @@ use crate::layout::placement::{WorkerSpawnAction, WorkerSpawnTarget};
 use crate::model::yaml::Value as YamlValue;
 use crate::transport::Transport;
 
+///
 /// Compute the spawn target for a worker. Python parity: one window per
 /// agent in the worker session, named after `agent_id`. First worker
 /// (= session does not yet exist) → NewSession; otherwise NewWindow.

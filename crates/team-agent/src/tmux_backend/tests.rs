@@ -146,6 +146,45 @@ fn backend_with_stdin(
     )
 }
 
+#[test]
+fn a21_spawn_command_too_long_is_structured_before_transport() {
+    let (backend, recorded) = backend_with(MockResp::Out(ok("%0\n")), Vec::new());
+    let session = SessionName::new("a21-session");
+    let window = WindowName::new("worker-long-role");
+    let argv = vec!["codex".to_string(), "x".repeat(20_000)];
+
+    let error = backend
+        .spawn_first(
+            &session,
+            &window,
+            &argv,
+            Path::new("/tmp/a21-workspace"),
+            &BTreeMap::new(),
+        )
+        .expect_err("oversized spawn must fail before tmux transport");
+    let text = error.to_string();
+    assert!(
+        text.contains("command_too_long"),
+        "structured error: {text}"
+    );
+    assert!(
+        text.contains("worker-long-role"),
+        "seat must be named: {text}"
+    );
+    assert!(
+        text.contains("actual_bytes="),
+        "actual length must be visible: {text}"
+    );
+    assert!(
+        text.contains("limit_bytes="),
+        "limit must be visible: {text}"
+    );
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "tmux must not be called: {text}"
+    );
+}
+
 fn svec(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| (*s).to_string()).collect()
 }

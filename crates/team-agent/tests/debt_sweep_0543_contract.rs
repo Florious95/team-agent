@@ -174,25 +174,6 @@ fn packaging_dry_run_enters_the_same_serial_home_boundary_as_real_copy() {
 }
 
 #[test]
-fn file_lock_timeout_fixture_has_unique_path_and_preserves_timeout_shape() {
-    let source = read_repo("crates/team-agent/src/platform/file_lock.rs");
-    let body = function_block_after(&source, "fn timeout_error_carries_path_and_seconds");
-    assert!(!body.contains("join(\"ta-b2-timeout\")"));
-    assert!(body.contains("std::process::id()"));
-    assert!(body.contains("fetch_add"));
-    for guard in [
-        "LockError::Timeout",
-        "timeout_secs > 0.0",
-        "timeout-lock.tmp",
-    ] {
-        assert!(
-            body.contains(guard),
-            "timeout behavior guard disappeared: {guard}"
-        );
-    }
-}
-
-#[test]
 fn line_count_missing_allowlist_is_valid() {
     let case = LineCountCase::new(1);
     let output = case.run(None, false, false);

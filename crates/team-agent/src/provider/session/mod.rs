@@ -1,3 +1,4 @@
+//!
 //! unit-6 (Stage 2) — provider session namespace.
 //!
 //! Houses session-specific provider concerns: resume preflight,
@@ -15,7 +16,4 @@ pub(crate) use context_fork::{
     PendingContextFork,
 };
 
-pub use resume::{
-    ProviderBackingCheck, RecoveryHint, ResumeDecisionDetail, ResumePreflight,
-    ResumePreflightOutcome, ResumeRefusalReason,
-};
+pub use resume::{RecoveryHint, ResumeRefusalReason};

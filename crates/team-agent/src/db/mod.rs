@@ -1,3 +1,4 @@
+//!
 //! step 3 · db — `team.db`(SQLite)的 schema 与迁移层(真相源 `message_store/schema*.py`)。
 //!
 //! §6 step 3:schema/migrations/indexes/WAL+busy-timeout/只读兼容。**消息操作本身(send/

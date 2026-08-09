@@ -1,3 +1,4 @@
+//!
 //! internal_delivery.py + delivery.py — coordinator/调度器侧 thin wrapper + 单条 tmux 注入投递
 //! + trust 有界重试 + turn-open arm (card §16/§65)。
 
@@ -93,7 +94,7 @@ pub fn deliver_persisted_message(
 
 /// `_tmux_pane_width` (`delivery.py:20`):查询 pane 列宽。**fail-safe** (bug-064/082):失败
 /// 返回 [`PaneWidthQuery::Failed`],**绝不**给默认宽度。借 step 9 transport 的 query。
-pub fn tmux_pane_width(transport: &dyn Transport, target: &Target) -> PaneWidthQuery {
+pub(crate) fn tmux_pane_width(transport: &dyn Transport, target: &Target) -> PaneWidthQuery {
     let queried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         transport.query(target, crate::transport::PaneField::PaneWidth)
     }));
@@ -2254,7 +2255,7 @@ pub fn execute_trust_retry(
 
 /// `_record_turn_open_if_leader_to_worker` (`delivery.py:430`):**take-over arm 来自真实投递**
 /// (card §121) —— 仅 leader→worker 注入/投递成功后才 arm,绝不凭空 arm。
-pub fn record_turn_open_if_leader_to_worker(
+pub(crate) fn record_turn_open_if_leader_to_worker(
     workspace: &Path,
     state: &serde_json::Value,
     sender: &str,
@@ -2413,7 +2414,7 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
 
 /// `_stamp_first_send_at_if_leader_to_worker` (`delivery.py:380`):首次 leader→worker 投递戳
 /// `first_send_at` (step 13 restart Route B atomicity 决策读它)。
-pub fn stamp_first_send_at_if_leader_to_worker(
+pub(crate) fn stamp_first_send_at_if_leader_to_worker(
     workspace: &Path,
     state: &serde_json::Value,
     sender: &str,

@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 layout step 1 — session name constructors + topology invariant guard.
 //!
 //! Python 0.2.11 truth source (recap):
@@ -25,6 +26,7 @@ use serde_json::Value as JsonValue;
 /// code does not have to depend on the leader module's internals.
 pub const LEADER_SESSION_PREFIX: &str = crate::leader::start::LEADER_SESSION_PREFIX;
 
+///
 /// Leader's dedicated tmux session name.
 ///
 /// Format: `team-agent-leader-<provider_wire>-<folder>-<sha1(workspace)[:8]>`.
@@ -37,6 +39,7 @@ pub fn leader_session_name(provider: Provider, workspace: &Path) -> SessionName 
     crate::leader::start::leader_session_name(provider, workspace)
 }
 
+///
 /// Worker tmux session name derived from the team spec.
 ///
 /// Format: `spec.runtime.session_name` if set, else `team-<team.name>`
@@ -48,13 +51,15 @@ pub fn worker_session_name(spec: &YamlValue) -> SessionName {
     crate::lifecycle::launch::worker_session_name_pub(spec)
 }
 
+///
 /// True when `name` starts with the leader session prefix.
 pub fn is_leader_session(name: &SessionName) -> bool {
     name.as_str().starts_with(LEADER_SESSION_PREFIX)
 }
 
+///
 /// True when `name` equals the worker session name derived from `spec`.
-pub fn is_worker_session(name: &SessionName, spec: &YamlValue) -> bool {
+fn is_worker_session(name: &SessionName, spec: &YamlValue) -> bool {
     worker_session_name(spec).as_str() == name.as_str()
 }
 
@@ -78,6 +83,7 @@ pub enum TopologyViolationKind {
     LeaderPaneIdCollidesWithAgent,
 }
 
+///
 /// Assert the runtime-state topology invariants (Step 1 — `warn!` only).
 ///
 /// Checks:
@@ -174,6 +180,7 @@ pub fn assert_topology_invariants(state: &JsonValue, spec: &YamlValue) -> Vec<To
     out
 }
 
+///
 /// Logs each violation in `violations` to stderr under the
 /// `team_agent::layout` tag. No-op when the list is empty. This is the
 /// Step-1 surface — `eprintln!` matches the codebase's existing logging

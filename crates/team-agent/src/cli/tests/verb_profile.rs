@@ -122,6 +122,44 @@ fn profile_init_routes_and_creates_secret_boundary_files() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+#[test]
+fn compatible_api_profile_init_template_contains_common_five_fields() {
+    let ws = tmp_workspace();
+    let code = run(
+        &profile_argv(&[
+            "profile",
+            "init",
+            "compat",
+            "--workspace",
+            ".",
+            "--auth-mode",
+            "compatible_api",
+            "--json",
+        ]),
+        &ws,
+    );
+    assert_eq!(
+        code,
+        ExitCode::Ok,
+        "compatible_api profile init must route and exit 0"
+    );
+
+    let expected =
+        "AUTH_MODE=compatible_api\nPROFILE_NAME=compat\nBASE_URL=\nAPI_KEY=\nMODEL=\n";
+    let dir = profiles_dir(&ws);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("compat.env")).unwrap(),
+        expected,
+        "compatible_api profile must expose the documented five-field template"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("compat.example.env")).unwrap(),
+        expected,
+        "compatible_api example must expose the documented five-field template"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 // Golden source:
 // - profiles/core.py:95-119 doctor_profile returns ok=true for existing profiles and
 //   ok=false for missing profiles; parser.py:506-508 maps result.ok false to exit 1.

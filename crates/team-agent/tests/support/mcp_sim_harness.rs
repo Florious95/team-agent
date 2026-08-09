@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -32,6 +32,18 @@ const EXPECTED_TOOLS: &[&str] = &[
     "stuck_cancel",
 ];
 
+fn test_binary_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
+        return PathBuf::from(path);
+    }
+    std::env::current_exe()
+        .expect("test executable path")
+        .parent()
+        .and_then(|deps| deps.parent())
+        .map(|target| target.join("team-agent"))
+        .expect("team-agent test binary path")
+}
+
 pub struct McpSimHarness {
     workspace: PathBuf,
     backend: TmuxBackend,
@@ -42,9 +54,16 @@ pub struct McpSimHarness {
 impl McpSimHarness {
     pub fn new() -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        let workspace = std::env::temp_dir().join(format!(
-            "ta-rs-mcp-sim-{}-{}",
+        let run_tag = format!(
+            "{}-{}",
             std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after unix epoch")
+                .as_nanos()
+        );
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-rs-mcp-sim-{run_tag}-{}",
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&workspace);
@@ -52,8 +71,7 @@ impl McpSimHarness {
         let workspace = std::fs::canonicalize(workspace).unwrap();
         let backend = TmuxBackend::for_workspace(&workspace);
         let session = SessionName::new(format!(
-            "team-mcp-sim-{}-{}",
-            std::process::id(),
+            "team-mcp-sim-{run_tag}-{}",
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let mut harness = Self {
@@ -366,7 +384,7 @@ fn spawn_mcp_client_with_catalog_check(
     owner_team_id: &str,
     check_catalog: bool,
 ) -> McpClient {
-    let program = env!("CARGO_BIN_EXE_team-agent").to_string();
+    let program = test_binary_path().to_string_lossy().into_owned();
     let args = vec![
         "mcp-server".to_string(),
         "--workspace".to_string(),

@@ -1,3 +1,4 @@
+//!
 //! abnormal track 消费的 fault/approval facts 抽取(`provider_state.read_fault_facts`)。
 
 use super::types::{FactKind, FaultFact, Signature, TurnId};
@@ -11,15 +12,6 @@ pub fn read_fault_facts(records: &[serde_json::Value], provider: Provider) -> Ve
         .iter()
         .filter_map(|record| fault_fact(provider, record))
         .collect()
-}
-
-pub fn explicit_error_fact(record: &serde_json::Value, provider: Provider) -> Option<FaultFact> {
-    match provider {
-        Provider::Codex => codex_explicit_error_fact(record),
-        Provider::Claude | Provider::ClaudeCode => claude_explicit_error_fact(record),
-        // copilot 一期不接 jsonl 真相源(C-3-5)。
-        Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
-    }
 }
 
 pub(crate) fn claude_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
@@ -48,23 +40,6 @@ pub(crate) fn claude_explicit_error_fact(record: &serde_json::Value) -> Option<F
         );
     }
     None
-}
-
-fn codex_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
-    if record.get("method").and_then(serde_json::Value::as_str) != Some("turn/completed") {
-        return None;
-    }
-    let turn = record.get("params").and_then(|p| p.get("turn"))?;
-    if turn.get("status").and_then(serde_json::Value::as_str) != Some("failed") {
-        return None;
-    }
-    Some(FaultFact::new(
-        Signature::new("turn_failed"),
-        turn.get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(TurnId::new),
-        FactKind::Failed,
-    ))
 }
 
 fn fault_fact(provider: Provider, record: &serde_json::Value) -> Option<FaultFact> {

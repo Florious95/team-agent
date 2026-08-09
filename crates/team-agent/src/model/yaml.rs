@@ -1,3 +1,4 @@
+//!
 //! step 2 · model — `simple_yaml` 方言移植(真相源 `src/team_agent/simple_yaml.py`)。
 //!
 //! Team Agent **不**用标准 YAML:它有一份零依赖、字节级特判的子集 `loads`/`dumps`,

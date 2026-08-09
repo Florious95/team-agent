@@ -1,5 +1,6 @@
-//! leader::owner_bind — Family A 正源 owner 绑定(bind_owner_from_caller_pane / emit_owner_bound_event)
-//! + leader 身份上下文派生(override / state / derive)。
+//!
+//! leader::owner_bind — Family A 正源 owner 绑定 + leader 身份上下文派生
+//! (override / state / derive)。
 
 use std::path::Path;
 
@@ -153,6 +154,7 @@ pub fn bind_owner_from_caller_pane(
         &machine_fingerprint,
         &os_user,
     )?;
+    let derived_leader_session_uuid = identity.leader_session_uuid.clone();
     let owner = TeamOwner {
         pane_id: PaneId::new(pane.clone()),
         provider,
@@ -163,6 +165,14 @@ pub fn bind_owner_from_caller_pane(
         claimed_via: ClaimedVia::ClaimLeader,
         os_user: Some(os_user),
     };
+    emit_owner_bound_event(
+        workspace,
+        &PaneId::new(pane.clone()),
+        &caller_current_command,
+        &derived_leader_session_uuid,
+        team_id,
+        None,
+    )?;
     Ok(OwnerBindResult {
         ok: true,
         owner: Some(owner),
@@ -176,7 +186,7 @@ pub fn bind_owner_from_caller_pane(
 
 /// `emit_owner_bound_event`(`leader_binding.py:162`)。成功绑定后的审计 hook
 /// (`owner.bound_from_caller_pane`;只写 uuid 短前缀,不泄全 uuid)。
-pub fn emit_owner_bound_event(
+fn emit_owner_bound_event(
     workspace: &Path,
     caller_pane_id: &PaneId,
     caller_current_command: &str,

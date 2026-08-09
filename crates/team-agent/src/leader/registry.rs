@@ -1,3 +1,4 @@
+//!
 //! Phase-DX E7 (0.5.9 host-leader-registry-design): file-per-leader discovery index.
 //!
 //! Location: `~/.team-agent/leaders/<workspace_hash>__<team_key>.json`.
@@ -147,7 +148,7 @@ pub fn workspace_hash(workspace: &Path) -> String {
 /// Compute the discovery-visible short label for a workspace path —
 /// basename by default, "workspace" when the path has no name component.
 #[must_use]
-pub fn workspace_short(workspace: &Path) -> String {
+fn workspace_short(workspace: &Path) -> String {
     workspace
         .file_name()
         .and_then(|s| s.to_str())
@@ -338,7 +339,7 @@ pub fn unregister_entry(workspace: &Path, team_key: &str) -> Option<PathBuf> {
 /// registry is a derived discovery index and unreadable files are the
 /// "STALE / UNREADABLE" dirty class rather than an error.
 #[must_use]
-pub fn read_all_entries() -> Vec<(PathBuf, LeaderRegistryEntry)> {
+fn read_all_entries() -> Vec<(PathBuf, LeaderRegistryEntry)> {
     let Some(dir) = registry_dir() else {
         return Vec::new();
     };
@@ -438,19 +439,6 @@ fn tmux_pane_live(socket: &str, pane_id: &str) -> bool {
         Ok(targets) => targets.iter().any(|t| t.pane_id.as_str() == pane_id),
         Err(_) => false,
     }
-}
-
-/// Return the canonical state's `leader_receiver` value for the entry's
-/// team, if one exists. Send/leaders paths use this so they never route
-/// through a stale registry channel — canonical state is the truth.
-#[must_use]
-pub fn canonical_receiver(entry: &LeaderRegistryEntry) -> Option<serde_json::Value> {
-    let state = crate::state::persist::load_runtime_state(&entry.workspace).ok()?;
-    let team = state
-        .get("teams")
-        .and_then(|v| v.as_object())
-        .and_then(|teams| teams.get(&entry.team_key))?;
-    team.get("leader_receiver").cloned()
 }
 
 /// Read all entries, classify each, and prune terminal-stale entries

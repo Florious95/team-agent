@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use team_agent::provider::{extract_approval_prompt, runtime_mcp_prompt_allowlisted, ApprovalKind};
+use team_agent::provider::{
+    extract_approval_prompt, runtime_approval_decision, ApprovalKind, RuntimeApprovalDecision,
+};
 
 #[test]
 fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fingerprint() {
@@ -23,9 +25,10 @@ fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fin
     assert_eq!(prompt.kind, ApprovalKind::McpTool);
     assert_eq!(prompt.server.as_deref(), Some("custom_server"));
     assert_eq!(prompt.tool.as_deref(), Some("write_file"));
-    assert!(
-        !runtime_mcp_prompt_allowlisted(&prompt),
-        "fixture precondition: custom MCP servers are not auto-approved Team Agent MCP tools"
+    assert_eq!(
+        runtime_approval_decision(&prompt, true),
+        RuntimeApprovalDecision::AwaitingHumanConfirm,
+        "fixture precondition: custom MCP servers wait for human confirmation"
     );
     assert!(
         extract_approval_prompt(

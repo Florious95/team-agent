@@ -33,6 +33,18 @@ pub const CALLER_IDENTITY_ENVS: &[&str] = &[
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn test_binary_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
+        return PathBuf::from(path);
+    }
+    std::env::current_exe()
+        .expect("test executable path")
+        .parent()
+        .and_then(|deps| deps.parent())
+        .map(|target| target.join("team-agent"))
+        .expect("team-agent test binary path")
+}
+
 /// 0.5.43 debt-sweep (debt-sweep-locate.md §4.2): short, process-unique
 /// absolute tmux socket path for tests that exec real `tmux -S`. Root
 /// cause of the Gate2 flake is macOS `AF_UNIX sun_path` >104 bytes when
@@ -204,7 +216,7 @@ impl HermeticTestEnv {
     }
 
     pub fn run_cli_env(&self, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+        let mut command = Command::new(test_binary_path());
         command.args(args).current_dir(cwd).env("HOME", &self.home);
         for key in CALLER_IDENTITY_ENVS {
             command.env_remove(key);

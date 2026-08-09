@@ -1,3 +1,4 @@
+//!
 //! unit-9 (Stage 4) — tmux endpoint selection policy, separated from the
 //! concrete `TmuxBackend` execution layer.
 //!
@@ -55,6 +56,7 @@ pub struct TmuxEndpointSelection {
     pub source: TmuxEndpointSource,
 }
 
+///
 /// Pure policy: pick the tmux endpoint to use given a (maybe-present)
 /// `state.json` Value.
 ///
@@ -91,6 +93,7 @@ pub fn select_endpoint_from_state(state: Option<&Value>) -> Option<TmuxEndpointS
     None
 }
 
+///
 /// State-first endpoint selection with workspace fallback. Equivalent to
 /// what `tmux_backend_for_runtime_state_or_workspace` does internally,
 /// minus the backend construction.

@@ -1,3 +1,4 @@
+//!
 //! step 14a · mcp_server::tools — `TeamOrchestratorTools`, the 12 typed handlers.
 
 use std::path::{Path, PathBuf};

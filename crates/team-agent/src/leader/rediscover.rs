@@ -1,3 +1,4 @@
+//!
 //! leader::rediscover — attach-leader readopt and leader receiver rediscovery.
 
 use std::collections::BTreeMap;
@@ -129,21 +130,7 @@ pub fn try_readopt_leader_pane(
     )))
 }
 
-/// `_rediscover_leader_receiver`: scan live targets and repair the receiver when
-/// exactly one usable pane matches the recorded owner identity.
-pub fn rediscover_leader_receiver(
-    workspace: &Path,
-    state: &mut Value,
-    transport: &dyn Transport,
-    event_log: &crate::event_log::EventLog,
-) -> Result<Value, LeaderError> {
-    let identity = OwnerIdentity::from_state(workspace, state)?;
-    rediscover_leader_receiver_with_identity(
-        workspace, state, transport, event_log, &identity, None,
-    )
-}
-
-pub fn rediscover_leader_receiver_with_owner_identity(
+fn rediscover_leader_receiver_with_owner_identity(
     workspace: &Path,
     state: &mut Value,
     transport: &dyn Transport,
@@ -204,7 +191,7 @@ fn rediscover_leader_receiver_with_identity(
     )
 }
 
-pub fn rediscover_leader_receiver_from_targets(
+fn rediscover_leader_receiver_from_targets(
     workspace: &Path,
     state: &mut Value,
     targets: &[PaneInfo],
@@ -216,7 +203,7 @@ pub fn rediscover_leader_receiver_from_targets(
     )
 }
 
-pub fn rediscover_leader_receiver_from_targets_with_owner_identity(
+pub(super) fn rediscover_leader_receiver_from_targets_with_owner_identity(
     workspace: &Path,
     state: &mut Value,
     targets: &[PaneInfo],

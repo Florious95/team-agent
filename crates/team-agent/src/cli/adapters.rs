@@ -1,3 +1,4 @@
+//!
 //! cli · adapters — 每子命令的薄壳 `cmd_*`(commands.py)。委派 status/lifecycle/diagnose/
 //! leader/messaging port,把委派结果包成 [`CmdResult`]。含逻辑的:`cmd_status`(三态互斥)、
 //! `cmd_doctor`(gate/comms/fix-schema/cleanup-orphans 分派)。
@@ -221,7 +222,8 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
 
 /// `cmd_status`(`commands.py:90`)。三态:`--summary`(xor json,xor agent)→五行文本;
 /// `--json`→`status_port::status(compact=!detail)`;else→`status_port::format_status(agent)`。
-pub fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
+#[cfg(test)]
+pub(crate) fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
     cmd_status_for_team(args, args.team.as_deref())
 }
 
@@ -408,7 +410,8 @@ pub fn cmd_sessions(args: &SessionsArgs) -> Result<CmdResult, CliError> {
 }
 
 /// `cmd_collect`(`parser.py:292`)。
-pub fn cmd_collect(args: &CollectArgs) -> Result<CmdResult, CliError> {
+#[cfg(test)]
+pub(crate) fn cmd_collect(args: &CollectArgs) -> Result<CmdResult, CliError> {
     cmd_collect_for_team(args, args.team.as_deref())
 }
 

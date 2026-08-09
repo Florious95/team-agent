@@ -34,6 +34,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use team_agent::tmux_backend::TmuxBackend;
+use team_agent::transport::{SessionName, Transport};
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
@@ -89,26 +91,18 @@ fn run_launcher_non_tty(env: &HermeticTestEnv, workspace: &Path) -> Output {
         .expect("run launcher")
 }
 
-/// Precise teardown for C1: the non-TTY launcher creates a nonce leader tmux
-/// SERVER (via `tmux -L <name>`) before the client attach fails, and that server
-/// survives (§4.2). Kill exactly the processes whose command line carries this
-/// test's workspace path — never a foreign socket/server (red line hygiene).
+/// Precise teardown for launcher tests: the non-TTY launcher creates a
+/// workspace-scoped tmux server before the client attach fails, and that server
+/// survives (§4.2). Kill exactly this test's endpoint, never a foreign server.
 struct LauncherResidueGuard {
-    workspace_token: String,
+    endpoint: String,
 }
 
 impl Drop for LauncherResidueGuard {
     fn drop(&mut self) {
-        let Ok(out) = Command::new("ps").args(["-axo", "pid=,command="]).output() else {
-            return;
-        };
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if line.contains(&self.workspace_token) {
-                if let Some(pid) = line.split_whitespace().next() {
-                    let _ = Command::new("kill").args(["-TERM", pid]).output();
-                }
-            }
-        }
+        let _ = Command::new("tmux")
+            .args(["-L", &self.endpoint, "kill-server"])
+            .output();
     }
 }
 
@@ -138,9 +132,10 @@ fn cli_error_logs(workspace: &Path) -> Vec<PathBuf> {
 fn c1_launcher_failure_persists_bounded_redacted_child_stderr() {
     let env = HermeticTestEnv::enter("launcher-c1");
     let ws = env.workspace("ws");
-    let _residue = LauncherResidueGuard {
-        workspace_token: ws.to_string_lossy().to_string(),
-    };
+    let endpoint = TmuxBackend::for_workspace(&ws)
+        .tmux_endpoint()
+        .expect("workspace backend has a tmux endpoint");
+    let _residue = LauncherResidueGuard { endpoint };
     let out = run_launcher_non_tty(&env, &ws);
     // The launcher must have failed (non-TTY attach), otherwise the fixture did
     // not exercise the failure path.
@@ -174,6 +169,124 @@ fn c1_launcher_failure_persists_bounded_redacted_child_stderr() {
          (e.g. `not a terminal`) AND a classification into the cli-error artifact, not only the \
          normalized `exited with status N` string. logs={logs:?} combined={combined:?}"
     );
+
+    let diagnostics_path = logs
+        .iter()
+        .flat_map(|path| std::fs::read_to_string(path).ok())
+        .flat_map(|text| text.lines().map(str::to_owned).collect::<Vec<_>>())
+        .find_map(|line| {
+            line.split_once("launcher_diagnostics=")
+                .map(|(_, path)| PathBuf::from(path))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "launcher failure must name its full diagnostics artifact; logs={logs:?}; combined={combined:?}"
+            )
+        });
+    let diagnostics = std::fs::read_to_string(&diagnostics_path).unwrap_or_else(|error| {
+        panic!(
+            "read launcher diagnostics {}: {error}",
+            diagnostics_path.display()
+        )
+    });
+    assert!(
+        diagnostics.contains("startup_stage="),
+        "launcher diagnostics must record startup stage: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.contains("child_stdout=") && diagnostics.contains("child_stderr="),
+        "launcher diagnostics must persist both child streams: {diagnostics:?}"
+    );
+}
+
+/// A failed managed launcher may roll back only the leader session it created.
+/// The pre-existing team session is a canary and must remain on the same tmux
+/// socket. This is the A-20 failure shape, with an extra assertion that the
+/// newly-created leader resource does not leak.
+#[test]
+fn a20_launcher_failure_preserves_existing_team_and_cleans_own_session() {
+    let env = HermeticTestEnv::enter("launcher-a20");
+    let ws = env.workspace("ws");
+    let backend = TmuxBackend::for_workspace(&ws);
+    let endpoint = backend
+        .tmux_endpoint()
+        .expect("workspace backend has a tmux endpoint");
+    let _residue = LauncherResidueGuard {
+        endpoint: endpoint.clone(),
+    };
+    let canary = SessionName::new("team-existing");
+    let create = Command::new("tmux")
+        .args([
+            "-L",
+            &endpoint,
+            "new-session",
+            "-d",
+            "-s",
+            canary.as_str(),
+            "sh",
+            "-lc",
+            "sleep 30",
+        ])
+        .output()
+        .expect("create pre-existing team canary");
+    assert!(create.status.success(), "create canary: {:?}", create);
+    let canary_pid = backend
+        .list_targets()
+        .expect("list canary pane")
+        .into_iter()
+        .find(|target| target.session == canary)
+        .and_then(|target| target.pane_pid)
+        .expect("canary pane pid");
+    let server_pid = parent_pid(canary_pid).expect("canary pane must have a tmux server parent");
+
+    let out = run_launcher_non_tty(&env, &ws);
+    assert!(!out.status.success(), "fixture must fail launcher attach");
+    assert!(
+        backend.has_session(&canary).unwrap_or(false),
+        "launcher failure must not kill pre-existing team session; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let leader_left = backend
+        .list_targets()
+        .unwrap_or_default()
+        .iter()
+        .any(|target| target.session.as_str().starts_with("team-agent-leader-"));
+    assert!(
+        !leader_left,
+        "launcher failure must clean only its own newly-created leader session"
+    );
+
+    // A-20b: a failure-path backend is not the owner of the already-running
+    // tmux server. Calling the server-level cleanup seam must be fail-safe,
+    // even though the pre-existing session survived the launcher rollback.
+    TmuxBackend::for_workspace(&ws).kill_server();
+    assert!(
+        backend.has_session(&canary).unwrap_or(false) && pid_alive(server_pid),
+        "A-20b: launcher failure must leave the pre-existing session and its tmux server alive; canary={} server={server_pid} stdout={} stderr={}",
+        canary.as_str(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn parent_pid(pid: u32) -> Option<u32> {
+    let out = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// C2 — every LOAD-BEARING kill_server/kill_session call site must emit a
@@ -223,27 +336,22 @@ fn c2_load_bearing_kill_calls_have_pre_call_audit() {
     );
 }
 
-/// C3 — GUARDRAIL (naturally-green): a launcher failure must NOT kill a
-/// pre-existing same-socket session. Baseline already preserves it (§4.2). This
-/// is not a RED; it is a guardrail that trips if a future failure-cleanup
-/// introduces a kill path. RED LINE: the fix must NOT add/extend kill-server or
-/// cleanup authority. We assert the launcher production entry (leader/start.rs)
-/// contains no reachable kill-server/kill-session in its failure path.
+/// C3 — GUARDRAIL: a launcher failure must not kill the tmux server or an
+/// unrelated session. Rollback is permitted only through the explicit
+/// self-resource cleanup helper covered by the A-20 canary test.
 #[test]
 fn c3_launcher_failure_path_has_no_reachable_kill_guardrail() {
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/leader/start.rs");
     let text = std::fs::read_to_string(src).expect("read leader/start.rs");
-    // Guardrail: the launcher entry must not CALL kill_server/kill_session in its
-    // failure path (locate §1.2: neither is reachable from leader/start.rs
-    // production code). We match the CALL form (`.kill_server(` / `.kill_session(`)
-    // — not a trait-impl definition (`fn kill_session(&self, ...)`), which is a
-    // test stub. If a future observability fix wires a kill call into the failure
-    // path, this trips.
-    let calls_kill = text.contains(".kill_server(") || text.contains(".kill_session(");
+    // A launcher failure must never gain kill-server authority. The only
+    // permitted session/pane cleanup is centralized in the self-resource
+    // rollback helper, which receives the pre-launch ownership bit.
+    let calls_kill_server = text.contains(".kill_server(");
     assert!(
-        !calls_kill,
-        "guardrail: the launcher failure path must NOT gain a reachable \
-         kill_server/kill_session CALL (red line: no new/extended kill-server or cleanup \
-         authority; a launcher failure must preserve a same-socket canary — locate §4.2)."
+        !calls_kill_server
+            && text.contains("cleanup_managed_leader_resources")
+            && text.contains("session_existed_before"),
+        "guardrail: launcher rollback must not gain kill-server authority and must be \
+         constrained to resources tracked as self-created."
     );
 }

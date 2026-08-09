@@ -1,3 +1,4 @@
+//!
 //! Durable boundary between resolved logical addressing and delivery/recovery.
 
 use std::path::{Path, PathBuf};
@@ -152,6 +153,7 @@ pub enum PersistResolution {
     Duplicate(String),
 }
 
+///
 /// The only production entry point that creates a durable message row.
 pub fn persist_resolved_send(
     intent: &ResolvedSendIntent,
@@ -168,7 +170,7 @@ pub fn persist_resolved_send(
         message_id: intent.requested_message_id.as_deref(),
         owner_team_id: intent.owner_team_id.as_ref().map(TeamKey::as_str),
         task_id: intent.task_id.as_ref().map(TaskId::as_str),
-        sender: intent.sender.as_str(),
+        sender: intent.sender.display_name(),
         recipient: intent.recipient.as_str(),
         reply_to: intent.reply_to.as_deref(),
         requires_ack: intent.requires_ack,

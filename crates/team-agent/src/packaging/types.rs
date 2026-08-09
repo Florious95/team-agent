@@ -1,3 +1,4 @@
+//!
 //! packaging 共享类型 —— §19 散字符串 → enum / §3 路径·版本 newtype / typed Outcome·Report /
 //! entry fn 入参 / PackagingError / 平台能力声明(纯函数 `platform_support`)。
 
@@ -20,18 +21,6 @@ use crate::db::DbError;
 // ===========================================================================
 // §19 散字符串态 → 穷尽 enum
 // ===========================================================================
-
-/// installer 子命令(`install.mjs:20-30` argv 散字符串 `install/update/doctor/uninstall/help`)。
-/// `unknown command` 走 exit 2 —— Rust 侧由 clap(step 14)在解析层挡掉,此 enum 是穷尽 match 无 fallthrough。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstallerCommand {
-    Install,
-    Update,
-    Doctor,
-    Uninstall,
-    Help,
-}
 
 /// skill 安装目标(`cli/parser.py:443` choices `codex/claude/all`)。`_skill_dest_dir` 据此选
 /// `~/.codex` vs `~/.claude`(`commands.py:467-472`)。**散字符串必须 enum**,与 step 8 Provider 对齐。
@@ -57,6 +46,7 @@ impl SkillTarget {
         SkillTarget::Copilot,
     ];
 
+    ///
     /// 单目标 → 对应 provider(`All` 无单一 provider → `None`)。与 [`Provider`] 对齐,防散字符串再生。
     pub fn provider(self) -> Option<Provider> {
         match self {
@@ -67,6 +57,7 @@ impl SkillTarget {
         }
     }
 
+    ///
     /// `_skill_dest_dir`:`~/.codex|.claude|.copilot/skills/team-agent`(`All` fan-out 全集,非单 dir → None)。
     pub fn dest_dir(self, home: &Path) -> Option<SkillDestDir> {
         match self {
@@ -128,6 +119,7 @@ pub enum BlockerSource {
 pub struct Version(pub String);
 
 impl Version {
+    ///
     /// 编译期注入的唯一版本(`env!("CARGO_PKG_VERSION")`)。
     pub fn current() -> Self {
         Self(env!("CARGO_PKG_VERSION").to_string())
@@ -161,7 +153,7 @@ pub struct SkillDestDir(pub PathBuf);
 /// 此 enum 只用于「release 矩阵覆盖面」声明。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReleaseTarget {
+pub(super) enum ReleaseTarget {
     MacosAarch64,
     MacosX8664,
     LinuxX8664,
@@ -181,7 +173,7 @@ pub enum ReleaseTarget {
 /// Truth source: `.team/artifacts/0.5.x-windows-portability-cr-verdict.md` §C-1。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "level")]
-pub enum PlatformSupport {
+pub(super) enum PlatformSupport {
     /// 原生一等(macOS/Linux tmux)。
     Native,
     /// 需 WSL + tmux backend(显式标要求,不假装原生)。
@@ -196,8 +188,9 @@ pub enum PlatformSupport {
     Unsupported { reason: String },
 }
 
+///
 /// release 矩阵中某目标平台的支持等级(§8 如实声明;能力门归 step 9)。纯函数。
-pub fn platform_support(target: ReleaseTarget) -> PlatformSupport {
+pub(super) fn platform_support(target: ReleaseTarget) -> PlatformSupport {
     match target {
         ReleaseTarget::MacosAarch64
         | ReleaseTarget::MacosX8664

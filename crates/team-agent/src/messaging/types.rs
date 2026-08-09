@@ -407,14 +407,14 @@ pub struct IdleEvaluation {
 
 /// 抑制快照 (card §50;`scheduler.py:383` `_agent_alert_snapshot`)。清除判据靠 snapshot diff。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AlertSnapshot {
+pub(crate) struct AlertSnapshot {
     pub assigned_task_ids: Vec<TaskId>,
     pub delivered_message_ids: Vec<String>,
 }
 
 /// 告警抑制条目 (card §50;`scheduler.py:287`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AlertSuppression {
+pub(crate) struct AlertSuppression {
     pub suppressed_at: String,
     pub suppressed_by: String,
     pub snapshot: AlertSnapshot,

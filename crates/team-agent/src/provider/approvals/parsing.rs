@@ -1,3 +1,4 @@
+//!
 use serde::{Deserialize, Serialize};
 
 use crate::provider::ApprovalKind;
@@ -38,11 +39,7 @@ impl ApprovalPrompt {
     }
 }
 
-pub fn capture_has_approval_prompt(capture: &str) -> bool {
-    extract_approval_prompt("agent", capture).is_some()
-}
-
-pub fn active_approval_control_index(lines: &[&str]) -> Option<usize> {
+fn active_approval_control_index(lines: &[&str]) -> Option<usize> {
     let idx = lines
         .iter()
         .enumerate()

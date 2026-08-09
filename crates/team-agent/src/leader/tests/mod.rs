@@ -1,51 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
-use std::cell::Cell;
 
 // ── helpers ────────────────────────────────────────────────────────────
 /// derive 一个真 LeaderSessionUuid(骨架无公开裸构造器,仅 `derive`)。
 fn uuid(fp: &str, ws: &str, user: &str, team: &str) -> LeaderSessionUuid {
     LeaderSessionUuid::derive(fp, ws, user, team).unwrap()
-}
-
-/// 注入式 turn-state 分类器:MUST-NOT-13 命门 —— 统计 classify 调用次数,
-/// 据此断言 idle 面经此 trait 分类、绝不直连任何 provider client。
-struct CountingClassifier {
-    calls: Cell<usize>,
-    result: TurnState,
-}
-impl CountingClassifier {
-    fn new(result: TurnState) -> Self {
-        Self {
-            calls: Cell::new(0),
-            result,
-        }
-    }
-}
-impl TurnStateClassifier for CountingClassifier {
-    fn classify(
-        &self,
-        _provider: Provider,
-        session_log_text: &str,
-    ) -> Result<TurnClassification, LeaderError> {
-        self.calls.set(self.calls.get() + 1);
-        // 空 session-log 文本 → unknown(bug-085:None rollout_path 漏穿后读到空串)。
-        let state = if session_log_text.is_empty() {
-            TurnState::Unknown
-        } else {
-            self.result
-        };
-        Ok(TurnClassification {
-            state,
-            turn_id: None,
-            annotations: vec![],
-            reason: if state == TurnState::Unknown {
-                Some("empty_session_log".into())
-            } else {
-                None
-            },
-        })
-    }
 }
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -133,9 +92,13 @@ fn event_names(ws: &std::path::Path) -> Vec<String> {
 
 mod basics;
 mod byte_findings;
+mod claim_leader_mailbox_flush_contract;
+mod historical_inventory_upgrade_gate_red;
 mod identity;
 mod idle;
 mod lease_api;
 mod lease_claim;
 mod rediscover;
+mod team_in_team_state_scope_red;
+mod terminal_and_replay_vs_rerender_invariants_red;
 mod wake_start_owner;

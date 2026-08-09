@@ -16,15 +16,6 @@ use super::DisplayBackend;
 // CROSS-LANE PLACEHOLDERS(13/14/15 兄弟 lane 尚未交付;leader 集成时 reconcile)
 // ===========================================================================
 
-/// step8 provider 还未暴露的 launch/resume/fork 命令构造门面。lifecycle 经它构造
-/// provider 命令字符串(`shell_command_for_agent`/`shell_resume_command_for_agent`/
-/// `shell_fork_command_for_agent`,`runtime` 自由函数)—— provider lane 落地后替换为
-/// 真实 `provider::shell_*` API。**PLACEHOLDER**:仅占位 argv,字段映射由 provider lane 定。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShellCommand {
-    pub argv: Vec<String>,
-}
-
 /// `EventLog` 已在 step4 落地,但 lifecycle 发射的 typed `EventKind` 名集(`lifecycle.*`/
 /// `restart.*`/`display.*`)是 step4 owned 的稳定事件名(JSON 名与 Python 一致)。
 /// **PLACEHOLDER**:此处仅命名 lifecycle 关心的事件名常量集,leader 集成时映射到

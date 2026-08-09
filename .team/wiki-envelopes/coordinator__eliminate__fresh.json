@@ -1,0 +1,468 @@
+{
+  "status": "complete",
+  "envelope": {
+    "module": "coordinator",
+    "role": "eliminate",
+    "branch": "r4/coordinator",
+    "product_worktree": "/Users/alauda/team-agent-scratch/wiki-pilot-r4-coordinator",
+    "baseline_sha": "71ddc52859db3f5c732b7d3fb513654358931c29",
+    "commit_sha": "17dd80322dc2419b1e962ee1ccf33b42298758ae",
+    "eliminated_count": 9,
+    "confirmed_red_ids": [
+      "coordinator-t2-01-daemon-test-seam",
+      "coordinator-t2-02-resolve-tick-interval",
+      "coordinator-t2-03-backoff-sleep",
+      "coordinator-t2-04-locate-shim-binary",
+      "coordinator-t2-05-spawn-shim-handshake",
+      "coordinator-t2-11-worker-abnormal-exit-surface",
+      "coordinator-t2-12-generic-abnormal-processor",
+      "coordinator-t2-14-tick-step-group-wire",
+      "coordinator-t2-15-coordinator-event-authority"
+    ],
+    "skipped": [
+      {
+        "id": "coordinator-t2-13-whole-team-gone-wire",
+        "status": "skipped_conflict",
+        "reason": "RED requires new production behavior: a MarkerStore implementation, TeamPresenceSnapshot construction, detect_whole_team_gone consumption, and escalation-result wiring. Leader ruled this outside the T2 boundary-only/no-behavior-change authorization."
+      }
+    ],
+    "exits": [
+      {
+        "id": "coordinator-t2-01-daemon-test-seam",
+        "exit": 1,
+        "resolution": "narrow_visibility",
+        "change": "run_daemon_with_coordinator is crate-internal and remains the daemon test seam",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "c3427479d3e8cfeb25b5869caf5e38d9d3f6e400"
+      },
+      {
+        "id": "coordinator-t2-02-resolve-tick-interval",
+        "exit": 1,
+        "resolution": "internalize",
+        "change": "resolve_tick_interval is coordinator-internal",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "608675d9de10b16957dd47356d98c861f2a6908a"
+      },
+      {
+        "id": "coordinator-t2-03-backoff-sleep",
+        "exit": 1,
+        "resolution": "internalize",
+        "change": "backoff_sleep_sec is coordinator-internal",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "d0fcab970151eb7f9dd8fea4bfad38bde491143d"
+      },
+      {
+        "id": "coordinator-t2-04-locate-shim-binary",
+        "exit": 1,
+        "resolution": "file_private",
+        "change": "locate_shim_binary is private to conpty_shim.rs",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "198945aa8ad31aebd1a107d25d385552751e3d4e"
+      },
+      {
+        "id": "coordinator-t2-05-spawn-shim-handshake",
+        "exit": 1,
+        "resolution": "file_private",
+        "change": "spawn_shim_and_handshake is private and owned by ensure_shim_running",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "68546afdfaf3c322d37a3606c830a9ec4ba1ce68"
+      },
+      {
+        "id": "coordinator-t2-11-worker-abnormal-exit-surface",
+        "exit": 1,
+        "resolution": "retire_duplicate_surface",
+        "change": "WorkerAbnormalExitSurface was removed; the live fresh-error EventLog path remains authoritative",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "53f2bb6893e39a589f088e5607fc467126a965a9"
+      },
+      {
+        "id": "coordinator-t2-12-generic-abnormal-processor",
+        "exit": 1,
+        "resolution": "retire_unused_surface",
+        "change": "process_abnormal_records and its now-isolated support surface were removed",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "dbd8dfff238491afdf7ad34be9eff8edb4fd835a"
+      },
+      {
+        "id": "coordinator-t2-14-tick-step-group-wire",
+        "exit": 3,
+        "resolution": "wire_existing_type",
+        "change": "live tick execution consumes TickStepGroup::ordered and exhaustively maps all six variants",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "40b8ea9134d9b39a9abe4c00ede5dfaf662c78af",
+        "automation_lag": true
+      },
+      {
+        "id": "coordinator-t2-15-coordinator-event-authority",
+        "exit": 1,
+        "resolution": "retire_duplicate_authority",
+        "change": "CoordinatorEvent was removed; direct production EventLog writes remain the single authority",
+        "red_before": "failed",
+        "red_after": "passed",
+        "commit_sha": "91c2b7c645cf47fbdbad7d321798034346297a76"
+      }
+    ],
+    "exit2_count": 0,
+    "exit3_count": 1,
+    "automation_lag": [
+      {
+        "id": "coordinator-t2-14-tick-step-group-wire",
+        "status": "automation_lag",
+        "finding_kind": "maturity_mismatch",
+        "reported_detail": "声明 wired,但在 src 全范围内未见任何消费者:TickStepGroup —— 疑似死代码",
+        "contradicting_product_fact": {
+          "symbol_identity": "crate::coordinator::steps::TickStepGroup",
+          "consumer_status": "product",
+          "product_consumers": [
+            "coordinator/tick.rs"
+          ],
+          "consumer_coverage_kind": "exact"
+        },
+        "toolfix_todo": "Make maturity consumption reuse the proof-based consumer facts (including type references and variant construction) so TickStepGroup is not reported as unwired."
+      }
+    ],
+    "set_diff": {
+      "identity_key": [
+        "rule_id",
+        "path",
+        "symbol"
+      ],
+      "before_count": 16,
+      "after_count": 7,
+      "before": [
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/backoff.rs",
+          "symbol": "run_daemon_with_coordinator"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/backoff.rs",
+          "symbol": "resolve_tick_interval"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/backoff.rs",
+          "symbol": "backoff_sleep_sec"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "locate_shim_binary"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "spawn_shim_and_handshake"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/orphan.rs",
+          "symbol": "WorkerAbnormalExitSurface"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/orphan.rs",
+          "symbol": "process_abnormal_records"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/steps/mod.rs",
+          "symbol": "TickStepGroup"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/types.rs",
+          "symbol": "CoordinatorEvent"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "recorded_shim_pipe_name"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "reconnect_recorded_shim"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/health.rs",
+          "symbol": "coordinator_metadata_mismatch_reason"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/health.rs",
+          "symbol": "collect_watch_lines"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/health.rs",
+          "symbol": "render_event_line"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/orphan.rs",
+          "symbol": "detect_whole_team_gone"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/types.rs",
+          "symbol": "IdleNode"
+        }
+      ],
+      "removed": [
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/backoff.rs",
+          "symbol": "run_daemon_with_coordinator"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/backoff.rs",
+          "symbol": "resolve_tick_interval"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/backoff.rs",
+          "symbol": "backoff_sleep_sec"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "locate_shim_binary"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "spawn_shim_and_handshake"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/orphan.rs",
+          "symbol": "WorkerAbnormalExitSurface"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/orphan.rs",
+          "symbol": "process_abnormal_records"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/steps/mod.rs",
+          "symbol": "TickStepGroup"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/types.rs",
+          "symbol": "CoordinatorEvent"
+        }
+      ],
+      "retained": [
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "recorded_shim_pipe_name"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/conpty_shim.rs",
+          "symbol": "reconnect_recorded_shim"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/health.rs",
+          "symbol": "coordinator_metadata_mismatch_reason"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/health.rs",
+          "symbol": "collect_watch_lines"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/health.rs",
+          "symbol": "render_event_line"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/orphan.rs",
+          "symbol": "detect_whole_team_gone"
+        },
+        {
+          "rule_id": "surface.no_consumer",
+          "path": "coordinator/types.rs",
+          "symbol": "IdleNode"
+        }
+      ],
+      "added": []
+    },
+    "collateral": {
+      "target_elimination_commits": [
+        "c3427479d3e8cfeb25b5869caf5e38d9d3f6e400",
+        "608675d9de10b16957dd47356d98c861f2a6908a",
+        "d0fcab970151eb7f9dd8fea4bfad38bde491143d",
+        "198945aa8ad31aebd1a107d25d385552751e3d4e",
+        "68546afdfaf3c322d37a3606c830a9ec4ba1ce68",
+        "53f2bb6893e39a589f088e5607fc467126a965a9",
+        "dbd8dfff238491afdf7ad34be9eff8edb4fd835a",
+        "40b8ea9134d9b39a9abe4c00ede5dfaf662c78af",
+        "91c2b7c645cf47fbdbad7d321798034346297a76"
+      ],
+      "production_orphans_removed": {
+        "commit_sha": "de39d12b34820ad433aac3d6d6ada56bf0444675",
+        "symbols": [
+          "AbnormalDecision",
+          "AbnormalNotification",
+          "AbnormalProcessOutput",
+          "AbnormalNotificationState",
+          "AbnormalError",
+          "ErrorLists",
+          "ProviderRegistry::error_lists"
+        ],
+        "scope": "Only implementation and test scaffolding made unreachable by retiring process_abnormal_records."
+      },
+      "integration_test_doubles_updated": {
+        "commit_sha": "17dd80322dc2419b1e962ee1ccf33b42298758ae",
+        "file_count": 14,
+        "change": "Removed ErrorLists imports and retired ProviderRegistry::error_lists implementations; no assertions changed."
+      }
+    },
+    "warnings_three_columns": {
+      "baseline_existing": [
+        {
+          "rule_id": "topology.module_cycle",
+          "shape": "runtime_detectors -> runtime_observation -> runtime_detectors",
+          "status": "pre_existing_unresolved"
+        }
+      ],
+      "new_structural_cost": [],
+      "rustc_revealed_confirmation": [
+        {
+          "shape": "Retiring ProviderRegistry::error_lists exposed stale integration-test implementations and ErrorLists imports.",
+          "disposition": "Removed from 14 test files; cargo check --tests then passed.",
+          "classification": "correctness_confirmation_not_product_cost"
+        }
+      ]
+    },
+    "new_discoveries": [
+      {
+        "status": "automation_lag",
+        "owner": "toolfix",
+        "item": "maturity_mismatch does not reuse proof-based TickStepGroup consumer facts"
+      }
+    ],
+    "test_target_compiles": true,
+    "behavior_gate": {
+      "status": "passed",
+      "identical": true,
+      "command": "cargo test -p team-agent --lib; batch0 RED suite; batch2 RED suite excluding T2-13; PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover",
+      "commands": [
+        "cargo test -p team-agent --lib",
+        "PYTHONDONTWRITEBYTECODE=1 WIKI_PILOT_SRC=/Users/alauda/team-agent-scratch/wiki-pilot-r4-coordinator/crates/team-agent/src python3 redtests/coordinator/red_coordinator_surface_batch0.py",
+        "PYTHONDONTWRITEBYTECODE=1 WIKI_PILOT_SRC=/Users/alauda/team-agent-scratch/wiki-pilot-r4-coordinator/crates/team-agent/src python3 redtests/coordinator/red_coordinator_surface_batch2.py CoordinatorSurfaceBatch2RedTests.test_00_positive_controls_are_green CoordinatorSurfaceBatch2RedTests.test_t2_11_duplicate_worker_abnormal_exit_surface_is_absent CoordinatorSurfaceBatch2RedTests.test_t2_12_generic_abnormal_processor_is_live_or_retired CoordinatorSurfaceBatch2RedTests.test_t2_14_live_tick_consumes_complete_tick_step_mapping CoordinatorSurfaceBatch2RedTests.test_t2_15_coordinator_event_has_one_production_authority",
+        "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover"
+      ],
+      "before": {
+        "rust_lib": {
+          "passed": 1688,
+          "failed": 0,
+          "ignored": 38
+        },
+        "batch0": {
+          "passed": 6,
+          "failed": 0
+        },
+        "batch2_nonconflict": {
+          "passed": 5,
+          "failed": 0
+        },
+        "tooling": {
+          "passed": 152,
+          "failed": 0
+        }
+      },
+      "after": {
+        "rust_lib": {
+          "passed": 1688,
+          "failed": 0,
+          "ignored": 38
+        },
+        "batch0": {
+          "passed": 6,
+          "failed": 0
+        },
+        "batch2_nonconflict": {
+          "passed": 5,
+          "failed": 0
+        },
+        "tooling": {
+          "passed": 152,
+          "failed": 0
+        }
+      }
+    },
+    "tests": {
+      "test_target": {
+        "command": "cargo check --tests --profile test --keep-going -p team-agent",
+        "exit_code": 0
+      },
+      "rust_lib": {
+        "command": "cargo test -p team-agent --lib",
+        "result": "1688 passed; 0 failed; 38 ignored",
+        "exit_code": 0
+      },
+      "tooling": {
+        "worktree": "/Users/alauda/team-agent-scratch/wiki-tooling.worktrees/coordinator__eliminate__1785958691",
+        "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover",
+        "result": "152 tests OK",
+        "exit_code": 0
+      },
+      "redtest_batch0": {
+        "result": "6 passed; 0 failed",
+        "exit_code": 0
+      },
+      "redtest_batch2_nonconflict": {
+        "result": "5 passed; 0 failed",
+        "exit_code": 0
+      },
+      "redtest_batch2_full": {
+        "result": "5 passed; 1 failed",
+        "expected_failure": "coordinator-t2-13-whole-team-gone-wire",
+        "exit_code": 1
+      }
+    },
+    "provenance": {
+      "command": "build_wiki.py",
+      "format": "json",
+      "invocation": "PYTHONDONTWRITEBYTECODE=1 python3 build_wiki.py --module=coordinator --callers=/Users/alauda/team-agent-scratch/wiki-pilot-r4-coordinator/crates/team-agent/src --json",
+      "tooling_worktree": "/Users/alauda/team-agent-scratch/wiki-tooling.worktrees/coordinator__eliminate__1785958691",
+      "tooling_commit_sha": "5e33ca854622eaf5e7d8b31082942065b0e1bcbc",
+      "product_baseline_sha": "71ddc52859db3f5c732b7d3fb513654358931c29",
+      "product_artifacts_sha": "17dd80322dc2419b1e962ee1ccf33b42298758ae",
+      "module": "coordinator",
+      "scan_status": "incomplete",
+      "candidate_count_before": 16,
+      "candidate_count_after": 7,
+      "candidate_identities_added": [],
+      "finding_count_after": 1,
+      "finding_after": "maturity_mismatch: TickStepGroup",
+      "unresolved_count_after": 1,
+      "unresolved_after": "topology.module_cycle: runtime_detectors -> runtime_observation -> runtime_detectors"
+    },
+    "closing": {
+      "artifacts_committed_sha": "17dd80322dc2419b1e962ee1ccf33b42298758ae",
+      "open_items_filed": ".team/wiki-envelopes/coordinator__eliminate__fresh.json: skipped T2-13 and T2-14 automation_lag/toolfix todo",
+      "new_shapes_filed": "none: T2-14 is the documented maturity-consumer automation-lag shape, and test-target collateral is already covered by the eliminate workflow",
+      "handover_written": "Read this envelope. Do not activate T2-13 without behavior authorization; route envelope.automation_lag[0] to toolfix."
+    }
+  }
+}

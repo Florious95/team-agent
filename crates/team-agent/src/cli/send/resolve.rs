@@ -1,3 +1,4 @@
+//!
 use super::mailbox::maybe_enqueue_offline_leader_mailbox;
 use super::persist::persist_resolved_target;
 use crate::cli::{CliError, SendArgs};
@@ -207,7 +208,7 @@ pub(super) fn send_to_logical_to(
                         &args.workspace,
                         name,
                         content,
-                        args.sender.as_str(),
+                        args.sender.display_name(),
                         args.task.as_deref(),
                         &error,
                     )? {
@@ -358,4 +359,208 @@ pub(super) fn send_to_resolved_name(
         }
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod a13_red_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+    use super::send_to_resolved_name;
+    use crate::cli::named_address::{NamedTargetKind, ResolvedNamedAddress};
+    use crate::cli::SendArgs;
+    use crate::message_store::MessageStore;
+    use crate::messaging::TrustedSender;
+    use crate::model::ids::AgentId;
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn fresh_workspace(tag: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let workspace = std::env::temp_dir().join(format!(
+            "team-agent-a13-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(workspace.join(".team/runtime")).expect("create fixture");
+        workspace
+    }
+
+    fn seed_team(workspace: &Path, team: &str) {
+        let session = format!("team-{team}");
+        let state = json!({
+            "active_team_key": team,
+            "status": "alive",
+            "session_name": session,
+            "agents": {},
+            "teams": {
+                team: {
+                    "status": "alive",
+                    "session_name": session,
+                    "agents": {},
+                    "leader_receiver": {"status": "unbound"}
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(workspace, &state).expect("save fixture state");
+        MessageStore::open(workspace).expect("create fixture store");
+    }
+
+    fn send_args(workspace: &Path) -> SendArgs {
+        SendArgs {
+            target: None,
+            message: vec!["payload".to_string()],
+            targets: None,
+            workspace: workspace.to_path_buf(),
+            team: None,
+            task: None,
+            sender: TrustedSender::from_runtime_identity_with_source(
+                AgentId::new("worker-1"),
+                workspace.display(),
+                "sender-team",
+            ),
+            no_ack: false,
+            no_wait: true,
+            watch_result: false,
+            timeout: 0.0,
+            confirm_human: false,
+            json: true,
+            message_id: None,
+            presentation: crate::messaging::presentation::PresentationRequest::default(),
+            pane: None,
+            to_name: Some("other-team/leader".to_string()),
+            to_leader: None,
+        }
+    }
+
+    fn leader_address(sender_workspace: &Path, target_workspace: &Path) -> ResolvedNamedAddress {
+        ResolvedNamedAddress {
+            raw_name: format!("{}::other-team/leader", target_workspace.display()),
+            target_kind: NamedTargetKind::Leader,
+            sender_workspace: sender_workspace.to_path_buf(),
+            target_workspace: target_workspace.to_path_buf(),
+            team_key: Some("other-team".to_string()),
+            agent_id: None,
+            pane_id: String::new(),
+            session_name: Some("team-other-team".to_string()),
+            window_name: None,
+            tmux_endpoint: None,
+            transport_kind: Some("direct_tmux".to_string()),
+            app_server: None,
+            state_pane_id: None,
+            state_pane_stale: false,
+            agent_status: None,
+            warning: None,
+        }
+    }
+
+    fn message_count(workspace: &Path) -> i64 {
+        let store = MessageStore::open(workspace).expect("open fixture store");
+        crate::db::schema::open_db(store.db_path())
+            .expect("open fixture database")
+            .query_row("select count(*) from messages", [], |row| row.get(0))
+            .expect("count fixture messages")
+    }
+
+    #[test]
+    fn a13_worker_cross_workspace_leader_send_preserves_target_scope() {
+        let sender_workspace = fresh_workspace("sender");
+        let target_workspace = fresh_workspace("target");
+        seed_team(&target_workspace, "other-team");
+        let mut args = send_args(&sender_workspace);
+        let to_name = format!("{}::other-team/leader", target_workspace.display());
+        args.to_name = Some(to_name.clone());
+        let value = super::send_to_logical_to(&args, &to_name, "payload")
+            .expect("cross-workspace leader send must preserve a structured outcome");
+        assert_eq!(
+            value["to_name"],
+            json!(to_name),
+            "cross-workspace receipt must retain the original target: {value}"
+        );
+        assert_eq!(
+            value["sender"],
+            json!(format!(
+                "{}::sender-team/worker-1",
+                sender_workspace.display()
+            )),
+            "cross-workspace receipt must retain the full sender: {value}"
+        );
+        assert_eq!(
+            message_count(&sender_workspace),
+            0,
+            "cross-workspace send must not fold into the sender workspace"
+        );
+        assert_eq!(
+            message_count(&target_workspace),
+            1,
+            "cross-workspace send must persist in the target workspace"
+        );
+
+        let _ = std::fs::remove_dir_all(sender_workspace);
+        let _ = std::fs::remove_dir_all(target_workspace);
+    }
+
+    #[test]
+    fn a13_worker_cross_workspace_identity_is_preserved_in_row_and_render() {
+        let sender_workspace = fresh_workspace("identity-sender");
+        let target_workspace = fresh_workspace("identity-target");
+        seed_team(&target_workspace, "other-team");
+        let mut args = send_args(&sender_workspace);
+        args.to_name = Some(format!("{}::other-team/leader", target_workspace.display()));
+        let resolved = leader_address(&sender_workspace, &target_workspace);
+
+        send_to_resolved_name(&args, &resolved, "identity payload")
+            .expect("cross-workspace identity send must persist");
+        let store = MessageStore::open(&target_workspace).expect("open target store");
+        let connection = crate::db::schema::open_db(store.db_path()).expect("open target db");
+        let sender: String = connection
+            .query_row("select sender from messages limit 1", [], |row| row.get(0))
+            .expect("read sender");
+        let expected = format!("{}::sender-team/worker-1", sender_workspace.display());
+        assert_eq!(
+            sender, expected,
+            "durable row must retain the full sender identity"
+        );
+        let rendered = crate::messaging::delivery::render_message(
+            &sender,
+            None,
+            "identity payload",
+            "msg-a13",
+        );
+        assert!(
+            rendered.contains(&expected),
+            "rendered pane must show full sender: {rendered}"
+        );
+        assert!(
+            !rendered.contains("from leader"),
+            "worker must not render as leader: {rendered}"
+        );
+
+        let _ = std::fs::remove_dir_all(sender_workspace);
+        let _ = std::fs::remove_dir_all(target_workspace);
+    }
+
+    #[test]
+    fn a13_worker_in_workspace_leader_send_remains_allowed() {
+        let workspace = fresh_workspace("in-workspace");
+        seed_team(&workspace, "other-team");
+        let args = send_args(&workspace);
+        let resolved = leader_address(&workspace, &workspace);
+
+        let value = send_to_resolved_name(&args, &resolved, "payload")
+            .expect("in-workspace leader send should preserve the existing path");
+        assert_ne!(
+            value["reason"],
+            Value::String("target_out_of_scope".to_string()),
+            "in-workspace send must not be classified as cross-workspace: {value}"
+        );
+        assert_eq!(
+            message_count(&workspace),
+            1,
+            "allowed send must persist once"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
 }

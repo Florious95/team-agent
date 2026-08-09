@@ -291,7 +291,7 @@ fn message_owner_team(db_path: &Path, message_id: &str) -> Result<Option<String>
 }
 
 /// `evaluate_idle_behavior` (`diagnose/comms.py:50`):idle 分类准确性评估。零 token,走 driver。
-pub fn evaluate_idle_behavior(
+pub(crate) fn evaluate_idle_behavior(
     workspace: &Path,
     agent_id: &str,
     claimed_status: &str,

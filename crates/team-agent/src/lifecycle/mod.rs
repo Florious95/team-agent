@@ -1,3 +1,4 @@
+//!
 //! step 13 · lifecycle — team 进程级生命周期编排器(ROUND-0.5 骨架)。
 //!
 //! 真相源 `team-agent-public` @ v0.2.11 (439bef8),只读。Card:
@@ -67,7 +68,7 @@ pub use display::*;
 pub use launch::*;
 pub use restart::*;
 
-pub use helpers::save_team_runtime_snapshot;
+pub(crate) use helpers::save_team_runtime_snapshot;
 pub(crate) use helpers::{plan_lock_path, plan_state_path, read_plan_state, save_plan_state};
 
 #[cfg(test)]

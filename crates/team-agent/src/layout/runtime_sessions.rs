@@ -1,3 +1,4 @@
+//!
 //! unit-1 (Stage 1) — typed runtime session identity.
 //!
 //! Provides two compile-time-distinct newtypes plus a `RuntimeSessions`
@@ -35,7 +36,7 @@ pub struct LeaderLauncherSession(SessionName);
 
 /// Why `WorkerSession::new` rejected a name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerSessionError {
+enum WorkerSessionError {
     /// The name is empty.
     Empty,
     /// The name carries the leader launcher prefix — must not be a worker
@@ -45,7 +46,7 @@ pub enum WorkerSessionError {
 
 /// Why `LeaderLauncherSession::new` rejected a name.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeaderLauncherSessionError {
+enum LeaderLauncherSessionError {
     /// The name is empty.
     Empty,
     /// The name does not carry the required leader launcher prefix.
@@ -136,6 +137,7 @@ pub enum RuntimeSessionAnomaly {
 }
 
 impl RuntimeSessions {
+    ///
     /// Read state.json's session-identity fields and wrap them in typed
     /// values. Never panics on bad state — anomalies are surfaced for
     /// callers to act on.
@@ -197,11 +199,13 @@ impl RuntimeSessions {
         }
     }
 
+    ///
     /// True if any session-identity anomaly was detected in state.
     pub fn has_anomalies(&self) -> bool {
         !self.anomalies.is_empty()
     }
 
+    ///
     /// True if a `state.session_name` looked like a leader launcher session
     /// — the exact 0.3.39 shape unit-3 must refuse before any kill.
     pub fn worker_session_name_is_leader_prefixed(&self) -> bool {
@@ -214,9 +218,10 @@ impl RuntimeSessions {
     }
 }
 
+///
 /// True when `name` is a leader launcher session (mirrors
 /// `layout::sessions::is_leader_session` on a raw &str).
-pub fn name_is_leader_launcher(name: &str) -> bool {
+fn name_is_leader_launcher(name: &str) -> bool {
     let session = SessionName::new(name);
     is_leader_session(&session)
 }

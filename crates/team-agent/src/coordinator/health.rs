@@ -1,3 +1,4 @@
+//!
 //! coordinator 健康/身份 & 只读可观测面:metadata 身份原语 + coordinator 路径 + watch 实时流。
 
 use std::io::{Read, Seek, SeekFrom};

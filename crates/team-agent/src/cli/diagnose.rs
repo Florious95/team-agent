@@ -1,3 +1,4 @@
+//!
 //! diagnose/preflight/wait-ready CLI helpers.
 use super::*;
 use crate::model::pane_authority_refusal::{

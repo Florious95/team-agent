@@ -1,3 +1,4 @@
+//!
 //! `team.db` 列布局迁移(Gap 46;真相源 `message_store/schema_migration.py`)。
 //!
 //! 检测**物理列序漂移**(`pragma table_info` 顺序 vs canonical),在**一个原子事务**
@@ -141,7 +142,7 @@ fn create_table_ddl(table: &str, name: &str) -> Option<String> {
 
 /// 一张表的布局 diff。
 #[derive(Debug, Clone)]
-pub struct Diff {
+struct Diff {
     pub table: &'static str,
     pub expected: Vec<&'static str>,
     pub actual: Vec<String>,
@@ -187,7 +188,7 @@ fn table_count(conn: &Connection, table: &str) -> Result<i64, DbError> {
     Ok(conn.query_row(&format!("select count(*) from {table}"), [], |r| r.get(0))?)
 }
 
-pub fn pragma_user_version(conn: &Connection) -> Result<i64, DbError> {
+fn pragma_user_version(conn: &Connection) -> Result<i64, DbError> {
     Ok(conn.query_row("pragma user_version", [], |r| r.get(0))?)
 }
 
@@ -230,7 +231,7 @@ fn run_version_migrations(conn: &Connection, schema_version: i64) -> Result<(), 
 
 /// `schema_migration.py:_layout_diffs`:按 `table_info` 物理列序检测漂移。
 /// 无任何 managed 表存在(fresh DB)→ 空(initialize 随后建表)。
-pub fn layout_diffs(conn: &Connection) -> Result<Vec<Diff>, DbError> {
+fn layout_diffs(conn: &Connection) -> Result<Vec<Diff>, DbError> {
     let mut any = false;
     for (t, _) in MANAGED_TABLE_LAYOUTS {
         if table_exists(conn, t)? {
@@ -419,7 +420,7 @@ pub fn ensure_table_layout(
 }
 
 /// `schema_migration.py:schema_diagnosis`:只读判定(不变更 DB)。
-pub fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis, DbError> {
+fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis, DbError> {
     if !db_path.exists() {
         // T3-3 cr verdict (A parity lock, 2026-06-10): a missing db is the LEGAL
         // first-use state — ok:true is layered with the explicit status axis and the

@@ -1,3 +1,4 @@
+//!
 //! 0.5.x Windows-native transport Phase 1: ConPTY backend.
 //!
 //! Wire protocol + portable shim state machine live in the

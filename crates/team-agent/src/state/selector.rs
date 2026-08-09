@@ -1,3 +1,4 @@
+//!
 //! Active team workspace selector.
 
 use std::path::{Path, PathBuf};

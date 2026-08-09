@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ErrorLists, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::provider::session::capture::capture_missing_provider_sessions_once;
 use team_agent::provider::{
     get_adapter, CaptureSessionContext, Provider, ProviderAdapter, SessionId,
@@ -539,13 +539,6 @@ struct AdapterRegistry;
 impl ProviderRegistry for AdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists {
-            whitelist: Vec::new(),
-            blacklist: Vec::new(),
-        }
     }
 }
 

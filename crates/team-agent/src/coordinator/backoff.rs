@@ -1,3 +1,4 @@
+//!
 //! daemon 主循环面(`__main__.py`)—— 退避序列 + tick 间隔解析 + 子进程入口。
 
 use thiserror::Error;
@@ -10,7 +11,7 @@ use crate::provider::ProviderAdapter;
 use super::health::{coordinator_pid_path, write_coordinator_metadata};
 use super::tick::{write_coordinator_heartbeat, TickError, TickReport, HEARTBEAT_STATUS_PANIC};
 use super::types::{
-    ErrorLists, MetadataSource, Pid, ProviderRegistry, WorkspacePath, BACKOFF_MAX_SEC,
+    MetadataSource, Pid, ProviderRegistry, WorkspacePath, BACKOFF_MAX_SEC,
     DEFAULT_TICK_INTERVAL_SEC,
 };
 use super::Coordinator;
@@ -122,7 +123,7 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     run_daemon_with_coordinator_and_boot_tmux(&args, &coordinator, Some(tmux_metadata))
 }
 
-pub fn run_daemon_with_coordinator(
+pub(crate) fn run_daemon_with_coordinator(
     args: &DaemonArgs,
     coordinator: &Coordinator,
 ) -> Result<(), DaemonError> {
@@ -519,14 +520,14 @@ fn current_ppid() -> u32 {
 
 /// 计算 tick 间隔(`_tick_interval`,`__main__.py:104-115`)。读 spec `runtime.tick_interval_sec`,
 /// 缺失/出错 → `DEFAULT_TICK_INTERVAL_SEC`;并确保 schema 存在(`MessageStore(workspace)`)。
-pub fn resolve_tick_interval(workspace: &WorkspacePath) -> Result<f64, TickError> {
+pub(super) fn resolve_tick_interval(workspace: &WorkspacePath) -> Result<f64, TickError> {
     let _ = MessageStore::open(workspace.as_path())?;
     Ok(DEFAULT_TICK_INTERVAL_SEC)
 }
 
 /// 退避序列(`__main__.py:65`):`min(interval * 2^min(failures-1, 5), 60.0)` → 5→10→20→40→60→60s。
 /// unit test 锁死本序列(card §85)。**纯函数,无 I/O,可直接 impl 钉死**(但 ROUND-0 仍占位)。
-pub fn backoff_sleep_sec(interval: f64, consecutive_failures: u32) -> f64 {
+pub(super) fn backoff_sleep_sec(interval: f64, consecutive_failures: u32) -> f64 {
     let failures = consecutive_failures.saturating_sub(1).min(5);
     let exp = i32::try_from(failures).unwrap_or(5);
     (interval * 2f64.powi(exp)).min(BACKOFF_MAX_SEC)
@@ -537,10 +538,6 @@ struct RealProviderRegistry;
 impl ProviderRegistry for RealProviderRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         crate::provider::get_adapter(provider)
-    }
-
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists::default()
     }
 }
 

@@ -1,3 +1,4 @@
+//!
 use crate::cli::{CliError, CmdOutput, CmdResult, ExitCode};
 use crate::messaging::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessageTarget, SendOptions,

@@ -35,7 +35,7 @@ pub fn remove_agent(
     )
 }
 
-pub fn remove_agent_with_transport(
+pub(crate) fn remove_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
     from_spec: bool,

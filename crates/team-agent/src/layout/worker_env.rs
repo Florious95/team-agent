@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 layout step 3 — worker spawn env (inherit-then-strip) + worker
 //! spawn cwd (YAML-only).
 //!
@@ -57,6 +58,7 @@ const WORKER_IDENTITY_EXACT: &[&str] = &["CLAUDECODE", "CLAUDE_EFFORT", "CODEX_T
 
 const WORKER_IDENTITY_PREFIXES: &[&str] = &["CLAUDE_CODE_"];
 
+///
 /// Build the worker spawn env per Python inherit-then-strip semantics.
 ///
 /// Inputs:
@@ -158,6 +160,7 @@ fn is_posix_shell_identifier(s: &str) -> bool {
     bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+///
 /// Compute worker spawn cwd per Python semantics: YAML
 /// `agent.spawn_cwd` if set, else `workspace`. The persisted-state
 /// `agent.spawn_cwd` override (the pre-0.3.28 Rust extension that caused

@@ -1,3 +1,4 @@
+//!
 //! Phase-DX E2: `agent_health` row capture/restore for the remove-agent flow.
 //!
 //! Extracted from `lifecycle/restart/remove.rs` so the SQL column reference to

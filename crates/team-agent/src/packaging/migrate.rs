@@ -1,3 +1,4 @@
+//!
 //! `doctor` 自检入口:把 step 3 schema_diagnosis +(placeholder)step 11/12 gate 结论归一成
 //! typed [`DoctorStatus`]。
 
@@ -6,6 +7,7 @@ use super::types::{
 };
 use crate::db::migration::schema_diagnosis_workspace;
 
+///
 /// `team-agent doctor`(`commands.py:218`)。packaging 的自检入口:把 step 3 schema_diagnosis +
 /// (placeholder)step 11 comms / step 12 orphan gate 结论归一成 typed [`DoctorStatus`]。
 /// **§84**:只调 step 3/11/12 的 trait 入口,注入 mock 时 provider 调用计数 = 0;绝不触发 prompt/token。

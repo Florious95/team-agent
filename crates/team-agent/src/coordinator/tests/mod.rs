@@ -25,23 +25,15 @@ fn meta(pid: u32, proto: u32, schema: i64) -> CoordinatorMetadata {
     }
 }
 
-/// `ProviderRegistry` mock — 断言**零** provider-client 调用 (MUST-NOT-13 / §84).
-/// `adapter_for`/`error_lists` 各记一次调用计数;abnormal-track 只允许触碰 `error_lists`,
-/// 绝不触碰 `adapter_for`(那会走真实 provider client crate)。
+/// `ProviderRegistry` mock — 记录 provider-client adapter 调用 (MUST-NOT-13 / §84).
 struct MockRegistry {
-    whitelist: Vec<String>,
-    blacklist: Vec<String>,
     adapter_calls: std::cell::Cell<u32>,
-    error_list_calls: std::cell::Cell<u32>,
 }
 
 impl MockRegistry {
-    fn new(whitelist: &[&str], blacklist: &[&str]) -> Self {
+    fn new(_whitelist: &[&str], _blacklist: &[&str]) -> Self {
         Self {
-            whitelist: whitelist.iter().map(|s| s.to_string()).collect(),
-            blacklist: blacklist.iter().map(|s| s.to_string()).collect(),
             adapter_calls: std::cell::Cell::new(0),
-            error_list_calls: std::cell::Cell::new(0),
         }
     }
 }
@@ -51,13 +43,6 @@ impl ProviderRegistry for MockRegistry {
         // 任何对它的调用都违反 §84 zero-injection;计数,断言保持 0。
         self.adapter_calls.set(self.adapter_calls.get() + 1);
         crate::provider::get_adapter(_provider)
-    }
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        self.error_list_calls.set(self.error_list_calls.get() + 1);
-        ErrorLists {
-            whitelist: self.whitelist.clone(),
-            blacklist: self.blacklist.clone(),
-        }
     }
 }
 

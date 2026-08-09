@@ -1,3 +1,4 @@
+//!
 //! unit-8 (Stage 3) — `lifecycle::launch::spec_state` phase boundary.
 //!
 //! The dedicated home for spec/runtime-path resolution and state-tree
@@ -39,38 +40,6 @@ use super::leader_context::{
     seed_unbound_launched_owner,
 };
 use super::worker_env::spawn_timestamp;
-
-/// Named launch phases under spec_state. Used in phase labels for logs
-/// and (future) for the orchestrator's step dispatcher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpecStatePhase {
-    ResolveSpecPaths,
-    MaterializeState,
-}
-
-impl SpecStatePhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ResolveSpecPaths => "launch.spec_state.resolve_spec_paths",
-            Self::MaterializeState => "launch.spec_state.materialize_state",
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_labels_are_dotted_paths_under_launch_spec_state() {
-        assert!(SpecStatePhase::ResolveSpecPaths
-            .as_str()
-            .starts_with("launch.spec_state."));
-        assert!(SpecStatePhase::MaterializeState
-            .as_str()
-            .starts_with("launch.spec_state."));
-    }
-}
 
 pub(super) fn initial_runtime_state(
     spec: &Value,
@@ -258,6 +227,7 @@ pub(super) fn yaml_value_to_json(value: &Value) -> serde_json::Value {
     }
 }
 
+///
 /// Set `runtime.session_name` on the compiled spec to `session_name`, creating the
 /// `runtime` map and/or the `session_name` entry if absent. Used by quick-start to
 /// derive the tmux session from the REQUESTED team identity (CR-040/042) rather
@@ -356,6 +326,7 @@ pub(super) fn spec_session_name(spec: &Value) -> SessionName {
     SessionName::new(format!("team-{team_name}"))
 }
 
+///
 /// 0.3.28 layout step 1: pub re-export of `spec_session_name` for the new
 /// `layout::sessions::worker_session_name` to delegate to. Single underlying
 /// impl; this just widens visibility without duplicating logic.
@@ -370,6 +341,7 @@ pub(super) fn spec_agents(spec: &Value) -> Vec<AgentId> {
         .collect()
 }
 
+///
 /// Bug 1 (0.4.2): expose spec agent id set so the restart path can filter
 /// state.agents to only the agents currently defined in the rebuilt spec.
 /// Returns a `BTreeSet<String>` for O(log n) membership checks.

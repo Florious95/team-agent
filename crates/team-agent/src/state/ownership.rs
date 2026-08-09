@@ -1,3 +1,4 @@
+//!
 //! Stage 2 of identity-boundary unified plan (architect direction 2026-06-23):
 //! `state::ownership` — single read entry point for `team_owner` lookups.
 //!
@@ -41,7 +42,7 @@ use crate::state::projection::{read_owner as projection_read_owner, team_state_k
 /// owner value. CLI status / diagnose use it to surface legacy duplicate
 /// warnings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OwnershipSource {
+enum OwnershipSource {
     /// Stage 5 canonical path: `.team/runtime/<team_key>/state.json` (not
     /// yet emitted — placeholder for forward compatibility).
     CanonicalPerTeamState,
@@ -57,11 +58,12 @@ pub enum OwnershipSource {
 /// caller consumes (same shape as `state.get("team_owner")` returned today);
 /// the `source` is diagnostic.
 #[derive(Debug, Clone)]
-pub struct OwnershipRead<'a> {
+struct OwnershipRead<'a> {
     pub value: &'a Value,
     pub source: OwnershipSource,
 }
 
+///
 /// Stage 2 entry point: read the team owner for the given `team_key` from an
 /// in-memory state value, honouring the legacy precedence. Returns `None` if
 /// no source carries a non-empty, valid owner record.
@@ -73,7 +75,7 @@ pub struct OwnershipRead<'a> {
 /// This deliberately reuses `projection::read_owner` so the pane-id validity
 /// check (`%N` or all-digits) stays in one place. The repository's value-add
 /// is the precedence ordering and the `OwnershipSource` tag.
-pub fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<OwnershipRead<'a>> {
+fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<OwnershipRead<'a>> {
     // Step 1 (Stage 5): canonical per-team state. Stage 2 does not consult
     // a separate file yet — owner truth still lives in the in-memory state.
     // Once Stage 5 wires `.team/runtime/<team_key>/state.json` as canonical,
@@ -109,6 +111,7 @@ pub fn read_owner_for_team<'a>(state: &'a Value, team_key: &str) -> Option<Owner
     None
 }
 
+///
 /// Convenience: just the JSON value, no diagnostic source. Returns `None`
 /// when no owner is found. Stable across Stage 5 — only the lookup
 /// implementation will move.
@@ -116,6 +119,7 @@ pub fn read_owner_value<'a>(state: &'a Value, team_key: &str) -> Option<&'a Valu
     read_owner_for_team(state, team_key).map(|read| read.value)
 }
 
+///
 /// Stage 3 (identity-boundary unified plan, architect direction 2026-06-23):
 /// single write entry point for owner mutations. Pre-Stage-3, owner writes
 /// were spread across 13 sites (claim/attach/readopt/managed-leader/quick-
@@ -187,6 +191,7 @@ pub fn write_owner(state: &mut Value, team_key: &str, record: OwnershipWrite) {
     }
 }
 
+///
 /// Stage 3 top-level cleanup (architect direction 2026-06-24,
 /// .team/artifacts/stage3-toplevel-cleanup-fix.md): strip the legacy
 /// top-level `team_owner / leader_receiver / owner_epoch` fields from a
@@ -202,12 +207,13 @@ pub fn write_owner(state: &mut Value, team_key: &str, record: OwnershipWrite) {
 /// load-time path — legacy single-team states may still have only
 /// top-level owner and no canonical `teams.<key>` owner, and a blind load
 /// strip would lose ownership before migration.
-pub fn strip_top_level_ownership(root: &mut serde_json::Map<String, Value>) {
+fn strip_top_level_ownership(root: &mut serde_json::Map<String, Value>) {
     for key in ["team_owner", "leader_receiver", "owner_epoch"] {
         root.remove(key);
     }
 }
 
+///
 /// Stage 3 save-output canonical-aware strip (architect direction
 /// 2026-06-24, .team/artifacts/stage3-save-strip-fix.md): conditional
 /// version of `strip_top_level_ownership` used by `state::persist`'s

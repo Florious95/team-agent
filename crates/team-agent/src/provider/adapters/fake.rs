@@ -1,3 +1,4 @@
+//!
 //! Fake provider — scripted worker built into the team-agent CLI itself.
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2).
 

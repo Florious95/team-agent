@@ -1,3 +1,4 @@
+//!
 //! E7 (0.5.9 host-leader-registry-design §4.1): `team-agent leaders` command.
 //!
 //! Enumerates entries under `~/.team-agent/leaders`, re-validates each
@@ -13,6 +14,7 @@
 use super::{types::LeadersArgs, CliError, CmdResult};
 use serde_json::{json, Value};
 
+///
 /// E7 CLI entry point (E7 test 2 marker: `cmd_leaders`).
 ///
 /// Reads registry entries, canonical-validates each, and groups by

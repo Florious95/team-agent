@@ -1,3 +1,4 @@
+//!
 //! provider 共享类型:enums / newtypes / ProviderCaps / ProviderError / 捕获+classify payload / 占位结构。
 
 use std::collections::{BTreeMap, BTreeSet};

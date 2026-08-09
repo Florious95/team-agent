@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 — Unified adaptive layout manager.
 //!
 //! Single source of truth for tmux topology decisions in the runtime:
@@ -31,6 +32,5 @@ pub mod worker_env;
 pub mod worker_window_helpers;
 
 pub use runtime_sessions::{
-    LeaderLauncherSession, LeaderLauncherSessionError, RuntimeSessionAnomaly, RuntimeSessions,
-    WorkerSession, WorkerSessionError,
+    LeaderLauncherSession, RuntimeSessionAnomaly, RuntimeSessions, WorkerSession,
 };

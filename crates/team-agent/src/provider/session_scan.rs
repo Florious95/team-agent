@@ -1,3 +1,4 @@
+//!
 //! Provider session-scan boundary.
 //!
 //! `ProviderAdapter` keeps the public polling facade in `adapter.rs`; this
@@ -13,27 +14,6 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod common;
 pub(crate) mod copilot;
-
-/// Marker label for which scan strategy a provider uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionScanStrategy {
-    CodexJsonl,
-    ClaudeTranscript,
-    CopilotHome,
-    NotRequired,
-}
-
-impl SessionScanStrategy {
-    pub fn for_provider(provider: Provider) -> Self {
-        match provider {
-            Provider::Codex => Self::CodexJsonl,
-            Provider::Claude | Provider::ClaudeCode => Self::ClaudeTranscript,
-            Provider::Copilot => Self::CopilotHome,
-            Provider::GeminiCli => Self::NotRequired,
-            Provider::Fake => Self::NotRequired,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureSessionContext {
@@ -87,24 +67,3 @@ pub(crate) fn scan_session_candidates_once(
 }
 
 pub(crate) use claude::rollout_path_has_leader_marker as rollout_path_has_claude_leader_marker;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strategy_per_provider() {
-        assert_eq!(
-            SessionScanStrategy::for_provider(Provider::Codex),
-            SessionScanStrategy::CodexJsonl
-        );
-        assert_eq!(
-            SessionScanStrategy::for_provider(Provider::Claude),
-            SessionScanStrategy::ClaudeTranscript
-        );
-        assert_eq!(
-            SessionScanStrategy::for_provider(Provider::Fake),
-            SessionScanStrategy::NotRequired
-        );
-    }
-}

@@ -1,3 +1,4 @@
+//!
 //! step 14b · cli — `team-agent <subcommand>` clap 命令面(真相源 `cli/`)。
 //!
 //! Card: `docs/phase0/subsystems/14-mcp_cli.md`(CLI 半边)。
@@ -78,6 +79,7 @@ pub use send::*;
 pub use status::*;
 pub use types::*;
 
+///
 /// Public `attach-leader` CLI handler. It consumes the typed pane/provider args and
 /// writes/returns a `leader_receiver` binding via the leader lease port.
 pub fn cmd_attach_leader(args: &AttachLeaderArgs) -> Result<CmdResult, CliError> {
@@ -117,6 +119,7 @@ pub mod lifecycle_port {
     use super::*;
     use crate::model::enums::Provider;
 
+    ///
     /// `runtime.quick_start`(`cmd_quick_start` 委派)。返回 `{ok, summary, ...}` 稳定形状。
     pub fn quick_start(
         workspace: &Path,
@@ -140,6 +143,7 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
+    ///
     /// `runtime.start_leader`(`codex`/`claude` passthrough + `cmd_codex`/`cmd_claude`)。
     pub fn start_leader(
         provider: Provider,
@@ -456,6 +460,7 @@ pub mod lifecycle_port {
         let window = plan.leader_window.as_ref()?;
         crate::tmux_backend::attach_command_for_workspace(cwd, session, window.as_str())
     }
+    ///
     /// `runtime.shutdown`(`cmd_shutdown`)。
     ///
     /// 0.5.x Phase 1d Batch 5: the workspace-transport branch now routes
@@ -547,6 +552,7 @@ pub mod lifecycle_port {
         },
     }
 
+    ///
     /// E12 纯决策(单测下沉):spare = `anchor_sessions` ∪ `team-agent-leader-*` 前缀(并集,锚优先)。
     /// 全部 session 都不 spare 且非空 → `KillServerExclusive`(独享 socket 兜底);否则逐 session
     /// kill 非 spare 的(共享 socket / leader 在 → 绝不整 server 拆)。空 session 集 → 逐 kill(no-op)。
@@ -2019,6 +2025,7 @@ pub mod lifecycle_port {
         }
     }
 
+    ///
     /// E4 真机 grounded(任何 team 的 shutdown 都不杀任何 team 的 leader 锚 pane):
     /// 扫 state.json 收集所有 leader-anchor pane_id(top-level team_owner /
     /// leader_receiver + teams[<key>].* 嵌套形态)。返非空 BTreeSet 给
@@ -2230,6 +2237,7 @@ pub mod lifecycle_port {
         protected
     }
 
+    ///
     /// B5/F2 + E4 真机 grounded(任何 team 的 shutdown 都不杀任何 team 的 leader 锚 pane):
     /// the leader terminal's pane process tree joins the protected set (same set, same
     /// mechanism as the invoker ancestry) so the workspace residual sweep's cmdline/cwd
@@ -2595,6 +2603,7 @@ pub mod lifecycle_port {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         path == root || path.starts_with(root)
     }
+    ///
     /// `runtime.restart`(`cmd_restart`)。
     pub fn restart(
         workspace: &Path,
@@ -2612,6 +2621,7 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
+    ///
     /// `runtime.start_agent`(`cmd_start_agent`)。
     pub fn start_agent(
         workspace: &Path,
@@ -2636,6 +2646,7 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
+    ///
     /// `runtime.stop_agent`(`cmd_stop_agent`)。
     pub fn stop_agent(
         workspace: &Path,
@@ -2648,6 +2659,7 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
+    ///
     /// `runtime.reset_agent`(`cmd_reset_agent`;`--discard-session` 必需)。
     pub fn reset_agent(
         workspace: &Path,
@@ -2698,6 +2710,7 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
+    ///
     /// `runtime.add_agent`(`cmd_add_agent`;`--role-file` 必需)。
     pub fn add_agent(
         workspace: &Path,
@@ -2724,6 +2737,7 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
+    ///
     /// `runtime.fork_agent`(`cmd_fork_agent`;`--as` 必需)。
     pub fn fork_agent(
         workspace: &Path,
@@ -2771,6 +2785,7 @@ pub mod lifecycle_port {
             Err(error) => Ok(error_value(error)),
         }
     }
+    ///
     /// `runtime.remove_agent`(`cmd_remove_agent`;`--from-spec` 须配 `--confirm`)。
     pub fn remove_agent(
         workspace: &Path,
@@ -2942,6 +2957,7 @@ pub mod lifecycle_port {
             format!("'{}'", raw.replace('\'', "'\\''"))
         }
     }
+    ///
     /// `runtime.acknowledge_idle`(`cmd_acknowledge_idle`)。
     pub fn acknowledge_idle(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
         let mut state = crate::state::persist::load_runtime_state(workspace)
@@ -4067,6 +4083,7 @@ pub mod lifecycle_port {
 pub mod diagnose_port {
     use super::*;
 
+    ///
     /// `runtime.doctor(spec)` + schema 注入(`cmd_doctor` 默认分支)。
     pub fn doctor(workspace: &Path, spec: Option<&Path>) -> Result<Value, CliError> {
         let tmux_path = which_path("tmux");
@@ -4334,8 +4351,10 @@ pub mod diagnose_port {
             }
         }
     }
+    ///
     /// `run_comms_selftest`(`--comms`/`--gate comms`)。**纯 state-read,零 token**(MUST-NOT-13)。
-    pub fn comms_selftest(
+    #[cfg(test)]
+    pub(super) fn comms_selftest(
         workspace: &Path,
         team: Option<&str>,
         gate: Option<&str>,
@@ -4343,14 +4362,19 @@ pub mod diagnose_port {
         crate::diagnose::comms::doctor_comms_json(workspace, team, gate)
     }
 
+    ///
     /// `orphan_gate(fix, confirm)`(`--gate orphans`)。CI gate。
-    pub fn orphan_gate(workspace: &Path, fix: bool, confirm: bool) -> Result<Value, CliError> {
+    #[cfg(test)]
+    pub(super) fn orphan_gate(workspace: &Path, fix: bool, confirm: bool) -> Result<Value, CliError> {
         crate::diagnose::orphans::orphan_gate_json(workspace, fix, confirm)
     }
+    ///
     /// `cleanup_orphan_coordinators(confirm)`(`--cleanup-orphans`;dry-run unless `--confirm`)。
-    pub fn cleanup_orphans(workspace: &Path, confirm: bool) -> Result<Value, CliError> {
+    #[cfg(test)]
+    pub(super) fn cleanup_orphans(workspace: &Path, confirm: bool) -> Result<Value, CliError> {
         crate::diagnose::orphans::cleanup_orphans_json(workspace, confirm)
     }
+    ///
     /// `fix_schema_layout`(`--fix-schema`)/`schema_diagnosis`。
     pub fn fix_schema(workspace: &Path) -> Result<Value, CliError> {
         let db_path = workspace.join(".team").join("runtime").join("team.db");
@@ -4520,6 +4544,7 @@ pub mod diagnose_port {
 pub mod leader_port {
     use super::*;
 
+    ///
     /// `runtime.takeover(workspace, team, confirm)` 的 CLI `--json` 投影。
     pub fn takeover(
         workspace: &Path,
@@ -4575,6 +4600,7 @@ pub mod leader_port {
         }
         Ok(value)
     }
+    ///
     /// `runtime.claim_leader(...)` 的 CLI `--json` 投影(`cmd_claim_leader`;含 inbox_hint)。
     pub fn claim_leader(
         workspace: &Path,
@@ -4624,6 +4650,7 @@ pub mod leader_port {
         Ok(value)
     }
 
+    ///
     /// `runtime.attach_leader(...)` 的 CLI `--json` 投影。
     pub fn attach_leader(
         workspace: &Path,
@@ -4651,6 +4678,7 @@ pub mod leader_port {
         Ok(value)
     }
 
+    ///
     /// `runtime.leader_identity(workspace, team)`(`cmd_identity`)。
     pub fn leader_identity(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
         crate::leader::leader_identity(workspace, team)
@@ -4720,6 +4748,7 @@ pub mod leader_port {
         );
     }
 
+    ///
     /// E7 GC hook: called from shutdown/unbind success paths.
     pub(crate) fn unregister_after_shutdown_success(
         workspace: &Path,
@@ -4991,6 +5020,7 @@ pub mod leader_port {
         Ok(json!([]))
     }
 
+    ///
     /// R8 D6 (decoupled for offline byte-lock — c-lite): project the requeued-exhausted event into the
     /// CLI `requeued_exhausted_watchers` return. golden (leader/__init__.py:56): the `watcher_ids`
     /// STRING list. (Current divergent body — the `requeued` Vec<WatcherNotice> objects — kept until

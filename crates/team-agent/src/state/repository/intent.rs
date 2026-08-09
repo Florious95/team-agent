@@ -1,3 +1,4 @@
+
 use super::StateWriteIntent;
 
 impl<'a> StateWriteIntent<'a> {

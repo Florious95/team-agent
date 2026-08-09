@@ -1,3 +1,4 @@
+//!
 //! peer messaging compatibility helpers.
 
 use std::path::Path;
@@ -7,6 +8,7 @@ use crate::message_store::MessageStore;
 
 use super::MessagingError;
 
+///
 /// `leader.py:allow_peer_talk`: persist a bidirectional peer allowlist entry.
 pub fn allow_peer_talk(
     workspace: &Path,

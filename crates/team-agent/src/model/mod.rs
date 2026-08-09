@@ -1,3 +1,4 @@
+//!
 //! step 2 · model — typed bedrock (REWRITE_PROMPT.md §6 step 2).
 //!
 //! 纯数据 + 纯函数核心:Python 的散字符串 / `dict[str,Any]` 在此变 §3 id-newtype +

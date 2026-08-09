@@ -1,3 +1,4 @@
+//!
 //! unit-11 (Stage 4) — coordinator tick `abnormal` step group.
 //!
 //! Abnormal-exit detection + classification step extracted from
@@ -15,6 +16,7 @@ use super::super::health::pid_is_running;
 use super::super::tick::TickError;
 use super::super::types::Pid;
 
+///
 /// #236 `worker.abnormal_exit` watcher.
 ///
 /// Notify only when the bounded transcript/rollout tail contains a latest explicit
@@ -967,6 +969,7 @@ fn abnormal_last_error_observation_cohort(state: &Value, agent_id: &str) -> Opti
 /// P1: Python `_TAIL_BYTES` parity (idle_takeover_wiring.py:13) — RS must not read less.
 const ABNORMAL_TAIL_BYTES: u64 = 131_072;
 
+///
 /// P1: bounded tail read; a partial first line is harmless (the consumer only parses
 /// the latest complete JSONL record) and lossy UTF-8 keeps a mid-codepoint seek safe.
 pub(crate) fn read_tail_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
@@ -1347,6 +1350,7 @@ impl ApiErrorRecoveryClass {
     }
 }
 
+///
 /// 0.5.36 §7.1: rules keyed on status/error text.
 pub(crate) fn classify_api_error_recovery(
     signature: &str,
@@ -1871,6 +1875,7 @@ fn process_api_error_recovery_intent(
 // path (which owns its own save).
 // ─────────────────────────────────────────────────────────────────────────
 
+///
 /// 0.5.36 §7.3: process all due recovery intents. Called from tick.rs
 /// AFTER atomic_save has flushed the detector-written intent. Reloads a
 /// fresh state each call so the caller's stale in-memory state cannot
@@ -2168,7 +2173,7 @@ fn write_recovery_intent_result(workspace: &Path, agent_id: &str, update: Recove
 mod tests {
     use super::*;
     use crate::coordinator::tick::Coordinator;
-    use crate::coordinator::types::{ErrorLists, ProviderRegistry, WorkspacePath};
+    use crate::coordinator::types::{ProviderRegistry, WorkspacePath};
     use std::io::Write as _;
 
     struct NormalRegistry;
@@ -2179,10 +2184,6 @@ mod tests {
             provider: crate::provider::Provider,
         ) -> Box<dyn crate::provider::ProviderAdapter> {
             crate::provider::get_adapter(provider)
-        }
-
-        fn error_lists(&self, _provider: crate::provider::Provider) -> ErrorLists {
-            ErrorLists::default()
         }
     }
     #[test]

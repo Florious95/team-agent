@@ -1,3 +1,4 @@
+//!
 //! unit-11 (Stage 4) — coordinator tick steps namespace.
 //!
 //! The 3083 LOC `coordinator/tick.rs` orchestrator runs an ordered
@@ -47,6 +48,7 @@ impl TickStepGroup {
         }
     }
 
+    ///
     /// Canonical ordering as a const slice — exhaustive over the enum.
     pub fn ordered() -> &'static [TickStepGroup] {
         &[

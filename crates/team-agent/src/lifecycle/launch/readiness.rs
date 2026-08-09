@@ -20,33 +20,6 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadinessPhase {
-    StartCoordinator,
-    ComputeVerdict,
-}
-
-impl ReadinessPhase {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::StartCoordinator => "launch.readiness.start_coordinator",
-            Self::ComputeVerdict => "launch.readiness.compute_verdict",
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn phase_labels_are_dotted_paths_under_launch_readiness() {
-        assert!(ReadinessPhase::StartCoordinator
-            .as_str()
-            .starts_with("launch.readiness."));
-    }
-}
-
 pub(super) fn quick_start_worker_readiness(
     workspace: &Path,
     team_key: &str,

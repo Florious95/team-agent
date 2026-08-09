@@ -1,3 +1,4 @@
+//!
 //! Runtime approval prompt decisions shared by coordinator hooks.
 
 use serde::{Deserialize, Serialize};
@@ -7,11 +8,11 @@ use crate::provider::{ApprovalFingerprint, ApprovalKind, ApprovalPrompt};
 
 pub const RUNTIME_MCP_APPROVAL_SERVER: &str = "team_orchestrator";
 
-pub fn runtime_mcp_tool_allowlisted(tool: &str) -> bool {
+fn runtime_mcp_tool_allowlisted(tool: &str) -> bool {
     !tool.trim().is_empty()
 }
 
-pub fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
+fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
     prompt.server.as_deref() == Some(RUNTIME_MCP_APPROVAL_SERVER)
         && prompt
             .tool
@@ -34,7 +35,7 @@ pub fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
 ///     reporting status to leader through the message bus is the same
 ///     architectural layer as `report_result` and is harmless. New tools
 ///     join only after explicit product decision (per architect note).
-pub fn runtime_mcp_tool_is_internal_control_plane(prompt: &ApprovalPrompt) -> bool {
+fn runtime_mcp_tool_is_internal_control_plane(prompt: &ApprovalPrompt) -> bool {
     if prompt.server.as_deref() != Some(RUNTIME_MCP_APPROVAL_SERVER) {
         return false;
     }
@@ -129,7 +130,7 @@ pub fn awaiting_human_confirm_reason(
     }
 }
 
-pub fn approval_prompt_fingerprint(
+fn approval_prompt_fingerprint(
     team: &str,
     agent_id: &str,
     prompt: &ApprovalPrompt,
@@ -163,7 +164,7 @@ pub fn approval_prompt_fingerprint(
     ApprovalFingerprint::new(fingerprint)
 }
 
-pub fn awaiting_human_confirm_dedupe_key(
+fn awaiting_human_confirm_dedupe_key(
     team: &str,
     agent_id: &str,
     fingerprint: &ApprovalFingerprint,

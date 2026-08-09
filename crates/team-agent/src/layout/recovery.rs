@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 layout step 7 — leader pane recovery.
 //!
 //! Python truth source (`leader/__init__.py:885-887` +
@@ -28,6 +29,7 @@ pub enum RecoveryOutcome {
     NeedsUserAttach,
 }
 
+///
 /// Compute the recovery outcome from the current environment.
 ///
 /// Reads `TMUX_PANE` from the supplied environment iterator (use
@@ -44,6 +46,7 @@ where
     RecoveryOutcome::NeedsUserAttach
 }
 
+///
 /// Emit the canonical `leader_receiver.rebind_required` event when the
 /// runtime falls through to `NeedsUserAttach`. Logs to stderr so operators
 /// see the cascade in event logs.

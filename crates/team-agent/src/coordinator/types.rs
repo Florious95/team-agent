@@ -1,5 +1,5 @@
 //! coordinator 共享数据面:常量 / newtype / 穷尽 enum / metadata / schema health /
-//! report 结构 / CoordinatorEvent / abnormal-track 数据型 / WatchCursor / cross-dep 占位。
+//! report 结构 / abnormal-track 数据型 / WatchCursor / cross-dep 占位。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -9,11 +9,10 @@ use serde_json::Value;
 use thiserror::Error;
 
 // ── REUSE — committed model types(不重定义)──────────────────────────────────
-use crate::model::enums::{AuthMode, Provider};
-// AuthMode/PaneLiveness 经 provider/transport 间接复用;此处只点名直接用到的。
+use crate::model::enums::Provider;
 
 // ── REUSE — step 8 provider(经 trait,MUST-NOT-13:绝不依赖 provider client crate)──
-use crate::provider::{ProcessLiveness, ProviderAdapter, RolloutPath, TurnId, TurnState};
+use crate::provider::{ProviderAdapter, RolloutPath, TurnState};
 
 // ===========================================================================
 // CONSTANTS(metadata.py:13 / __main__.py:101)
@@ -355,135 +354,8 @@ pub struct StopReport {
 }
 
 // ===========================================================================
-// CoordinatorEvent(§3/§22:typed event enum,serde tag 与 Python 字节级一致)
-// ===========================================================================
-
-/// 本 step 发出的事件(card 表整列;事件名稳定契约由 step 4 EventLog 拥有,本卡只点名
-/// coordinator 发的那批)。serde `tag = "event"` + 精确 rename 锁死字节(与 events.jsonl 一致)。
-/// 渲染(`watch::render_event_line`)是它的 `Display` 投影。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] // 无 Eq:某变体含 f64
-#[serde(tag = "event")]
-pub enum CoordinatorEvent {
-    #[serde(rename = "coordinator.boot")]
-    Boot { workspace: String, once: bool },
-    #[serde(rename = "coordinator.started")]
-    Started { pid: Pid, log: String },
-    #[serde(rename = "coordinator.stopped")]
-    Stopped { pid: Pid },
-    #[serde(rename = "coordinator.exit")]
-    Exit { stop: bool },
-    #[serde(rename = "coordinator.session_missing")]
-    SessionMissing { session: String },
-    #[serde(rename = "coordinator.orphan_self_terminate")]
-    OrphanSelfTerminate {
-        initial_ppid: u32,
-        current_ppid: u32,
-        workspace: String,
-    },
-    #[serde(rename = "coordinator.tick_error")]
-    TickError {
-        error: String,
-        exc_type: String,
-        consecutive_failures: u32,
-        next_sleep_sec: f64,
-    },
-    #[serde(rename = "coordinator.tick_error.suppressed")]
-    TickErrorSuppressed {
-        consecutive_failures: u32,
-        next_sleep_sec: f64,
-    },
-    #[serde(rename = "coordinator.tick_recovered")]
-    TickRecovered { consecutive_failures: u32 },
-    #[serde(rename = "coordinator.restart_incompatible")]
-    RestartIncompatible {
-        pid: Option<Pid>,
-        expected_protocol: u32,
-        expected_schema: i64,
-    },
-    #[serde(rename = "coordinator.restart_incompatible_stop_failed")]
-    RestartIncompatibleStopFailed { pid: Option<Pid> },
-    #[serde(rename = "coordinator.schema_incompatible")]
-    SchemaIncompatible {
-        table: Option<String>,
-        missing_columns: Vec<String>,
-    },
-    #[serde(rename = "idle_takeover.unknown_persistent")]
-    IdleTakeoverUnknownPersistent {
-        node_id: String,
-        provider: Option<Provider>,
-        auth_mode: Option<AuthMode>,
-        consecutive_ticks: u32,
-        rollout_path: Option<RolloutPath>,
-    },
-    #[serde(rename = "abnormal.notify")]
-    AbnormalNotify {
-        signature: String,
-        turn_id: Option<TurnId>,
-        decision: AbnormalDecision,
-    },
-    #[serde(rename = "worker.abnormal_exit")]
-    WorkerAbnormalExit {
-        team_id: String,
-        agent_id: String,
-        provider: Provider,
-        path: String,
-        provider_process_dead: bool,
-        latest_explicit_error: bool,
-        signature: String,
-        turn_id: Option<TurnId>,
-        process_liveness: ProcessLiveness,
-    },
-    #[serde(rename = "worker.abnormal_exit.check")]
-    WorkerAbnormalExitCheck {
-        team_id: String,
-        agent_id: String,
-        provider: Provider,
-        path: String,
-        provider_process_dead: bool,
-        latest_explicit_error: bool,
-        notification: bool,
-        suppressed_reason: Option<String>,
-    },
-    #[serde(rename = "abnormal_exit.single_signal_suppressed")]
-    AbnormalExitSingleSignalSuppressed {
-        team_id: String,
-        agent_id: String,
-        provider: Provider,
-        path: String,
-        reason: String,
-        provider_process_dead: bool,
-        dead_process: bool,
-        latest_explicit_error: bool,
-    },
-    #[serde(rename = "abnormal.whole_team_gone")]
-    AbnormalWholeTeamGone { classification: WholeTeamGoneClass },
-    #[serde(rename = "leader_notification.log_pruned")]
-    LeaderNotificationLogPruned { removed: u64 },
-    #[serde(rename = "leader_notification.prune_failed")]
-    LeaderNotificationPruneFailed { error: String },
-    #[serde(rename = "runtime.state.save_failed")]
-    RuntimeStateSaveFailed {
-        phase: String,
-        error: String,
-        exc_type: String,
-    },
-}
-
-// ===========================================================================
 // 异常轨 abnormal_track(abnormal_track.py)—— provider-neutral 数据型
 // ===========================================================================
-
-/// `_classify` 决策(`abnormal_track.py:198-204`)。whitelist > blacklist > default(C9 catch-bias)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AbnormalDecision {
-    /// whitelist 命中 → 不通知(`abnormal_track.py:201`)。
-    Skip,
-    /// blacklist 命中 → 通知(`abnormal_track.py:203`)。
-    NotifyBlacklist,
-    /// 结构化 fault 默认通知(C9 catch-bias,`abnormal_track.py:204`)。
-    NotifyDefault,
-}
 
 /// `detect_whole_team_gone` 分类(`abnormal_track.py:130/132/143`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -496,35 +368,6 @@ pub enum WholeTeamGoneClass {
     RestartInProgress,
     /// 闪退 → durable marker + deferred escalation(`abnormal_track.py:143`)。
     UnexpectedExit,
-}
-
-/// `process_abnormal_records` 单条通知(`abnormal_track.py:70-79`)。
-/// dedup key = `(signature, turn_id|fingerprint)`(C8,`abnormal_track.py:64-66`):turn_id 缺失退化为
-/// per-record content fingerprint 桶,**绝不**把不同 fault 折叠进一个全局桶。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AbnormalNotification {
-    pub signature: String,
-    pub turn_id: Option<TurnId>,
-    /// `kind == "approval"` → blocked_on_human,否则 abnormal(`abnormal_track.py:74`)。
-    pub state: TurnState,
-    pub decision: AbnormalDecision,
-    pub provider: Option<Provider>,
-    /// 原始 fault fact(provider reader 产出的结构化记录;本 module 不读屏不命名 provider)。
-    pub raw: Value,
-}
-
-/// `process_abnormal_records` 返回(`abnormal_track.py:83-88` typed 版)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AbnormalProcessOutput {
-    pub notifications: Vec<AbnormalNotification>,
-    /// 更新后的去重状态(`seen` 集合,`abnormal_track.py:82`)——caller 回存。
-    pub notification_state: AbnormalNotificationState,
-}
-
-/// abnormal 去重状态(`abnormal_track.py:31-32,82`)。`seen` = `signature\0bucket` key 集合。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AbnormalNotificationState {
-    pub seen: BTreeSet<String>,
 }
 
 /// `detect_whole_team_gone` 返回(`abnormal_track.py:140-147` typed 版)。
@@ -549,13 +392,6 @@ pub struct TeamPresenceSnapshot {
     pub tmux_sessions_present: bool,
     pub clean_shutdown: bool,
     pub restart_in_progress: bool,
-}
-
-/// abnormal track 错误(provider reader 翻译 fault facts 失败)。
-#[derive(Debug, Error)]
-pub enum AbnormalError {
-    #[error("provider: {0}")]
-    Provider(#[from] crate::provider::ProviderError),
 }
 
 // ===========================================================================
@@ -591,15 +427,6 @@ pub use crate::model::ids::AgentId;
 pub trait ProviderRegistry {
     /// 拿某 provider 的 adapter(`providers.get_adapter`)。
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter>;
-    /// 该 provider 的 error 黑白名单(`get_provider_registry(provider)["error_lists"]`,abnormal_track 用)。
-    fn error_lists(&self, provider: Provider) -> ErrorLists;
-}
-
-/// provider error 黑白名单(`abnormal_track.py:184-195`)。**PLACEHOLDER**(step 8 拥有)。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ErrorLists {
-    pub whitelist: Vec<String>,
-    pub blacklist: Vec<String>,
 }
 
 /// idle take-over 候选 node(`idle_takeover_wiring.build_idle_nodes`,step 8/11 拥有真名)。

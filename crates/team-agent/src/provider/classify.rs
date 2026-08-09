@@ -1,3 +1,4 @@
+//!
 //! JSONL→neutral turn-state 翻译 + idle take-over predicate(`provider_state.common` +
 //! `idle_predicate` 的 Rust 等价)。leader 经注入的 TurnStateClassifier 调到这里。
 

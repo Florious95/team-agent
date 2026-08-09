@@ -1,3 +1,4 @@
+//!
 //! Shared typed catalog for ambient tmux pane authority refusals.
 //!
 //! This module owns identities and payload shape only. Launchers and CLI

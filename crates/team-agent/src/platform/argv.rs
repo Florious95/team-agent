@@ -1,3 +1,4 @@
+//!
 //! Process argv / environ probe.
 //!
 //! ## Batch 4 real implementation (leader msg_0689a63a9e40)
@@ -41,6 +42,7 @@
 //! same disabled default. **This is intentional**: leaking a
 //! bypass via unknown argv would be a MUST-NOT-13 假绿 failure.
 
+///
 /// Return the argv tokens for `pid`, or `None` if unavailable on
 /// this platform.
 ///
@@ -72,6 +74,7 @@ pub fn argv_tokens(pid: u32) -> Option<Vec<String>> {
     }
 }
 
+///
 /// Return the environ text (NUL-joined) for `pid`, or `None`.
 ///
 /// - Linux: `/proc/<pid>/environ` verbatim (migration of
@@ -91,6 +94,7 @@ pub fn environ_text(pid: u32) -> Option<String> {
     }
 }
 
+///
 /// Return the parent PID of `pid`, or `None` if unavailable.
 ///
 /// Byte-preserving migration of `lifecycle/launch.rs::process_parent_pid`:

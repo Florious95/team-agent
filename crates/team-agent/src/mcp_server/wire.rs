@@ -1,3 +1,4 @@
+//!
 //! step 14a · mcp_server::wire — stdio loop + JSON-RPC route + tool dispatch + contracts.
 
 use std::io::{BufRead, Write};
@@ -86,16 +87,15 @@ pub fn dispatch(tools: &TeamOrchestratorTools, request: &Value) -> ToolResult {
 /// `handle_mcp(tools, request)` (`server.py:46-91`): the JSON-RPC router.
 ///   - `initialize` → serverInfo `team_orchestrator` v0.1.4 + echoed protocolVersion.
 ///   - `tools/list` → `{tools: TOOLS}`.
-///   - `tools/call` → run [`dispatch`], wrap into [`ToolCallResult`] (`isError` =
-///     dispatch returned `Err`); the arg-vs-runtime exception split (`server.py:
-///     69-72`) classifies a caught failure into `InvalidToolArguments` vs
-///     `InternalRuntimeError`.
+///   - `tools/call` → run [`dispatch`], wrap through the live
+///     `tool_call_result_value` path (`isError` = dispatch returned `Err`); the
+///     arg-vs-runtime exception split (`server.py:69-72`) classifies a caught
+///     failure into `InvalidToolArguments` vs `InternalRuntimeError`.
 ///   - `notifications/*` → `Ok(None)` (no frame; **must not** emit to stdout).
 ///   - unknown method → `-32601` error frame.
 /// Returns `Ok(None)` only for the notifications path; every other branch yields a
 /// frame.
 ///
-/// [`ToolCallResult`]: super::ToolCallResult
 pub fn handle_mcp(
     tools: &TeamOrchestratorTools,
     request: &Value,

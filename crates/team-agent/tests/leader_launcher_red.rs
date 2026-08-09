@@ -29,56 +29,6 @@ fn bin() -> &'static str {
 
 #[test]
 #[serial(env)]
-fn managed_claude_leader_plan_uses_workspace_socket_tmux_not_default_server() {
-    let workspace = tmp_dir("plan-socket");
-    let fake = FakeLauncherTools::new(&workspace);
-    let _env = EnvGuard::set([
-        (
-            "PATH",
-            Some(format!(
-                "{}:{}",
-                fake.bin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            )),
-        ),
-        ("TMUX", None),
-        ("TMUX_PANE", None),
-    ]);
-
-    let plan = team_agent::leader::leader_start_plan(
-        Provider::ClaudeCode,
-        &["--model".to_string(), "sonnet".to_string()],
-        &workspace,
-        false,
-        false,
-        None,
-        false,
-    )
-    .expect("fake claude/tmux make leader_start_plan reachable");
-
-    assert_eq!(
-        plan.mode,
-        team_agent::leader::LeaderStartMode::ManagedTmuxClient
-    );
-    // 0.3.28 Step 2: managed leader window is named after `provider_wire`
-    // (e.g. `claude_code`), not the literal `leader`. Architecture parity
-    // with Python `leader/__init__.py:114-131`.
-    assert!(
-        plan.argv.len() >= 5
-            && plan.argv[0] == "tmux"
-            && plan.argv[1] == "-L"
-            && plan.argv[2].starts_with("ta-")
-            && plan.argv.iter().any(|arg| arg == "attach-session")
-            && plan.argv.iter().any(|arg| arg.ends_with(":claude_code")),
-        "0.3.28 Step 2: managed leader client argv must be workspace-socketed \
-         (`tmux -L ta-* attach-session -t <leader_session>:claude_code`); \
-         argv={:?}",
-        plan.argv
-    );
-}
-
-#[test]
-#[serial(env)]
 fn cli_claude_json_does_not_report_success_without_starting_provider_or_tmux() {
     let workspace = tmp_dir("cli-noop");
     let fake = FakeLauncherTools::new(&workspace);

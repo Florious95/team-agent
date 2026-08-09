@@ -1,3 +1,4 @@
+//!
 //! lifecycle::restart —— 单 worker 起/停/重置/删 + 整队 Route B 重建 + plan halt/status。
 
 use std::collections::BTreeMap;
@@ -60,9 +61,9 @@ pub(crate) use agent::start_agent_at_paths;
 // this to replace a stuck provider process without going through the
 // public start-agent CLI path.
 pub(crate) use agent::start_agent_at_paths_for_recovery;
-pub use agent::{
-    reset_agent, reset_agent_with_transport, start_agent, start_agent_with_transport, stop_agent,
-    stop_agent_with_transport,
+pub use agent::{reset_agent, start_agent, stop_agent};
+pub(crate) use agent::{
+    reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,
 };
 pub(crate) use common::refresh_missing_provider_sessions;
 pub(crate) use common::restart_required_missing_session_agent_ids;
@@ -71,7 +72,7 @@ pub(crate) use common::session_identity_probe_for_agent;
 // `lifecycle::launch::add_agent` / `fork_agent` so all three (restart / add / fork)
 // route to the SAME tmux socket the live team uses.
 pub(crate) use common::lifecycle_worker_tmux_backend_for_selected_state;
-pub use orchestrator::{halt_plan, plan_status};
+pub(crate) use orchestrator::{halt_plan, plan_status};
 pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline;
 // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): expose the phase
 // timer + worker timing writer so `lifecycle::launch::launch_with_transport_in_workspace`
@@ -79,14 +80,15 @@ pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline
 pub(crate) use rebuild::{
     provider_wire_from_state, write_worker_spawn_timing_event, RestartPhaseTimer,
 };
-pub use rebuild::{
-    restart, restart_candidates, restart_with_session_convergence_deadline, restart_with_transport,
-    restart_with_transport_with_readiness_deadline, select_restart_state,
+pub use rebuild::{restart, restart_with_session_convergence_deadline};
+pub(crate) use rebuild::{
+    restart_candidates, restart_with_transport, restart_with_transport_with_readiness_deadline,
+    select_restart_state,
 };
-pub use remove::{remove_agent, remove_agent_flag_requirements, remove_agent_with_transport};
-pub use selection::{
-    classify_first_send_at, classify_restart_plan, decide_start_mode, python_type_name,
-};
+pub use remove::{remove_agent, remove_agent_flag_requirements};
+pub(crate) use remove::remove_agent_with_transport;
+pub(crate) use selection::{classify_first_send_at, classify_restart_plan, python_type_name};
+pub use selection::decide_start_mode;
 // Layer 2 (leader follow-up 2026-06-22): test-visible workspace-aware
 // classification so lifecycle/tests/restart.rs can exercise the
 // SessionBackingStoreMissing + checked_paths + RecoveryHint path

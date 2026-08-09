@@ -27,7 +27,7 @@ pub fn quick_start(
     quick_start_in_workspace(&workspace, agents_dir, name, yes, team_id)
 }
 
-pub fn quick_start_in_workspace(
+pub(crate) fn quick_start_in_workspace(
     workspace: &Path,
     agents_dir: &Path,
     name: Option<&str>,
@@ -37,28 +37,6 @@ pub fn quick_start_in_workspace(
     let workspace = explicit_quick_start_workspace(workspace);
     let transport = quick_start_tmux_backend(&workspace);
     quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, team_id, &transport)
-}
-
-pub fn quick_start_in_workspace_with_display(
-    workspace: &Path,
-    agents_dir: &Path,
-    name: Option<&str>,
-    yes: bool,
-    team_id: Option<&str>,
-    open_display: bool,
-) -> Result<QuickStartReport, LifecycleError> {
-    // Legacy entrypoint: no `--backend` override. Preserves the exact
-    // tmux behavior we shipped in Phase 1c (byte-equivalent tmux path
-    // when no explicit backend is asked for).
-    quick_start_in_workspace_with_display_and_backend(
-        workspace,
-        agents_dir,
-        name,
-        yes,
-        team_id,
-        open_display,
-        None,
-    )
 }
 
 /// 0.5.x Phase 1d Batch 2: quick-start with an optional
@@ -204,7 +182,7 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     )
 }
 
-pub fn quick_start_with_transport(
+pub(crate) fn quick_start_with_transport(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
@@ -215,7 +193,7 @@ pub fn quick_start_with_transport(
     quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, team_id, transport)
 }
 
-pub fn quick_start_with_transport_in_workspace(
+pub(crate) fn quick_start_with_transport_in_workspace(
     workspace: &Path,
     agents_dir: &Path,
     name: Option<&str>,
@@ -228,7 +206,7 @@ pub fn quick_start_with_transport_in_workspace(
     )
 }
 
-pub fn quick_start_with_transport_in_workspace_with_display(
+pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     workspace: &Path,
     agents_dir: &Path,
     name: Option<&str>,

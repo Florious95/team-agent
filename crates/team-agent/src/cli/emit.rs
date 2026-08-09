@@ -1,3 +1,4 @@
+//!
 //! cli · emit — `emit`(--json vs 人读 dict 逐键)+ 顶层 `run` 调度(parser.py `main`)+
 //! 人读标量/集合渲染(`human_value` / `json_dumps_like`)。
 
@@ -5,6 +6,7 @@ use super::spec::{command_spec, CommandKind, CommandTier, ALL_DISPATCH_KINDS, CO
 use super::*;
 use std::io::{ErrorKind, Write as _};
 
+///
 /// `emit`(`helpers.py:12-23`):`--json`→`json.dumps(indent=2, ensure_ascii=False, sort_keys=True)`;
 /// 否则 dict 逐键 `key: value`(嵌套 dict/list 内联 compact json,`ensure_ascii=False`)、非 dict 直接 print。
 /// 返回应打印到 stdout 的字符串(bin main 负责实际 println)。
@@ -42,6 +44,7 @@ fn emit_with_json_order(
     }
 }
 
+///
 /// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude/copilot passthrough 早返回 →
 /// 解析 argv 到 subcommand → 调对应 handler → 异常落盘 + 信封 + `ExitCode::Error` →
 /// `consume_leader_inbox_summary` → `emit` → `result.ok is False ? Error : Ok`。
@@ -333,6 +336,7 @@ fn compat_hidden_help(command: &str, usage: &str) -> String {
     format!("{usage}\n\nstatus: hidden compatibility command\nsunset: {sunset}\naction: {action}")
 }
 
+///
 /// Test-only public accessor for `command_help` — allows integration
 /// tests to grep the help copy without depending on internal parser
 /// machinery.
@@ -340,6 +344,7 @@ pub fn __test_command_help(command: Option<&str>) -> String {
     command_help(command)
 }
 
+///
 /// Test-only public accessor for `quick_start_args` — allows
 /// integration tests to exercise the parser without going through
 /// stdio + the full `main` entrypoint.
@@ -1094,6 +1099,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     };
     let message_start = usize::from(target.is_some());
     let workspace = workspace(&parsed, cwd);
+    let sender = trusted_cli_sender(&workspace, parsed.team.as_deref())?;
     let presentation_value = if parsed.presentation_sink.is_some()
         || parsed.message_class.is_some()
         || parsed.case_id.is_some()
@@ -1127,7 +1133,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         workspace,
         team: parsed.team,
         task: None,
-        sender: trusted_cli_sender(),
+        sender,
         no_ack: false,
         no_wait: true,
         watch_result: false,
@@ -1142,14 +1148,42 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     })
 }
 
-fn trusted_cli_sender() -> TrustedSender {
-    std::env::var("TEAM_AGENT_ID")
+fn trusted_cli_sender(workspace: &Path, team: Option<&str>) -> Result<TrustedSender, CliError> {
+    let agent_id = std::env::var("TEAM_AGENT_ID")
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(crate::model::ids::AgentId::new)
-        .map(TrustedSender::from_runtime_identity)
-        .unwrap_or_else(TrustedSender::leader)
+        .filter(|value| !value.is_empty());
+    let worker_context = ["TEAM_AGENT_OWNER_TEAM_ID", "TEAM_AGENT_AGENT_ID"]
+        .into_iter()
+        .any(|key| {
+            std::env::var(key)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+    let Some(agent_id) = agent_id else {
+        if worker_context {
+            return Err(CliError::Usage(
+                "send requires framework-injected TEAM_AGENT_ID; refusing leader identity fallback"
+                    .to_string(),
+            ));
+        }
+        return Ok(TrustedSender::leader());
+    };
+    let source_workspace = std::env::var("TEAM_AGENT_WORKSPACE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| workspace.display().to_string());
+    let source_team = std::env::var("TEAM_AGENT_OWNER_TEAM_ID")
+        .ok()
+        .or_else(|| std::env::var("TEAM_AGENT_TEAM_ID").ok())
+        .or_else(|| team.map(ToOwned::to_owned))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    Ok(TrustedSender::from_runtime_identity_with_source(
+        crate::model::ids::AgentId::new(agent_id),
+        source_workspace,
+        &source_team,
+    ))
 }
 
 fn warn_send_legacy_delivery_flags(args: &[String]) {

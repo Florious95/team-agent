@@ -1,3 +1,4 @@
+//!
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![allow(non_snake_case)]
 use super::*;
@@ -505,17 +506,21 @@ fn repair_schema_active_lock_is_blocked_no_backup() {
 
 #[test]
 fn diagnose_path_when_bin_on_path_reports_on_path() {
-    // bin_dir 在当前 PATH → OnPath{bin_dir}。构造:把 bin_dir 临时塞进 PATH。
-    // 取 PATH 首个真实条目作为 bin_dir,保证「在 PATH 上」。
+    // bin_dir 在当前 PATH → install report 的 path_hint 是 OnPath{bin_dir}。
     let path_var = std::env::var("PATH").unwrap_or_default();
-    let first = path_var
+    let bin = path_var
         .split(':')
-        .find(|p| !p.is_empty())
-        .expect("PATH has at least one entry");
-    let bin = BinDir(PathBuf::from(first));
-    let hint = diagnose_path(&bin).expect("diagnose on-path bin");
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .find(|p| p.ends_with("bin"))
+        .expect("PATH has at least one .../bin entry");
+    let mut opts = install_opts(SkillTarget::Codex);
+    opts.prefix = Prefix(bin.parent().expect("bin dir has parent").to_path_buf());
+    let hint = install(&opts)
+        .expect("install reports on-path bin")
+        .path_hint;
     match hint {
-        PathHint::OnPath { bin_dir } => assert_eq!(bin_dir, PathBuf::from(first)),
+        PathHint::OnPath { bin_dir } => assert_eq!(bin_dir, bin),
         PathHint::NotOnPath { .. } => panic!("PATH entry should report OnPath"),
     }
 }
@@ -523,15 +528,20 @@ fn diagnose_path_when_bin_on_path_reports_on_path() {
 #[test]
 fn diagnose_path_not_on_path_npmrc_prefix_is_none_no_npm() {
     // Rust 版无 npm 路径 → npmrc_prefix == None (skeleton:257).
-    // 用一个绝不在 PATH 的目录。
-    let bin = BinDir(PathBuf::from("/zzz-definitely-not-on-path-9f3a"));
-    let hint = diagnose_path(&bin).expect("diagnose off-path bin");
+    // 用一个绝不在 PATH 的安装前缀,经当前公开 install 路径取得诊断。
+    let prefix = PathBuf::from("/zzz-definitely-not-on-path-9f3a");
+    let bin = prefix.join("bin");
+    let mut opts = install_opts(SkillTarget::Codex);
+    opts.prefix = Prefix(prefix);
+    let hint = install(&opts)
+        .expect("install reports off-path bin")
+        .path_hint;
     match hint {
         PathHint::NotOnPath {
             bin_dir,
             diagnostic,
         } => {
-            assert_eq!(bin_dir, PathBuf::from("/zzz-definitely-not-on-path-9f3a"));
+            assert_eq!(bin_dir, bin);
             // Rust 无 npm → 绝不重新引入 .npmrc 解析.
             assert_eq!(diagnostic.npmrc_prefix, None);
             // path_entries == 当前 PATH 条目数 (bincheck.mjs:43).
@@ -649,136 +659,8 @@ fn install_skill_real_copy_removes_stale_files() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// uninstall — install.mjs:109-130。安全护栏:
-//   - 默认 purge_runtime=false → purged_runtime=false,不删 workspace/.team.
-//   - purge_runtime=true 且检测有 team 在跑 → 拒绝:purge_refused_team_running=true
-//     (或返 PurgeRefusedTeamRunning err — 取实现纪律,这里钉「不真删」)。
-// 真删 / team-running 判定 #[ignore]。
-// ───────────────────────────────────────────────────────────────────────
-
-/// TEST-SUPPORT seed helper: build a workspace whose state.json projects a RUNNING team
-/// (status "running" + a live coordinator pid). The team-running guard reads this projection.
-/// Real impl (pure scaffolding, not a production fn) so the NEW-CONTRACT guard test has a
-/// concrete fixture instead of a bare nonexistent path.
-fn seed_workspace_with_running_team(tag: &str) -> PathBuf {
-    let ws = std::env::temp_dir().join(format!("ta-ws-running-{}-{}", std::process::id(), tag));
-    let team_dir = ws.join(".team");
-    std::fs::create_dir_all(&team_dir).expect("seed .team dir");
-    // state.json shape mirrors step-5 state projection: a team marked running.
-    let state = serde_json::json!({
-        "teams": {
-            "demo": { "status": "running", "coordinator_pid": std::process::id() }
-        }
-    });
-    std::fs::write(
-        team_dir.join("state.json"),
-        serde_json::to_vec_pretty(&state).unwrap(),
-    )
-    .expect("seed state.json");
-    ws
-}
-
-/// TEST-SUPPORT seed helper: an idle workspace (state.json present, no running team).
-fn seed_workspace_idle(tag: &str) -> PathBuf {
-    let ws = std::env::temp_dir().join(format!("ta-ws-idle-{}-{}", std::process::id(), tag));
-    let team_dir = ws.join(".team");
-    std::fs::create_dir_all(&team_dir).expect("seed .team dir");
-    std::fs::write(
-        team_dir.join("state.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({ "teams": {} })).unwrap(),
-    )
-    .expect("seed state.json");
-    ws
-}
-
-#[test]
-#[serial_test::serial(env)]
-fn uninstall_default_does_not_purge_runtime() {
-    // PORT-GOLDEN (install.mjs:127-129): default (no --purge-runtime) leaves runtime; the
-    // "runtime directories are left ... for rollback" branch. Default must NOT purge
-    // workspace/.team. With workspace seeded, default must STILL leave it untouched on disk.
-    // Isolate HOME: uninstall() now removes ~/.codex|.claude skill dirs (reads HOME). Without an
-    // isolated empty HOME this test would (a) delete the real user's skill dir and (b) race
-    // p2_uninstall_removes_both_skill_dirs' HOME mutation → remove_dir_all NotFound flake under
-    // parallel cargo. Shared ENV_LOCK_PKG serializes the two HOME-touching uninstall tests.
-    let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
-    let home = std::env::temp_dir().join(format!("ta-uninst-default-home-{}", std::process::id()));
-    std::fs::create_dir_all(&home).unwrap();
-    let _h = HomeGuard::set(&home);
-    let ws = seed_workspace_idle("default-nopurge");
-    let opts = UninstallOptions {
-        prefix: Prefix(std::env::temp_dir().join(format!("ta-uninst-{}", std::process::id()))),
-        purge_runtime: false,
-        workspace: Some(ws.clone()),
-    };
-    let outcome = uninstall(&opts).expect("default uninstall");
-    assert!(!outcome.purged_runtime, "default must NOT purge runtime");
-    assert!(
-        !outcome.purge_refused_team_running,
-        "no purge requested → no refusal"
-    );
-    // SAFETY INVARIANT (card §uninstall 绝不默认删 workspace/.team): the seeded workspace
-    // .team must still exist after a default uninstall.
-    assert!(
-        ws.join(".team").join("state.json").exists(),
-        "default uninstall must NEVER delete workspace/.team"
-    );
-}
-
-#[test]
-#[ignore = "NEW-CONTRACT (Rust hardening, NOT a Python port-golden): real team-running guard \
-            needs live state projection (step 5). Python install.mjs:123-128 has NO such guard \
-            — it purges unconditionally on --purge-runtime. Confirmed with gate w59ds828k: this \
-            is intentional hardening backed by card §uninstall prose 'pass --purge-runtime only \
-            when no teams are running.' Marked NEW-CONTRACT, not PORT."]
-fn uninstall_purge_refused_when_team_running_NEW_CONTRACT() {
-    // NEW-CONTRACT safety guard: purge_runtime=true but workspace projects a RUNNING team →
-    // REFUSE purge (purge_refused_team_running=true OR PurgeRefusedTeamRunning err). The
-    // seeded workspace .team MUST survive regardless. This behavior is NOT in install.mjs.
-    let ws = seed_workspace_with_running_team("guard");
-    let opts = UninstallOptions {
-        prefix: Prefix(std::env::temp_dir().join("ta-uninst-guard")),
-        purge_runtime: true,
-        workspace: Some(ws.clone()),
-    };
-    match uninstall(&opts) {
-        Ok(o) => {
-            assert!(!o.purged_runtime, "must not purge while team running");
-            assert!(o.purge_refused_team_running, "must set refusal flag");
-        }
-        Err(PackagingError::PurgeRefusedTeamRunning(refused_ws)) => {
-            assert_eq!(refused_ws, ws, "refusal must name the running workspace");
-        }
-        Err(other) => panic!("expected refusal, got {other:?}"),
-    }
-    // Hard invariant: refused purge must leave the workspace fully intact.
-    assert!(
-        ws.join(".team").join("state.json").exists(),
-        "refused purge must NEVER delete workspace/.team"
-    );
-}
-
-#[test]
-#[ignore = "REAL-MACHINE-E2E: PORT-GOLDEN — --purge-runtime with NO running team really removes \
-            the runtime root (install.mjs:123-126 unconditional rmSync). File-system side effect."]
-fn uninstall_purge_runtime_idle_workspace_purges_PORT_GOLDEN() {
-    // PORT-GOLDEN (install.mjs:123-126): --purge-runtime DOES purge when no team is running.
-    // This is the faithful Python behavior (the guard above is the only Rust addition).
-    let ws = seed_workspace_idle("port-purge");
-    let opts = UninstallOptions {
-        prefix: Prefix(std::env::temp_dir().join("ta-uninst-port-purge")),
-        purge_runtime: true,
-        workspace: Some(ws.clone()),
-    };
-    let outcome = uninstall(&opts).expect("purge on idle workspace");
-    assert!(outcome.purged_runtime, "idle + --purge-runtime → purged");
-    assert!(!outcome.purge_refused_team_running, "no team → no refusal");
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// install / update — install.mjs:48-95。
+// install — install.mjs:48-95。
 //   - install 首装:InstallReport.replace == None (无二进制替换).
-//   - update:replace == Some(..) (有原子替换;失败回滚到 .previous,bug-084 同源).
 //   - installer 默认 skill_target = All (install.mjs:74 `--target all`).
 // 全副作用 #[ignore] (写 bin / 拷 skill / 探 PATH / 跑 doctor) — clean-install E2E.
 // ───────────────────────────────────────────────────────────────────────
@@ -802,19 +684,6 @@ fn install_first_time_has_no_binary_replace() {
     assert_eq!(report.skills.len(), 2);
     // 版本 == 单一真相源.
     assert_eq!(report.version, Version::current());
-}
-
-#[test]
-#[ignore = "REAL-MACHINE-E2E: atomic binary replace + .previous backup + rollback (bug-084 同源)"]
-fn update_performs_atomic_binary_replace() {
-    // install.mjs:60-66 — update 有 dest→backup + tmp→dest 原子替换.
-    let opts = install_opts(SkillTarget::All);
-    let report = update(&opts).expect("update");
-    match report.replace {
-        Some(AtomicReplaceOutcome::Replaced { .. })
-        | Some(AtomicReplaceOutcome::ReplacedCrossDevice { .. }) => {}
-        other => panic!("update must replace binary, got {other:?}"),
-    }
 }
 
 #[test]
@@ -846,7 +715,7 @@ fn install_skill_dry_run_is_pure_no_provider_state() {
     // hold the same `ENV_LOCK_PKG` + `HomeGuard::set` guards; without
     // matching guards here, two dry-run runs can observe HOME after
     // a real-copy test swapped it, producing spurious diffs. Same
-    // env critical section as install/uninstall.
+    // env critical section as the other HOME-mutating install tests.
     let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
     let home = std::env::temp_dir().join(format!(
         "ta-0543-pkg-dry-{}-{}",
@@ -877,8 +746,11 @@ fn install_skill_dry_run_is_pure_no_provider_state() {
 fn diagnose_path_empty_path_has_zero_entries() {
     // bincheck.mjs:43 — searchPath ? split.length : 0;空 PATH → 0 entries.
     // (真改 process env PATH 影响并行测试,故 ignore;实现层应支持注入 PATH.)
-    let bin = BinDir(PathBuf::from("/anything"));
-    let hint = diagnose_path(&bin).expect("diagnose empty path");
+    let mut opts = install_opts(SkillTarget::Codex);
+    opts.prefix = Prefix(PathBuf::from("/anything"));
+    let hint = install(&opts)
+        .expect("install reports empty PATH")
+        .path_hint;
     if let PathHint::NotOnPath { diagnostic, .. } = hint {
         assert_eq!(diagnostic.path_entries, 0);
     } else {
@@ -947,65 +819,4 @@ fn install_skill_all_real_copies_to_three_provider_locations() {
             "{sub}: installed SKILL.md bytes must equal source"
         );
     }
-}
-
-// P1 — update() must perform a REAL atomic replace (rename dest→.previous), not fabricate
-// a Replaced outcome whose backup file never exists (install.mjs:60-66; bug-084).
-#[test]
-fn p2_update_creates_real_atomic_replace_backup() {
-    let base = std::env::temp_dir().join(format!("ta-p2-update-{}", std::process::id()));
-    let prefix = base.join("prefix");
-    std::fs::create_dir_all(prefix.join("bin")).unwrap();
-    let dest = prefix.join("bin").join("team-agent");
-    std::fs::write(&dest, b"OLD BINARY").unwrap(); // pre-existing bin to back up
-    let self_bin = base.join("team-agent-new");
-    std::fs::write(&self_bin, b"NEW BINARY").unwrap();
-
-    let opts = InstallOptions {
-        prefix: Prefix(prefix.clone()),
-        self_binary: self_bin,
-        skill_target: SkillTarget::All,
-    };
-    let report = update(&opts).unwrap();
-    let backup = match report.replace {
-        Some(AtomicReplaceOutcome::Replaced { backup }) => backup,
-        other => panic!("update must report a Replaced atomic replace, got {other:?}"),
-    };
-    assert!(
-        backup.exists(),
-        "update() must actually rename dest→.previous; the claimed backup file must exist on disk"
-    );
-}
-
-// P1 — uninstall() must remove ALL provider skill dirs (~/.codex|.claude|.copilot/skills/team-agent)
-// and record them (install.mjs:115-122 + E9 copilot). Table-driven over SkillTarget::SINGLE_TARGETS.
-#[test]
-#[serial_test::serial(env)]
-fn p2_uninstall_removes_all_provider_skill_dirs() {
-    let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
-    let base = std::env::temp_dir().join(format!("ta-p2-uninst-{}", std::process::id()));
-    let home = base.join("home");
-    let codex = home.join(".codex").join("skills").join("team-agent");
-    let claude = home.join(".claude").join("skills").join("team-agent");
-    let copilot = home.join(".copilot").join("skills").join("team-agent");
-    for d in [&codex, &claude, &copilot] {
-        std::fs::create_dir_all(d).unwrap();
-        std::fs::write(d.join("SKILL.md"), b"x").unwrap();
-    }
-    let _h = HomeGuard::set(&home);
-
-    let opts = UninstallOptions {
-        prefix: Prefix(base.join("prefix")),
-        purge_runtime: false,
-        workspace: None,
-    };
-    let out = uninstall(&opts).unwrap();
-    assert_eq!(
-        out.removed_skill_dirs.len(),
-        3,
-        "uninstall must remove ~/.codex, ~/.claude AND ~/.copilot skill dirs"
-    );
-    assert!(!codex.exists(), "~/.codex skill dir must be removed");
-    assert!(!claude.exists(), "~/.claude skill dir must be removed");
-    assert!(!copilot.exists(), "~/.copilot skill dir must be removed");
 }

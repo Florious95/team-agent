@@ -94,8 +94,13 @@ fn leader_start_plan_pins_mode_and_leader_env() {
     );
     assert!(!plan.is_external_leader);
     assert!(
-        plan.argv.iter().any(|arg| arg == "attach-session"),
-        "no-tmux managed launch attaches the user client to the leader window: {:?}",
+        plan.argv.len() >= 5
+            && plan.argv[0] == "tmux"
+            && plan.argv[1] == "-L"
+            && plan.argv[2].starts_with("ta-")
+            && plan.argv.iter().any(|arg| arg == "attach-session")
+            && plan.argv.iter().any(|arg| arg.ends_with(":fake")),
+        "no-tmux managed launch uses the workspace socket and attaches the user client to the leader window: {:?}",
         plan.argv
     );
     // plan 边界 detached 恒 false(`-d` 插入在 start_leader 层,非此处)。

@@ -1,3 +1,4 @@
+//!
 //! Codex provider-local command builder + permission/sandbox helpers.
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure

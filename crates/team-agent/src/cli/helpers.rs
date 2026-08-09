@@ -1,3 +1,4 @@
+//!
 //! cli · helpers — 跨子模块共用的小工具:tmux 冲突解析、Python 真值/falsy-or 语义、
 //! 字符级截断、相对 age 文本、稳定 key-sorted JSON。
 

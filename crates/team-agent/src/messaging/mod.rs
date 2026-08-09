@@ -1,3 +1,4 @@
+//!
 //! step 11 · messaging — delivery / scheduler / results / collect / report_result /
 //! watchers / leader-receiver / selftest 编排状态机 (ROUND-0 SKELETON).
 //!
@@ -83,11 +84,8 @@ pub use address::{parse_logical_address, LogicalAddress, LogicalAddressTarget};
 pub use delivery::{
     deliver_pending_message, deliver_pending_messages, deliver_persisted_message,
     deliver_stored_message, execute_trust_retry, handle_trust_retry_needed,
-    record_turn_open_if_leader_to_worker,
-    retry_injection_after_trust_auto_answer, stamp_first_send_at_if_leader_to_worker,
-    tmux_pane_width,
+    retry_injection_after_trust_auto_answer,
 };
-pub use helpers::fail_leader_delivery;
 pub use leader_channel::{
     resolve_live_leader_channel, DirectTmuxLeaderChannel, LeaderChannelResolution,
     LeaderChannelUnbound, LiveLeaderChannel,
@@ -95,7 +93,7 @@ pub use leader_channel::{
 pub use leader_receiver::{
     deliver_to_leader_fallback_pane, enqueue_leader_mailbox_until_attach,
     mirror_peer_message_to_leader, send_to_leader_receiver,
-    send_to_leader_receiver_with_message_id, send_to_leader_receiver_with_presentation,
+    send_to_leader_receiver_with_presentation,
 };
 pub use peers::allow_peer_talk;
 pub use persist::{
@@ -107,24 +105,22 @@ pub use results::{
     report_result_for_owner_team, report_result_for_owner_team_with_primary_error,
 };
 pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel, stuck_list};
-pub use selftest::{evaluate_idle_behavior, run_comms_selftest, CommsSelftestDriver};
+pub use selftest::{run_comms_selftest, CommsSelftestDriver};
 pub use send::{
-    apply_worker_sender_bypass, send_message, session_drift_refusal, MessageTarget, SendOptions,
-    TrustedSender,
+    apply_worker_sender_bypass, send_message, MessageTarget, SendOptions, TrustedSender,
 };
 pub use trust::{attempt_trust_auto_answer, TrustAnswerOutcome};
 pub use types::{
-    ActivityStatus, AgentActivity, AlertSnapshot, AlertSuppression, AlertType, CheckEvidence,
-    CheckKind, CheckStatus, ContractSuiteCheck, DeliveryOutcome, DeliveryRefusal, DeliveryStage,
-    DeliveryStatus, IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery,
+    ActivityStatus, AgentActivity, AlertType, CheckEvidence, CheckKind, CheckStatus,
+    ContractSuiteCheck, DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus,
+    IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery,
     ProviderSdkCalls, ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload,
     TrustRetryPayload, WatcherNotice, WorkerRuntimeState, RESULT_DELIVERY_MAX_ATTEMPTS,
     SEND_RETRY_MAX_ATTEMPTS, TRUST_RETRY_BACKOFF_SECONDS, TRUST_RETRY_MAX_ATTEMPTS,
 };
 pub use watchers::{
-    delivered_result_message, format_result_watcher_notification, notify_result_watchers,
-    requeue_after_claim_leader, requeue_delivery_exhausted_watchers, result_id_from_text,
-    retry_result_deliveries,
+    format_result_watcher_notification, requeue_after_claim_leader,
+    requeue_delivery_exhausted_watchers, result_id_from_text, retry_result_deliveries,
 };
 
 // `MessageStatusShadow` 是 [`DeliveryOutcome::message_status`] 的公有字段类型,原在模块根

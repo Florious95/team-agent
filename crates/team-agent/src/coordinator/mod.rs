@@ -1,3 +1,4 @@
+//!
 //! step 12 · coordinator — daemon lifecycle / single-tick orchestration SKELETON (ROUND-0).
 //!
 //! Card: `docs/phase0/subsystems/12-coordinator.md`.
@@ -10,8 +11,7 @@
 //!   - `coordinator/metadata.py`     (COORDINATOR_PROTOCOL_VERSION=2, pid_is_running, read/write/ok meta)
 //!   - `coordinator/paths.py`        (coordinator.pid / coordinator.json / coordinator.log paths)
 //!   - `watch/__init__.py`           (run_watch / collect_watch_lines / render_event_line / WatchCursor)
-//!   - `abnormal_track.py`           (Gap 32 §4 provider-neutral abnormal track:
-//!     process_abnormal_records / detect_whole_team_gone)
+//!   - `abnormal_track.py`           (Gap 32 §4 provider-neutral whole-team-gone detection)
 //!
 //! 职责(card §职责):per-workspace daemon 生命周期 + 单次 tick 编排。tick 按固定顺序把
 //! step 8-11 的原子操作串成一个只读 + 投递既定 obligation 的回路 —— **绝不**在无 pending

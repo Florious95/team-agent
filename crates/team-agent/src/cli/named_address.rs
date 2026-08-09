@@ -1,3 +1,4 @@
+//!
 //! CLI-local stable name resolver for `team-agent send --to-name`.
 
 use std::path::{Path, PathBuf};
@@ -193,6 +194,7 @@ impl NamedAddressError {
         self.with_scoped_suggestions(requested_display, candidate_values, best)
     }
 
+    ///
     /// 0.5.45 naming-addressing (design §3.3/§3.4): attach an
     /// advisory suggestion payload. `requested` is the original typo
     /// (surfaced verbatim in JSON + N38 Action); `ranked_candidates`
@@ -469,6 +471,7 @@ fn normalize_bare_with_team_scope(
     }
 }
 
+///
 /// E6 wiring helper (`cli::send::maybe_enqueue_offline_leader_mailbox`):
 /// re-parse a `<workspace>::<team>/leader` name and return the resolved
 /// target workspace + canonical team_key so send.rs can enqueue the
@@ -500,10 +503,14 @@ struct ParsedNamedAddress {
 
 impl ParsedNamedAddress {
     fn display_name(&self) -> String {
-        match &self.target {
+        let target = match &self.target {
             ParsedTarget::BareAgent(agent) => agent.clone(),
             ParsedTarget::TeamEntity { team, entity } => format!("{team}/{entity}"),
             ParsedTarget::SessionWindow { session, window } => format!("{session}:{window}"),
+        };
+        match &self.workspace {
+            Some(workspace) => format!("{}::{target}", workspace.display()),
+            None => target,
         }
     }
 }

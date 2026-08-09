@@ -1,3 +1,4 @@
+//!
 //! 移植 `team_agent/task_graph.py` 的三个纯函数:`find_dependency_cycle` /
 //! `ready_tasks` / `update_task_status`(真相源 v0.2.11)。
 //!

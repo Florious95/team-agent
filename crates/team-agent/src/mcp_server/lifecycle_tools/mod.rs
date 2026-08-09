@@ -1,3 +1,4 @@
+//!
 //! MCP lifecycle tool facades.
 //!
 //! S0 keeps the old placeholder behavior behind stable module boundaries so

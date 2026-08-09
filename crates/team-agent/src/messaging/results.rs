@@ -1,3 +1,4 @@
+//!
 //! results.py — collect + report_result + envelope 校验编排 (card §66/§67)。
 
 use std::path::{Path, PathBuf};

@@ -1,3 +1,4 @@
+//!
 //! `.team/` 布局路径(移植 `paths.py` 的 workspace/team-dir 部分)。
 //!
 //! Python 端 `runtime_dir`/`logs_dir`/`artifacts_dir`/`messages_dir` 把 `.team/<sub>`

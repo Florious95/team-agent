@@ -109,7 +109,7 @@ fn resolve_restart_context(
 /// `restart` with an injected transport (tests: recording mock; prod: real TmuxBackend). The Route-B
 /// resume/fresh worker spawn + start_coordinator are wired here over `transport`. (rt-host-a sweep:
 /// was a stub returning RequirementUnmet at the spawn boundary — never spawned/resumed/started coordinator.)
-pub fn restart_with_transport(
+pub(crate) fn restart_with_transport(
     workspace: &Path,
     allow_fresh: bool,
     team: Option<&str>,
@@ -118,7 +118,7 @@ pub fn restart_with_transport(
     restart_with_transport_with_readiness_deadline(workspace, allow_fresh, team, transport, None)
 }
 
-pub fn restart_with_transport_with_readiness_deadline(
+pub(crate) fn restart_with_transport_with_readiness_deadline(
     workspace: &Path,
     allow_fresh: bool,
     team: Option<&str>,
@@ -158,7 +158,7 @@ pub fn restart_with_transport_with_readiness_deadline(
     }
 }
 
-pub fn restart_with_transport_with_session_convergence_deadline(
+pub(crate) fn restart_with_transport_with_session_convergence_deadline(
     workspace: &Path,
     allow_fresh: bool,
     team: Option<&str>,
@@ -1224,6 +1224,14 @@ fn restart_with_selected_team_and_transport(
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
     try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+    if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
+    {
+        let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
+            &selected.run_workspace,
+            &session_name,
+            &probe,
+        );
+    }
     // 0.3.28 Step 1: topology invariant guard (warn-only). Same pattern as
     // `lifecycle::launch::launch_with_transport_in_workspace` — logs to stderr,
     // never panics. Hard error path is deferred to Step 10.
@@ -3062,7 +3070,7 @@ fn write_restart_resume_decision_event(
 
 /// `restart_candidates(workspace)`(`restart/selection.py:12`)。从 snapshot + active
 /// state 收集可重启 team。
-pub fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidate>, LifecycleError> {
+pub(crate) fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidate>, LifecycleError> {
     let state = crate::state::persist::load_runtime_state(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let alive = crate::state::projection::team_state_candidates(&state);
@@ -3084,7 +3092,7 @@ pub fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidate>, Lif
 
 /// `select_restart_state(workspace, team)`(`restart/selection.py:49`)。按 `--team` 或
 /// 唯一性选一个;歧义/未找到 → `TeamSelect`。
-pub fn select_restart_state(
+pub(crate) fn select_restart_state(
     workspace: &Path,
     team: Option<&str>,
 ) -> Result<RestartCandidate, LifecycleError> {

@@ -1,3 +1,4 @@
+//!
 //! step 14a · mcp_server::normalize — string-alias regularization + result compaction.
 
 use serde_json::Value;
@@ -28,9 +29,9 @@ pub fn normalize_result_status(value: Option<&str>) -> ResultStatus {
     normalize_result_status_observed(value).0
 }
 
-/// The observed variant: `.1` carries the raw unrecognized literal so ingestion
-/// boundaries (wire report_result) can emit `provider.result.unknown_status_normalized`.
-pub fn normalize_result_status_observed(value: Option<&str>) -> (ResultStatus, Option<String>) {
+/// The internal observed variant: `.1` carries the raw unrecognized literal for
+/// callers that need to retain it.
+fn normalize_result_status_observed(value: Option<&str>) -> (ResultStatus, Option<String>) {
     let token = normalize_token(value);
     if token.is_empty() {
         return (ResultStatus::Success, None);

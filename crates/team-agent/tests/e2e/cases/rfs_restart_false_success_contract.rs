@@ -315,13 +315,13 @@ fn rfs_source_guard_forbids_cross_socket_auto_rebind_and_keeps_resume_signature(
         "R10 guard: restart must not grow an auto-rebind-across-socket escape hatch; forbidden markers={forbidden_rebind:?}"
     );
 
-    let resume = source_tree(&["src/provider/session/resume.rs"]);
+    let resume_selection = source_tree(&["src/lifecycle/restart/selection.rs"]);
     let restart_common = source_tree(&["src/lifecycle/restart/common.rs"]);
     assert!(
-        resume.contains("pub fn check(")
-            && resume.contains("provider_can_resume: bool")
-            && resume.contains("backing: Option<&ProviderBackingCheck>"),
-        "R10 guard: provider/session/resume.rs signature must stay explicit about provider_can_resume and backing validation"
+        resume_selection.contains("identity_probe.identity_ok == Some(false)")
+            && resume_selection.contains("ResumeRefusalReason::SessionIdentityMismatch")
+            && resume_selection.contains("ResumeDecision::Refuse"),
+        "R10 guard: live restart selection must refuse a backing-valid session identity mismatch"
     );
     assert!(
         !restart_common.contains(".capture_session_id("),

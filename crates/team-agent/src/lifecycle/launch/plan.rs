@@ -4,7 +4,7 @@ use super::*;
 
 /// `start_plan(workspace, plan_path, start)`(`orchestrator/__init__.py:26`)。load_plan
 /// (YAML 校验)→ 持久化 PlanState → 派发首 stage。对已 running/halted/completed 幂等返回。
-pub fn start_plan(
+pub(crate) fn start_plan(
     workspace: &Path,
     plan_path: &Path,
     start: bool,
@@ -56,7 +56,7 @@ pub fn start_plan(
 
 /// `handle_report_result(workspace, envelope)`(`orchestrator/__init__.py:79`)。被 step11
 /// report_result 路径调用以推进 stage;条件匹配 → 推进/完成,否则 `NoMatch`。
-pub fn handle_report_result(
+pub(crate) fn handle_report_result(
     workspace: &Path,
     envelope: &serde_json::Value,
 ) -> Result<PlanProgress, LifecycleError> {

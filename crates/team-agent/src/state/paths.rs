@@ -1,3 +1,4 @@
+//!
 //! Stage 0 of the identity-boundary unified plan (architect direction
 //! 2026-06-23): `TeamScope` + `TeamRuntimePaths` foundation.
 //!
@@ -42,6 +43,7 @@ pub struct TeamScope {
 }
 
 impl TeamScope {
+    ///
     /// Construct a TeamScope from an already-resolved workspace + team_key.
     /// Callers that have a display name must resolve it through the existing
     /// `state::selector` machinery first; this constructor refuses an empty
@@ -66,6 +68,7 @@ impl TeamScope {
         &self.team_key
     }
 
+    ///
     /// Convenience: derive the path helper from this scope.
     pub fn paths(&self) -> TeamRuntimePaths {
         TeamRuntimePaths::for_scope(self)
@@ -110,6 +113,7 @@ impl TeamRuntimePaths {
         &self.team_key
     }
 
+    ///
     /// `.team/runtime/teams/<team_key>/` — the team's future B3 runtime
     /// directory. It is not used as product authority until the B3 migration;
     /// current callers must keep using `runtime_state_path`.
@@ -119,6 +123,7 @@ impl TeamRuntimePaths {
             .join(&self.team_key)
     }
 
+    ///
     /// Transitional runtime spec path. Mirrors the existing
     /// `runtime_spec_path` helper while specs remain at
     /// `.team/runtime/<team_key>/team.spec.yaml`.
@@ -126,6 +131,7 @@ impl TeamRuntimePaths {
         runtime_spec_path(&self.workspace, &self.team_key)
     }
 
+    ///
     /// `.team/runtime/teams/<team_key>/state.json` — the canonical per-team
     /// state path that B3 will start writing. Not used by current product
     /// code; callers must continue using `runtime_state_path` until B3
@@ -134,11 +140,13 @@ impl TeamRuntimePaths {
         self.team_dir().join("state.json")
     }
 
+    ///
     /// `.team/runtime/teams/<team_key>/coordinator.pid` — future sidecar location.
     pub fn coordinator_pid_path(&self) -> PathBuf {
         self.team_dir().join("coordinator.pid")
     }
 
+    ///
     /// `.team/runtime/teams/<team_key>/coordinator.log` — future sidecar location.
     pub fn coordinator_log_path(&self) -> PathBuf {
         self.team_dir().join("coordinator.log")
@@ -180,6 +188,7 @@ pub enum CommandScope {
 }
 
 impl CommandScope {
+    ///
     /// Resolve the CLI's `--team` argument against the workspace state.
     /// On any I/O error the empty case is returned — destructive commands
     /// will run their own selector and surface the real error.
@@ -202,6 +211,7 @@ impl CommandScope {
         }
     }
 
+    ///
     /// Convert to an `Option<String>` for backward compatibility with
     /// existing `args.team.as_deref()` call sites.
     pub fn team_key(&self) -> Option<&str> {
@@ -211,11 +221,13 @@ impl CommandScope {
         }
     }
 
+    ///
     /// True iff there are 2+ alive teams and no explicit `--team`.
     pub fn is_ambiguous(&self) -> bool {
         matches!(self, Self::Ambiguous(_))
     }
 
+    ///
     /// The candidate list when ambiguous; empty otherwise.
     pub fn candidates(&self) -> &[String] {
         match self {

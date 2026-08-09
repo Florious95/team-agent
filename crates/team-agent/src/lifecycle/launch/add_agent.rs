@@ -130,7 +130,7 @@ pub fn add_agent_force(
 
 /// `add_agent` with an injected transport — after the recompile+write, wires the new worker spawn
 /// (via start_agent_with_transport) + start_coordinator (rt-host-a sweep: recompiled but never spawned).
-pub fn add_agent_with_transport(
+pub(crate) fn add_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
     role_file_path: &Path,
@@ -157,7 +157,7 @@ pub fn add_agent_with_transport(
     )
 }
 
-pub fn add_agent_with_transport_force(
+pub(crate) fn add_agent_with_transport_force(
     workspace: &Path,
     agent_id: &AgentId,
     role_file_path: &Path,

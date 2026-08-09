@@ -1,3 +1,4 @@
+//!
 //! lifecycle::helpers —— runtime snapshot 原子写(bug-084)+ plan-state 路径/读取。
 
 use std::fs;
@@ -6,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+///
 /// `save_team_runtime_snapshot(workspace, state)` — Foundation-0 F0-2:
 /// this is now a **diagnostic-only** legacy per-session snapshot writer.
 /// Root/projection `.team/runtime/state.json` is the sole product
@@ -24,7 +26,7 @@ use super::*;
 /// team-key layout will live under a different path
 /// (`teams/<team_key>/...`), so this file also cannot be mistaken for
 /// the future canonical shape.
-pub fn save_team_runtime_snapshot(
+pub(crate) fn save_team_runtime_snapshot(
     workspace: &Path,
     state: &serde_json::Value,
 ) -> Result<PathBuf, LifecycleError> {

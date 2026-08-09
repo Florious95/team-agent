@@ -1,3 +1,4 @@
+//!
 //! 私有内部 helpers (status wire / envelope 校验 / scheduled kind 解析 / activity 信号
 //! 解析 / id 生成 / MessageStatusShadow 占位)。跨子模块/测试可见者升 `pub(crate)`。
 
@@ -268,7 +269,7 @@ fn idle_activity() -> AgentActivity {
 /// outcome **不被视为 success**(I-3 反向断言要求 `leader_receiver.rs` 源文件不得含
 /// `DeliveryStatus::FallbackLog` 或 `fallback_inbox` 字面量,所以本函数从 `leader_receiver.rs`
 /// 搬到本 helpers 模块,字面量在此被允许)。
-pub fn fail_leader_delivery(
+pub(crate) fn fail_leader_delivery(
     workspace: &std::path::Path,
     payload: &serde_json::Value,
     reason: DeliveryRefusal,

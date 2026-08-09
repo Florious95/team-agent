@@ -1,3 +1,4 @@
+//!
 //! Coordinator core:daemon lifecycle 宿主 + 单次 tick 编排(19 步固定顺序)+ health/start/stop。
 
 use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ use super::health::{
     pid_is_running, read_coordinator_metadata, write_coordinator_metadata,
 };
 use super::runtime_observation::{self, CapturedRuntimeFact};
+use super::steps::TickStepGroup;
 use super::types::{
     AgentId, CoordinatorHealthStatus, HealthReport, MetadataSource, Pid, ProviderRegistry,
     SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome, StopReport,
@@ -225,7 +227,7 @@ impl Coordinator {
     /// `if let Some(rec) = &self.order_recorder { rec.lock()...push(STEP_NAME) }`(tick
     /// 副作用 ORDER 测试断言固定序列)。生产两者均 `None`,零开销。
     pub fn tick(&self) -> Result<TickReport, TickError> {
-        self.record_step("load_state");
+        self.record_step(TickStepGroup::SessionGate, "load_state");
         let raw_state = crate::state::persist::load_runtime_state(self.workspace.as_path())?;
         // Issue 2 (Round 3b gate review §6): when the runtime carries
         // `active_team_key` AND `teams.<key>` exists, project the team-scoped
@@ -246,7 +248,7 @@ impl Coordinator {
         let event_log = EventLog::new(self.workspace.as_path());
         increment_coordinator_tick_iteration_count(&self.workspace);
 
-        self.record_step("tmux_session_gate");
+        self.record_step(TickStepGroup::SessionGate, "tmux_session_gate");
         if let Some(session_name) = state
             .get("session_name")
             .and_then(Value::as_str)
@@ -268,7 +270,7 @@ impl Coordinator {
             }
         }
 
-        self.record_step("capture_missing");
+        self.record_step(TickStepGroup::SessionGate, "capture_missing");
         let pending_context_fork_audits =
             match self.capture_missing_sessions(&mut state, &event_log) {
                 Ok(audits) => audits,
@@ -293,10 +295,10 @@ impl Coordinator {
             .unwrap_or_default();
         let has_work_obligation = tick_has_work_obligation(&store);
 
-        self.record_step("refresh_statuses");
+        self.record_step(TickStepGroup::HealthSync, "refresh_statuses");
         // TODO(spine slice 2b): split lightweight runtime status refresh from health sync.
 
-        self.record_step("startup_prompts");
+        self.record_step(TickStepGroup::RuntimePrompts, "startup_prompts");
         self.handle_startup_prompts(&mut state, &event_log, &pane_snapshot, &window_snapshot);
 
         // #229 step2-retry: once an agent's `startup_prompts` flipped to `handled`
@@ -318,7 +320,7 @@ impl Coordinator {
         // 否则 deliver_pending(下行投递主干)够不到,消息卡 accepted。
         // bug-084 哲学 + A-6 同族:每步独立 try,失败写 `coordinator.tick.<step>_failed`
         // 事件后继续走下一步;tick 本身仍返 Ok。
-        self.record_step("runtime_prompts");
+        self.record_step(TickStepGroup::RuntimePrompts, "runtime_prompts");
         if let Err(error) = self.handle_runtime_approval_prompts(
             &mut state,
             &event_log,
@@ -331,7 +333,7 @@ impl Coordinator {
             );
         }
 
-        self.record_step("sync_health");
+        self.record_step(TickStepGroup::HealthSync, "sync_health");
         // P5 (C-P5-1, N3): ONE pane snapshot per tick, shared by sync_health and the
         // abnormal-exit pass (same-tick reuse only — the snapshot does not outlive
         // this tick; every tick re-reads).
@@ -365,7 +367,7 @@ impl Coordinator {
             );
         }
 
-        self.record_step("deliver_pending");
+        self.record_step(TickStepGroup::Delivery, "deliver_pending");
         let delivered = crate::messaging::deliver_pending_messages(
             self.workspace.as_path(),
             &state,
@@ -376,7 +378,7 @@ impl Coordinator {
         .map(|message_id| DeliveredMessage { message_id })
         .collect::<Vec<_>>();
 
-        self.record_step("fire_scheduled");
+        self.record_step(TickStepGroup::Delivery, "fire_scheduled");
         let scheduled = crate::messaging::fire_due_scheduled_events(
             self.workspace.as_path(),
             &store,
@@ -394,18 +396,18 @@ impl Coordinator {
         // (deliver_pending / fire_scheduled / collect_results) above and below this
         // block continue to flow unchanged. `_state` / `_store` here are intentionally
         // unused (the lookups they powered were nag inputs only).
-        self.record_step("detect_stuck");
+        self.record_step(TickStepGroup::Abnormal, "detect_stuck");
         let stuck: Vec<AgentId> = Vec::new();
-        self.record_step("record_unknown_idle");
-        self.record_step("evaluate_takeover");
+        self.record_step(TickStepGroup::Abnormal, "record_unknown_idle");
+        self.record_step(TickStepGroup::Abnormal, "evaluate_takeover");
         let idle_alerts: Vec<IdleAlert> = Vec::new();
-        self.record_step("detect_deadlocks");
+        self.record_step(TickStepGroup::Abnormal, "detect_deadlocks");
         let deadlock_alerts: Vec<DeadlockAlert> = Vec::new();
         let _ = &store;
 
-        self.record_step("detect_compaction");
-        self.record_step("detect_drift");
-        self.record_step("detect_api_errors");
+        self.record_step(TickStepGroup::Abnormal, "detect_compaction");
+        self.record_step(TickStepGroup::Abnormal, "detect_drift");
+        self.record_step(TickStepGroup::Abnormal, "detect_api_errors");
         let leader_capture = self.capture_leader_receiver(&state);
         let observations = runtime_observation::observe(
             self.workspace.as_path(),
@@ -425,7 +427,7 @@ impl Coordinator {
             results: Vec::new(),
         };
 
-        self.record_step("atomic_save");
+        self.record_step(TickStepGroup::Persist, "atomic_save");
         let saved = match &self.save_hook {
             Some(hook) => hook(&self.workspace, &state),
             None => {
@@ -474,20 +476,20 @@ impl Coordinator {
         // step, and drives the lifecycle helper. Runs OUTSIDE the pre-save
         // window so nested lifecycle saves cannot be clobbered by this
         // tick's final in-memory save (R6 boundary guard).
-        self.record_step("attempt_api_error_recoveries");
+        self.record_step(TickStepGroup::Abnormal, "attempt_api_error_recoveries");
         crate::coordinator::steps::abnormal::attempt_due_recoveries(
             self.workspace.as_path(),
             &event_log,
             self.transport.as_ref(),
         );
 
-        self.record_step("collect_results");
+        self.record_step(TickStepGroup::Delivery, "collect_results");
         collections.results =
             collect_results(crate::messaging::collect_results_and_notify_watchers(
                 self.workspace.as_path(),
                 &event_log,
             )?);
-        self.record_step("prune_dedupe_log");
+        self.record_step(TickStepGroup::Persist, "prune_dedupe_log");
         Ok(base_tick_report(true, false, None, Some(true), collections))
     }
 
@@ -1430,7 +1432,8 @@ impl Coordinator {
         super::health::message_store_schema_health(&self.workspace)
     }
 
-    fn record_step(&self, step: &'static str) {
+    fn record_step(&self, group: TickStepGroup, step: &'static str) {
+        debug_assert!(TickStepGroup::ordered().contains(&group));
         if let Some(recorder) = &self.order_recorder {
             if let Ok(mut guard) = recorder.lock() {
                 guard.push(step);
@@ -2756,13 +2759,6 @@ mod u1_tests {
                     "capture exploded",
                 ),
             )
-        }
-
-        fn error_lists(
-            &self,
-            _provider: crate::provider::Provider,
-        ) -> super::super::types::ErrorLists {
-            super::super::types::ErrorLists::default()
         }
     }
 

@@ -1,3 +1,4 @@
+//!
 //! cli · leader — `codex`/`claude`/`copilot` passthrough(`cmd_leader_passthrough` + `_provider_args` /
 //! `_leader_launcher_args`)+ leader fallback inbox 摘要(`consume_leader_inbox_summary` 及
 //! `_leader_inbox_entries` / `_leader_inbox_summary` / `_leader_inbox_entry_title`)。
@@ -8,6 +9,7 @@ use super::*;
 // `codex`/`claude` passthrough 解析(helpers.py `_provider_args`/`_leader_launcher_args`)
 // =============================================================================
 
+///
 /// `_provider_args`(`helpers.py:190-193`):剥掉前导 `--`(REMAINDER 第一个 token)。
 pub fn provider_args(values: &[String]) -> Vec<String> {
     match values.first().map(String::as_str) {
@@ -16,8 +18,9 @@ pub fn provider_args(values: &[String]) -> Vec<String> {
     }
 }
 
+///
 /// `_leader_launcher_args`(`helpers.py:196-226`):解析 attach 旗标;`--attach-session` 缺值 → Err。
-pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, CliError> {
+pub(super) fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, CliError> {
     let mut out = LeaderLauncherArgs::default();
     let mut idx = 0;
     while idx < values.len() {
@@ -92,6 +95,7 @@ fn without_leader_json(values: &[String]) -> Vec<String> {
     out
 }
 
+///
 /// `codex`/`claude`/`copilot` passthrough(`parser.py:86`/`_run_leader_passthrough`):leader 早返回,
 /// **不**进 subparser。`-h`/`--help` 打 usage 直接返回 [`CmdResult::none`]。否则解析 attach
 /// 旗标 + `lifecycle_port::start_leader`。`command` ∈ {codex, claude, copilot}。
@@ -120,6 +124,7 @@ pub(crate) fn leader_passthrough_provider(command: &str) -> crate::model::enums:
 // leader fallback inbox 摘要(helpers.py `consume_leader_inbox_summary`)
 // =============================================================================
 
+///
 /// `consume_leader_inbox_summary`(`helpers.py:26-55`):每条命令后读
 /// `.team/runtime/leader-inbox.log`,从游标 `.cursor` 起读新增字节,渲染 N 条 fallback 条目摘要
 /// (`_leader_inbox_summary`,字节预算 budget=500 截断 + `Hint: team-agent inbox leader`),

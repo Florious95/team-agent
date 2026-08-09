@@ -1,3 +1,4 @@
+//!
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -532,10 +533,6 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
         .collect::<Vec<_>>();
     out.sort();
     out
-}
-
-pub fn session_capture_complete(state: &Value) -> bool {
-    incomplete_resumable_agent_ids(state).is_empty()
 }
 
 pub fn recover_resume_session_from_events(

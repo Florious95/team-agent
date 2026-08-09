@@ -1,3 +1,4 @@
+//!
 //! step 14a · mcp_server::helpers — pure regularization + shared free helpers.
 
 use std::io::Write as _;

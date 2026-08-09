@@ -1,3 +1,4 @@
+//!
 //! projection:team 选择 / top-level 派生视图(真相源 `state.py`,0.2.6 Family B C6-C8)。
 //!
 //! `state.teams` 是唯一候选源(`status == "alive"`);顶层 `session_name`/`team_dir`/`agents`/`tasks`
@@ -24,6 +25,7 @@ use crate::state::persist::{
 
 pub(crate) const CURRENT_TEAM_ALIAS: &str = "current";
 
+///
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。
 pub fn team_state_key(state: &Value) -> String {
@@ -184,6 +186,7 @@ fn legacy_owner_team_aliases(entry: &Value) -> impl Iterator<Item = String> + '_
         .map(str::to_string)
 }
 
+///
 /// `compact_team_state`(`state.py:105`):剔除 `teams`(team entry 不嵌套全量 teams),保序。
 pub fn compact_team_state(state: &Value) -> Value {
     match state.as_object() {
@@ -208,6 +211,7 @@ pub fn state_is_managed_leader(state: &Value) -> bool {
     !state_is_external_leader(state)
 }
 
+///
 /// `merge_workspace_team_state`(`state.py:111`):把新启动的 team 并入既有 workspace state。
 pub fn merge_workspace_team_state(existing: &Value, launched: &Value) -> Value {
     let launched_key = team_state_key(launched);
@@ -239,6 +243,7 @@ pub fn merge_workspace_team_state(existing: &Value, launched: &Value) -> Value {
     Value::Object(merged)
 }
 
+///
 /// `team_state_candidates`(`state.py:131`):唯一候选源 = `state.teams` 中
 /// `status=="alive"`(大小写不敏感;缺 status/空 视为 alive,但 0.5.26 起
 /// legacy shutdown 残留「无 status + 全体 agents 处于终态」不再算 alive)。
@@ -263,6 +268,7 @@ pub fn team_state_candidates(state: &Value) -> Map<String, Value> {
     out
 }
 
+///
 /// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1): 唯一 alive
 /// 谓词。规则:
 /// - 非 object → 排除;
@@ -348,8 +354,9 @@ pub(crate) fn agent_status_is_terminal(status: &str) -> bool {
     )
 }
 
+///
 /// `format_team_candidates`(`state.py:148`):候选摘要串(key 排序;agents 排序逗号连,空→`-`)。
-pub fn format_team_candidates(team_states: &Map<String, Value>) -> String {
+fn format_team_candidates(team_states: &Map<String, Value>) -> String {
     if team_states.is_empty() {
         return "No team state was found.".to_string();
     }
@@ -412,6 +419,7 @@ fn valid_owner_pane_id(pane_id: &str) -> bool {
     pane_id.starts_with('%') || pane_id.chars().all(|ch| ch.is_ascii_digit())
 }
 
+///
 /// `_project_top_level_view`(`state.py:167`,C8):把 `teams[team_key]` 投影成扁平顶层视图。
 pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
     // entry = _team_entry_from_state(...) or {} —— 空 dict 亦走 {} 分支(同内容)。
@@ -488,6 +496,7 @@ pub struct TeamScopeResolution {
     pub state: Value,
 }
 
+///
 /// Resolve a requested team selector once, returning both the canonical map key and its
 /// projected state. Callers must carry `canonical_team_key` forward rather than deriving team
 /// identity again from the projection or the original alias.
@@ -646,6 +655,7 @@ pub fn resolve_runtime_team_scope(
     ))
 }
 
+///
 /// `select_runtime_state`(`state.py:193`):compatibility projection wrapper.
 pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Value, StateError> {
     resolve_runtime_team_scope(workspace, team).map(|resolved| resolved.state)
@@ -677,8 +687,9 @@ fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
         .is_some_and(|name| team == name)
 }
 
+///
 /// `ambiguous_team_target_result`(`state.py:226`):无显式 team 且多候选 → 拒绝 dict;否则 None。
-pub fn ambiguous_team_target_result(state: &Value) -> Option<Value> {
+fn ambiguous_team_target_result(state: &Value) -> Option<Value> {
     let alive = team_state_candidates(state);
     let active = state
         .get("active_team_key")
@@ -704,6 +715,7 @@ pub fn ambiguous_team_target_result(state: &Value) -> Option<Value> {
     }))
 }
 
+///
 /// `resolve_team_scoped_state`(`state.py:243`):返回 `(state, refusal)`,二者恰一为 Some。
 /// `team=None` 且歧义 → refusal;否则 select,RuntimeError → `team_target_unresolved` refusal。
 pub fn resolve_team_scoped_state(
@@ -732,6 +744,7 @@ pub fn resolve_team_scoped_state(
     }
 }
 
+///
 /// `save_team_scoped_state`(`state.py:594`):把 team-scoped(投影后)state 写回 workspace,**保全**
 /// 多 team workspace 里其他 team 的持久态。单 team(磁盘无 `teams` 且 primary key == target)退化为
 /// 纯 `save_runtime_state`(字节等价);多 team 时把本 team 落到 `teams[target_key]=compact(...)`,顶层

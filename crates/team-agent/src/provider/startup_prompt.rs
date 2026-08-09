@@ -1,3 +1,4 @@
+//!
 //! codex startup-prompt recognizer — workspace-trust + update-skip screen detection.
 //!
 //! Golden (READ-ONLY truth `team-agent-public` v0.2.11): `provider_cli/codex.py`

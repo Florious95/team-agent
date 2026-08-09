@@ -42,7 +42,7 @@ pub fn start_agent(
 /// `start_agent` with an injected transport — wires the single-worker resume/fresh spawn +
 /// start_coordinator (rt-host-a sweep: was a stub returning RequirementUnmet at the spawn boundary).
 #[allow(clippy::too_many_arguments)]
-pub fn start_agent_with_transport(
+pub(crate) fn start_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
     force: bool,
@@ -801,7 +801,7 @@ pub fn stop_agent(
     )
 }
 
-pub fn stop_agent_with_transport(
+pub(crate) fn stop_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
     team: Option<&str>,
@@ -1249,7 +1249,7 @@ pub fn reset_agent(
     )
 }
 
-pub fn reset_agent_with_transport(
+pub(crate) fn reset_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
     discard_session: bool,

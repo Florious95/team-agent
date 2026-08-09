@@ -67,51 +67,6 @@ fn attach_leader_binds_pane_advances_epoch_and_persists() {
     assert_eq!(persisted["team_owner"]["owner_epoch"], serde_json::json!(1));
 }
 
-// autobind:$TMUX_PANE 缺 → Ok(None)(__init__.py:885-887,锁前直接返回,不开锁)。
-// 强化:断言这是 lock-not-acquired 早退 —— 不写 state.json(无 receiver/owner 落盘),
-// 不发任何 leader_receiver.* 事件(锁前 return,连 EventLog 都不构造)。
-#[test]
-fn autobind_returns_none_when_tmux_pane_missing() {
-    if std::env::var_os("TMUX_PANE").is_some() {
-        return; // 在 tmux 内:走绑定路径,本用例只验缺失分支。
-    }
-    let ws = std::env::temp_dir().join(format!("ta_rs_auto_{}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
-    let r = autobind_leader_receiver_from_env(&ws, Provider::Codex, LeaseSource::Restart).unwrap();
-    assert!(r.is_none(), "$TMUX_PANE 缺 → autobind 返回 Ok(None)");
-    // lock-not-acquired 早退:state.json 未被写(load 兜底成空 state,无 team_owner/receiver)。
-    let st = crate::state::persist::load_runtime_state(&ws).unwrap();
-    assert!(
-        st.get("leader_receiver").is_none(),
-        "skip 路径不应落 receiver"
-    );
-    assert!(st.get("team_owner").is_none(), "skip 路径不应落 owner");
-    // 早退发生在 EventLog 构造前 → 无任何事件文件。
-    let events = crate::event_log::EventLog::new(&ws).tail(50).unwrap();
-    assert!(events.is_empty(), "skip 路径绝不写审计事件");
-}
-
-// autobind 成功支:$TMUX_PANE 命中 → 锁内 attach_leader_to_state → Ok(Some(receiver))。
-// receiver.pane_id == 注入 pane,discovery==EnvPane($TMUX_PANE 直接命中)。
-// env 变更进程全局且与并行 test race,且依赖跨 lane 的 live pane resolver,故 real-machine-gated。
-#[test]
-#[ignore = "needs live $TMUX_PANE + cross-lane _resolve_leader_pane; env mutation races parallel tests"]
-fn autobind_binds_env_pane_on_success() {
-    let ws = std::env::temp_dir().join(format!("ta_rs_auto_ok_{}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
-    // SAFETY: #[ignore]d,单独 `--ignored --test-threads=1` 跑,不与并行 test race。
-    unsafe { std::env::set_var("TMUX_PANE", "%42") };
-    let r = autobind_leader_receiver_from_env(&ws, Provider::Codex, LeaseSource::Restart).unwrap();
-    unsafe { std::env::remove_var("TMUX_PANE") };
-    let receiver = r.expect("$TMUX_PANE 命中 → Ok(Some(receiver))");
-    assert_eq!(receiver.pane_id, PaneId::new("%42"));
-    assert_eq!(
-        receiver.discovery,
-        Some(Discovery::EnvPane),
-        "$TMUX_PANE 命中 → discovery=env_pane"
-    );
-}
-
 // claim_leader:无 ambiguous incident → 走 claim_lease_no_incident 直接 acquire/CAS。
 // 现 unimplemented → RED;锁住返回 LeaseResult。
 #[test]

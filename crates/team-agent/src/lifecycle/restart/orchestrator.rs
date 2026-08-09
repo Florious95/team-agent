@@ -4,7 +4,7 @@ use super::*;
 
 /// `halt_plan(workspace, plan_id, reason)`(`orchestrator/__init__.py:152`)。停 plan;
 /// 非 running → 幂等返回。
-pub fn halt_plan(
+pub(crate) fn halt_plan(
     workspace: &Path,
     plan_id: &PlanId,
     reason: &str,
@@ -26,7 +26,7 @@ pub fn halt_plan(
 }
 
 /// `plan_status(workspace, plan_id)`(`orchestrator/__init__.py:177`)。读 plan 持久态。
-pub fn plan_status(workspace: &Path, plan_id: &PlanId) -> Result<PlanState, LifecycleError> {
+pub(crate) fn plan_status(workspace: &Path, plan_id: &PlanId) -> Result<PlanState, LifecycleError> {
     let path = plan_state_path(workspace, plan_id);
     if !path.exists() {
         return Err(LifecycleError::InvalidPlan(format!(

@@ -1,3 +1,4 @@
+//!
 //! Official communication modes shared by configuration and projection consumers.
 
 /// The complete product-supported communication-mode catalog.

@@ -1,3 +1,4 @@
+//!
 //! 移植 `team_agent/routing.py` 的纯函数 `route_task`(真相源 v0.2.11)。
 //!
 //! 操作 spec/task 的 [`yaml::Value`]。返回 [`RouteResult`]{agent_id, reason}。

@@ -1,3 +1,4 @@
+//!
 //! 0.3.28 layout step 8 — display overlay (3-pane tiling).
 //!
 //! Python truth source: 3-pane tiling exists ONLY in the display overlay
@@ -15,6 +16,7 @@ use crate::transport::{SessionName, WindowName};
 /// 3 panes per overlay window — Python parity.
 pub const OVERLAY_PANES_PER_WINDOW: usize = 3;
 
+///
 /// Overlay window name for a 0-based group index. Index 0 → `overview`;
 /// N ≥ 1 → `overview-{N+1}`. Names are scoped by `session_tag` so multiple
 /// teams can coexist on one leader session.
@@ -38,6 +40,7 @@ pub struct OverlayPlacement {
     pub window: WindowName,
 }
 
+///
 /// Compute the overlay placements for a list of agent_ids. Deterministic by
 /// input order: agent `i` → window `i / 3`, slot `i % 3`.
 pub fn plan_overlay_placements(session_tag: &str, agents: &[&str]) -> Vec<OverlayPlacement> {
@@ -53,9 +56,10 @@ pub fn plan_overlay_placements(session_tag: &str, agents: &[&str]) -> Vec<Overla
         .collect()
 }
 
+///
 /// True when a window name belongs to a display overlay (matches
 /// `team-agent:<...>:overview[-N]`).
-pub fn is_overlay_window(name: &WindowName) -> bool {
+fn is_overlay_window(name: &WindowName) -> bool {
     let n = name.as_str();
     if !n.starts_with("team-agent:") {
         return false;
@@ -63,6 +67,7 @@ pub fn is_overlay_window(name: &WindowName) -> bool {
     n.contains(":overview")
 }
 
+///
 /// 0.3.28 Step 8 invariant: `spawn_split` may ONLY be called from the
 /// overlay module. This helper emits a warn-level event when called from
 /// anywhere else (Step 9 promotes to a hard error / panic gate). The

@@ -1,3 +1,4 @@
+//!
 //! owner-gate:trust own-vs-foreign(§11 / bug-064 / bug-082 血泪;真相源 `state.py`)。
 //!
 //! 三核心纯判定(集成 send_message/MCP 是 step 11/14):
@@ -37,6 +38,7 @@ pub struct CallerIdentity {
     pub leader_session_uuid_source: String,
 }
 
+///
 /// `check_team_owner`(`state.py:366`)的纯判定版:caller 身份 + 是否有 TEAM_AGENT_ID + liveness 注入。
 /// 返回 `None`=允许(own / 无 owner / 死 owner pane 可接管);`Some(dict)`=拒绝(team_owner_mismatch)。
 ///
@@ -123,6 +125,7 @@ fn caller_to_value(c: &CallerIdentity) -> Value {
     })
 }
 
+///
 /// `worker_sender_bypasses_owner_gate`(`state.py:400`):worker peer-send 绕过 owner 门。
 /// 返回 `Some(agent_id)`=绕过;`None`=不绕过(走 owner 门)。
 pub fn worker_sender_bypasses_owner_gate(
@@ -160,6 +163,7 @@ pub fn worker_sender_bypasses_owner_gate(
     Some(sender.to_string())
 }
 
+///
 /// §11 realpath own-vs-foreign(`state.py:449`):**两边 canonicalize** 后全等才判 own。
 /// macOS `/tmp → /private/tmp` 软链不对称由「两边 canonicalize」消除。canonicalize 失败(路径不存在)
 /// → 退化为词法绝对比较(此时无软链可解,等价)。**禁 basename/startswith/子串/反推**。
@@ -187,6 +191,7 @@ fn lexical_abs(p: &Path) -> std::path::PathBuf {
     }
 }
 
+///
 /// `os.path.realpath` 等价(对抗 P0-B):全路径存在 → `canonicalize`;否则对**最长存在前缀**
 /// canonicalize(解析其软链)再拼回缺失末段(规范化 `..`/`.`)。这复刻 Python「解析存在部分的
 /// 软链 + 保留不存在末段」,修掉「父目录是软链 + 末段不存在 → 漏判 own」的 §11 血泪。

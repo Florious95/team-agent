@@ -1,3 +1,4 @@
+//!
 //! §3 id newtypes —— Python 把 agent/task/team id 全用裸 `str` 混传(route/owner-gate/
 //! tasks 串台)。newtype 让"混传"编不过。serde `transparent` 保证序列化字节 == 裸字符串。
 

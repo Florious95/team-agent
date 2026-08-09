@@ -1,3 +1,4 @@
+//!
 //! `profile {init,doctor,show}` CLI verb.
 
 use super::*;
@@ -159,7 +160,7 @@ fn validate_auth_mode(auth_mode: &str) -> Result<(), CliError> {
 fn profile_template(name: &str, auth_mode: &str) -> String {
     match auth_mode {
         "compatible_api" | "official_api" => {
-            format!("AUTH_MODE={auth_mode}\nPROFILE_NAME={name}\nAPI_KEY=\nMODEL=\n")
+            format!("AUTH_MODE={auth_mode}\nPROFILE_NAME={name}\nBASE_URL=\nAPI_KEY=\nMODEL=\n")
         }
         _ => format!("AUTH_MODE=subscription\nPROFILE_NAME={name}\n"),
     }

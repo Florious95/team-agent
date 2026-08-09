@@ -1,3 +1,4 @@
+//!
 //! Typed presentation metadata shared by message and result ingress.
 
 use serde::{Deserialize, Serialize};
@@ -256,7 +257,7 @@ pub fn normalize_send_presentation(
     })
 }
 
-pub fn normalize_presentation(value: Option<&Value>) -> (PresentationRequest, Option<String>) {
+pub(crate) fn normalize_presentation(value: Option<&Value>) -> (PresentationRequest, Option<String>) {
     let Some(value) = value else {
         return (PresentationRequest::default(), None);
     };

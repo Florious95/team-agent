@@ -1,3 +1,4 @@
+//!
 //! step 15 · packaging — release 产物布局 / 薄 self-install / migration·repair SKELETON (ROUND-0).
 //!
 //! Card: `docs/phase0/subsystems/15-packaging.md`.

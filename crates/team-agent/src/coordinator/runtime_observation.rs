@@ -1,3 +1,4 @@
+//!
 //! Shared coordinator runtime observation seam.
 //!
 //! S0 only defines the typed capture/result surface. Lane 1 fills capture facts;

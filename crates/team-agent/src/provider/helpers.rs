@@ -1,3 +1,4 @@
+//!
 //! provider 跨子模块共享 helper:JSONL 解析 / session_id 抽取 / 正则编译。
 
 use super::types::{ProviderError, StatusPatterns};

@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use team_agent::coordinator::{
-    observe_runtime, Coordinator, ErrorLists, ProviderRegistry, WorkspacePath,
+    observe_runtime, Coordinator, ProviderRegistry, WorkspacePath,
 };
 use team_agent::model::enums::Provider;
 use team_agent::model::ids::AgentId;
@@ -935,12 +935,6 @@ struct RealAdapterRegistry;
 impl ProviderRegistry for RealAdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
-    }
-    fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists {
-            whitelist: Vec::new(),
-            blacklist: Vec::new(),
-        }
     }
 }
 

@@ -1,3 +1,4 @@
+//!
 //! §19 散字符串态 → 穷尽 enum。每个 variant 与 Python 字符串**一一对应**(`#[serde]`
 //! rename 到精确字符串),保证 spec/state/event 序列化字节不漂移(§7)。
 //!

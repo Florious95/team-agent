@@ -1,3 +1,4 @@
+//!
 //! Pure logical-address grammar shared by public entry-point adapters.
 
 use std::path::PathBuf;

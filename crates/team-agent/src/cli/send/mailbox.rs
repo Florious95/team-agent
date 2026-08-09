@@ -1,3 +1,4 @@
+//!
 use super::*;
 
 pub(super) fn maybe_enqueue_offline_leader_mailbox(
@@ -64,6 +65,7 @@ pub(super) fn maybe_enqueue_offline_leader_mailbox(
             "to_name": to_name,
             "target_workspace": target_workspace.display().to_string(),
             "team_key": team_key,
+            "sender": sender,
             "recipient": "leader",
             "leader_attached": false,
             "message_id": message_id,
@@ -78,6 +80,7 @@ pub(super) fn maybe_enqueue_offline_leader_mailbox(
             "to_name": to_name,
             "target_workspace": target_workspace.display().to_string(),
             "team_key": team_key,
+            "sender": sender,
             "recipient": "leader",
             "leader_attached": false,
             "message_id": message_id,

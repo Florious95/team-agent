@@ -1,3 +1,4 @@
+//!
 //! Cross-platform exclusive file lock primitive.
 //!
 //! ## Batch 2 real implementation (leader msg_c833639b61b8)
@@ -26,12 +27,6 @@
 //! 2. `unlock(&File)` — release the lock. Called from `Drop` in both
 //!    caller sites.
 //!
-//! A high-level `try_lock_exclusive(path, timeout) -> FileLockGuard`
-//! wrapper is also provided (uses the same primitives + a bare polling
-//! loop) for future callers that don't need the metadata/waiter
-//! machinery — but the two existing product callers keep their own
-//! loops per this batch's byte-preserving constraint.
-//!
 //! ## Windows implementation
 //!
 //! Windows implementation uses `LockFileEx` /
@@ -54,9 +49,8 @@
 
 use std::fs::File;
 use std::io;
-use std::path::Path;
-use std::time::Duration;
 
+///
 /// Try to acquire an exclusive advisory lock on `file` without
 /// blocking. Returns `Ok(true)` if the lock was acquired, `Ok(false)`
 /// if the file is already locked by someone else, `Err(...)` on real
@@ -86,6 +80,7 @@ pub fn try_lock_once_nonblocking(file: &File) -> io::Result<bool> {
     }
 }
 
+///
 /// Release the exclusive lock held on `file`. Called from `Drop` in
 /// caller code so the release runs even on panic.
 ///
@@ -204,100 +199,7 @@ fn unlock_windows(file: &File) -> io::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// High-level convenience wrapper.
-// ─────────────────────────────────────────────────────────────────────
-
-/// Owns the underlying `File` handle + platform lock. `Drop` unlocks
-/// via `unlock(&file)`.
-///
-/// Callers that don't need the lifecycle-lock metadata/waiter/held_long
-/// event machinery can use `try_lock_exclusive(path, timeout)` directly.
-/// The existing product callers (`state/persist.rs`, `lifecycle/lock.rs`)
-/// use `try_lock_once_nonblocking` + `unlock` directly and keep their
-/// own polling loops for byte-preserving behavior.
-pub struct FileLockGuard {
-    file: Option<File>,
-}
-
-impl std::fmt::Debug for FileLockGuard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileLockGuard")
-            .field("held", &self.file.is_some())
-            .finish()
-    }
-}
-
-impl FileLockGuard {
-    /// Test-only accessor for the wrapped file handle.
-    #[cfg(test)]
-    fn file(&self) -> &File {
-        self.file.as_ref().expect("file present until Drop")
-    }
-}
-
-impl Drop for FileLockGuard {
-    fn drop(&mut self) {
-        if let Some(file) = self.file.take() {
-            // Best-effort unlock. If it fails the OS still releases on
-            // handle close.
-            let _ = unlock(&file);
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum LockError {
-    #[error("file lock timeout after {timeout_secs:.2}s on {path}")]
-    Timeout { timeout_secs: f64, path: String },
-    #[error("file lock io error on {path}: {source}")]
-    Io {
-        path: String,
-        #[source]
-        source: io::Error,
-    },
-}
-
-/// High-level: acquire an exclusive lock on `path` within `timeout`,
-/// polling every 50ms. Returns a guard that unlocks on `Drop`.
-///
-/// Existing product callers do NOT use this — they need their own
-/// metadata/waiter/held_long event machinery. This wrapper exists for
-/// simple future callers.
-pub fn try_lock_exclusive(path: &Path, timeout: Duration) -> Result<FileLockGuard, LockError> {
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(|e| LockError::Io {
-            path: path.display().to_string(),
-            source: e,
-        })?;
-    let start = std::time::Instant::now();
-    loop {
-        match try_lock_once_nonblocking(&file) {
-            Ok(true) => return Ok(FileLockGuard { file: Some(file) }),
-            Ok(false) => {}
-            Err(e) => {
-                return Err(LockError::Io {
-                    path: path.display().to_string(),
-                    source: e,
-                });
-            }
-        }
-        if start.elapsed() >= timeout {
-            return Err(LockError::Timeout {
-                timeout_secs: timeout.as_secs_f64(),
-                path: path.display().to_string(),
-            });
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Tests: primitive + convenience wrapper on the host platform.
+// Tests: primitives on the host platform.
 // Both branches (unix + windows) exercise the same trait shape via
 // the top-level `try_lock_once_nonblocking` / `unlock` functions —
 // the test source is cfg-free.
@@ -331,24 +233,6 @@ mod tests {
             unlock(&file).is_ok(),
             "unlock must succeed for our own lock"
         );
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn convenience_try_lock_exclusive_acquires_and_drop_releases() {
-        // The high-level convenience wrapper is what future callers
-        // will use. Verify the drop-releases-lock invariant.
-        let dir = std::env::temp_dir().join("ta-b2-convenience");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("convenience-lock.tmp");
-        {
-            let guard = try_lock_exclusive(&path, Duration::from_secs(1))
-                .expect("first acquire must succeed");
-            let _ = guard.file();
-        }
-        let guard2 = try_lock_exclusive(&path, Duration::from_secs(1))
-            .expect("post-drop reacquire must succeed");
-        drop(guard2);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -391,42 +275,5 @@ mod tests {
         );
         unlock(&file2).unwrap();
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn timeout_error_carries_path_and_seconds() {
-        // Convenience wrapper's timeout error shape.
-        //
-        // 0.5.43 debt-sweep (§6.2): the pre-0.5.43 fixed
-        // `ta-b2-timeout/timeout-lock.tmp` path let parallel test
-        // workers race for the same file across cargo threads. Each
-        // run now allocates a per-process + monotonic-atomic dir so
-        // `--test-threads=2` cannot false-fail. Timeout shape and
-        // `timeout-lock.tmp` basename are preserved so downstream
-        // guards keep firing.
-        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ta-b2-timeout-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("timeout-lock.tmp");
-        let _hold =
-            try_lock_exclusive(&path, Duration::from_secs(1)).expect("first acquire must succeed");
-        let err = try_lock_exclusive(&path, Duration::from_millis(150))
-            .expect_err("second acquire must timeout");
-        match err {
-            LockError::Timeout {
-                timeout_secs,
-                path: p,
-            } => {
-                assert!(timeout_secs > 0.0);
-                assert!(p.ends_with("timeout-lock.tmp"), "path suffix: {p}");
-            }
-            other => panic!("expected Timeout, got {other:?}"),
-        }
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

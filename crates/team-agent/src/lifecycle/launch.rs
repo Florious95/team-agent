@@ -1,3 +1,4 @@
+//!
 //! lifecycle::launch —— 冷启 / quick-start / 危险审批探测 + add/fork / plan 起步与推进。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +18,7 @@ use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
 
+///
 /// `launch(spec_path, dry_run, auto_approve, skip_profile_smoke)`(`launch/core.py:29`)。
 /// 冷启全队:路由 tasks、resolve 权限/危险审批门、session 冲突检查(冲突 →
 /// `SessionConflict` 拒绝不 kill)、按 startup 顺序起每个 worker、捕获 session、开显示、
@@ -40,7 +42,7 @@ pub fn launch(
     )
 }
 
-pub fn launch_with_transport(
+pub(crate) fn launch_with_transport(
     spec_path: &Path,
     dry_run: bool,
     auto_approve: bool,
@@ -186,10 +188,9 @@ pub fn launch_with_transport_in_workspace(
 }
 
 mod plan;
-pub use plan::{handle_report_result, start_plan};
+pub(crate) use plan::{handle_report_result, start_plan};
 
 pub mod spawn;
-pub use spawn::SpawnPhase;
 pub(super) use spawn::*;
 
 mod layout;
@@ -247,10 +248,10 @@ pub(crate) use identity::{
 
 mod quick_start;
 pub(super) use quick_start::*;
-pub use quick_start::{
-    quick_start, quick_start_in_workspace, quick_start_in_workspace_with_display,
-    quick_start_in_workspace_with_display_and_backend, quick_start_with_transport,
-    quick_start_with_transport_in_workspace, quick_start_with_transport_in_workspace_with_display,
+pub use quick_start::{quick_start, quick_start_in_workspace_with_display_and_backend};
+pub(crate) use quick_start::{
+    quick_start_in_workspace, quick_start_with_transport, quick_start_with_transport_in_workspace,
+    quick_start_with_transport_in_workspace_with_display,
 };
 
 mod quick_start_transport;
@@ -263,7 +264,6 @@ pub(crate) use quick_start_transport::{
 
 pub mod readiness;
 pub(crate) use readiness::launched_team_receiver_is_attached;
-pub use readiness::ReadinessPhase;
 pub(super) use readiness::*;
 
 mod approval;
@@ -276,9 +276,8 @@ use approval::{
 
 mod add_agent;
 pub(super) use add_agent::*;
-pub use add_agent::{
-    add_agent, add_agent_force, add_agent_with_transport, add_agent_with_transport_force,
-};
+pub use add_agent::{add_agent, add_agent_force};
+pub(crate) use add_agent::{add_agent_with_transport, add_agent_with_transport_force};
 
 mod add_agent_state;
 pub(crate) use add_agent_state::inject_agent_into_spec;
@@ -320,4 +319,4 @@ use spec_state::{
     spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
     spec_tasks_json, team_workspace, write_launch_permission_audit, yaml_value_to_json,
 };
-pub use spec_state::{worker_session_name_pub, SpecStatePhase};
+pub use spec_state::worker_session_name_pub;

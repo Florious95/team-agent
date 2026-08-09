@@ -1,3 +1,4 @@
+//!
 //! Positive provider attribution for leader panes.
 
 use std::collections::BTreeMap;

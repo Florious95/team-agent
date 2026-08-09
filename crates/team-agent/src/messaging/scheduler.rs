@@ -1,3 +1,4 @@
+//!
 //! scheduler.py — 调度器心脏 + stuck 检测 + 告警抑制 (card §18/§68/§73)。
 
 use std::path::Path;

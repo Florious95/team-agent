@@ -1,3 +1,4 @@
+//!
 //! leader::lease — attach / claim / autobind 统一 CAS 路径 + claim_lease_no_incident
 //! + 双写 / 分叉检测。
 
@@ -19,8 +20,8 @@ use crate::transport::{PaneId, PaneInfo, Transport};
 use super::helpers::{get_path_str, get_path_u64, now_ts, parse_provider};
 use super::owner_bind::leader_identity_context;
 use super::{
-    ClaimedVia, Discovery, LeaderError, LeaderReceiver, LeaseReason, LeaseResult, LeaseSource,
-    LeaseStatus, OwnerEpoch, ReceiverMode, ReceiverStatus, TeamOwner,
+    ClaimedVia, Discovery, LeaderError, LeaderIncident, LeaderReceiver, LeaseReason, LeaseResult,
+    LeaseSource, LeaseStatus, OwnerEpoch, ReceiverMode, ReceiverStatus, TeamOwner,
 };
 
 // ── leader::lease — attach / claim / takeover / autobind / readopt 统一 CAS 路径 ──
@@ -427,7 +428,7 @@ pub(crate) fn requeued_exhausted_watchers_event_payload(
 /// (cwd+command 宽松匹配);否则严格 UUID 门 + `try_readopt_leader_pane` 收敛到 lease claim。
 /// 返回 `(receiver, validation)`。
 #[allow(clippy::too_many_arguments)]
-pub fn attach_leader_to_state(
+pub(crate) fn attach_leader_to_state(
     workspace: &Path,
     state: &mut Value,
     pane: Option<&PaneId>,
@@ -470,6 +471,14 @@ pub fn attach_leader_to_state(
             super::LeaderEvent::ReceiverAttached.name(),
             json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
         )?;
+        let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
+        crate::messaging::watchers::recover_watchers_for_incident(
+            workspace,
+            event_log,
+            &team_id,
+            &pane_id,
+            LeaderIncident::LeaderAttached,
+        )?;
         return Ok((receiver, json!({"ok": true})));
     }
     write_lease_dual_state(workspace, state)?;
@@ -477,22 +486,15 @@ pub fn attach_leader_to_state(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
     )?;
+    let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
+    crate::messaging::watchers::recover_watchers_for_incident(
+        workspace,
+        event_log,
+        &team_id,
+        &pane_id,
+        LeaderIncident::LeaderAttached,
+    )?;
     Ok((receiver, json!({"ok": true})))
-}
-
-/// `autobind_leader_receiver_from_env`(card §44;`__init__.py:880`)。进程启动/restart 时从
-/// `$TMUX_PANE` 自动绑定;`$TMUX_PANE` 缺 → `Ok(None)`;异常写 `autobind_skipped` 返 `Ok(None)`。
-/// 持 `LEADER_OWNERSHIP_LOCK`(lease mutation 不能与 takeover/claim/attach/send 交错)。
-pub fn autobind_leader_receiver_from_env(
-    workspace: &Path,
-    provider: Provider,
-    source: LeaseSource,
-) -> Result<Option<LeaderReceiver>, LeaderError> {
-    let _ = (workspace, provider, source);
-    if std::env::var_os("TMUX_PANE").is_none() {
-        return Ok(None);
-    }
-    Ok(None)
 }
 
 /// `claim_leader`(card §45;`__init__.py:744`)。`team-agent claim-leader` 入口。
@@ -605,9 +607,12 @@ pub fn claim_leader(
     )?;
     if result.ok {
         if let Some(pane) = result.bound_pane_id.as_ref() {
-            let store = MessageStore::open(workspace)?;
-            crate::messaging::watchers::requeue_after_claim_leader(
-                workspace, &store, &event_log, &team_id, pane, None,
+            crate::messaging::watchers::recover_watchers_for_incident(
+                workspace,
+                &event_log,
+                &team_id,
+                pane,
+                LeaderIncident::LeaderClaimed,
             )?;
         }
     }
@@ -618,7 +623,7 @@ pub fn claim_leader(
 /// 直接 acquire/CAS against live evidence。precheck epoch + caller 资格门 + confirm 门 +
 /// **锁内 revalidate(TOCTOU C3/C15)** + 双写 + 审计。
 #[allow(clippy::too_many_arguments)]
-pub fn claim_lease_no_incident(
+pub(crate) fn claim_lease_no_incident(
     workspace: &Path,
     state: &mut Value,
     team: Option<&str>,

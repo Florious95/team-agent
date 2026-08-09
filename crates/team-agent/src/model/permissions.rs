@@ -1,3 +1,4 @@
+//!
 //! §19/§3 移植 `permissions.py`:role/provider/alias → 规范化权限矩阵。
 //!
 //! Python 全程裸 `str` + `dict[str, Any]`(`expand_tools`/`resolve_permissions`/
@@ -56,7 +57,7 @@ impl Tool {
 ///
 /// 注:返回**声明序集合**;Python 返回的是 role 字面顺序的 list,但下游 `resolve_*`
 /// 立即过 `expand_tools`(去重+排序),顺序不参与对拍,故此处用 `BTreeSet` 即可。
-pub fn default_tools_for_role(role: &str) -> BTreeSet<Tool> {
+fn default_tools_for_role(role: &str) -> BTreeSet<Tool> {
     use Tool::*;
     let tools: &[Tool] = match role {
         "leader" | "supervisor" => &[FsRead, FsList, McpTeam, ProviderBuiltin],
@@ -175,7 +176,7 @@ pub fn is_canonical_tool(name: &str) -> bool {
 ///
 /// 表里没有的 provider(如 `claude`)= Python 的 `.get(provider, {})` → 空表 →
 /// 每个 tool 再 `.get(tool, "prompt_only")` → 全 `prompt_only`(对拍 `R-unknownprov`)。
-pub fn provider_enforcement(provider: Provider, tool: Tool) -> Enforcement {
+fn provider_enforcement(provider: Provider, tool: Tool) -> Enforcement {
     use Enforcement::{Hard, PromptOnly};
     use Tool::*;
     match provider {

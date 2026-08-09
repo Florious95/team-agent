@@ -5,12 +5,13 @@ use std::path::Path;
 use rusqlite::{params, OptionalExtension};
 
 use crate::event_log::EventLog;
+use crate::leader::LeaderIncident;
 use crate::message_store::{MessageStore, NotificationClaimParams};
 use crate::model::ids::{TaskId, TeamKey};
 use crate::transport::PaneId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecoveryIncident {
+pub(crate) struct RecoveryIncident {
     pub incident_id: String,
     pub occurred_at: String,
 }
@@ -20,7 +21,7 @@ use super::{MessagingError, WatcherNotice, RESULT_DELIVERY_MAX_ATTEMPTS};
 /// `notify_result_watchers` (`result_delivery.py:38`):匹配 + 去重 + (有界) 投递 result 给 leader
 /// watcher。**恰好一次** (Gap 32/38):同 result_id 多 watcher → 1 次注入,余 `superseded`。
 /// 去重唯一原语 = [`MessageStore::claim_leader_notification_delivery`]。`collect`/coordinator tick 调。
-pub fn notify_result_watchers(
+pub(crate) fn notify_result_watchers(
     workspace: &Path,
     result: &serde_json::Value,
     event_log: &EventLog,
@@ -475,20 +476,25 @@ pub fn requeue_after_claim_leader(
 
 pub fn recover_watchers_for_incident(
     workspace: &Path,
-    store: &MessageStore,
     event_log: &EventLog,
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
-    incident: &RecoveryIncident,
+    incident: LeaderIncident,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
-    requeue_after_claim_leader(
-        workspace,
-        store,
-        event_log,
-        owner_team_id,
-        claimed_pane_id,
-        Some(&incident.occurred_at),
-    )
+    match incident {
+        LeaderIncident::LeaderAttached => Ok(Vec::new()),
+        LeaderIncident::LeaderClaimed => {
+            let store = MessageStore::open(workspace)?;
+            requeue_after_claim_leader(
+                workspace,
+                &store,
+                event_log,
+                owner_team_id,
+                claimed_pane_id,
+                None,
+            )
+        }
+    }
 }
 
 /// 0.5.5 gate054 round-2: attach-leader (and claim-leader) requeue for leader messages
@@ -601,7 +607,7 @@ pub fn requeue_delivery_exhausted_watchers(
 
 /// `delivered_result_message` (`result_delivery.py:394`):内容级去重 —— 查某 result_id 是否已有
 /// 投递的 leader 通知消息。
-pub fn delivered_result_message(
+pub(crate) fn delivered_result_message(
     store: &MessageStore,
     result_id: &str,
     task_id: Option<&TaskId>,

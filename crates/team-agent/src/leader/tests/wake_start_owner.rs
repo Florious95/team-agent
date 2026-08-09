@@ -1,95 +1,6 @@
 use super::*;
 
 // =====================================================================
-// 4. wake 层纯函数(unimplemented → RED)。golden:probe_leader.py 5 分支 + boundary。
-// =====================================================================
-
-#[test]
-fn should_reread_no_file_when_current_mtime_none() {
-    // current_mtime is None → {reread:false, no_file}(wake.py:31-32)。
-    let d = should_reread(None, None, None, 100.0, 60.0);
-    assert!(!d.reread);
-    assert_eq!(d.reason, RereadReason::NoFile);
-}
-
-#[test]
-fn should_reread_never_classified() {
-    // last_classified_mtime is None → {reread:true, never_classified}。
-    let d = should_reread(None, Some(10.0), None, 100.0, 60.0);
-    assert!(d.reread);
-    assert_eq!(d.reason, RereadReason::NeverClassified);
-}
-
-#[test]
-fn should_reread_file_changed() {
-    // current != last_classified → {reread:true, file_changed}。
-    let d = should_reread(Some(5.0), Some(20.0), Some(10.0), 100.0, 60.0);
-    assert!(d.reread);
-    assert_eq!(d.reason, RereadReason::FileChanged);
-}
-
-#[test]
-fn should_reread_quiescent_already_classified_at_and_past_debounce() {
-    // current==last_classified 且 silent_for >= debounce → quiescent(不再重读)。
-    // silent_for = max(0, now-current_mtime) = 100-10 = 90 >= 60。
-    let d = should_reread(Some(10.0), Some(10.0), Some(10.0), 100.0, 60.0);
-    assert!(!d.reread);
-    assert_eq!(d.reason, RereadReason::QuiescentAlreadyClassified);
-    // 边界:silent_for 恰 == debounce(now-current=60)→ 仍 quiescent(>= 比较)。
-    let b = should_reread(Some(40.0), Some(40.0), Some(40.0), 100.0, 60.0);
-    assert!(!b.reread);
-    assert_eq!(b.reason, RereadReason::QuiescentAlreadyClassified);
-}
-
-#[test]
-fn should_reread_unchanged_within_debounce() {
-    // current==last_classified 且 silent_for < debounce → unchanged。
-    // now-current = 100-95 = 5 < 60。注:last_mtime 在 Python body 中未被使用。
-    let d = should_reread(Some(10.0), Some(95.0), Some(95.0), 100.0, 60.0);
-    assert!(!d.reread);
-    assert_eq!(d.reason, RereadReason::Unchanged);
-}
-
-#[test]
-fn on_file_changed_adds_node_sorted_and_records_mtime() {
-    // golden probe_leader.py:add b → pending ["b"];add a → sorted ["a","b"]。
-    let s0 = on_file_changed(None, "b", 1.0);
-    assert_eq!(s0.pending, vec!["b".to_string()]);
-    assert_eq!(s0.mtimes.get("b"), Some(&1.0));
-    let s1 = on_file_changed(Some(&s0), "a", 2.0);
-    assert_eq!(
-        s1.pending,
-        vec!["a".to_string(), "b".to_string()],
-        "pending 必须 sorted"
-    );
-    assert_eq!(s1.mtimes.get("a"), Some(&2.0));
-    // 重复 add b:pending 仍是 set(不重复),mtime 被更新到 3.0。
-    let s2 = on_file_changed(Some(&s1), "b", 3.0);
-    assert_eq!(s2.pending, vec!["a".to_string(), "b".to_string()]);
-    assert_eq!(s2.mtimes.get("b"), Some(&3.0));
-}
-
-#[test]
-fn take_pending_drains_sorted_and_clears_pending_but_keeps_mtimes() {
-    // golden probe_leader.py:drain → (["a","b"], state{pending:[], mtimes 保留})。
-    let mut st = on_file_changed(None, "b", 3.0);
-    st = on_file_changed(Some(&st), "a", 2.0);
-    let (drained, after) = take_pending(Some(&st));
-    assert_eq!(drained, vec!["a".to_string(), "b".to_string()]);
-    assert!(after.pending.is_empty());
-    // mtimes 不被 drain 清空。
-    assert_eq!(after.mtimes.get("a"), Some(&2.0));
-    assert_eq!(after.mtimes.get("b"), Some(&3.0));
-    // 再 drain → 空。
-    let (drained2, _after2) = take_pending(Some(&after));
-    assert!(drained2.is_empty());
-    // drain None → ([], default state)。
-    let (none_drained, none_state) = take_pending(None);
-    assert!(none_drained.is_empty());
-    assert!(none_state.pending.is_empty());
-}
-
-// =====================================================================
 // 5. leader_session_name — sha1 派生 + 文件夹消毒(unimplemented → RED)
 // =====================================================================
 
@@ -194,28 +105,33 @@ fn owner_bind_refused_event_name_is_owner_bind_refused() {
     assert_eq!(LeaderEvent::OwnerBindRefused.name(), "owner.bind_refused");
 }
 
-// emit_owner_bound_event:成功绑定 hook(owner.bound_from_caller_pane;leader_binding.py:162-183)。
+// bind_owner_from_caller_pane:成功绑定后调用 owner.bound_from_caller_pane 审计 hook
+// (leader_binding.py:162-183)。
 // 强化(no-full-uuid-leak 命门):事件只写 derived_uuid_prefix == derived[:12](12 hex),
 // old uuid 为 None → old_uuid_prefix == ""(空串,非缺省);全 32 hex uuid 绝不出现在任何字段。
 // unimplemented → RED。
 #[test]
 fn emit_owner_bound_event_logs_prefix_only_never_full_uuid() {
+    let _lock = ENV_LOCK.lock().unwrap();
     let ws = std::env::temp_dir().join(format!("ta_rs_emit_{}", std::process::id()));
     std::fs::create_dir_all(&ws).unwrap();
-    let caller = PaneId::new("%7");
-    let derived = uuid("fp", "/ws", "u", "default");
-    let full = derived.as_str().to_string();
+    let _env = EnvGuard::apply(&[
+        ("TMUX_PANE", Some("%7")),
+        ("TEAM_AGENT_MACHINE_FINGERPRINT", Some("fp")),
+        ("TEAM_AGENT_LEADER_PROVIDER", Some("codex")),
+        ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
+    ]);
+    let result = bind_owner_from_caller_pane(&ws, &TeamKey::new("default"), None).unwrap();
+    assert!(result.ok, "caller pane should produce an owner binding");
+    let owner = result.owner.as_ref().expect("successful bind has owner");
+    let full = owner
+        .leader_session_uuid
+        .as_ref()
+        .expect("successful bind has leader session uuid")
+        .as_str()
+        .to_string();
     assert_eq!(full.len(), 32, "derive 产 32 hex");
     let prefix12 = full[..12].to_string();
-    emit_owner_bound_event(
-        &ws,
-        &caller,
-        "codex",
-        &derived,
-        &TeamKey::new("default"),
-        None,
-    )
-    .unwrap();
     // 读回审计事件:恰一条 owner.bound_from_caller_pane。
     let events = crate::event_log::EventLog::new(&ws).tail(50).unwrap();
     let ev = events
@@ -223,7 +139,10 @@ fn emit_owner_bound_event_logs_prefix_only_never_full_uuid() {
         .find(|e| e["event"] == serde_json::json!("owner.bound_from_caller_pane"))
         .expect("必写 owner.bound_from_caller_pane");
     assert_eq!(ev["caller_pane_id"], serde_json::json!("%7"));
-    assert_eq!(ev["caller_current_command"], serde_json::json!("codex"));
+    assert_eq!(
+        ev["caller_current_command"],
+        serde_json::json!(result.caller_current_command)
+    );
     assert_eq!(ev["team_id"], serde_json::json!("default"));
     // derived_uuid_prefix == derived[:12](只前缀,12 hex)。
     assert_eq!(ev["derived_uuid_prefix"], serde_json::json!(prefix12));

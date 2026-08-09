@@ -1,3 +1,4 @@
+//!
 //! 用户面错误。
 //!
 //! 陷阱 #6(02-model 卡):Python `errors.py` 用自定义 `RuntimeError` **遮蔽**内建

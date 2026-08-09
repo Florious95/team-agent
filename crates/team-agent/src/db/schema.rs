@@ -1,3 +1,4 @@
+//!
 //! `team.db` schema 初始化(真相源 `message_store/schema.py` + `schema_migration.py`)。
 //!
 //! slice 1:fresh DB schema —— 8 表 DDL、6 索引、ALTER 式列迁移、agent_health 重建、

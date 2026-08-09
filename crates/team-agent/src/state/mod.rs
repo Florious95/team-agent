@@ -1,3 +1,4 @@
+//!
 //! step 5 · state — state.json 持久化 / identity / owner-gate / projection(真相源 `state.py`)。
 //!
 //! §6 step 5:原子写/锁/self-heal(**bug-084** 血泪)/ team projection / leader receiver identity /
@@ -32,6 +33,7 @@ pub mod selector;
 use serde_json::Value;
 use thiserror::Error;
 
+///
 /// Python 真值语义(`null`/`false`/`0`/`""`/`[]`/`{}` → false),`state` 模块共用。
 pub(crate) fn json_truthy(v: &Value) -> bool {
     match v {

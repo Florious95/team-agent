@@ -1,3 +1,4 @@
+//!
 //! step 9 · transport — 控制面 trait + typed payload(ROUND-0 SKELETON).
 //!
 //! 设计真相源:`docs/phase0/transport-backend-design.md` §1(Rust 草图:Target /
@@ -485,6 +486,20 @@ pub enum TransportError {
         argv: Vec<String>,
         code: Option<i32>,
         stderr: String,
+    },
+    /// The final tmux spawn argv is too large for the transport command envelope.
+    /// Keep this separate from `Subprocess` so callers do not have to parse a
+    /// provider-sized argv dump to learn the actionable limit.
+    #[error(
+        "command_too_long: backend={backend:?}; segment={segment}; session={session}; window={window}; actual_bytes={actual_bytes}; limit_bytes={limit_bytes}"
+    )]
+    CommandTooLong {
+        backend: BackendKind,
+        segment: String,
+        session: String,
+        window: String,
+        actual_bytes: usize,
+        limit_bytes: usize,
     },
     /// wezterm mux 连不上 / tmux server 不在。
     #[error("mux unavailable on {backend:?}: {detail}")]

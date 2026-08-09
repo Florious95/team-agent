@@ -1,3 +1,4 @@
+//!
 //! Stage 0 of the identity-boundary unified plan (architect direction
 //! 2026-06-23): `SessionAttributionKey`.
 //!

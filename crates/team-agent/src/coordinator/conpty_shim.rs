@@ -1,3 +1,4 @@
+//!
 //! Windows ConPTY shim lifecycle manager.
 //!
 //! 0.5.x Windows portability Batch 6 Option A. The design's
@@ -160,7 +161,7 @@ pub enum ShimError {
 ///    installations.
 /// 2. Env override `TEAM_AGENT_WINDOWS_SHIM_PATH` — tests + CI
 ///    harness (Batch 6 SSH real-machine harness sets this).
-pub fn locate_shim_binary() -> Result<PathBuf, ShimError> {
+fn locate_shim_binary() -> Result<PathBuf, ShimError> {
     if let Ok(explicit) = std::env::var("TEAM_AGENT_WINDOWS_SHIM_PATH") {
         let p = PathBuf::from(&explicit);
         if p.exists() {
@@ -218,7 +219,7 @@ fn fresh_pipe_token() -> String {
 /// downstream `transport_factory::conpty_pipe_ready(...)` opens on
 /// the next factory resolve. The `pipe_token` is NOT persisted (CR
 /// C-1); it stays in `ShimHandle` memory only.
-pub fn spawn_shim_and_handshake(
+fn spawn_shim_and_handshake(
     workspace: &Path,
     team_key: &str,
     workspace_hash: &str,
