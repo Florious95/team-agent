@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.62
+
+- **Release integration:** R3-R5 T2 elimination, A-12/A-13, and launcher crash-family hardening across A-18/A-20/A-20b/A-21/A-22/A-22b.
+
 ## 0.5.61
 
 - **Feature: case-scoped result reads.** `results --case` adds the approved CLI-only case filter with independent team and case predicates; no result schema, MCP, or watcher behavior changes.
