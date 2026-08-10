@@ -2,6 +2,13 @@
 
 use std::path::Path;
 
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use rusqlite::{params, OptionalExtension};
 
 use crate::event_log::EventLog;
@@ -119,6 +126,128 @@ fn watcher_matches(
     task_matches && agent_matches
 }
 
+pub(crate) fn notify_fifo_result_watchers(
+    conn: &rusqlite::Connection,
+    event_log: &EventLog,
+    task_id: &str,
+    result_id: &str,
+) -> Result<(), MessagingError> {
+    let mut stmt = conn.prepare(
+        "select watcher_id, recipient from result_watchers
+         where task_id = ?1 and status = 'pending' and recipient is not null
+         order by created_at, watcher_id",
+    )?;
+    let rows = stmt
+        .query_map(params![task_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for (watcher_id, recipient) in rows {
+        let _ = notify_fifo_waiter(conn, event_log, &watcher_id, task_id, result_id, &recipient)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn notify_fifo_waiter(
+    conn: &rusqlite::Connection,
+    event_log: &EventLog,
+    watcher_id: &str,
+    task_id: &str,
+    result_id: &str,
+    recipient: &str,
+) -> Result<WatcherNotice, MessagingError> {
+    let write = (|| -> std::io::Result<()> {
+        let mut fifo = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(recipient)?;
+        fifo.write_all(format!("{result_id}\n").as_bytes())
+    })();
+    match write {
+        Ok(()) => {
+            event_log.write(
+                "result_wake.notified",
+                serde_json::json!({
+                    "task_id": task_id,
+                    "result_id": result_id,
+                    "watcher_id": watcher_id,
+                    "recipient": recipient,
+                }),
+            )?;
+            Ok(WatcherNotice {
+                watcher_id: watcher_id.to_string(),
+                result_id: Some(result_id.to_string()),
+                ok: true,
+                status: Some("notified".to_string()),
+                notified_message_id: None,
+                primary_watcher_id: None,
+                prior_state: None,
+                error: None,
+            })
+        }
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::ENXIO || code == libc::ENOENT
+            ) =>
+        {
+            let reason = if error.raw_os_error() == Some(libc::ENXIO) {
+                "ENXIO"
+            } else {
+                "ENOENT"
+            };
+            conn.execute(
+                "delete from result_watchers where watcher_id = ?1",
+                params![watcher_id],
+            )?;
+            event_log.write(
+                "result_wake.notify_failed",
+                serde_json::json!({
+                    "task_id": task_id,
+                    "result_id": result_id,
+                    "watcher_id": watcher_id,
+                    "recipient": recipient,
+                    "reason": reason,
+                }),
+            )?;
+            Ok(WatcherNotice {
+                watcher_id: watcher_id.to_string(),
+                result_id: Some(result_id.to_string()),
+                ok: false,
+                status: Some("removed".to_string()),
+                notified_message_id: None,
+                primary_watcher_id: None,
+                prior_state: None,
+                error: Some(reason.to_string()),
+            })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn notify_fifo_waiter(
+    _conn: &rusqlite::Connection,
+    _event_log: &EventLog,
+    watcher_id: &str,
+    _task_id: &str,
+    result_id: &str,
+    _recipient: &str,
+) -> Result<WatcherNotice, MessagingError> {
+    Ok(WatcherNotice {
+        watcher_id: watcher_id.to_string(),
+        result_id: Some(result_id.to_string()),
+        ok: false,
+        status: Some("unsupported".to_string()),
+        notified_message_id: None,
+        primary_watcher_id: None,
+        prior_state: None,
+        error: Some("POSIX FIFO support unavailable".to_string()),
+    })
+}
+
 fn deliver_primary_watcher(
     workspace: &Path,
     conn: &rusqlite::Connection,
@@ -143,6 +272,20 @@ fn deliver_primary_watcher(
             "missing_result_id",
         );
     };
+    if let Some(recipient) = watcher
+        .get("recipient")
+        .and_then(|value| value.as_str())
+        .filter(|recipient| Path::new(recipient).is_absolute())
+    {
+        return notify_fifo_waiter(
+            conn,
+            event_log,
+            watcher_id,
+            result_task.unwrap_or_default(),
+            result_id,
+            recipient,
+        );
+    }
     if let Some(existing) = delivered_result_message(
         store,
         result_id,
@@ -196,7 +339,10 @@ fn deliver_primary_watcher(
             .get("leader_id")
             .and_then(|v| v.as_str())
             .unwrap_or("team-agent"),
-        "leader",
+        watcher
+            .get("recipient")
+            .and_then(|value| value.as_str())
+            .unwrap_or("leader"),
         &content,
         None,
         false,
@@ -332,7 +478,7 @@ pub fn retry_result_deliveries(
     // delivery path with dedupe/attempt bounds); a watcher is never flipped to
     // `notified` without a delivery. Missing result rows are skipped (still retryable).
     let mut stmt = conn.prepare(
-        "select watcher_id, owner_team_id, task_id, agent_id, leader_id, status, created_at,
+        "select watcher_id, owner_team_id, task_id, agent_id, leader_id, recipient, status, created_at,
                 result_id, notified_message_id
          from result_watchers
          where status in ('pending', 'notify_failed')
@@ -346,10 +492,11 @@ pub fn retry_result_deliveries(
                 "task_id": row.get::<_, Option<String>>(2)?,
                 "agent_id": row.get::<_, Option<String>>(3)?,
                 "leader_id": row.get::<_, Option<String>>(4)?,
-                "status": row.get::<_, Option<String>>(5)?,
-                "created_at": row.get::<_, Option<String>>(6)?,
-                "result_id": row.get::<_, Option<String>>(7)?,
-                "notified_message_id": row.get::<_, Option<String>>(8)?,
+                "recipient": row.get::<_, Option<String>>(5)?,
+                "status": row.get::<_, Option<String>>(6)?,
+                "created_at": row.get::<_, Option<String>>(7)?,
+                "result_id": row.get::<_, Option<String>>(8)?,
+                "notified_message_id": row.get::<_, Option<String>>(9)?,
             }))
         })?
         .collect::<Result<Vec<_>, _>>()?;

@@ -677,6 +677,13 @@ pub struct ResultsArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitArgs {
+    pub task_id: String,
+    pub workspace: PathBuf,
+    pub json: bool,
+}
+
 /// `diagnose`(`parser.py:298`) runtime health report, distinct from `doctor`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnoseArgs {

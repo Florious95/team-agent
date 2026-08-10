@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::db::DbError;
 
 /// `schema.py:90`。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// 8 张表的 DDL(逐字照搬 `schema.py:initialize_schema` 的内联建表;含 `if not exists`)。
 /// 顺序与 Python 一致(leader_notification_log 在 ensure 块后创建)。
@@ -23,7 +23,7 @@ const CREATE_SCHEDULED_EVENTS: &str = "create table if not exists scheduled_even
 const CREATE_DELIVERY_TOKENS: &str = "create table if not exists delivery_tokens (\n              message_id text primary key,\n              unique_token text not null,\n              injected_at text not null,\n              visible_at text,\n              consumed_at text,\n              failed_at text,\n              failure_reason text\n            )";
 const CREATE_AGENT_HEALTH: &str = "create table if not exists agent_health (\n              owner_team_id text,\n              agent_id text not null,\n              status text not null,\n              last_output_at text,\n              context_usage_pct integer,\n              current_task_id text,\n              updated_at text not null,\n              unique(owner_team_id, agent_id)\n            )";
 const CREATE_PEER_ALLOWLIST: &str = "create table if not exists peer_allowlist (\n              a text not null,\n              b text not null,\n              created_at text not null,\n              primary key (a, b)\n            )";
-const CREATE_RESULT_WATCHERS: &str = "create table if not exists result_watchers (\n              watcher_id text primary key,\n              owner_team_id text,\n              task_id text,\n              agent_id text,\n              message_id text,\n              leader_id text not null,\n              status text not null,\n              created_at text not null,\n              completed_at text,\n              result_id text,\n              notified_message_id text,\n              error text\n            )";
+const CREATE_RESULT_WATCHERS: &str = "create table if not exists result_watchers (\n              watcher_id text primary key,\n              owner_team_id text,\n              task_id text,\n              agent_id text,\n              message_id text,\n              leader_id text not null,\n              recipient text,\n              status text not null,\n              created_at text not null,\n              completed_at text,\n              result_id text,\n              notified_message_id text,\n              error text\n            )";
 const CREATE_LEADER_NOTIFICATION_LOG: &str = "create table if not exists leader_notification_log (\n              result_id text not null,\n              owner_team_id text not null default '',\n              owner_epoch integer not null default 0,\n              leader_session_uuid text,\n              notified_message_id text not null,\n              notified_at text not null,\n              leader_pane_id_at_notify text,\n              envelope_content_hash text,\n              primary key (result_id, owner_team_id, owner_epoch)\n            )";
 const CREATE_AGENT_HEALTH_NEW: &str = "create table agent_health_new (\n              owner_team_id text,\n              agent_id text not null,\n              status text not null,\n              last_output_at text,\n              context_usage_pct integer,\n              current_task_id text,\n              updated_at text not null,\n              unique(owner_team_id, agent_id)\n            )";
 
@@ -104,6 +104,7 @@ const RESULT_WATCHER_COLUMNS: &[&str] = &[
     "agent_id",
     "message_id",
     "leader_id",
+    "recipient",
     "status",
     "created_at",
     "completed_at",
@@ -297,10 +298,16 @@ pub fn initialize_schema(
         &tx,
         "result_watchers",
         RESULT_WATCHER_COLUMNS,
-        &[(
-            "owner_team_id",
-            "alter table result_watchers add column owner_team_id text",
-        )],
+        &[
+            (
+                "owner_team_id",
+                "alter table result_watchers add column owner_team_id text",
+            ),
+            (
+                "recipient",
+                "alter table result_watchers add column recipient text",
+            ),
+        ],
     )?;
     tx.execute(CREATE_LEADER_NOTIFICATION_LOG, [])?;
     ensure_table_columns(
@@ -360,13 +367,13 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_four() {
+    fn user_version_is_five() {
         let conn = fresh();
         let v: i64 = conn
             .query_row("pragma user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
     }
 
     #[test]
@@ -513,6 +520,7 @@ mod tests {
                     ("agent_id", "TEXT", 0, None, 0),
                     ("message_id", "TEXT", 0, None, 0),
                     ("leader_id", "TEXT", 1, None, 0),
+                    ("recipient", "TEXT", 0, None, 0),
                     ("status", "TEXT", 1, None, 0),
                     ("created_at", "TEXT", 1, None, 0),
                     ("completed_at", "TEXT", 0, None, 0),

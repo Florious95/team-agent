@@ -469,8 +469,8 @@ fn r8_pre_feature_v4_database_is_read_without_schema_migration_or_backup() {
         "R8 RED results_schema_growth: the read API must not add a results column; layout={results_layout:?}"
     );
     assert_eq!(
-        SCHEMA_VERSION, 4,
-        "R8 RED schema_version_bump: the read API must not require a schema migration"
+        SCHEMA_VERSION, 5,
+        "R8 RED schema_version_drift: DS-01 recipient storage is the v5 migration; results reads must remain compatible with pre-feature v4 databases"
     );
 
     let case = Case::from_pre_feature_v4("case-results-r8");

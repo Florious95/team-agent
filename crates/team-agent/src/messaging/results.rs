@@ -842,6 +842,7 @@ fn report_result_for_owner_team_inner(
         return Ok(serde_json::Value::Object(out));
     }
     let event_log = EventLog::new(workspace);
+    super::watchers::notify_fifo_result_watchers(&conn, &event_log, task_id, &result_id)?;
     if presentation.effective_sink != super::presentation::PresentationSink::Leader {
         event_log.write(
             "presentation.stored_without_live_inject",

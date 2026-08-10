@@ -196,6 +196,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
                 .map(emit_result)
         }
         "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
+        "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
         "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
         "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
@@ -243,6 +244,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "profile",
     "collect",
     "results",
+    "wait",
     "diagnose",
     "preflight",
     "wait-ready",
@@ -403,6 +405,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
         Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("wait") => "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]".to_string(),
         Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
         Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]".to_string(),
@@ -1317,6 +1320,18 @@ fn watch_args(args: &[String], cwd: &Path) -> WatchArgs {
         workspace: workspace(&parsed, cwd),
         team: parsed.team,
     }
+}
+
+fn wait_args(args: &[String], cwd: &Path) -> Result<WaitArgs, CliError> {
+    let parsed = parse_args(args);
+    let workspace = workspace(&parsed, cwd);
+    Ok(WaitArgs {
+        task_id: parsed
+            .task
+            .ok_or_else(|| CliError::Usage("wait requires --task <id>".to_string()))?,
+        workspace,
+        json: parsed.json,
+    })
 }
 
 fn approvals_args(args: &[String], cwd: &Path) -> ApprovalsArgs {
