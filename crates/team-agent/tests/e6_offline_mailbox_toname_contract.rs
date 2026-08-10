@@ -189,6 +189,18 @@ fn e6_mailbox_paths_do_not_spawn_provider_or_worker_processes() {
 
 #[test]
 fn e6_mailbox_does_not_create_parallel_inbox_or_message_store() {
+    assert!(
+        !is_approved_ds01_fifo_notification(
+            "src/messaging/watchers.rs",
+            163,
+            "let mut mailbox = OpenOptions::new()",
+        ) && !is_approved_ds01_fifo_notification(
+            "src/messaging/watchers.rs",
+            999,
+            "let mut fifo = OpenOptions::new()",
+        ),
+        "E6 guard: the DS-01 exception must not exempt a new file-backed mailbox in watchers.rs"
+    );
     let offenders = parallel_store_offenders(&[
         "src/cli/send.rs",
         "src/cli/named_address.rs",
@@ -357,12 +369,31 @@ fn parallel_store_offenders(files: &[&str]) -> Vec<(String, usize, String)> {
                 || line.contains("File::create")
                 || line.contains("OpenOptions")
                 || line.contains(".write_all(");
-            if writes_file_store {
+            if writes_file_store && !is_approved_ds01_fifo_notification(rel, idx + 1, line) {
                 offenders.push(((*rel).to_string(), idx + 1, line.trim().to_string()));
             }
         }
     }
     offenders
+}
+
+fn is_approved_ds01_fifo_notification(rel: &str, line_number: usize, line: &str) -> bool {
+    // E6 forbids a parallel file-backed message store, not every file write. These
+    // exact lines are DS-01's one-shot FIFO notification; authoritative state and
+    // the FIFO recipient remain in team.db. The approved MessageStore/team.db seam
+    // cannot preserve O_WRONLY|O_NONBLOCK plus immediate ENXIO/ENOENT, which DS-01
+    // clauses 2 and 3 require so an absent waiter never blocks or poisons report_result.
+    rel == "src/messaging/watchers.rs"
+        && matches!(
+            (line_number, line.trim()),
+            (7, "use std::fs::OpenOptions;")
+                | (11, "use std::os::unix::fs::OpenOptionsExt;")
+                | (163, "let mut fifo = OpenOptions::new()")
+                | (
+                    167,
+                    "fifo.write_all(format!(\"{result_id}\\n\").as_bytes())"
+                )
+        )
 }
 
 fn claim_for_delivery_statuses() -> String {
