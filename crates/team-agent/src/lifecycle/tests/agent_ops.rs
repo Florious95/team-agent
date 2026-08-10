@@ -1,6 +1,6 @@
 use super::launch_spawn::{
-    quick_start_team_dir, seed_healthy_coordinator, DELEG_ROLE_ALPHA, DELEG_ROLE_BRAVO,
-    QS_VALID_ROLE,
+    quick_start_team_dir, restart_ws_two_resumable_workers, seed_healthy_coordinator,
+    DELEG_ROLE_ALPHA, DELEG_ROLE_BRAVO, QS_VALID_ROLE,
 };
 use super::*;
 use crate::transport::test_support::OfflineTransport;
@@ -50,6 +50,149 @@ pub(super) fn lanea_team_ws(status: &str) -> PathBuf {
     )
     .unwrap();
     ws
+}
+
+// A-31 RED: a stale pane must not be treated as a live seat merely because its
+// old window name still exists. The assertion is on the physical spawn record,
+// not on start-agent's success-shaped return value.
+#[test]
+fn start_agent_pane_dead_must_not_noop_on_live_window() {
+    let ws = restart_ws_two_resumable_workers();
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["agents"]["alpha"]["pane_id"] = json!("%dead");
+    state["agents"]["alpha"]["stale"] = json!(true);
+    state["agents"]["alpha"]["stale_reason"] = json!("pane_dead");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_windows(vec![crate::transport::WindowName::new("alpha")])
+        .with_pane_presence("%dead", false)
+        .with_liveness("%dead", crate::transport::PaneLiveness::Dead);
+    let _ = start_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        false,
+        false,
+        false,
+        None,
+        &transport,
+    );
+
+    assert!(
+        !transport.spawn_records().is_empty(),
+        "A-31: pane_dead must trigger a physical respawn even when the stale window remains; asserting only the command's success-shaped return would miss the Noop bug"
+    );
+}
+
+// A-31 RED: a live pane from another session is not this agent's live seat.
+// The assertion is on the physical spawn record, not on start-agent's
+// success-shaped return value.
+#[test]
+fn start_agent_foreign_live_pane_must_respawn_for_intended_window() {
+    let ws = restart_ws_two_resumable_workers();
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["agents"]["alpha"]["pane_id"] = json!("%foreign");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+    let foreign = crate::transport::PaneInfo {
+        pane_id: crate::transport::PaneId::new("%foreign"),
+        session: crate::transport::SessionName::new("foreign-session"),
+        window_index: None,
+        window_name: Some(crate::transport::WindowName::new("foreign-window")),
+        pane_index: None,
+        tty: None,
+        current_command: None,
+        current_path: None,
+        active: true,
+        pane_pid: None,
+        leader_env: std::collections::BTreeMap::new(),
+    };
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_windows(vec![crate::transport::WindowName::new("alpha")])
+        .with_targets(vec![foreign])
+        .with_pane_presence("%foreign", true)
+        .with_liveness("%foreign", crate::transport::PaneLiveness::Live);
+    let _ = start_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        false,
+        false,
+        false,
+        None,
+        &transport,
+    );
+
+    assert!(
+        !transport.spawn_records().is_empty(),
+        "A-31: a physically live pane owned by another session must trigger a physical respawn for alpha; start-agent must not Noop on foreign pane %foreign"
+    );
+}
+
+// A-35 mirror RED: an ownership query failure is missing evidence, not proof
+// that the cached live pane is foreign. start-agent must retain the base
+// conservative Noop direction and leave retry authority to the operator.
+#[test]
+fn start_agent_transport_ownership_query_failure_must_not_respawn_live_pane() {
+    let ws = restart_ws_two_resumable_workers();
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["agents"]["alpha"]["pane_id"] = json!("%transport-error");
+    state["agents"]["alpha"]["stale"] = json!(false);
+    state["agents"]["alpha"]["stale_reason"] = serde_json::Value::Null;
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_windows(vec![crate::transport::WindowName::new("alpha")])
+        .with_pane_presence("%transport-error", true)
+        .with_liveness("%transport-error", crate::transport::PaneLiveness::Live)
+        .with_list_targets_error("simulated tmux snapshot failure");
+    let _ = start_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        false,
+        false,
+        false,
+        None,
+        &transport,
+    );
+
+    assert!(
+        transport.spawn_records().is_empty(),
+        "A-35 mirror: list_targets failure is missing ownership evidence, not proof of a foreign/dead pane; a physically live cached pane must not trigger a duplicate spawn"
+    );
+}
+
+// A-31 guard RED: an explicit pane_dead reason remains positive death
+// evidence even when the persisted pane tuple is absent.
+#[test]
+fn start_agent_pane_dead_reason_must_respawn_without_cached_pane_id() {
+    let ws = restart_ws_two_resumable_workers();
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let agent = state["agents"]["alpha"].as_object_mut().unwrap();
+    agent.remove("pane_id");
+    agent.insert("stale".to_string(), json!(true));
+    agent.insert("stale_reason".to_string(), json!("pane_dead"));
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_windows(vec![crate::transport::WindowName::new("alpha")]);
+    let _ = start_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        false,
+        false,
+        false,
+        None,
+        &transport,
+    );
+
+    assert!(
+        !transport.spawn_records().is_empty(),
+        "A-31 guard: stale_reason=pane_dead is positive death evidence and must trigger a physical respawn even when no cached pane_id remains"
+    );
 }
 
 // remove_agent [P0] — from_spec + force on a NON-running agent atomically removes it from state.agents

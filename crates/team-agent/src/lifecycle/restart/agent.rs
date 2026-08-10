@@ -131,8 +131,35 @@ pub(crate) fn start_agent_at_paths(
             return Err(LifecycleError::RequirementUnmet(error));
         }
     }
-    let agent_live = if adaptive_layout {
-        agent_pane_live(transport, &raw_agent)
+    // A persisted window name is only a topology hint. Once a pane binding is
+    // recorded, the pane must be both physically live and owned by the
+    // intended session/window; a foreign pane must never make start-agent
+    // return Noop. A coordinator-provided pane_dead reason is also
+    // authoritative when a backend cannot answer the exact-pane probe.
+    let pane_marked_dead = raw_agent
+        .get("stale_reason")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|reason| matches!(reason, "pane_dead" | "both"));
+    // A stale cached pane may still be recoverable without a spawn when the
+    // intended per-agent window has exactly one live pane. The pane found by
+    // this session/window lookup, not the cached id, is the binding that the
+    // Noop path refreshes. A foreign pane with no intended window still falls
+    // through to a real spawn.
+    let noop_pane = if adaptive_layout {
+        None
+    } else {
+        single_live_pane_for_window(transport, &session_name, &window)
+    };
+    let agent_live = if pane_marked_dead {
+        false
+    } else if adaptive_layout
+        || raw_agent
+            .get("pane_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|pane| !pane.is_empty())
+    {
+        agent_pane_owned_and_live(transport, &raw_agent, &session_name, &window)
+            || noop_pane.is_some()
     } else {
         window_exists(transport, &session_name, &window)
     };
@@ -145,11 +172,6 @@ pub(crate) fn start_agent_at_paths(
     // state — assert_topology_invariants from Step 1 catches the
     // upstream corruption.
     let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &raw_agent);
-    let noop_pane = if adaptive_layout {
-        None
-    } else {
-        single_live_pane_for_window(transport, &session_name, &window)
-    };
     if has_collision && noop_pane.is_none() {
         eprintln!(
             "team_agent::layout e51_collision_post_step2 agent_id=`{agent_id}` \
@@ -603,7 +625,12 @@ fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_
     })
 }
 
-fn agent_pane_live(transport: &dyn crate::transport::Transport, agent: &serde_json::Value) -> bool {
+fn agent_pane_owned_and_live(
+    transport: &dyn crate::transport::Transport,
+    agent: &serde_json::Value,
+    expected_session: &crate::transport::SessionName,
+    expected_window: &str,
+) -> bool {
     let Some(pane) = agent
         .get("pane_id")
         .and_then(serde_json::Value::as_str)
@@ -612,7 +639,22 @@ fn agent_pane_live(transport: &dyn crate::transport::Transport, agent: &serde_js
     else {
         return false;
     };
-    agent_pane_live_by_id(transport, &pane)
+    let Ok(targets) = transport.list_targets() else {
+        // Ownership is unknown when the topology snapshot fails. Preserve the
+        // base liveness direction: only positive death evidence may authorize
+        // a destructive respawn; otherwise fall back to the pane probe and
+        // leave retry authority to the operator.
+        return agent_pane_live_by_id(transport, &pane);
+    };
+    let owned = targets.iter().any(|target| {
+        target.pane_id == pane
+            && target.session.as_str() == expected_session.as_str()
+            && target
+                .window_name
+                .as_ref()
+                .is_some_and(|window| window.as_str() == expected_window)
+    });
+    owned && agent_pane_live_by_id(transport, &pane)
 }
 
 fn agent_pane_live_by_id(

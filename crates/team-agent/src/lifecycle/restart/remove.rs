@@ -5,8 +5,8 @@ use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 /// `remove_agent(workspace, agent_id, from_spec, force, team)`(`lifecycle/agents.py:22`)。
-/// 从 spec/state/team_state/role-file/agent_health 原子摘除;`_RemoveRollback` 字节级快照
-/// 回滚全部。未传 from_spec 确认 / 运行中未传 force → 拒绝。
+/// 从 spec/state/team_state/agent_health 原子摘除；role markdown 是用户资产，始终保留。
+/// `_RemoveRollback` 字节级快照回滚全部运行时变更。未传 from_spec 确认 / 运行中未传 force → 拒绝。
 pub fn remove_agent(
     workspace: &Path,
     agent_id: &AgentId,
@@ -567,9 +567,6 @@ fn remove_agent_inner(
             write_remove_step_event(paths.run_workspace, agent_id, "stop", &target, Some(true))?;
         }
     }
-    let dynamic_role_path =
-        managed_dynamic_role_file_path(paths.run_workspace, &working_state, agent_id)?;
-    let dynamic_role_required = has_recorded_dynamic_role_file(&working_state, agent_id);
     // golden agents.py:81-83: removed_state = deepcopy(state); pop the agent; save_team_scoped_state
     // (team projection) — NOT a raw save, so other teams in a multi-team workspace are preserved.
     let mut removed_state = working_state;
@@ -623,22 +620,10 @@ fn remove_agent_inner(
         "team.spec.yaml",
         None,
     )?;
-    let role_file_removed = match dynamic_role_path.as_deref() {
-        Some(path) => remove_dynamic_role_file(path, dynamic_role_required)?,
-        None => false,
-    };
-    if role_file_removed {
-        let dynamic_role_path = dynamic_role_path.as_deref().expect("managed role path");
-        let resource = dynamic_role_path.to_string_lossy().to_string();
-        cleared_locations.push(serde_json::json!(resource));
-        write_remove_step_event(
-            paths.run_workspace,
-            agent_id,
-            "role_file",
-            &dynamic_role_path.to_string_lossy(),
-            None,
-        )?;
-    }
+    // Role markdown is user-owned input, including files under the registered
+    // dynamic-role path. Removing a seat only unregisters runtime state/spec;
+    // cleanup is intentionally not part of the default operation.
+    let role_file_removed = false;
     let agent_health_deleted = delete_agent_health(paths.run_workspace, team_key, agent_id)?;
     cleared_locations.push(serde_json::json!("agent_health"));
     write_remove_step_event(
@@ -976,92 +961,6 @@ fn task_without_agent_assignee(task: &YamlValue, agent_id: &AgentId) -> YamlValu
     )
 }
 
-fn remove_dynamic_role_file(path: &Path, required: bool) -> Result<bool, LifecycleError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && required => Err(
-            LifecycleError::StatePersist(format!("dynamic role file missing: {}", path.display())),
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(LifecycleError::StatePersist(format!(
-            "remove role file {}: {e}",
-            path.display()
-        ))),
-    }
-}
-
-fn dynamic_role_file_path(
-    workspace: &Path,
-    state: &serde_json::Value,
-    agent_id: &AgentId,
-) -> std::path::PathBuf {
-    if let Some(raw) = state
-        .get("agents")
-        .and_then(|v| v.get(agent_id.as_str()))
-        .and_then(|v| v.get("dynamic_role_file"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        let path = std::path::PathBuf::from(raw);
-        if path.is_absolute() {
-            return path;
-        }
-        return workspace.join(path);
-    }
-    workspace
-        .join(".team")
-        .join("dynamic-role-files")
-        .join(format!("{}.md", agent_id.as_str()))
-}
-
-/// Resolve a deletable role artifact. `dynamic_role_file` may point at an
-/// external `--role-file`; only canonical children of the runtime-managed
-/// directory belong to remove/rollback. A symlink escape is external.
-fn managed_dynamic_role_file_path(
-    workspace: &Path,
-    state: &serde_json::Value,
-    agent_id: &AgentId,
-) -> Result<Option<std::path::PathBuf>, LifecycleError> {
-    let path = dynamic_role_file_path(workspace, state, agent_id);
-    let managed_root = workspace.join(".team").join("dynamic-role-files");
-    let canonical_root = match std::fs::canonicalize(&managed_root) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(path.starts_with(&managed_root).then_some(path));
-        }
-        Err(error) => {
-            return Err(LifecycleError::StatePersist(format!(
-                "resolve managed role root {}: {error}",
-                managed_root.display()
-            )))
-        }
-    };
-    let canonical_path = match std::fs::canonicalize(&path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(path.starts_with(&managed_root).then_some(path));
-        }
-        Err(error) => {
-            return Err(LifecycleError::StatePersist(format!(
-                "resolve role file {}: {error}",
-                path.display()
-            )))
-        }
-    };
-    Ok(canonical_path
-        .starts_with(&canonical_root)
-        .then_some(canonical_path))
-}
-
-fn has_recorded_dynamic_role_file(state: &serde_json::Value, agent_id: &AgentId) -> bool {
-    state
-        .get("agents")
-        .and_then(|v| v.get(agent_id.as_str()))
-        .and_then(|v| v.get("dynamic_role_file"))
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
-}
-
 fn delete_agent_health(
     workspace: &Path,
     owner_team_id: &str,
@@ -1127,8 +1026,6 @@ struct RemoveRollback {
     state: serde_json::Value,
     team_state_text: Option<String>,
     team_state_path: std::path::PathBuf,
-    dynamic_role_bytes: Option<Vec<u8>>,
-    dynamic_role_path: Option<std::path::PathBuf>,
     /// golden agents.py:185: the agent_health row captured BEFORE delete, re-upserted on rollback.
     health: Option<CapturedHealth>,
     restore_running: bool,
@@ -1164,15 +1061,6 @@ impl RemoveRollback {
                 )))
             }
         };
-        let dynamic_role_path = managed_dynamic_role_file_path(workspace, state, agent_id)?;
-        let dynamic_role_bytes = match dynamic_role_path.as_deref() {
-            Some(path) => match std::fs::read(path) {
-                Ok(bytes) => Some(bytes),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(LifecycleError::StatePersist(format!("read role file: {e}"))),
-            },
-            None => None,
-        };
         let health = select_agent_health(workspace, team_key, agent_id)?;
         Ok(Self {
             agent_id: agent_id.clone(),
@@ -1181,15 +1069,13 @@ impl RemoveRollback {
             state: state.clone(),
             team_state_text,
             team_state_path,
-            dynamic_role_bytes,
-            dynamic_role_path,
             health,
             restore_running: false,
         })
     }
 
     /// golden agents.py:189-227 `_RemoveRollback.restore`: BEST-EFFORT — wrap EACH artifact restore
-    /// (spec → workspace_state → team_state → role_file → agent_health) in its own try/except, append
+    /// (spec → workspace_state → team_state → agent_health) in its own try/except, append
     /// per-artifact failures to `errors`, and NEVER short-circuit on the first failure. The worker is
     /// only re-started when restore_running AND no errors. Returns the collected error strings (empty
     /// == ok); the caller re-raises the ORIGINAL operation error annotated with rollback_ok.
@@ -1235,24 +1121,6 @@ impl RemoveRollback {
         };
         if let Err(e) = team_state_result {
             errors.push(format!("team_state:{e}"));
-        }
-        // role_file
-        let role_file_result = match (&self.dynamic_role_path, &self.dynamic_role_bytes) {
-            (Some(path), Some(bytes)) => {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(path, bytes)
-            }
-            (Some(path), None) => match std::fs::remove_file(path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e),
-            },
-            (None, _) => Ok(()),
-        };
-        if let Err(e) = role_file_result {
-            errors.push(format!("role_file:{e}"));
         }
         if self.restore_running && errors.is_empty() {
             if let Err(e) = start_agent_at_paths(

@@ -1390,6 +1390,45 @@ fn remove_preserves_external_role_source_for_both_flag_forms() {
     }
 }
 
+// A-28 RED: the role markdown recorded for a seat is still a user asset. The
+// default remove path must unregister the seat without deleting the managed
+// registration-path document.
+#[test]
+fn remove_agent_preserves_registered_role_markdown_by_default() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": {
+            "status": "stopped",
+            "provider": "codex",
+            "window": "alpha",
+            "dynamic_role_file": ".team/dynamic-role-files/alpha.md"
+        },
+        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+    }));
+    let role = ws.join(".team/dynamic-role-files/alpha.md");
+    std::fs::create_dir_all(role.parent().unwrap()).unwrap();
+    let original = b"user-authored registered role\n";
+    std::fs::write(&role, original).unwrap();
+
+    let result = remove_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        false,
+        true,
+        None,
+        &LaneTransport::new("team-laneateam", &[]),
+    );
+    assert!(result.is_ok(), "remove-agent should unregister the seat: {result:?}");
+    assert!(
+        role.exists(),
+        "A-28: remove-agent must preserve the registered role markdown by default"
+    );
+    assert_eq!(
+        std::fs::read(&role).unwrap(),
+        original,
+        "A-28: remove-agent must preserve the registered role markdown by default"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn remove_preserves_managed_path_symlink_escape() {
@@ -1564,26 +1603,19 @@ fn lanea_remove_rollback_restarts_force_stopped_worker() {
     );
 }
 
-// ── REMOVE #11 (remove-dynamic-role-path-and-required-8, warn) [RED] — missing REQUIRED role file raises
-// Golden agents.py:255-261 _remove_dynamic_role_file(path, required=True) RAISES "dynamic role file
-// missing: <path>" when the state recorded a dynamic_role_file but it is absent. Rust hardcodes the
-// default path and returns Ok(false) silently (restart.rs:951-953), losing the hard-fail+rollback. RED:
-// a dynamic agent whose recorded role file is MISSING must raise, not silently complete the removal.
+// A recorded role path is user-owned input, not a remove-agent precondition.
+// Missing role markdown therefore must not block unregistering the seat.
 #[test]
-fn lanea_remove_dynamic_role_file_missing_raises() {
+fn lanea_remove_dynamic_role_file_missing_does_not_block_unregister() {
     let ws = lanea_ws_agents(json!({
         "alpha": { "status": "stopped", "provider": "codex", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/custom.md" }, // file NOT created
         "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let text = format!(
-        "{:?}",
-        remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx)
-    );
+    let result = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx);
     assert!(
-        text.contains("dynamic role file missing"),
-        "golden agents.py:259-260: a state-recorded dynamic_role_file that is MISSING must RAISE 'dynamic role \
-         file missing: <path>' (required=true); Rust returns Ok(false) silently and completes the remove. got {text}"
+        result.is_ok(),
+        "remove-agent must unregister even when a recorded role path is missing; got {result:?}"
     );
 }
 
