@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.64
+
+- **`remove-agent` 保留角色文件：** 不再删除注册路径下的角色 Markdown；只移除运行时、spec、state 与 health 记录，角色文件继续作为用户资产保留。
+- **`start-agent` 判活改为按 pane 归属判定：** 仅当 pane 物理存活且归属 intended session:window 时才视为活；foreign pane 不再造成 `Noop` 假成功。
+- **transport 查询失败时保守不重建：** `list_targets()` 失败表示证据缺失，不授权 spawn；`stale_reason=pane_dead` 等明确死亡证据仍照常触发重建。
+
 ## 0.5.63
 
 - **行为变更：`abnormal_exit` 不再自动重启席位。** worker 非正常退出仍会产生 `worker.abnormal_exit` 检测、结构化事件和 leader 通知；恢复改由手动命令或编排层决策。
