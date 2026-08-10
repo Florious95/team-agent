@@ -407,7 +407,7 @@ impl Drop for CliCase {
 }
 
 fn team_agent_bin() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_team-agent")
+    let path = std::env::var_os("CARGO_BIN_EXE_team-agent")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::current_exe().ok().and_then(|exe| {
@@ -417,7 +417,13 @@ fn team_agent_bin() -> PathBuf {
                 candidate.exists().then_some(candidate)
             })
         })
-        .expect("team-agent test binary must be available")
+        .expect("team-agent test binary must be available");
+    assert!(
+        path.is_file(),
+        "team-agent test binary does not exist: {}; run `cargo build -p team-agent --bin team-agent` first",
+        path.display()
+    );
+    path
 }
 
 fn test_tmp_root() -> PathBuf {
