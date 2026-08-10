@@ -33,15 +33,22 @@ const EXPECTED_TOOLS: &[&str] = &[
 ];
 
 fn test_binary_path() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
-        return PathBuf::from(path);
-    }
-    std::env::current_exe()
-        .expect("test executable path")
-        .parent()
-        .and_then(|deps| deps.parent())
-        .map(|target| target.join("team-agent"))
-        .expect("team-agent test binary path")
+    let path = if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
+        PathBuf::from(path)
+    } else {
+        std::env::current_exe()
+            .expect("test executable path")
+            .parent()
+            .and_then(|deps| deps.parent())
+            .map(|target| target.join("team-agent"))
+            .expect("team-agent test binary path")
+    };
+    assert!(
+        path.is_file(),
+        "team-agent test binary does not exist: {}; run `cargo build -p team-agent --bin team-agent` first",
+        path.display()
+    );
+    path
 }
 
 pub struct McpSimHarness {
