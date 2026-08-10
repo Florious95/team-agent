@@ -12,8 +12,9 @@ usage() {
 usage: cleanup-tmux-residue.sh [--older-than-minutes N] [--created-after-epoch EPOCH] [--socket-dir DIR] [--dry-run] [--verbose]
 
 Safely cleans Team Agent test tmux residue under /private/tmp/tmux-$(id -u).
-Only socket basenames matching ta-* or adv-* are eligible. The default socket is
-never matched or touched.
+Only socket basenames matching ta-* or adv-* are eligible. A socket is owned
+only when its creator left the ordinary-file sidecar marker `<socket>.owner`.
+The default socket and unmarked sockets are never matched or touched.
 USAGE
 }
 
@@ -80,6 +81,7 @@ killed=0
 removed=0
 skipped_recent=0
 skipped_non_socket=0
+skipped_unmarked=0
 errors=0
 
 for socket in "$socket_dir"/ta-* "$socket_dir"/adv-*; do
@@ -97,7 +99,21 @@ for socket in "$socket_dir"/ta-* "$socket_dir"/adv-*; do
     continue
   fi
 
-  mtime="$(mtime_epoch "$socket" 2>/dev/null || echo 0)"
+  owner_marker="${socket}.owner"
+  owner_marker_value=""
+  if [[ ! -f "$owner_marker" || ! -r "$owner_marker" ]]; then
+    skipped_unmarked=$((skipped_unmarked + 1))
+    [[ "$verbose" -eq 1 ]] && echo "cleanup-tmux-residue: skip unmarked socket $socket"
+    continue
+  fi
+  owner_marker_value="$(<"$owner_marker")"
+  if [[ -z "$owner_marker_value" ]]; then
+    skipped_unmarked=$((skipped_unmarked + 1))
+    [[ "$verbose" -eq 1 ]] && echo "cleanup-tmux-residue: skip empty owner marker $owner_marker"
+    continue
+  fi
+
+  mtime="$(mtime_epoch "$owner_marker" 2>/dev/null || echo 0)"
   if [[ -n "$created_after_epoch" ]]; then
     if (( mtime < created_after_epoch )); then
       skipped_recent=$((skipped_recent + 1))
@@ -125,6 +141,9 @@ for socket in "$socket_dir"/ta-* "$socket_dir"/adv-*; do
       echo "cleanup-tmux-residue: failed to remove $socket" >&2
     fi
   fi
+  if [[ ! -e "$socket" && ! -S "$socket" ]]; then
+    rm -f -- "$owner_marker" || errors=$((errors + 1))
+  fi
 done
 
 mode="older_than_minutes=$older_than_minutes"
@@ -132,7 +151,7 @@ if [[ -n "$created_after_epoch" ]]; then
   mode="created_after_epoch=$created_after_epoch"
 fi
 
-echo "cleanup-tmux-residue: socket_dir=$socket_dir mode=$mode candidates=$candidates killed=$killed removed=$removed skipped_recent=$skipped_recent skipped_non_socket=$skipped_non_socket errors=$errors"
+echo "cleanup-tmux-residue: socket_dir=$socket_dir mode=$mode candidates=$candidates killed=$killed removed=$removed skipped_recent=$skipped_recent skipped_non_socket=$skipped_non_socket skipped_unmarked=$skipped_unmarked errors=$errors"
 
 if [[ "$errors" -ne 0 ]]; then
   exit 1

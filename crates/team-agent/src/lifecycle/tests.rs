@@ -24,17 +24,23 @@ fn sess(s: &str) -> SessionName {
 pub(crate) fn test_binary_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
-        if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
-            return path;
-        }
-        let current = std::env::current_exe().expect("test executable path");
-        current
+        let path = if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
+            path
+        } else {
+            let current = std::env::current_exe().expect("test executable path");
+            current
             .parent()
             .and_then(|deps| deps.parent())
             .map(|target| target.join("team-agent"))
             .expect("team-agent test binary path")
             .to_string_lossy()
             .into_owned()
+        };
+        assert!(
+            std::path::Path::new(&path).is_file(),
+            "team-agent test binary does not exist: {path}; run `cargo build -p team-agent --bin team-agent` first"
+        );
+        path
     })
     .as_str()
 }
