@@ -453,11 +453,13 @@ fn status_port_status_detail_full_keeps_uncompacted_events() {
 // =========================================================================
 
 fn send_args_fixture() -> SendArgs {
+    let workspace = seed_send_workspace();
+    let _ = crate::message_store::MessageStore::open(&workspace).unwrap();
     SendArgs {
         target: Some("alice".into()),
         message: vec!["hello".into(), "world".into(), "foo".into()],
         targets: None,
-        workspace: PathBuf::from("."),
+        workspace,
         team: Some("teamA".into()),
         task: Some("t-1".into()),
         sender: TrustedSender::leader(),
@@ -689,7 +691,7 @@ fn cmd_send_failed_outcome_yields_error_exit() {
     // DeliveryOutcome ok=false (e.g. refused) -> from_json -> ExitCode::Error (parser.py:507).
     // A failed send to a target must propagate non-zero exit reporting through CmdResult.
     let args = SendArgs {
-        target: Some("nonexistent".into()),
+        target: Some("drifted".into()),
         no_ack: false,
         no_wait: false,
         watch_result: false,

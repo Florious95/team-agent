@@ -42,6 +42,37 @@ fn seed_status_workspace() -> std::path::PathBuf {
     dir
 }
 
+fn seed_send_workspace() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "ta-cli-send-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let team = dir.join(".team");
+    std::fs::create_dir_all(team.join("runtime")).unwrap();
+    let state = json!({
+        "active_team_key": "teamA",
+        "teams": {
+            "teamA": {
+                "agents": {
+                    "alice": {"provider": "codex"},
+                    "drifted": {"provider": "codex", "status": "session_drift"}
+                },
+                "tasks": [{"id": "t-1"}]
+            }
+        }
+    });
+    std::fs::write(
+        team.join("runtime").join("state.json"),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+    dir
+}
+
 const DELEG_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
 const DELEG_INVALID_ROLE: &str = "---\nname: broken\nrole: Broken Worker\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nNo provider field.\n";
 const DELEG_TEAM_MD: &str =
