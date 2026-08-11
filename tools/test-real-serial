@@ -5,18 +5,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 run_start_epoch="$(date +%s)"
+test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/team-agent-test-real-serial.XXXXXX")"
+export TEAM_AGENT_TEST_TMP="$test_tmp_root"
 cleanup_tmux_residue_on_exit() {
   local rc=$?
   local cleanup_rc=0
   "$ROOT/tools/cleanup-tmux-residue.sh" --created-after-epoch "$run_start_epoch" || cleanup_rc=$?
+  if [[ -d "$test_tmp_root" ]]; then
+    rm -rf -- "$test_tmp_root" || cleanup_rc=$?
+  fi
   if [[ "$cleanup_rc" -ne 0 ]]; then
     echo "test-real-serial: cleanup-tmux-residue failed rc=$cleanup_rc" >&2
   fi
   exit "$rc"
 }
 trap cleanup_tmux_residue_on_exit EXIT
-
-rm -rf "${TMPDIR:-/tmp}/.team"
 
 set +e
 cargo test -p team-agent --all-targets -- --ignored --test-threads=1

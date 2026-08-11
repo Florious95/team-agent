@@ -505,7 +505,6 @@ pub fn claim_leader(
     team: Option<&str>,
     confirm: bool,
 ) -> Result<LeaseResult, LeaderError> {
-    let _ = confirm;
     let caller = std::env::var("TMUX_PANE")
         .ok()
         .filter(|pane| !pane.is_empty())
@@ -598,7 +597,7 @@ pub fn claim_leader(
         Some(team_id.as_str()),
         &team_id,
         &PaneId::new(caller),
-        true,
+        confirm,
         &event_log,
         &liveness,
         caller_target.as_ref(),
