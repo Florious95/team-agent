@@ -931,6 +931,7 @@
       "result": {
         "exit_code": 0,
         "output": {
+          "ack_forced_off": false,
           "agent_id": "w1",
           "channel": null,
           "content_length_bytes": 12,
