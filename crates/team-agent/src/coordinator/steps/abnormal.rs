@@ -798,6 +798,9 @@ fn worker_provider_exit_marker_check(
         // The wrapper writes its exit code immediately after this marker.  A
         // truncated capture can leave the marker without a complete token;
         // keep that case explicit rather than guessing success (or zero).
+        // Scope: this detail only covers exits that execute the wrapper's
+        // marker printf. SIGKILL, direct pane termination, and host power loss
+        // produce no marker; that absence is silent, not `rc=unknown`.
         let rc = cap
             .text
             .split_once(&marker)
