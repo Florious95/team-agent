@@ -27,7 +27,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::db::migration::MANAGED_TABLE_LAYOUTS;
-use team_agent::db::schema::{open_db, SCHEMA_VERSION};
+use team_agent::db::schema::{open_db, table_layout, SCHEMA_VERSION};
 use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
@@ -456,6 +456,14 @@ fn r7_results_is_cli_only_and_real_tools_list_stays_at_thirteen() {
 }
 
 #[test]
+fn schema_version_bump_must_be_deliberate() {
+    assert_eq!(
+        SCHEMA_VERSION, 5,
+        "changing SCHEMA_VERSION migrates every already-published team.db; the bump must be an explicit decision"
+    );
+}
+
+#[test]
 #[serial(case_results_cli)]
 fn r8_pre_feature_v4_database_is_read_without_schema_migration_or_backup() {
     let results_layout = MANAGED_TABLE_LAYOUTS
@@ -468,12 +476,30 @@ fn r8_pre_feature_v4_database_is_read_without_schema_migration_or_backup() {
         7,
         "R8 RED results_schema_growth: the read API must not add a results column; layout={results_layout:?}"
     );
-    assert_eq!(
-        SCHEMA_VERSION, 4,
-        "R8 RED schema_version_bump: the read API must not require a schema migration"
-    );
-
     let case = Case::from_pre_feature_v4("case-results-r8");
+    let db_path = case.workspace.join(".team/team.db");
+    let before_conn = Connection::open(&db_path).expect("R8 open frozen v4 database before read");
+    let before_version: i64 = before_conn
+        .query_row("pragma user_version", [], |row| row.get(0))
+        .expect("R8 read frozen user_version before read");
+    assert_eq!(
+        before_version, 4,
+        "R8 fixture must remain an exact pre-feature v4 database"
+    );
+    let before_layouts = MANAGED_TABLE_LAYOUTS
+        .iter()
+        .map(|(table, _)| {
+            (
+                (*table).to_string(),
+                table_layout(&before_conn, table).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    drop(before_conn);
+    let before_bytes = fs::read(&db_path).expect("R8 read frozen database bytes before read");
+    let before_modified = fs::metadata(&db_path)
+        .and_then(|metadata| metadata.modified())
+        .expect("R8 read frozen database mtime before read");
     let before_backups = migration_backups(&case.workspace);
     let body = results_body(case.run_results("case-pre-feature"), "R8");
     assert!(
@@ -484,6 +510,40 @@ fn r8_pre_feature_v4_database_is_read_without_schema_migration_or_backup() {
     assert_eq!(
         after_backups, before_backups,
         "R8 RED migration_backup_created: a read-only feature must not create team.db.pre-migration backups"
+    );
+    let after_conn = Connection::open(&db_path).expect("R8 open frozen v4 database after read");
+    let after_version: i64 = after_conn
+        .query_row("pragma user_version", [], |row| row.get(0))
+        .expect("R8 read frozen user_version after read");
+    let after_layouts = MANAGED_TABLE_LAYOUTS
+        .iter()
+        .map(|(table, _)| {
+            (
+                (*table).to_string(),
+                table_layout(&after_conn, table).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    drop(after_conn);
+    assert_eq!(
+        after_version, before_version,
+        "R8 RED user_version_changed: reading a frozen v4 database must not migrate it"
+    );
+    assert_eq!(
+        after_layouts, before_layouts,
+        "R8 RED table_layout_changed: reading a frozen v4 database must not alter its schema"
+    );
+    assert_eq!(
+        fs::read(&db_path).expect("R8 read frozen database bytes after read"),
+        before_bytes,
+        "R8 RED database_content_changed: reading a frozen v4 database must not write it"
+    );
+    assert_eq!(
+        fs::metadata(&db_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("R8 read frozen database mtime after read"),
+        before_modified,
+        "R8 RED database_mtime_changed: reading a frozen v4 database must not touch it"
     );
 }
 

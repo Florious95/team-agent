@@ -523,6 +523,11 @@ pub fn cmd_results(args: &ResultsArgs) -> Result<CmdResult, CliError> {
     })
 }
 
+pub fn cmd_wait(args: &WaitArgs) -> Result<CmdResult, CliError> {
+    let result = messaging::wait_for_result(&args.workspace, &args.task_id)?;
+    Ok(CmdResult::from_json(result.to_json(), args.json))
+}
+
 /// `cmd_allow_peer_talk`(`parser.py allow-peer-talk`).
 pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliError> {
     if args.team.is_some() {

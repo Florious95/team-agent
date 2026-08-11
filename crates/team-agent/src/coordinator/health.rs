@@ -1064,6 +1064,23 @@ pub fn render_event_line(event: &Value) -> Option<String> {
             clean_field(event, &["provider"], "-"),
             clean_field(event, &["matched_pattern_snippet", "snippet"], "-")
         )),
+        "result_wake.registered" => Some(format!(
+            "result_wake.registered: task={} watcher={}",
+            clean_field(event, &["task_id"], "-"),
+            clean_field(event, &["watcher_id"], "-")
+        )),
+        "result_wake.notified" => Some(format!(
+            "result_wake.notified: task={} result={} watcher={}",
+            clean_field(event, &["task_id"], "-"),
+            clean_field(event, &["result_id"], "-"),
+            clean_field(event, &["watcher_id"], "-")
+        )),
+        "result_wake.notify_failed" => Some(format!(
+            "result_wake.notify_failed: task={} watcher={} reason={}",
+            clean_field(event, &["task_id"], "-"),
+            clean_field(event, &["watcher_id"], "-"),
+            clean_field(event, &["reason", "error"], "-")
+        )),
         _ => None,
     }
 }

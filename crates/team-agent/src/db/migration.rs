@@ -98,6 +98,7 @@ pub const MANAGED_TABLE_LAYOUTS: &[(&str, &[&str])] = &[
             "agent_id",
             "message_id",
             "leader_id",
+            "recipient",
             "status",
             "created_at",
             "completed_at",
@@ -129,7 +130,7 @@ const CREATE_TABLE_TEMPLATES: &[(&str, &str)] = &[
     ("delivery_tokens", "create table if not exists __TABLE__ (\n          message_id text primary key,\n          unique_token text not null,\n          injected_at text not null,\n          visible_at text,\n          consumed_at text,\n          failed_at text,\n          failure_reason text\n        )"),
     ("agent_health", "create table if not exists __TABLE__ (\n          owner_team_id text,\n          agent_id text not null,\n          status text not null,\n          last_output_at text,\n          context_usage_pct integer,\n          current_task_id text,\n          updated_at text not null,\n          unique(owner_team_id, agent_id)\n        )"),
     ("peer_allowlist", "create table if not exists __TABLE__ (\n          a text not null,\n          b text not null,\n          created_at text not null,\n          primary key (a, b)\n        )"),
-    ("result_watchers", "create table if not exists __TABLE__ (\n          watcher_id text primary key,\n          owner_team_id text,\n          task_id text,\n          agent_id text,\n          message_id text,\n          leader_id text not null,\n          status text not null,\n          created_at text not null,\n          completed_at text,\n          result_id text,\n          notified_message_id text,\n          error text\n        )"),
+    ("result_watchers", "create table if not exists __TABLE__ (\n          watcher_id text primary key,\n          owner_team_id text,\n          task_id text,\n          agent_id text,\n          message_id text,\n          leader_id text not null,\n          recipient text,\n          status text not null,\n          created_at text not null,\n          completed_at text,\n          result_id text,\n          notified_message_id text,\n          error text\n        )"),
     ("leader_notification_log", "create table if not exists __TABLE__ (\n          result_id text not null,\n          owner_team_id text not null default '',\n          owner_epoch integer not null default 0,\n          leader_session_uuid text,\n          notified_message_id text not null,\n          notified_at text not null,\n          leader_pane_id_at_notify text,\n          envelope_content_hash text,\n          primary key (result_id, owner_team_id, owner_epoch)\n        )"),
 ];
 
