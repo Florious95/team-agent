@@ -1,11 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Exit codes: 1=test execution failure; 2=cleanup failure when tests pass;
+# 3=runner setup failure. If tests and cleanup both fail, return 1 and print
+# both original statuses.
+test_failure_exit_code=1
+cleanup_failure_exit_code=2
+runner_setup_failure_exit_code=3
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 run_start_epoch="$(date +%s)"
-test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/team-agent-test-fast.XXXXXX")"
+# macOS `sockaddr_un.sun_path` holds 104 bytes including its trailing NUL, so
+# a pathname may use at most 103 bytes. The longest current test suffix is
+# 40 bytes (n41's t70n41/<tmux-uid>/<ta-hash> shape); reserve 10 bytes for
+# future suffix growth and keep the runner-owned root below 53 bytes. The
+# suffix length is an observation from 2026-08-11, not an upper bound; this
+# guard constrains only the realpath of the root, not future suffix growth.
+# The 10-byte margin is an explicit, unbacked margin choice.
+socket_path_max_bytes=103
+longest_socket_suffix_bytes=40
+socket_root_budget=$((socket_path_max_bytes - longest_socket_suffix_bytes - 10))
+test_tmp_root="$(mktemp -d "/tmp/ta-fast.XXXXXX")"
+test_tmp_root="$(realpath "$test_tmp_root")"
+test_tmp_root_bytes="$(LC_ALL=C printf '%s' "$test_tmp_root" | wc -c | tr -d '[:space:]')"
+if (( test_tmp_root_bytes >= socket_root_budget )); then
+  rmdir "$test_tmp_root"
+  echo "test-fast: temp root path too long bytes=$test_tmp_root_bytes budget<$socket_root_budget path=$test_tmp_root" >&2
+  exit "$runner_setup_failure_exit_code"
+fi
 export TEAM_AGENT_TEST_TMP="$test_tmp_root"
 cleanup_test_temp_workspaces_on_exit() {
   local cleanup_rc=0
@@ -34,7 +58,14 @@ cleanup_tmux_residue_on_exit() {
   "$ROOT/tools/cleanup-tmux-residue.sh" --created-after-epoch "$run_start_epoch" || cleanup_rc=$?
   cleanup_test_temp_workspaces_on_exit || cleanup_rc=$?
   if [[ "$cleanup_rc" -ne 0 ]]; then
-    echo "test-fast: cleanup failed rc=$cleanup_rc" >&2
+    echo "test-fast: CLEANUP_FAILED rc=$cleanup_rc test_exit=$rc" >&2
+    if [[ "$rc" -eq 0 ]]; then
+      rc="$cleanup_failure_exit_code"
+    else
+      rc="$test_failure_exit_code"
+    fi
+  elif [[ "$rc" -ne 0 ]]; then
+    rc="$test_failure_exit_code"
   fi
   exit "$rc"
 }
@@ -51,7 +82,7 @@ fail_log="$artifact_dir/test-fast-failures-$stamp.txt"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "test-fast requires jq to parse cargo --message-format=json output" >&2
-  exit 2
+  exit "$runner_setup_failure_exit_code"
 fi
 
 if cargo test -p team-agent --all-targets --no-run --message-format=json-render-diagnostics >"$json_log"; then
@@ -172,4 +203,4 @@ else
 fi
 cat "$doc_log"
 
-echo "test-fast: ok"
+echo "test-fast: tests passed; cleanup pending"

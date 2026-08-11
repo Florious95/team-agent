@@ -1,21 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Exit codes: 1=test execution failure; 2=cleanup failure when tests pass;
+# 3=runner setup failure. If tests and cleanup both fail, return 1 and print
+# both original statuses.
+test_failure_exit_code=1
+cleanup_failure_exit_code=2
+runner_setup_failure_exit_code=3
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 run_start_epoch="$(date +%s)"
-test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/team-agent-test-real-serial.XXXXXX")"
+# Keep the runner-owned root below the measured Unix-socket path budget:
+# sun_path is 104 bytes including NUL, the longest current test suffix is 40
+# bytes, and 10 bytes remain as change margin (103 - 40 - 10 = 53). The
+# suffix length is an observation from 2026-08-11, not an upper bound; this
+# guard constrains only the realpath of the root, not future suffix growth.
+# The 10-byte margin is an explicit, unbacked margin choice.
+socket_path_max_bytes=103
+longest_socket_suffix_bytes=40
+socket_root_budget=$((socket_path_max_bytes - longest_socket_suffix_bytes - 10))
+test_tmp_root="$(mktemp -d "/tmp/ta-real.XXXXXX")"
+test_tmp_root="$(realpath "$test_tmp_root")"
+test_tmp_root_bytes="$(LC_ALL=C printf '%s' "$test_tmp_root" | wc -c | tr -d '[:space:]')"
+if (( test_tmp_root_bytes >= socket_root_budget )); then
+  rmdir "$test_tmp_root"
+  echo "test-real-serial: temp root path too long bytes=$test_tmp_root_bytes budget<$socket_root_budget path=$test_tmp_root" >&2
+  exit "$runner_setup_failure_exit_code"
+fi
 export TEAM_AGENT_TEST_TMP="$test_tmp_root"
 cleanup_tmux_residue_on_exit() {
   local rc=$?
   local cleanup_rc=0
   "$ROOT/tools/cleanup-tmux-residue.sh" --created-after-epoch "$run_start_epoch" || cleanup_rc=$?
   if [[ -d "$test_tmp_root" ]]; then
-    rm -rf -- "$test_tmp_root" || cleanup_rc=$?
+    if rm -rf -- "$test_tmp_root"; then
+      :
+    else
+      rm_rc=$?
+      cleanup_rc="$rm_rc"
+      echo "test-real-serial: temp workspace cleanup failed path=$test_tmp_root rc=$rm_rc" >&2
+    fi
   fi
   if [[ "$cleanup_rc" -ne 0 ]]; then
-    echo "test-real-serial: cleanup-tmux-residue failed rc=$cleanup_rc" >&2
+    echo "test-real-serial: CLEANUP_FAILED rc=$cleanup_rc test_exit=$rc" >&2
+    if [[ "$rc" -eq 0 ]]; then
+      rc="$cleanup_failure_exit_code"
+    else
+      rc="$test_failure_exit_code"
+    fi
+  elif [[ "$rc" -ne 0 ]]; then
+    rc="$test_failure_exit_code"
   fi
   exit "$rc"
 }
@@ -31,4 +67,4 @@ if [[ "$rc" -ne 0 ]]; then
   exit "$rc"
 fi
 
-echo "test-real-serial: ok"
+echo "test-real-serial: tests passed; cleanup pending"
