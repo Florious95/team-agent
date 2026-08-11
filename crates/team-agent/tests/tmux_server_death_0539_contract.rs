@@ -10,7 +10,7 @@
 //! - Display cleanup and raw tmux guards must not bypass the workspace-scoped
 //!   transport through helper indirection.
 //! - Worker provider exits are contained like manual tmux: the pane keeps a
-//!   marker/shell fallback instead of disappearing via a final provider exec.
+//!   marker/inert tail instead of disappearing via a final provider exec.
 //! - tmux server death is diagnosed as `tmux_server_crashed`, not as a cryptic
 //!   agent-local provider failure or only `tmux_session_missing`.
 //! - The real-machine fuzz gate includes the missing production shape:
@@ -18,8 +18,14 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use team_agent::tmux_backend::worker_shell_wrapper_command;
+
+const A37_INERT_SH_TAIL: &str = r#"exec /bin/sh -c 'trap '\'''\'' INT QUIT; stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done'"#;
+const LEGACY_LOGIN_SHELL_TAIL: &str = "exec \"${SHELL:-/bin/zsh}\" -l";
 
 #[test]
 fn display_cleanup_uses_scoped_transport_not_raw_tmux_helper() {
@@ -59,11 +65,22 @@ fn display_cleanup_uses_scoped_transport_not_raw_tmux_helper() {
     );
 }
 
+// A-37 shape c, 0.5.65: the former assertion required an interactive login
+// shell tail (`exec "${SHELL:-/bin/zsh}" -l`). That behavior was deliberately
+// replaced with the exact inert `/bin/sh -c` tail below so provider exit cannot
+// accept or execute pane stdin.
 #[test]
-fn worker_spawns_use_provider_wrapper_with_exit_marker_and_shell_fallback() {
+fn worker_spawns_use_provider_wrapper_with_exit_marker_and_inert_tail() {
     let backend = read_repo_file("crates/team-agent/src/tmux_backend.rs");
     let transport = read_repo_file("crates/team-agent/src/transport.rs");
     let spawn_common = read_repo_file("crates/team-agent/src/lifecycle/restart/common.rs");
+    let worker_line = worker_shell_wrapper_command(
+        &["codex".to_string(), "--help".to_string()],
+        Path::new("/var/work"),
+        &BTreeMap::new(),
+        &[],
+        "codex",
+    );
 
     let missing = missing_requirements(&[
         (
@@ -76,9 +93,9 @@ fn worker_spawns_use_provider_wrapper_with_exit_marker_and_shell_fallback() {
                 || backend.contains("worker_provider_exit_marker"),
         ),
         (
-            "worker wrapper falls back to an interactive shell after provider exit",
-            backend.contains("worker_shell_wrapper_command")
-                && backend.contains("${SHELL:-/bin/zsh}"),
+            "worker wrapper uses the exact A-37 inert sh tail and not the legacy login shell",
+            worker_line.ends_with(A37_INERT_SH_TAIL)
+                && !worker_line.contains(LEGACY_LOGIN_SHELL_TAIL),
         ),
         (
             "transport trait exposes first-worker wrapper spawn",
@@ -102,7 +119,7 @@ fn worker_spawns_use_provider_wrapper_with_exit_marker_and_shell_fallback() {
 
     assert!(
         missing.is_empty(),
-        "RED2: worker panes must contain provider exit the same way managed leader panes do: provider child process, explicit marker, then shell fallback. Missing: {missing:?}"
+        "RED2: worker panes must contain provider exit as a provider child with an explicit marker and exact inert tail. Missing: {missing:?}"
     );
 }
 

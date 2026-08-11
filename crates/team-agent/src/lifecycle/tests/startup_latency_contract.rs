@@ -167,13 +167,17 @@ fn restart_failure_aggregation_matches_serial_semantics_without_early_abort() {
         ["w1", "w2", "w4", "w5", "w6", "w7", "w8"],
         "R2: successful workers after w3 must still be spawned and reported"
     );
+    let mut observed_spawn_windows = transport
+        .spawn_calls()
+        .into_iter()
+        .map(|call| call.window)
+        .collect::<Vec<_>>();
+    let mut expected_spawn_windows = worker_ids(8);
+    observed_spawn_windows.sort();
+    expected_spawn_windows.sort();
     assert_eq!(
-        transport
-            .spawn_calls()
-            .iter()
-            .map(|call| call.window.as_str())
-            .collect::<Vec<_>>(),
-        worker_ids(8),
+        observed_spawn_windows,
+        expected_spawn_windows,
         "R2: failure aggregation must attempt the full plan; no early return after w3"
     );
 
