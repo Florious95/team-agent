@@ -1723,8 +1723,8 @@ pub fn worker_provider_exit_marker(provider_label: &str) -> String {
 /// as a CHILD of a long-lived shell so provider exit does NOT collapse the
 /// worker pane (which under upstream tmux 3.6a private-server bugs can
 /// cascade into whole-server death). When the provider exits, the worker
-/// pane returns to an interactive shell with an explicit worker exit
-/// marker, matching manual `tmux new-window` then `<provider>` behaviour.
+/// pane remains alive with an explicit worker exit marker, then runs an
+/// inert `sh` tail that does not read terminal input.
 pub fn worker_shell_wrapper_command(
     argv: &[String],
     cwd: &Path,
@@ -1758,23 +1758,21 @@ pub fn worker_shell_wrapper_command(
         worker_provider_exit_marker(provider_label)
     )));
     parts.push("\"$rc\";".to_string());
-    parts.push("exec".to_string());
-    parts.push("\"${SHELL:-/bin/zsh}\"".to_string());
-    parts.push("-l".to_string());
+    parts.push(inert_pane_tail_command());
     parts.join(" ")
 }
 
 /// 0.4.x (CR C-2): leader shell wrapper — provider runs as a CHILD of a
 /// long-lived shell, not as the pane's primary process. When the provider
-/// exits, the pane returns to an interactive shell with an explicit exit
-/// marker, matching manual `tmux new-session` then `claude` behaviour.
+/// exits, the pane remains alive with an explicit exit marker, then runs an
+/// inert `sh` tail that does not read terminal input.
 ///
 /// Four required envelope sections (CR C-2):
 ///   1. cd <cwd>                    — same as `shell_command`
 ///   2. unset <KEY> ...             — provider env_unset block
 ///   3. KEY=val ... <provider>      — env exports + provider invocation
 ///                                    (NO `exec` — runs as child)
-///   4. printf exit marker; exec shell -l
+///   4. printf exit marker; exec inert sh tail
 ///
 /// `provider_label` is a human-readable provider name (e.g. "claude",
 /// "codex") embedded in the exit marker for diagnostics.
@@ -1809,7 +1807,7 @@ pub fn leader_shell_wrapper_command(
     }
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.push(";".to_string());
-    // 4. exit marker + fall back to interactive shell
+    // 4. exit marker + inert shell tail
     parts.push("rc=$?;".to_string());
     parts.push("printf".to_string());
     // CR R6: marker text comes from single-source `leader_provider_exit_marker`.
@@ -1818,10 +1816,16 @@ pub fn leader_shell_wrapper_command(
         leader_provider_exit_marker(provider_label)
     )));
     parts.push("\"$rc\";".to_string());
-    parts.push("exec".to_string());
-    parts.push("\"${SHELL:-/bin/zsh}\"".to_string());
-    parts.push("-l".to_string());
+    parts.push(inert_pane_tail_command());
     parts.join(" ")
+}
+
+fn inert_pane_tail_command() -> String {
+    // `sh` is deliberate: provider-exit health checks use the shell basename
+    // to reach the exit-marker branch. `sh -c` does not read commands from
+    // stdin; disabling echo also prevents input from appearing accepted.
+    let script = r#"stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done"#;
+    format!("exec /bin/sh -c {}", shell_quote(script))
 }
 
 fn shell_quote(raw: &str) -> String {
