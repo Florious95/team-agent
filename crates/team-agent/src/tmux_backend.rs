@@ -1824,7 +1824,7 @@ fn inert_pane_tail_command() -> String {
     // `sh` is deliberate: provider-exit health checks use the shell basename
     // to reach the exit-marker branch. `sh -c` does not read commands from
     // stdin; disabling echo also prevents input from appearing accepted.
-    let script = r#"stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done"#;
+    let script = r#"trap '' INT QUIT; stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done"#;
     format!("exec /bin/sh -c {}", shell_quote(script))
 }
 

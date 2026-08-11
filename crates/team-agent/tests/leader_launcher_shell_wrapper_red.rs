@@ -33,7 +33,7 @@ use team_agent::transport::{
 #[allow(unused_imports)]
 use team_agent::transport::PaneLiveness as TransportPaneLiveness;
 
-const A37_INERT_SH_TAIL: &str = "exec /bin/sh -c 'stty -echo 2>/dev/null; printf \"%s\\n\" \"[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command.\"; while :; do sleep 3600 & wait \"$!\"; done'";
+const A37_INERT_SH_TAIL: &str = r#"exec /bin/sh -c 'trap '\'''\'' INT QUIT; stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done'"#;
 const LEGACY_LOGIN_SHELL_TAIL: &str = "exec \"${SHELL:-/bin/zsh}\" -l";
 
 // CR C-1 + C-2 unit test: the leader shell wrapper for a Claude launcher
@@ -84,6 +84,7 @@ fn managed_leader_shell_line_includes_claude_unset_block() {
 // changed it in 0.5.65 so provider exit no longer returns the pane to a
 // command-capable shell. Before deleting or weakening this assertion, first
 // confirm the A-37 injection boundary is protected elsewhere.
+// It also traps INT/QUIT: their keyboard-reachable default actions would destroy the pane and take the exit marker with it.
 #[test]
 fn managed_leader_shell_line_emits_exit_marker_and_inert_sh_tail() {
     let env: BTreeMap<String, String> = BTreeMap::new();
