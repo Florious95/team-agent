@@ -3,9 +3,9 @@
 //! 1. `managed_leader_shell_line_includes_claude_unset_block` — unit/golden
 //!    that `leader_shell_wrapper_command` for a Claude leader includes the
 //!    full Claude session-inheritance unset list (CR C-1 single source).
-//! 2. `managed_leader_shell_line_emits_exit_marker_and_exec_shell` — the
+//! 2. `managed_leader_shell_line_emits_exit_marker_and_inert_sh_tail` — the
 //!    wrapper line has all 4 sections (cd, unset, env+cmd no exec, exit
-//!    marker + exec shell).
+//!    marker + inert `sh` tail).
 //! 3. `leader_provider_health_detects_provider_exited_when_shell_with_marker` —
 //!    when a pane is addressable but current-command is a shell and the
 //!    exit marker is in the capture, health reports `ProviderExited`.
@@ -20,8 +20,8 @@ use std::sync::Mutex;
 use team_agent::leader::{leader_provider_health, LeaderProviderHealth};
 use team_agent::model::enums::PaneLiveness;
 use team_agent::tmux_backend::{
-    leader_provider_exit_marker, leader_shell_wrapper_command, LEADER_PROVIDER_EXIT_MARKER_PREFIX,
-    LEADER_PROVIDER_EXIT_MARKER_SUFFIX,
+    leader_provider_exit_marker, leader_shell_wrapper_command, worker_shell_wrapper_command,
+    LEADER_PROVIDER_EXIT_MARKER_PREFIX, LEADER_PROVIDER_EXIT_MARKER_SUFFIX,
 };
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -32,6 +32,9 @@ use team_agent::transport::{
 
 #[allow(unused_imports)]
 use team_agent::transport::PaneLiveness as TransportPaneLiveness;
+
+const A37_INERT_SH_TAIL: &str = r#"exec /bin/sh -c 'trap '\'''\'' INT QUIT; stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done'"#;
+const LEGACY_LOGIN_SHELL_TAIL: &str = "exec \"${SHELL:-/bin/zsh}\" -l";
 
 // CR C-1 + C-2 unit test: the leader shell wrapper for a Claude launcher
 // must include EVERY entry in profile_launch::provider_env_unsets(Claude, *)
@@ -77,8 +80,13 @@ fn managed_leader_shell_line_includes_claude_unset_block() {
 }
 
 // CR C-2: all 4 envelope sections present.
+// This assertion originally required `exec "${SHELL:-/bin/zsh}" -l`; A-37 form c
+// changed it in 0.5.65 so provider exit no longer returns the pane to a
+// command-capable shell. Before deleting or weakening this assertion, first
+// confirm the A-37 injection boundary is protected elsewhere.
+// It also traps INT/QUIT: their keyboard-reachable default actions would destroy the pane and take the exit marker with it.
 #[test]
-fn managed_leader_shell_line_emits_exit_marker_and_exec_shell() {
+fn managed_leader_shell_line_emits_exit_marker_and_inert_sh_tail() {
     let env: BTreeMap<String, String> = BTreeMap::new();
     let line = leader_shell_wrapper_command(
         &["claude".to_string(), "--help".to_string()],
@@ -105,14 +113,37 @@ fn managed_leader_shell_line_emits_exit_marker_and_exec_shell() {
         "section 4: exit marker; got {line}"
     );
     assert!(
-        line.contains("exec \"${SHELL:-/bin/zsh}\" -l"),
-        "section 4: fall back to interactive shell; got {line}"
+        line.ends_with(A37_INERT_SH_TAIL),
+        "section 4: exact inert sh tail changed; expected suffix={A37_INERT_SH_TAIL:?}; got {line}"
+    );
+    assert!(
+        !line.contains(LEGACY_LOGIN_SHELL_TAIL),
+        "section 4: A-37 must not fall back to a command-capable login shell; got {line}"
     );
     // Critical anti-regression: no `exec claude` (the bug we're fixing).
     assert!(
         !line.contains("exec claude"),
         "leader wrapper MUST NOT use `exec claude` — provider must run as \
-         child of shell so pane returns to shell on exit. Got: {line}"
+         child of shell so the wrapper records its exit before the inert tail. Got: {line}"
+    );
+}
+
+#[test]
+fn worker_shell_line_uses_exact_a37_inert_sh_tail() {
+    let line = worker_shell_wrapper_command(
+        &["codex".to_string(), "--help".to_string()],
+        Path::new("/var/work"),
+        &BTreeMap::new(),
+        &[],
+        "codex",
+    );
+    assert!(
+        line.ends_with(A37_INERT_SH_TAIL),
+        "worker wrapper exact inert sh tail changed; expected suffix={A37_INERT_SH_TAIL:?}; got {line}"
+    );
+    assert!(
+        !line.contains(LEGACY_LOGIN_SHELL_TAIL),
+        "worker wrapper must not fall back to a command-capable login shell; got {line}"
     );
 }
 
@@ -137,6 +168,24 @@ fn leader_provider_health_detects_provider_exited_when_shell_with_marker() {
         health,
         LeaderProviderHealth::ProviderExited,
         "shell + exit marker must report ProviderExited; got {health:?}"
+    );
+}
+
+#[test]
+fn a37_inert_sh_basename_with_marker_still_reports_provider_exited() {
+    let marker = leader_provider_exit_marker("claude");
+    let transport = HealthMockTransport::new(
+        PaneLiveness::Live,
+        Some("sh".to_string()),
+        Some(format!(
+            "{marker} 17\n[team-agent] Provider exited; pane is inert"
+        )),
+    );
+    let pane_id = PaneId::new("%a37");
+    assert_eq!(
+        leader_provider_health(&transport, &pane_id, "claude"),
+        LeaderProviderHealth::ProviderExited,
+        "A-37 inert tail basename `sh` must remain on the provider-exit marker path"
     );
 }
 
