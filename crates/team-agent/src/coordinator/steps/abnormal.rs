@@ -578,7 +578,7 @@ fn agent_process_liveness(
     // pane for POSITIVE provider evidence via current-command + worker
     // exit marker. Under the 0.5.39 wrapper, `state.status=running` is
     // administrative spawn accounting, not runtime truth — a provider
-    // may have exited into the shell fallback while state still reads
+    // may have exited into the inert shell tail while state still reads
     // running. The marker probe positively proves that case; when it
     // fires we return Dead here instead of the false Alive further
     // down.

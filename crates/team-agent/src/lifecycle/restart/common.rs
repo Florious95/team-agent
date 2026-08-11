@@ -405,9 +405,9 @@ pub(super) fn spawn_agent_window(
 
     // 0.5.39 Slice 2 (tmux-server-death-locate §7 Slice 2): route the
     // primary worker spawn through the worker shell wrapper so provider
-    // exit leaves the pane at an interactive shell with an explicit exit
-    // marker instead of collapsing the pane into `[exited]`. This mirrors
-    // the leader wrapper's manual-tmux equivalence. The split path stays
+    // exit leaves the pane at an inert sh tail with an explicit exit marker
+    // instead of collapsing the pane into `[exited]`. The inert tail does
+    // not read pane stdin. The split path stays
     // on plain spawn_split — split panes are display overlays, not the
     // primary worker process.
     let provider_label = crate::provider::wire::command_name(provider);

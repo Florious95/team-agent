@@ -613,11 +613,11 @@ pub trait Transport: Send + Sync {
     /// variant that reuses the leader-wrapper mechanism so worker provider
     /// exit does not collapse the pane into `[exited]` (which under
     /// upstream tmux 3.6a private-server bugs can cascade into server
-    /// death). When the provider exits, the worker pane returns to an
-    /// interactive shell with an explicit worker exit marker — matching
-    /// manual `tmux new-window` then `<provider>` behaviour. Default falls
-    /// back to plain `spawn_first_with_env_unset` for backends that have
-    /// no shell layer (test-only `OfflineTransport`).
+    /// death). When the provider exits, the worker pane keeps an explicit
+    /// worker exit marker and runs the inert `/bin/sh -c` tail: it ignores
+    /// INT/QUIT and does not read pane stdin. Default falls back to plain
+    /// `spawn_first_with_env_unset` for backends that have no shell layer
+    /// (test-only `OfflineTransport`).
     fn spawn_first_with_worker_shell_wrapper(
         &self,
         session: &SessionName,
@@ -650,12 +650,12 @@ pub trait Transport: Send + Sync {
     /// 0.4.x (CR C-2): leader-specific spawn variant. Instead of `exec <cmd>`
     /// (which makes the provider the pane's primary process and turns the
     /// pane into `[exited]` when the provider exits), build a shell line
-    /// that runs the provider as a CHILD of a long-lived shell:
-    /// `cd ... && unset ... && KEY=val ... <cmd>; rc=$?; printf '\n[team-agent] <provider> exited with %s\n' "$rc"; exec "${SHELL:-/bin/zsh}" -l`.
-    /// When the provider exits, the pane returns to an interactive shell with
-    /// an explicit exit marker — matching manual `tmux new-session` then
-    /// `claude` behaviour. Default falls back to plain `spawn_first_with_env_unset`
-    /// for backends that have no shell layer (test-only `OfflineTransport`).
+    /// that runs the provider as a CHILD of a long-lived shell. When the
+    /// provider exits, the wrapper records the exit code and marker, then
+    /// execs an inert `/bin/sh -c` tail that ignores INT/QUIT and does not
+    /// read pane stdin. Default falls back to plain
+    /// `spawn_first_with_env_unset` for backends that have no shell layer
+    /// (test-only `OfflineTransport`).
     fn spawn_first_with_leader_shell_wrapper(
         &self,
         session: &SessionName,

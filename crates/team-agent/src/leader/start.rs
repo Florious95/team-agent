@@ -1269,12 +1269,12 @@ fn ensure_managed_provider_live_after_attach(
 /// 0.4.x (CR C-3 P0): leader provider health reconciliation. The default
 /// `liveness()` check only proves the pane is ADDRESSABLE via tmux — it
 /// returns `Live` even when the provider has exited and the wrapper shell
-/// fell back to an interactive shell. This function distinguishes
+/// remains at its inert tail. This function distinguishes
 /// `provider_alive` from `provider_exited` by:
 ///   1. Reading `pane_current_command` (tmux `#{pane_current_command}`).
 ///   2. If the current command matches the expected provider binary (or
 ///      one of its known aliases), report `Alive`.
-///   3. If the current command is an interactive shell AND the pane
+///   3. If the current command is a shell tail process AND the pane
 ///      content contains the exit marker `[team-agent] <provider> exited`
 ///      (emitted by `leader_shell_wrapper_command`), report
 ///      `ProviderExited`.
@@ -1282,7 +1282,7 @@ fn ensure_managed_provider_live_after_attach(
 ///      conservative default — avoid false-positive exit alarms.
 ///
 /// Note: when the leader shell wrapper is used (CR C-2), a provider exit
-/// leaves the pane as `<SHELL:-/bin/zsh>` with the exit marker in
+/// leaves the pane as an inert `/bin/sh -c` tail with the exit marker in
 /// scrollback. Pre-wrapper code that hit `exec claude` would have left the
 /// pane as `[exited]` and `liveness()` would have returned `Dead`. The new
 /// failure mode requires this richer health check to surface
@@ -1340,16 +1340,16 @@ pub enum LeaderProviderHealth {
     Unreachable,
 }
 
-/// 0.4.x (CR R6 + R3): single-source interactive-shell detection.
+/// 0.4.x (CR R6 + R3): single-source shell-tail detection.
 /// Used by:
-///   - `leader_provider_health` to decide "pane fell back to shell"
-///   - shutdown logic to recognise a leader pane in fallback-shell mode
+///   - `leader_provider_health` to decide "pane is at the shell tail"
+///   - shutdown logic to recognise a leader pane in shell-tail mode
 ///     as still owned by the leader (not stray).
 ///
 /// Matches by basename (case-insensitive) — `pane_current_command` returns
 /// the basename of the running binary. Conservative whitelist of POSIX +
-/// common interactive shells; missing entries here are false negatives
-/// (shell looks like provider absent → health says Alive) which is the
+/// common shell processes; missing entries here are false negatives
+/// (shell tail looks like provider absent → health says Alive) which is the
 /// safe default per the CR R6 conservative-Alive rule.
 fn is_interactive_shell_basename(name: &str) -> bool {
     let trimmed = name.trim().to_ascii_lowercase();

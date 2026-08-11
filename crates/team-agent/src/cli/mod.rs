@@ -2245,14 +2245,15 @@ pub mod lifecycle_port {
     /// runs, where the leader is never in the invoker's ancestry.
     ///
     /// 0.4.x (CR R3): leader shell wrapper interaction. The leader pane's
-    /// controlling process is the `sh -lc "...; exec ${SHELL} -l"` that
-    /// runs Claude as a CHILD. When Claude exits and the shell wrapper falls
-    /// back via `exec ${SHELL} -l`, the controlling PID is REPLACED in-place
-    /// by the interactive shell (same pane_pid). Because this function
-    /// protects by `pane.pane_pid` (Source 1 & 2), the fallback interactive
-    /// shell is already covered by the same protection set — shutdown will
-    /// NOT treat the fallback shell as a stray process. Verified by the
-    /// `leader_fallback_shell_protected_when_provider_exited` test.
+    /// controlling process is the `sh -lc` wrapper that runs Claude as a
+    /// CHILD. When Claude exits, the wrapper records the marker and replaces
+    /// its command with the inert `/bin/sh -c` tail (which ignores INT/QUIT
+    /// and does not read pane stdin). Because this function protects by
+    /// `pane.pane_pid` (Source 1 & 2), that tail is covered by the same
+    /// protection set — shutdown will NOT treat it as a stray process.
+    /// This protection is currently untested; the former claim that
+    /// `leader_fallback_shell_protected_when_provider_exited` verified it
+    /// referred to a test absent from this repository (A-46).
     ///
     /// Two leader-pane sources(N39 双来源,真机 grounded):
     /// 1. **Session prefix**: tmux session starts with `team-agent-leader-`(契约 grounded;

@@ -518,9 +518,9 @@ if [ "$track" != 1 ]; then
 fi
 # 0.5.39 Slice 2: worker spawn now goes through the worker shell
 # wrapper (tmux-server-death-locate §7 Slice 2), which embeds a
-# printf format literal containing "\n" bytes so the pane returns to
-# an interactive shell with an explicit exit marker instead of
-# collapsing to `[exited]`. Those embedded newlines land inside the
+# printf format literal containing "\n" bytes so the pane retains an
+# inert sh tail with an explicit exit marker instead of collapsing to
+# `[exited]`. Those embedded newlines land inside the
 # tmux argv payload, so a naive `printf '%s\n' "$*"` writes multiple
 # lines per tmux invocation and downstream `raw.lines()` scans see
 # fake "argv" lines that carry only the marker text. Escape newlines
