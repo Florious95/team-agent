@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.65
+
+- **A-37 shape c: inert provider-exit tail.** After the provider exits, the wrapper records the exit marker and replaces itself with an inert `sh` tail that does not read stdin and ignores `INT` and `QUIT`; it no longer falls back to a command-capable login shell.
+- **Provider exit-code observation.** The probe side now captures the exit code immediately following the wrapper marker. A missing, truncated, or non-numeric value is reported as `unknown`; this covers only executions that reached that wrapper line.
+- **Delivery output schema: `ack_forced_off`.** CLI and MCP delivery output now includes `ack_forced_off`, defaulting to `false` for backward compatibility. This is a command-output schema addition, not an event schema change.
+- **Safer test runners.** `tools/test-fast` and `tools/test-real-serial` create a private temporary root per run, export `TEAM_AGENT_TEST_TMP`, and remove only their own root. A path-budget guard measures the resolved root path. The guard constrains the root only: the 40-byte suffix is the longest value observed on 2026-08-11, not a future upper bound.
+- **Distinct runner failures.** Test execution failure, cleanup failure after green tests, and runner setup failure now return distinct non-zero codes (`1`, `2`, and `3`); when both testing and cleanup fail, the test-failure code wins and both statuses are printed.
+- **DS-01 result-store wake.** `wait --task <id>` can register before a result is stored and be woken when `report_result` commits the result; the result-watcher recipient is persisted through the v4-to-v5 schema migration with existing rows preserved.
+- **A-35 claim confirmation.** `claim-leader` now honors the confirmation gate for a live owner: an unconfirmed live owner is refused, while a dead owner remains reclaimable.
+- **A-38 fail-closed subprocess paths.** Test helpers verify that the resolved `team-agent` binary is a file before spawning it and emit an actionable error instead of silently proceeding with a missing executable.
+
 ## 0.5.64
 
 - **`remove-agent` 保留角色文件：** 不再删除注册路径下的角色 Markdown；只移除运行时、spec、state 与 health 记录，角色文件继续作为用户资产保留。
