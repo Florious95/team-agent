@@ -133,6 +133,7 @@ pub fn send_to_leader_receiver_with_presentation(
                 stage: None,
                 reason: Some(DeliveryRefusal::Duplicate),
                 channel: Some("leader_receiver".to_string()),
+                ack_forced_off: requires_ack,
             });
         }
         PersistResolution::Persisted(persisted) => persisted.message_id,
@@ -174,6 +175,7 @@ pub fn send_to_leader_receiver_with_presentation(
                 stage: None,
                 reason: None,
                 channel: Some("leader_receiver".to_string()),
+                ack_forced_off: requires_ack,
             });
         }
     }
@@ -210,6 +212,7 @@ pub fn send_to_leader_receiver_with_presentation(
         stage: None,
         reason: None,
         channel: Some("leader_receiver".to_string()),
+        ack_forced_off: requires_ack,
     })
 }
 
@@ -255,6 +258,7 @@ pub fn deliver_to_leader_fallback_pane(
             stage: None,
             reason: None,
             channel: Some("leader_receiver".to_string()),
+            ack_forced_off: false,
         });
     }
 
@@ -269,6 +273,7 @@ pub fn deliver_to_leader_fallback_pane(
             stage: None,
             reason: None,
             channel: Some("leader_receiver".to_string()),
+            ack_forced_off: false,
         });
     }
 
@@ -310,6 +315,7 @@ pub fn deliver_to_leader_fallback_pane(
             stage: None,
             reason: Some(DeliveryRefusal::LeaderNotAttached),
             channel: Some("fallback_pane".to_string()),
+            ack_forced_off: false,
         });
     };
 
@@ -383,6 +389,7 @@ pub fn deliver_to_leader_fallback_pane(
             stage: None,
             reason: Some(DeliveryRefusal::LeaderNotAttached),
             channel: Some("rebind_required".to_string()),
+            ack_forced_off: false,
         });
     };
     let target = Target::Pane(PaneId::new(channel.pane_id));
@@ -435,6 +442,7 @@ pub fn deliver_to_leader_fallback_pane(
                             stage: Some(DeliveryStage::Submit),
                             reason: None,
                             channel: Some("leader_acceptance_pending".to_string()),
+                            ack_forced_off: false,
                         });
                     }
                     super::delivery::LeaderReceiptObservation::TokenObserved => {}
@@ -461,6 +469,7 @@ pub fn deliver_to_leader_fallback_pane(
                     stage: None,
                     reason: None,
                     channel: Some("fallback_pane".to_string()),
+                    ack_forced_off: false,
                 })
             } else {
                 let reason = format!(
@@ -486,6 +495,7 @@ pub fn deliver_to_leader_fallback_pane(
                     stage: Some(DeliveryStage::Submit),
                     reason: None,
                     channel: Some("fallback_pane".to_string()),
+                    ack_forced_off: false,
                 })
             }
         }
@@ -527,6 +537,7 @@ pub fn deliver_to_leader_fallback_pane(
                 stage: None,
                 reason: Some(DeliveryRefusal::TmuxTargetMissing),
                 channel: Some(channel),
+                ack_forced_off: false,
             })
         }
     }
@@ -718,5 +729,6 @@ pub fn enqueue_leader_mailbox_until_attach(
         stage: None,
         reason: None,
         channel: Some("leader_mailbox".to_string()),
+        ack_forced_off: false,
     })
 }

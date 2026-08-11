@@ -211,6 +211,7 @@ pub(crate) fn delivery_outcome_value(out: &DeliveryOutcome) -> Value {
         "ok": out.ok,
         "status": enum_value(out.status),
         "message_id": out.message_id,
+        "ack_forced_off": out.ack_forced_off,
     });
     if let Some(obj) = value.as_object_mut() {
         if let Some(reason) = out.reason {

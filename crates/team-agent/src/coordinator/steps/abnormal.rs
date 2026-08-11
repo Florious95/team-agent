@@ -795,9 +795,29 @@ fn worker_provider_exit_marker_check(
         .capture(&target, crate::transport::CaptureRange::Tail(200))
         .ok()?;
     if cap.text.contains(&marker) {
+        // The wrapper writes its exit code immediately after this marker.  A
+        // truncated capture can leave the marker without a complete token;
+        // keep that case explicit rather than guessing success (or zero).
+        // Scope: this detail only covers exits that execute the wrapper's
+        // marker printf. SIGKILL, direct pane termination, and host power loss
+        // produce no marker; that absence is silent, not `rc=unknown`.
+        let rc = cap
+            .text
+            .split_once(&marker)
+            .and_then(|(_, tail)| {
+                let token = tail.split_whitespace().next()?;
+                let end = tail.find(token)? + token.len();
+                tail.as_bytes()
+                    .get(end)
+                    .is_some_and(u8::is_ascii_whitespace)
+                    .then_some(token)
+            })
+            .and_then(|token| token.parse::<i32>().ok())
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         Some(process_check(
             ProcessLiveness::Dead,
-            format!("worker_provider_exited:{pane_id_str}"),
+            format!("worker_provider_exited:{pane_id_str}:rc={rc}"),
         ))
     } else {
         None
@@ -1813,6 +1833,39 @@ mod tests {
             recency,
             ErrorRecency::Stale,
             "cohort change baselines the observed error instead of treating it as fresh"
+        );
+    }
+
+    #[test]
+    fn worker_exit_marker_detail_includes_exit_code() {
+        let pane_id = crate::transport::PaneId::new("%marker-rc");
+        let marker = crate::tmux_backend::worker_provider_exit_marker("codex");
+        let transport = crate::transport::test_support::OfflineTransport::new()
+            .with_capture_for_pane(pane_id.as_str(), format!("\n{marker} 23\n"));
+        let mut agent = test_abnormal_agent("/tmp/rollout.jsonl", Some(1), None);
+        agent.pane_id = Some(pane_id.as_str().to_string());
+
+        let check = worker_provider_exit_marker_check(&agent, &transport).expect("marker hit");
+
+        assert_eq!(check.state, ProcessLiveness::Dead);
+        assert_eq!(check.detail, "worker_provider_exited:%marker-rc:rc=23");
+    }
+
+    #[test]
+    fn worker_exit_marker_detail_uses_unknown_for_truncated_exit_code() {
+        let pane_id = crate::transport::PaneId::new("%marker-truncated");
+        let marker = crate::tmux_backend::worker_provider_exit_marker("codex");
+        let transport = crate::transport::test_support::OfflineTransport::new()
+            .with_capture_for_pane(pane_id.as_str(), format!("\n{marker} "));
+        let mut agent = test_abnormal_agent("/tmp/rollout.jsonl", Some(1), None);
+        agent.pane_id = Some(pane_id.as_str().to_string());
+
+        let check = worker_provider_exit_marker_check(&agent, &transport).expect("marker hit");
+
+        assert_eq!(check.state, ProcessLiveness::Dead);
+        assert_eq!(
+            check.detail,
+            "worker_provider_exited:%marker-truncated:rc=unknown"
         );
     }
 
