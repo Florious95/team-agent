@@ -709,6 +709,38 @@ fn report_result_invalid_envelope_errors_validation() {
     );
 }
 
+#[test]
+fn leader_receiver_reports_requires_ack_forced_off() {
+    let ws = tmp_ws("ack-forced-off");
+    let log = EventLog::new(&ws);
+    let state = json(serde_json::json!({
+        "active_team_key": "team-a",
+        "teams": {"team-a": {}}
+    }));
+
+    let outcome = send_to_leader_receiver(
+        &ws,
+        &state,
+        "leader",
+        "ack contract probe",
+        None,
+        "worker",
+        true,
+        None,
+        &log,
+    )
+    .unwrap();
+
+    let value = crate::mcp_server::helpers::delivery_outcome_value(&outcome);
+    assert_eq!(
+        value
+            .get("ack_forced_off")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "requires_ack=true must report that the unavailable ack guarantee was forced off"
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // GROUP N — notify_result_watchers dedupe (exactly-once, Gap 32/38).
 // result_delivery.py:38-132. superseded for duplicate watchers same result.

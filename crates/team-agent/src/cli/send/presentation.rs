@@ -108,6 +108,7 @@ pub(super) fn delivery_outcome_json(
         "sender": opts.sender,
         "message_id": outcome.message_id,
         "message_status": outcome.message_status.0,
+        "ack_forced_off": outcome.ack_forced_off,
         "verification": outcome.verification,
         "stage": outcome.stage.map(delivery_stage_wire),
         "reason": outcome.reason.map(delivery_refusal_wire),

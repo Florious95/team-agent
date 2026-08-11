@@ -214,6 +214,7 @@ pub fn send_message(
                 stage: None,
                 reason: Some(crate::messaging::DeliveryRefusal::EmptyTargetList),
                 channel: None,
+                ack_forced_off: false,
             });
         }
         MessageTarget::Fanout(recipients) => {
@@ -351,6 +352,7 @@ pub fn send_message(
         stage: None,
         reason: None,
         channel: None,
+        ack_forced_off: false,
     })
 }
 
@@ -404,6 +406,7 @@ fn persist_stored_only_send(
         stage: None,
         reason: None,
         channel: Some(presentation.effective_sink.as_str().to_string()),
+        ack_forced_off: false,
     })
 }
 
@@ -451,6 +454,7 @@ fn refused_outcome_with_id(reason: DeliveryRefusal, message_id: Option<String>) 
         stage: None,
         reason: Some(reason),
         channel: None,
+        ack_forced_off: false,
     }
 }
 
@@ -467,6 +471,7 @@ fn refused_outcome_with_verification(
         stage: None,
         reason: Some(reason),
         channel: None,
+        ack_forced_off: false,
     }
 }
 
@@ -549,6 +554,7 @@ fn coordinator_unavailable_outcome(
             stage: None,
             reason: Some(DeliveryRefusal::CoordinatorUnavailable),
             channel: Some("coordinator_unavailable".to_string()),
+            ack_forced_off: false,
         },
     }))
 }
@@ -573,6 +579,7 @@ fn rebind_required_outcome_with_verification(
         stage: None,
         reason: Some(DeliveryRefusal::LeaderNotAttached),
         channel: Some("rebind_required".to_string()),
+        ack_forced_off: false,
     }
 }
 
@@ -804,6 +811,7 @@ pub(crate) fn session_drift_refusal(
         stage: None,
         reason: Some(DeliveryRefusal::SessionDrift),
         channel: None,
+        ack_forced_off: false,
     }))
 }
 
@@ -924,5 +932,6 @@ fn fanout_send(
         } else {
             channel_label.to_string()
         }),
+        ack_forced_off: false,
     })
 }

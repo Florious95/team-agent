@@ -295,6 +295,8 @@ pub enum PaneWidthQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveryOutcome {
     pub ok: bool,
+    /// Whether a caller-requested ack guarantee was unavailable and forced off.
+    pub ack_forced_off: bool,
     /// 投递层结果态 (≠ 行态)。
     pub status: DeliveryStatus,
     /// step 7 `messages.status` 行态原文 (shadow;leader 集成时收口为 step 7 enum)。
