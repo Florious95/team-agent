@@ -567,9 +567,17 @@ fn cmd_send_joins_message_with_single_space() {
         CmdOutput::Json(ref v) => {
             assert!(v.get("ok").is_some(), "send result Json must carry `ok`");
             if v.get("ok").and_then(|ok| ok.as_bool()) == Some(true) {
+                let delivered = v.get("delivered").and_then(|x| x.as_bool()) == Some(true);
+                // hermetic tier 假设：此 fixture 无法产生真实 tmux Delivered。
+                // 若 delivered=true 命中说明 tier 前提变了（例如 seed 开了 Delivered 通路），
+                // 应立即失败以强制重新审视，而不是悄悄跑一条从未验过的分支。
+                assert!(
+                    !delivered,
+                    "hermetic seed 不应产生 delivered=true；tier 假设变了"
+                );
                 assert_eq!(
                     v.get("reminder").and_then(|reminder| reminder.as_str()),
-                    Some(crate::cli::SEND_REMINDER)
+                    Some("Message queued; coordinator will notify when the worker receives it. Do not poll the worker terminal with capture-pane.")
                 );
             }
         }
