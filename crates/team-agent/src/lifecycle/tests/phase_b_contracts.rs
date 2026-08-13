@@ -463,8 +463,8 @@ fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
 }
 
 fn breal_workspace() -> (PathBuf, PathBuf) {
-    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
-    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
     let team = team_dir_with_roles(&[("w1.md", w1), ("w2.md", w2)]);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
@@ -483,7 +483,7 @@ fn breal_workspace() -> (PathBuf, PathBuf) {
 }
 
 fn breal_one_worker_workspace() -> (PathBuf, PathBuf) {
-    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
     let team = team_dir_with_roles(&[("w1.md", w1)]);
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
@@ -526,7 +526,7 @@ fn strip_runtime_command_context(workspace: &std::path::Path) {
 
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
 }
 

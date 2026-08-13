@@ -270,7 +270,6 @@ fn restart_with_selected_team_and_transport(
     let spec_workspace = runtime_spec.parent().ok_or_else(|| {
         LifecycleError::TeamSelect("active team spec workspace not found".to_string())
     })?;
-    let safety = crate::lifecycle::launch::effective_runtime_config(&spec)?;
     // Bug 1 (0.4.2 P0): the rebuilt spec is the single source of truth for the
     // active roster. Any agent in state.agents that is NOT in the rebuilt
     // spec is a stale leftover (role doc was deleted between sessions) and
@@ -526,7 +525,6 @@ fn restart_with_selected_team_and_transport(
             &selected.team_key,
             &session_name,
             transport,
-            &safety,
             tmux_endpoint_source,
             &state,
         )
@@ -551,12 +549,25 @@ fn restart_with_selected_team_and_transport(
         if let Some(parallel_result) = parallel_result {
             match parallel_result {
                 Ok(pspawn) => {
+                    let raw_agent = state
+                        .get("agents")
+                        .and_then(|v| v.get(decision.agent_id.as_str()))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let rehydrated = rehydrate_agent_command_context_from_spec(
+                        spec_workspace,
+                        &decision.agent_id,
+                        &raw_agent,
+                    );
+                    let launched_bypass = matches!(
+                        rehydrated.get("dangerously_skip_permissions"),
+                        Some(serde_json::Value::Bool(true))
+                    );
                     apply_marked_respawn(
                         &selected.run_workspace,
                         &selected.team_key,
                         &mut state,
                         transport,
-                        &safety,
                         &phase_timer,
                         decision,
                         &pspawn.spawn,
@@ -565,6 +576,7 @@ fn restart_with_selected_team_and_transport(
                         &mut successful_agents,
                         &mut failed_agents,
                         &mut fatal_resume_failure,
+                        launched_bypass,
                     );
                 }
                 Err(error) => {
@@ -709,7 +721,7 @@ fn restart_with_selected_team_and_transport(
             session_id,
             session_live,
             transport,
-            Some(&safety),
+            None,
             layout_placement.as_ref(),
             None,
             tmux_endpoint_source,
@@ -737,6 +749,10 @@ fn restart_with_selected_team_and_transport(
             }
         };
         let verify_start = std::time::Instant::now();
+        let launched_bypass = matches!(
+            agent.get("dangerously_skip_permissions"),
+            Some(serde_json::Value::Bool(true))
+        );
         if let Err(error) = verify_spawned_agent_live(&decision.agent_id, &spawn, transport)
             .and_then(|_| {
                 mark_agent_respawned(
@@ -745,7 +761,7 @@ fn restart_with_selected_team_and_transport(
                     decision.restart_mode,
                     &spawn,
                     transport,
-                    &safety,
+                    launched_bypass,
                 )
             })
         {
@@ -787,7 +803,16 @@ fn restart_with_selected_team_and_transport(
             .and_then(|agents| agents.get_mut(decision.agent_id.as_str()))
             .and_then(serde_json::Value::as_object_mut)
         {
-            persist_effective_approval_policy_for_restart(agent, &safety);
+            // 0.5.66 bypass 单源:policy 从 agent 行字段派生。
+            let agent_provider = agent
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .and_then(crate::provider::wire::parse_canonical_provider)
+                .unwrap_or(crate::model::enums::Provider::Codex);
+            crate::lifecycle::launch::persist_effective_approval_policy_from_agent(
+                agent,
+                agent_provider,
+            );
         }
         // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
         // pair the state-side activity clear with a DB `agent_health` clear so
@@ -1958,7 +1983,7 @@ fn mark_agent_respawned(
     restart_mode: StartMode,
     spawn: &SpawnedAgentWindow,
     transport: &dyn crate::transport::Transport,
-    safety: &DangerousApproval,
+    launched_bypass: bool,
 ) -> Result<(), LifecycleError> {
     let Some(agent) = state
         .get_mut("agents")
@@ -2081,7 +2106,18 @@ fn mark_agent_respawned(
         }
     }
     crate::lifecycle::launch::persist_command_plan_state(agent, &spawn.plan, &spawn.profile_launch);
-    persist_effective_approval_policy_for_restart(agent, safety);
+    // 0.5.66 bypass 单源:policy 从 agent 行字段派生,不再用全队 `DangerousApproval`。
+    let agent_provider = agent
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::provider::wire::parse_canonical_provider)
+        .unwrap_or(crate::model::enums::Provider::Codex);
+    crate::lifecycle::launch::persist_effective_approval_policy_from_agent(agent, agent_provider);
+    // 0.5.66 bypass 单源 §2.6:fresh spawn(restart)记录运行面 bypass 值。
+    agent.insert(
+        "as_launched_dangerously_skip_permissions".to_string(),
+        serde_json::json!(launched_bypass),
+    );
     if let Some(placement) = spawn.layout_placement.as_ref() {
         agent.insert(
             "layout_window".to_string(),
@@ -2510,7 +2546,6 @@ fn run_bounded_parallel_worker_spawns(
     team_key: &str,
     session_name: &SessionName,
     transport: &(dyn crate::transport::Transport),
-    safety: &DangerousApproval,
     tmux_endpoint_source: Option<&str>,
     state: &serde_json::Value,
 ) -> Vec<Option<Result<ParallelSpawnResult, String>>> {
@@ -2589,7 +2624,7 @@ fn run_bounded_parallel_worker_spawns(
         first_input.session_id.as_ref(),
         first_session_live,
         transport,
-        Some(safety),
+        None,
         first_input.layout_placement.as_ref(),
         None,
         tmux_endpoint_source,
@@ -2673,7 +2708,7 @@ fn run_bounded_parallel_worker_spawns(
                     input.session_id.as_ref(),
                     /* into_existing_session */ true,
                     transport,
-                    Some(safety),
+                    None,
                     input.layout_placement.as_ref(),
                     None,
                     tmux_endpoint_source,
@@ -2716,7 +2751,6 @@ fn apply_marked_respawn(
     team_key: &str,
     state: &mut serde_json::Value,
     transport: &(dyn crate::transport::Transport),
-    safety: &DangerousApproval,
     phase_timer: &RestartPhaseTimer,
     decision: &RestartedAgent,
     spawn: &SpawnedAgentWindow,
@@ -2725,6 +2759,7 @@ fn apply_marked_respawn(
     successful_agents: &mut Vec<RestartedAgent>,
     failed_agents: &mut Vec<RestartFailedAgent>,
     fatal_resume_failure: &mut bool,
+    launched_bypass: bool,
 ) {
     let verify_start = std::time::Instant::now();
     if let Err(error) =
@@ -2735,7 +2770,7 @@ fn apply_marked_respawn(
                 decision.restart_mode,
                 spawn,
                 transport,
-                safety,
+                launched_bypass,
             )
         })
     {
@@ -2776,7 +2811,16 @@ fn apply_marked_respawn(
         .and_then(|agents| agents.get_mut(decision.agent_id.as_str()))
         .and_then(serde_json::Value::as_object_mut)
     {
-        persist_effective_approval_policy_for_restart(agent, safety);
+        // 0.5.66 bypass 单源:policy 从 agent 行字段派生。
+        let agent_provider = agent
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::provider::wire::parse_canonical_provider)
+            .unwrap_or(crate::model::enums::Provider::Codex);
+        crate::lifecycle::launch::persist_effective_approval_policy_from_agent(
+            agent,
+            agent_provider,
+        );
     }
     let _ = crate::db::agent_health_capture::clear_agent_health_observation(
         run_workspace,
@@ -3728,7 +3772,7 @@ tasks:
             StartMode::Resumed,
             &spawn,
             &RespawnEpochTransport,
-            &disabled_safety(),
+            false,
         )
         .expect("mark respawned");
 

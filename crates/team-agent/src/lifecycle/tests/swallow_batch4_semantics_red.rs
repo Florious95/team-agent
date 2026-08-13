@@ -172,7 +172,7 @@ fn write_claude_compatible_team(ws: &Path) -> PathBuf {
     .unwrap();
     std::fs::write(
         team.join("agents/worker_a.md"),
-        "---\nname: worker_a\nrole: Compat Worker\nprovider: claude\nmodel: claude-haiku\nauth_mode: compatible_api\nprofile: relay\ntools:\n  - mcp_team\n---\n\nCompat worker.\n",
+        "---\nname: worker_a\nrole: Compat Worker\nprovider: claude\nmodel: claude-haiku\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: relay\ntools:\n  - mcp_team\n---\n\nCompat worker.\n",
     )
     .unwrap();
     std::fs::write(

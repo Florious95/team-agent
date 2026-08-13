@@ -488,7 +488,7 @@ fn write_team_docs(team_dir: &Path, workers: usize) {
 
 fn role_doc(worker: &str) -> String {
     format!(
-        "---\nname: {worker}\nrole: Worker {worker}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{worker}.\n"
+        "---\nname: {worker}\nrole: Worker {worker}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n"
     )
 }
 

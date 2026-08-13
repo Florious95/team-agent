@@ -299,10 +299,6 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
                     Value::Int(max_active_agents(agent_ids.len())),
                 ),
                 ("startup_order", list_str(agent_ids)),
-                (
-                    "dangerous_auto_approve",
-                    bool_field(&team_meta, "dangerous_auto_approve", false),
-                ),
                 ("fast", bool_field(&team_meta, "fast", false)),
                 (
                     "tick_interval_sec",
@@ -421,7 +417,12 @@ fn compile_role_agent_with_mode(
             ]),
         ),
         ("tools", list_str(tools)),
-        ("permission_mode", Value::Str("restricted".to_string())),
+        // 0.5.66 bypass 单源:compiler 透传角色 md 的 `dangerously_skip_permissions`
+        // (必填 bool,spec 校验保证存在)。取代旧"恒发 permission_mode: restricted"。
+        (
+            "dangerously_skip_permissions",
+            Value::Bool(required_dangerously_skip_permissions(&meta, role_path)?),
+        ),
         (
             "communication_mode",
             Value::Str(communication_mode.as_str().to_string()),
@@ -547,6 +548,25 @@ fn required_string(meta: &Value, path: &Path, key: &str) -> Result<String, Model
             path.display()
         ))
     })
+}
+
+/// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。
+/// 缺 = 编译失败(消息含硬串);非 bool = 同 fail-loud。
+fn required_dangerously_skip_permissions(
+    meta: &Value,
+    path: &Path,
+) -> Result<bool, ModelError> {
+    match meta.get("dangerously_skip_permissions") {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(ModelError::Validation(format!(
+            "{}: front matter field dangerously_skip_permissions must be a boolean。这个值必须问用户，leader 不许自决。",
+            path.display()
+        ))),
+        None => Err(ModelError::Validation(format!(
+            "{}: missing front matter field dangerously_skip_permissions。这个值必须问用户，leader 不许自决。",
+            path.display()
+        ))),
+    }
 }
 
 fn optional_string_value(meta: &Value, key: &str) -> Value {

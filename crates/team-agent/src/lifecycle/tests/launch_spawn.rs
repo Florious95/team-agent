@@ -31,8 +31,8 @@ struct HermeticTestEnv;
 
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
-pub(super) const QS_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
-const QS_ROLE_NO_PROVIDER: &str = "---\nname: implementer\nrole: Implementation Engineer\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
+pub(super) const QS_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
+const QS_ROLE_NO_PROVIDER: &str = "---\nname: implementer\nrole: Implementation Engineer\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
 
 /// A REAL team dir `<base>/teamdir/{TEAM.md, agents/implementer.md}` — already in team-dir
 /// layout, so quick_start's prepare_quick_start_team returns it as-is and writes the compiled
@@ -57,7 +57,7 @@ fn quick_start_team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
 
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
     )
 }
 
@@ -448,7 +448,7 @@ fn add_agent_proceeds_past_owner_gate_and_reaches_recompile() {
     let role = ws.join("w2-role.md");
     std::fs::write(
         &role,
-        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nSecond worker.\n",
+        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSecond worker.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -617,23 +617,8 @@ fn spine_quick_start_seeds_state_under_team_workspace_not_team_dir() {
     );
 }
 
-// #10 — launch dry-run safety is derived from spec.runtime.dangerous_auto_approve (source=runtime_config),
-// NOT a hardcoded Disabled. Golden config.py:effective_runtime_config.
-#[test]
-fn spine_launch_dry_run_safety_reflects_spec_dangerous() {
-    let team = quick_start_team_dir_custom(QS_TEAM_MD_DANGEROUS, QS_VALID_ROLE);
-    let spec_path = compiled_spec_path(&team);
-    let report = launch(&spec_path, true, false, true).expect("dry_run launch");
-    assert!(
-        report.safety.enabled,
-        "safety must reflect spec.runtime.dangerous_auto_approve=true"
-    );
-    assert_eq!(
-        report.safety.source,
-        DangerousApprovalSource::RuntimeConfig,
-        "safety source must be runtime_config when spec-declared"
-    );
-}
+// #10 removed — launch dry-run safety was derived from spec.runtime.dangerous_auto_approve.
+// 0.5.66 bypass 单源:该字段废弃,safety 改由 per-agent `dangerously_skip_permissions` 派生。
 
 // #12 — launch dry-run produces one RoutingDecision PER spec.task via route_task, with the real task id
 // and the route_task reason taxonomy — not one synthetic 'default_assignee' route. Golden core.py:77-88.
@@ -709,7 +694,7 @@ fn e5_add_agent_does_not_copy_role_into_platform_dir_and_injects_into_spec() {
     seed_canonical_team_identity(&team, "teamdir");
     // External role file OUTSIDE team_dir/agents, with recognizable body content.
     let role = team.parent().unwrap().join("w2-external-role.md");
-    let role_body = "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nUNIQUE-E5-BUG1-MARKER body for w2.\n";
+    let role_body = "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nUNIQUE-E5-BUG1-MARKER body for w2.\n";
     std::fs::write(&role, role_body).unwrap();
     let transport = OfflineTransport::new();
     // The spawn may not complete under OfflineTransport; we only assert the no-copy + spec-inject
@@ -749,7 +734,7 @@ fn e5_restart_rebuilds_runtime_spec_from_role_docs() {
                                                  // Edit a role doc AFTER initial compile: change alpha's role text.
     std::fs::write(
         ws.join("agents").join("alpha.md"),
-        "---\nname: alpha\nrole: RENAMED Alpha Role\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha edited.\n",
+        "---\nname: alpha\nrole: RENAMED Alpha Role\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha edited.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -974,7 +959,7 @@ fn e5_add_agent_resolves_team_dir_to_role_dir_when_runtime_spec_exists() {
     let role = team.join("w2-role.md");
     std::fs::write(
         &role,
-        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nw2.\n",
+        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nw2.\n",
     )
     .unwrap();
     let transport = OfflineTransport::new();
@@ -1563,9 +1548,9 @@ fn quick_start_fresh_ws_spawns_resident_tmux_and_coordinator() {
 // Golden: restart/orchestration.py (Route-B resume spawn), lifecycle/start.py, lifecycle/operations.py.
 // ═════════════════════════════════════════════════════════════════════════
 
-pub(super) const DELEG_ROLE_ALPHA: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
-pub(super) const DELEG_ROLE_BRAVO: &str = "---\nname: bravo\nrole: Bravo Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nBravo.\n";
-const DELEG_ROLE_WORKER2: &str = "---\nname: worker2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nSecond worker.\n";
+pub(super) const DELEG_ROLE_ALPHA: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
+pub(super) const DELEG_ROLE_BRAVO: &str = "---\nname: bravo\nrole: Bravo Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nBravo.\n";
+const DELEG_ROLE_WORKER2: &str = "---\nname: worker2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSecond worker.\n";
 
 /// A workspace (= self-contained team dir) with a compiled 2-agent spec + state listing alpha/bravo as
 /// RESUMABLE (running, valid first_send_at, session_id) + a seeded HEALTHY coordinator.
@@ -2437,7 +2422,7 @@ fn restart_allow_fresh_copilot_keeps_session_id_null_until_capture_confirms() {
     .unwrap();
     std::fs::write(
         ws.join("agents").join("alpha.md"),
-        "---\nname: alpha\nrole: Alpha Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
+        "---\nname: alpha\nrole: Alpha Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile copilot team");
@@ -2541,7 +2526,7 @@ fn restart_allow_fresh_claude_clears_poisoned_session_id() {
     .unwrap();
     std::fs::write(
         ws.join("agents").join("alpha.md"),
-        "---\nname: alpha\nrole: Alpha\nprovider: claude\nmodel: sonnet\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
+        "---\nname: alpha\nrole: Alpha\nprovider: claude\nmodel: sonnet\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile");
@@ -2612,7 +2597,7 @@ fn fork_refuses_source_with_partial_tuple() {
     .unwrap();
     std::fs::write(
         ws.join("agents").join("src.md"),
-        "---\nname: src\nrole: Source\nprovider: codex\nmodel: gpt\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nSrc.\n",
+        "---\nname: src\nrole: Source\nprovider: codex\nmodel: gpt\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSrc.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile");
@@ -3084,6 +3069,8 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "mcp_config",
             "permissions",
             "effective_approval_policy",
+            // 0.5.66 bypass 单源:fresh spawn 记录运行面 bypass 值(restart drift 挡板)。
+            "as_launched_dangerously_skip_permissions",
             "session_id",
             "rollout_path",
             "captured_at",

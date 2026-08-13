@@ -57,5 +57,10 @@ serial_test = { version = "3", features = ["file_locks"] }
 name = "e2e"
 path = "tests/e2e/main.rs"
 
+# 0.5.66 bypass 单源:E2E 验证角色字段 → 运行面 → drift 挡板 → force fresh spawn。
+[[test]]
+name = "e2e_bypass_single_source"
+path = "tests/e2e_bypass_single_source.rs"
+
 [lints]
 workspace = true

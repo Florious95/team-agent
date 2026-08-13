@@ -337,7 +337,6 @@ pub(super) fn add_agent_with_transport_at_paths(
         )));
     }
     inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
-    let safety = effective_runtime_config(&spec)?;
     // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
     // E42 (0.3.24 P0): capture pre-write bytes for atomic rollback. If anything
@@ -362,7 +361,6 @@ pub(super) fn add_agent_with_transport_at_paths(
         agent_id,
         &meta,
         role_file_path,
-        &safety,
     ) {
         rollback_add_agent_atomic(
             run_workspace,

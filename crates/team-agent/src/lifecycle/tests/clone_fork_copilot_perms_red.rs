@@ -304,7 +304,7 @@ fn write_team_docs(workspace: &Path, provider: &str) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: {provider}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{SOURCE} body.\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: {provider}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE} body.\n"
         ),
     )
     .expect("write source role doc");
@@ -323,7 +323,7 @@ fn write_copilot_team_docs(workspace: &Path) -> PathBuf {
     std::fs::write(
         team_dir.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCopilot source body.\n"
+            "---\nname: {SOURCE}\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCopilot source body.\n"
         ),
     )
     .expect("write source role doc");
@@ -502,20 +502,16 @@ fn r8_copilot_fork_is_no_longer_capability_refused() {
 }
 
 /// R7 permission-clamp GUARDRAIL — a fork's effective approval policy is derived
-/// from the LEADER and never escalates above it (MUST-16). Naturally green at
-/// baseline (the role model forces permission_mode=restricted and inherits
-/// approval from the leader); its teeth engage after implement recompiles the
-/// role via RoleSourceResolver — any raw clone of a compiled permission above the
-/// leader trips it. The true escalation scenario (a source declaring capability
-/// above the leader) is a real-machine concern.
+/// from the LEADER and never escalates above it (MUST-16). 0.5.66 bypass 单源:
+/// fork 的 approval policy 由源角色的 `dangerously_skip_permissions` 派生
+/// (本 fixture = false → `source=disabled`),不再依赖 leader argv 继承。任何
+/// fork 都不得出现 `source=leader_process`(旧模型已删)或 capability 高于源。
 #[test]
 fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
     // Claude source + success-path backing shim so the fork COMPLETES and a NEW
-    // row exists to inspect — no vacuous pass on a refused fork. The dangerous
-    // leader is established by the PINNED ancestry seam (see ANCESTRY_ENV note):
-    // `source=leader_process` is only correct when a dangerous ancestor is
-    // actually detected, so the fixture must supply one instead of borrowing
-    // the host's.
+    // row exists to inspect — no vacuous pass on a refused fork. The source role
+    // declares `dangerously_skip_permissions: false`, so the fork's policy must
+    // resolve to `disabled` (fail-closed) — the new single-source model.
     let case = Case::start("cf-r7");
     let fork = case.fork(NEW);
     assert_eq!(
@@ -538,11 +534,17 @@ fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
     let above = policy
         .get("worker_capability_above_leader")
         .and_then(Value::as_bool);
-    assert_eq!(
+    assert_ne!(
         source,
         Some("leader_process"),
-        "guardrail: a fork's effective approval policy must be derived from the leader \
-         (source=leader_process), not raw-cloned from the source; MUST-16. policy={policy}"
+        "0.5.66: fork policy must never be leader_process (old ancestry model removed); \
+         policy={policy}"
+    );
+    assert_eq!(
+        source,
+        Some("disabled"),
+        "guardrail: a fork's approval policy derives from the role's dangerously_skip_permissions \
+         (false → disabled), never raw-cloned escalation; MUST-16. policy={policy}"
     );
     assert_ne!(
         above,
@@ -552,18 +554,9 @@ fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
     );
 }
 
-/// R7b reverse positive control — with a pinned RESTRICTED leader ancestry the
-/// fork's policy must resolve to `source=disabled` (fail-closed), never
-/// `leader_process`, and still never escalate. This is the CI-truth face of the
-/// clamp (a clean runner == no dangerous ancestor) and proves r7 does not pass
-/// by constant behavior: the same fixture flips leader_process↔disabled purely
-/// on the pinned seam. Mirrors the deterministic product contract
-/// `lifecycle/tests/core.rs` (clean mocked ancestry → Disabled).
-///
-/// NOTE deliberately NOT asserted with the seam UNSET: unpinned, the policy is
-/// a function of the host process tree (the exact non-hermeticity this
-/// revision removes), so an unset-seam assertion would be red on any host
-/// whose own leader runs dangerously.
+/// R7b reverse positive control — same source role (dangerously_skip_permissions:
+/// false) must also resolve to `source=disabled` under any ancestry seam. 0.5.66
+/// 起 policy 与 leader argv 无关:source 恒 `disabled`,fork 恒不升级(MUST-16)。
 #[test]
 fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
     let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
@@ -587,16 +580,15 @@ fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
     assert_eq!(
         policy.get("source").and_then(Value::as_str),
         Some("disabled"),
-        "reverse control: a restricted/clean leader ancestry must resolve to source=disabled \
-         (fail-closed), never leader_process. policy={policy}"
+        "fail-closed: source role declares dangerously_skip_permissions=false → fork policy must \
+         be disabled; policy={policy}"
     );
     assert_ne!(
         policy
             .get("worker_capability_above_leader")
             .and_then(Value::as_bool),
         Some(true),
-        "reverse control: a restricted leader must never yield a fork above the leader; MUST-16. \
-         policy={policy}"
+        "a fork must never yield a capability above the source; MUST-16. policy={policy}"
     );
 }
 

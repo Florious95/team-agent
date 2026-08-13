@@ -1371,7 +1371,7 @@ impl RestartFixture {
         std::fs::write(
             team.join("agents/worker_a.md"),
             format!(
-                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: {}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: {}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
                 if provider == "claude" {
                     "claude-sonnet-4-6"
                 } else {
@@ -1409,7 +1409,7 @@ impl RestartFixture {
         std::fs::write(
             team.join("agents/worker_a.md"),
             format!(
-                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: {}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+                "---\nname: worker_a\nrole: Worker\nprovider: {provider}\nmodel: {}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
                 if provider == "claude" {
                     "claude-sonnet-4-6"
                 } else {

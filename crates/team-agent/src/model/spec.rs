@@ -354,8 +354,31 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
     );
     match spec.get("agents") {
         Some(Yaml::List(agents)) if !agents.is_empty() => {
+            // 0.5.66 bypass 单源:收集缺/错 `dangerously_skip_permissions` 的角色清单,
+            // 循环后一次性报出,满足"缺字段错误消息含每个缺字段的角色 id 清单"硬要求。
+            let mut missing_bypass: Vec<String> = Vec::new();
+            let mut bad_type_bypass: Vec<String> = Vec::new();
             for (idx, agent) in agents.iter().enumerate() {
                 check_agent(agent, &format!("/agents/{idx}"), &mut e);
+                match agent.get("dangerously_skip_permissions") {
+                    None => missing_bypass.push(agent_label(agent, idx)),
+                    Some(value) if !matches!(value, Yaml::Bool(_)) => {
+                        bad_type_bypass.push(agent_label(agent, idx))
+                    }
+                    Some(_) => {}
+                }
+            }
+            if !missing_bypass.is_empty() {
+                e.push(format!(
+                    "/agents/dangerously_skip_permissions: missing required field (role id(s): {})。**这个值必须问用户，leader 不许自决。**",
+                    missing_bypass.join(", ")
+                ));
+            }
+            if !bad_type_bypass.is_empty() {
+                e.push(format!(
+                    "/agents/dangerously_skip_permissions: must be a boolean (role id(s): {})。**这个值必须问用户，leader 不许自决。**",
+                    bad_type_bypass.join(", ")
+                ));
             }
         }
         _ => e.push("/agents: must be a non-empty list".to_string()),
@@ -384,7 +407,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "working_directory",
         "system_prompt",
         "tools",
-        "permission_mode",
+        "dangerously_skip_permissions",
         "preferred_for",
         "avoid_for",
         "output_contract",
@@ -397,7 +420,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "working_directory",
         "system_prompt",
         "tools",
-        "permission_mode",
+        "dangerously_skip_permissions",
         "preferred_for",
         "avoid_for",
         "output_contract",
@@ -407,6 +430,10 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "profile",
         "credential_ref",
         "forked_from",
+        // 存量角色 md 的 `permission_mode` 是历史无效值(compiler 曾恒发 restricted)。
+        // 0.5.66 起不再被 compiler 消费;保留在 allowed 以免存量文件 fail-loud
+        // (§3.1 迁移时顺手删除,0.6.0 可收紧)。
+        "permission_mode",
         // 0.4.x provider effort MVP step 3: per-agent effort override (resolved at compile).
         "effort",
     ];
@@ -479,6 +506,15 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
             "{path}/output_contract/format: must be result_envelope_v1"
         ));
     }
+}
+
+/// 汇总错误里引用 agent 的可读标签:`<id>` 优先,退回 `<index> (role: <role>)`。
+fn agent_label(agent: &Yaml, idx: usize) -> String {
+    agent
+        .get("id")
+        .and_then(Yaml::as_str)
+        .map(|id| format!("`{id}`"))
+        .unwrap_or_else(|| format!("agents[{idx}]"))
 }
 
 fn check_routing(routing: Option<&Yaml>, errors: &mut Vec<String>) {
@@ -564,7 +600,6 @@ fn check_runtime(runtime: Option<&Yaml>, errors: &mut Vec<String>) {
         "max_active_agents",
         "startup_order",
         "display_backend",
-        "dangerous_auto_approve",
         "auto_attach_leader",
         "fast",
         "tick_interval_sec",
@@ -587,9 +622,6 @@ fn check_runtime(runtime: Option<&Yaml>, errors: &mut Vec<String>) {
         {
             errors.push("/runtime/display_backend: invalid display backend".to_string());
         }
-    }
-    if get("dangerous_auto_approve").is_some_and(|v| !matches!(v, Yaml::Bool(_))) {
-        errors.push("/runtime/dangerous_auto_approve: must be a boolean".to_string());
     }
     if get("auto_trust_own_workspace").is_some_and(|v| !matches!(v, Yaml::Bool(_))) {
         errors.push("/runtime/auto_trust_own_workspace: must be a boolean".to_string());
@@ -1020,6 +1052,58 @@ mod tests {
         );
     }
 
+    // 0.5.66 bypass 单源 §4.1:缺 `dangerously_skip_permissions` 字段 → 错误消息
+    // 必须列出每个缺字段的角色 id + 硬串"这个值必须问用户，leader 不许自决。"。
+    #[test]
+    fn test_missing_dangerously_field_reports_role_list() {
+        // 从 fixture 文本里删掉第一个 agent 的字段,模拟该角色缺字段。
+        let text = include_str!("testdata/team.spec.yaml");
+        let without_first = text.replacen("    dangerously_skip_permissions: false\n", "", 1);
+        assert_ne!(text, without_first, "fixture must contain the field");
+        let spec = yaml::loads(&without_first).unwrap();
+        let errors = all_spec_errors(&spec);
+        let missing: Vec<&String> = errors
+            .iter()
+            .filter(|m| m.starts_with("/agents/dangerously_skip_permissions: missing"))
+            .collect();
+        assert_eq!(missing.len(), 1, "exactly one missing-field error, got: {errors:#?}");
+        assert!(
+            missing[0].contains("`codex_implementer`"),
+            "must name the role id, got: {}",
+            missing[0]
+        );
+        assert!(
+            missing[0].contains("这个值必须问用户，leader 不许自决。"),
+            "must carry the hard string, got: {}",
+            missing[0]
+        );
+    }
+
+    // 0.5.66 bypass 单源 §4.1:非 bool 值 → fail-loud 类型错,同样带角色清单 + 硬串。
+    #[test]
+    fn test_invalid_dangerously_type_rejected() {
+        let text = include_str!("testdata/team.spec.yaml");
+        let bad = text.replacen("    dangerously_skip_permissions: false\n", "    dangerously_skip_permissions: \"yes\"\n", 1);
+        assert_ne!(text, bad, "fixture must contain the field");
+        let spec = yaml::loads(&bad).unwrap();
+        let errors = all_spec_errors(&spec);
+        let type_errs: Vec<&String> = errors
+            .iter()
+            .filter(|m| m.starts_with("/agents/dangerously_skip_permissions: must be a boolean"))
+            .collect();
+        assert_eq!(type_errs.len(), 1, "exactly one type error, got: {errors:#?}");
+        assert!(
+            type_errs[0].contains("`codex_implementer`"),
+            "must name the role id, got: {}",
+            type_errs[0]
+        );
+        assert!(
+            type_errs[0].contains("这个值必须问用户，leader 不许自决。"),
+            "must carry the hard string, got: {}",
+            type_errs[0]
+        );
+    }
+
     #[test]
     fn empty_spec_matches_python_golden() {
         let spec = yaml::loads("{}").unwrap();
@@ -1049,5 +1133,44 @@ mod tests {
                 "/leader/provider: unknown provider None",
             ]
         );
+    }
+
+    // 0.5.66 bypass 单源 §4.1:7 触发面共用同一 spec 校验层——compile_team 是它们的共同
+    // 必经点(quick-start/restart/add/fork 都调用),缺字段一律 fail-loud。此处验证
+    // compile 级校验确实 fail-loud,即各触发面(经 compile_team)都被覆盖。
+    #[test]
+    fn test_all_7_triggers_run_field_check() {
+        // compile_team 是 7 触发面的 spec 校验必经点:
+        //   quick-start(quick_start.rs:233 compile_team)
+        //   restart(rebuild.rs:3245 rebuild_runtime_spec_from_roles → compile_team)
+        //   add-agent(add_agent.rs:331 compile_role_agent)
+        //   clone-agent(clone_agent.rs:62 → add_agent)
+        //   fork-agent(fork_agent.rs:96 validate_spec)
+        //   start-agent / reset-agent(操作已编译 spec,团队创建时经 compile_team 校验)
+        // 验证 compile_team 对缺字段的角色文档 fail-loud。
+        let team = std::env::temp_dir().join(format!(
+            "ta-spec-7trigger-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&team);
+        std::fs::create_dir_all(team.join("agents")).unwrap();
+        std::fs::write(
+            team.join("TEAM.md"),
+            "---\nname: t7\nobjective: 7 trigger.\nprovider: codex\n---\n\nteam.\n",
+        )
+        .unwrap();
+        // 角色文档故意缺 dangerously_skip_permissions
+        std::fs::write(
+            team.join("agents").join("w.md"),
+            "---\nname: w\nrole: Worker\nprovider: codex\ntools:\n  - mcp_team\n---\n\nw.\n",
+        )
+        .unwrap();
+        let err = crate::compiler::compile_team(&team).unwrap_err().to_string();
+        assert!(
+            err.contains("missing front matter field dangerously_skip_permissions")
+                && err.contains("这个值必须问用户，leader 不许自决。"),
+            "compile_team must fail-loud on missing field (shared by all 7 triggers); got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&team);
     }
 }

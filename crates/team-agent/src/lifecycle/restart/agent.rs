@@ -181,6 +181,31 @@ pub(crate) fn start_agent_at_paths(
         );
     }
     let agent_live = agent_live && (!has_collision || noop_pane.is_some());
+    // 0.5.66 bypass 单源 §2.6 — dangerously_skip_permissions drift 挡板:
+    // Noop 路径不 spawn,若声明面(角色 md / spec)与运行面(as-launched)不一致,
+    // 拒 Noop 报明,防"改了 md 却以为生效、进程仍带旧 bypass 跑着"的暗门。
+    let file_bypass = agent
+        .get("dangerously_skip_permissions")
+        .and_then(serde_json::Value::as_bool);
+    let launched_bypass = raw_agent
+        .get("as_launched_dangerously_skip_permissions")
+        .and_then(serde_json::Value::as_bool);
+    if !force && agent_live && check_bypass_drift(file_bypass, launched_bypass) {
+        // 0.5.66 bypass 单源 §2.7:Noop drift 拒也写审计事件。
+        let _ = crate::event_log::EventLog::new(workspace).write(
+            "worker.spawn_dangerously_skip_permissions_drift_denied",
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "file_value": file_bypass,
+                "launched_value": launched_bypass,
+                "action": "noop_denied_require_remove_add_or_force",
+            }),
+        );
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "dangerously_skip_permissions drift for agent {agent_id}: file={file_bypass:?} but running process launched with {launched_bypass:?}. \
+             Run `remove-agent {agent_id}` then `add-agent {agent_id}` to apply, or `restart --force {agent_id}` to accept fresh spawn."
+        )));
+    }
     if !force && agent_live {
         let old_binding = pane_binding_snapshot(&raw_agent);
         let refreshed_binding = noop_pane.as_ref().map(pane_binding_from_live);
@@ -257,7 +282,10 @@ pub(crate) fn start_agent_at_paths(
     };
     let into_existing_session =
         session_live_or_default(transport, &session_name, session_name_present(&state));
-    let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
+    let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
+        &agent,
+        provider,
+    )?;
     let layout_placement = if adaptive_layout {
         crate::lifecycle::launch::adaptive_existing_placement_for_agent(
             &state,
@@ -323,6 +351,30 @@ pub(crate) fn start_agent_at_paths(
         &safety,
         start_mode,
     )?;
+    // 0.5.66 bypass 单源 §2.7:启动即带 bypass → 审计留痕。
+    if safety.enabled {
+        let state_agent = state
+            .get("agents")
+            .and_then(|v| v.get(agent_id.as_str()));
+        let _ = crate::event_log::EventLog::new(workspace).write(
+            "worker.spawn_dangerously_skip_permissions",
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "role": state_agent
+                    .and_then(|a| a.get("role"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                "provider": state_agent
+                    .and_then(|a| a.get("provider"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                "trigger": "start-agent",
+                "spec_source_path": crate::lifecycle::launch::agent_id_spec_source_path(
+                    workspace, agent_id.as_str(),
+                ),
+            }),
+        );
+    }
     // **0.3.24 add-agent socket drift fix**: keep `state.tmux_endpoint` /
     // `state.tmux_socket` synchronized with the transport actually used for the
     // spawn. Without this, add-agent / fork-agent could spawn to a socket that
@@ -1078,6 +1130,12 @@ fn mark_agent_started(
     // lifecycle/topology fields so absence == UNKNOWN until the next
     // coordinator tick or pane fallback produces a post-spawn observation.
     clear_agent_runtime_activity_observation(agent);
+    // 0.5.66 bypass 单源 §2.6:fresh spawn 那一刻记录运行面 bypass 值,
+    // 供下一次 restart 的 Noop drift 挡板比较。
+    agent.insert(
+        "as_launched_dangerously_skip_permissions".to_string(),
+        serde_json::json!(safety.enabled),
+    );
     // S1-CAPTURE-001 (0.4.8, CR M3 provider-agnostic): on a Fresh /
     // FreshAfterMissingRollout start, the prior session's authoritative
     // capture tuple MUST be cleared before persist_command_plan_state
@@ -1609,7 +1667,6 @@ fn write_start_agent_start_event(
     let adapter = crate::provider::get_adapter(provider);
     // Contract C / F6.4: event log must record the same context-aware argv that the
     // actual spawn used — so the role/tools/MCP context appears in `start_agent.agent_start`.
-    let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
     let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
         agent,
         Some(agent_id.as_str()),
@@ -1620,7 +1677,6 @@ fn write_start_agent_start_event(
     let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
         &command_agent,
         provider,
-        &safety,
     )?;
     let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     let mcp_config = adapter
@@ -1831,6 +1887,17 @@ fn write_reset_complete_event(
     Ok(())
 }
 
+/// 0.5.66 bypass 单源 §2.6:声明面(file)与运行面(as-launched)是否 drift。
+/// 缺 as-launched(从未 spawn)= 视为未启动,不 drift(首次 Noop 无进程可比)。
+fn check_bypass_drift(file: Option<bool>, launched: Option<bool>) -> bool {
+    match (file, launched) {
+        (Some(file), Some(launched)) => file != launched,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1906,5 +1973,24 @@ mod tests {
             !pane_conflicts_with_leader_or_other(&state, &agent_id, &agent),
             "other-agent collision checks must also include tmux_socket"
         );
+    }
+
+    // 0.5.66 bypass 单源 §4.1:Noop drift 检测——声明面与运行面不一致 → drift。
+    #[test]
+    fn test_restart_noop_denied_on_drift() {
+        // file=true, launched=false → drift(改了 md 升 bypass 但进程没带)。
+        assert!(check_bypass_drift(Some(true), Some(false)));
+        // file=false, launched=true → drift(改了 md 撤 bypass 但进程还带着)。
+        assert!(check_bypass_drift(Some(false), Some(true)));
+    }
+
+    // 0.5.66 bypass 单源 §4.1:无 drift 或从未 spawn(as-launched 缺)→ 不拒。
+    #[test]
+    fn test_restart_fresh_spawn_after_drift_uses_file_value() {
+        assert!(!check_bypass_drift(Some(true), Some(true)));
+        assert!(!check_bypass_drift(Some(false), Some(false)));
+        // 从未 spawn:as-launched 缺失 → 不 drift(首次 Noop 无进程可比)。
+        assert!(!check_bypass_drift(Some(true), None));
+        assert!(!check_bypass_drift(None, None));
     }
 }

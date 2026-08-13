@@ -94,7 +94,7 @@ fn collect_result_file_ingests_valid_known_task_envelope_into_results() {
     .unwrap();
     std::fs::write(
         team.join("agents").join("w1.md"),
-        "---\nname: w1\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nW1.\n",
+        "---\nname: w1\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nW1.\n",
     )
     .unwrap();
     let spec = crate::compiler::compile_team(&team).expect("compile collect team");

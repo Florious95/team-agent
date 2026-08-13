@@ -232,6 +232,11 @@ pub(super) fn finalize_fork_state(
         .and_then(serde_json::Value::as_object_mut)
     {
         persist_effective_approval_policy(agent, input.safety);
+        // 0.5.66 bypass 单源 §2.6:fork fresh spawn 记录运行面 bypass 值。
+        agent.insert(
+            "as_launched_dangerously_skip_permissions".to_string(),
+            serde_json::json!(input.safety.enabled),
+        );
     }
     maybe_fail_fork_after_spawn("save_runtime_state")?;
     crate::state::repository::StateRepository::new(input.workspace)

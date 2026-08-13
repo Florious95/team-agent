@@ -861,7 +861,7 @@ fn contract_c_lifecycle_launch_command_carries_role_tools_and_real_mcp_context()
     .unwrap();
     std::fs::write(
         teamdir.join("agents").join("w1.md"),
-        "---\nname: w1\nrole: Worker must call report_result exactly once.\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlways use report_result for completion.\n",
+        "---\nname: w1\nrole: Worker must call report_result exactly once.\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAlways use report_result for completion.\n",
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&teamdir).unwrap();

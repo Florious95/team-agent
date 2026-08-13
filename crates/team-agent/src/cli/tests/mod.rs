@@ -73,8 +73,8 @@ fn seed_send_workspace() -> std::path::PathBuf {
     dir
 }
 
-const DELEG_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
-const DELEG_INVALID_ROLE: &str = "---\nname: broken\nrole: Broken Worker\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nNo provider field.\n";
+const DELEG_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
+const DELEG_INVALID_ROLE: &str = "---\nname: broken\nrole: Broken Worker\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nNo provider field.\n";
 const DELEG_TEAM_MD: &str =
     "---\nname: clidelegteam\nobjective: Delegation probe.\nprovider: fake\n---\n\nteam.\n";
 

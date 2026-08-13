@@ -39,6 +39,7 @@ agents:
       - "provider_builtin"
       - "banana"
     permission_mode: "restricted"
+    dangerously_skip_permissions: false
     preferred_for:
       - "implementation"
       - "bug_fix"
@@ -69,6 +70,7 @@ agents:
       - "mcp_team"
       - "provider_builtin"
     permission_mode: "restricted"
+    dangerously_skip_permissions: false
     preferred_for:
       - "research"
       - "architecture"
@@ -99,6 +101,7 @@ agents:
       - "mcp_team"
       - "provider_builtin"
     permission_mode: "restricted"
+    dangerously_skip_permissions: false
     preferred_for:
       - "review"
       - "risk_check"
@@ -141,7 +144,6 @@ runtime:
   session_name: "teamspec-full-example"
   auto_launch: true
   require_user_approval_before_launch: true
-  dangerous_auto_approve: false
   max_active_agents: 3
   startup_order:
     - "codex_implementer"

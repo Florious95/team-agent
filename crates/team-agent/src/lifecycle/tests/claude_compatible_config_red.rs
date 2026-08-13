@@ -152,14 +152,14 @@ fn write_claude_profile_team(ws: &Path, team_key: &str, agent_id: &str) -> PathB
     std::fs::write(
         team.join("TEAM.md"),
         format!(
-            "---\nname: {team_key}\nobjective: Claude compatible config contract.\nprovider: claude\nauth_mode: compatible_api\n---\n\nTeam.\n"
+            "---\nname: {team_key}\nobjective: Claude compatible config contract.\nprovider: claude\nauth_mode: compatible_api\ndangerously_skip_permissions: false\n---\n\nTeam.\n"
         ),
     )
     .unwrap();
     std::fs::write(
         team.join("agents").join(format!("{agent_id}.md")),
         format!(
-            "---\nname: {agent_id}\nrole: Claude Worker\nprovider: claude\nauth_mode: compatible_api\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+            "---\nname: {agent_id}\nrole: Claude Worker\nprovider: claude\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n"
         ),
     )
     .unwrap();

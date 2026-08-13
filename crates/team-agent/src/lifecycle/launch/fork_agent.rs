@@ -121,7 +121,7 @@ pub fn fork_agent_with_transport(
         )));
     }
     let model = new_agent.get("model").and_then(Value::as_str);
-    let safety = effective_runtime_config(&new_spec)?;
+    let safety = effective_runtime_config_for_worker_spawn(new_agent, provider)?;
     let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
         new_agent,
         Some(as_agent_id.as_str()),
@@ -132,7 +132,6 @@ pub fn fork_agent_with_transport(
     let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
         &command_agent,
         provider,
-        &safety,
     )?;
     let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     let mcp_config = adapter.mcp_config(auth_mode).map_err(|e| {

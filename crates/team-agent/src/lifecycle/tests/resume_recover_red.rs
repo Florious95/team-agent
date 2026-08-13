@@ -151,7 +151,7 @@ impl ResumeFixture {
         .unwrap();
         std::fs::write(
             team.join("agents").join("worker_a.md"),
-            "---\nname: worker_a\nrole: Worker A\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: worker_a\nrole: Worker A\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&team).unwrap();

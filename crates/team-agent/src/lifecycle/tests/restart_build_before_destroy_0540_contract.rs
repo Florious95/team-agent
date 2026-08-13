@@ -218,7 +218,7 @@ fn write_team_docs(team_dir: &Path, workers: &[String], provider: ProviderShape)
         fs::write(
             team_dir.join("agents").join(format!("{worker}.md")),
             format!(
-                "---\nname: {worker}\nrole: Worker {worker}\nprovider: {}\nmodel: {}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{worker}.\n",
+                "---\nname: {worker}\nrole: Worker {worker}\nprovider: {}\nmodel: {}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n",
                 provider.provider(),
                 provider.model()
             ),

@@ -116,7 +116,6 @@ pub(super) fn upsert_agent_state_from_role(
     agent_id: &AgentId,
     meta: &Value,
     dynamic_role_file: &Path,
-    safety: &DangerousApproval,
 ) -> Result<(), LifecycleError> {
     let mut state =
         crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
@@ -195,7 +194,13 @@ pub(super) fn upsert_agent_state_from_role(
         }
     }
     if let Some(obj) = entry.as_object_mut() {
-        persist_effective_approval_policy(obj, safety);
+        // 0.5.66 bypass 单源:policy 从 role 文档字段派生,不再用全队 `DangerousApproval`。
+        let meta_provider = meta
+            .get("provider")
+            .and_then(Value::as_str)
+            .and_then(crate::provider::wire::parse_provider)
+            .unwrap_or(Provider::Codex);
+        persist_effective_approval_policy_from_yaml_agent(obj, meta, meta_provider);
     }
     agent_map.insert(agent_id.as_str().to_string(), entry);
     crate::lifecycle::restart::remove::clear_agent_retirement_in_state(&mut state, agent_id);

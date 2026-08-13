@@ -393,7 +393,7 @@ impl RestartAutoAttachCase {
         std::fs::write(
             workspace.join("agents").join(format!("{WORKER}.md")),
             format!(
-                "---\nname: {WORKER}\nrole: Worker {WORKER}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+                "---\nname: {WORKER}\nrole: Worker {WORKER}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
             ),
         )
         .expect("write worker role");

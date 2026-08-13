@@ -291,7 +291,7 @@ fn agent(id: &str, status: &str, topology: bool) -> Value {
 }
 
 fn role_doc(id: &str) -> String {
-    format!("---\nname: {id}\nrole: {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{id}.\n")
+    format!("---\nname: {id}\nrole: {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id}.\n")
 }
 
 fn assert_no_standards(case: &Case) {

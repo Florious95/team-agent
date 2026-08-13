@@ -7,7 +7,7 @@
 //! translation. Auth hint (`copilot_auth_hint`) stays in `adapter.rs`;
 //! session-store scanning lives under `provider/session_scan/copilot.rs`.
 
-use crate::model::enums::AuthMode;
+use crate::model::enums::{AuthMode, Provider};
 use crate::provider::McpConfig;
 
 pub(crate) fn copilot_base_command(
@@ -29,7 +29,10 @@ pub(crate) fn copilot_base_command(
         "--disable-builtin-mcps".to_string(),
     ];
     if copilot_dangerous_auto_approve(tools) {
-        argv.push("--allow-all".to_string());
+        // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给。
+        let flag = crate::provider::bypass_flags::provider_bypass_flag(Provider::Copilot)
+            .expect("copilot provider must define a bypass flag");
+        argv.push(flag.to_string());
     } else {
         for flag in copilot_permission_flags(tools) {
             argv.push(flag);

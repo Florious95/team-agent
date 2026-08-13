@@ -393,7 +393,7 @@ fn write_min_team(ws: &Path, name: &str) -> PathBuf {
     .unwrap();
     std::fs::write(
         team.join("agents/worker_a.md"),
-        "---\nname: worker_a\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+        "---\nname: worker_a\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
     )
     .unwrap();
     team

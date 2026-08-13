@@ -6,7 +6,7 @@
 //! `json_inline` stays in `adapter.rs` because it is also used by other
 //! sites; this file reaches it via `super::*`.
 
-use crate::model::enums::AuthMode;
+use crate::model::enums::{AuthMode, Provider};
 use crate::provider::adapter::json_inline;
 use crate::provider::{McpConfig, ProviderCommandOverrides};
 
@@ -41,7 +41,10 @@ pub(crate) fn codex_base_command(
         argv.push(profile.to_string());
     }
     if codex_dangerous_auto_approve(tools) {
-        argv.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+        // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给。
+        let flag = crate::provider::bypass_flags::provider_bypass_flag(Provider::Codex)
+            .expect("codex provider must define a bypass flag");
+        argv.push(flag.to_string());
     } else {
         argv.push("--sandbox".to_string());
         argv.push(codex_sandbox_mode(tools).to_string());

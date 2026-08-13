@@ -3,7 +3,7 @@ use super::*;
 
 // ═════════════════════════════════════════════════════════════════════════
 
-const DELEG_ROLE_ALPHA_COMPAT: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: compatible_api\nprofile: alpha-compat\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
+const DELEG_ROLE_ALPHA_COMPAT: &str = "---\nname: alpha\nrole: Alpha Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: alpha-compat\ntools:\n  - mcp_team\n---\n\nAlpha.\n";
 
 type LaneKills = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 pub(super) type LaneSpawns = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<String>)>>>;
@@ -816,7 +816,7 @@ fn current_alias_authority_does_not_leak_into_real_sibling_same_id_retirement() 
     );
 }
 
-const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
+const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
 
 struct HermeticTestEnv {
     root: std::path::PathBuf,

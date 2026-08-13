@@ -135,7 +135,7 @@ impl TestWorkspace {
         std::fs::create_dir_all(&agents_dir).expect("create agents/");
         for id in agent_ids {
             let body = format!(
-                "---\nname: {id}\nrole: Fake worker {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nFake worker {id}.\n",
+                "---\nname: {id}\nrole: Fake worker {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake worker {id}.\n",
             );
             std::fs::write(agents_dir.join(format!("{id}.md")), body)
                 .unwrap_or_else(|e| panic!("write agents/{id}.md: {e}"));

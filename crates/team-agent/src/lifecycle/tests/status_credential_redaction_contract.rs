@@ -685,12 +685,12 @@ fn write_profile_fixture(root: &Path, base_url: &str, token: &str) -> PathBuf {
     .unwrap();
     fs::write(
         team.join("TEAM.md"),
-        "---\nname: redact-profile\nobjective: Synthetic redaction profile contract.\nprovider: claude\nauth_mode: compatible_api\n---\n\nTeam.\n",
+        "---\nname: redact-profile\nobjective: Synthetic redaction profile contract.\nprovider: claude\nauth_mode: compatible_api\ndangerously_skip_permissions: false\n---\n\nTeam.\n",
     )
     .unwrap();
     fs::write(
         team.join("agents/worker.md"),
-        "---\nname: worker\nrole: Worker\nprovider: claude\nauth_mode: compatible_api\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+        "---\nname: worker\nrole: Worker\nprovider: claude\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n",
     )
     .unwrap();
     team

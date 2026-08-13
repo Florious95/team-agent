@@ -182,7 +182,7 @@ fn run_dispatches_quick_start_compiles_spec() {
     .unwrap();
     std::fs::write(
             dir.join("agents").join("implementer.md"),
-            "---\nname: implementer\nrole: Impl\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImpl.\n",
+            "---\nname: implementer\nrole: Impl\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImpl.\n",
         )
         .unwrap();
     let argv = vec![

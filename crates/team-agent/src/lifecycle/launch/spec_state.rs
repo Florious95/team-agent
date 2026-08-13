@@ -33,7 +33,6 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
-use super::approval::detect_dangerous_approval;
 use super::identity::spec_display_backend;
 use super::leader_context::{
     attributed_provider_for_pane_across_tmux_sockets, caller_provider_for_seed_with_lookup,
@@ -387,64 +386,86 @@ pub(super) fn spec_default_assignee(spec: &Value) -> Option<AgentId> {
         .or_else(|| spec_agents(spec).into_iter().next())
 }
 
-pub(crate) fn effective_runtime_config(spec: &Value) -> Result<DangerousApproval, LifecycleError> {
-    let enabled = spec
-        .get("runtime")
-        .and_then(|v| v.get("dangerous_auto_approve"))
-        .is_some_and(Value::is_truthy);
-    if enabled {
-        let leader = detect_dangerous_approval()?;
-        Ok(DangerousApproval {
-            enabled: true,
-            source: DangerousApprovalSource::RuntimeConfig,
+/// 0.5.66 bypass 单源:从**单个 agent**(yaml spec)的 `dangerously_skip_permissions` 构造
+/// `DangerousApproval`(取代旧"runtime config + leader argv"全队一份)。
+/// true → source=RuntimeConfig(角色声明即用户明确同意,coordinator 的
+/// `explicit_yes_confirmed` 自动放行);false → Disabled。
+pub(crate) fn effective_runtime_config_for_worker_spawn(
+    agent: &Value,
+    provider: Provider,
+) -> Result<DangerousApproval, LifecycleError> {
+    let enabled = matches!(
+        agent.get("dangerously_skip_permissions"),
+        Some(Value::Bool(true))
+    );
+    if !enabled {
+        return Ok(DangerousApproval {
+            enabled: false,
+            source: DangerousApprovalSource::Disabled,
             inherited: false,
             provider: None,
             flag: None,
-            worker_capability_above_leader: !leader.enabled,
-            ancestry_binary_name: leader.ancestry_binary_name,
+            worker_capability_above_leader: false,
+            ancestry_binary_name: None,
             unexpected_binary: false,
-        })
-    } else {
-        Ok(detect_dangerous_approval()?)
+        });
     }
+    let flag = crate::provider::bypass_flags::provider_bypass_flag(provider);
+    Ok(DangerousApproval {
+        enabled: true,
+        source: DangerousApprovalSource::RuntimeConfig,
+        inherited: false,
+        provider: Some(provider_display_str(provider).to_string()),
+        flag: flag.map(str::to_string),
+        worker_capability_above_leader: false,
+        ancestry_binary_name: None,
+        unexpected_binary: false,
+    })
 }
 
-pub(crate) fn effective_runtime_config_for_worker_spawn(
+/// 0.5.66 bypass 单源:restart/state 路径的 serde_json 版(agent 来自 state JSON)。
+pub(crate) fn effective_runtime_config_for_worker_spawn_json(
+    agent: &serde_json::Value,
+    provider: Provider,
 ) -> Result<DangerousApproval, LifecycleError> {
-    detect_dangerous_approval()
+    let enabled = agent
+        .get("dangerously_skip_permissions")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(DangerousApproval {
+            enabled: false,
+            source: DangerousApprovalSource::Disabled,
+            inherited: false,
+            provider: None,
+            flag: None,
+            worker_capability_above_leader: false,
+            ancestry_binary_name: None,
+            unexpected_binary: false,
+        });
+    }
+    let flag = crate::provider::bypass_flags::provider_bypass_flag(provider);
+    Ok(DangerousApproval {
+        enabled: true,
+        source: DangerousApprovalSource::RuntimeConfig,
+        inherited: false,
+        provider: Some(provider_display_str(provider).to_string()),
+        flag: flag.map(str::to_string),
+        worker_capability_above_leader: false,
+        ancestry_binary_name: None,
+        unexpected_binary: false,
+    })
 }
 
-pub(super) fn write_launch_permission_audit(
-    workspace: &Path,
-    safety: &DangerousApproval,
-) -> Result<(), LifecycleError> {
-    crate::event_log::EventLog::new(workspace)
-        .write(
-            "launch.permissions_resolved",
-            serde_json::json!({
-                "dangerous_auto_approve": safety.enabled,
-                "dangerous_auto_approve_source": safety.source,
-                "dangerous_auto_approve_inherited": safety.inherited,
-                "dangerous_auto_approve_provider": safety.provider,
-                "dangerous_auto_approve_flag": safety.flag,
-                "worker_capability_above_leader": safety.worker_capability_above_leader,
-                "ancestry_binary_name": safety.ancestry_binary_name,
-            }),
-        )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if safety.unexpected_binary {
-        crate::event_log::EventLog::new(workspace)
-            .write(
-                "dangerous_flag_in_unexpected_binary",
-                serde_json::json!({
-                    "provider": safety.provider,
-                    "flag": safety.flag,
-                    "ancestry_binary_name": safety.ancestry_binary_name,
-                }),
-            )
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+pub(crate) fn provider_display_str(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "claude",
+        Provider::ClaudeCode => "claude_code",
+        Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
+        Provider::GeminiCli => "gemini_cli",
+        Provider::Fake => "fake",
     }
-    Ok(())
 }
 
 pub(super) fn team_workspace(team_dir: &Path) -> PathBuf {
@@ -454,4 +475,40 @@ pub(super) fn team_workspace(team_dir: &Path) -> PathBuf {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| team_dir.to_path_buf())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::model::enums::Provider;
+
+    fn yaml_agent(bypass: bool) -> Value {
+        crate::model::yaml::loads(&format!(
+            "id: a\nrole: r\nprovider: codex\ndangerously_skip_permissions: {bypass}\n"
+        ))
+        .unwrap()
+    }
+
+    // 0.5.66 bypass 单源 §4.1:true → enabled + source=runtime_config(角色声明即明确同意)。
+    #[test]
+    fn test_effective_safety_from_true_field() {
+        let safety =
+            effective_runtime_config_for_worker_spawn(&yaml_agent(true), Provider::Codex).unwrap();
+        assert!(safety.enabled);
+        assert_eq!(safety.source, DangerousApprovalSource::RuntimeConfig);
+        assert_eq!(
+            safety.flag.as_deref(),
+            Some("--dangerously-bypass-approvals-and-sandbox")
+        );
+    }
+
+    // 0.5.66 bypass 单源 §4.1:false → Disabled。
+    #[test]
+    fn test_effective_safety_from_false_field() {
+        let safety =
+            effective_runtime_config_for_worker_spawn(&yaml_agent(false), Provider::Codex).unwrap();
+        assert!(!safety.enabled);
+        assert_eq!(safety.source, DangerousApprovalSource::Disabled);
+    }
 }

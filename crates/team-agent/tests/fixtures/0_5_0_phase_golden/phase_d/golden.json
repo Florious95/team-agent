@@ -7,17 +7,6 @@
       "ts": "<TS>"
     },
     {
-      "ancestry_binary_name": null,
-      "dangerous_auto_approve": false,
-      "dangerous_auto_approve_flag": null,
-      "dangerous_auto_approve_inherited": false,
-      "dangerous_auto_approve_provider": null,
-      "dangerous_auto_approve_source": "disabled",
-      "event": "launch.permissions_resolved",
-      "ts": "<TS>",
-      "worker_capability_above_leader": false
-    },
-    {
       "elapsed_ms": 0,
       "event": "launch.phase",
       "phase": "spawn_all",
@@ -435,6 +424,7 @@
           "agents": {
             "w1": {
               "agent_id": "w1",
+              "as_launched_dangerously_skip_permissions": false,
               "attribution_confidence": null,
               "auth_mode": "subscription",
               "capture_state": "pending_first_turn",
@@ -480,6 +470,7 @@
             },
             "w2": {
               "agent_id": "w2",
+              "as_launched_dangerously_skip_permissions": false,
               "attribution_confidence": null,
               "auth_mode": "subscription",
               "capture_state": "pending_first_turn",
@@ -560,17 +551,6 @@
               "event": "launch.phase",
               "phase": "compile_spec",
               "ts": "<TS>"
-            },
-            {
-              "ancestry_binary_name": null,
-              "dangerous_auto_approve": false,
-              "dangerous_auto_approve_flag": null,
-              "dangerous_auto_approve_inherited": false,
-              "dangerous_auto_approve_provider": null,
-              "dangerous_auto_approve_source": "disabled",
-              "event": "launch.permissions_resolved",
-              "ts": "<TS>",
-              "worker_capability_above_leader": false
             },
             {
               "elapsed_ms": 0,
@@ -791,6 +771,7 @@
               "agents": {
                 "w1": {
                   "agent_id": "w1",
+                  "as_launched_dangerously_skip_permissions": false,
                   "attribution_confidence": null,
                   "auth_mode": "subscription",
                   "capture_state": "pending_first_turn",
@@ -833,6 +814,7 @@
                 },
                 "w2": {
                   "agent_id": "w2",
+                  "as_launched_dangerously_skip_permissions": false,
                   "attribution_confidence": null,
                   "auth_mode": "subscription",
                   "capture_state": "pending_first_turn",
@@ -1027,6 +1009,7 @@
     "agents": {
       "w1": {
         "agent_id": "w1",
+        "as_launched_dangerously_skip_permissions": false,
         "attribution_confidence": null,
         "auth_mode": "subscription",
         "capture_state": "pending_first_turn",
@@ -1072,6 +1055,7 @@
       },
       "w2": {
         "agent_id": "w2",
+        "as_launched_dangerously_skip_permissions": false,
         "attribution_confidence": null,
         "auth_mode": "subscription",
         "capture_state": "pending_first_turn",
@@ -1161,6 +1145,7 @@
         "agents": {
           "w1": {
             "agent_id": "w1",
+            "as_launched_dangerously_skip_permissions": false,
             "auth_mode": "subscription",
             "capture_state": "pending_first_turn",
             "effective_approval_policy": {
@@ -1201,6 +1186,7 @@
           },
           "w2": {
             "agent_id": "w2",
+            "as_launched_dangerously_skip_permissions": false,
             "attribution_confidence": null,
             "auth_mode": "subscription",
             "capture_state": "pending_first_turn",

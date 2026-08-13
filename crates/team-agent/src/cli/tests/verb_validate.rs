@@ -36,7 +36,7 @@ agents:
       - "git_diff"
       - "mcp_team"
       - "provider_builtin"
-    permission_mode: "restricted"
+    dangerously_skip_permissions: false
     preferred_for:
       - "implementation"
     avoid_for: []

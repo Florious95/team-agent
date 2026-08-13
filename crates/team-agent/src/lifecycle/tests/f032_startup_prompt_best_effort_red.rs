@@ -27,7 +27,7 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 
 const TEAM_MD: &str =
     "---\nname: f032team\nobjective: F032 lifecycle prompt fault probe.\nprovider: codex\n---\n\nF032.\n";
-const ROLE_MD: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement.\n";
+const ROLE_MD: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement.\n";
 
 #[test]
 fn f032_launch_spawn_path_treats_startup_prompt_panic_as_best_effort() {

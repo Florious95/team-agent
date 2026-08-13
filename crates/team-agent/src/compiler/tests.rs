@@ -105,6 +105,7 @@ role: Implementation Engineer
 provider: codex
 model: gpt-5.5
 auth_mode: subscription
+dangerously_skip_permissions: false
 tools:
   - fs_read
   - fs_write
@@ -189,7 +190,7 @@ fn front_matter_non_object_errors() {
 // separators=(",",":"))` with the workspace path templated to __WS__.
 // (team-agent-public v0.2.11, /tmp/probe_compiler.py.)
 
-const BASE_NOPROFILE_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":"gpt-5.5","tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks and report result_envelope_v1.","file":null},"tools":["fs_read","fs_write","execute_bash","mcp_team"],"permission_mode":"restricted","communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"adaptive","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"dangerous_auto_approve":false,"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const BASE_NOPROFILE_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":"gpt-5.5","tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks and report result_envelope_v1.","file":null},"tools":["fs_read","fs_write","execute_bash","mcp_team"],"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"adaptive","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
 fn compile_base_noprofile_matches_python_dict_order_and_values() {
@@ -254,12 +255,13 @@ provider: codex
 tools:
   - fs_read
   - mcp_team
+dangerously_skip_permissions: false
 ---
 
 Implement bounded tasks.
 ";
 
-const RUNTIME_DEFAULTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.4","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"tools":["fs_read","mcp_team"],"permission_mode":"restricted","communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"ghostty_window","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"dangerous_auto_approve":true,"fast":true,"tick_interval_sec":1,"push_min_interval_sec":3,"stuck_timeout_sec":5},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const RUNTIME_DEFAULTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.4","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"tools":["fs_read","mcp_team"],"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"ghostty_window","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":true,"tick_interval_sec":1,"push_min_interval_sec":3,"stuck_timeout_sec":5},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
 fn compile_runtime_front_matter_defaults_match_python() {
@@ -294,12 +296,13 @@ role: Editor and Defender
 provider: claude_code
 tools:
   - mcp_team
+dangerously_skip_permissions: false
 ---
 
 Edit and defend the argument.
 ";
 
-const ALIAS_JSON: &str = r#"{"version":1,"team":{"name":"debate-team","mode":"supervisor_worker","objective":"Compile thin role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"editor","role":"Editor and Defender","provider":"claude_code","model":"claude-sonnet-4-6","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Edit and defend the argument.","file":null},"tools":["mcp_team"],"permission_mode":"restricted","communication_mode":"leader_centric","preferred_for":["editor","Editor and Defender"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"editor","rules":[{"id":"route-editor","match":{"assignee":["editor"]},"assign_to":"editor","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"none","session_name":"team-debate-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["editor"],"dangerous_auto_approve":false,"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"editor","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const ALIAS_JSON: &str = r#"{"version":1,"team":{"name":"debate-team","mode":"supervisor_worker","objective":"Compile thin role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"editor","role":"Editor and Defender","provider":"claude_code","model":"claude-sonnet-4-6","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Edit and defend the argument.","file":null},"tools":["mcp_team"],"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["editor","Editor and Defender"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"editor","rules":[{"id":"route-editor","match":{"assignee":["editor"]},"assign_to":"editor","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"none","session_name":"team-debate-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["editor"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"editor","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
 fn compile_provider_models_claude_code_falls_back_to_claude_alias() {
@@ -325,6 +328,7 @@ name: implementer
 role: Implementation Engineer
 provider: codex
 auth_mode: subscription
+dangerously_skip_permissions: false
 tools:
   - mcp_team
 ---
@@ -332,7 +336,7 @@ tools:
 Implement bounded tasks.
 ";
 
-const BUILTIN_JSON: &str = r#"{"version":1,"team":{"name":"default-model-team","mode":"supervisor_worker","objective":"Compile role docs without model fields.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"tools":["mcp_team"],"permission_mode":"restricted","communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"none","session_name":"team-default-model-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"dangerous_auto_approve":false,"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const BUILTIN_JSON: &str = r#"{"version":1,"team":{"name":"default-model-team","mode":"supervisor_worker","objective":"Compile role docs without model fields.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"tools":["mcp_team"],"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"none","session_name":"team-default-model-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
 fn compile_subscription_without_model_uses_builtin_provider_default() {
@@ -351,6 +355,7 @@ role: Alpha Worker
 provider: codex
 model: gpt-5.5
 auth_mode: subscription
+dangerously_skip_permissions: false
 tools:
   - mcp_team
 ---
@@ -365,6 +370,7 @@ role: Bravo Worker
 provider: codex
 model: gpt-5.5
 auth_mode: subscription
+dangerously_skip_permissions: false
 tools:
   - mcp_team
 ---
@@ -372,7 +378,7 @@ tools:
 Bravo body.
 ";
 
-const TWO_AGENTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":"gpt-5.5","tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"alpha","role":"Alpha Worker","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Alpha body.","file":null},"tools":["mcp_team"],"permission_mode":"restricted","communication_mode":"leader_centric","preferred_for":["alpha","Alpha Worker"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}},{"id":"bravo","role":"Bravo Worker","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Bravo body.","file":null},"tools":["mcp_team"],"permission_mode":"restricted","communication_mode":"leader_centric","preferred_for":["bravo","Bravo Worker"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"alpha","rules":[{"id":"route-alpha","match":{"assignee":["alpha"]},"assign_to":"alpha","priority":10},{"id":"route-bravo","match":{"assignee":["bravo"]},"assign_to":"bravo","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"adaptive","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":2,"startup_order":["alpha","bravo"],"dangerous_auto_approve":false,"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"alpha","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const TWO_AGENTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":"gpt-5.5","tools":["fs_read","fs_list","mcp_team"],"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"alpha","role":"Alpha Worker","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Alpha body.","file":null},"tools":["mcp_team"],"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["alpha","Alpha Worker"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}},{"id":"bravo","role":"Bravo Worker","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Bravo body.","file":null},"tools":["mcp_team"],"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["bravo","Bravo Worker"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"alpha","rules":[{"id":"route-alpha","match":{"assignee":["alpha"]},"assign_to":"alpha","priority":10},{"id":"route-bravo","match":{"assignee":["bravo"]},"assign_to":"bravo","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","display_backend":"adaptive","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":2,"startup_order":["alpha","bravo"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"alpha","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
 fn compile_two_agents_sorted_by_filename_with_routing_and_startup_order() {
@@ -394,6 +400,7 @@ name: implementer
 role: Implementation Engineer
 model: gpt-5.5
 auth_mode: subscription
+dangerously_skip_permissions: false
 tools:
   - mcp_team
 ---
@@ -419,6 +426,7 @@ role: Implementation Engineer
 provider: codex
 model: gpt-5.5
 auth_mode: compatible_api
+dangerously_skip_permissions: false
 tools:
   - mcp_team
 ---
@@ -448,7 +456,7 @@ fn compile_compatible_api_without_profile_errors() {
 const TM_CODEX: &str = "---\nname: T\nprovider: codex\n---\nx\n";
 
 fn role_nomodel(provider: &str) -> String {
-    format!("---\nname: w\nrole: R\nprovider: {provider}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nbody\n")
+    format!("---\nname: w\nrole: R\nprovider: {provider}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nbody\n")
 }
 
 fn agent0(spec: &Value) -> &Value {
@@ -626,7 +634,7 @@ fn fix_a5_session_name_override_wins() {
 
 #[test]
 fn fix_a6_tools_shell_maps_to_execute_bash() {
-    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ntools:\n  - shell\n  - mcp_team\n---\nb\n";
+    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - shell\n  - mcp_team\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let spec = compile_team(&team).expect("shell must normalize to execute_bash and compile");
     assert_eq!(
@@ -637,7 +645,7 @@ fn fix_a6_tools_shell_maps_to_execute_bash() {
 
 #[test]
 fn fix_a6_missing_tools_errors() {
-    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\n---\nb\n";
+    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let err = compile_team(&team).unwrap_err();
     assert!(
@@ -648,7 +656,7 @@ fn fix_a6_missing_tools_errors() {
 
 #[test]
 fn fix_a6_tools_not_a_list_errors() {
-    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ntools: justastring\n---\nb\n";
+    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools: justastring\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let err = compile_team(&team).unwrap_err();
     assert!(
@@ -661,7 +669,7 @@ fn fix_a6_tools_not_a_list_errors() {
 
 #[test]
 fn fix_a7_empty_body_inline_falls_back_to_role() {
-    let role = "---\nname: w\nrole: Reviewer Role\nprovider: codex\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n";
+    let role = "---\nname: w\nrole: Reviewer Role\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let spec = compile_team(&team).unwrap();
     assert_eq!(
@@ -675,7 +683,7 @@ fn fix_a7_empty_body_inline_falls_back_to_role() {
 #[test]
 fn fix_a8_official_api_without_profile_errors() {
     // official_api (any non-subscription) without profile MUST NOT silently compile.
-    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: official_api\ntools:\n  - mcp_team\n---\nb\n";
+    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: official_api\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let err = compile_team(&team).unwrap_err();
     assert!(
@@ -706,14 +714,9 @@ fn fix_a8_compatible_api_error_names_the_auth_mode() {
 #[test]
 fn fix_a9_bool_coercion_yes_and_one_are_true() {
     for v in ["yes", "1"] {
-        let tm = format!("---\nname: T\nprovider: codex\ndangerous_auto_approve: {v}\nworker_to_worker: {v}\n---\nx\n");
+        let tm = format!("---\nname: T\nprovider: codex\nworker_to_worker: {v}\n---\nx\n");
         let team = build_team(&tm, &[("w.md", &role_nomodel("codex"))], &[]);
         let spec = compile_team(&team).unwrap();
-        assert_eq!(
-            get_path(&spec, &["runtime", "dangerous_auto_approve"]),
-            Some(&Value::Bool(true)),
-            "value {v}"
-        );
         assert_eq!(
             get_path(&spec, &["communication", "worker_to_worker"]),
             Some(&Value::Bool(true)),
@@ -726,11 +729,11 @@ fn fix_a9_bool_coercion_yes_and_one_are_true() {
 fn fix_a9_bool_coercion_no_is_python_truthy() {
     // FLAG: Python bool("no") is TRUE (only 0/false/False are falsy). The contract
     // note said "no->false" but Python golden is no->true; we lock Python.
-    let tm = "---\nname: T\nprovider: codex\ndangerous_auto_approve: no\n---\nx\n";
+    let tm = "---\nname: T\nprovider: codex\nworker_to_worker: no\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
     assert_eq!(
-        get_path(&spec, &["runtime", "dangerous_auto_approve"]),
+        get_path(&spec, &["communication", "worker_to_worker"]),
         Some(&Value::Bool(true))
     );
 }
@@ -753,7 +756,7 @@ fn fix_a9_int_coercion_of_quoted_string() {
 fn fix_a10_crlf_role_doc_front_matter_is_parsed() {
     // Windows-authored \r\n doc: read_text universal-newlines normalizes before
     // the "---\n" check, so the front matter parses (current keeps \r\n → no FM).
-    let crlf_role = "---\r\nname: crlfworker\r\nrole: R\r\nprovider: codex\r\nauth_mode: subscription\r\ntools:\r\n  - mcp_team\r\n---\r\n\r\nbody\r\n";
+    let crlf_role = "---\r\nname: crlfworker\r\nrole: R\r\nprovider: codex\r\nauth_mode: subscription\r\ndangerously_skip_permissions: false\r\ntools:\r\n  - mcp_team\r\n---\r\n\r\nbody\r\n";
     let team = build_team(TM_CODEX, &[("w.md", crlf_role)], &[]);
     let spec = compile_team(&team).expect("CRLF role doc must parse its front matter");
     assert_eq!(

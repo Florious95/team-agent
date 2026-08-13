@@ -1010,24 +1010,6 @@ fn quick_start_empty_dir_returns_typed_report_not_error_path_only() {
     }
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// detect_dangerous_approval — launch/config.py
-// 默认进程(无 --dangerously-* 祖先)→ enabled=false / source=Disabled / inherited=false。
-// launch 在 inherited=false 且无 --yes 时 raise DangerousApprovalRequired(core.py:120)。
-// ───────────────────────────────────────────────────────────────────────
-
-#[test]
-#[serial_test::serial(env)]
-fn detect_dangerous_approval_clean_process_is_disabled() {
-    // Explicit mock ancestry keeps the test independent from the real Codex/CI
-    // process tree that runs cargo.
-    let _ancestry = EnvVarGuard::set("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[]");
-    let got = detect_dangerous_approval().expect("探测祖先链应 Ok");
-    assert!(!got.enabled, "干净进程不应启用危险审批");
-    assert_eq!(got.source, DangerousApprovalSource::Disabled);
-    assert!(!got.inherited);
-}
-
 #[test]
 #[serial_test::serial(env)]
 fn leader_pane_env_absent_pane_fails_fast() {

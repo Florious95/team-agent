@@ -213,7 +213,10 @@ pub(super) fn spawn_agent_window(
     let safety = if let Some(safety) = safety {
         safety
     } else {
-        detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
+        detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
+            agent,
+            provider,
+        )?;
         &detected_safety
     };
     let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
@@ -226,7 +229,6 @@ pub(super) fn spawn_agent_window(
     let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
         &command_agent,
         provider,
-        safety,
     )?;
     let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     // owner_team_id resolution priority (Issue 2 fix):
@@ -591,6 +593,8 @@ fn merge_command_context_fields(
         "effort",
         "profile",
         "permission_mode",
+        // 0.5.66 bypass 单源:rehydrate 同步合入,restart 的 safety 构造读到新值。
+        "dangerously_skip_permissions",
     ] {
         if let Some(value) = spec_agent.get(field).and_then(yaml_value_to_json) {
             obj.insert(field.to_string(), value);
@@ -797,13 +801,6 @@ pub(super) fn lifecycle_worker_tmux_backend_for_state(
 ) -> crate::tmux_backend::TmuxBackend {
     crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(run_workspace, Some(state))
         .backend
-}
-
-pub(super) fn persist_effective_approval_policy_for_restart(
-    agent: &mut serde_json::Map<String, serde_json::Value>,
-    safety: &DangerousApproval,
-) {
-    crate::lifecycle::launch::persist_effective_approval_policy(agent, safety);
 }
 
 pub(super) fn save_restart_projected_state(

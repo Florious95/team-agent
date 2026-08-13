@@ -746,7 +746,7 @@ fn write_team(
         std::fs::write(
             team.join("agents").join(format!("{}.md", agent.id)),
             format!(
-                "---\nname: {}\nrole: {}\nprovider: {}\nmodel: fake\nauth_mode: subscription\ntools:\n{}---\n\n{}\n",
+                "---\nname: {}\nrole: {}\nprovider: {}\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n{}---\n\n{}\n",
                 agent.id, agent.role, agent.provider, tools, agent.body
             ),
         )

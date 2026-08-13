@@ -8,7 +8,7 @@
 //! resolver (`claude_context_model`) stay in `adapter.rs`; capture scanning
 //! helpers now live under `provider/session_scan/claude.rs`.
 
-use crate::model::enums::AuthMode;
+use crate::model::enums::{AuthMode, Provider};
 use crate::provider::adapter::{next_session_token, prompt_needs_native_mcp, BasicProviderAdapter};
 use crate::provider::{McpConfig, ProviderAdapter, ProviderError};
 
@@ -49,7 +49,10 @@ pub(crate) fn claude_base_command(
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["claude".to_string()];
     if claude_dangerous_auto_approve(tools) {
-        argv.push("--dangerously-skip-permissions".to_string());
+        // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给(单源)。
+        let flag = crate::provider::bypass_flags::provider_bypass_flag(Provider::Claude)
+            .expect("claude provider must define a bypass flag");
+        argv.push(flag.to_string());
     } else {
         argv.push("--permission-mode".to_string());
         argv.push("default".to_string());

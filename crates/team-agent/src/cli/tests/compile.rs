@@ -10,7 +10,7 @@ fn compile_team_dir(tag: &str) -> std::path::PathBuf {
     .unwrap();
     std::fs::write(
         team.join("agents").join("worker.md"),
-        "---\nname: worker\nrole: Worker\nprovider: fake\nmodel: fake\ntools:\n  - mcp_team\n---\n\nWorker role.\n",
+        "---\nname: worker\nrole: Worker\nprovider: fake\nmodel: fake\ntools:\n  - mcp_team\ndangerously_skip_permissions: false\n---\n\nWorker role.\n",
     )
     .unwrap();
     team

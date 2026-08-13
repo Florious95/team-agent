@@ -881,7 +881,7 @@ fn team_dir_with_name(root: &Path, dir_name: &str, spec_name: &str, agent_id: &s
 
 fn role_doc(name: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+        "---\nname: {name}\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
     )
 }
 

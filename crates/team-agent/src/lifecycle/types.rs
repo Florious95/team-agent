@@ -473,8 +473,6 @@ pub struct LaunchReport {
     pub routes: Vec<RoutingDecision>,
     /// 权限摘要(每 agent 一条)。
     pub permissions: Vec<PermissionSummary>,
-    /// 危险审批安全态(dry-run 报告里的 `safety`)。
-    pub safety: DangerousApproval,
     /// leader receiver(attach 成功时;经 step10 leader::attach_leader_to_state)。
     pub leader_receiver_attached: bool,
     pub session_capture_incomplete_agents: Vec<String>,

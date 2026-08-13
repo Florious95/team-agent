@@ -246,7 +246,7 @@ fn fixture(tag: &str, team_mode: Option<&str>) -> PathBuf {
         std::fs::write(
             root.join("agents").join(format!("worker_{id}.md")),
             format!(
-                "---\nname: worker_{id}\nrole: Communication Worker\nprovider: claude\ncommunication_mode: {id}\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL {id}\n"
+                "---\nname: worker_{id}\nrole: Communication Worker\nprovider: claude\ndangerously_skip_permissions: false\ncommunication_mode: {id}\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL {id}\n"
             ),
         )
         .unwrap();
@@ -265,7 +265,7 @@ fn default_fixture(tag: &str) -> PathBuf {
     }
     std::fs::write(
         root.join("agents").join("worker_default.md"),
-        "---\nname: worker_default\nrole: Communication Worker\nprovider: claude\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL default\n",
+        "---\nname: worker_default\nrole: Communication Worker\nprovider: claude\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nROLE BODY SENTINEL default\n",
     )
     .unwrap();
     root

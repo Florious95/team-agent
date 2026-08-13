@@ -27,7 +27,6 @@ pub(super) fn spawn_agents(
     spec_path: &Path,
     spec: &Value,
     session_name: &SessionName,
-    safety: &DangerousApproval,
     transport: &dyn Transport,
 ) -> Result<Vec<StartedAgent>, LifecycleError> {
     // E5 解耦:team_dir(角色定义 + profiles 所在)≠ spec_path.parent()(spec 已迁出到 .team/runtime)。
@@ -100,9 +99,10 @@ pub(super) fn spawn_agents(
         let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
             &command_agent,
             provider,
-            safety,
         )?;
         let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
+        // 0.5.66 bypass 单源:per-agent safety 只服务 env 注入与审计,不参与 argv 决策。
+        let safety = effective_runtime_config_for_worker_spawn(agent, provider)?;
         let mcp_team_id = runtime_team_key_for_spec(spec_path, spec, session_name);
         let mcp_config = adapter
             .mcp_config(auth_mode)
@@ -283,6 +283,25 @@ pub(super) fn spawn_agents(
                     "spawn_epoch": spawn_epoch,
                 })),
             );
+            // 0.5.66 bypass 单源 §2.7:最终 argv 含 bypass flag → 审计留痕。
+            if matches!(
+                agent.get("dangerously_skip_permissions"),
+                Some(Value::Bool(true))
+            ) {
+                let _ = event_log.write(
+                    "worker.spawn_dangerously_skip_permissions",
+                    serde_json::json!({
+                        "agent_id": agent_id_raw,
+                        "role": agent
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        "provider": provider,
+                        "trigger": "launch",
+                        "spec_source_path": agent_id_spec_source_path(workspace, agent_id_raw),
+                    }),
+                );
+            }
         }
         // 0.3.28 Step 4b: replaced the `adaptive_layout_plan` 3-pane tiling
         // with Python-parity 1-window-per-agent placement. Window name =
@@ -380,4 +399,22 @@ pub(super) fn spawn_agents(
         });
     }
     Ok(started)
+}
+
+/// 0.5.66 bypass 单源 §2.7:审计事件里角色 md 的 spec 来源路径(尽力解析,失败空串)。
+pub(crate) fn agent_id_spec_source_path(workspace: &Path, agent_id: &str) -> String {
+    let team_dir = crate::state::persist::load_runtime_state(workspace)
+        .ok()
+        .and_then(|state| {
+            state
+                .get("team_dir")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        });
+    team_dir
+        .map(|dir| dir.join("agents").join(format!("{agent_id}.md")))
+        .unwrap_or_else(|| workspace.join(".team/current/agents").join(format!("{agent_id}.md")))
+        .display()
+        .to_string()
 }

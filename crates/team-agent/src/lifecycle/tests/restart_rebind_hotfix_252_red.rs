@@ -342,7 +342,7 @@ impl HotfixCase {
         std::fs::write(
             dir.join("agents").join(format!("{agent_id}.md")),
             format!(
-                "---\nname: {agent_id}\nrole: Greeter\nprovider: {}\nmodel: test\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+                "---\nname: {agent_id}\nrole: Greeter\nprovider: {}\nmodel: test\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
                 provider_name(provider)
             ),
         )

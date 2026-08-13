@@ -358,7 +358,7 @@ impl DisplayFixture {
             std::fs::write(
                 team.join("agents").join(format!("{worker}.md")),
                 format!(
-                    "---\nname: {worker}\nrole: Adaptive fake worker {worker}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+                    "---\nname: {worker}\nrole: Adaptive fake worker {worker}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
                 ),
             )
             .unwrap();

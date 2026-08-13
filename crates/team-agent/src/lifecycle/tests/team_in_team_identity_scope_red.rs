@@ -244,7 +244,7 @@ fn write_team_dir(root: &Path, dir_name: &str, agent: &str) -> PathBuf {
 
 fn role_doc(agent: &str) -> String {
     format!(
-        "---\nname: {agent}\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+        "---\nname: {agent}\nrole: Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
     )
 }
 

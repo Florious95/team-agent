@@ -456,7 +456,7 @@ impl UpgradeFixture {
         std::fs::create_dir_all(self.team_dir.join("agents")).unwrap();
         std::fs::write(
             self.team_dir.join("agents").join("upgrade_worker.md"),
-            "---\nname: upgrade_worker\nrole: Upgrade Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: upgrade_worker\nrole: Upgrade Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&self.team_dir).unwrap();

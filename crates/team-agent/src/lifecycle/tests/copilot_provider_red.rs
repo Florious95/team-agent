@@ -229,8 +229,9 @@ team_orchestrator or @<.team/runtime/mcp/worker_a.json>; got {value:?}"
 }
 
 /// Face 1 dangerous tier (C-5-1, verdict `dangerous_auto_approve_argv_contains_allow_all`):
-/// dangerous_auto_approve must map to `--allow-all` (claude --dangerously-skip-permissions
-/// parity, paths+urls included) — NOT the silently-narrower `--allow-all-tools`.
+/// role `dangerously_skip_permissions: true` must map to `--allow-all` (claude
+/// `--dangerously-skip-permissions` parity, paths+urls included) — NOT the
+/// silently-narrower `--allow-all-tools`. 0.5.66 bypass 单源:bypass 由角色字段驱动。
 #[test]
 #[serial(env)]
 fn copilot_argv_dangerous_maps_to_allow_all() {
@@ -254,7 +255,7 @@ fn copilot_argv_dangerous_maps_to_allow_all() {
     let mut failures = Vec::new();
     if !argv.iter().any(|arg| arg == "--allow-all") {
         failures.push(format!(
-            "C-5-1: dangerous_auto_approve must produce `--allow-all` (=--yolo, claude \
+            "C-5-1: dangerously_skip_permissions=true must produce `--allow-all` (=--yolo, claude \
 parity incl. paths+urls); argv={argv:?}"
         ));
     }
@@ -1101,8 +1102,8 @@ fn copilot_subscription_model_precedence_role_over_profile() {
     // point the agent at the profile
     let agent_md = team_dir.join("agents/worker_a.md");
     let body = std::fs::read_to_string(&agent_md).unwrap().replace(
-        "auth_mode: subscription\n",
-        "auth_mode: subscription\nprofile: subm\n",
+        "auth_mode: subscription\ndangerously_skip_permissions: false\n",
+        "auth_mode: subscription\ndangerously_skip_permissions: false\nprofile: subm\n",
     );
     std::fs::write(&agent_md, body).unwrap();
     seed_healthy_coordinator(&ws);
@@ -1387,7 +1388,7 @@ fn write_copilot_byok_team(ws: &Path, name: &str, model: Option<&str>) -> PathBu
     std::fs::write(
         team.join("agents/worker_a.md"),
         format!(
-            "---\nname: worker_a\nrole: Copilot Worker\nprovider: copilot\n{model_field}auth_mode: compatible_api\nprofile: byok\ntools:\n  - mcp_team\n---\n\nCOPILOT ROLE BODY SENTINEL: BYOK worker.\n"
+            "---\nname: worker_a\nrole: Copilot Worker\nprovider: copilot\n{model_field}auth_mode: compatible_api\ndangerously_skip_permissions: false\nprofile: byok\ntools:\n  - mcp_team\n---\n\nCOPILOT ROLE BODY SENTINEL: BYOK worker.\n"
         ),
     )
     .unwrap();
@@ -1412,15 +1413,16 @@ fn write_copilot_team(ws: &Path, name: &str, tools: &[&str], dangerous: bool) ->
     let _ = TeamOpts;
     let team = ws.join(name);
     std::fs::create_dir_all(team.join("agents")).unwrap();
-    let dangerous_line = if dangerous {
-        "dangerous_auto_approve: true\n"
+    // 0.5.66 bypass 单源:bypass 由角色字段驱动,不再是 TEAM.md dangerous_auto_approve。
+    let role_bypass = if dangerous {
+        "true"
     } else {
-        ""
+        "false"
     };
     std::fs::write(
         team.join("TEAM.md"),
         format!(
-            "---\nname: {name}\nobjective: copilot provider contract fixture.\nprovider: copilot\n{dangerous_line}---\n\nTeam fixture.\n"
+            "---\nname: {name}\nobjective: copilot provider contract fixture.\nprovider: copilot\n---\n\nTeam fixture.\n"
         ),
     )
     .unwrap();
@@ -1431,7 +1433,7 @@ fn write_copilot_team(ws: &Path, name: &str, tools: &[&str], dangerous: bool) ->
     std::fs::write(
         team.join("agents/worker_a.md"),
         format!(
-            "---\nname: worker_a\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ntools:\n{tool_lines}---\n\nCOPILOT ROLE BODY SENTINEL: serve the copilot adapter contract.\n"
+            "---\nname: worker_a\nrole: Copilot Worker\nprovider: copilot\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: {role_bypass}\ntools:\n{tool_lines}---\n\nCOPILOT ROLE BODY SENTINEL: serve the copilot adapter contract.\n"
         ),
     )
     .unwrap();

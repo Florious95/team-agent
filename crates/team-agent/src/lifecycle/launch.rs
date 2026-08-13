@@ -70,6 +70,7 @@ pub fn launch_with_transport_in_workspace(
     transport: &dyn Transport,
 ) -> Result<LaunchReport, LifecycleError> {
     let _ = skip_profile_smoke;
+    let _ = auto_approve; // 0.5.66: bypass 单源后无 runtime.dangerous_auto_approve,`--yes` 为 no-op。
     // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): launch.phase
     // timer with monotonic `elapsed_ms` for latency triage.
     let phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
@@ -82,14 +83,12 @@ pub fn launch_with_transport_in_workspace(
     let text = std::fs::read_to_string(spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    // 0.5.66 §3.2 跨 workspace 兼容警示:leader argv 带 bypass flag 但当前团队
+    // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
+    // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。
+    emit_dangerous_flag_no_role_declared_warning(workspace, &spec);
     phase_timer.emit(workspace, "launch.phase", "compile_spec");
     let session_name = spec_session_name(&spec);
-    let safety = effective_runtime_config(&spec)?;
-    if safety.enabled && !safety.inherited && !auto_approve && !dry_run {
-        return Err(LifecycleError::DangerousApprovalRequired(
-            "runtime dangerous_auto_approve is enabled".to_string(),
-        ));
-    }
     if !dry_run && transport_has_session(transport, &session_name) {
         return Err(LifecycleError::SessionConflict(format!(
             "tmux session already exists: {}",
@@ -103,7 +102,6 @@ pub fn launch_with_transport_in_workspace(
             raw: serde_json::json!({"source": "compiled_spec"}),
         })
         .collect::<Vec<_>>();
-    write_launch_permission_audit(workspace, &safety)?;
     let routes = spec_routes(&spec);
     let started = if dry_run {
         Vec::new()
@@ -114,7 +112,6 @@ pub fn launch_with_transport_in_workspace(
             spec_path,
             &spec,
             &session_name,
-            &safety,
             transport,
         )?;
         persist_spawn_agent_state(
@@ -124,7 +121,6 @@ pub fn launch_with_transport_in_workspace(
             &session_name,
             transport,
             &started,
-            &safety,
         )?;
         // 0.5.38: per-worker timing tags (source="launch") so operators can
         // trace which worker's spawn dominates wall time. Zeros for now on
@@ -181,10 +177,47 @@ pub fn launch_with_transport_in_workspace(
         tmux_endpoint: transport.tmux_endpoint(),
         routes,
         permissions,
-        safety,
         leader_receiver_attached: false,
         session_capture_incomplete_agents: Vec::new(),
     })
+}
+
+/// 0.5.66 §3.2 跨 workspace 升级警示(仅警示,不做行为决策)。
+/// leader argv 含 bypass flag、但当前 spec 所有 agent 都未声明
+/// `dangerously_skip_permissions=true` → 写 `dangerously_flag_present_but_no_role_declared`。
+///
+/// TODO(0.6.0): remove(0.6.0 删源头 A 后此警示无意义)。
+fn emit_dangerous_flag_no_role_declared_warning(workspace: &Path, spec: &Value) {
+    let argv: Vec<String> = std::env::args().collect();
+    emit_dangerous_flag_no_role_declared_warning_with_argv(workspace, spec, &argv);
+}
+
+/// 带显式 argv 的可测版。
+fn emit_dangerous_flag_no_role_declared_warning_with_argv(
+    workspace: &Path,
+    spec: &Value,
+    argv: &[String],
+) {
+    if crate::provider::bypass_flags::detect_bypass_flag_in_argv(argv).is_none() {
+        return;
+    }
+    let any_role_declared = spec_agent_values(spec).iter().any(|agent| {
+        matches!(
+            agent.get("dangerously_skip_permissions"),
+            Some(Value::Bool(true))
+        )
+    });
+    if any_role_declared {
+        return;
+    }
+    let _ = crate::event_log::EventLog::new(workspace).write(
+        "dangerously_flag_present_but_no_role_declared",
+        serde_json::json!({
+            "message": "leader process carries a bypass flag but no role in this team declares \
+                       dangerously_skip_permissions=true; bypass no longer inherits to workers \
+                       (0.5.66 single-source). Declare the field per role to opt in.",
+        }),
+    );
 }
 
 mod plan;
@@ -192,6 +225,7 @@ pub(crate) use plan::{handle_report_result, start_plan};
 
 pub mod spawn;
 pub(super) use spawn::*;
+pub(crate) use spawn::agent_id_spec_source_path;
 
 mod layout;
 pub(super) use layout::*;
@@ -221,7 +255,10 @@ pub(crate) use leader_context::{
 
 mod agent_state;
 pub(super) use agent_state::*;
-pub(crate) use agent_state::{effective_approval_policy, persist_effective_approval_policy};
+pub(crate) use agent_state::{
+    effective_approval_policy, persist_effective_approval_policy,
+    persist_effective_approval_policy_from_agent,
+};
 
 mod mcp_config;
 pub(super) use mcp_config::*;
@@ -266,14 +303,6 @@ pub mod readiness;
 pub(crate) use readiness::launched_team_receiver_is_attached;
 pub(super) use readiness::*;
 
-mod approval;
-pub use approval::detect_dangerous_approval;
-use approval::{
-    binary_matches_provider, binary_name, dangerous_leader_flags,
-    detect_dangerous_approval_in_argv, disabled_dangerous_approval, process_ancestry_argv,
-    process_argv_tokens, process_parent_pid,
-};
-
 mod add_agent;
 pub(super) use add_agent::*;
 pub use add_agent::{add_agent, add_agent_force};
@@ -309,14 +338,81 @@ pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state,
 
 pub mod spec_state;
 pub(crate) use spec_state::{
-    effective_runtime_config, effective_runtime_config_for_worker_spawn,
     override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
+};
+pub(crate) use spec_state::{
+    effective_runtime_config_for_worker_spawn, effective_runtime_config_for_worker_spawn_json,
 };
 use spec_state::{
     env_nonempty, has_positive_caller_leader_env, initial_runtime_state,
     override_spec_display_backend, override_spec_runtime_str,
     seed_launched_owner_from_caller_with_provider_lookup, seed_launched_owner_from_env,
     spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
-    spec_tasks_json, team_workspace, write_launch_permission_audit, yaml_value_to_json,
+    spec_tasks_json, team_workspace, yaml_value_to_json,
 };
 pub use spec_state::worker_session_name_pub;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    // 0.5.66 §4.1 test_leader_flag_present_but_no_role_true_writes_warning_event:
+    // leader argv 带 bypass flag + 无角色声明 true → 写 warning 事件。
+    #[test]
+    fn test_leader_flag_present_but_no_role_true_writes_warning_event() {
+        let ws = std::env::temp_dir().join(format!(
+            "ta-bypass-warning-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let spec = yaml::loads(
+            "version: 1\nteam: {}\nleader: {}\nagents:\n  - id: a\n    role: r\n    provider: fake\n    dangerously_skip_permissions: false\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "team-agent".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        emit_dangerous_flag_no_role_declared_warning_with_argv(&ws, &spec, &argv);
+        let events = crate::event_log::EventLog::new(&ws).tail(0).unwrap();
+        assert!(
+            events.iter().any(|event| {
+                event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("dangerously_flag_present_but_no_role_declared")
+            }),
+            "leader flag + no role declared must write the warning event; events={events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    // 0.5.66 §4.1 同测试的反向:有角色声明 true → 不写 warning。
+    #[test]
+    fn test_leader_flag_present_but_role_declared_no_warning() {
+        let ws = std::env::temp_dir().join(format!(
+            "ta-bypass-warning-none-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let spec = yaml::loads(
+            "version: 1\nteam: {}\nleader: {}\nagents:\n  - id: a\n    role: r\n    provider: fake\n    dangerously_skip_permissions: true\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "team-agent".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+        ];
+        emit_dangerous_flag_no_role_declared_warning_with_argv(&ws, &spec, &argv);
+        let events = crate::event_log::EventLog::new(&ws).tail(0).unwrap();
+        assert!(
+            !events.iter().any(|event| {
+                event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("dangerously_flag_present_but_no_role_declared")
+            }),
+            "role declared true must suppress the warning; events={events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}

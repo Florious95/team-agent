@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::communication_mode::CommunicationMode;
-use crate::lifecycle::types::{DangerousApproval, LifecycleError};
+use crate::lifecycle::types::LifecycleError;
 use crate::model::enums::{Enforcement, Provider};
 use crate::model::ids::AgentId;
 use crate::model::permissions::{resolve_permissions, AgentPermissionInput};
@@ -42,6 +42,8 @@ pub(crate) struct WorkerCommandAgent {
     system_prompt_file: Option<String>,
     output_contract_format: Option<String>,
     communication_mode: CommunicationMode,
+    /// 0.5.66 bypass 单源:agent-level `dangerously_skip_permissions`(必填 bool)。
+    dangerously_skip_permissions: bool,
 }
 
 impl WorkerCommandAgent {
@@ -92,6 +94,10 @@ impl WorkerCommandAgent {
                     .get("communication_mode")
                     .and_then(crate::model::yaml::Value::as_str),
             )?,
+            dangerously_skip_permissions: matches!(
+                agent.get("dangerously_skip_permissions"),
+                Some(crate::model::yaml::Value::Bool(true))
+            ),
         })
     }
 
@@ -142,6 +148,10 @@ impl WorkerCommandAgent {
                     .get("communication_mode")
                     .and_then(serde_json::Value::as_str),
             )?,
+            dangerously_skip_permissions: agent
+                .get("dangerously_skip_permissions")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
         })
     }
 }
@@ -175,17 +185,42 @@ pub(crate) fn compile_worker_system_prompt(
 pub(crate) fn resolved_tool_strings_for_command(
     agent: &WorkerCommandAgent,
     provider: Provider,
-    safety: &DangerousApproval,
 ) -> Result<Vec<String>, LifecycleError> {
     let mut tools: Vec<String> = resolve_agent_permissions(agent, provider)?
         .sorted_tool_strings()
         .into_iter()
         .map(str::to_string)
         .collect();
-    if safety.enabled && !tools.iter().any(|tool| tool == "dangerous_auto_approve") {
-        tools.push("dangerous_auto_approve".to_string());
+    // 0.5.66 bypass 单源:读 agent 自己的 `dangerously_skip_permissions` bool,
+    // 不再收 team/runtime/leader argv 派生的 `DangerousApproval`。true → 加
+    // `dangerous_auto_approve` 哨兵(adapter 消费点不变);provider 无 bypass
+    // argv 定义 → fail-loud,不静默 fallback。
+    if agent.dangerously_skip_permissions {
+        let flag = crate::provider::bypass_flags::provider_bypass_flag(provider).ok_or_else(
+            || {
+                LifecycleError::RequirementUnmet(format!(
+                    "provider {} has no bypass argv flag defined; dangerously_skip_permissions=true cannot be honored",
+                    provider_display_name(provider)
+                ))
+            },
+        )?;
+        debug_assert!(flag.starts_with("--"));
+        if !tools.iter().any(|tool| tool == "dangerous_auto_approve") {
+            tools.push("dangerous_auto_approve".to_string());
+        }
     }
     Ok(tools)
+}
+
+fn provider_display_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "claude",
+        Provider::ClaudeCode => "claude_code",
+        Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
+        Provider::GeminiCli => "gemini_cli",
+        Provider::Fake => "fake",
+    }
 }
 
 fn resolve_agent_permissions(
@@ -282,20 +317,6 @@ fn provider_default_prompt_only_tools(provider: Provider) -> &'static [&'static 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::types::DangerousApprovalSource;
-
-    fn disabled_safety() -> DangerousApproval {
-        DangerousApproval {
-            enabled: false,
-            source: DangerousApprovalSource::Disabled,
-            inherited: false,
-            provider: None,
-            flag: None,
-            worker_capability_above_leader: false,
-            ancestry_binary_name: None,
-            unexpected_binary: false,
-        }
-    }
 
     #[test]
     fn empty_tools_use_role_defaults_and_aliases_resolve_before_command() {
@@ -308,10 +329,10 @@ mod tests {
             system_prompt_file: None,
             output_contract_format: None,
             communication_mode: CommunicationMode::default(),
+            dangerously_skip_permissions: false,
         };
         let tools =
-            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode, &disabled_safety())
-                .unwrap();
+            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
         assert_eq!(
             tools,
             [
@@ -330,9 +351,80 @@ mod tests {
             ..agent
         };
         let tools =
-            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode, &disabled_safety())
-                .unwrap();
+            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
         assert_eq!(tools, ["fs_list", "fs_read", "fs_write", "mcp_team"]);
+    }
+
+    // 0.5.66 bypass 单源 §4.1:true → tools 追加 `dangerous_auto_approve` 哨兵。
+    #[test]
+    fn test_true_field_produces_bypass_flag_argv() {
+        let agent = WorkerCommandAgent {
+            id: Some("dev".to_string()),
+            provider: Provider::ClaudeCode,
+            role: Some("developer".to_string()),
+            declared_tools: Some(vec!["mcp_team".to_string()]),
+            system_prompt_inline: None,
+            system_prompt_file: None,
+            output_contract_format: None,
+            communication_mode: CommunicationMode::default(),
+            dangerously_skip_permissions: true,
+        };
+        let tools = resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
+        assert!(
+            tools.iter().any(|tool| tool == "dangerous_auto_approve"),
+            "true field must append the dangerous_auto_approve sentinel; tools={tools:?}"
+        );
+        assert!(
+            tools.iter().any(|tool| tool == "mcp_team"),
+            "normal tools must remain; tools={tools:?}"
+        );
+    }
+
+    // 0.5.66 bypass 单源 §4.1:false → 不追加哨兵。
+    #[test]
+    fn test_false_field_produces_no_bypass_flag_argv() {
+        let agent = WorkerCommandAgent {
+            id: Some("dev".to_string()),
+            provider: Provider::ClaudeCode,
+            role: Some("developer".to_string()),
+            declared_tools: Some(vec!["mcp_team".to_string()]),
+            system_prompt_inline: None,
+            system_prompt_file: None,
+            output_contract_format: None,
+            communication_mode: CommunicationMode::default(),
+            dangerously_skip_permissions: false,
+        };
+        let tools = resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
+        assert!(
+            !tools.iter().any(|tool| tool == "dangerous_auto_approve"),
+            "false field must not append the sentinel; tools={tools:?}"
+        );
+    }
+
+    // 0.5.66 bypass 单源 §4.1:provider 未定义 bypass 参数 + true → fail-loud。
+    #[test]
+    fn test_provider_without_bypass_flag_definition_errors() {
+        let agent = WorkerCommandAgent {
+            id: Some("dev".to_string()),
+            provider: Provider::GeminiCli,
+            role: Some("developer".to_string()),
+            declared_tools: Some(vec!["mcp_team".to_string()]),
+            system_prompt_inline: None,
+            system_prompt_file: None,
+            output_contract_format: None,
+            communication_mode: CommunicationMode::default(),
+            dangerously_skip_permissions: true,
+        };
+        let err = resolved_tool_strings_for_command(&agent, Provider::GeminiCli).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no bypass argv flag defined"),
+            "provider without bypass flag + true must fail-loud; got {msg}"
+        );
+        assert!(
+            msg.contains("gemini_cli"),
+            "error must name the provider; got {msg}"
+        );
     }
 
     #[test]
@@ -353,6 +445,7 @@ mod tests {
             system_prompt_file: None,
             output_contract_format: Some("result_envelope_v1".to_string()),
             communication_mode: CommunicationMode::default(),
+            dangerously_skip_permissions: false,
         };
         let prompt = compile_worker_system_prompt(&agent).unwrap();
         assert!(

@@ -28,7 +28,6 @@ pub(super) fn persist_spawn_agent_state(
     session_name: &SessionName,
     transport: &dyn Transport,
     started: &[StartedAgent],
-    safety: &DangerousApproval,
 ) -> Result<(), LifecycleError> {
     let state_path = crate::state::persist::runtime_state_path(workspace);
     let mut state = match crate::state::repository::StateRepository::new(workspace)
@@ -134,7 +133,6 @@ pub(super) fn persist_spawn_agent_state(
                 &team_id,
                 Some(agent_id_to_pane_id(started, id)),
                 pane_pid,
-                safety,
                 started_agent,
                 Some(&profile_dir),
             )?,

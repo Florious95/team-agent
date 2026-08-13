@@ -677,7 +677,7 @@ fn write_team_docs(workspace: &Path, workers: &[(&str, &str)]) {
     fs::create_dir_all(workspace.join("agents")).unwrap();
     fs::write(workspace.join("TEAM.md"), "---\nname: current\nobjective: P0 host co-tenant contract.\nprovider: codex\n---\n").unwrap();
     for (worker, model) in workers {
-        let role = format!("---\nname: {worker}\nrole: {worker}\nprovider: codex\nmodel: {model}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{worker}.\n");
+        let role = format!("---\nname: {worker}\nrole: {worker}\nprovider: codex\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n");
         fs::write(workspace.join("agents").join(format!("{worker}.md")), role).unwrap();
     }
 }

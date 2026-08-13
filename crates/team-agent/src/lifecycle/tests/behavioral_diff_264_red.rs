@@ -528,7 +528,7 @@ fn write_team(workspace: &Path, fixture: &TeamFixture<'_>) -> PathBuf {
         std::fs::write(
             team.join("agents").join(format!("{}.md", agent.id)),
             format!(
-                "---\nname: {}\nrole: {}\nprovider: {}\n{model}auth_mode: {}\n{profile}tools:\n{tools}---\n\n{}\n",
+                "---\nname: {}\nrole: {}\nprovider: {}\n{model}auth_mode: {}\n{profile}dangerously_skip_permissions: false\ntools:\n{tools}---\n\n{}\n",
                 agent.id, agent.role, agent.provider, agent.auth_mode, agent.body
             ),
         )
