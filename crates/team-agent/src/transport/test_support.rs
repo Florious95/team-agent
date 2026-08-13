@@ -35,6 +35,7 @@ struct OfflineState {
     calls: Vec<&'static str>,
     spawns: Vec<SpawnRecord>,
     pane_titles: Vec<(String, String, String, String)>,
+    window_options: Vec<(String, String)>,
     inject_targets: Vec<Target>,
     inject_payloads: Vec<String>,
     tmux_endpoint: Option<String>,
@@ -70,6 +71,7 @@ impl Default for OfflineState {
             calls: Vec::new(),
             spawns: Vec::new(),
             pane_titles: Vec::new(),
+            window_options: Vec::new(),
             inject_targets: Vec::new(),
             inject_payloads: Vec::new(),
             tmux_endpoint: None,
@@ -265,6 +267,10 @@ impl OfflineTransport {
 
     pub fn pane_title_records(&self) -> Vec<(String, String, String, String)> {
         self.with_state(|state| state.pane_titles.clone())
+    }
+
+    pub fn window_options(&self) -> Vec<(String, String)> {
+        self.with_state(|state| state.window_options.clone())
     }
 
     pub fn inject_targets(&self) -> Vec<Target> {
@@ -553,6 +559,20 @@ impl Transport for OfflineTransport {
     ) -> Result<SetEnvOutcome, TransportError> {
         self.record("set_session_env");
         Ok(SetEnvOutcome::Applied)
+    }
+
+    fn set_window_option(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        option: &str,
+        value: &str,
+    ) -> Result<(), TransportError> {
+        self.with_state(|state| {
+            state.calls.push("set_window_option");
+            state.window_options.push((option.to_string(), value.to_string()));
+        });
+        Ok(())
     }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {

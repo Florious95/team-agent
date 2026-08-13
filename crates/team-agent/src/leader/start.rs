@@ -1059,6 +1059,16 @@ fn execute_managed_leader_plan_attempt(
         workspace,
         session_existed_before,
     )?;
+    // A-55 (window rename race): tmux defaults `allow-rename` + `automatic-rename`
+    // ON, so the pane's shell wrapper can print an OSC title-set escape during
+    // init (zshrc/starship/PROMPT_COMMAND) and rename the window away from WINDOW
+    // between spawn-poll and attach — making `attach-session -t SESSION:WINDOW`
+    // fail with "can't find window: WINDOW". Lock both off right after spawn,
+    // before run_leader_argv. Best-effort: a failure must NOT abort the launcher
+    // (old tmux may lack the option), but it is audited below.
+    let (rename_result, rename_stderr) =
+        lock_down_window_rename(&transport, session, &spawned.window);
+    write_window_rename_lockdown_event(workspace, &rename_result, &rename_stderr);
     if let Err(error) = persist_managed_leader_binding(plan, workspace, &spawned) {
         cleanup_managed_leader_resources(
             &transport,
@@ -2246,6 +2256,44 @@ fn write_leader_startup_prompt_event(workspace: &Path, event: &str, fields: serd
     let _ = crate::event_log::EventLog::new(workspace).write(event, fields);
 }
 
+/// A-55 (window rename race): lock the freshly-spawned leader window against
+/// rename — `allow-rename off` (refuse pane-internal OSC title-set renames)
+/// AND `automatic-rename off` (refuse tmux's own command-driven rename). Both
+/// must be set; tmux treats them as independent. Best-effort: a failure must
+/// NOT abort the launcher (old tmux may lack the option) — return the outcome
+/// for audit instead of propagating an error. Returns (result, tmux_stderr).
+fn lock_down_window_rename(
+    transport: &dyn Transport,
+    session: &SessionName,
+    window: &WindowName,
+) -> (String, String) {
+    let allow_rename = transport.set_window_option(session, window, "allow-rename", "off");
+    let automatic_rename = transport.set_window_option(session, window, "automatic-rename", "off");
+    let (result, stderr) = match (&allow_rename, &automatic_rename) {
+        (Ok(()), Ok(())) => ("ok".to_string(), String::new()),
+        (Ok(()), Err(error)) => ("failed".to_string(), error.to_string()),
+        (Err(error), Ok(())) => ("failed".to_string(), error.to_string()),
+        (Err(a), Err(b)) => (
+            "failed".to_string(),
+            format!("allow-rename: {a}; automatic-rename: {b}"),
+        ),
+    };
+    (result, stderr)
+}
+
+/// A-55: audit the rename-lockdown outcome to the event log. Failure does not
+/// abort the launcher; record ok/failed + tmux stderr for regression triage.
+fn write_window_rename_lockdown_event(workspace: &Path, result: &str, stderr: &str) {
+    write_leader_startup_prompt_event(
+        workspace,
+        "leader.launcher.window_rename_lockdown",
+        serde_json::json!({
+            "result": result,
+            "tmux_stderr": stderr,
+        }),
+    );
+}
+
 fn ensure_tmux_installed() -> Result<(), LeaderError> {
     match Command::new("tmux").arg("-V").output() {
         Ok(output) if output.status.success() => Ok(()),
@@ -2350,8 +2398,8 @@ mod tests {
     use super::{
         ensure_managed_provider_live_after_attach, execute_leader_plan_after_ambient_authority,
         format_launcher_failure, handle_exec_provider_startup_prompts,
-        is_interactive_shell_basename, push_bounded_stderr, shlex_quote,
-        VerifiedAmbientPaneAuthority, LEADER_STDERR_LIMIT,
+        is_interactive_shell_basename, lock_down_window_rename, push_bounded_stderr, shlex_quote,
+        write_window_rename_lockdown_event, VerifiedAmbientPaneAuthority, LEADER_STDERR_LIMIT,
     };
 
     struct ScriptedTransport {
@@ -2359,6 +2407,8 @@ mod tests {
         sent: Mutex<Vec<(Target, Vec<Key>)>>,
         liveness: PaneLiveness,
         targets: Vec<PaneInfo>,
+        window_options: Mutex<Vec<(String, String)>>,
+        window_option_error: Mutex<Option<String>>,
     }
 
     impl ScriptedTransport {
@@ -2368,6 +2418,8 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
                 liveness: PaneLiveness::Unknown,
                 targets: Vec::new(),
+                window_options: Mutex::new(Vec::new()),
+                window_option_error: Mutex::new(None),
             }
         }
 
@@ -2377,6 +2429,8 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
                 liveness,
                 targets: Vec::new(),
+                window_options: Mutex::new(Vec::new()),
+                window_option_error: Mutex::new(None),
             }
         }
 
@@ -2386,11 +2440,34 @@ mod tests {
                 sent: Mutex::new(Vec::new()),
                 liveness,
                 targets,
+                window_options: Mutex::new(Vec::new()),
+                window_option_error: Mutex::new(None),
+            }
+        }
+
+        /// A-55: a ScriptedTransport whose `set_window_option` always fails with
+        /// the given tmux stderr — proves the lockdown never aborts the launcher.
+        fn with_window_option_error(error: &str) -> Self {
+            Self {
+                screens: Mutex::new(Vec::new()),
+                sent: Mutex::new(Vec::new()),
+                liveness: PaneLiveness::Unknown,
+                targets: Vec::new(),
+                window_options: Mutex::new(Vec::new()),
+                window_option_error: Mutex::new(Some(error.to_string())),
             }
         }
 
         fn sent(&self) -> Vec<(Target, Vec<Key>)> {
             match self.sent.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        /// All `set-window-option option value` pairs, in call order.
+        fn window_options(&self) -> Vec<(String, String)> {
+            match self.window_options.lock() {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
             }
@@ -2509,6 +2586,34 @@ mod tests {
             _value: &str,
         ) -> Result<SetEnvOutcome, TransportError> {
             Ok(SetEnvOutcome::Applied)
+        }
+
+        fn set_window_option(
+            &self,
+            _session: &SessionName,
+            _window: &WindowName,
+            option: &str,
+            value: &str,
+        ) -> Result<(), TransportError> {
+            if let Some(stderr) = self
+                .window_option_error
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+            {
+                return Err(TransportError::Subprocess {
+                    argv: vec!["tmux".to_string(), "set-window-option".to_string()],
+                    code: Some(1),
+                    stderr,
+                });
+            }
+            match self.window_options.lock() {
+                Ok(mut guard) => guard.push((option.to_string(), value.to_string())),
+                Err(poisoned) => poisoned
+                    .into_inner()
+                    .push((option.to_string(), value.to_string())),
+            }
+            Ok(())
         }
 
         fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
@@ -2987,5 +3092,65 @@ mod tests {
 
         assert_eq!(captured.len(), LEADER_STDERR_LIMIT);
         assert!(captured.ends_with(b"XYZ"));
+    }
+
+    #[test]
+    fn managed_leader_launch_disables_window_rename() {
+        let transport = ScriptedTransport::with_liveness(PaneLiveness::Live);
+        let session = SessionName::new("team-agent-leader-claude_code-demo");
+        let window = WindowName::new("claude_code");
+
+        let (result, stderr) = lock_down_window_rename(&transport, &session, &window);
+
+        assert_eq!(result, "ok", "both set-window-option calls must succeed");
+        assert!(stderr.is_empty());
+        let options = transport.window_options();
+        assert_eq!(
+            options,
+            vec![
+                ("allow-rename".to_string(), "off".to_string()),
+                ("automatic-rename".to_string(), "off".to_string()),
+            ],
+            "both rename lockdown options must be issued, in order"
+        );
+    }
+
+    #[test]
+    fn launcher_survives_set_window_option_failure() {
+        let workspace =
+            std::env::temp_dir().join(format!("ta-rename-lockdown-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let transport = ScriptedTransport::with_window_option_error(
+            "set-window-option: unknown option: allow-rename",
+        );
+        let session = SessionName::new("team-agent-leader-claude_code-demo");
+        let window = WindowName::new("claude_code");
+
+        // Lockdown must NOT abort the launcher: it returns a failed outcome
+        // (recorded for audit) instead of propagating an error.
+        let (result, stderr) = lock_down_window_rename(&transport, &session, &window);
+
+        assert_eq!(result, "failed", "a set-window-option failure is audited, not fatal");
+        assert!(
+            stderr.contains("unknown option"),
+            "tmux stderr must surface in the audit payload: {stderr}"
+        );
+
+        // The audit event lands in the workspace event log with result=failed.
+        write_window_rename_lockdown_event(&workspace, &result, &stderr);
+        let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+        let lockdown = events
+            .iter()
+            .find(|event| {
+                event["event"] == "leader.launcher.window_rename_lockdown"
+            })
+            .expect("rename_lockdown event must be written even on failure");
+        assert_eq!(lockdown["result"], "failed");
+        assert!(
+            lockdown["tmux_stderr"].as_str().unwrap_or_default().contains("unknown option"),
+            "event must carry tmux stderr for regression triage: {lockdown}"
+        );
+
+        std::fs::remove_dir_all(&workspace).ok();
     }
 }

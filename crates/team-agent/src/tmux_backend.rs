@@ -2557,6 +2557,25 @@ impl Transport for TmuxBackend {
         Ok(SetEnvOutcome::Applied)
     }
 
+    fn set_window_option(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        option: &str,
+        value: &str,
+    ) -> Result<(), TransportError> {
+        let target = format!("{}:{}", session.as_str(), window.as_str());
+        let argv = vec![
+            "tmux".to_string(),
+            "set-window-option".to_string(),
+            "-t".to_string(),
+            target,
+            option.to_string(),
+            value.to_string(),
+        ];
+        self.run_ok(&argv)
+    }
+
     fn kill_server(&self) -> Result<(), TransportError> {
         TmuxBackend::kill_server(self);
         Ok(())

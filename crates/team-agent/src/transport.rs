@@ -762,6 +762,23 @@ pub trait Transport: Send + Sync {
         value: &str,
     ) -> Result<SetEnvOutcome, TransportError>;
 
+    /// A-55 (window rename race): set a tmux per-window option (e.g.
+    /// `allow-rename off`, `automatic-rename off`) on an existing window.
+    /// tmux=`set-window-option -t SESSION:WINDOW`; non-tmux backends refuse
+    /// via the default (typed unsupported).
+    fn set_window_option(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        _option: &str,
+        _value: &str,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::MuxUnavailable {
+            backend: self.kind(),
+            detail: "set-window-option is tmux-only".to_string(),
+        })
+    }
+
     // —— LIFECYCLE(SL)——
 
     fn kill_server(&self) -> Result<(), TransportError> {

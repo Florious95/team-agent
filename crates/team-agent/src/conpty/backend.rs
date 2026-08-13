@@ -644,6 +644,22 @@ impl Transport for ConPtyBackend {
         Ok(SetEnvOutcome::InternalizedAtSpawn)
     }
 
+    fn set_window_option(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        _option: &str,
+        _value: &str,
+    ) -> Result<(), TransportError> {
+        // Design §Transport Boundary: window options are tmux concepts; ConPTY
+        // has no per-window option registry, so this is a typed capability
+        // refusal. Callers must `let _ =` this (A-55 lockdown is best-effort).
+        Err(TransportError::MuxUnavailable {
+            backend: BackendKind::ConPty,
+            detail: "set-window-option is tmux-only".to_string(),
+        })
+    }
+
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
         let resp = self.dispatch(Op::HasPane, serde_json::json!({"pane_id": pane.as_str()}))?;
         Ok(Some(resp.result["present"].as_bool().unwrap_or(false)))
