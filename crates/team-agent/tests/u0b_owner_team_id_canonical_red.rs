@@ -241,7 +241,7 @@ runtime:
   session_name: "team-{team_key}"
   auto_launch: true
   startup_order: ["{agent_id}"]
-  dangerous_auto_approve: false
+  dangerously_skip_permissions: false
 tasks:
   - id: "task_initial"
     title: "Initial task"

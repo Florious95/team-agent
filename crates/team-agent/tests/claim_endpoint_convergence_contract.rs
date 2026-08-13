@@ -865,7 +865,7 @@ runtime:
   max_active_agents: 1
   startup_order:
     - "{worker}"
-  dangerous_auto_approve: false
+  dangerously_skip_permissions: false
   fast: false
   tick_interval_sec: 2
   push_min_interval_sec: 60

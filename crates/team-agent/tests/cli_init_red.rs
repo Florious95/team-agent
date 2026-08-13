@@ -149,7 +149,7 @@ runtime:
   session_name: teamspec-full-example
   auto_launch: true
   require_user_approval_before_launch: true
-  dangerous_auto_approve: false
+  dangerously_skip_permissions: false
   max_active_agents: 3
   startup_order:
     - codex_implementer
