@@ -65,7 +65,7 @@ const POLLUTED_CALLER_AUTHORITY_ENVS: &[&str] = &[
 ];
 
 #[test]
-#[serial(env)]
+#[serial(env, pid_probe)]
 fn polluted_caller_env_never_authorizes_teardown_to_kill_foreign_tmux() {
     let env = hermetic_guard::HermeticTestEnv::enter("p0-caller-env-sentinel");
     let shim_dir = env.root().join("bin");
@@ -150,7 +150,7 @@ exec "$TEAM_AGENT_TEST_REAL_TMUX" "$@"
 }
 
 #[test]
-#[serial(env)]
+#[serial(env, pid_probe)]
 fn restart_allow_fresh_does_not_leave_same_role_host_cotenants() {
     let mut failures = Vec::new();
     let (env, workspace) = team_case("p0-restart", &["developer", "test-engineer", "arch-reviewer"]);

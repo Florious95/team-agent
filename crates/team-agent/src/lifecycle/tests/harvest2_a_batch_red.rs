@@ -422,7 +422,10 @@ check behind it = false green); it must reflect an actual doctor result"
 /// T3-2 (claude_auth_hint parse failure): when `claude auth status` output is
 /// unparseable / unsuccessful, the hint must not default to Present (auth misreported
 /// as available). PATH-shims a `claude` that prints garbage and exits non-zero.
+/// Mutates the process-global PATH/HOME — must not race host_cotenant's ps/tmux
+/// shims (P0 pid-probe isolation), hence `#[serial(pid_probe)]`.
 #[test]
+#[serial(pid_probe)]
 fn t3_claude_auth_hint_parse_failure_is_not_present() {
     let home = tmp_ws("t3-auth-home");
     let shim_dir = home.join("bin");

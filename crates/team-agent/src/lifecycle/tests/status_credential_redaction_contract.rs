@@ -368,7 +368,7 @@ fn red6_cli_restart_reports_and_top_level_error_logs_are_redacted() {
 }
 
 #[test]
-#[serial(env)]
+#[serial(env, pid_probe)]
 fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let tmux = fs::read_to_string(root.join("src/tmux_backend.rs")).unwrap();
