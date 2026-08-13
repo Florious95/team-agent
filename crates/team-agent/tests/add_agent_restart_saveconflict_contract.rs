@@ -434,7 +434,7 @@ fn test_tmp_root() -> PathBuf {
 
 fn role_doc(id: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: Fake worker {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nFake worker {id}.\n"
+        "---\nname: {id}\nrole: Fake worker {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake worker {id}.\n"
     )
 }
 
