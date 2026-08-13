@@ -17,6 +17,8 @@ pub fn provider_window_name(provider: Provider) -> &'static str {
         Provider::Codex => "codex",
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
+        Provider::Grok => "grok",
+        Provider::CursorAgent => "agent",
         Provider::Fake => "fake",
     }
 }

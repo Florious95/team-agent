@@ -270,9 +270,9 @@ pub(crate) use mcp_config::{
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
-    apply_copilot_instructions_overlay, apply_mcp_auto_approval_env, apply_profile_launch_env,
-    fill_spawn_placeholders, fill_spawn_placeholders_full, inherited_env_with_team_overrides,
-    persist_command_plan_state, spawn_timestamp,
+    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay, apply_mcp_auto_approval_env,
+    apply_profile_launch_env, fill_spawn_placeholders, fill_spawn_placeholders_full,
+    inherited_env_with_team_overrides, persist_command_plan_state, spawn_timestamp,
 };
 
 mod identity;

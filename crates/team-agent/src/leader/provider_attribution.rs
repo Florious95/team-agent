@@ -17,6 +17,11 @@ const COMMAND_GRAMMAR_PROVIDER_COMMANDS: &[(&str, Provider)] = &[
     ("codex", Provider::Codex),
     ("copilot", Provider::Copilot),
     ("gemini", Provider::GeminiCli),
+    ("grok", Provider::Grok),
+    // NOTE: Cursor `agent` binary is NOT added here — command-text attribution
+    // is a substring contains() match in table order; `"agent"` would also
+    // match the framework's own `team-agent` binary and mis-attribute leader
+    // panes. CursorAgent panes need env/argv-based attribution (TODO 0.5.67).
     ("fake", Provider::Fake),
 ];
 

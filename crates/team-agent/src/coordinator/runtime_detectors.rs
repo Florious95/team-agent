@@ -554,6 +554,8 @@ fn runtime_event_provider_name(provider: Provider) -> &'static str {
         Provider::Codex => "codex",
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
+        Provider::Grok => "grok",
+        Provider::CursorAgent => "cursor_agent",
         Provider::Fake => "fake",
     }
 }

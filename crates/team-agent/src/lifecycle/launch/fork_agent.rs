@@ -289,6 +289,20 @@ pub fn fork_agent_with_transport(
             error
         })?;
     }
+    // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+    if provider == Provider::CursorAgent {
+        apply_cursor_agent_rules_overlay(&workspace, as_agent_id.as_str(), &system_prompt)
+            .map_err(|error| {
+                let _ = std::fs::write(&spec_path, text.as_bytes());
+                cleanup_fork_mcp_artifacts(
+                    &workspace,
+                    as_agent_id,
+                    &mcp_config_path,
+                    &profile_launch,
+                );
+                error
+            })?;
+    }
     let mut reserved_state = state.clone();
     reserve_forked_agent_state(
         &mut reserved_state,

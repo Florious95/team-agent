@@ -32,7 +32,8 @@ pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration 
     match provider {
         Provider::Claude | Provider::ClaudeCode => Duration::from_secs(45),
         Provider::Codex => Duration::from_secs(10),
-        Provider::Copilot | Provider::GeminiCli | Provider::Fake => Duration::from_secs(5),
+        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
+        | Provider::Fake => Duration::from_secs(5),
     }
 }
 
@@ -178,7 +179,7 @@ fn provider_backing_root(provider: Provider, plan: &CommandPlan) -> PathBuf {
         Provider::Claude | Provider::ClaudeCode => home.join(".claude").join("projects"),
         Provider::Codex => home.join(".codex").join("sessions"),
         Provider::Copilot => home.join(".copilot").join("session-state"),
-        Provider::GeminiCli | Provider::Fake => home,
+        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => home,
     }
 }
 

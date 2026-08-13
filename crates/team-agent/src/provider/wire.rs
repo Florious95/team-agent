@@ -34,6 +34,8 @@ pub(crate) fn provider_wire(provider: Provider) -> &'static str {
         Provider::Codex => "codex",
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
+        Provider::Grok => "grok",
+        Provider::CursorAgent => "cursor_agent",
         Provider::Fake => "fake",
     }
 }
@@ -86,6 +88,8 @@ pub(crate) fn provider_model_keys(provider: Provider) -> &'static [&'static str]
         Provider::Codex => &["codex"],
         Provider::Copilot => &["copilot"],
         Provider::GeminiCli => &["gemini_cli"],
+        Provider::Grok => &["grok"],
+        Provider::CursorAgent => &["cursor_agent"],
         Provider::Fake => &["fake"],
     }
 }
@@ -94,6 +98,11 @@ pub(crate) fn builtin_provider_model(provider: Provider) -> Option<&'static str>
     match provider {
         Provider::Claude | Provider::ClaudeCode => Some("claude-sonnet-4-6"),
         Provider::Codex => Some("gpt-5.5"),
+        // 0.5.67 Step 6: grok/cursor_agent 默认模型 hardcode。
+        //   grok: "grok-4"
+        //   cursor_agent: "sonnet-4-thinking" — TODO leader 醒后确认 (playbook Step 6)。
+        Provider::Grok => Some("grok-4"),
+        Provider::CursorAgent => Some("sonnet-4-thinking"),
         Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }
@@ -112,6 +121,11 @@ pub(crate) fn aliases(provider: Provider) -> &'static [&'static str] {
         Provider::Codex => &["codex"],
         Provider::Copilot => &["copilot"],
         Provider::GeminiCli => &["gemini_cli"],
+        Provider::Grok => &["grok"],
+        // canonical wire form 恒为首项 (parse_provider round-trip 依赖); "agent"
+        // 是 exec 二进制名, 仅作 alias (不参与 command-text 子串匹配, 见
+        // leader/provider_attribution.rs TODO)。
+        Provider::CursorAgent => &["cursor_agent", "agent"],
         Provider::Fake => &["fake"],
     }
 }
@@ -126,6 +140,8 @@ pub(crate) fn command_name(provider: Provider) -> &'static str {
         Provider::Codex => "codex",
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
+        Provider::Grok => "grok",
+        Provider::CursorAgent => "agent",
         Provider::Fake => "team-agent",
     }
 }
@@ -136,6 +152,8 @@ const ALL_PROVIDERS: &[Provider] = &[
     Provider::Codex,
     Provider::Copilot,
     Provider::GeminiCli,
+    Provider::Grok,
+    Provider::CursorAgent,
     Provider::Fake,
 ];
 

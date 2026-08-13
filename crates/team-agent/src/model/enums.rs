@@ -21,6 +21,12 @@ pub enum Provider {
     /// AGENTS.md + `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` env(B2 灵魂件降级,§C2)。
     Copilot,
     GeminiCli,
+    /// Grok CLI (0.5.67 provider-adapter). Append system prompt via `--rules`,
+    /// bypass `--always-approve`, session `--session-id`.
+    Grok,
+    /// Cursor `agent` CLI (0.5.67 provider-adapter). Append system prompt via
+    /// workspace `.cursor/rules/*.mdc` (方案 1 变体), bypass `--force`.
+    CursorAgent,
     Fake,
 }
 
@@ -84,7 +90,11 @@ impl ProviderEffort {
         match provider {
             Provider::Claude | Provider::ClaudeCode => true,
             Provider::Codex => !self.is_claude_only(),
-            Provider::Copilot | Provider::GeminiCli | Provider::Fake => false,
+            Provider::Copilot
+            | Provider::GeminiCli
+            | Provider::Grok
+            | Provider::CursorAgent
+            | Provider::Fake => false,
         }
     }
 }

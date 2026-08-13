@@ -424,6 +424,9 @@ fn provider_env_exports(
                 }
             }
         }
+        // 0.5.67: grok/cursor_agent 一期无 profile exports (走 subscription
+        // 已登录态或 BYOK 由上层编排)。Cursor 的 proxy env TODO 见 cursor_agent.rs。
+        Provider::Grok | Provider::CursorAgent => {}
         Provider::Fake => {}
     }
     exports
@@ -497,6 +500,11 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
         // C-7-1 cr verdict: 一期 subscription-only(已登录态),exports/unsets 空;
         // BYOK(COPILOT_PROVIDER_*)二期立项时单独 cr verdict 再开。
         Provider::Copilot => {}
+        // 0.5.67: grok 无 env 需 unset; cursor 一期也走空 unset。Cursor 的
+        // HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY unset TODO 见 cursor_agent.rs
+        // (global-agent 只接受 http:// 协议 proxy, runtime 注入 https:// 会 crash)。
+        Provider::Grok => {}
+        Provider::CursorAgent => {}
         Provider::Fake => {}
     }
     unsets
@@ -915,6 +923,8 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
         // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK required key 集合;
         // 二期 BYOK 立项时填(向后兼容字段保留)。
         Provider::Copilot => &[],
+        // 0.5.67: grok/cursor_agent 一期无 BYOK required key 集合 (同 copilot 精神)。
+        Provider::Grok | Provider::CursorAgent => &[],
         Provider::Fake => &[],
     }
 }

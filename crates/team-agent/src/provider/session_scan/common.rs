@@ -60,7 +60,11 @@ pub(super) fn candidate_session_files(
                     &mut out,
                 )?;
             }
-            Provider::Copilot | Provider::GeminiCli | Provider::Fake => {}
+            Provider::Copilot
+            | Provider::Grok
+            | Provider::CursorAgent
+            | Provider::GeminiCli
+            | Provider::Fake => {}
         }
     }
     out.sort_by(|a, b| {

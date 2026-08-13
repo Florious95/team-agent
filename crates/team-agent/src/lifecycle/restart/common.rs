@@ -338,6 +338,14 @@ pub(super) fn spawn_agent_window(
             &mut env,
         )?;
     }
+    // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+    if provider == crate::provider::Provider::CursorAgent {
+        crate::lifecycle::launch::apply_cursor_agent_rules_overlay(
+            workspace,
+            agent_id.as_str(),
+            &system_prompt,
+        )?;
+    }
     // 0.3.28 Step 3: per Python parity, worker spawn cwd is ALWAYS `workspace`.
     // The persisted-state `agent.spawn_cwd` override is ignored (it was a
     // Rust-only extension that drifted to `.team/runtime/<team_key>/` after
@@ -1107,7 +1115,7 @@ pub(super) fn resume_backing_probe_for_agent(
             }
             copilot_session_store_has_session(session_id.as_str())
         }
-        Provider::GeminiCli | Provider::Fake => false,
+        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic

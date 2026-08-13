@@ -234,6 +234,11 @@ pub(super) fn spawn_agents(
                 system_prompt.as_str(),
                 &mut env,
             )?;
+        }
+        // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+        if matches!(provider, Provider::CursorAgent) {
+            apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
+        }
             // C-A-6 cr verdict v2 — Copilot worker env 全量继承下,用户 shell 的
             // COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN 会穿透 + 按 cmd-login 实证
             // **优先于凭据库**(可能静默改变 auth 通道)。一期只观测不剥除(剥除是
