@@ -75,7 +75,7 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
     if args.force || !default_agent_path.exists() {
         std::fs::write(
             &default_agent_path,
-            "---\nname: worker\nrole: Worker\nprovider: fake\ntools:\n  - mcp_team\n---\n\nWait for instructions.\n",
+            "---\nname: worker\nrole: Worker\nprovider: fake\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWait for instructions.\n",
         )?;
     }
     if args.force || !state_path.exists() {
