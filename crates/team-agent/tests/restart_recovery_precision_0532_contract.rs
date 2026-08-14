@@ -1250,7 +1250,7 @@ fn assert_ready_is_not_idle(
 
 fn role_doc() -> String {
     format!(
-        "---\nname: {WORKER}\nrole: Fake helper\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nFake helper.\n"
+        "---\nname: {WORKER}\nrole: Fake helper\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake helper.\n"
     )
 }
 

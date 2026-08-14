@@ -683,7 +683,7 @@ fn provider_command(provider: ProviderShape) -> &'static str {
 
 fn role_doc(id: &str, provider: &str, model: &str) -> String {
     format!(
-        "---\nname: {id}\nrole: Worker {id}\nprovider: {provider}\nmodel: {model}\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker {id}.\n"
+        "---\nname: {id}\nrole: Worker {id}\nprovider: {provider}\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker {id}.\n"
     )
 }
 

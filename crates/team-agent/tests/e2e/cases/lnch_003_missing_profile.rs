@@ -23,7 +23,7 @@ fn lnch_003_quick_start_refuses_missing_profile() {
     let team_md = "---\nname: lnch003\nobjective: missing-profile probe.\nprovider: fake\ndisplay_backend: none\n---\n\nTeam.\n";
     fs::write(ws.path().join("TEAM.md"), team_md).unwrap();
     fs::create_dir_all(ws.path().join("agents")).unwrap();
-    let agent_md = "---\nname: c\nrole: Claude worker\nprovider: claude\nauth_mode: compatible_api\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n";
+    let agent_md = "---\nname: c\nrole: Claude worker\nprovider: claude\nauth_mode: compatible_api\ndangerously_skip_permissions: false\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n";
     fs::write(ws.path().join("agents/c.md"), agent_md).unwrap();
 
     let out = quick_start_fake(&ws, team_id);

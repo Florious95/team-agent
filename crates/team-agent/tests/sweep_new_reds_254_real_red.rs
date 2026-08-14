@@ -707,7 +707,7 @@ fn write_fake_team(root: &Path, team_key: &str, agent: &str) {
     std::fs::write(
         team.join("agents").join(format!("{agent}.md")),
         format!(
-            "---\nname: {agent}\nrole: Real RED fake worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+            "---\nname: {agent}\nrole: Real RED fake worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
         ),
     )
     .unwrap();

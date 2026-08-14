@@ -428,7 +428,7 @@ fn write_fake_team(root: &Path, team_key: &str, agent: &str, tasks: &[(&str, &st
     std::fs::write(
         team.join("agents").join(format!("{agent}.md")),
         format!(
-            "---\nname: {agent}\nrole: Shipgate fake worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+            "---\nname: {agent}\nrole: Shipgate fake worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
         ),
     )
     .unwrap();

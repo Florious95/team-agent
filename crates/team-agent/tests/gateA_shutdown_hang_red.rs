@@ -1239,7 +1239,7 @@ fn team_state(team_dir: &Path, session_name: &str, agent_status: &str) -> Value 
 
 fn role_doc(name: &str, role: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: {role}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{role}.\n"
+        "---\nname: {name}\nrole: {role}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
     )
 }
 
