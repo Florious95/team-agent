@@ -445,7 +445,7 @@ impl E6Case {
         std::fs::write(
             agents_dir.join(format!("{agent_id}.md")),
             format!(
-                "---\nname: {agent_id}\nrole: Fake E6 Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nFake worker keeping the team alive.\n"
+                "---\nname: {agent_id}\nrole: Fake E6 Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake worker keeping the team alive.\n"
             ),
         )
         .expect("write fake worker");

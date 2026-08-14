@@ -281,7 +281,7 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{SOURCE}.\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{SOURCE}.\n"
         ),
     )
     .expect("write source role doc");

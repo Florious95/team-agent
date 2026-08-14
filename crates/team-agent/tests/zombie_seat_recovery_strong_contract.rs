@@ -264,7 +264,7 @@ impl SeatCase {
 
 fn role_doc(agent: &str) -> String {
     format!(
-        "---\nname: {agent}\nrole: {agent}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{agent}.\n"
+        "---\nname: {agent}\nrole: {agent}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{agent}.\n"
     )
 }
 

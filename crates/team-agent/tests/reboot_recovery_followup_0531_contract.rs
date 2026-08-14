@@ -405,6 +405,7 @@ agents:
       file: null
     tools: []
     permission_mode: "restricted"
+    dangerously_skip_permissions: false
     preferred_for: []
     avoid_for: []
     output_contract:
@@ -431,7 +432,6 @@ runtime:
   max_active_agents: 1
   startup_order:
     - "{worker}"
-  dangerously_skip_permissions: false
   fast: false
   tick_interval_sec: 2
   push_min_interval_sec: 60

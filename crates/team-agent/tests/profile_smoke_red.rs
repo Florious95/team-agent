@@ -291,7 +291,7 @@ impl ProfileFixture {
         .unwrap();
         std::fs::write(
             team.join("agents").join("clauder.md"),
-            "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nauth_mode: compatible_api\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n",
+            "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nauth_mode: compatible_api\nprofile: local\nmodel: null\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n",
         )
         .unwrap();
         Self { root, team }

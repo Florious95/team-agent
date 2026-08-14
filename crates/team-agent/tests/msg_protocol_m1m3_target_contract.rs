@@ -74,7 +74,7 @@ impl TargetCase {
             std::fs::write(
                 workspace.join("agents").join(format!("{worker}.md")),
                 format!(
-                    "---\nname: {worker}\nrole: {worker}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{worker}.\n"
+                    "---\nname: {worker}\nrole: {worker}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n"
                 ),
             )
             .expect("write worker role doc");

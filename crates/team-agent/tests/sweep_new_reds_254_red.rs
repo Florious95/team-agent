@@ -545,7 +545,7 @@ fn write_team_dir(root: &Path, name: &str, agents: &[(&str, &str)]) -> PathBuf {
 
 fn role_doc(agent: &str, role: &str) -> String {
     format!(
-        "---\nname: {agent}\nrole: {role}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+        "---\nname: {agent}\nrole: {role}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
     )
 }
 

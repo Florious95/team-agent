@@ -195,7 +195,7 @@ fn write_source_role(workspace: &Path, body: &str) {
     std::fs::write(
         workspace.join("agents").join(format!("{SOURCE}.md")),
         format!(
-            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{body}\n"
+            "---\nname: {SOURCE}\nrole: {SOURCE}\nprovider: claude\nmodel: claude-sonnet-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{body}\n"
         ),
     )
     .expect("write source role doc");

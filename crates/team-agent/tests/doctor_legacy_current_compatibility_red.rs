@@ -44,9 +44,9 @@ fn bin() -> &'static str {
 const TEAM_MD: &str =
     "---\nname: legacy-team\nobjective: SMOKE-1 legacy team fixture.\nprovider: codex\n---\n\nteam.\n";
 
-const ROLE_A: &str = "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker A role doc.\n";
+const ROLE_A: &str = "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker A role doc.\n";
 
-const ROLE_B: &str = "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker B role doc (duplicate id).\n";
+const ROLE_B: &str = "---\nname: worker\nrole: Worker\nprovider: codex\nmodel: gpt-5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker B role doc (duplicate id).\n";
 
 #[test]
 fn doctor_does_not_fail_solely_because_legacy_home_dot_team_current_is_invalid() {

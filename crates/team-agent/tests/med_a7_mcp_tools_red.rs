@@ -374,7 +374,7 @@ fn seed_forkable_source(harness: &McpSimHarness) {
     .unwrap();
     std::fs::write(
         team_dir.join("agents/worker_a.md"),
-        "---\nname: worker_a\nrole: Source Worker\nprovider: claude\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nSource worker.\n",
+        "---\nname: worker_a\nrole: Source Worker\nprovider: claude\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nSource worker.\n",
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&team_dir).expect("compile fixture team");

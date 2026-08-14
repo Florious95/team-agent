@@ -62,7 +62,7 @@ impl Fixture {
         fs::write(
             root.join("agents").join(format!("{name}.md")),
             format!(
-                "---\nname: {name}\nrole: Verification Worker\nprovider: codex\nmodel: gpt-5\ntools:\n  - fs_read\n  - mcp_team\n{mode}---\n\nStable persona body for {name}.\n"
+                "---\nname: {name}\nrole: Verification Worker\nprovider: codex\nmodel: gpt-5\ntools:\n  - fs_read\n  - mcp_team\ndangerously_skip_permissions: false\n{mode}---\n\nStable persona body for {name}.\n"
             ),
         )
         .expect("write role doc");

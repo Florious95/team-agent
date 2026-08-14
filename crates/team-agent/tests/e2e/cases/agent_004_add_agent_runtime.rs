@@ -14,7 +14,7 @@ fn agent_004_add_agent_runtime() {
     let role = roles.join("b.md");
     std::fs::write(
         &role,
-        "---\nname: b\nrole: Added fake worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAdded fake worker.\n",
+        "---\nname: b\nrole: Added fake worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nAdded fake worker.\n",
     )
     .expect("write b role");
 

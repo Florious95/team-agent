@@ -298,7 +298,7 @@ fn write_role(path: &Path, id: &str) {
     std::fs::write(
         path,
         format!(
-            "---\nname: {id}\nrole: {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{id}.\n"
+            "---\nname: {id}\nrole: {id}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{id}.\n"
         ),
     )
     .expect("write role file");

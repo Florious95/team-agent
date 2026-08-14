@@ -74,7 +74,7 @@ impl ConsistencyCase {
         std::fs::write(
             workspace.join("agents").join(format!("{WORKER}.md")),
             format!(
-                "---\nname: {WORKER}\nrole: {WORKER}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{WORKER}.\n"
+                "---\nname: {WORKER}\nrole: {WORKER}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{WORKER}.\n"
             ),
         )
         .expect("write worker role doc");
