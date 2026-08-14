@@ -370,13 +370,13 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
             }
             if !missing_bypass.is_empty() {
                 e.push(format!(
-                    "/agents/dangerously_skip_permissions: missing required field (role id(s): {})。**这个值必须问用户，leader 不许自决。**",
+                    "/agents/dangerously_skip_permissions: missing required field (role id(s): {}). This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.",
                     missing_bypass.join(", ")
                 ));
             }
             if !bad_type_bypass.is_empty() {
                 e.push(format!(
-                    "/agents/dangerously_skip_permissions: must be a boolean (role id(s): {})。**这个值必须问用户，leader 不许自决。**",
+                    "/agents/dangerously_skip_permissions: must be a boolean (role id(s): {}). This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.",
                     bad_type_bypass.join(", ")
                 ));
             }
@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     // 0.5.66 bypass 单源 §4.1:缺 `dangerously_skip_permissions` 字段 → 错误消息
-    // 必须列出每个缺字段的角色 id + 硬串"这个值必须问用户，leader 不许自决。"。
+    // 必须列出每个缺字段的角色 id + 用户可读的必填说明。
     #[test]
     fn test_missing_dangerously_field_reports_role_list() {
         // 从 fixture 文本里删掉第一个 agent 的字段,模拟该角色缺字段。
@@ -1073,8 +1073,8 @@ mod tests {
             missing[0]
         );
         assert!(
-            missing[0].contains("这个值必须问用户，leader 不许自决。"),
-            "must carry the hard string, got: {}",
+            missing[0].contains("This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed."),
+            "must carry the user-facing required-field message, got: {}",
             missing[0]
         );
     }
@@ -1098,8 +1098,8 @@ mod tests {
             type_errs[0]
         );
         assert!(
-            type_errs[0].contains("这个值必须问用户，leader 不许自决。"),
-            "must carry the hard string, got: {}",
+            type_errs[0].contains("This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed."),
+            "must carry the user-facing required-field message, got: {}",
             type_errs[0]
         );
     }
@@ -1168,7 +1168,7 @@ mod tests {
         let err = crate::compiler::compile_team(&team).unwrap_err().to_string();
         assert!(
             err.contains("missing front matter field dangerously_skip_permissions")
-                && err.contains("这个值必须问用户，leader 不许自决。"),
+                && err.contains("This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed."),
             "compile_team must fail-loud on missing field (shared by all 7 triggers); got {err}"
         );
         let _ = std::fs::remove_dir_all(&team);

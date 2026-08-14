@@ -559,11 +559,11 @@ fn required_dangerously_skip_permissions(
     match meta.get("dangerously_skip_permissions") {
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => Err(ModelError::Validation(format!(
-            "{}: front matter field dangerously_skip_permissions must be a boolean。这个值必须问用户，leader 不许自决。",
+            "{}: front matter field dangerously_skip_permissions must be a boolean. This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.",
             path.display()
         ))),
         None => Err(ModelError::Validation(format!(
-            "{}: missing front matter field dangerously_skip_permissions。这个值必须问用户，leader 不许自决。",
+            "{}: missing front matter field dangerously_skip_permissions. This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.",
             path.display()
         ))),
     }
