@@ -80,7 +80,9 @@ pub fn fork_agent_with_transport(
         as_agent_id,
         label,
     )?;
-    clamp_materialized_role_to_leader(materialized_role.path(), &spec)?;
+    // The materialized role carries the source role's DECLARED tools verbatim —
+    // fork (like clone/add-agent) preserves the source seat's full tools set; the
+    // leader-ceiling tools clamp was a silent capability drop (see role_source.rs).
     let team_meta = crate::compiler::read_front_matter(&fork_team_dir.join("TEAM.md"))
         .map(|(meta, _)| meta)
         .map_err(|error| LifecycleError::Compile(error.to_string()))?;
