@@ -337,7 +337,7 @@ impl TmuxBackend {
         }
     }
 
-    pub(crate) fn with_runner_for_tmux_endpoint(
+    pub fn with_runner_for_tmux_endpoint(
         runner: Box<dyn CommandRunner>,
         endpoint: &str,
     ) -> Self {
@@ -1051,6 +1051,18 @@ impl TmuxBackend {
         } else {
             Err(subprocess_error(argv, output))
         }
+    }
+
+    /// P0 copy-mode: pane 是否处于 copy-mode（非 0）。best-effort，查询失败 → None。
+    ///
+    /// Cherry-pick 866939b1 冲突裁定：本线没有 `inject_journal` 模块（modify/delete），
+    /// 不复活整份 journal；只留下提交前检测所需的 `pane_in_mode`。
+    fn pane_in_mode(&self, target: &Target) -> Option<bool> {
+        let raw = self.query(target, PaneField::PaneMode).ok().flatten()?;
+        Some(matches!(
+            pane_mode_from_raw(Some(raw)),
+            Some(PaneMode::Copy | PaneMode::Unknown)
+        ))
     }
 }
 
@@ -2235,6 +2247,20 @@ impl Transport for TmuxBackend {
                     // under a fake-success path. Python parity: ONLY ever
                     // send Enter, never Escape.
                     let _ = escape_argv;
+
+                    // P0 copy-mode (leader 100% 复现):pane 处于 copy-mode 时 Enter 被
+                    // copy-mode 吃掉(既不提交也不换行,tmux 却 rc=0,框架误以为成功)。
+                    // 每次按 Enter 前检测 pane_in_mode,非 0 先 `send-keys -X cancel`
+                    // 退出 copy-mode 再 Enter。copy-mode 不是忙闲,注入仍无条件进行;
+                    // cancel 失败不得让注入失败(copy-mode 未退出则 Enter 被吃,但
+                    // 不因此抛错——流水里如实记录)。
+                    if let Some(mode) = self.pane_in_mode(target) {
+                        if mode {
+                            let cancel_argv =
+                                crate::transport::tmux_cancel_mode_argv(&pane, PaneMode::Copy);
+                            let _ = self.run_inject_stage(&cancel_argv, InjectStage::Submit);
+                        }
+                    }
 
                     // Enter — send-keys failure is degraded (tmux may not have
                     // the pane in sim/test env). Break to consumed=None path
