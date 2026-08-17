@@ -13,9 +13,9 @@ output. All communication must go through Team Agent MCP tools.
 
 ## Communication (mandatory)
 
-- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')
-- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')
-- Task complete: team_orchestrator.report_result(summary='...') — call exactly once
+- Coordinate with teammate: {send_message}(to='<agent_id>', content='...')
+- Broadcast to all teammates: {send_message}(to='*', content='...')
+- Task complete: {report_result}(summary='...') — call exactly once
 
 ## Rules
 
@@ -29,7 +29,7 @@ output. All communication must go through Team Agent MCP tools.
 // semantics (leader-attach dependence + fallback status) that the
 // generic runtime section deliberately leaves out.
 const RESULT_ENVELOPE_OUTPUT_CONTRACT: &str =
-    "Final completion must call team_orchestrator.report_result exactly once with a short summary \
+    "Final completion must call {report_result} exactly once with a short summary \
 and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. \
 If no leader is attached, the tool returns a fallback/failed result instead of completion.";
 
@@ -163,13 +163,15 @@ pub(crate) fn compile_worker_system_prompt(
     // identity line anchors the very first section (live Python worker argv confirms).
     // C-1 cr verdict / B2 灵魂件 — identity 必须 FIRST(MUST-4 行为层守:空白上下文问
     // "你是谁"必须先答 Team Agent worker 身份)。runtime contract 跟后。
+    let send_message = mcp_tool_name(agent.provider, "team_orchestrator", "send_message");
+    let report_result = mcp_tool_name(agent.provider, "team_orchestrator", "report_result");
     let mut chunks = vec![
         identity_section(agent),
-        runtime_contract_section(),
-        agent.communication_mode.runtime_contract().to_string(),
+        runtime_contract_section(&send_message, &report_result),
+        agent.communication_mode.runtime_contract(&send_message),
         role_body(agent)?,
     ];
-    if let Some(contract) = output_contract(agent) {
+    if let Some(contract) = output_contract(agent, &report_result) {
         chunks.push(contract);
     }
     if let Some(notes) = permission_notes(agent)? {
@@ -212,6 +214,22 @@ pub(crate) fn resolved_tool_strings_for_command(
     Ok(tools)
 }
 
+/// Provider-facing MCP tool name. Only verified call forms are filled in.
+/// Unverified providers keep the historical dotted spelling.
+fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
+    match provider {
+        Provider::Claude | Provider::ClaudeCode => format!("mcp__{server}__{tool}"),
+        Provider::Grok => format!("{server}__{tool}"),
+        // CursorAgent / Codex / Copilot / GeminiCli / Fake: 未验证，沿用现状点号。
+        // CursorAgent 不可与 grok 同臂：仓库里没有活转录，`{server}__{tool}` 是推断。
+        Provider::CursorAgent
+        | Provider::Codex
+        | Provider::Copilot
+        | Provider::GeminiCli
+        | Provider::Fake => format!("{server}.{tool}"),
+    }
+}
+
 fn provider_display_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
@@ -238,8 +256,10 @@ fn resolve_agent_permissions(
     .map_err(|e| LifecycleError::Compile(e.to_string()))
 }
 
-fn runtime_contract_section() -> String {
-    RUNTIME_CONTRACT_SECTION.to_string()
+fn runtime_contract_section(send_message: &str, report_result: &str) -> String {
+    RUNTIME_CONTRACT_SECTION
+        .replace("{send_message}", send_message)
+        .replace("{report_result}", report_result)
 }
 
 fn communication_mode(value: Option<&str>) -> Result<CommunicationMode, LifecycleError> {
@@ -273,9 +293,9 @@ fn role_body(agent: &WorkerCommandAgent) -> Result<String, LifecycleError> {
     Ok(chunks.join("\n\n"))
 }
 
-fn output_contract(agent: &WorkerCommandAgent) -> Option<String> {
+fn output_contract(agent: &WorkerCommandAgent, report_result: &str) -> Option<String> {
     (agent.output_contract_format.as_deref() == Some("result_envelope_v1"))
-        .then(|| RESULT_ENVELOPE_OUTPUT_CONTRACT.to_string())
+        .then(|| RESULT_ENVELOPE_OUTPUT_CONTRACT.replace("{report_result}", report_result))
 }
 
 fn permission_notes(agent: &WorkerCommandAgent) -> Result<Option<String>, LifecycleError> {
