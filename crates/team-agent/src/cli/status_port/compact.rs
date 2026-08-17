@@ -4,13 +4,17 @@ use super::*;
 pub(super) fn compact_status(full: Value) -> Value {
     let not_ready = compact_not_ready(&full);
     let ready = compact_ready(&full, &not_ready);
+    let grok_slot = full.get("grok_slot").cloned().unwrap_or(Value::Null);
+    let grok_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
+        && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
     json!({
-        "ok": true,
+        "ok": grok_ok,
         "team": full.get("team").cloned().unwrap_or(Value::Null),
         "session_name": full.get("session_name").cloned().unwrap_or(Value::Null),
         "leader_attach_command": full.get("leader_attach_command").cloned().unwrap_or(Value::Null),
         "ready": ready,
         "not_ready": not_ready,
+        "grok_slot": grok_slot,
         "agents": compact_agents(full.get("agents")),
     })
 }
@@ -111,6 +115,20 @@ pub(super) fn not_ready_reasons(full: &Value) -> Vec<String> {
         == Some(true)
     {
         reasons.push("awaiting_trust_prompt".to_string());
+    }
+    let grok_slot = full.get("grok_slot");
+    let grok_readable = grok_slot
+        .and_then(|slot| slot.get("readable"))
+        .and_then(Value::as_bool);
+    let grok_consistent = grok_slot
+        .and_then(|slot| slot.get("consistent"))
+        .and_then(Value::as_bool);
+    if grok_readable != Some(true) || grok_consistent != Some(true) {
+        if grok_readable == Some(false) || grok_slot.is_none() || grok_slot == Some(&Value::Null) {
+            reasons.push("grok_slot_unjudgeable".to_string());
+        } else {
+            reasons.push("grok_slot_mismatch".to_string());
+        }
     }
     reasons
 }
