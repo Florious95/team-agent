@@ -81,7 +81,7 @@ pub(super) fn quick_start_session_capture_incomplete_agents(
     crate::session_capture::incomplete_interacted_resumable_agent_ids(team_state)
 }
 
-pub(crate) fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
+pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
     let Ok(state) = load_runtime_state(workspace) else {
         return true;
     };
