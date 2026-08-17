@@ -11,6 +11,7 @@
 //! boundary:
 //!   - 不测 claim-leader 写路径，不测投递/信箱
 //!   - 不把 state.json 的 leader_receiver 副本当成已接
+//!   - discovery=quick_start 的 attached 不是凭据，注册表才是
 //! maturity: wired
 //! ---
 //!
@@ -42,6 +43,7 @@ fn attached_looking_state() -> serde_json::Value {
                 "agents": {"implementer": {"status": "running"}},
                 "leader_receiver": {
                     "status": "attached",
+                    "discovery": "quick_start",
                     "pane_id": "%1",
                     "tmux_socket": "/tmp/does-not-matter"
                 }
@@ -85,7 +87,7 @@ fn registry_missing_is_unbound_even_when_state_copy_looks_attached() {
 
     assert!(
         !launched_team_receiver_is_attached(&workspace, TEAM_KEY),
-        "no host registry entry must be unbound; state.json looking attached is only a copy"
+        "discovery=quick_start attached in state.json is not credentials; missing registry must be unbound"
     );
     env.assert_real_registry_unchanged(before);
 }
