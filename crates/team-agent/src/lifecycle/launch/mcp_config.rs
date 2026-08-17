@@ -229,7 +229,11 @@ pub(crate) fn ensure_exclusive_grok_cwd(
     if occupants.len() < 2 {
         return Ok(());
     }
-    Err(grok_occupied_cwd_error(workspace, incoming_agent_id, &occupants))
+    Err(grok_occupied_cwd_error(
+        workspace,
+        incoming_agent_id,
+        &occupants,
+    ))
 }
 
 pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
@@ -282,15 +286,13 @@ fn grok_occupied_cwd_error(
 /// （与 grok `--trust` / `/hooks-trust` 同一份；未信任则项目作用域 MCP 不生效）。
 /// `GROK_FOLDER_TRUST=0` 时 grok 自己关掉 folder-trust，本检查跟着放行。
 pub(crate) fn ensure_grok_login_and_folder_trust(cwd: &Path) -> Result<(), LifecycleError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            LifecycleError::RequirementUnmet(
-                "error: HOME is unset; cannot verify grok login or folder trust\n\
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        LifecycleError::RequirementUnmet(
+            "error: HOME is unset; cannot verify grok login or folder trust\n\
                  action: export HOME and retry"
-                    .to_string(),
-            )
-        })?;
+                .to_string(),
+        )
+    })?;
     let grok_home = home.join(".grok");
     if !grok_auth_present(&grok_home) {
         return Err(LifecycleError::RequirementUnmet(format!(
@@ -370,7 +372,7 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// `McpConfig.raw` 与写出的 grok 表名都必须是 `team_orchestrator`，与
 /// `worker_command_context` 契约（grok: `team_orchestrator__send_message`）对齐。
 /// grok 按 server 名给工具加命名空间，写成 `team-agent` 会变成 `team-agent__*`。
-pub(crate) fn apply_grok_mcp_overlay(
+pub fn apply_grok_mcp_overlay(
     workspace: &Path,
     mcp_config: &crate::provider::McpConfig,
 ) -> Result<(), LifecycleError> {
@@ -417,6 +419,15 @@ pub(crate) fn apply_grok_mcp_overlay(
 
     let incoming = env.get("TEAM_AGENT_ID").map(String::as_str).unwrap_or("");
     ensure_exclusive_grok_cwd(workspace, incoming, None)?;
+
+    // TEAM_AGENT_ID is per-seat and already on the pane env (worker_spawn_env).
+    // Writing it into the directory-scoped toml lets the next overlay/rewrite
+    // win and poison a waiting seat's first MCP spawn. Omit it; inherit.
+    // Empty values are also omitted: toml wins on the same key, and
+    // non_empty_string("") becomes None (owner/sender drop to unknown).
+    let mut env = env;
+    env.remove("TEAM_AGENT_ID");
+    env.retain(|_, value| !value.trim().is_empty());
 
     let stanza = render_grok_team_agent_stanza(command, &args, &env);
     let dir = workspace.join(".grok");
@@ -472,9 +483,9 @@ fn upsert_toml_table_prefixes(existing: &str, tables: &[&str], stanza: &str) -> 
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             let name = &trimmed[1..trimmed.len() - 1];
-            skip = tables.iter().any(|table| {
-                name == *table || name.starts_with(&format!("{table}."))
-            });
+            skip = tables
+                .iter()
+                .any(|table| name == *table || name.starts_with(&format!("{table}.")));
         }
         if !skip {
             out.push_str(line);

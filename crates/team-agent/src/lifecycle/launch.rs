@@ -81,8 +81,8 @@ pub fn launch_with_transport_in_workspace(
 ) -> Result<LaunchReport, LifecycleError> {
     let _ = skip_profile_smoke;
     let _ = auto_approve; // 0.5.66: bypass 单源后无 runtime.dangerous_auto_approve,`--yes` 为 no-op。
-    // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): launch.phase
-    // timer with monotonic `elapsed_ms` for latency triage.
+                          // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): launch.phase
+                          // timer with monotonic `elapsed_ms` for latency triage.
     let phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     if !spec_path.exists() {
         return Err(LifecycleError::Compile(format!(
@@ -119,13 +119,7 @@ pub fn launch_with_transport_in_workspace(
         Vec::new()
     } else {
         phase_timer.emit(workspace, "launch.phase", "spawn_all");
-        let started = spawn_agents(
-            workspace,
-            spec_path,
-            &spec,
-            &session_name,
-            transport,
-        )?;
+        let started = spawn_agents(workspace, spec_path, &spec, &session_name, transport)?;
         persist_spawn_agent_state(
             workspace,
             spec_path,
@@ -236,8 +230,8 @@ mod plan;
 pub(crate) use plan::{handle_report_result, start_plan};
 
 pub mod spawn;
-pub(super) use spawn::*;
 pub(crate) use spawn::agent_id_spec_source_path;
+pub(super) use spawn::*;
 
 mod layout;
 pub(super) use layout::*;
@@ -273,10 +267,10 @@ pub(crate) use agent_state::{
 };
 
 mod mcp_config;
+pub use mcp_config::apply_grok_mcp_overlay;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    apply_grok_mcp_overlay, ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust,
-    grok_shared_cwd_error,
+    ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust, grok_shared_cwd_error,
     point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
     write_worker_mcp_config_for_provider,
 };
@@ -284,9 +278,10 @@ pub(crate) use mcp_config::{
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
-    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay, apply_mcp_auto_approval_env,
-    apply_profile_launch_env, fill_spawn_placeholders, fill_spawn_placeholders_full,
-    inherited_env_with_team_overrides, persist_command_plan_state, spawn_timestamp,
+    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay,
+    apply_mcp_auto_approval_env, apply_profile_launch_env, fill_spawn_placeholders,
+    fill_spawn_placeholders_full, inherited_env_with_team_overrides, persist_command_plan_state,
+    spawn_timestamp,
 };
 
 mod identity;
@@ -327,8 +322,8 @@ pub(crate) use add_agent_state::inject_agent_into_spec;
 pub(super) use add_agent_state::*;
 
 mod fork_agent;
-pub use fork_agent::{fork_agent_with_transport, in_window_fork, in_window_fork_command};
 pub(super) use fork_agent::*;
+pub use fork_agent::{fork_agent_with_transport, in_window_fork, in_window_fork_command};
 
 mod fork_entry;
 pub use fork_entry::fork_agent;
@@ -344,9 +339,7 @@ pub(super) use ownership::*;
 pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};
 
 pub mod spec_state;
-pub(crate) use spec_state::{
-    override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
-};
+pub use spec_state::worker_session_name_pub;
 pub(crate) use spec_state::{
     effective_runtime_config_for_worker_spawn, effective_runtime_config_for_worker_spawn_json,
 };
@@ -357,7 +350,9 @@ use spec_state::{
     spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
     spec_tasks_json, team_workspace, yaml_value_to_json,
 };
-pub use spec_state::worker_session_name_pub;
+pub(crate) use spec_state::{
+    override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
+};
 
 #[cfg(test)]
 mod tests {
@@ -368,10 +363,8 @@ mod tests {
     // leader argv 带 bypass flag + 无角色声明 true → 写 warning 事件。
     #[test]
     fn test_leader_flag_present_but_no_role_true_writes_warning_event() {
-        let ws = std::env::temp_dir().join(format!(
-            "ta-bypass-warning-test-{}",
-            std::process::id()
-        ));
+        let ws =
+            std::env::temp_dir().join(format!("ta-bypass-warning-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
         let spec = yaml::loads(
@@ -425,10 +418,8 @@ mod tests {
 
     #[test]
     fn team_agent_force_flag_does_not_look_like_bypass() {
-        let ws = std::env::temp_dir().join(format!(
-            "ta-bypass-force-not-bypass-{}",
-            std::process::id()
-        ));
+        let ws =
+            std::env::temp_dir().join(format!("ta-bypass-force-not-bypass-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
         let spec = yaml::loads(

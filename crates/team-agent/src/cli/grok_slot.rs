@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: grok_slot_report
-//!       what: 盘上 TEAM_AGENT_ID、在役 grok、pre_first_turn；读不出为 unjudgeable
+//!       what: 盘上 TEAM_AGENT_ID（缺席=已切到 pane 继承）、在役 grok、pre_first_turn；读不出为 unjudgeable
 //! boundary:
 //!   - 读不出不报一致
 //!   - 不写盘、不改 overlay
@@ -118,6 +118,19 @@ fn classify(
             live_seats: live_ids,
             pre_first_turn,
             reason: "no grok seats and no slot file".to_string(),
+        };
+    }
+    // After the carrier switch, identity is not on disk. Absent TEAM_AGENT_ID
+    // with at most one live grok is the healthy shape.
+    if disk.is_none() && live_ids.len() <= 1 {
+        return GrokSlotReport {
+            readable: true,
+            consistent: true,
+            disk_team_agent_id: None,
+            live_seats: live_ids,
+            pre_first_turn,
+            reason: "slot does not carry TEAM_AGENT_ID; identity inherits from pane env"
+                .to_string(),
         };
     }
     if live_ids.len() == 1 && disk.as_deref() == Some(live_ids[0].as_str()) {

@@ -82,9 +82,9 @@ TEAM_AGENT_AUTH_MODE = "subscription"
         "migrated file must declare the canonical server; text={text}"
     );
     assert!(
-        text.contains("TEAM_AGENT_ID = \"migrated-seat\"")
+        !text.contains("TEAM_AGENT_ID")
             && text.contains("TEAM_AGENT_WORKSPACE = \"/ws-migrated\""),
-        "identity env must land on the new table, not vanish during rename; text={text}"
+        "TEAM_AGENT_ID must not land on the shared toml; workspace env must survive rename; text={text}"
     );
     assert!(
         text.contains("[mcp_servers.keep-me]"),
@@ -280,9 +280,8 @@ fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
         "spawned overlay must not leave the misnamed team-agent table; text={text}"
     );
     assert!(
-        text.contains("TEAM_AGENT_ID = \"grok_writer\"")
-            || text.contains("TEAM_AGENT_ID = 'grok_writer'"),
-        "TEAM_AGENT_ID must be this grok seat, not a leftover placeholder; text={text}"
+        !text.contains("TEAM_AGENT_ID"),
+        "shared grok toml must not carry TEAM_AGENT_ID (pane env is the carrier); text={text}"
     );
     assert!(
         text.contains(&format!("TEAM_AGENT_WORKSPACE = \"{workspace}\""))
