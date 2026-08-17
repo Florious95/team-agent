@@ -290,7 +290,7 @@ fn test_grok_build_command_bypass_flag_when_dangerous() {
             AuthMode::Subscription,
             None,
             None,
-            None,
+            Some("grok-4"),
             &["dangerous_auto_approve"],
         )
         .expect("dangerous build_command ok");
@@ -299,11 +299,39 @@ fn test_grok_build_command_bypass_flag_when_dangerous() {
         "dangerous grok must include `--always-approve`: {dangerous:?}"
     );
     let safe = adapter
-        .build_command(AuthMode::Subscription, None, None, None)
+        .build_command(AuthMode::Subscription, None, None, Some("grok-4"))
         .expect("safe build_command ok");
     assert!(
         !safe.iter().any(|a| a == "--always-approve"),
         "non-dangerous grok must not include --always-approve: {safe:?}"
+    );
+}
+
+#[test]
+fn test_grok_build_command_refuses_missing_model() {
+    let adapter = get_adapter(Provider::Grok);
+    let err = adapter
+        .build_command(AuthMode::Subscription, None, None, None)
+        .expect_err("grok must refuse to build argv without an explicit model");
+    let text = err.to_string();
+    assert!(
+        text.to_ascii_lowercase().contains("model"),
+        "error must name model; got {text}"
+    );
+    assert!(
+        text.to_ascii_lowercase().contains("built-in")
+            || text.to_ascii_lowercase().contains("builtin")
+            || text.contains("内建"),
+        "error must name the built-in default the framework would fill; got {text}"
+    );
+    assert!(
+        argv_contains_adjacent(
+            &adapter
+                .build_command(AuthMode::Subscription, None, None, Some("grok-4.6"))
+                .expect("explicit model must build"),
+            &["--model", "grok-4.6"]
+        ),
+        "explicit model must still become adjacent `--model grok-4.6`"
     );
 }
 

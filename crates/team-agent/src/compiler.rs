@@ -390,6 +390,7 @@ fn compile_role_agent_with_mode(
     let id = required_string(&meta, role_path, "name")?;
     let role = required_string(&meta, role_path, "role")?;
     let provider = required_string(&meta, role_path, "provider")?;
+    require_explicit_grok_role_model(&meta, role_path, &provider)?;
     let model = resolve_model(&meta, team_meta, &provider);
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
@@ -548,6 +549,31 @@ fn required_string(meta: &Value, path: &Path, key: &str) -> Result<String, Model
             path.display()
         ))
     })
+}
+
+/// 缺 model 时框架会填内建默认（grok 上是 grok-4），席位因此静默拿到
+/// 与角色文件无关的模型和上下文窗口，而 argv 看起来完全正常。
+/// 角色文件必须自己写死；内建默认、team 级默认、CLI 全局默认都是隐式来源。
+fn require_explicit_grok_role_model(
+    meta: &Value,
+    path: &Path,
+    provider: &str,
+) -> Result<(), ModelError> {
+    if parse_canonical_provider(provider) != Some(Provider::Grok) {
+        return Ok(());
+    }
+    if string_field(meta, "model").is_some_and(|value| !value.trim().is_empty()) {
+        return Ok(());
+    }
+    Err(ModelError::Validation(format!(
+        "{}: missing front matter field model. \
+Without an explicit model the framework fills a built-in default (grok-4 for grok), \
+so the seat silently gets a model and context window that are not in the role file, \
+while argv still looks normal. The role file must name the model itself; \
+built-in defaults, team-level defaults, and the Grok CLI global default are all implicit sources. Example:\n\
+model: grok-4.6",
+        path.display()
+    )))
 }
 
 /// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。
