@@ -319,8 +319,10 @@ fn test_grok_build_command_refuses_missing_model() {
         "error must name model; got {text}"
     );
     assert!(
-        text.contains("~/.grok/config.toml") || text.contains("[models] default"),
-        "error must name the globally mutable default; got {text}"
+        text.to_ascii_lowercase().contains("built-in")
+            || text.to_ascii_lowercase().contains("builtin")
+            || text.contains("内建"),
+        "error must name the built-in default the framework would fill; got {text}"
     );
     assert!(
         argv_contains_adjacent(

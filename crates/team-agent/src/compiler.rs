@@ -551,8 +551,9 @@ fn required_string(meta: &Value, path: &Path, key: &str) -> Result<String, Model
     })
 }
 
-/// Grok CLI 省略 `--model` 会继承 `~/.grok/config.toml` `[models] default`，
-/// 该文件可被框架外改动且不告警。角色文件必须自己写死 model；禁止 builtin / 全局默认兜底。
+/// 缺 model 时框架会填内建默认（grok 上是 grok-4），席位因此静默拿到
+/// 与角色文件无关的模型和上下文窗口，而 argv 看起来完全正常。
+/// 角色文件必须自己写死；内建默认、team 级默认、CLI 全局默认都是隐式来源。
 fn require_explicit_grok_role_model(
     meta: &Value,
     path: &Path,
@@ -566,9 +567,10 @@ fn require_explicit_grok_role_model(
     }
     Err(ModelError::Validation(format!(
         "{}: missing front matter field model. \
-Grok seats must declare model explicitly because omitting --model lets Grok CLI inherit \
-~/.grok/config.toml [models] default; that file can change outside this repo with no warning, \
-so the same role silently gets a different model and context window. Example:\n\
+Without an explicit model the framework fills a built-in default (grok-4 for grok), \
+so the seat silently gets a model and context window that are not in the role file, \
+while argv still looks normal. The role file must name the model itself; \
+built-in defaults, team-level defaults, and the Grok CLI global default are all implicit sources. Example:\n\
 model: grok-4.6",
         path.display()
     )))

@@ -4,7 +4,7 @@
 //! boundary: 只钉 Provider::Grok 的启动契约；不改 claude/codex/copilot 路径
 //!
 //! 修之前判红（40e91fba）：grok 角色缺 model 仍会成功启动（compiler 填
-//! builtin grok-4，或省略 --model 让 CLI 吃 ~/.grok/config.toml [models] default）。
+//! 内建默认 grok-4，argv 带 `--model grok-4`，看起来完全正常）。
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -20,7 +20,7 @@ use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::transport::test_support::OfflineTransport;
 
-/// 1. grok 角色缺 model ⇒ 启动被拒，错误含 "model" 与「全局默认可被外部改且不告警」。
+/// 1. grok 角色缺 model ⇒ 启动被拒，错误含 "model" 与「内建默认 / 隐式来源」。
 ///    40e91fba 上会成功启动（有 overlay / 有 spawn）⇒ 本条红。
 #[test]
 #[serial(env)]
@@ -50,8 +50,8 @@ fn grok_role_missing_model_refuses_to_start() {
 
     let err = match result {
         Ok(report) => panic!(
-            "grok role without model must refuse to start; silent inherit of \
-             ~/.grok/config.toml [models] default is the incident; report={report:?}"
+            "grok role without model must refuse to start; a built-in default \
+             would silently pick the model; report={report:?}"
         ),
         Err(error) => error.to_string(),
     };
@@ -61,15 +61,12 @@ fn grok_role_missing_model_refuses_to_start() {
         "error must name the missing field; err={err}"
     );
     assert!(
-        err.contains("~/.grok/config.toml") || err.contains("[models] default"),
-        "error must name the globally mutable default that caused the incident; err={err}"
+        lower.contains("built-in") || lower.contains("builtin") || err.contains("内建"),
+        "error must name the built-in default the framework would fill; err={err}"
     );
     assert!(
-        lower.contains("no warning")
-            || err.contains("不告警")
-            || lower.contains("without warning")
-            || err.contains("不告警"),
-        "error must say the global default can change with no warning; err={err}"
+        lower.contains("implicit") || err.contains("隐式"),
+        "error must reject every implicit source, not just one fallback; err={err}"
     );
     assert!(
         err.contains("model: grok-4.6") || err.contains("model: grok-4"),
