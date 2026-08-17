@@ -133,16 +133,20 @@ pub(crate) fn ensure_exclusive_grok_cwd(
         if ids.len() < 2 {
             continue;
         }
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "error: grok seats cannot share a cwd; grok MCP is directory-scoped to <cwd>/.grok/config.toml and a second seat would overwrite TEAM_AGENT_ID\n\
-             cwd: {}\n\
-             grok_seats: {}\n\
-             action: give each grok seat its own worktree/directory (a separate workspace), then retry; do not start two grok seats in the same workspace",
-            cwd.display(),
-            ids.join(", "),
-        )));
+        return Err(grok_shared_cwd_error(&cwd, &ids));
     }
     Ok(())
+}
+
+pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
+    LifecycleError::RequirementUnmet(format!(
+        "error: grok seats cannot share a cwd; grok MCP is directory-scoped to <cwd>/.grok/config.toml and a second seat would overwrite TEAM_AGENT_ID\n\
+         cwd: {}\n\
+         grok_seats: {}\n\
+         action: give each grok seat its own worktree/directory (a separate workspace), then retry; do not start two grok seats in the same workspace",
+        cwd.display(),
+        seats.join(", "),
+    ))
 }
 
 /// 未登录 / 目录未信任时不许起出「能收信、没有手」的 grok 席。
@@ -231,6 +235,9 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// Grok CLI 没有 `--mcp-config`。同 `apply_cursor_agent_rules_overlay`：launch
 /// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
 /// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
+///
+/// 调用方必须先跑 [`ensure_exclusive_grok_cwd`]。本函数只写盘，不再做
+/// 冲突检测——检测到再回滚会留下半截 `.grok/config.toml`。
 ///
 /// `McpConfig.raw` 的 server 名是框架内部的 `team_orchestrator`；写盘时改成
 /// grok 侧已实测能 `mcp doctor` 通过的 `team-agent`。

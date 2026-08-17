@@ -337,6 +337,7 @@ pub(super) fn add_agent_with_transport_at_paths(
         )));
     }
     inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
+    // 内存里注入后再查。必须在 write_spec_atomic / overlay 之前拒绝。
     ensure_exclusive_grok_cwd(&spec, run_workspace)?;
     // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);

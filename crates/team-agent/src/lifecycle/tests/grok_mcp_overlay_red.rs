@@ -56,6 +56,10 @@ fn two_grok_seats_sharing_cwd_must_refuse_to_start() {
             && (err.contains("worktree") || err.contains("workspace") || err.contains("directory")),
         "error must give an executable next step (own worktree/directory); err={err}"
     );
+    assert!(
+        !ws.join(".grok").join("config.toml").exists(),
+        "must refuse before writing overlay; a leftover .grok/config.toml is a half-written identity"
+    );
 }
 
 #[test]
