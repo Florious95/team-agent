@@ -44,17 +44,20 @@ fn two_grok_seats_sharing_cwd_must_refuse_to_start() {
         Err(error) => error.to_string(),
     };
     assert!(
-        err.contains(".grok/config.toml") || err.to_ascii_lowercase().contains("cwd"),
-        "error must name the directory-scoped MCP constraint; err={err}"
+        err.contains("only one grok seat per workspace"),
+        "error must state the real limit, not a fake worktree remedy; err={err}"
+    );
+    assert!(
+        err.contains(".grok/config.toml") && err.to_ascii_lowercase().contains("directory-scoped"),
+        "error must name the directory-scoped MCP cause; err={err}"
     );
     assert!(
         err.contains("g1") && err.contains("g2"),
         "error must name both colliding grok seats; err={err}"
     );
     assert!(
-        err.contains("action:")
-            && (err.contains("worktree") || err.contains("workspace") || err.contains("directory")),
-        "error must give an executable next step (own worktree/directory); err={err}"
+        !err.contains("worktree") && !err.contains("then retry"),
+        "must not promise a remedy this version cannot honor; err={err}"
     );
     assert!(
         !ws.join(".grok").join("config.toml").exists(),

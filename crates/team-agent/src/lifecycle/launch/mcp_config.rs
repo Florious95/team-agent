@@ -95,14 +95,12 @@ pub(crate) fn write_worker_mcp_config_for_provider(
     Ok(path)
 }
 
-/// Grok MCP 是**目录作用域**：CLI 只读 `<cwd>/.grok/config.toml`
-/// （`grok mcp add --scope project`）。同一 cwd 写第二份身份会覆盖
-/// `TEAM_AGENT_ID`，两席共用一个 send_message / report_result 身份。
-///
-/// 硬约束：每个 grok 席必须有自己的 cwd（各自 worktree / 各自目录）。
-/// 框架检测到两个 grok 席共用同一 cwd 时必须拒绝启动，不许静默覆盖。
-/// 今日 launch/add/fork 的 worker cwd 恒为 workspace（D5），所以一个
-/// workspace 最多一个 grok 席。下一步是给另一席单独的 workspace/worktree。
+/// Grok MCP 是**目录作用域**（`mcp_injection: dir_scoped`）：CLI 只读
+/// `<cwd>/.grok/config.toml`。同目录后起席位会覆盖这份文件，先起席位的
+/// 身份被回溯性改写且不报错。本版 worker cwd 恒为 workspace（D5），
+/// exclusive 检查也不读 per-agent cwd ⇒ 一个 workspace 只支持一个 grok 席。
+/// 这是 grok 的 provider 能力边界，不是框架通则（claude/codex 走 argv
+/// `--mcp-config`，同目录多席没有这个问题）。
 pub(crate) fn ensure_exclusive_grok_cwd(
     spec: &Value,
     workspace: &Path,
@@ -140,10 +138,10 @@ pub(crate) fn ensure_exclusive_grok_cwd(
 
 pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
     LifecycleError::RequirementUnmet(format!(
-        "error: grok seats cannot share a cwd; grok MCP is directory-scoped to <cwd>/.grok/config.toml and a second seat would overwrite TEAM_AGENT_ID\n\
-         cwd: {}\n\
-         grok_seats: {}\n\
-         action: give each grok seat its own worktree/directory (a separate workspace), then retry; do not start two grok seats in the same workspace",
+        "error: this version supports only one grok seat per workspace\n\
+         reason: grok MCP is directory-scoped (<cwd>/.grok/config.toml); a second seat in the same directory overwrites TEAM_AGENT_ID and retroactively contaminates the first seat\n\
+         workspace: {}\n\
+         grok_seats: {}",
         cwd.display(),
         seats.join(", "),
     ))

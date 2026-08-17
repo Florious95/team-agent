@@ -72,8 +72,8 @@ pub fn fork_agent_with_transport(
             as_agent_id.as_str()
         )));
     }
-    // Fork 出第二个 grok 席必与源席同 cwd。在 materialize_latest_role
-    // 写角色文件 / overlay 之前拒绝，避免回滚半截配置。
+    // 本版一个 workspace 只支持一个 grok 席。fork 出第二个 grok 必撞
+    // 源席的目录作用域 MCP。在 materialize_latest_role 写盘之前拒绝。
     if fork_spec_agent(&spec, source_agent_id)
         .and_then(|agent| agent.get("provider").and_then(Value::as_str))
         == Some("grok")

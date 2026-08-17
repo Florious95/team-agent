@@ -1,7 +1,11 @@
 //!
 //! purpose: Grok CLI argv + permission deny 映射；MCP 不走 CLI flag
-//! contract: launch 写 `<cwd>/.grok/config.toml`；同一 cwd 只允许一个 grok 席；
-//!   未登录 / 目录未信任必须拒绝启动。未知工具映射记成 Unsupported，不发明 deny 名
+//! contract: launch 写 `<cwd>/.grok/config.toml`；未登录 / 目录未信任必须拒绝启动。
+//!   未知工具映射记成 Unsupported，不发明 deny 名
+//! mcp_injection: dir_scoped —— 每席必须独立工作目录；同 cwd 多席会静默串台，故拒绝。
+//!   对照 claude/codex 是 argv 作用域（`--mcp-config`），同目录多席没有这个问题。
+//!   本版 exclusive 检查不读 per-agent cwd，一个 workspace 只支持一个 grok 席。
+//!   这是 Provider::Grok 的能力边界，不是框架对所有 provider 的限制。
 //! boundary: 只服务 Provider::Grok。不改 claude/codex/copilot 路径
 //!
 //! Grok CLI provider-local command builders + permission helpers.
