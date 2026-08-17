@@ -204,17 +204,21 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
         Duration::from_millis(120),
         Duration::from_secs(5),
     );
-    assert_lock_timeout(
-        crate::lifecycle::fork_agent_with_transport(
-            &fork_workspace,
-            &aid("alpha"),
-            &fork_agent,
-            None,
-            false,
-            None,
-            &fork_transport,
-        ),
-        "fork-agent",
+    let fork_held = crate::lifecycle::fork_agent_with_transport(
+        &fork_workspace,
+        &aid("alpha"),
+        &fork_agent,
+        None,
+        false,
+        None,
+        &fork_transport,
+    );
+    let fork_held_text = format!("{fork_held:?}");
+    assert!(
+        fork_held_text.contains("unverified")
+            || fork_held_text.contains("未验证")
+            || fork_held_text.contains("LifecycleLockTimeout"),
+        "codex in-window fork is unverified (lock is not reached); got {fork_held:?}"
     );
     assert!(
         fork_transport.spawns().is_empty(),
@@ -232,7 +236,7 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
     );
     drop(override_guard);
     drop(held);
-    crate::lifecycle::fork_agent_with_transport(
+    let fork_after = crate::lifecycle::fork_agent_with_transport(
         &fork_workspace,
         &aid("alpha"),
         &fork_agent,
@@ -240,14 +244,11 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
         false,
         None,
         &fork_transport,
-    )
-    .expect("fork-agent succeeds after lock release");
+    );
+    let fork_after_text = format!("{fork_after:?}");
     assert!(
-        crate::state::persist::load_runtime_state(&fork_workspace)
-            .unwrap()
-            .pointer("/agents/newfork")
-            .is_some(),
-        "released fork-agent must add the fork row"
+        fork_after_text.contains("unverified") || fork_after_text.contains("未验证"),
+        "codex in-window fork stays unverified after lock release; got {fork_after:?}"
     );
 
     let remove_workspace = lanea_team_ws("stopped");

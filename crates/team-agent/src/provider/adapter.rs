@@ -1339,9 +1339,16 @@ pub(crate) fn next_session_token() -> String {
 #[cfg(test)]
 mod fork_materialization_source_guard {
     #[test]
-    fn lifecycle_uses_provider_neutral_fork_materialization_dispatch() {
+    fn lifecycle_uses_in_window_fork_not_session_file_materialization() {
         let source = include_str!("../lifecycle/launch/fork_agent.rs");
-        assert!(source.contains(".materialize_fork_backing("));
+        assert!(
+            source.contains("in_window_fork(") && source.contains("inject_clean_command"),
+            "fork must stay on the shared in-window inject path"
+        );
+        assert!(
+            !source.contains(".materialize_fork_backing("),
+            "session-file fork materialization must stay gone"
+        );
         assert!(!source.contains("materialize_codex_fork"));
         assert!(!source.contains("codex_fork"));
     }

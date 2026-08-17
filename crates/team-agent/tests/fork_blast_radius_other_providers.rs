@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: A9-other-providers-unchanged
-//!       what: 只有 grok+subscription 返回 /fork；claude/codex/copilot/cursor/gemini 为 None
+//!       what: grok+subscription=/fork；claude+subscription=/branch；其余未验证为 None
 //! boundary:
 //!   - 不把「函数存在」当通过
 //!   - 不给未验证 provider 填推断斜杠命令
@@ -34,13 +34,18 @@ fn grok_compatible_api_does_not_get_slash_fork() {
 }
 
 #[test]
-fn claude_does_not_get_in_window_fork_command() {
+fn claude_subscription_uses_branch_not_fork() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
-        for auth in [AuthMode::Subscription, AuthMode::CompatibleApi, AuthMode::OfficialApi] {
+        assert_eq!(
+            in_window_fork_command(provider, AuthMode::Subscription),
+            Some("/branch"),
+            "{provider:?} subscription session-split is /branch (v2.1.181)"
+        );
+        for auth in [AuthMode::CompatibleApi, AuthMode::OfficialApi] {
             assert_eq!(
                 in_window_fork_command(provider, auth),
                 None,
-                "{provider:?} must not be given a guessed in-window fork command; auth={auth:?}"
+                "{provider:?} {auth:?} must stay on the refuse path"
             );
         }
     }

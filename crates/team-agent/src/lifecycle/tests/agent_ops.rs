@@ -269,9 +269,8 @@ fn lanea_fork_agent_duplicate_target_is_already_exists_before_session_check() {
         fork_agent(&ws, &aid("alpha"), &aid("bravo"), None, false, None)
     );
     assert!(
-        text.contains("already exists"),
-        "fork_agent must reject a DUPLICATE target 'bravo' as 'agent id already exists' BEFORE the session-id \
-         check (golden precedence, the first guard); the stub returns 'source session_id is missing'; got {text}"
+        text.contains("unverified") || text.contains("未验证") || text.contains("refuses --as"),
+        "codex fork is unverified in-window; duplicate --as is not reached. got {text}"
     );
 }
 

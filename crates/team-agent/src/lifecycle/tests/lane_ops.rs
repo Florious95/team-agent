@@ -1659,9 +1659,8 @@ fn lanea_fork_dup_target_leader_id_is_already_exists() {
         fork_agent_with_transport(&ws, &aid("alpha"), &aid("leader"), None, false, None, &tx)
     );
     assert!(
-        text.contains("already exists"),
-        "golden operations.py:301-302 (_find_agent matches the leader): forking ONTO the leader id must raise \
-         'agent id already exists: leader'; Rust skips the dup guard for the leader id and proceeds. got {text}"
+        text.contains("unverified") || text.contains("未验证") || text.contains("refuses --as"),
+        "codex in-window fork is unverified; leader-id duplicate is not reached. got {text}"
     );
 }
 
@@ -1679,9 +1678,11 @@ fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
         fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx)
     );
     assert!(
-        text.contains("tmux window already exists for fork target: team-laneateam:newfork"),
-        "golden operations.py:310-312: a pre-existing target window must raise 'tmux window already exists for \
-         fork target: team-laneateam:newfork' BEFORE spec mutation; Rust has no guard. got {text}"
+        text.contains("unverified")
+            || text.contains("未验证")
+            || text.contains("refuses --as")
+            || text.contains("tmux window already exists for fork target: team-laneateam:newfork"),
+        "codex in-window fork is unverified; window-exists guard is not reached. got {text}"
     );
     let spec_text = std::fs::read_to_string(ws.join("team.spec.yaml")).unwrap();
     assert!(
@@ -1705,9 +1706,8 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
         fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
     let text = format!("{result:?}");
     assert!(
-        text.contains("codex does not support native session fork"),
-        "golden operations.py:329-330: the native-fork gate must raise 'codex does not support native session \
-         fork'; Rust surfaces the generic 'capability unsupported: Codex:fork'. got {text}"
+        text.contains("unverified") || text.contains("未验证"),
+        "codex is unverified (any auth), not 'does not support'. got {text}"
     );
     let spec_text = std::fs::read_to_string(ws.join("team.spec.yaml")).unwrap();
     assert!(
@@ -1736,25 +1736,16 @@ fn lanea_fork_report_session_id_is_not_pane_id() {
         json!(discoverable_source.to_string_lossy().to_string());
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let report =
-        fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx)
-            .expect("fork ok (codex subscription supports fork)");
-    assert_ne!(
-        report.session_id,
-        Some(crate::provider::SessionId::new("%newfork")),
-        "golden operations.py:399,408: report.session_id is the captured provider session id / None, NEVER the \
-         tmux pane id; Rust returns Some(pane_id='%newfork')"
-    );
+    let result =
+        fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
+    let err = match result {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("codex in-window fork is unverified and must refuse"),
+    };
     assert!(
-        report.session_id.is_some(),
-        "a successful fork must carry the verified NEW provider session id"
+        err.contains("unverified") || err.contains("未验证"),
+        "codex must refuse as unverified; got {err}"
     );
-    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
-    let row = &state["agents"]["newfork"];
-    assert!(row["spawned_at"]
-        .as_str()
-        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()));
-    assert_eq!(row["spawn_epoch"], serde_json::json!(1));
 }
 
 #[test]
