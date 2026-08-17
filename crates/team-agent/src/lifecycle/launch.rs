@@ -327,7 +327,7 @@ pub(crate) use add_agent_state::inject_agent_into_spec;
 pub(super) use add_agent_state::*;
 
 mod fork_agent;
-pub use fork_agent::{fork_agent_with_transport, in_window_fork_command};
+pub use fork_agent::{fork_agent_with_transport, in_window_fork, in_window_fork_command};
 pub(super) use fork_agent::*;
 
 mod fork_entry;

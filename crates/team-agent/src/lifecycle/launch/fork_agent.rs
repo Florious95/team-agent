@@ -3,9 +3,9 @@
 //! contract:
 //!   provides:
 //!     - name: fork_agent_with_transport
-//!       what: grok subscription 注入纯净 /fork；屏幕出现 forked from 才算成功
-//!     - name: in_window_fork_command
-//!       what: 只有已验证的 provider+auth 才给出窗口内命令；未验证返回 None
+//!       what: grok/claude subscription 注入纯净斜杠命令；屏幕出现该 provider 的实测标记才算成功
+//!     - name: in_window_fork
+//!       what: 已验证的 provider+subscription 给出 command+screen_mark；未验证返回 None
 //!   depends:
 //!     - crate::lifecycle::pane_input_lock
 //!     - crate::transport::Transport
@@ -25,15 +25,50 @@ use crate::lifecycle::pane_input_lock::{
 use crate::lifecycle::profile_launch::{parse_auth_mode, parse_provider};
 use crate::model::enums::{AuthMode, Provider};
 
-const FORKED_FROM_MARK: &str = "forked from";
 const MAX_ENTER_RETRIES: u32 = 8;
 
-/// Official in-window fork command. None = unverified or unsupported.
-/// Only grok+subscription is field-proven (2026-08-17).
-pub fn in_window_fork_command(provider: Provider, auth: AuthMode) -> Option<&'static str> {
+/// Injected slash command + the screen mark that proves it landed.
+/// Difference between providers lives only in this data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InWindowFork {
+    pub command: &'static str,
+    pub screen_mark: &'static str,
+}
+
+/// Official in-window fork. None = unverified or unsupported-auth.
+/// grok `/fork` mark `forked from` (2026-08-17).
+/// claude `/branch` mark `Branched conversation` (Claude Code v2.1.181, 2026-08-17).
+/// claude `/fork` is a background-agent command (`Usage: /fork <directive>`), not the session split.
+pub fn in_window_fork(provider: Provider, auth: AuthMode) -> Option<InWindowFork> {
     match (provider, auth) {
-        (Provider::Grok, AuthMode::Subscription) => Some("/fork"),
+        (Provider::Grok, AuthMode::Subscription) => Some(InWindowFork {
+            command: "/fork",
+            screen_mark: "forked from",
+        }),
+        (Provider::Claude | Provider::ClaudeCode, AuthMode::Subscription) => Some(InWindowFork {
+            command: "/branch",
+            screen_mark: "Branched conversation",
+        }),
         _ => None,
+    }
+}
+
+pub fn in_window_fork_command(provider: Provider, auth: AuthMode) -> Option<&'static str> {
+    in_window_fork(provider, auth).map(|spec| spec.command)
+}
+
+fn refuse_missing_in_window_fork(provider: Provider, provider_raw: &str) -> LifecycleError {
+    if matches!(
+        provider,
+        Provider::Grok | Provider::Claude | Provider::ClaudeCode
+    ) {
+        LifecycleError::Provider(format!(
+            "{provider_raw} does not support native session fork"
+        ))
+    } else {
+        LifecycleError::Provider(format!(
+            "{provider_raw} in-window fork is unverified (未验证)"
+        ))
     }
 }
 
@@ -72,14 +107,12 @@ pub fn fork_agent_with_transport(
         .unwrap_or("subscription");
     let provider = parse_provider(provider_raw).unwrap_or(Provider::Grok);
     let auth = parse_auth_mode(auth_raw).unwrap_or(AuthMode::Subscription);
-    let Some(command) = in_window_fork_command(provider, auth) else {
-        return Err(LifecycleError::Provider(format!(
-            "{provider_raw} does not support native session fork"
-        )));
+    let Some(spec) = in_window_fork(provider, auth) else {
+        return Err(refuse_missing_in_window_fork(provider, provider_raw));
     };
     if as_agent_id.as_str() != source_agent_id.as_str() {
         return Err(LifecycleError::RequirementUnmet(format!(
-            "in-place fork refuses --as {as_agent_id}: grok /fork stays on {source_agent_id}"
+            "in-place fork refuses --as {as_agent_id}: session stays on {source_agent_id}"
         )));
     }
     let pane_raw = agent
@@ -108,8 +141,8 @@ pub fn fork_agent_with_transport(
             }),
         );
     }
-    inject_clean_command(transport, &target, command)?;
-    wait_for_forked_from(transport, &target)?;
+    inject_clean_command(transport, &target, spec.command)?;
+    wait_for_screen_mark(transport, &target, spec.screen_mark)?;
     drop(lock);
     crate::event_log::EventLog::new(&run_ws)
         .write(
@@ -118,7 +151,8 @@ pub fn fork_agent_with_transport(
                 "source_agent_id": source_agent_id.as_str(),
                 "agent_id": source_agent_id.as_str(),
                 "pane_id": pane_raw,
-                "command": command,
+                "command": spec.command,
+                "screen_mark": spec.screen_mark,
             }),
         )
         .map_err(|e| {
@@ -153,24 +187,33 @@ fn inject_clean_command(
     Ok(())
 }
 
-fn wait_for_forked_from(
+const NO_CONVERSATION_TO_BRANCH: &str =
+    "Failed to branch conversation: No conversation to branch";
+
+fn wait_for_screen_mark(
     transport: &dyn Transport,
     target: &Target,
+    screen_mark: &str,
 ) -> Result<(), LifecycleError> {
     for attempt in 0..MAX_ENTER_RETRIES {
         let cap = transport
             .capture(target, crate::transport::CaptureRange::Tail(40))
             .map_err(|e| LifecycleError::Transport(e.to_string()))?;
-        if cap.text.contains(FORKED_FROM_MARK) {
+        if cap.text.contains(screen_mark) {
             return Ok(());
         }
+        if cap.text.contains(NO_CONVERSATION_TO_BRANCH) {
+            return Err(LifecycleError::RequirementUnmet(
+                NO_CONVERSATION_TO_BRANCH.to_string(),
+            ));
+        }
         if attempt + 1 < MAX_ENTER_RETRIES {
-            // Mixed text in the box is not failure. Retry Enter only — never re-paste /fork.
+            // Mixed text in the box is not failure. Retry Enter only — never re-paste the slash command.
             let _ = transport.send_keys(target, &[crate::transport::Key::Enter]);
             std::thread::sleep(std::time::Duration::from_millis(80));
         }
     }
-    Err(LifecycleError::RequirementUnmet(
-        "fork inject did not produce 'forked from' on screen".to_string(),
-    ))
+    Err(LifecycleError::RequirementUnmet(format!(
+        "fork inject did not produce {screen_mark:?} on screen"
+    )))
 }
