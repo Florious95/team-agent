@@ -329,7 +329,6 @@ pub(super) use add_agent_state::*;
 mod fork_agent;
 pub use fork_agent::{fork_agent_with_transport, in_window_fork_command};
 pub(super) use fork_agent::*;
-pub(crate) use fork_agent::{finalize_pending_fork_capture, ContextForkFinalized};
 
 mod fork_entry;
 pub use fork_entry::fork_agent;

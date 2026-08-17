@@ -271,17 +271,12 @@ impl Coordinator {
         }
 
         self.record_step(TickStepGroup::SessionGate, "capture_missing");
-        let pending_context_fork_audits =
-            match self.capture_missing_sessions(&mut state, &event_log) {
-                Ok(audits) => audits,
-                Err(error) => {
-                    let _ = event_log.write(
-                        "coordinator.tick.capture_missing_failed",
-                        serde_json::json!({"error": error.to_string()}),
-                    );
-                    Vec::new()
-                }
-            };
+        if let Err(error) = self.capture_missing_sessions(&mut state, &event_log) {
+            let _ = event_log.write(
+                "coordinator.tick.capture_missing_failed",
+                serde_json::json!({"error": error.to_string()}),
+            );
+        }
 
         // Slice 1 energy gate: one pane snapshot per tick feeds probe eligibility,
         // health sync, and abnormal-exit detection. Missing panes are filtered
@@ -461,15 +456,6 @@ impl Coordinator {
                 collections,
             ));
         }
-        for context_fork in &pending_context_fork_audits {
-            context_fork.write_audit(&event_log).map_err(|error| {
-                eprintln!(
-                    "[coordinator] context_fork audit publish failed after state commit: {error}"
-                );
-                TickError::EventLog(error)
-            })?;
-        }
-
         self.record_step(TickStepGroup::Delivery, "collect_results");
         collections.results =
             collect_results(crate::messaging::collect_results_and_notify_watchers(
@@ -489,7 +475,7 @@ impl Coordinator {
         &self,
         state: &mut Value,
         event_log: &EventLog,
-    ) -> Result<Vec<crate::lifecycle::launch::ContextForkFinalized>, TickError> {
+    ) -> Result<(), TickError> {
         let report = crate::session_capture::capture_missing_provider_sessions_once(
             state,
             &mut |provider| self.provider_registry.adapter_for(provider),
@@ -653,7 +639,7 @@ impl Coordinator {
                 }),
             )?;
         }
-        Ok(report.context_forks)
+        Ok(())
     }
 
     fn sync_agent_health(

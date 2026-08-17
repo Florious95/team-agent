@@ -21,14 +21,10 @@
 //!         typed timeout variant(如 `ProviderError::ContextForkTimeout`
 //!         或 `Result<Proof, ContextForkTerminationReason>` 分型),
 //!         outcome 层按 typed variant match,禁 contains(...) 嗅探字符串。
-//!   齿3 (C4 finalize 拒 source 冒充 + 清 pending 字段) — 行为面:mock
-//!         PendingContextFork state seed 一个 `fork_source_session_id=SRC`
-//!         的 agent row,调 `finalize_pending_fork_capture` 传入
-//!         `captured.session_id == SRC`,必须**拒 finalize**(return false 或
-//!         typed error);且合法 captured(id != SRC)finalize 后保留血源字段
-//!         `fork_source_session_id`，只清运行态 pending 字段
-//!         `pending_target_agent` / `pending_grace_secs`。
-//!         正控:合法 captured 正常 finalize + capture_state=captured。
+//!   齿3 (C4 空壳 finalize 已拔) — 0.5.67 就地 /fork 后 `fork_finalize.rs`
+//!         与 `finalize_pending_fork_capture` 不再存在。旧测试读已删文件
+//!         会 os error 2。新齿钉：文件已删、空壳函数/调用方已删、
+//!         apply_captured_session 不再被 pending_context_fork 拐进恒 None。
 //!
 //! LINEAGE:
 //! - Baseline: 5b847e4 (0.5.56 tested tip;fork-agent 破,0.5.58 加 typed
@@ -313,88 +309,87 @@ fn outcome_module_forbids_error_string_sniffing() {
 }
 
 // ---------------------------------------------------------------------------
-// 齿3 — C4 finalize source-id 拒绝 + 清 pending 字段(源码文本扫)
+// 齿3 — 空壳 finalize 已连调用方一起拔掉（不再读 fork_finalize.rs）
 // ---------------------------------------------------------------------------
 //
-// `finalize_pending_fork_capture` is `pub(crate)` — not reachable from
-// integration tests without an in-crate helper. We probe SOURCE shape:
-// (a) function body must contain a source-id refusal predicate
-//     comparing captured.session_id to fork_source_session_id;
-// (b) function body must preserve `fork_source_session_id` as lineage while
-//     removing the runtime pending fields (`pending_target_agent` /
-//     `pending_grace_secs`) via `agent.remove(...)` calls.
-// (c) positive-control source shape: the function still returns `bool`
-//     and writes `session_id`/`rollout_path`/`capture_state` on the
-//     legitimate path.
+// 就地 /fork 之后没有 pending-capture 需要 finalize。旧齿读
+// lifecycle/launch/fork_finalize.rs，拔根后 os error 2。本齿改钉：
+// (a) fork_finalize.rs 不存在（阳性对照：同目录 fork_agent.rs 可读）；
+// (b) fork_agent.rs 不再定义 finalize_pending_fork_capture / write_audit；
+// (c) capture.rs 的 apply_captured_session 不再拐进恒 None 的空壳，
+//     有 session_id+rollout_path 时仍写出 captured。
 
 #[test]
 #[serial(env)]
-fn finalize_pending_fork_capture_refuses_source_id_and_clears_pending_fields() {
-    let src = read_src("lifecycle/launch/fork_finalize.rs");
-    let start = src
-        .find("pub(crate) fn finalize_pending_fork_capture")
-        .or_else(|| src.find("pub fn finalize_pending_fork_capture"))
-        .expect("finalize_pending_fork_capture not found in fork_finalize.rs");
-    let tail = &src[start..];
-    // Cheap block extract: up to first `\n}\n` at column-0 close brace.
-    let end_off = tail
-        .find("\n}\n")
-        .expect("could not locate closing brace of finalize_pending_fork_capture");
-    let body = &tail[..end_off];
-
-    // Face (a): source-id refusal — body must reference BOTH
-    // `fork_source_session_id` AND a comparison / early-return path.
-    let mentions_source_field = body.contains("fork_source_session_id");
-    let has_refusal_shape = mentions_source_field
-        && (body.contains("return false")
-            || body.contains("return None")
-            || body.contains("return Ok(false)")
-            || body.contains("return Err")
-            || body.contains("MasqueradeRefused"));
+fn pending_fork_finalize_shell_is_gone_and_capture_falls_through() {
+    let launch_dir = crate_src().join("lifecycle").join("launch");
+    let fork_agent_path = launch_dir.join("fork_agent.rs");
+    let fork_agent = fs::read_to_string(&fork_agent_path).unwrap_or_else(|e| {
+        panic!(
+            "positive control: must read {}: {e}",
+            fork_agent_path.display()
+        )
+    });
     assert!(
-        has_refusal_shape,
-        "C4: finalize_pending_fork_capture body has no source-id refusal \
-         predicate. Must add `if captured.session_id == agent.fork_source_session_id \
-         {{ return None; }}` (or false/typed error) BEFORE writing the tuple. \
-         mentions_source_field={mentions_source_field}. body head:\n{}",
-        body.chars().take(600).collect::<String>()
+        fork_agent.contains("fn fork_agent_with_transport"),
+        "positive control: fork_agent.rs must still export fork_agent_with_transport"
     );
 
-    // Face (b): lineage remains queryable after capture; only runtime pending
-    // scaffold is removed.
+    let finalize_path = launch_dir.join("fork_finalize.rs");
     assert!(
-        !body.contains("remove(\"fork_source_session_id\")"),
-        "C4: finalize_pending_fork_capture removes `fork_source_session_id`. \
-         Captured rows must preserve this lineage field; its only finalize \
-         use is source-session exclusion, not reopening pending state."
+        !finalize_path.exists(),
+        "fork_finalize.rs must stay deleted (was the os-error-2 target)"
     );
-    for field in ["pending_target_agent", "pending_grace_secs"] {
-        let needle_a = format!("remove(\"{field}\")");
-        let needle_b = format!("remove(\"{field}\".");
-        assert!(
-            body.contains(&needle_a) || body.contains(&needle_b),
-            "C4: finalize_pending_fork_capture does not remove pending \
-             scaffold field `{field}` after successful finalize. Reviewer \
-             §C4: captured row must not carry pending residue. Expected \
-             `agent.remove(\"{field}\");` in body."
-        );
-    }
 
-    // Face (c) positive control: function still marks capture_state as captured
-    // and still returns an explicit success/failure result.
     assert!(
-        body.contains("capture_state")
-            && (body.contains("\"captured\"") || body.contains(":captured")),
-        "PC: legitimate finalize path must still mark capture_state as \
-         `captured`; guard hardening should not delete the happy-path write."
+        !fork_agent.contains("fn finalize_pending_fork_capture"),
+        "silent-None finalize_pending_fork_capture must be deleted from fork_agent.rs"
     );
-    // The audited path returns the finalized lineage fact in `Some` and
-    // refusal as `None`; legacy bool / typed Result shapes remain admissible.
     assert!(
-        src[start..(start + 200)].contains("-> bool")
-            || src[start..(start + 300)].contains("Result<bool")
-            || src[start..(start + 300)].contains("Option<ContextForkFinalized>"),
-        "PC: finalize_pending_fork_capture signature drifted; expected \
-         `-> Option<ContextForkFinalized>`, `-> bool`, or `-> Result<bool, _>`."
+        !fork_agent.contains("fn write_audit"),
+        "write_audit empty Ok shell must be deleted from fork_agent.rs"
+    );
+
+    let capture = read_src("provider/session/capture.rs");
+    assert!(
+        capture.contains("fn apply_captured_session"),
+        "positive control: apply_captured_session must still exist"
+    );
+    assert!(
+        !capture.contains("finalize_pending_fork_capture"),
+        "capture.rs must not call the deleted finalize_pending_fork_capture"
+    );
+    assert!(
+        !capture.contains("ContextForkFinalized"),
+        "capture.rs must not keep ContextForkFinalized after the shell was removed"
+    );
+
+    let apply_start = capture
+        .find("fn apply_captured_session")
+        .expect("apply_captured_session not found after positive control");
+    let apply_tail = &capture[apply_start..];
+    let apply_end = apply_tail
+        .find("\nfn ")
+        .unwrap_or(apply_tail.len());
+    let apply_body = &apply_tail[..apply_end];
+    assert!(
+        !apply_body.contains("pending_context_fork"),
+        "apply_captured_session must not special-case pending_context_fork into a silent None"
+    );
+    assert!(
+        apply_body.contains("session_id")
+            && apply_body.contains("rollout_path")
+            && apply_body.contains("\"captured\""),
+        "apply_captured_session must still write the captured tuple on the happy path"
+    );
+
+    let tick = read_src("coordinator/tick.rs");
+    assert!(
+        tick.contains("fn capture_missing_sessions"),
+        "positive control: tick.rs still captures missing sessions"
+    );
+    assert!(
+        !tick.contains("write_audit") && !tick.contains("ContextForkFinalized"),
+        "tick.rs must not call write_audit / carry ContextForkFinalized after the shell was removed"
     );
 }

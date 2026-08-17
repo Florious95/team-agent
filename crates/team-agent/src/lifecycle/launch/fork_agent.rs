@@ -77,6 +77,11 @@ pub fn fork_agent_with_transport(
             "{provider_raw} does not support native session fork"
         )));
     };
+    if as_agent_id.as_str() != source_agent_id.as_str() {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "in-place fork refuses --as {as_agent_id}: grok /fork stays on {source_agent_id}"
+        )));
+    }
     let pane_raw = agent
         .get("pane_id")
         .and_then(serde_json::Value::as_str)
@@ -104,9 +109,21 @@ pub fn fork_agent_with_transport(
         );
     }
     inject_clean_command(transport, &target, command)?;
-    let seen = wait_for_forked_from(transport, &target)?;
+    wait_for_forked_from(transport, &target)?;
     drop(lock);
-    let _ = as_agent_id;
+    crate::event_log::EventLog::new(&run_ws)
+        .write(
+            "lifecycle.fork.in_place",
+            serde_json::json!({
+                "source_agent_id": source_agent_id.as_str(),
+                "agent_id": source_agent_id.as_str(),
+                "pane_id": pane_raw,
+                "command": command,
+            }),
+        )
+        .map_err(|e| {
+            LifecycleError::StatePersist(format!("fork audit write failed: {e}"))
+        })?;
     Ok(ForkAgentReport {
         source_agent_id: source_agent_id.clone(),
         new_agent_id: source_agent_id.clone(),
@@ -116,11 +133,7 @@ pub fn fork_agent_with_transport(
             coordinator_started: false,
         },
         session_id: None,
-        backing_state: if seen {
-            ForkBackingState::Verified
-        } else {
-            ForkBackingState::PendingContextFork
-        },
+        backing_state: ForkBackingState::Verified,
     })
 }
 
@@ -143,13 +156,13 @@ fn inject_clean_command(
 fn wait_for_forked_from(
     transport: &dyn Transport,
     target: &Target,
-) -> Result<bool, LifecycleError> {
+) -> Result<(), LifecycleError> {
     for attempt in 0..MAX_ENTER_RETRIES {
         let cap = transport
             .capture(target, crate::transport::CaptureRange::Tail(40))
             .map_err(|e| LifecycleError::Transport(e.to_string()))?;
         if cap.text.contains(FORKED_FROM_MARK) {
-            return Ok(true);
+            return Ok(());
         }
         if attempt + 1 < MAX_ENTER_RETRIES {
             // Mixed text in the box is not failure. Retry Enter only — never re-paste /fork.
@@ -160,40 +173,4 @@ fn wait_for_forked_from(
     Err(LifecycleError::RequirementUnmet(
         "fork inject did not produce 'forked from' on screen".to_string(),
     ))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ContextForkFinalized {
-    source_agent_id: String,
-    agent_id: String,
-    session_id: String,
-    rollout_path: String,
-    captured_via: String,
-    attribution_confidence: String,
-}
-
-impl ContextForkFinalized {
-    pub(crate) fn write_audit(
-        &self,
-        event_log: &crate::event_log::EventLog,
-    ) -> Result<(), crate::event_log::EventLogError> {
-        let _ = (
-            &self.source_agent_id,
-            &self.agent_id,
-            &self.session_id,
-            &self.rollout_path,
-            &self.captured_via,
-            &self.attribution_confidence,
-        );
-        let _ = event_log;
-        Ok(())
-    }
-}
-
-/// Old pending-fork capture is gone. Do not read provider session files.
-pub(crate) fn finalize_pending_fork_capture(
-    _agent: &mut serde_json::Map<String, serde_json::Value>,
-    _captured: &crate::provider::CapturedSession,
-) -> Option<ContextForkFinalized> {
-    None
 }
