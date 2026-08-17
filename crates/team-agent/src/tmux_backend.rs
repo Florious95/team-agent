@@ -2020,6 +2020,13 @@ impl Transport for TmuxBackend {
         observer: Option<&dyn SubmitObserver>,
     ) -> Result<InjectReport, TransportError> {
         let pane = pane_from_target(target);
+        let _pane_input = crate::lifecycle::pane_input_lock::acquire_or_proceed(
+            crate::lifecycle::pane_input_lock::PaneInputLockRequest {
+                workspace: self.event_workspace.as_deref(),
+                target_key: pane.as_str(),
+                operation: "inject",
+            },
+        );
         // U1 #7: pane readback signal for the non-pasted-prompt text path.
         let mut token_visible_for_report: Option<bool> = None;
         match payload {
@@ -2323,6 +2330,13 @@ impl Transport for TmuxBackend {
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> {
         let pane = pane_from_target(target);
+        let _pane_input = crate::lifecycle::pane_input_lock::acquire_or_proceed(
+            crate::lifecycle::pane_input_lock::PaneInputLockRequest {
+                workspace: self.event_workspace.as_deref(),
+                target_key: pane.as_str(),
+                operation: "send_keys",
+            },
+        );
         if keys.contains(&Key::CancelMode) {
             if let Some(mode) = pane_mode_from_raw(self.query(target, PaneField::PaneMode)?) {
                 let argv = crate::transport::tmux_cancel_mode_argv(&pane, mode);

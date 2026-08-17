@@ -46,6 +46,7 @@ pub mod display;
 pub mod helpers;
 pub mod launch;
 pub(crate) mod lock;
+pub(crate) mod pane_input_lock;
 pub(crate) mod profile_launch;
 pub(crate) mod profile_smoke;
 pub mod restart;
