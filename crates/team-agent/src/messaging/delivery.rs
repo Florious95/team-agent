@@ -510,7 +510,37 @@ pub fn deliver_pending_message(
         true,
         Some(&submit_observer),
     ) {
-        Ok(report) => report,
+        Ok(report) => {
+            // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
+            // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
+            if !crate::provider::submit_now::keep_provider_queue_requested() {
+                match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
+                    Ok(flush) if flush.extra_enters > 0 => {
+                        let _ = event_log.write(
+                            "send.grok_send_now",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "recipient": message.recipient,
+                                "extra_enters": flush.extra_enters,
+                                "mark_cleared": flush.mark_cleared,
+                            }),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = event_log.write(
+                            "send.grok_send_now_failed",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "recipient": message.recipient,
+                                "error": error.to_string(),
+                            }),
+                        );
+                    }
+                }
+            }
+            report
+        }
         Err(error) => {
             let reason = format!("inject_failed:{error}");
             if message.recipient == "leader" {

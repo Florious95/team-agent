@@ -44,6 +44,7 @@ pub mod faults;
 pub mod session;
 pub mod session_scan;
 pub mod startup_prompt;
+pub mod submit_now;
 pub mod types;
 /// 0.4.x: provider wire-format helpers — single source of truth for
 /// `Provider` ↔ string conversions (replaces 7 hand-rolled match copies).
