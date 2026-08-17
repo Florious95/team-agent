@@ -266,6 +266,9 @@ pub(crate) use agent_state::{
     persist_effective_approval_policy_from_agent,
 };
 
+mod grok_per_seat;
+pub(crate) use grok_per_seat::{is_per_seat_env_key, per_seat_keys_in_toml};
+
 mod mcp_config;
 pub use mcp_config::apply_grok_mcp_overlay;
 pub(super) use mcp_config::*;

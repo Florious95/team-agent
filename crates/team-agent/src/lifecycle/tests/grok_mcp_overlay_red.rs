@@ -116,45 +116,62 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
 }
 
 #[test]
-fn two_grok_seats_sharing_cwd_must_refuse_to_start() {
-    let ws = tmp_dir("grok-cwd-collision");
+#[serial(env)]
+fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
+    let ws = tmp_dir("grok-cwd-coexist");
+    let home = tmp_dir("grok-cwd-coexist-home");
+    seed_grok_home(&home, Some(&ws));
+    let _guard = HomeGuard::set(&home);
     let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
 
-    let result = quick_start_with_transport_in_workspace(
+    quick_start_with_transport_in_workspace(
         &ws,
         &team,
         None,
         true,
         Some("grokteam"),
         &OfflineTransport::new(),
-    );
+    )
+    .expect("two grok seats must start when the shared toml has no per-seat keys");
 
-    let err = match result {
-        Ok(report) => panic!(
-            "two grok seats sharing cwd must refuse to start; silent overlay overwrite \
-             would make both seats use the last TEAM_AGENT_ID; report={report:?}"
-        ),
-        Err(error) => error.to_string(),
-    };
+    let text = std::fs::read_to_string(ws.join(".grok/config.toml")).unwrap_or_default();
     assert!(
-        err.contains("already occupies this workspace") || err.contains("g1"),
-        "error must name the occupying grok seat; err={err}"
+        !text.contains("TEAM_AGENT_ID")
+            && !text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            && !text.contains("TEAM_AGENT_AUTH_MODE"),
+        "overlay must not write per-seat keys; text={text}"
+    );
+}
+
+#[test]
+fn second_grok_refuses_only_when_toml_has_a_per_seat_key() {
+    let ws = tmp_dir("grok-cwd-per-seat");
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        "[mcp_servers.team_orchestrator.env]\nTEAM_AGENT_FUTURE_SEAT_KEY = \"leaked\"\n",
+    )
+    .unwrap();
+    let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
+
+    let err = quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        Some("grokteam"),
+        &OfflineTransport::new(),
+    )
+    .expect_err("a leftover per-seat key must refuse another grok seat");
+    let text = err.to_string();
+    assert!(
+        text.contains("per-seat") && text.contains("TEAM_AGENT_FUTURE_SEAT_KEY"),
+        "error must name the per-seat key, not seat count; err={text}"
     );
     assert!(
-        err.contains(".grok/config.toml") && err.to_ascii_lowercase().contains("directory-scoped"),
-        "error must name the directory-scoped MCP cause; err={err}"
-    );
-    assert!(
-        err.contains("g1") && err.contains("g2"),
-        "error must name both colliding grok seats; err={err}"
-    );
-    assert!(
-        !err.contains("worktree") && !err.contains("then retry"),
-        "must not promise a remedy this version cannot honor; err={err}"
-    );
-    assert!(
-        !ws.join(".grok").join("config.toml").exists(),
-        "must refuse before writing overlay; a leftover .grok/config.toml is a half-written identity"
+        !text.contains("already occupies this workspace"),
+        "must not use the retired seat-count error; err={text}"
     );
 }
 

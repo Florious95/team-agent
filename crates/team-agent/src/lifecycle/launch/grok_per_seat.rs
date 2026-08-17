@@ -1,0 +1,97 @@
+//! ---
+//! purpose: 判定 .grok/config.toml env 里哪些键是每席私有
+//! contract:
+//!   provides:
+//!     - name: is_per_seat_env_key
+//!       what: TEAM_AGENT_* 除 WORKSPACE 外都是每席键
+//!     - name: per_seat_keys_in_toml
+//!       what: 扫描 toml env 表里的每席键
+//! boundary:
+//!   - 不写盘
+//!   - 不数 grok 席位个数
+//! maturity: wired
+//! ---
+
+/// Shared identity keys belong on pane env. The only TEAM_AGENT_* key
+/// allowed in the directory-scoped grok toml is WORKSPACE (same cwd).
+pub(crate) fn is_per_seat_env_key(key: &str) -> bool {
+    let key = key.trim();
+    key.starts_with("TEAM_AGENT_") && key != "TEAM_AGENT_WORKSPACE"
+}
+
+pub(crate) fn per_seat_keys_in_toml(text: &str) -> Vec<(String, String)> {
+    let mut in_env_table = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let name = &trimmed[1..trimmed.len() - 1];
+            in_env_table = name.ends_with(".env");
+            continue;
+        }
+        if !in_env_table {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if !is_per_seat_env_key(key) {
+            continue;
+        }
+        let rest = rest.trim();
+        let value = rest
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(rest);
+        if out.iter().any(|(existing, _)| existing == key) {
+            continue;
+        }
+        out.push((key.to_string(), value.to_string()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_is_shared_other_team_agent_keys_are_per_seat() {
+        assert!(!is_per_seat_env_key("TEAM_AGENT_WORKSPACE"));
+        assert!(is_per_seat_env_key("TEAM_AGENT_ID"));
+        assert!(is_per_seat_env_key("TEAM_AGENT_OWNER_TEAM_ID"));
+        assert!(is_per_seat_env_key("TEAM_AGENT_AUTH_MODE"));
+        assert!(is_per_seat_env_key("TEAM_AGENT_FUTURE_SEAT_KEY"));
+        assert!(!is_per_seat_env_key("GROK_FOLDER_TRUST"));
+    }
+
+    #[test]
+    fn scan_finds_per_seat_keys_in_env_table_only() {
+        let text = r#"
+[mcp_servers.other.env]
+TEAM_AGENT_ID = "ignore-other-server-still-counts"
+
+[mcp_servers.team_orchestrator]
+command = "/bin/x"
+
+[mcp_servers.team_orchestrator.env]
+TEAM_AGENT_WORKSPACE = "/ws"
+TEAM_AGENT_AUTH_MODE = "impostor"
+"#;
+        let keys = per_seat_keys_in_toml(text);
+        assert!(
+            keys.iter().any(|(k, v)| k == "TEAM_AGENT_AUTH_MODE" && v == "impostor"),
+            "must see AUTH; keys={keys:?}"
+        );
+        assert!(
+            keys.iter().any(|(k, _)| k == "TEAM_AGENT_ID"),
+            "any env table per-seat key counts; keys={keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|(k, _)| k == "TEAM_AGENT_WORKSPACE"),
+            "WORKSPACE is shared; keys={keys:?}"
+        );
+    }
+}

@@ -70,13 +70,7 @@ pub(crate) fn grok_slot_report(workspace: &Path, state: &Value) -> GrokSlotRepor
             }
             Ok(text) => {
                 let disk = parse_disk_slot(&text);
-                return classify(
-                    disk,
-                    live_ids,
-                    pre_first_turn,
-                    expected_owner,
-                    expected_auth,
-                );
+                return classify(disk, live_ids, pre_first_turn, expected_owner, expected_auth);
             }
         }
     }
@@ -94,14 +88,30 @@ struct DiskSlot {
     team_agent_id: Option<String>,
     owner_team_id: Option<String>,
     auth_mode: Option<String>,
+    extras: Vec<(String, String)>,
 }
 
 fn parse_disk_slot(text: &str) -> DiskSlot {
+    let keys = crate::lifecycle::launch::per_seat_keys_in_toml(text);
     DiskSlot {
-        team_agent_id: parse_toml_key(text, "TEAM_AGENT_ID"),
-        owner_team_id: parse_toml_key(text, "TEAM_AGENT_OWNER_TEAM_ID"),
-        auth_mode: parse_toml_key(text, "TEAM_AGENT_AUTH_MODE"),
+        team_agent_id: find_key(&keys, "TEAM_AGENT_ID"),
+        owner_team_id: find_key(&keys, "TEAM_AGENT_OWNER_TEAM_ID"),
+        auth_mode: find_key(&keys, "TEAM_AGENT_AUTH_MODE"),
+        extras: keys
+            .into_iter()
+            .filter(|(key, _)| {
+                key != "TEAM_AGENT_ID"
+                    && key != "TEAM_AGENT_OWNER_TEAM_ID"
+                    && key != "TEAM_AGENT_AUTH_MODE"
+            })
+            .collect(),
     }
+}
+
+fn find_key(keys: &[(String, String)], want: &str) -> Option<String> {
+    keys.iter()
+        .find(|(key, _)| key == want)
+        .map(|(_, value)| value.clone())
 }
 
 fn unjudgeable(
@@ -163,8 +173,8 @@ fn classify(
     if let Some(disk_auth) = disk.auth_mode.as_deref() {
         mismatches.push(format!("per-seat key TEAM_AGENT_AUTH_MODE={disk_auth}"));
     }
-    if live_ids.len() > 1 {
-        mismatches.push(format!("live_seats={}", live_ids.join(",")));
+    for (key, value) in &disk.extras {
+        mismatches.push(format!("per-seat key {key}={value}"));
     }
 
     if mismatches.is_empty() {
@@ -286,22 +296,4 @@ fn expected_auth_mode(live: &[LiveGrok]) -> Option<String> {
     found
 }
 
-fn parse_toml_key(text: &str, key: &str) -> Option<String> {
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix(key) else {
-            continue;
-        };
-        let rest = rest.trim().strip_prefix('=')?;
-        let rest = rest.trim();
-        let unquoted = rest
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-            .unwrap_or(rest);
-        if !unquoted.is_empty() {
-            return Some(unquoted.to_string());
-        }
-    }
-    None
-}
+

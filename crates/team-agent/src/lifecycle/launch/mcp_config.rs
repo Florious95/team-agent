@@ -198,42 +198,42 @@ fn spec_grok_ids(spec: &Value) -> Vec<String> {
     ids
 }
 
-/// Count live grok seats from runtime state (the in-service set), unioned
-/// with any grok ids on the spec being launched. The compiled add-agent spec
-/// only has the static base + the incoming seat, so state is the authority
-/// for already-running dynamic grok seats.
+/// Refuse a grok launch only when the directory-scoped toml still carries
+/// per-seat keys. Seat count is not a reason: identity lives on pane env.
+/// The per-seat test is [`super::is_per_seat_env_key`] — same one status uses.
 pub(crate) fn ensure_exclusive_grok_cwd(
     workspace: &Path,
-    incoming_agent_id: &str,
-    spec: Option<&Value>,
+    _incoming_agent_id: &str,
+    _spec: Option<&Value>,
 ) -> Result<(), LifecycleError> {
-    let mut occupants = live_grok_occupants_from_state(workspace)?;
-    if let Some(spec) = spec {
-        for id in spec_grok_ids(spec) {
-            if !occupants.iter().any(|o| o.id == id) {
-                occupants.push(GrokOccupant {
-                    id,
-                    spawned_at: None,
-                    status: "spec".to_string(),
-                });
-            }
-        }
-    }
-    if !incoming_agent_id.is_empty() && !occupants.iter().any(|o| o.id == incoming_agent_id) {
-        occupants.push(GrokOccupant {
-            id: incoming_agent_id.to_string(),
-            spawned_at: None,
-            status: "incoming".to_string(),
-        });
-    }
-    if occupants.len() < 2 {
+    let path = workspace.join(".grok").join("config.toml");
+    if !path.exists() {
         return Ok(());
     }
-    Err(grok_occupied_cwd_error(
-        workspace,
-        incoming_agent_id,
-        &occupants,
-    ))
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        LifecycleError::RequirementUnmet(format!(
+            "error: cannot judge grok shared slot (unreadable {})\n\
+             reason: {error}\n\
+             action: fix permissions on that file before adding another grok seat",
+            path.display()
+        ))
+    })?;
+    let keys = super::per_seat_keys_in_toml(&text);
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let named = keys
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(LifecycleError::RequirementUnmet(format!(
+        "error: grok shared slot still carries per-seat keys ({named})\n\
+         reason: .grok/config.toml is directory-scoped; per-seat keys would be inherited by every grok seat\n\
+         workspace: {}\n\
+         action: remove per-seat keys from the toml (identity belongs on pane env)",
+        workspace.display()
+    )))
 }
 
 pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
