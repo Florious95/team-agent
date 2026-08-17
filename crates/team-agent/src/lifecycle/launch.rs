@@ -312,7 +312,7 @@ pub(crate) use quick_start_transport::{
 };
 
 pub mod readiness;
-pub(crate) use readiness::launched_team_receiver_is_attached;
+pub use readiness::launched_team_receiver_is_attached;
 pub(super) use readiness::*;
 
 mod add_agent;

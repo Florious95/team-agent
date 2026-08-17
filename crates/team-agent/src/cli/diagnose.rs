@@ -208,10 +208,43 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut issues,
         &mut repairs,
     );
+    append_registry_channel_unbound_issue(workspace, state, &mut issues, &mut repairs);
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
+}
+
+fn append_registry_channel_unbound_issue(
+    workspace: &std::path::Path,
+    state: &Value,
+    issues: &mut Value,
+    repairs: &mut Value,
+) {
+    let team_key = crate::state::projection::team_state_key(state);
+    if team_key.is_empty()
+        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
+    {
+        return;
+    }
+    if let Some(items) = issues.as_array_mut() {
+        if !items.iter().any(|item| {
+            item.as_str() == Some("leader_not_attached")
+                || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
+        }) {
+            items.push(json!("leader_not_attached"));
+        }
+    }
+    if let Some(items) = repairs.as_array_mut() {
+        items.push(recovery_hint(
+            state
+                .get("session_name")
+                .and_then(Value::as_str)
+                .unwrap_or(team_key.as_str()),
+            "leader_not_attached",
+            "team-agent claim-leader",
+        ));
+    }
 }
 
 fn append_live_leader_workspace_mismatch_issue(
@@ -337,6 +370,54 @@ fn live_leader_workspace_mismatch(
         );
     }
     Some((issue, repair))
+}
+
+pub(crate) fn append_registry_channel_unbound_to_report(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    report: &mut Value,
+) {
+    let team_key = team
+        .filter(|team| !team.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            crate::state::persist::load_runtime_state(workspace)
+                .ok()
+                .map(|state| crate::state::projection::team_state_key(&state))
+        })
+        .unwrap_or_default();
+    if team_key.is_empty()
+        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
+    {
+        return;
+    }
+    let Some(object) = report.as_object_mut() else {
+        return;
+    };
+    object.insert("ok".to_string(), Value::Bool(false));
+    let mut issues = object
+        .get("issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !issues.iter().any(|item| {
+        item.as_str() == Some("leader_not_attached")
+            || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
+    }) {
+        issues.push(json!("leader_not_attached"));
+    }
+    object.insert("issues".to_string(), Value::Array(issues));
+    let mut repairs = object
+        .get("suggested_repairs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    repairs.push(recovery_hint(
+        &team_key,
+        "leader_not_attached",
+        "team-agent claim-leader",
+    ));
+    object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }
 
 pub(crate) fn append_selected_live_leader_workspace_mismatch(
