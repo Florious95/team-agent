@@ -238,7 +238,7 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// 冲突检测——检测到再回滚会留下半截 `.grok/config.toml`。
 ///
 /// `McpConfig.raw` 与写出的 grok 表名都必须是 `team_orchestrator`，与
-/// `worker_command_context` 契约（`team_orchestrator.send_message`）对齐。
+/// `worker_command_context` 契约（grok: `team_orchestrator__send_message`）对齐。
 /// grok 按 server 名给工具加命名空间，写成 `team-agent` 会变成 `team-agent__*`。
 pub(crate) fn apply_grok_mcp_overlay(
     workspace: &Path,

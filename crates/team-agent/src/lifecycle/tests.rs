@@ -92,4 +92,5 @@ mod acceptance_b_batch_red;
 mod claude_compatible_config_red;
 mod grok_mcp_overlay_red;
 mod communication_mode_runtime_contract_red;
+mod mcp_tool_name_format_red;
 mod clone_fork_copilot_perms_red;

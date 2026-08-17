@@ -10,7 +10,7 @@ pub enum CommunicationMode {
 
 const LEADER_CENTRIC_RUNTIME_CONTRACT: &str = r#"# Team Agent communication contract: leader_centric
 
-- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')
+- Progress, blockers, questions: {send_message}(to='leader', content='...')
 
 When you receive a message from the leader or a teammate, you MUST respond
 through MCP tools. Writing a reply in your terminal does nothing — the sender
@@ -39,10 +39,12 @@ impl CommunicationMode {
             .find(|mode| mode.as_str() == value)
     }
 
-    pub const fn runtime_contract(self) -> &'static str {
+    pub fn runtime_contract(self, send_message: &str) -> String {
         match self {
-            Self::LeaderCentric => LEADER_CENTRIC_RUNTIME_CONTRACT,
-            Self::Orchestrated => ORCHESTRATED_RUNTIME_CONTRACT,
+            Self::LeaderCentric => {
+                LEADER_CENTRIC_RUNTIME_CONTRACT.replace("{send_message}", send_message)
+            }
+            Self::Orchestrated => ORCHESTRATED_RUNTIME_CONTRACT.to_string(),
         }
     }
 }
