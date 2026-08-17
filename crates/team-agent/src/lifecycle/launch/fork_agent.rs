@@ -90,6 +90,7 @@ pub fn fork_agent_with_transport(
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
     let new_spec =
         append_forked_agent(&spec, &compiled.agent, source_agent_id, as_agent_id, label)?;
+    ensure_exclusive_grok_cwd(&new_spec, &workspace)?;
     // validate 用角色定义目录的 team_workspace(校验 working_directory),非 spec 落点。
     let validate_ws =
         crate::model::paths::team_workspace(&fork_team_dir).unwrap_or_else(|_| workspace.clone());

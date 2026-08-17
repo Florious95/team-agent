@@ -1,4 +1,9 @@
 //!
+//! purpose: Cursor `agent` CLI argv；role 走 workspace rules 文件，不入 argv
+//! contract: MCP 未实现。收到 mcp_config 必须 CapabilityUnsupported，不许静默丢弃
+//!   （否则会起出能收信、没有 send_message/report_result 的席位）
+//! boundary: 只服务 Provider::CursorAgent。不改 claude/codex/copilot/grok 路径
+//!
 //! Cursor `agent` CLI provider-local command builders + permission helpers.
 //!
 //! Mirrors `adapters/claude.rs` skeleton (0.5.67 provider-adapter step), with
@@ -72,7 +77,13 @@ pub(crate) fn cursor_agent_base_command(
     // 路径写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`
     // (worker_env::apply_cursor_agent_rules_overlay, 同 copilot AGENTS.md 机制)。
     // argv 只带 `--workspace {workspace}`(placeholder 由 fill_spawn_placeholders 替换)。
-    let _ = (adapter, auth_mode, mcp_config, managed_mcp_config, system_prompt);
+    if mcp_config.is_some() {
+        return Err(ProviderError::CapabilityUnsupported(
+            "cursor_agent MCP is not implemented; starting a cursor seat would receive mail with no send_message/report_result. action: use grok/claude/codex/copilot, or wait for a cursor MCP overlay"
+                .to_string(),
+        ));
+    }
+    let _ = (adapter, auth_mode, managed_mcp_config, system_prompt);
     argv.push("--workspace".to_string());
     argv.push("{workspace}".to_string());
     Ok(argv)

@@ -30,8 +30,15 @@ pub(crate) fn provider_bypass_flag(provider: Provider) -> Option<&'static str> {
     }
 }
 
-/// 0.5.66 §3.2 跨 workspace 兼容警示用:扫 argv tokens 找已知 bypass flag。
-/// **只做检测,不做行为决策**(0.6.0 删)。
+/// 0.5.66 §3.2 跨 workspace 兼容警示用:扫 **team-agent 进程自己的** argv tokens
+/// 找已知 bypass flag。**只做检测,不做行为决策**(0.6.0 删)。
+///
+/// 不认 `--force`:那是 team-agent 自己的 CLI 旗(`init --force` /
+/// `remove-agent --confirm --force` / `restart --force`),与 cursor worker
+/// 的 `--force` 撞名。本函数看不到「当前在看哪个 provider 的 argv」,
+/// 认 `--force` 会把既有非 grok/cursor 路径误判成 bypass。
+/// cursor worker 的 bypass 仍走 [`provider_bypass_flag`],不走这条检测面。
+/// `--always-approve` 可以认:team-agent 自己没有这个旗。
 ///
 /// TODO(0.6.0): remove
 pub(crate) fn detect_bypass_flag_in_argv(argv_tokens: &[String]) -> Option<&'static str> {
@@ -49,9 +56,6 @@ pub(crate) fn detect_bypass_flag_in_argv(argv_tokens: &[String]) -> Option<&'sta
         }
         if token == "--always-approve" {
             return Some("--always-approve");
-        }
-        if token == "--force" {
-            return Some("--force");
         }
     }
     None
@@ -97,6 +101,24 @@ mod tests {
         assert_eq!(
             provider_bypass_flag(Provider::CursorAgent),
             Some("--force")
+        );
+    }
+
+    #[test]
+    fn detect_bypass_flag_ignores_team_agent_force() {
+        let argv = [
+            "team-agent".to_string(),
+            "remove-agent".to_string(),
+            "x".to_string(),
+            "--confirm".to_string(),
+            "--force".to_string(),
+        ];
+        assert_eq!(
+            detect_bypass_flag_in_argv(&argv),
+            None,
+            "detect_bypass_flag_in_argv scans team-agent process argv, not worker argv; \
+             `remove-agent --force` must not look like a provider bypass flag; got {:?}",
+            detect_bypass_flag_in_argv(&argv)
         );
     }
 }

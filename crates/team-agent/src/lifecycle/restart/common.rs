@@ -347,6 +347,7 @@ pub(super) fn spawn_agent_window(
         )?;
     }
     if provider == crate::provider::Provider::Grok {
+        crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
         crate::lifecycle::launch::apply_grok_mcp_overlay(workspace, &mcp_config)?;
     }
     // 0.3.28 Step 3: per Python parity, worker spawn cwd is ALWAYS `workspace`.

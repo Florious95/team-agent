@@ -43,6 +43,7 @@ pub(super) fn spawn_agents(
     let team_dir = team_dir_buf
         .as_deref()
         .unwrap_or_else(|| spec_path.parent().unwrap_or_else(|| Path::new(".")));
+    ensure_exclusive_grok_cwd(spec, workspace)?;
     let runtime_fast = matches!(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))
@@ -262,6 +263,7 @@ pub(super) fn spawn_agents(
         }
         // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
         if matches!(provider, Provider::Grok) {
+            ensure_grok_login_and_folder_trust(workspace)?;
             apply_grok_mcp_overlay(workspace, &mcp_config)?;
         }
         let spawn_epoch = u64::try_from(started.len()).unwrap_or(u64::MAX);

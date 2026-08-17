@@ -17,12 +17,106 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
+use team_agent::lifecycle::{ensure_grok_login_and_folder_trust, LifecycleError};
 use team_agent::transport::test_support::OfflineTransport;
 
 #[test]
+fn two_grok_seats_sharing_cwd_must_refuse_to_start() {
+    let ws = tmp_dir("grok-cwd-collision");
+    let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
+
+    let result = quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        Some("grokteam"),
+        &OfflineTransport::new(),
+    );
+
+    let err = match result {
+        Ok(report) => panic!(
+            "two grok seats sharing cwd must refuse to start; silent overlay overwrite \
+             would make both seats use the last TEAM_AGENT_ID; report={report:?}"
+        ),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        err.contains(".grok/config.toml") || err.to_ascii_lowercase().contains("cwd"),
+        "error must name the directory-scoped MCP constraint; err={err}"
+    );
+    assert!(
+        err.contains("g1") && err.contains("g2"),
+        "error must name both colliding grok seats; err={err}"
+    );
+    assert!(
+        err.contains("action:")
+            && (err.contains("worktree") || err.contains("workspace") || err.contains("directory")),
+        "error must give an executable next step (own worktree/directory); err={err}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn grok_untrusted_folder_refuses_to_start() {
+    let ws = tmp_dir("grok-untrusted");
+    let home = tmp_dir("grok-untrusted-home");
+    seed_grok_home(&home, None);
+    let _guard = HomeGuard::set(&home);
+    let team = write_grok_team(&ws, "grokteam", "grok_writer");
+    let err = quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        Some("grokteam"),
+        &OfflineTransport::new(),
+    )
+    .expect_err("untrusted folder must not start a grok seat");
+    let text = err.to_string();
+    assert!(
+        text.contains("not trusted") && text.contains("action:"),
+        "untrusted-folder error must be actionable; err={text}"
+    );
+    assert!(
+        text.contains("grok --trust") || text.contains("/hooks-trust"),
+        "next step must name grok --trust or /hooks-trust; err={text}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn grok_missing_login_refuses_to_start() {
+    let ws = tmp_dir("grok-nologin");
+    let home = tmp_dir("grok-nologin-home");
+    std::fs::create_dir_all(home.join(".grok")).unwrap();
+    std::fs::write(
+        home.join(".grok").join("trusted_folders.toml"),
+        format!("[folders.\"{}\"]\ntrusted = true\n", ws.display()),
+    )
+    .unwrap();
+    let _guard = HomeGuard::set(&home);
+    let err = ensure_grok_login_and_folder_trust(&ws).expect_err("missing auth.json");
+    match err {
+        LifecycleError::RequirementUnmet(text) => {
+            assert!(
+                text.contains("grok login") && text.contains("action:"),
+                "login error must tell the operator to run grok login; err={text}"
+            );
+        }
+        other => panic!("expected RequirementUnmet, got {other:?}"),
+    }
+}
+
+#[test]
+#[serial(env)]
 fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
     let ws = tmp_dir("grok-mcp-overlay");
+    let home = tmp_dir("grok-mcp-overlay-home");
+    seed_grok_home(&home, Some(&ws));
+    let _guard = HomeGuard::set(&home);
     let team = write_grok_team(&ws, "grokteam", "grok_writer");
     let config_path = ws.join(".grok").join("config.toml");
     assert!(
@@ -114,6 +208,10 @@ fn current_team_agent_command() -> String {
 }
 
 fn write_grok_team(ws: &Path, team_key: &str, agent_id: &str) -> PathBuf {
+    write_grok_team_agents(ws, team_key, &[agent_id])
+}
+
+fn write_grok_team_agents(ws: &Path, team_key: &str, agent_ids: &[&str]) -> PathBuf {
     let team = ws.join(team_key);
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(
@@ -123,14 +221,50 @@ fn write_grok_team(ws: &Path, team_key: &str, agent_id: &str) -> PathBuf {
         ),
     )
     .unwrap();
-    std::fs::write(
-        team.join("agents").join(format!("{agent_id}.md")),
-        format!(
-            "---\nname: {agent_id}\nrole: Grok Writer\nprovider: grok\nmodel: grok-4\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
-        ),
-    )
-    .unwrap();
+    for agent_id in agent_ids {
+        std::fs::write(
+            team.join("agents").join(format!("{agent_id}.md")),
+            format!(
+                "---\nname: {agent_id}\nrole: Grok Writer\nprovider: grok\nmodel: grok-4\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+            ),
+        )
+        .unwrap();
+    }
     team
+}
+
+fn seed_grok_home(home: &Path, trusted_cwd: Option<&Path>) {
+    let grok = home.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(grok.join("auth.json"), r#"{"test":"ok"}"#).unwrap();
+    if let Some(cwd) = trusted_cwd {
+        std::fs::write(
+            grok.join("trusted_folders.toml"),
+            format!("[folders.\"{}\"]\ntrusted = true\n", cwd.display()),
+        )
+        .unwrap();
+    }
+}
+
+struct HomeGuard {
+    prev: Option<String>,
+}
+
+impl HomeGuard {
+    fn set(home: &Path) -> Self {
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home);
+        Self { prev }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {

@@ -95,6 +95,139 @@ pub(crate) fn write_worker_mcp_config_for_provider(
     Ok(path)
 }
 
+/// Grok MCP 是**目录作用域**：CLI 只读 `<cwd>/.grok/config.toml`
+/// （`grok mcp add --scope project`）。同一 cwd 写第二份身份会覆盖
+/// `TEAM_AGENT_ID`，两席共用一个 send_message / report_result 身份。
+///
+/// 硬约束：每个 grok 席必须有自己的 cwd（各自 worktree / 各自目录）。
+/// 框架检测到两个 grok 席共用同一 cwd 时必须拒绝启动，不许静默覆盖。
+/// 今日 launch/add/fork 的 worker cwd 恒为 workspace（D5），所以一个
+/// workspace 最多一个 grok 席。下一步是给另一席单独的 workspace/worktree。
+pub(crate) fn ensure_exclusive_grok_cwd(
+    spec: &Value,
+    workspace: &Path,
+) -> Result<(), LifecycleError> {
+    let mut by_cwd: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for agent in spec_agent_values(spec) {
+        if agent_is_paused(agent) {
+            continue;
+        }
+        let Some(id) = agent.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let provider = agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .and_then(crate::lifecycle::profile_launch::parse_provider);
+        if provider != Some(Provider::Grok) {
+            continue;
+        }
+        // Launch cwd is workspace for every worker today (D5). Grok MCP
+        // lives at that directory's `.grok/config.toml`.
+        by_cwd
+            .entry(workspace.to_path_buf())
+            .or_default()
+            .push(id.to_string());
+    }
+    for (cwd, ids) in by_cwd {
+        if ids.len() < 2 {
+            continue;
+        }
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "error: grok seats cannot share a cwd; grok MCP is directory-scoped to <cwd>/.grok/config.toml and a second seat would overwrite TEAM_AGENT_ID\n\
+             cwd: {}\n\
+             grok_seats: {}\n\
+             action: give each grok seat its own worktree/directory (a separate workspace), then retry; do not start two grok seats in the same workspace",
+            cwd.display(),
+            ids.join(", "),
+        )));
+    }
+    Ok(())
+}
+
+/// 未登录 / 目录未信任时不许起出「能收信、没有手」的 grok 席。
+/// 登录态看 `$HOME/.grok/auth.json`；目录信任看 `$HOME/.grok/trusted_folders.toml`
+/// （与 grok `--trust` / `/hooks-trust` 同一份；未信任则项目作用域 MCP 不生效）。
+/// `GROK_FOLDER_TRUST=0` 时 grok 自己关掉 folder-trust，本检查跟着放行。
+pub(crate) fn ensure_grok_login_and_folder_trust(cwd: &Path) -> Result<(), LifecycleError> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "error: HOME is unset; cannot verify grok login or folder trust\n\
+                 action: export HOME and retry"
+                    .to_string(),
+            )
+        })?;
+    let grok_home = home.join(".grok");
+    if !grok_auth_present(&grok_home) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "error: grok is not logged in (missing or empty {})\n\
+             action: run `grok login` then retry add-agent/launch",
+            grok_home.join("auth.json").display()
+        )));
+    }
+    if folder_trust_required() && !grok_folder_is_trusted(&grok_home, cwd) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "error: grok folder is not trusted; project-scope MCP at {}/.grok/config.toml will not load\n\
+             cwd: {}\n\
+             action: from that directory run `grok --trust` (or `/hooks-trust` in a grok session), then retry",
+            cwd.display(),
+            cwd.display()
+        )));
+    }
+    Ok(())
+}
+
+fn grok_auth_present(grok_home: &Path) -> bool {
+    let path = grok_home.join("auth.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value.as_object().is_some_and(|map| !map.is_empty())
+}
+
+fn folder_trust_required() -> bool {
+    !matches!(
+        std::env::var("GROK_FOLDER_TRUST").ok().as_deref(),
+        Some("0") | Some("false") | Some("off")
+    )
+}
+
+fn grok_folder_is_trusted(grok_home: &Path, cwd: &Path) -> bool {
+    let text = std::fs::read_to_string(grok_home.join("trusted_folders.toml")).unwrap_or_default();
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    grok_trusted_folders(&text).into_iter().any(|trusted| {
+        let trusted = std::fs::canonicalize(&trusted).unwrap_or(trusted);
+        cwd == trusted || cwd.starts_with(&trusted)
+    })
+}
+
+fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
+    let mut current = None;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("[folders.\"") {
+            current = rest.strip_suffix("\"]").map(str::to_string);
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            current = None;
+            continue;
+        }
+        if trimmed == "trusted = true" {
+            if let Some(path) = current.take() {
+                out.push(PathBuf::from(path));
+            }
+        }
+    }
+    out
+}
+
 /// Grok CLI 没有 `--mcp-config`。同 `apply_cursor_agent_rules_overlay`：launch
 /// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
 /// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。

@@ -1,4 +1,9 @@
 //!
+//! purpose: Grok CLI argv + permission deny 映射；MCP 不走 CLI flag
+//! contract: launch 写 `<cwd>/.grok/config.toml`；同一 cwd 只允许一个 grok 席；
+//!   未登录 / 目录未信任必须拒绝启动。未知工具映射记成 Unsupported，不发明 deny 名
+//! boundary: 只服务 Provider::Grok。不改 claude/codex/copilot 路径
+//!
 //! Grok CLI provider-local command builders + permission helpers.
 //!
 //! Mirrors `adapters/claude.rs` (0.5.67 provider-adapter step). Pure
@@ -90,17 +95,44 @@ pub(crate) fn grok_dangerous_auto_approve(tools: &[&str]) -> bool {
 
 pub(crate) fn grok_disallowed_tools(tools: &[&str]) -> Vec<&'static str> {
     let mut disallowed = Vec::new();
-    if !tools.contains(&"execute_bash") {
-        disallowed.push("Bash");
-    }
-    if !tools.contains(&"fs_read") {
-        disallowed.push("Read");
-    }
-    if !tools.contains(&"fs_write") {
-        disallowed.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-    }
-    if !tools.contains(&"fs_list") {
-        disallowed.extend(["Glob", "Grep"]);
+    for tool in [
+        "execute_bash",
+        "fs_read",
+        "fs_write",
+        "fs_list",
+        "network",
+        "git_diff",
+        "mcp_team",
+        "provider_builtin",
+    ] {
+        if tools.contains(&tool) {
+            continue;
+        }
+        match grok_tool_mapping(tool) {
+            GrokToolMapping::Deny(names) => disallowed.extend(names),
+            GrokToolMapping::Unsupported | GrokToolMapping::Bypass => {}
+        }
     }
     disallowed
+}
+
+/// Canonical tool → grok CLI deny names. Unknown tools stay Unsupported
+/// (no invented `--disallowedTools` token).
+pub(crate) fn grok_tool_mapping(tool: &str) -> GrokToolMapping {
+    match tool {
+        "execute_bash" => GrokToolMapping::Deny(&["Bash"]),
+        "fs_read" => GrokToolMapping::Deny(&["Read"]),
+        "fs_write" => GrokToolMapping::Deny(&["Edit", "Write", "MultiEdit", "NotebookEdit"]),
+        "fs_list" => GrokToolMapping::Deny(&["Glob", "Grep"]),
+        "dangerous_auto_approve" => GrokToolMapping::Bypass,
+        "network" | "git_diff" | "mcp_team" | "provider_builtin" => GrokToolMapping::Unsupported,
+        _ => GrokToolMapping::Unsupported,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrokToolMapping {
+    Deny(&'static [&'static str]),
+    Bypass,
+    Unsupported,
 }

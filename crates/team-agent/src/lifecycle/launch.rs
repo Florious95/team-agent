@@ -263,8 +263,9 @@ pub(crate) use agent_state::{
 mod mcp_config;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    apply_grok_mcp_overlay, point_native_mcp_config_at_file, resolve_mcp_config,
-    write_worker_mcp_config, write_worker_mcp_config_for_provider,
+    apply_grok_mcp_overlay, ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust,
+    point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
+    write_worker_mcp_config_for_provider,
 };
 
 mod worker_env;
@@ -412,6 +413,37 @@ mod tests {
                     == Some("dangerously_flag_present_but_no_role_declared")
             }),
             "role declared true must suppress the warning; events={events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn team_agent_force_flag_does_not_look_like_bypass() {
+        let ws = std::env::temp_dir().join(format!(
+            "ta-bypass-force-not-bypass-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let spec = yaml::loads(
+            "version: 1\nteam: {}\nleader: {}\nagents:\n  - id: a\n    role: r\n    provider: fake\n    dangerously_skip_permissions: false\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "team-agent".to_string(),
+            "remove-agent".to_string(),
+            "x".to_string(),
+            "--confirm".to_string(),
+            "--force".to_string(),
+        ];
+        emit_dangerous_flag_no_role_declared_warning_with_argv(&ws, &spec, &argv);
+        let events = crate::event_log::EventLog::new(&ws).tail(0).unwrap();
+        assert!(
+            !events.iter().any(|event| {
+                event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("dangerously_flag_present_but_no_role_declared")
+            }),
+            "team-agent --force must not emit bypass warning; events={events:?}"
         );
         let _ = std::fs::remove_dir_all(&ws);
     }

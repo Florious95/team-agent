@@ -349,3 +349,45 @@ fn test_cursor_agent_build_command_bypass_flag_when_dangerous() {
         "non-dangerous cursor must not include --force: {safe:?}"
     );
 }
+
+#[test]
+fn test_cursor_agent_refuses_mcp_config_loudly() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let cfg = McpConfig {
+        raw: serde_json::json!({
+            "team_orchestrator": {
+                "command": "/bin/team-agent",
+                "args": ["mcp-server"]
+            }
+        }),
+    };
+    let err = adapter
+        .build_command(AuthMode::Subscription, Some(&cfg), None, None)
+        .expect_err("cursor must not silently drop mcp_config");
+    let text = err.to_string();
+    assert!(
+        text.to_ascii_lowercase().contains("mcp") && text.contains("not implemented"),
+        "cursor MCP hole must be a loud capability error; got {text}"
+    );
+    assert!(
+        text.contains("action:"),
+        "cursor MCP error must give a next step; got {text}"
+    );
+}
+
+#[test]
+fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
+    use crate::provider::adapters::grok::{grok_tool_mapping, GrokToolMapping};
+    assert_eq!(
+        grok_tool_mapping("network"),
+        GrokToolMapping::Unsupported
+    );
+    assert_eq!(
+        grok_tool_mapping("not_a_real_tool"),
+        GrokToolMapping::Unsupported
+    );
+    assert!(
+        !matches!(grok_tool_mapping("execute_bash"), GrokToolMapping::Unsupported),
+        "known tools must stay mapped"
+    );
+}
