@@ -40,16 +40,10 @@ pub fn clone_agent(
         as_agent_id,
         label,
     )?;
-    let spec_path = selected
-        .spec_path
-        .as_ref()
-        .ok_or_else(|| LifecycleError::TeamSelect("active team spec not found".to_string()))?;
-    let spec = crate::model::yaml::loads(
-        &std::fs::read_to_string(spec_path)
-            .map_err(|error| LifecycleError::Compile(error.to_string()))?,
-    )
-    .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-    clamp_materialized_role_to_leader(materialized.path(), &spec)?;
+    // The materialized role carries the source role's DECLARED tools verbatim —
+    // a clone must preserve the source seat's full tools set (add-agent does
+    // the same; no leader-ceiling clamp). See role_source.rs for the removed
+    // clamp_materialized_role_to_leader.
     let added = add_agent(
         &selected.run_workspace,
         as_agent_id,

@@ -86,49 +86,6 @@ pub(super) fn materialize_latest_role(
     Ok(MaterializedRole { path, keep: false })
 }
 
-pub(super) fn clamp_materialized_role_to_leader(
-    materialized: &Path,
-    spec: &Value,
-) -> Result<(), LifecycleError> {
-    let leader_tools = spec
-        .get("leader")
-        .and_then(|leader| leader.get("tools"))
-        .and_then(Value::as_list)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let (mut meta, body) = crate::compiler::read_front_matter(materialized)
-        .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-    let requested = meta
-        .get("tools")
-        .and_then(Value::as_list)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let ceiling = crate::model::permissions::expand_tool_strings(&leader_tools)
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    let effective = crate::model::permissions::expand_tool_strings(&requested)
-        .into_iter()
-        .filter(|tool| ceiling.contains(tool))
-        .map(Value::Str)
-        .collect::<Vec<_>>();
-    set_yaml_map_value(&mut meta, "tools", Value::List(effective))?;
-    let rendered = format!("---\n{}---\n\n{}", yaml::dumps(&meta), body);
-    std::fs::write(materialized, rendered.as_bytes())
-        .map_err(|error| LifecycleError::StatePersist(error.to_string()))
-}
-
 fn resolve_role_source(
     run_workspace: &Path,
     team_dir: &Path,
