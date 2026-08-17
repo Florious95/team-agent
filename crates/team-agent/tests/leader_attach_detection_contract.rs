@@ -97,10 +97,10 @@ fn unreadable_runtime_state_is_unbound_not_attached() {
     let env = HermeticTestEnv::enter("lc2-no-state");
     env.scrub_tmux();
     let workspace = env.workspace("ws");
-    assert!(
-        !workspace.join(".team/runtime/state.json").exists(),
-        "runtime state must be absent so load_runtime_state fails"
-    );
+    let state_path = workspace.join(".team/runtime/state.json");
+    std::fs::create_dir_all(state_path.parent().expect("state parent"))
+        .expect("create runtime dir");
+    std::fs::write(&state_path, "{this is not json").expect("write corrupt state.json");
 
     assert!(
         !launched_team_receiver_is_attached(&workspace, TEAM_KEY),
