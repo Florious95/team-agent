@@ -390,6 +390,7 @@ fn compile_role_agent_with_mode(
     let id = required_string(&meta, role_path, "name")?;
     let role = required_string(&meta, role_path, "role")?;
     let provider = required_string(&meta, role_path, "provider")?;
+    require_explicit_grok_role_model(&meta, role_path, &provider)?;
     let model = resolve_model(&meta, team_meta, &provider);
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
@@ -548,6 +549,29 @@ fn required_string(meta: &Value, path: &Path, key: &str) -> Result<String, Model
             path.display()
         ))
     })
+}
+
+/// Grok CLI 省略 `--model` 会继承 `~/.grok/config.toml` `[models] default`，
+/// 该文件可被框架外改动且不告警。角色文件必须自己写死 model；禁止 builtin / 全局默认兜底。
+fn require_explicit_grok_role_model(
+    meta: &Value,
+    path: &Path,
+    provider: &str,
+) -> Result<(), ModelError> {
+    if parse_canonical_provider(provider) != Some(Provider::Grok) {
+        return Ok(());
+    }
+    if string_field(meta, "model").is_some_and(|value| !value.trim().is_empty()) {
+        return Ok(());
+    }
+    Err(ModelError::Validation(format!(
+        "{}: missing front matter field model. \
+Grok seats must declare model explicitly because omitting --model lets Grok CLI inherit \
+~/.grok/config.toml [models] default; that file can change outside this repo with no warning, \
+so the same role silently gets a different model and context window. Example:\n\
+model: grok-4.6",
+        path.display()
+    )))
 }
 
 /// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。

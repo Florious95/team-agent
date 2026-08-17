@@ -91,5 +91,6 @@ mod worker_spawn_env_red;
 mod acceptance_b_batch_red;
 mod claude_compatible_config_red;
 mod grok_mcp_overlay_red;
+mod grok_require_explicit_model_red;
 mod communication_mode_runtime_contract_red;
 mod clone_fork_copilot_perms_red;

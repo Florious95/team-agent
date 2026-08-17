@@ -1,6 +1,7 @@
 //!
 //! purpose: Grok CLI argv + permission deny 映射；MCP 不走 CLI flag
 //! contract: launch 写 `<cwd>/.grok/config.toml`；未登录 / 目录未信任必须拒绝启动。
+//!   角色缺 model 必须拒绝启动（禁止继承 ~/.grok/config.toml [models] default）。
 //!   未知工具映射记成 Unsupported，不发明 deny 名
 //! mcp_injection: dir_scoped —— 每席必须独立工作目录；同 cwd 多席会静默串台，故拒绝。
 //!   对照 claude/codex 是 argv 作用域（`--mcp-config`），同目录多席没有这个问题。
@@ -70,10 +71,21 @@ pub(crate) fn grok_base_command(
     if grok_dangerous_auto_approve(tools) {
         argv.push("--always-approve".to_string());
     }
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    let model = match model.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(model) => model,
+        None => {
+            return Err(ProviderError::Command(
+                "grok launch requires an explicit model. \
+Omitting --model lets Grok CLI inherit ~/.grok/config.toml [models] default; \
+that file can change outside this repo with no warning, so the same role silently \
+gets a different model and context window. Set the role front-matter field, for example:\n\
+model: grok-4.6"
+                    .to_string(),
+            ));
+        }
+    };
+    argv.push("--model".to_string());
+    argv.push(model.to_string());
     if let Some(effort) = effort {
         // Grok accepts `--effort` as alias for `--reasoning-effort`.
         argv.push("--effort".to_string());
