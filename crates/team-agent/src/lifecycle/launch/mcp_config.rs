@@ -237,12 +237,15 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// 调用方必须先跑 [`ensure_exclusive_grok_cwd`]。本函数只写盘，不再做
 /// 冲突检测——检测到再回滚会留下半截 `.grok/config.toml`。
 ///
-/// `McpConfig.raw` 的 server 名是框架内部的 `team_orchestrator`；写盘时改成
-/// grok 侧已实测能 `mcp doctor` 通过的 `team-agent`。
+/// `McpConfig.raw` 与写出的 grok 表名都必须是 `team_orchestrator`，与
+/// `worker_command_context` 契约（`team_orchestrator.send_message`）对齐。
+/// grok 按 server 名给工具加命名空间，写成 `team-agent` 会变成 `team-agent__*`。
 pub(crate) fn apply_grok_mcp_overlay(
     workspace: &Path,
     mcp_config: &crate::provider::McpConfig,
 ) -> Result<(), LifecycleError> {
+    // adapter.rs 只产出 team_orchestrator。team-agent 是 0.5.67 overlay
+    // 误用的旧 inbound key，读侧留一版以免夹具还带旧名；0.5.68 若无引用再删。
     let server = mcp_config
         .raw
         .get("team_orchestrator")
@@ -288,7 +291,13 @@ pub(crate) fn apply_grok_mcp_overlay(
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let body = upsert_toml_table_prefix(&existing, "mcp_servers.team-agent", &stanza);
+    // 同时摘掉新表和 0.5.67 误写的 [mcp_servers.team-agent]，否则改名后两套
+    // team MCP 并存，grok 会列出两份指向同一进程的工具。
+    let body = upsert_toml_table_prefixes(
+        &existing,
+        &["mcp_servers.team_orchestrator", "mcp_servers.team-agent"],
+        &stanza,
+    );
     let tmp = dir.join("config.toml.tmp");
     std::fs::write(&tmp, body.as_bytes())
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
@@ -302,7 +311,7 @@ fn render_grok_team_agent_stanza(
     args: &[String],
     env: &BTreeMap<String, String>,
 ) -> String {
-    let mut out = String::from("[mcp_servers.team-agent]\n");
+    let mut out = String::from("[mcp_servers.team_orchestrator]\n");
     out.push_str(&format!("command = {}\n", toml_quote(command)));
     out.push_str("args = [\n");
     for arg in args {
@@ -311,7 +320,7 @@ fn render_grok_team_agent_stanza(
     out.push_str("]\n");
     out.push_str("enabled = true\n");
     if !env.is_empty() {
-        out.push_str("\n[mcp_servers.team-agent.env]\n");
+        out.push_str("\n[mcp_servers.team_orchestrator.env]\n");
         for (key, value) in env {
             out.push_str(&format!("{key} = {}\n", toml_quote(value)));
         }
@@ -323,15 +332,16 @@ fn toml_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn upsert_toml_table_prefix(existing: &str, table: &str, stanza: &str) -> String {
-    let child_prefix = format!("{table}.");
+fn upsert_toml_table_prefixes(existing: &str, tables: &[&str], stanza: &str) -> String {
     let mut out = String::new();
     let mut skip = false;
     for line in existing.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
             let name = &trimmed[1..trimmed.len() - 1];
-            skip = name == table || name.starts_with(&child_prefix);
+            skip = tables.iter().any(|table| {
+                name == *table || name.starts_with(&format!("{table}."))
+            });
         }
         if !skip {
             out.push_str(line);
