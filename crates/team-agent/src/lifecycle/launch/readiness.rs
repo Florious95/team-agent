@@ -81,48 +81,62 @@ pub(super) fn quick_start_session_capture_incomplete_agents(
     crate::session_capture::incomplete_interacted_resumable_agent_ids(team_state)
 }
 
+/// Host registry is the deliverability authority. Workspace `state.json`
+/// is only a copy. Detection failure is unbound, never attached.
 pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
-    let Ok(state) = load_runtime_state(workspace) else {
-        return true;
-    };
-    let team_state = state
-        .get("teams")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|teams| teams.get(team_key))
-        .unwrap_or(&state);
-    if team_state.get("leader_receiver").is_none() {
-        return crate::state::projection::state_is_external_leader(team_state);
+    match registry_deliverability(workspace, team_key) {
+        RegistryDeliverability::Attached => {}
+        RegistryDeliverability::Unbound | RegistryDeliverability::Undecidable => return false,
     }
-    if team_uses_fake_model_harness(team_state) {
-        return true;
-    }
-    leader_receiver_is_attached(team_state)
+    load_runtime_state(workspace).is_ok()
 }
 
-pub(super) fn team_uses_fake_model_harness(team_state: &serde_json::Value) -> bool {
-    team_state
-        .get("agents")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|agents| {
-            !agents.is_empty()
-                && agents.values().all(|agent| {
-                    agent.get("model").and_then(serde_json::Value::as_str) == Some("fake")
-                })
-        })
+enum RegistryDeliverability {
+    Attached,
+    Unbound,
+    Undecidable,
 }
 
-pub(super) fn leader_receiver_is_attached(team_state: &serde_json::Value) -> bool {
-    let Some(receiver) = team_state.get("leader_receiver") else {
-        return false;
+fn registry_deliverability(workspace: &Path, team_key: &str) -> RegistryDeliverability {
+    let Some(dir) = crate::leader::registry::registry_dir() else {
+        return RegistryDeliverability::Undecidable;
     };
-    let status = receiver
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let pane_id = receiver
-        .get("pane_id")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| receiver.get("pane").and_then(serde_json::Value::as_str))
-        .unwrap_or("");
-    status == "attached" && !pane_id.is_empty() && pane_id != "__team_agent_unbound__"
+    if team_key.is_empty() {
+        return RegistryDeliverability::Unbound;
+    }
+    let hash = crate::leader::registry::workspace_hash(workspace);
+    let path = dir.join(format!("{hash}__{team_key}.json"));
+    match std::fs::read_to_string(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            RegistryDeliverability::Unbound
+        }
+        Err(_) => RegistryDeliverability::Undecidable,
+        Ok(text) => {
+            match serde_json::from_str::<crate::leader::registry::LeaderRegistryEntry>(&text) {
+                Err(_) => RegistryDeliverability::Undecidable,
+                Ok(entry) => {
+                    if entry.status != "attached" {
+                        return RegistryDeliverability::Unbound;
+                    }
+                    if let Some(authorized) = entry
+                        .channel
+                        .get("authorized_team_workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                    {
+                        if !same_workspace_path(Path::new(authorized), workspace) {
+                            return RegistryDeliverability::Unbound;
+                        }
+                    }
+                    RegistryDeliverability::Attached
+                }
+            }
+        }
+    }
+}
+
+fn same_workspace_path(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
