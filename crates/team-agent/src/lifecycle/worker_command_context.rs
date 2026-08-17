@@ -219,11 +219,14 @@ pub(crate) fn resolved_tool_strings_for_command(
 fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
     match provider {
         Provider::Claude | Provider::ClaudeCode => format!("mcp__{server}__{tool}"),
-        Provider::Grok | Provider::CursorAgent => format!("{server}__{tool}"),
-        // Codex / Copilot / GeminiCli / Fake: 未验证，沿用现状点号。
-        Provider::Codex | Provider::Copilot | Provider::GeminiCli | Provider::Fake => {
-            format!("{server}.{tool}")
-        }
+        Provider::Grok => format!("{server}__{tool}"),
+        // CursorAgent / Codex / Copilot / GeminiCli / Fake: 未验证，沿用现状点号。
+        // CursorAgent 不可与 grok 同臂：仓库里没有活转录，`{server}__{tool}` 是推断。
+        Provider::CursorAgent
+        | Provider::Codex
+        | Provider::Copilot
+        | Provider::GeminiCli
+        | Provider::Fake => format!("{server}.{tool}"),
     }
 }
 
