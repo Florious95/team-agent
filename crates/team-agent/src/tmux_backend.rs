@@ -1,3 +1,13 @@
+//! ---
+//! purpose: 通过 tmux argv 执行 spawn/inject/capture
+//! contract:
+//!   provides:
+//!     - name: TmuxBackend
+//!       what: Transport 的 tmux 实现，inject/send_keys 取 pane 输入锁
+//! boundary:
+//!   - 不把 fire-and-forget 报成 delivered
+//! maturity: wired
+//! ---
 //!
 //! Concrete tmux `Transport` backend (SKELETON) — the real executor that runs `tmux <argv>`.
 //!

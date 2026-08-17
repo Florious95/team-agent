@@ -1,3 +1,14 @@
+//! ---
+//! purpose: 零上下文重读角色文件再起一席，不继承源会话
+//! contract:
+//!   provides:
+//!     - name: clone_agent
+//!       what: 用源席最新角色文件 add-agent，保留源工具集
+//! boundary:
+//!   - 不走 fork 的窗口内命令
+//!   - 不把 clone 与 fork 合成一条路径
+//! maturity: wired
+//! ---
 use crate::lifecycle::*;
 use crate::model::ids::AgentId;
 use crate::provider::SessionId;

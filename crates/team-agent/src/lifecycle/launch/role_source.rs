@@ -1,10 +1,37 @@
+//! ---
+//! purpose: 把源席最新角色文件物化到 dynamic-role-files
+//! contract:
+//!   provides:
+//!     - name: materialize_latest_role
+//!       what: clone/add 用的角色落盘，以磁盘最新文件为准
+//! boundary:
+//!   - 不负责 fork 窗口注入
+//!   - 不读 provider session 落盘
+//! maturity: wired
+//! ---
 use std::path::{Path, PathBuf};
 
 use crate::lifecycle::LifecycleError;
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 
-use super::set_yaml_map_value;
+fn set_yaml_map_value(
+    value: &mut Value,
+    key: &str,
+    next: Value,
+) -> Result<(), LifecycleError> {
+    let Value::Map(pairs) = value else {
+        return Err(LifecycleError::Compile(
+            "agent entry is not a map".to_string(),
+        ));
+    };
+    if let Some((_, existing)) = pairs.iter_mut().find(|(k, _)| k == key) {
+        *existing = next;
+    } else {
+        pairs.push((key.to_string(), next));
+    }
+    Ok(())
+}
 
 pub(super) struct MaterializedRole {
     path: PathBuf,

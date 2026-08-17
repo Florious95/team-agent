@@ -1,3 +1,13 @@
+//! ---
+//! purpose: provider 命令构造与会话观察入口
+//! contract:
+//!   provides:
+//!     - name: adapter
+//!       what: 按 Provider 分发 launch/capability
+//! boundary:
+//!   - 不把 observation 写成 ownership
+//! maturity: wired
+//! ---
 //!
 //! step 8 · provider — type + trait SKELETON (ROUND-0).
 //!

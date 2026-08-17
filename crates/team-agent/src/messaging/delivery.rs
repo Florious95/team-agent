@@ -1,3 +1,14 @@
+//! ---
+//! purpose: 把已认领消息注入目标 pane 并记录投递阶段
+//! contract:
+//!   provides:
+//!     - name: deliver_stored_message
+//!       what: 单次物理注入；grok 队列默认再按回车顶出
+//! boundary:
+//!   - 不把物理 success 写成 delivered
+//!   - 不重粘文本
+//! maturity: wired
+//! ---
 //!
 //! internal_delivery.py + delivery.py — coordinator/调度器侧 thin wrapper + 单条 tmux 注入投递
 //! + trust 有界重试 + turn-open arm (card §16/§65)。

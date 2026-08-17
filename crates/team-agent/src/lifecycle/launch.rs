@@ -1,3 +1,13 @@
+//! ---
+//! purpose: 冷启、add/clone/fork 入口拼装
+//! contract:
+//!   provides:
+//!     - name: fork_agent
+//!       what: 成员分身入口，grok 走窗口内命令
+//! boundary:
+//!   - 不读 provider 会话落盘
+//! maturity: wired
+//! ---
 //!
 //! lifecycle::launch —— 冷启 / quick-start / 危险审批探测 + add/fork / plan 起步与推进。
 
@@ -317,18 +327,12 @@ pub(crate) use add_agent_state::inject_agent_into_spec;
 pub(super) use add_agent_state::*;
 
 mod fork_agent;
-pub use fork_agent::fork_agent_with_transport;
+pub use fork_agent::{fork_agent_with_transport, in_window_fork_command};
 pub(super) use fork_agent::*;
+pub(crate) use fork_agent::{finalize_pending_fork_capture, ContextForkFinalized};
 
 mod fork_entry;
 pub use fork_entry::fork_agent;
-
-mod fork_state;
-pub(super) use fork_state::*;
-
-mod fork_finalize;
-pub(super) use fork_finalize::*;
-pub(crate) use fork_finalize::{finalize_pending_fork_capture, ContextForkFinalized};
 
 mod role_source;
 pub(super) use role_source::*;

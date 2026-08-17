@@ -1,3 +1,13 @@
+//! ---
+//! purpose: team 进程级生命周期编排（起停加减 clone/fork）
+//! contract:
+//!   provides:
+//!     - name: launch
+//!       what: 冷启与成员生命周期入口
+//! boundary:
+//!   - 不拥有物理注入，只调用 transport
+//! maturity: wired
+//! ---
 //!
 //! step 13 · lifecycle — team 进程级生命周期编排器(ROUND-0.5 骨架)。
 //!
