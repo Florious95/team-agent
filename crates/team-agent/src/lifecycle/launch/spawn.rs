@@ -260,6 +260,10 @@ pub(super) fn spawn_agents(
         if matches!(provider, Provider::CursorAgent) {
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
         }
+        // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
+        if matches!(provider, Provider::Grok) {
+            apply_grok_mcp_overlay(workspace, &mcp_config)?;
+        }
         let spawn_epoch = u64::try_from(started.len()).unwrap_or(u64::MAX);
         let spawned_at = spawn_timestamp_for_agent(u32::try_from(spawn_epoch).unwrap_or(u32::MAX));
         // E6 层1 实证3 + 诊断留痕:落最终 worker argv(spawn 前的真实形态)。

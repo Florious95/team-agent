@@ -263,8 +263,8 @@ pub(crate) use agent_state::{
 mod mcp_config;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
-    write_worker_mcp_config_for_provider,
+    apply_grok_mcp_overlay, point_native_mcp_config_at_file, resolve_mcp_config,
+    write_worker_mcp_config, write_worker_mcp_config_for_provider,
 };
 
 mod worker_env;

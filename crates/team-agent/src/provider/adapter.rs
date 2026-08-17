@@ -343,7 +343,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 writes_global_settings: true,
             },
             // Grok: --resume/--fork-session 齐全 → resume/fork true; 无原生
-            // --mcp-config flag → native_mcp_config false (MCP 走 profile env)。
+            // --mcp-config flag → native_mcp_config false (MCP 走 .grok/config.toml)。
             Provider::Grok => ProviderCaps {
                 resume: true,
                 fork: true,

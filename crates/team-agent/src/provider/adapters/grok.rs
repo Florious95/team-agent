@@ -17,7 +17,8 @@
 //!   cwd     → `--cwd <CWD>` / `-w, --worktree [<WORKTREE>]`
 //!
 //! No native `--mcp-config` flag on the Grok CLI (`grok mcp` is a subcommand)
-//! → `native_mcp_config: false`; MCP reaches the worker via profile env only.
+//! → `native_mcp_config: false`; MCP reaches the worker via launch-path
+//! `<cwd>/.grok/config.toml` (`apply_grok_mcp_overlay`).
 
 use crate::model::enums::AuthMode;
 use crate::provider::adapter::{next_session_token, BasicProviderAdapter};
@@ -74,7 +75,7 @@ pub(crate) fn grok_base_command(
         argv.push(prompt.to_string());
     }
     // Grok CLI has no `--mcp-config` flag — the claude inline-MCP block is
-    // intentionally absent (native_mcp_config: false, MCP via profile env).
+    // intentionally absent. Launch writes `<cwd>/.grok/config.toml`.
     let _ = (adapter, auth_mode, mcp_config, managed_mcp_config);
     for tool in grok_disallowed_tools(tools) {
         argv.push("--disallowedTools".to_string());

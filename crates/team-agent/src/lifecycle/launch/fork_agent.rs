@@ -303,6 +303,13 @@ pub fn fork_agent_with_transport(
                 error
             })?;
     }
+    if provider == Provider::Grok {
+        apply_grok_mcp_overlay(&workspace, &mcp_config).map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            error
+        })?;
+    }
     let mut reserved_state = state.clone();
     reserve_forked_agent_state(
         &mut reserved_state,

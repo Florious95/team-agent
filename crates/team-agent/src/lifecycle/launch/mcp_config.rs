@@ -95,6 +95,119 @@ pub(crate) fn write_worker_mcp_config_for_provider(
     Ok(path)
 }
 
+/// Grok CLI 没有 `--mcp-config`。同 `apply_cursor_agent_rules_overlay`：launch
+/// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
+/// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
+///
+/// `McpConfig.raw` 的 server 名是框架内部的 `team_orchestrator`；写盘时改成
+/// grok 侧已实测能 `mcp doctor` 通过的 `team-agent`。
+pub(crate) fn apply_grok_mcp_overlay(
+    workspace: &Path,
+    mcp_config: &crate::provider::McpConfig,
+) -> Result<(), LifecycleError> {
+    let server = mcp_config
+        .raw
+        .get("team_orchestrator")
+        .or_else(|| mcp_config.raw.get("team-agent"))
+        .ok_or_else(|| {
+            LifecycleError::StatePersist(
+                "grok MCP overlay requires team_orchestrator in resolved mcp config".to_string(),
+            )
+        })?;
+    let command = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("grok MCP overlay missing command".to_string())
+        })?;
+    let args = server
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let env = server
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let stanza = render_grok_team_agent_stanza(command, &args, &env);
+    let dir = workspace.join(".grok");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
+    let path = dir.join("config.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let body = upsert_toml_table_prefix(&existing, "mcp_servers.team-agent", &stanza);
+    let tmp = dir.join("config.toml.tmp");
+    std::fs::write(&tmp, body.as_bytes())
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
+    Ok(())
+}
+
+fn render_grok_team_agent_stanza(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut out = String::from("[mcp_servers.team-agent]\n");
+    out.push_str(&format!("command = {}\n", toml_quote(command)));
+    out.push_str("args = [\n");
+    for arg in args {
+        out.push_str(&format!("    {},\n", toml_quote(arg)));
+    }
+    out.push_str("]\n");
+    out.push_str("enabled = true\n");
+    if !env.is_empty() {
+        out.push_str("\n[mcp_servers.team-agent.env]\n");
+        for (key, value) in env {
+            out.push_str(&format!("{key} = {}\n", toml_quote(value)));
+        }
+    }
+    out
+}
+
+fn toml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn upsert_toml_table_prefix(existing: &str, table: &str, stanza: &str) -> String {
+    let child_prefix = format!("{table}.");
+    let mut out = String::new();
+    let mut skip = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let name = &trimmed[1..trimmed.len() - 1];
+            skip = name == table || name.starts_with(&child_prefix);
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let trimmed = out.trim_end();
+    if trimmed.is_empty() {
+        stanza.to_string()
+    } else {
+        format!("{trimmed}\n\n{stanza}")
+    }
+}
+
 /// C-3-4 cr verdict v2 — McpConfig.raw 是 `{name: {type, command, args, env}}` 形;
 /// copilot mcp add schema 取 `transport` 替 `type`(stdio|http|sse 同值)。仅
 /// 字段名变换,其余字段全保留。

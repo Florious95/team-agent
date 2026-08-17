@@ -346,6 +346,9 @@ pub(super) fn spawn_agent_window(
             &system_prompt,
         )?;
     }
+    if provider == crate::provider::Provider::Grok {
+        crate::lifecycle::launch::apply_grok_mcp_overlay(workspace, &mcp_config)?;
+    }
     // 0.3.28 Step 3: per Python parity, worker spawn cwd is ALWAYS `workspace`.
     // The persisted-state `agent.spawn_cwd` override is ignored (it was a
     // Rust-only extension that drifted to `.team/runtime/<team_key>/` after
