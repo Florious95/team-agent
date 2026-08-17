@@ -317,15 +317,19 @@ pub fn mark_displaced_same_pane_entries_unbound(winner: &LeaderRegistryEntry) ->
         if pane != winner_pane {
             continue;
         }
-        let socket = entry
+        let Some(socket) = entry
             .channel
             .get("tmux_socket")
             .and_then(Value::as_str)
-            .filter(|socket| !socket.is_empty());
-        if let (Some(left), Some(right)) = (winner_socket, socket) {
-            if left != right {
-                continue;
-            }
+            .filter(|socket| !socket.is_empty())
+        else {
+            continue;
+        };
+        let Some(winner_socket) = winner_socket else {
+            continue;
+        };
+        if socket != winner_socket {
+            continue;
         }
         entry.status = REGISTRY_STATUS_UNBOUND.to_string();
         entry.updated_at = chrono::Utc::now().to_rfc3339();
