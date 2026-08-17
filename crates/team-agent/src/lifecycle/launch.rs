@@ -94,7 +94,7 @@ pub fn launch_with_transport_in_workspace(
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
     // Grok cwd 冲突在写 events / spawn overlay 之前拒绝，避免回滚半截配置。
-    ensure_exclusive_grok_cwd(&spec, workspace)?;
+    ensure_exclusive_grok_cwd(workspace, "", Some(&spec))?;
     // 0.5.66 §3.2 跨 workspace 兼容警示:leader argv 带 bypass flag 但当前团队
     // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
     // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。

@@ -235,7 +235,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     override_spec_workspace(&mut spec, &workspace);
     // Grok cwd 冲突必须在 write_spec_atomic / MessageStore / overlay 之前拒绝。
     // 回滚半截 spec 或 .grok/config.toml 本身会失败，留下比不写更糟的半配置。
-    ensure_exclusive_grok_cwd(&spec, &workspace)?;
+    ensure_exclusive_grok_cwd(&workspace, "", Some(&spec))?;
     if !open_display {
         override_spec_display_backend(&mut spec, "none");
     }

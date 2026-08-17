@@ -43,7 +43,7 @@ pub(super) fn spawn_agents(
     let team_dir = team_dir_buf
         .as_deref()
         .unwrap_or_else(|| spec_path.parent().unwrap_or_else(|| Path::new(".")));
-    ensure_exclusive_grok_cwd(spec, workspace)?;
+    ensure_exclusive_grok_cwd(workspace, "", Some(spec))?;
     let runtime_fast = matches!(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))

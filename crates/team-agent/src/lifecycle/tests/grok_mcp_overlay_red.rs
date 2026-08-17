@@ -135,8 +135,8 @@ fn two_grok_seats_sharing_cwd_must_refuse_to_start() {
         Err(error) => error.to_string(),
     };
     assert!(
-        err.contains("only one grok seat per workspace"),
-        "error must state the real limit, not a fake worktree remedy; err={err}"
+        err.contains("already occupies this workspace") || err.contains("g1"),
+        "error must name the occupying grok seat; err={err}"
     );
     assert!(
         err.contains(".grok/config.toml") && err.to_ascii_lowercase().contains("directory-scoped"),

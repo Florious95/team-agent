@@ -101,49 +101,179 @@ pub(crate) fn write_worker_mcp_config_for_provider(
 /// exclusive 检查也不读 per-agent cwd ⇒ 一个 workspace 只支持一个 grok 席。
 /// 这是 grok 的 provider 能力边界，不是框架通则（claude/codex 走 argv
 /// `--mcp-config`，同目录多席没有这个问题）。
-pub(crate) fn ensure_exclusive_grok_cwd(
-    spec: &Value,
-    workspace: &Path,
-) -> Result<(), LifecycleError> {
-    let mut by_cwd: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+struct GrokOccupant {
+    id: String,
+    spawned_at: Option<String>,
+    status: String,
+}
+
+fn agent_is_grok(agent: &Value) -> bool {
+    agent
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(crate::lifecycle::profile_launch::parse_provider)
+        == Some(Provider::Grok)
+}
+
+fn status_is_live(status: &str) -> bool {
+    !matches!(
+        status,
+        "stopped" | "stopping" | "removed" | "spawn_failed" | "failed"
+    )
+}
+
+fn occupant_from_state_row(id: &str, agent: &serde_json::Value) -> Option<GrokOccupant> {
+    let provider = agent
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::lifecycle::profile_launch::parse_provider);
+    if provider != Some(Provider::Grok) {
+        return None;
+    }
+    let status = agent
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("running");
+    if !status_is_live(status) {
+        return None;
+    }
+    Some(GrokOccupant {
+        id: id.to_string(),
+        spawned_at: agent
+            .get("spawned_at")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        status: status.to_string(),
+    })
+}
+
+fn live_grok_occupants_from_state(workspace: &Path) -> Result<Vec<GrokOccupant>, LifecycleError> {
+    let path = crate::state::persist::runtime_state_path(workspace);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let state = crate::state::persist::load_runtime_state(workspace).map_err(|e| {
+        LifecycleError::StatePersist(format!(
+            "cannot count live grok seats (state unreadable): {e}"
+        ))
+    })?;
+    let mut out = Vec::new();
+    if let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) {
+        for (id, agent) in agents {
+            if let Some(row) = occupant_from_state_row(id, agent) {
+                out.push(row);
+            }
+        }
+    }
+    if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {
+        for team in teams.values() {
+            let Some(agents) = team.get("agents").and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for (id, agent) in agents {
+                if out.iter().any(|o| o.id == *id) {
+                    continue;
+                }
+                if let Some(row) = occupant_from_state_row(id, agent) {
+                    out.push(row);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn spec_grok_ids(spec: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
     for agent in spec_agent_values(spec) {
-        if agent_is_paused(agent) {
+        if agent_is_paused(agent) || !agent_is_grok(agent) {
             continue;
         }
-        let Some(id) = agent.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let provider = agent
-            .get("provider")
-            .and_then(Value::as_str)
-            .and_then(crate::lifecycle::profile_launch::parse_provider);
-        if provider != Some(Provider::Grok) {
-            continue;
+        if let Some(id) = agent.get("id").and_then(Value::as_str) {
+            if !ids.iter().any(|existing| existing == id) {
+                ids.push(id.to_string());
+            }
         }
-        // Launch cwd is workspace for every worker today (D5). Grok MCP
-        // lives at that directory's `.grok/config.toml`.
-        by_cwd
-            .entry(workspace.to_path_buf())
-            .or_default()
-            .push(id.to_string());
     }
-    for (cwd, ids) in by_cwd {
-        if ids.len() < 2 {
-            continue;
+    ids
+}
+
+/// Count live grok seats from runtime state (the in-service set), unioned
+/// with any grok ids on the spec being launched. The compiled add-agent spec
+/// only has the static base + the incoming seat, so state is the authority
+/// for already-running dynamic grok seats.
+pub(crate) fn ensure_exclusive_grok_cwd(
+    workspace: &Path,
+    incoming_agent_id: &str,
+    spec: Option<&Value>,
+) -> Result<(), LifecycleError> {
+    let mut occupants = live_grok_occupants_from_state(workspace)?;
+    if let Some(spec) = spec {
+        for id in spec_grok_ids(spec) {
+            if !occupants.iter().any(|o| o.id == id) {
+                occupants.push(GrokOccupant {
+                    id,
+                    spawned_at: None,
+                    status: "spec".to_string(),
+                });
+            }
         }
-        return Err(grok_shared_cwd_error(&cwd, &ids));
     }
-    Ok(())
+    if !incoming_agent_id.is_empty() && !occupants.iter().any(|o| o.id == incoming_agent_id) {
+        occupants.push(GrokOccupant {
+            id: incoming_agent_id.to_string(),
+            spawned_at: None,
+            status: "incoming".to_string(),
+        });
+    }
+    if occupants.len() < 2 {
+        return Ok(());
+    }
+    Err(grok_occupied_cwd_error(workspace, incoming_agent_id, &occupants))
 }
 
 pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
     LifecycleError::RequirementUnmet(format!(
-        "error: this version supports only one grok seat per workspace\n\
-         reason: grok MCP is directory-scoped (<cwd>/.grok/config.toml); a second seat in the same directory overwrites TEAM_AGENT_ID and retroactively contaminates the first seat\n\
+        "error: grok seat already occupies this workspace\n\
+         reason: grok MCP is directory-scoped (<cwd>/.grok/config.toml); a second seat overwrites TEAM_AGENT_ID\n\
          workspace: {}\n\
          grok_seats: {}",
         cwd.display(),
         seats.join(", "),
+    ))
+}
+
+fn grok_occupied_cwd_error(
+    cwd: &Path,
+    incoming: &str,
+    occupants: &[GrokOccupant],
+) -> LifecycleError {
+    let holder = occupants
+        .iter()
+        .find(|o| o.id != incoming)
+        .or_else(|| occupants.first());
+    let holder_id = holder.map(|o| o.id.as_str()).unwrap_or("unknown");
+    let started = holder
+        .and_then(|o| o.spawned_at.as_deref())
+        .unwrap_or("unknown");
+    let names = occupants
+        .iter()
+        .map(|o| {
+            if let Some(at) = &o.spawned_at {
+                format!("{} (status={}, started {})", o.id, o.status, at)
+            } else {
+                format!("{} (status={})", o.id, o.status)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    LifecycleError::RequirementUnmet(format!(
+        "error: grok seat {holder_id} already occupies this workspace (started {started})\n\
+         incoming: {incoming}\n\
+         reason: grok MCP is directory-scoped (<cwd>/.grok/config.toml); a second seat overwrites TEAM_AGENT_ID and the first seat's first turn would inherit the wrong identity\n\
+         workspace: {}\n\
+         grok_seats: {names}",
+        cwd.display(),
     ))
 }
 
@@ -234,8 +364,8 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
 /// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
 ///
-/// 调用方必须先跑 [`ensure_exclusive_grok_cwd`]。本函数只写盘，不再做
-/// 冲突检测——检测到再回滚会留下半截 `.grok/config.toml`。
+/// Exclusive-cwd check runs here so restart cannot skip it.
+/// Incoming seat is `TEAM_AGENT_ID` on the resolved MCP env (self-restart is allowed).
 ///
 /// `McpConfig.raw` 与写出的 grok 表名都必须是 `team_orchestrator`，与
 /// `worker_command_context` 契约（grok: `team_orchestrator__send_message`）对齐。
@@ -284,6 +414,9 @@ pub(crate) fn apply_grok_mcp_overlay(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
+
+    let incoming = env.get("TEAM_AGENT_ID").map(String::as_str).unwrap_or("");
+    ensure_exclusive_grok_cwd(workspace, incoming, None)?;
 
     let stanza = render_grok_team_agent_stanza(command, &args, &env);
     let dir = workspace.join(".grok");
