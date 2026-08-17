@@ -2313,6 +2313,8 @@ fn provider_command_name(provider: Provider) -> &'static str {
         // (leader/start.rs:192-204 派生)自动覆盖前缀保护。
         Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
+        Provider::Grok => "grok",
+        Provider::CursorAgent => "agent",
         Provider::Fake => "fake",
     }
 }

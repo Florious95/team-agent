@@ -83,6 +83,8 @@ pub fn launch_with_transport_in_workspace(
     let text = std::fs::read_to_string(spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    // Grok cwd 冲突在写 events / spawn overlay 之前拒绝，避免回滚半截配置。
+    ensure_exclusive_grok_cwd(&spec, workspace)?;
     // 0.5.66 §3.2 跨 workspace 兼容警示:leader argv 带 bypass flag 但当前团队
     // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
     // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。
@@ -263,6 +265,8 @@ pub(crate) use agent_state::{
 mod mcp_config;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
+    apply_grok_mcp_overlay, ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust,
+    grok_shared_cwd_error,
     point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
     write_worker_mcp_config_for_provider,
 };
@@ -270,9 +274,9 @@ pub(crate) use mcp_config::{
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
-    apply_copilot_instructions_overlay, apply_mcp_auto_approval_env, apply_profile_launch_env,
-    fill_spawn_placeholders, fill_spawn_placeholders_full, inherited_env_with_team_overrides,
-    persist_command_plan_state, spawn_timestamp,
+    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay, apply_mcp_auto_approval_env,
+    apply_profile_launch_env, fill_spawn_placeholders, fill_spawn_placeholders_full,
+    inherited_env_with_team_overrides, persist_command_plan_state, spawn_timestamp,
 };
 
 mod identity;
@@ -412,6 +416,37 @@ mod tests {
                     == Some("dangerously_flag_present_but_no_role_declared")
             }),
             "role declared true must suppress the warning; events={events:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn team_agent_force_flag_does_not_look_like_bypass() {
+        let ws = std::env::temp_dir().join(format!(
+            "ta-bypass-force-not-bypass-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let spec = yaml::loads(
+            "version: 1\nteam: {}\nleader: {}\nagents:\n  - id: a\n    role: r\n    provider: fake\n    dangerously_skip_permissions: false\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "team-agent".to_string(),
+            "remove-agent".to_string(),
+            "x".to_string(),
+            "--confirm".to_string(),
+            "--force".to_string(),
+        ];
+        emit_dangerous_flag_no_role_declared_warning_with_argv(&ws, &spec, &argv);
+        let events = crate::event_log::EventLog::new(&ws).tail(0).unwrap();
+        assert!(
+            !events.iter().any(|event| {
+                event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("dangerously_flag_present_but_no_role_declared")
+            }),
+            "team-agent --force must not emit bypass warning; events={events:?}"
         );
         let _ = std::fs::remove_dir_all(&ws);
     }

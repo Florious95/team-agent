@@ -342,6 +342,22 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: true,
             },
+            // Grok: --resume/--fork-session 齐全 → resume/fork true; 无原生
+            // --mcp-config flag → native_mcp_config false (MCP 走 .grok/config.toml)。
+            Provider::Grok => ProviderCaps {
+                resume: true,
+                fork: true,
+                native_mcp_config: false,
+                writes_global_settings: false,
+            },
+            // Cursor agent: --resume [chatId] 有 → resume true; 无 fork flag →
+            // fork false; 无 --mcp-config → native_mcp_config false。
+            Provider::CursorAgent => ProviderCaps {
+                resume: true,
+                fork: false,
+                native_mcp_config: false,
+                writes_global_settings: false,
+            },
             Provider::Fake => ProviderCaps {
                 resume: false,
                 fork: false,
@@ -454,6 +470,24 @@ impl ProviderAdapter for BasicProviderAdapter {
                 }
                 Ok(argv)
             }
+            Provider::Grok => Ok(grok_launch_command(
+                self,
+                auth_mode,
+                mcp_config,
+                system_prompt,
+                model,
+                tools,
+            )?),
+            Provider::CursorAgent => Ok(cursor_agent_base_command(
+                self,
+                auth_mode,
+                mcp_config,
+                system_prompt,
+                model,
+                tools,
+                false,
+                None,
+            )?),
             Provider::Fake => Ok(fake_worker_command()),
         }
     }
@@ -725,6 +759,38 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
             }
+            // Grok resume: base + `--resume <id>` (grok -r/--resume 接受 id|title)。
+            Provider::Grok => {
+                let mut argv = grok_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    tools,
+                    false,
+                    None,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                Ok(argv)
+            }
+            // Cursor resume: base + `--resume <chatId>`。
+            Provider::CursorAgent => {
+                let mut argv = cursor_agent_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    tools,
+                    false,
+                    None,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                Ok(argv)
+            }
             Provider::GeminiCli | Provider::Fake => Err(ProviderError::ResumeUnavailable(format!(
                 "{} resume requires session_id",
                 provider_wire(self.provider)
@@ -882,7 +948,27 @@ impl ProviderAdapter for BasicProviderAdapter {
             Provider::Copilot => Err(ProviderError::CapabilityUnsupported(
                 "copilot CLI 无 fork 旗标,session-store 不支持 branched continuation".to_string(),
             )),
-            Provider::GeminiCli | Provider::Fake => {
+            // Grok fork: base + 新 `--session-id` + `--resume <src>` + `--fork-session`
+            // (grok help: --fork-session 需配合 --resume/--continue)。
+            Provider::Grok => {
+                let mut argv = grok_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    tools,
+                    false,
+                    None,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(next_session_token());
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                argv.push("--fork-session".to_string());
+                Ok(argv)
+            }
+            Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => {
                 Err(ProviderError::CapabilityUnsupported(format!(
                     "{} does not support native session fork",
                     provider_wire(self.provider)
@@ -1061,7 +1147,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                 r"working|processing",
                 r"Error|panic",
             ),
-            Provider::GeminiCli | Provider::Fake => {
+            // Grok/Cursor: 暂无专有 status 正则, 沿用 generic (idle `>`, busy
+            // working/processing, error Traceback) — 与 GeminiCli 同级降级。
+            Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => {
                 patterns(r">", r"working|processing", r"Error|Traceback")
             }
         }
@@ -1164,7 +1252,9 @@ pub(crate) fn json_inline(value: &serde_json::Value) -> String {
 use super::adapters::claude::{claude_base_command, claude_launch_command};
 use super::adapters::codex::codex_base_command;
 use super::adapters::copilot::{copilot_base_command, copilot_base_command_resume};
+use super::adapters::cursor_agent::cursor_agent_base_command;
 use super::adapters::fake::fake_worker_command;
+use super::adapters::grok::{grok_base_command, grok_launch_command};
 
 /// Contract C / MUST-8: the per-worker Team Agent MCP server config used by Claude
 /// (`--mcp-config`) and Codex (`-c mcp_servers.*` injection). Placeholders

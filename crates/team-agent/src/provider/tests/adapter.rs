@@ -261,3 +261,133 @@ fn unsupported_provider_capability_error_message_shape() {
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
 // Lock the CORRECT Python v0.2.11 behavior the strengthened contracts missed.
 // Golden re-probed via /tmp/probe_p2_provider.py vs team-agent-public @ 439bef8.
+
+// ═══════════════ 0.5.67 provider-adapter (Grok + CursorAgent) ═══════════════
+// 仿 claude build_command tests 结构 (见 build_command_includes_model_and_system_prompt)。
+// 不跑 cargo (禁 cargo 红线), 静态编码 + leader verify 时执行。
+
+#[test]
+fn test_grok_build_command_includes_rules_flag_when_system_prompt_set() {
+    let adapter = get_adapter(Provider::Grok);
+    let argv = adapter
+        .build_command(AuthMode::Subscription, None, Some("be helpful"), Some("grok-4"))
+        .expect("build_command ok");
+    assert!(
+        argv_contains_adjacent(&argv, &["--model", "grok-4"]),
+        "argv must contain `--model grok-4` adjacency: {argv:?}"
+    );
+    assert!(
+        argv_contains_adjacent(&argv, &["--rules", "be helpful"]),
+        "grok append-system-prompt must be `--rules 'be helpful'`: {argv:?}"
+    );
+}
+
+#[test]
+fn test_grok_build_command_bypass_flag_when_dangerous() {
+    let adapter = get_adapter(Provider::Grok);
+    let dangerous = adapter
+        .build_command_with_tools(
+            AuthMode::Subscription,
+            None,
+            None,
+            None,
+            &["dangerous_auto_approve"],
+        )
+        .expect("dangerous build_command ok");
+    assert!(
+        argv_contains_adjacent(&dangerous, &["--always-approve"]),
+        "dangerous grok must include `--always-approve`: {dangerous:?}"
+    );
+    let safe = adapter
+        .build_command(AuthMode::Subscription, None, None, None)
+        .expect("safe build_command ok");
+    assert!(
+        !safe.iter().any(|a| a == "--always-approve"),
+        "non-dangerous grok must not include --always-approve: {safe:?}"
+    );
+}
+
+#[test]
+fn test_cursor_agent_build_command_includes_workspace_flag() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let argv = adapter
+        .build_command(AuthMode::Subscription, None, Some("be helpful"), Some("sonnet-4-thinking"))
+        .expect("build_command ok");
+    // system_prompt 不入 argv (方案 1 变体走 workspace rules 文件), argv 只带
+    // --workspace {workspace} placeholder (spawn 时 fill_spawn_placeholders 替换)。
+    assert!(
+        argv_contains_adjacent(&argv, &["--workspace", "{workspace}"]),
+        "cursor argv must carry `--workspace {{workspace}}`: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--rules" || a == "--append-system-prompt"),
+        "cursor append-system-prompt must NOT go on argv (workspace rules file): {argv:?}"
+    );
+}
+
+#[test]
+fn test_cursor_agent_build_command_bypass_flag_when_dangerous() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let dangerous = adapter
+        .build_command_with_tools(
+            AuthMode::Subscription,
+            None,
+            None,
+            None,
+            &["dangerous_auto_approve"],
+        )
+        .expect("dangerous build_command ok");
+    assert!(
+        argv_contains_adjacent(&dangerous, &["--force"]),
+        "dangerous cursor must include `--force`: {dangerous:?}"
+    );
+    let safe = adapter
+        .build_command(AuthMode::Subscription, None, None, None)
+        .expect("safe build_command ok");
+    assert!(
+        !safe.iter().any(|a| a == "--force"),
+        "non-dangerous cursor must not include --force: {safe:?}"
+    );
+}
+
+#[test]
+fn test_cursor_agent_refuses_mcp_config_loudly() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let cfg = McpConfig {
+        raw: serde_json::json!({
+            "team_orchestrator": {
+                "command": "/bin/team-agent",
+                "args": ["mcp-server"]
+            }
+        }),
+    };
+    let err = adapter
+        .build_command(AuthMode::Subscription, Some(&cfg), None, None)
+        .expect_err("cursor must not silently drop mcp_config");
+    let text = err.to_string();
+    assert!(
+        text.to_ascii_lowercase().contains("mcp") && text.contains("not implemented"),
+        "cursor MCP hole must be a loud capability error; got {text}"
+    );
+    assert!(
+        text.contains("action:"),
+        "cursor MCP error must give a next step; got {text}"
+    );
+}
+
+#[test]
+fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
+    use crate::provider::adapters::grok::{grok_tool_mapping, GrokToolMapping};
+    assert_eq!(
+        grok_tool_mapping("network"),
+        GrokToolMapping::Unsupported
+    );
+    assert_eq!(
+        grok_tool_mapping("not_a_real_tool"),
+        GrokToolMapping::Unsupported
+    );
+    assert!(
+        !matches!(grok_tool_mapping("execute_bash"), GrokToolMapping::Unsupported),
+        "known tools must stay mapped"
+    );
+}

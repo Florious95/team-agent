@@ -172,6 +172,35 @@ pub(crate) fn apply_copilot_instructions_overlay(
     Ok(())
 }
 
+/// 0.5.67 Cursor append-system-prompt 方案 1 变体（冒烟 PASS, see
+/// .team/artifacts/0.5.67-cursor-rules-smoke.md）— Cursor `agent` CLI 无
+/// append/rule CLI flag, 只从 workspace 静态 rules 文件读:
+///   `.cursor/rules/**/*.mdc` (alwaysApply: true) / `AGENTS.md` / `.cursorrules`。
+///
+/// 这里在 launch 路径写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`
+/// 并把 role（= compile_worker_system_prompt 输出）放进去, argv 只带
+/// `--workspace <workspace>`（cursor_agent.rs）。cursor CLI 读取该目录即加载 role。
+///
+/// 目录布局为 workspace 内 `.cursor/rules/`（Cursor 唯一 rules 通道; 无法像 copilot
+/// 那样放 `.team/runtime/` —— 那是 Cursor 不读的路径）。文件名含 `<agent_id>`
+/// 保证 per-agent 隔离, 不互相污染。
+pub(crate) fn apply_cursor_agent_rules_overlay(
+    workspace: &Path,
+    agent_id: &str,
+    system_prompt: &str,
+) -> Result<(), LifecycleError> {
+    let dir = workspace.join(".cursor").join("rules");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
+    let rules = dir.join(format!("team-agent-role-{agent_id}.mdc"));
+    let content = format!(
+        "---\ndescription: Team Agent role injection (auto-generated)\nalwaysApply: true\n---\n\n{system_prompt}\n"
+    );
+    std::fs::write(&rules, content.as_bytes())
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", rules.display())))?;
+    Ok(())
+}
+
 /// C-3-2/C-3-3 cr verdict v2 — Copilot spawn 前调 `copilot mcp list` 扫用户全局
 /// `~/.copilot/mcp-config.json` 与 workspace `.mcp.json` 的 MCP 残留;对每个非
 /// `team_orchestrator` server 追加 `--disable-mcp-server <name>`(main-help:72-73)

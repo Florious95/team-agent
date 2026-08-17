@@ -95,6 +95,257 @@ pub(crate) fn write_worker_mcp_config_for_provider(
     Ok(path)
 }
 
+/// Grok MCP 是**目录作用域**（`mcp_injection: dir_scoped`）：CLI 只读
+/// `<cwd>/.grok/config.toml`。同目录后起席位会覆盖这份文件，先起席位的
+/// 身份被回溯性改写且不报错。本版 worker cwd 恒为 workspace（D5），
+/// exclusive 检查也不读 per-agent cwd ⇒ 一个 workspace 只支持一个 grok 席。
+/// 这是 grok 的 provider 能力边界，不是框架通则（claude/codex 走 argv
+/// `--mcp-config`，同目录多席没有这个问题）。
+pub(crate) fn ensure_exclusive_grok_cwd(
+    spec: &Value,
+    workspace: &Path,
+) -> Result<(), LifecycleError> {
+    let mut by_cwd: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    for agent in spec_agent_values(spec) {
+        if agent_is_paused(agent) {
+            continue;
+        }
+        let Some(id) = agent.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let provider = agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .and_then(crate::lifecycle::profile_launch::parse_provider);
+        if provider != Some(Provider::Grok) {
+            continue;
+        }
+        // Launch cwd is workspace for every worker today (D5). Grok MCP
+        // lives at that directory's `.grok/config.toml`.
+        by_cwd
+            .entry(workspace.to_path_buf())
+            .or_default()
+            .push(id.to_string());
+    }
+    for (cwd, ids) in by_cwd {
+        if ids.len() < 2 {
+            continue;
+        }
+        return Err(grok_shared_cwd_error(&cwd, &ids));
+    }
+    Ok(())
+}
+
+pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
+    LifecycleError::RequirementUnmet(format!(
+        "error: this version supports only one grok seat per workspace\n\
+         reason: grok MCP is directory-scoped (<cwd>/.grok/config.toml); a second seat in the same directory overwrites TEAM_AGENT_ID and retroactively contaminates the first seat\n\
+         workspace: {}\n\
+         grok_seats: {}",
+        cwd.display(),
+        seats.join(", "),
+    ))
+}
+
+/// 未登录 / 目录未信任时不许起出「能收信、没有手」的 grok 席。
+/// 登录态看 `$HOME/.grok/auth.json`；目录信任看 `$HOME/.grok/trusted_folders.toml`
+/// （与 grok `--trust` / `/hooks-trust` 同一份；未信任则项目作用域 MCP 不生效）。
+/// `GROK_FOLDER_TRUST=0` 时 grok 自己关掉 folder-trust，本检查跟着放行。
+pub(crate) fn ensure_grok_login_and_folder_trust(cwd: &Path) -> Result<(), LifecycleError> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "error: HOME is unset; cannot verify grok login or folder trust\n\
+                 action: export HOME and retry"
+                    .to_string(),
+            )
+        })?;
+    let grok_home = home.join(".grok");
+    if !grok_auth_present(&grok_home) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "error: grok is not logged in (missing or empty {})\n\
+             action: run `grok login` then retry add-agent/launch",
+            grok_home.join("auth.json").display()
+        )));
+    }
+    if folder_trust_required() && !grok_folder_is_trusted(&grok_home, cwd) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "error: grok folder is not trusted; project-scope MCP at {}/.grok/config.toml will not load\n\
+             cwd: {}\n\
+             action: from that directory run `grok --trust` (or `/hooks-trust` in a grok session), then retry",
+            cwd.display(),
+            cwd.display()
+        )));
+    }
+    Ok(())
+}
+
+fn grok_auth_present(grok_home: &Path) -> bool {
+    let path = grok_home.join("auth.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    value.as_object().is_some_and(|map| !map.is_empty())
+}
+
+fn folder_trust_required() -> bool {
+    !matches!(
+        std::env::var("GROK_FOLDER_TRUST").ok().as_deref(),
+        Some("0") | Some("false") | Some("off")
+    )
+}
+
+fn grok_folder_is_trusted(grok_home: &Path, cwd: &Path) -> bool {
+    let text = std::fs::read_to_string(grok_home.join("trusted_folders.toml")).unwrap_or_default();
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    grok_trusted_folders(&text).into_iter().any(|trusted| {
+        let trusted = std::fs::canonicalize(&trusted).unwrap_or(trusted);
+        cwd == trusted || cwd.starts_with(&trusted)
+    })
+}
+
+fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
+    let mut current = None;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("[folders.\"") {
+            current = rest.strip_suffix("\"]").map(str::to_string);
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            current = None;
+            continue;
+        }
+        if trimmed == "trusted = true" {
+            if let Some(path) = current.take() {
+                out.push(PathBuf::from(path));
+            }
+        }
+    }
+    out
+}
+
+/// Grok CLI 没有 `--mcp-config`。同 `apply_cursor_agent_rules_overlay`：launch
+/// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
+/// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
+///
+/// 调用方必须先跑 [`ensure_exclusive_grok_cwd`]。本函数只写盘，不再做
+/// 冲突检测——检测到再回滚会留下半截 `.grok/config.toml`。
+///
+/// `McpConfig.raw` 的 server 名是框架内部的 `team_orchestrator`；写盘时改成
+/// grok 侧已实测能 `mcp doctor` 通过的 `team-agent`。
+pub(crate) fn apply_grok_mcp_overlay(
+    workspace: &Path,
+    mcp_config: &crate::provider::McpConfig,
+) -> Result<(), LifecycleError> {
+    let server = mcp_config
+        .raw
+        .get("team_orchestrator")
+        .or_else(|| mcp_config.raw.get("team-agent"))
+        .ok_or_else(|| {
+            LifecycleError::StatePersist(
+                "grok MCP overlay requires team_orchestrator in resolved mcp config".to_string(),
+            )
+        })?;
+    let command = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("grok MCP overlay missing command".to_string())
+        })?;
+    let args = server
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let env = server
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|text| (key.clone(), text.to_string()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let stanza = render_grok_team_agent_stanza(command, &args, &env);
+    let dir = workspace.join(".grok");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
+    let path = dir.join("config.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let body = upsert_toml_table_prefix(&existing, "mcp_servers.team-agent", &stanza);
+    let tmp = dir.join("config.toml.tmp");
+    std::fs::write(&tmp, body.as_bytes())
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
+    Ok(())
+}
+
+fn render_grok_team_agent_stanza(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> String {
+    let mut out = String::from("[mcp_servers.team-agent]\n");
+    out.push_str(&format!("command = {}\n", toml_quote(command)));
+    out.push_str("args = [\n");
+    for arg in args {
+        out.push_str(&format!("    {},\n", toml_quote(arg)));
+    }
+    out.push_str("]\n");
+    out.push_str("enabled = true\n");
+    if !env.is_empty() {
+        out.push_str("\n[mcp_servers.team-agent.env]\n");
+        for (key, value) in env {
+            out.push_str(&format!("{key} = {}\n", toml_quote(value)));
+        }
+    }
+    out
+}
+
+fn toml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn upsert_toml_table_prefix(existing: &str, table: &str, stanza: &str) -> String {
+    let child_prefix = format!("{table}.");
+    let mut out = String::new();
+    let mut skip = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let name = &trimmed[1..trimmed.len() - 1];
+            skip = name == table || name.starts_with(&child_prefix);
+        }
+        if !skip {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let trimmed = out.trim_end();
+    if trimmed.is_empty() {
+        stanza.to_string()
+    } else {
+        format!("{trimmed}\n\n{stanza}")
+    }
+}
+
 /// C-3-4 cr verdict v2 — McpConfig.raw 是 `{name: {type, command, args, env}}` 形;
 /// copilot mcp add schema 取 `transport` 替 `type`(stdio|http|sse 同值)。仅
 /// 字段名变换,其余字段全保留。

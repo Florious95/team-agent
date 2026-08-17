@@ -72,6 +72,20 @@ pub fn fork_agent_with_transport(
             as_agent_id.as_str()
         )));
     }
+    // 本版一个 workspace 只支持一个 grok 席。fork 出第二个 grok 必撞
+    // 源席的目录作用域 MCP。在 materialize_latest_role 写盘之前拒绝。
+    if fork_spec_agent(&spec, source_agent_id)
+        .and_then(|agent| agent.get("provider").and_then(Value::as_str))
+        == Some("grok")
+    {
+        return Err(grok_shared_cwd_error(
+            &workspace,
+            &[
+                source_agent_id.as_str().to_string(),
+                as_agent_id.as_str().to_string(),
+            ],
+        ));
+    }
     let mut materialized_role = materialize_latest_role(
         &workspace,
         &fork_team_dir,
@@ -90,6 +104,7 @@ pub fn fork_agent_with_transport(
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
     let new_spec =
         append_forked_agent(&spec, &compiled.agent, source_agent_id, as_agent_id, label)?;
+    ensure_exclusive_grok_cwd(&new_spec, &workspace)?;
     // validate 用角色定义目录的 team_workspace(校验 working_directory),非 spec 落点。
     let validate_ws =
         crate::model::paths::team_workspace(&fork_team_dir).unwrap_or_else(|_| workspace.clone());
@@ -284,6 +299,27 @@ pub fn fork_agent_with_transport(
             &mut env,
         )
         .map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            error
+        })?;
+    }
+    // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+    if provider == Provider::CursorAgent {
+        apply_cursor_agent_rules_overlay(&workspace, as_agent_id.as_str(), &system_prompt)
+            .map_err(|error| {
+                let _ = std::fs::write(&spec_path, text.as_bytes());
+                cleanup_fork_mcp_artifacts(
+                    &workspace,
+                    as_agent_id,
+                    &mcp_config_path,
+                    &profile_launch,
+                );
+                error
+            })?;
+    }
+    if provider == Provider::Grok {
+        apply_grok_mcp_overlay(&workspace, &mcp_config).map_err(|error| {
             let _ = std::fs::write(&spec_path, text.as_bytes());
             cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
             error

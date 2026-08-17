@@ -2058,7 +2058,7 @@ fn recipient_pane_has_actionable_startup_prompt(
             crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        Provider::GeminiCli | Provider::Fake => false,
+        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
     }
 }
 

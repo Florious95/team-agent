@@ -1485,6 +1485,8 @@ pub(crate) fn provider_doctor_checks() -> Value {
         crate::provider::Provider::ClaudeCode,
         crate::provider::Provider::Codex,
         crate::provider::Provider::GeminiCli,
+        crate::provider::Provider::Grok,
+        crate::provider::Provider::CursorAgent,
         crate::provider::Provider::Fake,
     ] {
         let adapter = crate::provider::get_adapter(provider);

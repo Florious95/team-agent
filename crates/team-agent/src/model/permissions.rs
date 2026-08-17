@@ -189,6 +189,9 @@ fn provider_enforcement(provider: Provider, tool: Tool) -> Enforcement {
             FsRead | FsWrite | FsList | ExecuteBash | GitDiff | ProviderBuiltin => Hard,
         },
         Provider::Fake => Hard,
+        // 0.5.67: grok/cursor_agent 无 deny-kind 概念 (同 codex 精神), 诚实
+        // prompt_only, 不替 provider 决。
+        Provider::Grok | Provider::CursorAgent => PromptOnly,
         // Copilot(C-2-1 cr verdict):execute_bash/fs_write/network/mcp_team = hard,
         // fs_read/fs_list/git_diff/provider_builtin = prompt_only(诚实:copilot 无
         // 对应 deny kind,framework 不替决,留给 provider prompt 控制;MUST-NOT-13)。

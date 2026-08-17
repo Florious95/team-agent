@@ -43,6 +43,7 @@ pub(super) fn spawn_agents(
     let team_dir = team_dir_buf
         .as_deref()
         .unwrap_or_else(|| spec_path.parent().unwrap_or_else(|| Path::new(".")));
+    ensure_exclusive_grok_cwd(spec, workspace)?;
     let runtime_fast = matches!(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))
@@ -255,6 +256,15 @@ pub(super) fn spawn_agents(
                     }),
                 );
             }
+        }
+        // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+        if matches!(provider, Provider::CursorAgent) {
+            apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
+        }
+        // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
+        if matches!(provider, Provider::Grok) {
+            ensure_grok_login_and_folder_trust(workspace)?;
+            apply_grok_mcp_overlay(workspace, &mcp_config)?;
         }
         let spawn_epoch = u64::try_from(started.len()).unwrap_or(u64::MAX);
         let spawned_at = spawn_timestamp_for_agent(u32::try_from(spawn_epoch).unwrap_or(u32::MAX));
