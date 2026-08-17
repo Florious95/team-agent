@@ -266,7 +266,7 @@ mod mcp_config;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
     apply_grok_mcp_overlay, ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust,
-    grok_shared_cwd_error,
+    ensure_grok_overlay_ready, grok_shared_cwd_error,
     point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
     write_worker_mcp_config_for_provider,
 };

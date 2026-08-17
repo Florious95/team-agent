@@ -323,6 +323,9 @@ pub(super) fn spawn_agents(
         // downstream consumers (display dict, layout_window persistence).
         let placement: Option<LayoutPlacement> = None;
         let window = WindowName::new(agent_id_raw);
+        if matches!(provider, Provider::Grok) {
+            ensure_grok_overlay_ready(workspace)?;
+        }
         let spawn = if started.is_empty() {
             transport.spawn_first_with_env_unset(
                 session_name,

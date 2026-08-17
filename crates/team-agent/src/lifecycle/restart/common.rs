@@ -425,6 +425,9 @@ pub(super) fn spawn_agent_window(
     // on plain spawn_split — split panes are display overlays, not the
     // primary worker process.
     let provider_label = crate::provider::wire::command_name(provider);
+    if provider == crate::provider::Provider::Grok {
+        crate::lifecycle::launch::ensure_grok_overlay_ready(workspace)?;
+    }
     let result = if let Some(placement) = layout_placement {
         if placement.starts_window {
             if into_existing_session {

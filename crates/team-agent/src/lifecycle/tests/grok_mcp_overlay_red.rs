@@ -14,16 +14,25 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::lifecycle::{
-    apply_grok_mcp_overlay, ensure_grok_login_and_folder_trust, LifecycleError,
+    apply_grok_mcp_overlay, ensure_grok_login_and_folder_trust, ensure_grok_overlay_ready,
+    LifecycleError,
 };
 use team_agent::provider::McpConfig;
 use team_agent::transport::test_support::OfflineTransport;
+use team_agent::transport::{
+    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
+};
 
 #[test]
 fn grok_overlay_writes_canonical_team_orchestrator_server_name() {
@@ -93,6 +102,71 @@ TEAM_AGENT_AUTH_MODE = "subscription"
     assert!(
         !text.contains("stale-id") && !text.contains("/old/team-agent"),
         "stale identity/command from the old table must not remain; text={text}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn grok_transport_spawn_must_see_ready_overlay() {
+    let ws = tmp_dir("grok-overlay-before-spawn");
+    let home = tmp_dir("grok-overlay-before-spawn-home");
+    seed_grok_home(&home, Some(&ws));
+    let _guard = HomeGuard::set(&home);
+    let team = write_grok_team(&ws, "grokteam", "grok_writer");
+    let transport = OverlayOrderTransport::new(ws.clone());
+
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        Some("grokteam"),
+        &transport,
+    )
+    .expect("grok quick-start should spawn after overlay");
+
+    let snaps = transport.snapshots.lock().unwrap().clone();
+    assert_eq!(
+        snaps.len(),
+        1,
+        "expected one grok spawn; snaps={snaps:?}"
+    );
+    let snap = &snaps[0];
+    assert!(
+        snap.overlay_exists,
+        "spawn stub ran before .grok/config.toml existed; cwd snapshot={snap:?}"
+    );
+    assert!(
+        snap.overlay_text
+            .contains("[mcp_servers.team_orchestrator]"),
+        "spawn stub saw overlay without canonical server; grok would start with zero tools; text={}",
+        snap.overlay_text
+    );
+    assert!(
+        snap.overlay_verified_event,
+        "spawn stub ran before grok.overlay_ready was recorded; write and spawn are still racing; events_head={}",
+        snap.events_head
+    );
+}
+
+#[test]
+fn grok_overlay_ready_gate_refuses_missing_or_wrong_file() {
+    let ws = tmp_dir("grok-overlay-gate");
+    let err = ensure_grok_overlay_ready(&ws).expect_err("missing overlay");
+    let missing = err.to_string();
+    assert!(
+        missing.contains("not readable") && missing.contains("do not start the seat"),
+        "missing overlay must refuse start; err={missing}"
+    );
+
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(grok.join("config.toml"), "[mcp_servers.other]\ncommand = \"x\"\n").unwrap();
+    let err = ensure_grok_overlay_ready(&ws).expect_err("wrong overlay");
+    let wrong = err.to_string();
+    assert!(
+        wrong.contains("team_orchestrator") && wrong.contains("do not start the seat"),
+        "wrong overlay must refuse start; err={wrong}"
     );
 }
 
@@ -345,6 +419,158 @@ fn seed_grok_home(home: &Path, trusted_cwd: Option<&Path>) {
             format!("[folders.\"{}\"]\ntrusted = true\n", cwd.display()),
         )
         .unwrap();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OverlaySpawnSnapshot {
+    overlay_exists: bool,
+    overlay_text: String,
+    overlay_verified_event: bool,
+    events_head: String,
+}
+
+struct OverlayOrderTransport {
+    workspace: PathBuf,
+    snapshots: Mutex<Vec<OverlaySpawnSnapshot>>,
+}
+
+impl OverlayOrderTransport {
+    fn new(workspace: PathBuf) -> Self {
+        Self {
+            workspace,
+            snapshots: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn snapshot_at_spawn(&self, cwd: &Path) {
+        let overlay = cwd.join(".grok").join("config.toml");
+        let overlay_text = std::fs::read_to_string(&overlay).unwrap_or_default();
+        let events = self
+            .workspace
+            .join(".team")
+            .join("logs")
+            .join("events.jsonl");
+        let events_text = std::fs::read_to_string(&events).unwrap_or_default();
+        self.snapshots.lock().unwrap().push(OverlaySpawnSnapshot {
+            overlay_exists: overlay.exists(),
+            overlay_text,
+            overlay_verified_event: events_text.contains("grok.overlay_ready"),
+            events_head: events_text.chars().take(400).collect(),
+        });
+    }
+}
+
+impl Transport for OverlayOrderTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+
+    fn spawn_first(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        _argv: &[String],
+        cwd: &Path,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        self.snapshot_at_spawn(cwd);
+        Ok(SpawnResult {
+            pane_id: PaneId::new("%1"),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: Some(21_000),
+        })
+    }
+
+    fn spawn_into(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        self.spawn_first(session, window, argv, cwd, env)
+    }
+
+    fn inject(
+        &self,
+        _target: &Target,
+        _payload: &InjectPayload,
+        _submit: Key,
+        _bracketed: bool,
+    ) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: InjectStage::Submit,
+            inject_verification: InjectVerification::CaptureContainsToken,
+            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            turn_verification: TurnVerification::NotYetObserved,
+            attempts: 1,
+            submit_diagnostics: None,
+        })
+    }
+
+    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
+    }
+
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
+        match field {
+            PaneField::PaneWidth => Ok(Some("120".to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    fn liveness(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
+        Ok(team_agent::transport::PaneLiveness::Live)
+    }
+
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
+        Ok(false)
+    }
+
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    fn set_session_env(
+        &self,
+        _session: &SessionName,
+        _key: &str,
+        _value: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+
+    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
     }
 }
 

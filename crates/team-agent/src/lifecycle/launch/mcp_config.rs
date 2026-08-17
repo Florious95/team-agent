@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -291,18 +292,55 @@ pub(crate) fn apply_grok_mcp_overlay(
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    // 同时摘掉新表和 0.5.67 误写的 [mcp_servers.team-agent]，否则改名后两套
-    // team MCP 并存，grok 会列出两份指向同一进程的工具。
+    // 摘掉新表和 0.5.67 误写的 [mcp_servers.team-agent]，避免两套 team MCP 并存。
     let body = upsert_toml_table_prefixes(
         &existing,
         &["mcp_servers.team_orchestrator", "mcp_servers.team-agent"],
         &stanza,
     );
     let tmp = dir.join("config.toml.tmp");
-    std::fs::write(&tmp, body.as_bytes())
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+    {
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+        file.write_all(body.as_bytes())
+            .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+        file.sync_all()
+            .map_err(|e| LifecycleError::StatePersist(format!("fsync {}: {e}", tmp.display())))?;
+    }
     std::fs::rename(&tmp, &path)
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
+    if let Ok(dir_file) = std::fs::File::open(&dir) {
+        let _ = dir_file.sync_all();
+    }
+    ensure_grok_overlay_ready(workspace)?;
+    let _ = crate::event_log::EventLog::new(workspace).write(
+        "grok.overlay_ready",
+        serde_json::json!({
+            "path": path.to_string_lossy(),
+            "workspace": workspace.to_string_lossy(),
+        }),
+    );
+    Ok(())
+}
+
+/// 回读 overlay；缺文件或缺 canonical 表 ⇒ 拒绝启动。必须在 spawn 前调用。
+pub(crate) fn ensure_grok_overlay_ready(workspace: &Path) -> Result<(), LifecycleError> {
+    let path = workspace.join(".grok").join("config.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        LifecycleError::RequirementUnmet(format!(
+            "error: grok MCP overlay is not readable at {}\n\
+             reason: {e}\n\
+             action: do not start the seat; overlay must be on disk before spawn",
+            path.display()
+        ))
+    })?;
+    if !text.contains("[mcp_servers.team_orchestrator]") {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "error: grok MCP overlay at {} is missing [mcp_servers.team_orchestrator]\n\
+             action: do not start the seat; a grok process started now would have no Team MCP tools",
+            path.display()
+        )));
+    }
     Ok(())
 }
 

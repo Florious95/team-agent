@@ -357,6 +357,13 @@ pub fn fork_agent_with_transport(
     // Release the metadata lock before per-seat provider convergence; finalize reacquires it.
     drop(_lock);
     let spawn_epoch = 1_u64;
+    if provider == Provider::Grok {
+        ensure_grok_overlay_ready(&workspace).map_err(|error| {
+            let _ = std::fs::write(&spec_path, text.as_bytes());
+            cleanup_fork_mcp_artifacts(&workspace, as_agent_id, &mcp_config_path, &profile_launch);
+            error
+        })?;
+    }
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
             &session_name,
