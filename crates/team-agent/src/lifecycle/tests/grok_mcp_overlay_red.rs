@@ -83,8 +83,10 @@ TEAM_AGENT_AUTH_MODE = "subscription"
     );
     assert!(
         !text.contains("TEAM_AGENT_ID")
+            && !text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            && !text.contains("TEAM_AGENT_AUTH_MODE")
             && text.contains("TEAM_AGENT_WORKSPACE = \"/ws-migrated\""),
-        "TEAM_AGENT_ID must not land on the shared toml; workspace env must survive rename; text={text}"
+        "per-seat keys must not land on the shared toml; workspace env must survive rename; text={text}"
     );
     assert!(
         text.contains("[mcp_servers.keep-me]"),
@@ -289,14 +291,8 @@ fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
         "TEAM_AGENT_WORKSPACE must match spawn cwd; workspace={workspace} text={text}"
     );
     assert!(
-        text.contains("TEAM_AGENT_OWNER_TEAM_ID = \"grokteam\"")
-            || text.contains("TEAM_AGENT_OWNER_TEAM_ID = 'grokteam'"),
-        "TEAM_AGENT_OWNER_TEAM_ID must be the runtime team key; text={text}"
-    );
-    assert!(
-        text.contains("TEAM_AGENT_AUTH_MODE = \"subscription\"")
-            || text.contains("TEAM_AGENT_AUTH_MODE = 'subscription'"),
-        "TEAM_AGENT_AUTH_MODE must come from the resolved MCP config; text={text}"
+        !text.contains("TEAM_AGENT_OWNER_TEAM_ID") && !text.contains("TEAM_AGENT_AUTH_MODE"),
+        "shared grok toml must not carry per-seat OWNER/AUTH; text={text}"
     );
 }
 

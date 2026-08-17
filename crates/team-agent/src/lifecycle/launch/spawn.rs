@@ -208,8 +208,12 @@ pub(super) fn spawn_agents(
             )?;
         }
         fill_spawn_placeholders_full(&mut plan.argv, workspace, agent_id_raw, Some(&mcp_team_id));
-        let mut env =
-            inherited_env_with_team_overrides(workspace, agent_id_raw, Some(&mcp_team_id));
+        let mut env = inherited_env_with_team_overrides(
+            workspace,
+            agent_id_raw,
+            Some(&mcp_team_id),
+            Some(auth_mode_env_value(auth_mode)),
+        );
         apply_profile_launch_env(&mut env, &profile_launch);
         apply_mcp_auto_approval_env(&mut env, &safety);
         // Python providers.py:145 + launch/core.py:253 — fresh launch runs the worker

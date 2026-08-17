@@ -420,13 +420,12 @@ pub fn apply_grok_mcp_overlay(
     let incoming = env.get("TEAM_AGENT_ID").map(String::as_str).unwrap_or("");
     ensure_exclusive_grok_cwd(workspace, incoming, None)?;
 
-    // TEAM_AGENT_ID is per-seat and already on the pane env (worker_spawn_env).
-    // Writing it into the directory-scoped toml lets the next overlay/rewrite
-    // win and poison a waiting seat's first MCP spawn. Omit it; inherit.
-    // Empty values are also omitted: toml wins on the same key, and
-    // non_empty_string("") becomes None (owner/sender drop to unknown).
+    // Per-seat keys live on the pane env. The directory-scoped toml is a
+    // last-writer slot: keep only WORKSPACE (and the launch command).
     let mut env = env;
     env.remove("TEAM_AGENT_ID");
+    env.remove("TEAM_AGENT_OWNER_TEAM_ID");
+    env.remove("TEAM_AGENT_AUTH_MODE");
     env.retain(|_, value| !value.trim().is_empty());
 
     let stanza = render_grok_team_agent_stanza(command, &args, &env);

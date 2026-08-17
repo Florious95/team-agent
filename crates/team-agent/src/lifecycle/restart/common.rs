@@ -327,6 +327,7 @@ pub(super) fn spawn_agent_window(
         workspace,
         agent_id.as_str(),
         team_id.as_deref(),
+        Some(crate::lifecycle::launch::auth_mode_env_value(auth_mode)),
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);

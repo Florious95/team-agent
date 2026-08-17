@@ -154,45 +154,22 @@ fn classify(
     expected_auth: Option<String>,
 ) -> GrokSlotReport {
     let mut mismatches = Vec::new();
-    if let (Some(disk_id), true) = (disk.team_agent_id.as_deref(), live_ids.len() == 1) {
-        if disk_id != live_ids[0] {
-            mismatches.push(format!("id disk={disk_id} live={}", live_ids[0]));
-        }
-    } else if disk.team_agent_id.is_some() && live_ids.len() != 1 {
-        mismatches.push(format!(
-            "id disk={} live={}",
-            disk.team_agent_id.as_deref().unwrap_or("(absent)"),
-            if live_ids.is_empty() {
-                "(none)".to_string()
-            } else {
-                live_ids.join(",")
-            }
-        ));
+    if let Some(disk_id) = disk.team_agent_id.as_deref() {
+        mismatches.push(format!("per-seat key TEAM_AGENT_ID={disk_id}"));
+    }
+    if let Some(disk_owner) = disk.owner_team_id.as_deref() {
+        mismatches.push(format!("per-seat key TEAM_AGENT_OWNER_TEAM_ID={disk_owner}"));
+    }
+    if let Some(disk_auth) = disk.auth_mode.as_deref() {
+        mismatches.push(format!("per-seat key TEAM_AGENT_AUTH_MODE={disk_auth}"));
     }
     if live_ids.len() > 1 {
         mismatches.push(format!("live_seats={}", live_ids.join(",")));
     }
-    if let (Some(disk_owner), Some(want_owner)) =
-        (disk.owner_team_id.as_deref(), expected_owner.as_deref())
-    {
-        if disk_owner != want_owner {
-            mismatches.push(format!("owner disk={disk_owner} expected={want_owner}"));
-        }
-    }
-    if let (Some(disk_auth), Some(want_auth)) =
-        (disk.auth_mode.as_deref(), expected_auth.as_deref())
-    {
-        if disk_auth != want_auth {
-            mismatches.push(format!("auth disk={disk_auth} expected={want_auth}"));
-        }
-    }
 
     if mismatches.is_empty() {
-        let reason = if disk.team_agent_id.is_none() {
-            "slot does not carry TEAM_AGENT_ID; residual OWNER/AUTH match live seats".to_string()
-        } else {
-            "slot matches the single live grok seat".to_string()
-        };
+        let reason =
+            "toml carries no per-seat identity keys; identity inherits from pane env".to_string();
         return GrokSlotReport {
             readable: true,
             consistent: true,

@@ -59,10 +59,19 @@ pub(crate) fn fill_spawn_placeholders(argv: &mut [String], workspace: &Path, age
 ///
 /// `TMUX` / `TMUX_PANE` are stripped because they bind the inherited shell to the **launching**
 /// tmux pane; leaving them in would point worker-side tmux integrations at the wrong pane.
+pub(crate) fn auth_mode_env_value(mode: AuthMode) -> &'static str {
+    match mode {
+        AuthMode::Subscription => "subscription",
+        AuthMode::OfficialApi => "official_api",
+        AuthMode::CompatibleApi => "compatible_api",
+    }
+}
+
 pub(crate) fn inherited_env_with_team_overrides(
     workspace: &Path,
     agent_id: &str,
     team_id: Option<&str>,
+    auth_mode: Option<&str>,
 ) -> BTreeMap<String, String> {
     // 0.3.28 Step 3: delegate to `layout::worker_env::worker_spawn_env` which
     // implements Python's whitelist semantics (`providers.py:130-145`). The
@@ -77,7 +86,13 @@ pub(crate) fn inherited_env_with_team_overrides(
     //   * Strips `COPILOT_DISABLE_TERMINAL_TITLE` (re-injected per-agent by
     //     `apply_copilot_instructions_overlay` based on the WORKER's provider).
     //   * Strips `TMUX` / `TMUX_PANE` (would attach worker to leader's pane).
-    crate::layout::worker_env::worker_spawn_env(std::env::vars(), workspace, agent_id, team_id)
+    crate::layout::worker_env::worker_spawn_env(
+        std::env::vars(),
+        workspace,
+        agent_id,
+        team_id,
+        auth_mode,
+    )
 }
 
 pub(crate) fn apply_mcp_auto_approval_env(

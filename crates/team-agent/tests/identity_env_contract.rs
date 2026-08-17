@@ -70,6 +70,28 @@ fn child_env(pane: &BTreeMap<String, String>, toml: &str) -> BTreeMap<String, St
 }
 
 #[test]
+fn pane_env_carries_id_owner_and_auth() {
+    let pane = worker_spawn_env(
+        Vec::<(String, String)>::new(),
+        Path::new("/ws"),
+        "alpha",
+        Some("team-alpha"),
+        Some("subscription"),
+    );
+    for key in [
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_OWNER_TEAM_ID",
+        "TEAM_AGENT_AUTH_MODE",
+    ] {
+        let value = pane.get(key).map(String::as_str).unwrap_or("");
+        assert!(
+            !value.trim().is_empty(),
+            "{key} must be non-empty on the generated pane env (not via grok toml); pane={pane:?}"
+        );
+    }
+}
+
+#[test]
 fn generated_per_seat_env_id_owner_auth_are_non_empty() {
     let ws = tmp_dir("generated");
     let workspace = ws.to_string_lossy().into_owned();
@@ -78,6 +100,7 @@ fn generated_per_seat_env_id_owner_auth_are_non_empty() {
         &ws,
         "alpha",
         Some("team-alpha"),
+        Some("subscription"),
     );
     apply_grok_mcp_overlay(
         &ws,
@@ -97,6 +120,10 @@ fn generated_per_seat_env_id_owner_auth_are_non_empty() {
             !value.trim().is_empty(),
             "{key} must be non-empty in the generated per-seat env; toml={toml} pane={pane:?}"
         );
+        assert!(
+            !toml.contains(key),
+            "shared grok toml must not carry per-seat {key}; toml={toml}"
+        );
     }
     assert_eq!(
         child.get("TEAM_AGENT_ID").map(String::as_str),
@@ -109,10 +136,6 @@ fn generated_per_seat_env_id_owner_auth_are_non_empty() {
     assert_eq!(
         child.get("TEAM_AGENT_AUTH_MODE").map(String::as_str),
         Some("subscription")
-    );
-    assert!(
-        !toml.contains("TEAM_AGENT_ID"),
-        "shared grok toml must not carry TEAM_AGENT_ID (pane inherit is the carrier); toml={toml}"
     );
 }
 
@@ -128,8 +151,8 @@ fn empty_overlay_owner_is_omitted_not_written() {
         "empty OWNER must not land in toml (toml wins and non_empty_string turns \"\" into None); toml={toml}"
     );
     assert!(
-        toml.contains("TEAM_AGENT_AUTH_MODE = \"subscription\""),
-        "non-empty AUTH must still be written; toml={toml}"
+        !toml.contains("TEAM_AGENT_AUTH_MODE"),
+        "AUTH must not land in toml once pane env carries it; toml={toml}"
     );
 }
 
@@ -145,6 +168,7 @@ fn empty_overlay_owner_must_not_clobber_pane_or_become_unknown() {
         &ws,
         "alpha",
         Some("team-alpha"),
+        Some("subscription"),
     );
     apply_grok_mcp_overlay(&ws, &sample_mcp("alpha", &workspace, "", "subscription"))
         .expect("overlay write");

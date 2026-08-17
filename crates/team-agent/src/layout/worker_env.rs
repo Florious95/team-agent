@@ -72,7 +72,8 @@ const WORKER_IDENTITY_PREFIXES: &[&str] = &["CLAUDE_CODE_"];
 ///   * All POSIX-valid shell identifier keys from `parent_env` EXCEPT
 ///     those matching `STRIP_PREFIXES` / `STRIP_EXACT`.
 ///   * Overlay: `TEAM_AGENT_WORKSPACE`, `TEAM_AGENT_ID`,
-///     `TEAM_AGENT_AGENT_ID`, `TEAM_AGENT_OWNER_TEAM_ID` (when present).
+///     `TEAM_AGENT_AGENT_ID`, `TEAM_AGENT_OWNER_TEAM_ID` (when present),
+///     `TEAM_AGENT_AUTH_MODE` (when present).
 ///
 /// POSIX-validity filter: shell variable names must match
 /// `[A-Za-z_][A-Za-z0-9_]*`. Cargo's integration-test runner exports keys
@@ -83,6 +84,7 @@ pub fn worker_spawn_env<I>(
     workspace: &Path,
     agent_id: &str,
     team_id: Option<&str>,
+    auth_mode: Option<&str>,
 ) -> BTreeMap<String, String>
 where
     I: IntoIterator<Item = (String, String)>,
@@ -105,6 +107,9 @@ where
     env.insert("TEAM_AGENT_AGENT_ID".to_string(), agent_id.to_string());
     if let Some(tid) = team_id.filter(|s| !s.is_empty()) {
         env.insert("TEAM_AGENT_OWNER_TEAM_ID".to_string(), tid.to_string());
+    }
+    if let Some(auth) = auth_mode.filter(|s| !s.is_empty()) {
+        env.insert("TEAM_AGENT_AUTH_MODE".to_string(), auth.to_string());
     }
     env
 }
@@ -223,6 +228,7 @@ mod tests {
             Path::new("/ws"),
             "developer",
             Some("alpha"),
+            None,
         );
         for stripped in [
             "TEAM_AGENT_LEADER_PROVIDER",
@@ -248,6 +254,7 @@ mod tests {
             Path::new("/ws"),
             "developer",
             Some("alpha"),
+            Some("subscription"),
         );
         assert_eq!(
             env.get("TEAM_AGENT_ID").map(String::as_str),
@@ -265,11 +272,21 @@ mod tests {
             env.get("TEAM_AGENT_OWNER_TEAM_ID").map(String::as_str),
             Some("alpha")
         );
+        assert_eq!(
+            env.get("TEAM_AGENT_AUTH_MODE").map(String::as_str),
+            Some("subscription")
+        );
     }
 
     #[test]
     fn worker_spawn_env_inherits_parent_env_minus_strip_list() {
-        let env = worker_spawn_env(make_parent_env(&[]), Path::new("/ws"), "developer", None);
+        let env = worker_spawn_env(
+            make_parent_env(&[]),
+            Path::new("/ws"),
+            "developer",
+            None,
+            None,
+        );
         // Inherit-then-strip: every parent key passes through EXCEPT the
         // strip list. PATH-like + provider creds + random user vars all
         // present.
@@ -292,7 +309,7 @@ mod tests {
     #[test]
     fn worker_spawn_env_drops_posix_invalid_keys() {
         let parent = make_parent_env(&[("CARGO_BIN_EXE_team-agent", "/bin/x")]);
-        let env = worker_spawn_env(parent, Path::new("/ws"), "developer", None);
+        let env = worker_spawn_env(parent, Path::new("/ws"), "developer", None, None);
         assert!(!env.contains_key("CARGO_BIN_EXE_team-agent"));
     }
 
