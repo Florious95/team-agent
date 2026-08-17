@@ -1,9 +1,9 @@
 //! ---
-//! purpose: 对账 .grok/config.toml 槽位与在役 grok 席，含未首 turn 危险窗
+//! purpose: 对账 .grok/config.toml 残余共享槽与在役 grok 席，含未首 turn 危险窗
 //! contract:
 //!   provides:
 //!     - name: grok_slot_report
-//!       what: 盘上 TEAM_AGENT_ID（缺席=已切到 pane 继承）、在役 grok、pre_first_turn；读不出为 unjudgeable
+//!       what: 盘上 ID/OWNER/AUTH、在役 grok、pre_first_turn；读不出为 unjudgeable
 //! boundary:
 //!   - 读不出不报一致
 //!   - 不写盘、不改 overlay
@@ -18,6 +18,10 @@ pub(crate) struct GrokSlotReport {
     pub readable: bool,
     pub consistent: bool,
     pub disk_team_agent_id: Option<String>,
+    pub disk_owner_team_id: Option<String>,
+    pub disk_auth_mode: Option<String>,
+    pub expected_owner_team_id: Option<String>,
+    pub expected_auth_mode: Option<String>,
     pub live_seats: Vec<String>,
     pub pre_first_turn: Vec<String>,
     pub reason: String,
@@ -29,6 +33,10 @@ impl GrokSlotReport {
             "readable": self.readable,
             "consistent": self.consistent,
             "disk_team_agent_id": self.disk_team_agent_id,
+            "disk_owner_team_id": self.disk_owner_team_id,
+            "disk_auth_mode": self.disk_auth_mode,
+            "expected_owner_team_id": self.expected_owner_team_id,
+            "expected_auth_mode": self.expected_auth_mode,
             "live_seats": self.live_seats,
             "pre_first_turn": self.pre_first_turn,
             "reason": self.reason,
@@ -47,6 +55,8 @@ pub(crate) fn grok_slot_report(workspace: &Path, state: &Value) -> GrokSlotRepor
         .map(|seat| seat.id.clone())
         .collect::<Vec<_>>();
     let live_ids = live.iter().map(|seat| seat.id.clone()).collect::<Vec<_>>();
+    let expected_owner = expected_owner_team_id(state);
+    let expected_auth = expected_auth_mode(&live);
 
     let toml_path = workspace.join(".grok").join("config.toml");
     if toml_path.exists() {
@@ -59,12 +69,39 @@ pub(crate) fn grok_slot_report(workspace: &Path, state: &Value) -> GrokSlotRepor
                 );
             }
             Ok(text) => {
-                let disk = parse_toml_team_agent_id(&text);
-                return classify(disk, live_ids, pre_first_turn);
+                let disk = parse_disk_slot(&text);
+                return classify(
+                    disk,
+                    live_ids,
+                    pre_first_turn,
+                    expected_owner,
+                    expected_auth,
+                );
             }
         }
     }
-    classify(None, live_ids, pre_first_turn)
+    classify(
+        DiskSlot::default(),
+        live_ids,
+        pre_first_turn,
+        expected_owner,
+        expected_auth,
+    )
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiskSlot {
+    team_agent_id: Option<String>,
+    owner_team_id: Option<String>,
+    auth_mode: Option<String>,
+}
+
+fn parse_disk_slot(text: &str) -> DiskSlot {
+    DiskSlot {
+        team_agent_id: parse_toml_key(text, "TEAM_AGENT_ID"),
+        owner_team_id: parse_toml_key(text, "TEAM_AGENT_OWNER_TEAM_ID"),
+        auth_mode: parse_toml_key(text, "TEAM_AGENT_AUTH_MODE"),
+    }
 }
 
 fn unjudgeable(
@@ -76,6 +113,10 @@ fn unjudgeable(
         readable: false,
         consistent: false,
         disk_team_agent_id: None,
+        disk_owner_team_id: None,
+        disk_auth_mode: None,
+        expected_owner_team_id: None,
+        expected_auth_mode: None,
         live_seats,
         pre_first_turn,
         reason,
@@ -106,62 +147,84 @@ fn unreadable_state_reason(workspace: &Path, state: &Value) -> Option<String> {
 }
 
 fn classify(
-    disk: Option<String>,
+    disk: DiskSlot,
     live_ids: Vec<String>,
     pre_first_turn: Vec<String>,
+    expected_owner: Option<String>,
+    expected_auth: Option<String>,
 ) -> GrokSlotReport {
-    if live_ids.is_empty() && disk.is_none() {
+    let mut mismatches = Vec::new();
+    if let (Some(disk_id), true) = (disk.team_agent_id.as_deref(), live_ids.len() == 1) {
+        if disk_id != live_ids[0] {
+            mismatches.push(format!("id disk={disk_id} live={}", live_ids[0]));
+        }
+    } else if disk.team_agent_id.is_some() && live_ids.len() != 1 {
+        mismatches.push(format!(
+            "id disk={} live={}",
+            disk.team_agent_id.as_deref().unwrap_or("(absent)"),
+            if live_ids.is_empty() {
+                "(none)".to_string()
+            } else {
+                live_ids.join(",")
+            }
+        ));
+    }
+    if live_ids.len() > 1 {
+        mismatches.push(format!("live_seats={}", live_ids.join(",")));
+    }
+    if let (Some(disk_owner), Some(want_owner)) =
+        (disk.owner_team_id.as_deref(), expected_owner.as_deref())
+    {
+        if disk_owner != want_owner {
+            mismatches.push(format!("owner disk={disk_owner} expected={want_owner}"));
+        }
+    }
+    if let (Some(disk_auth), Some(want_auth)) =
+        (disk.auth_mode.as_deref(), expected_auth.as_deref())
+    {
+        if disk_auth != want_auth {
+            mismatches.push(format!("auth disk={disk_auth} expected={want_auth}"));
+        }
+    }
+
+    if mismatches.is_empty() {
+        let reason = if disk.team_agent_id.is_none() {
+            "slot does not carry TEAM_AGENT_ID; residual OWNER/AUTH match live seats".to_string()
+        } else {
+            "slot matches the single live grok seat".to_string()
+        };
         return GrokSlotReport {
             readable: true,
             consistent: true,
-            disk_team_agent_id: None,
+            disk_team_agent_id: disk.team_agent_id,
+            disk_owner_team_id: disk.owner_team_id,
+            disk_auth_mode: disk.auth_mode,
+            expected_owner_team_id: expected_owner,
+            expected_auth_mode: expected_auth,
             live_seats: live_ids,
             pre_first_turn,
-            reason: "no grok seats and no slot file".to_string(),
+            reason,
         };
     }
-    // After the carrier switch, identity is not on disk. Absent TEAM_AGENT_ID
-    // with at most one live grok is the healthy shape.
-    if disk.is_none() && live_ids.len() <= 1 {
-        return GrokSlotReport {
-            readable: true,
-            consistent: true,
-            disk_team_agent_id: None,
-            live_seats: live_ids,
-            pre_first_turn,
-            reason: "slot does not carry TEAM_AGENT_ID; identity inherits from pane env"
-                .to_string(),
-        };
-    }
-    if live_ids.len() == 1 && disk.as_deref() == Some(live_ids[0].as_str()) {
-        return GrokSlotReport {
-            readable: true,
-            consistent: true,
-            disk_team_agent_id: disk,
-            live_seats: live_ids,
-            pre_first_turn,
-            reason: "slot matches the single live grok seat".to_string(),
-        };
-    }
-    let disk_label = disk.clone().unwrap_or_else(|| "(absent)".to_string());
-    let live_label = if live_ids.is_empty() {
-        "(none)".to_string()
-    } else {
-        live_ids.join(",")
-    };
+
     GrokSlotReport {
         readable: true,
         consistent: false,
-        disk_team_agent_id: disk,
+        disk_team_agent_id: disk.team_agent_id,
+        disk_owner_team_id: disk.owner_team_id,
+        disk_auth_mode: disk.auth_mode,
+        expected_owner_team_id: expected_owner,
+        expected_auth_mode: expected_auth,
         live_seats: live_ids,
         pre_first_turn,
-        reason: format!("grok slot mismatch: disk={disk_label} live={live_label}"),
+        reason: format!("grok slot mismatch: {}", mismatches.join("; ")),
     }
 }
 
 struct LiveGrok {
     id: String,
     pre_first_turn: bool,
+    auth_mode: Option<String>,
 }
 
 fn live_grok_from_state(state: &Value) -> Vec<LiveGrok> {
@@ -204,14 +267,52 @@ fn push_live_from_map(agents: Option<&serde_json::Map<String, Value>>, out: &mut
         out.push(LiveGrok {
             id: id.clone(),
             pre_first_turn: first.is_none(),
+            auth_mode: agent_auth_mode(agent),
         });
     }
 }
 
-fn parse_toml_team_agent_id(text: &str) -> Option<String> {
+fn agent_auth_mode(agent: &Value) -> Option<String> {
+    match agent.get("auth_mode") {
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(other) if !other.is_null() => Some(other.to_string().trim_matches('"').to_string()),
+        _ => None,
+    }
+}
+
+fn expected_owner_team_id(state: &Value) -> Option<String> {
+    for key in ["active_team_key", "team_key", "TEAM_AGENT_OWNER_TEAM_ID"] {
+        if let Some(value) = state
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn expected_auth_mode(live: &[LiveGrok]) -> Option<String> {
+    let mut found = None;
+    for seat in live {
+        let Some(auth) = seat.auth_mode.as_deref() else {
+            continue;
+        };
+        match found {
+            None => found = Some(auth.to_string()),
+            Some(ref existing) if existing != auth => return None,
+            Some(_) => {}
+        }
+    }
+    found
+}
+
+fn parse_toml_key(text: &str, key: &str) -> Option<String> {
     for line in text.lines() {
         let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix("TEAM_AGENT_ID") else {
+        let Some(rest) = trimmed.strip_prefix(key) else {
             continue;
         };
         let rest = rest.trim().strip_prefix('=')?;
