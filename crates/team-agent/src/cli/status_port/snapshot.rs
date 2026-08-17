@@ -90,7 +90,25 @@ impl RuntimeSnapshot {
                 serde_json::json!(tmux_present),
             );
         }
-        let readiness = crate::cli::diagnose::wait_readiness(&readiness_state);
+        let mut readiness = crate::cli::diagnose::wait_readiness(&readiness_state);
+        let team_key = owner_team_id
+            .filter(|team| !team.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::state::projection::team_state_key(state));
+        if !team_key.is_empty()
+            && !crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
+        {
+            if let Some(object) = readiness.as_object_mut() {
+                object.insert("all_attached_receiver".to_string(), json!(false));
+                object.insert("ready".to_string(), json!(false));
+                object.insert("state".to_string(), json!("leader_receiver_unbound"));
+                object.insert("next_action".to_string(), json!("claim-leader"));
+                object.insert(
+                    "reason".to_string(),
+                    json!("leader registry does not authorize this workspace"),
+                );
+            }
+        }
         let full = crate::redaction::redact_external_value(&json!({
             "ok": true,
             "team": state.pointer("/leader/id").cloned().unwrap_or_else(|| json!("leader")),

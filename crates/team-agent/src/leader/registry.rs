@@ -243,6 +243,9 @@ pub fn register_binding_from_state_best_effort(
     );
     let event_log = crate::event_log::EventLog::new(workspace);
     let write_result = write_entry_best_effort(&entry);
+    if write_result.is_some() {
+        let _ = mark_displaced_same_pane_entries_unbound(&entry);
+    }
     let status = if let Some(path) = &write_result {
         let _ = event_log.write(
             EVENT_REGISTERED,
@@ -273,6 +276,64 @@ pub fn register_binding_from_state_best_effort(
         source: source.to_string(),
         owner_epoch: entry.owner_epoch,
     })
+}
+
+/// Stored registry status after another workspace claimed the same pane.
+pub const REGISTRY_STATUS_UNBOUND: &str = "unbound";
+
+/// When workspace B claims a pane, every other attached registry row that
+/// still names that pane is no longer deliverable. Mark those rows unbound.
+/// Does not change pane-side authorization storage.
+pub fn mark_displaced_same_pane_entries_unbound(winner: &LeaderRegistryEntry) -> Vec<PathBuf> {
+    let Some(winner_pane) = winner
+        .channel
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .filter(|pane| !pane.is_empty())
+    else {
+        return Vec::new();
+    };
+    let winner_socket = winner
+        .channel
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .filter(|socket| !socket.is_empty());
+    let mut displaced = Vec::new();
+    for (path, mut entry) in read_all_entries() {
+        if entry.workspace_hash == winner.workspace_hash && entry.team_key == winner.team_key {
+            continue;
+        }
+        if entry.status != "attached" {
+            continue;
+        }
+        let Some(pane) = entry
+            .channel
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .filter(|pane| !pane.is_empty())
+        else {
+            continue;
+        };
+        if pane != winner_pane {
+            continue;
+        }
+        let socket = entry
+            .channel
+            .get("tmux_socket")
+            .and_then(Value::as_str)
+            .filter(|socket| !socket.is_empty());
+        if let (Some(left), Some(right)) = (winner_socket, socket) {
+            if left != right {
+                continue;
+            }
+        }
+        entry.status = REGISTRY_STATUS_UNBOUND.to_string();
+        entry.updated_at = chrono::Utc::now().to_rfc3339();
+        if write_entry_best_effort(&entry).is_some() {
+            displaced.push(path);
+        }
+    }
+    displaced
 }
 
 fn entry_filename(entry: &LeaderRegistryEntry) -> String {

@@ -55,11 +55,20 @@ pub(super) fn compact_not_ready(full: &Value) -> Value {
         })
         .unwrap_or_default();
     let mut obj = Map::new();
+    let channel_unbound = reasons
+        .iter()
+        .any(|reason| reason == "leader_receiver_unbound");
     obj.insert(
         "reasons".to_string(),
         Value::Array(reasons.into_iter().map(Value::String).collect()),
     );
     obj.insert("agents".to_string(), Value::Array(agents));
+    if channel_unbound {
+        obj.insert(
+            "next_action".to_string(),
+            Value::String("claim-leader".to_string()),
+        );
+    }
     Value::Object(obj)
 }
 
