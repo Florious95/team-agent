@@ -119,14 +119,14 @@ fn write_grok_team(ws: &Path, team_key: &str, agent_id: &str) -> PathBuf {
     std::fs::write(
         team.join("TEAM.md"),
         format!(
-            "---\nname: {team_key}\nobjective: grok MCP overlay contract.\nprovider: grok\n---\n\nTeam.\n"
+            "---\nname: {team_key}\nobjective: grok MCP overlay contract.\nprovider: grok\ndangerously_skip_permissions: false\n---\n\nTeam.\n"
         ),
     )
     .unwrap();
     std::fs::write(
         team.join("agents").join(format!("{agent_id}.md")),
         format!(
-            "---\nname: {agent_id}\nrole: Grok Writer\nprovider: grok\nmodel: grok-4\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+            "---\nname: {agent_id}\nrole: Grok Writer\nprovider: grok\nmodel: grok-4\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWorker.\n"
         ),
     )
     .unwrap();
