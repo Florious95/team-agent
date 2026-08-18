@@ -11,9 +11,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::{
-    CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
+    sleep_remaining_paste_to_submit_floor, CommandOutput, CommandRunner, RealCommandRunner,
+    TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
 };
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
@@ -924,6 +926,57 @@ fn inject_waits_for_token_visibility_before_enter() {
     assert_eq!(
         report.submit_verification,
         SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+}
+
+#[test]
+fn paste_to_submit_floor_default_is_zero_even_if_test_tmp_is_set() {
+    let (be, _) = backend_with(MockResp::Out(ok("")), vec![]);
+    assert_eq!(
+        be.paste_to_submit_floor(),
+        Duration::ZERO,
+        "default floor must be ZERO; TEAM_AGENT_TEST_TMP is not this switch"
+    );
+}
+
+#[test]
+fn paste_to_submit_nonzero_floor_is_actually_slept() {
+    let start = Instant::now();
+    sleep_remaining_paste_to_submit_floor(start, Duration::from_millis(40));
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(40),
+        "non-zero floor must sleep the remaining time; elapsed={elapsed:?}"
+    );
+}
+
+#[test]
+fn paste_to_submit_zero_floor_does_not_sleep() {
+    let start = Instant::now();
+    sleep_remaining_paste_to_submit_floor(start, Duration::ZERO);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(20),
+        "ZERO floor must be free for claude/codex/grok; elapsed={elapsed:?}"
+    );
+}
+
+#[test]
+fn inject_honors_injected_nonzero_paste_to_submit_floor() {
+    let (be, _) = backend_with(MockResp::Out(ok("hello")), vec![]);
+    be.set_paste_to_submit_floor(Duration::from_millis(40));
+    let start = Instant::now();
+    be.inject(
+        &Target::Pane(PaneId::new("%7")),
+        &InjectPayload::Text("hello".to_string()),
+        Key::Enter,
+        true,
+    )
+    .expect("inject");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(40),
+        "inject must take the injected cursor floor; elapsed={elapsed:?}"
     );
 }
 

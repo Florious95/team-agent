@@ -39,6 +39,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::model::enums::PaneLiveness;
@@ -202,7 +203,15 @@ pub struct TmuxBackend {
     /// swallow batch 2: workspace for failure-observability events (`tmux.*_failed`);
     /// `None` for non-workspace-bound backends (no event log to write to).
     event_workspace: Option<PathBuf>,
+    /// Cursor Ink only. Default 0 so claude/codex/grok pay nothing.
+    /// Delivery sets this for `Provider::CursorAgent` per inject; tests inject a
+    /// small non-zero Duration to cover the sleep branch. Not TEAM_AGENT_TEST_TMP.
+    paste_to_submit_floor_ms: AtomicU64,
 }
+
+/// Measured cursor-agent 2026.08.11 floor: text and first Enter must be ≥1s apart
+/// (phase0 M2-5/M2-6; `.team/scripts/cursor_send.sh`). Other providers stay ZERO.
+pub const CURSOR_PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_secs(1);
 
 enum TmuxSocketEndpoint {
     Name(String),
@@ -241,38 +250,45 @@ pub(crate) struct RuntimeTmuxBackendSelection {
 }
 
 impl TmuxBackend {
+    fn assemble(
+        runner: Box<dyn CommandRunner>,
+        socket: Option<TmuxSocketEndpoint>,
+        event_workspace: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            runner,
+            socket,
+            event_workspace,
+            paste_to_submit_floor_ms: AtomicU64::new(0),
+        }
+    }
+
     /// Backend bound to the real `tmux` subprocess on the SHARED default socket (no `-L`).
     /// Non-team callers + existing argv/unit tests stay unaffected.
     pub fn new() -> Self {
-        Self {
-            runner: Box::new(RealCommandRunner),
-            socket: None,
-            event_workspace: None,
-        }
+        Self::assemble(Box::new(RealCommandRunner), None, None)
     }
 
     /// CP-1 team backend: bound to the real `tmux` subprocess on a PER-WORKSPACE socket, derived
     /// deterministically from the canonicalized workspace path so the leader CLI, the daemon, and
     /// every later op (spawn / inject / has_session / kill) hit the SAME `tmux -L <socket>` server.
     pub fn for_workspace(workspace: &Path) -> Self {
-        Self {
-            runner: Box::new(RealCommandRunner),
-            socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(
-                workspace,
-            ))),
-            event_workspace: Some(workspace.to_path_buf()),
-        }
+        Self::assemble(
+            Box::new(RealCommandRunner),
+            Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(workspace))),
+            Some(workspace.to_path_buf()),
+        )
     }
 
     pub(crate) fn for_socket_name(socket: &str) -> Self {
         if socket.is_empty() || socket == "default" {
             Self::new()
         } else {
-            Self {
-                runner: Box::new(RealCommandRunner),
-                socket: Some(TmuxSocketEndpoint::Name(socket.to_string())),
-                event_workspace: None,
-            }
+            Self::assemble(
+                Box::new(RealCommandRunner),
+                Some(TmuxSocketEndpoint::Name(socket.to_string())),
+                None,
+            )
         }
     }
 
@@ -280,19 +296,17 @@ impl TmuxBackend {
         if endpoint.is_empty() || endpoint == "default" {
             Self::new()
         } else if Path::new(endpoint).is_absolute() {
-            Self {
-                runner: Box::new(RealCommandRunner),
-                socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
-                event_workspace: None,
-            }
+            Self::assemble(
+                Box::new(RealCommandRunner),
+                Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
+                None,
+            )
         } else if let Some(path) = socket_path_for_name(endpoint) {
-            Self {
-                runner: Box::new(RealCommandRunner),
-                socket: Some(TmuxSocketEndpoint::Path(
-                    path.to_string_lossy().into_owned(),
-                )),
-                event_workspace: None,
-            }
+            Self::assemble(
+                Box::new(RealCommandRunner),
+                Some(TmuxSocketEndpoint::Path(path.to_string_lossy().into_owned())),
+                None,
+            )
         } else {
             Self::new()
         }
@@ -317,23 +331,29 @@ impl TmuxBackend {
 
     /// Backend with an injected runner (tests: canned/recording tmux output). Shared default socket.
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
-        Self {
-            runner,
-            socket: None,
-            event_workspace: None,
-        }
+        Self::assemble(runner, None, None)
+    }
+
+    /// Injected paste→Enter floor. Production delivery sets 1s only for
+    /// `Provider::CursorAgent`. Tests pass a small non-zero Duration to cover
+    /// the sleep branch. Default is ZERO regardless of TEAM_AGENT_TEST_TMP.
+    pub fn set_paste_to_submit_floor(&self, floor: Duration) {
+        let ms = u64::try_from(floor.as_millis()).unwrap_or(u64::MAX);
+        self.paste_to_submit_floor_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn paste_to_submit_floor(&self) -> Duration {
+        Duration::from_millis(self.paste_to_submit_floor_ms.load(Ordering::Relaxed))
     }
 
     /// Backend with an injected runner bound to a per-workspace socket (tests: assert the `-L` is in
     /// the recorded argv for a workspace-bound backend).
     pub fn with_runner_for_workspace(runner: Box<dyn CommandRunner>, workspace: &Path) -> Self {
-        Self {
+        Self::assemble(
             runner,
-            socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(
-                workspace,
-            ))),
-            event_workspace: Some(workspace.to_path_buf()),
-        }
+            Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(workspace))),
+            Some(workspace.to_path_buf()),
+        )
     }
 
     pub(crate) fn with_runner_for_tmux_endpoint(
@@ -341,31 +361,21 @@ impl TmuxBackend {
         endpoint: &str,
     ) -> Self {
         if Path::new(endpoint).is_absolute() {
-            Self {
+            Self::assemble(
                 runner,
-                socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
-                event_workspace: None,
-            }
+                Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
+                None,
+            )
         } else if endpoint.is_empty() || endpoint == "default" {
-            Self {
-                runner,
-                socket: None,
-                event_workspace: None,
-            }
+            Self::assemble(runner, None, None)
         } else if let Some(path) = socket_path_for_name(endpoint) {
-            Self {
+            Self::assemble(
                 runner,
-                socket: Some(TmuxSocketEndpoint::Path(
-                    path.to_string_lossy().into_owned(),
-                )),
-                event_workspace: None,
-            }
+                Some(TmuxSocketEndpoint::Path(path.to_string_lossy().into_owned())),
+                None,
+            )
         } else {
-            Self {
-                runner,
-                socket: None,
-                event_workspace: None,
-            }
+            Self::assemble(runner, None, None)
         }
     }
 
@@ -1138,18 +1148,8 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
 /// U1 #7: the exact delivery-token marker a token payload carries
 /// (`[team-agent-token:<id>]`). Use the full marker, not only the prefix, so an old
 /// scrollback token cannot verify a new message.
-/// Cursor Ink swallows Enter that arrives with the paste. Measured floor is
-/// 1s. Tests set TEAM_AGENT_TEST_TMP and skip the wait so the suite stays cheap.
-fn paste_to_submit_floor() -> Duration {
-    if std::env::var_os("TEAM_AGENT_TEST_TMP").is_some() {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(1)
-    }
-}
-
-fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant) {
-    let remain = paste_to_submit_floor().saturating_sub(pasted_at.elapsed());
+pub(crate) fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant, floor: Duration) {
+    let remain = floor.saturating_sub(pasted_at.elapsed());
     if !remain.is_zero() {
         std::thread::sleep(remain);
     }
@@ -2020,6 +2020,10 @@ impl Transport for TmuxBackend {
         self.spawn_with_command(session, window, &command, false)
     }
 
+    fn set_paste_to_submit_floor(&self, floor: Duration) {
+        TmuxBackend::set_paste_to_submit_floor(self, floor);
+    }
+
     fn inject(
         &self,
         target: &Target,
@@ -2088,7 +2092,9 @@ impl Transport for TmuxBackend {
                 // Design truth source: .team/artifacts/E55-delivery-architecture-design.html
                 // Python parity: dynamic timeout max(2s, bytes/25000), poll 50ms.
                 // Cursor Ink：文本与 Enter 必须分开发且间隔 ≥1s，否则第一次
-                // Enter 被吞。token 可见性轮询的耗时算进这 1s；测试隔离下地板为 0。
+                // Enter 被吞。token 可见性轮询的耗时算进这 1s。地板由
+                // `set_paste_to_submit_floor` 注入，默认 ZERO；只有 cursor 席
+                // 在 delivery 里设成 1s。
                 // ═══════════════════════════════════════════════════════════
                 let inject_start = std::time::Instant::now();
                 let pasted_at = inject_start;
@@ -2154,7 +2160,7 @@ impl Transport for TmuxBackend {
                     });
                 }
 
-                sleep_remaining_paste_to_submit_floor(pasted_at);
+                sleep_remaining_paste_to_submit_floor(pasted_at, self.paste_to_submit_floor());
 
                 let marker = payload_token_marker(payload);
                 let max_submit_attempts: u32 = 3;

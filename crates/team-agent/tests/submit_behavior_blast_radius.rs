@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use team_agent::provider::submit_now::{
-    flush_explicit_queue, CURSOR_SEND_NOW_MARK, GROK_SEND_NOW_MARK,
+    flush_explicit_queue_for, CURSOR_SEND_NOW_MARK, GROK_SEND_NOW_MARK,
 };
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
 use team_agent::transport::{Key, PaneId, Target, Transport};
@@ -61,10 +61,14 @@ fn backend(screen: &str, enters: &Arc<Mutex<u32>>) -> TmuxBackend {
 }
 
 fn flush_enters(screen: &str) -> u32 {
+    flush_enters_for(screen, &[GROK_SEND_NOW_MARK, CURSOR_SEND_NOW_MARK])
+}
+
+fn flush_enters_for(screen: &str, marks: &[&str]) -> u32 {
     let enters = Arc::new(Mutex::new(0));
     let be = backend(screen, &enters);
     let target = Target::Pane(PaneId::new("%1"));
-    flush_explicit_queue(&be, &target).expect("flush");
+    flush_explicit_queue_for(&be, &target, marks).expect("flush");
     let n = *enters.lock().expect("enters");
     n
 }
@@ -110,5 +114,60 @@ fn cursor_queue_mark_gets_send_now_enter() {
     assert!(
         n >= 1,
         "cursor queue mark must be flushed by extra Enter (not re-paste); got {n}"
+    );
+}
+
+const CLAUDE_NO_QUEUE: &str = "● Running tool\nesc to interrupt\n❯ ";
+const CODEX_NO_QUEUE: &str = "workdir · thinking\nesc to interrupt\n";
+
+/// 该路单独启用：grok 标记在无队列 pane 上必须零次 send_keys。
+#[test]
+fn grok_mark_alone_on_no_queue_pane_sends_zero_enters() {
+    assert_eq!(
+        flush_enters_for(CLAUDE_NO_QUEUE, &[GROK_SEND_NOW_MARK]),
+        0,
+        "grok detector alone must not press Enter on a claude pane"
+    );
+    assert_eq!(
+        flush_enters_for(CODEX_NO_QUEUE, &[GROK_SEND_NOW_MARK]),
+        0,
+        "grok detector alone must not press Enter on a codex pane"
+    );
+}
+
+/// 该路单独启用：cursor 标记在无队列 pane 上必须零次 send_keys。
+#[test]
+fn cursor_mark_alone_on_no_queue_pane_sends_zero_enters() {
+    assert_eq!(
+        flush_enters_for(CLAUDE_NO_QUEUE, &[CURSOR_SEND_NOW_MARK]),
+        0,
+        "cursor detector alone must not press Enter on a claude pane"
+    );
+    assert_eq!(
+        flush_enters_for(CODEX_NO_QUEUE, &[CURSOR_SEND_NOW_MARK]),
+        0,
+        "cursor detector alone must not press Enter on a codex pane"
+    );
+}
+
+/// grok 路单独启用时，cursor 的页脚不算队列。
+#[test]
+fn grok_mark_alone_ignores_cursor_queue_footer() {
+    let screen = format!("#1 follow-up\n{CURSOR_SEND_NOW_MARK} · ↑ select/edit · esc cancel\n");
+    assert_eq!(
+        flush_enters_for(&screen, &[GROK_SEND_NOW_MARK]),
+        0,
+        "enabling only the grok mark must not fire on a cursor follow-ups footer"
+    );
+}
+
+/// cursor 路单独启用时，grok 的页脚不算队列。
+#[test]
+fn cursor_mark_alone_ignores_grok_queue_footer() {
+    let screen = format!("#1 stop-do-not-delete\n{GROK_SEND_NOW_MARK}\n");
+    assert_eq!(
+        flush_enters_for(&screen, &[CURSOR_SEND_NOW_MARK]),
+        0,
+        "enabling only the cursor mark must not fire on a grok Enter:send now footer"
     );
 }
