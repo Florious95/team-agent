@@ -1530,3 +1530,7 @@ fn p2_classify_first_send_at_accepts_broad_iso_like_python() {
 // Golden: diagnose/quick_start.py, launch/core.py, lifecycle/start.py, restart/orchestration.py,
 // lifecycle/operations.py (team-agent-public @ v0.2.11).
 // ═════════════════════════════════════════════════════════════════════════
+
+// tests.rs 不在本单 write_paths 内；从本文件挂上夹具模块，cargo test 才能收录。
+#[path = "gate_fixtures.rs"]
+mod gate_fixtures;
