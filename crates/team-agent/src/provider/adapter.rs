@@ -577,6 +577,22 @@ impl ProviderAdapter for BasicProviderAdapter {
             //   * `-C <workspace>`(双保险,即便 spawn cwd 漂移也能锚定)
             // mcp_config inline 形态由 build_command 写入,launch 路径会用
             // point_native_mcp_config_at_file 重写为 @<file> 形(§C1 note)。
+            Provider::Grok => {
+                let mut argv = grok_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch
+                        .is_some_and(|profile| profile.managed_mcp_config),
+                    ctx.effort,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(next_session_token());
+                Ok(CommandPlan::argv_only(argv))
+            }
             Provider::Copilot => {
                 let expected = next_session_token();
                 let mut argv = copilot_base_command(
@@ -867,6 +883,27 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push(session_id.as_str().to_string());
                 Ok(CommandPlan::argv_only(argv))
             }
+            Provider::Grok => {
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "resume requires session_id".to_string(),
+                    ));
+                };
+                let mut argv = grok_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch
+                        .is_some_and(|profile| profile.managed_mcp_config),
+                    ctx.effort,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                Ok(CommandPlan::argv_only(argv))
+            }
             _ => self
                 .build_resume_command_with_context(
                     session_id,
@@ -1091,6 +1128,30 @@ impl ProviderAdapter for BasicProviderAdapter {
                     provider_projects_root: Some(root),
                     managed_mcp_config: profile.managed_mcp_config,
                 })
+            }
+            Provider::Grok => {
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "fork requires session_id".to_string(),
+                    ));
+                };
+                let mut argv = grok_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch
+                        .is_some_and(|profile| profile.managed_mcp_config),
+                    ctx.effort,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(next_session_token());
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                argv.push("--fork-session".to_string());
+                Ok(CommandPlan::argv_only(argv))
             }
             _ => self
                 .fork_with_context(

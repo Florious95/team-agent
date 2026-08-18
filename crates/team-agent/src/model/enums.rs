@@ -39,7 +39,8 @@ pub enum Provider {
 /// Provider support:
 ///   - claude / claude_code: low|medium|high|xhigh|max → `--effort <level>`
 ///   - codex: low|medium|high|xhigh (NOT max) → `-c model_reasoning_effort=<level>`
-///   - copilot / gemini_cli / fake: unsupported — warning event, no flag
+///   - grok: low|medium|high|xhigh (NOT max) → `--effort <level>`
+///   - copilot / gemini_cli / cursor_agent / fake: unsupported — warning event, no flag
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderEffort {
     #[serde(rename = "low")]
@@ -84,17 +85,15 @@ impl ProviderEffort {
     }
 
     /// True when the given provider supports this effort level. `max` is
-    /// Claude-only; other levels are supported by Claude and Codex, ignored
-    /// by Copilot/Gemini/Fake (warning emitted at runtime).
+    /// Claude-only; other levels are supported by Claude, Codex, and Grok.
+    /// Copilot/Gemini/CursorAgent/Fake ignore the field (warning at runtime).
     pub fn is_supported_by(self, provider: Provider) -> bool {
         match provider {
             Provider::Claude | Provider::ClaudeCode => true,
-            Provider::Codex => !self.is_claude_only(),
-            Provider::Copilot
-            | Provider::GeminiCli
-            | Provider::Grok
-            | Provider::CursorAgent
-            | Provider::Fake => false,
+            Provider::Codex | Provider::Grok => !self.is_claude_only(),
+            Provider::Copilot | Provider::GeminiCli | Provider::CursorAgent | Provider::Fake => {
+                false
+            }
         }
     }
 }
