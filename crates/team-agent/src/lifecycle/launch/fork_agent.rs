@@ -7,6 +7,7 @@
 //!     - name: in_window_fork
 //!       what: 已验证的 provider+subscription 给出 command+screen_mark；未验证返回 None
 //!   depends:
+//!     - crate::lifecycle::lock
 //!     - crate::lifecycle::pane_input_lock
 //!     - crate::transport::Transport
 //! boundary:
@@ -87,15 +88,27 @@ pub fn fork_agent_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let lock_workspace = selected.run_workspace.clone();
+    let lock_team_key = selected.team_key.clone();
+    let _lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &lock_workspace,
+        operation: "fork-agent",
+        team: Some(lock_team_key.as_str()),
+        agent_id: Some(source_agent_id),
+    })?;
+    let selected = crate::state::selector::resolve_active_team(
+        &lock_workspace,
+        Some(lock_team_key.as_str()),
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     let run_ws = selected.run_workspace.clone();
     let agent = selected
         .state
         .get("agents")
         .and_then(|agents| agents.get(source_agent_id.as_str()))
         .ok_or_else(|| {
-            LifecycleError::RequirementUnmet(format!(
-                "unknown worker agent id: {source_agent_id}"
-            ))
+            LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
         })?;
     let provider_raw = agent
         .get("provider")
@@ -155,9 +168,7 @@ pub fn fork_agent_with_transport(
                 "screen_mark": spec.screen_mark,
             }),
         )
-        .map_err(|e| {
-            LifecycleError::StatePersist(format!("fork audit write failed: {e}"))
-        })?;
+        .map_err(|e| LifecycleError::StatePersist(format!("fork audit write failed: {e}")))?;
     Ok(ForkAgentReport {
         source_agent_id: source_agent_id.clone(),
         new_agent_id: source_agent_id.clone(),
@@ -187,8 +198,7 @@ fn inject_clean_command(
     Ok(())
 }
 
-const NO_CONVERSATION_TO_BRANCH: &str =
-    "Failed to branch conversation: No conversation to branch";
+const NO_CONVERSATION_TO_BRANCH: &str = "Failed to branch conversation: No conversation to branch";
 
 fn wait_for_screen_mark(
     transport: &dyn Transport,
