@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{
-    sleep_remaining_paste_to_submit_floor, CommandOutput, CommandRunner, RealCommandRunner,
-    TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
+    current_paste_to_submit_floor, sleep_remaining_paste_to_submit_floor,
+    with_paste_to_submit_floor, CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend,
+    PANE_BINDING_NONCE_METADATA_KEY,
 };
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
@@ -931,9 +932,8 @@ fn inject_waits_for_token_visibility_before_enter() {
 
 #[test]
 fn paste_to_submit_floor_default_is_zero_even_if_test_tmp_is_set() {
-    let (be, _) = backend_with(MockResp::Out(ok("")), vec![]);
     assert_eq!(
-        be.paste_to_submit_floor(),
+        current_paste_to_submit_floor(),
         Duration::ZERO,
         "default floor must be ZERO; TEAM_AGENT_TEST_TMP is not this switch"
     );
@@ -964,15 +964,16 @@ fn paste_to_submit_zero_floor_does_not_sleep() {
 #[test]
 fn inject_honors_injected_nonzero_paste_to_submit_floor() {
     let (be, _) = backend_with(MockResp::Out(ok("hello")), vec![]);
-    be.set_paste_to_submit_floor(Duration::from_millis(40));
     let start = Instant::now();
-    be.inject(
-        &Target::Pane(PaneId::new("%7")),
-        &InjectPayload::Text("hello".to_string()),
-        Key::Enter,
-        true,
-    )
-    .expect("inject");
+    with_paste_to_submit_floor(Duration::from_millis(40), || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text("hello".to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    });
     let elapsed = start.elapsed();
     assert!(
         elapsed >= Duration::from_millis(40),

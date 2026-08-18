@@ -515,18 +515,18 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
-    transport.set_paste_to_submit_floor(paste_to_submit_floor_for_recipient(
-        state,
-        &message.recipient,
-    ));
-    let inject_attempt = transport.inject_with_submit_observer(
-        &target,
-        &payload,
-        Key::Enter,
-        true,
-        Some(&submit_observer),
+    let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
+        paste_to_submit_floor_for_recipient(state, &message.recipient),
+        || {
+            transport.inject_with_submit_observer(
+                &target,
+                &payload,
+                Key::Enter,
+                true,
+                Some(&submit_observer),
+            )
+        },
     );
-    transport.set_paste_to_submit_floor(Duration::ZERO);
     let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。

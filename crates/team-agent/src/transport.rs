@@ -23,7 +23,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -713,10 +712,6 @@ pub trait Transport: Send + Sync {
         }
         Ok(report)
     }
-
-    /// Per-inject paste→Enter floor. Default ZERO (claude/codex/grok).
-    /// Only the tmux backend honors a non-zero value; mocks stay no-op.
-    fn set_paste_to_submit_floor(&self, _floor: Duration) {}
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError>;
 
