@@ -8,6 +8,8 @@
 //!       what: 扫描 toml env 表里的每席键
 //!     - name: strip_per_seat_keys_from_toml
 //!       what: 从任意 .env 表删掉每席键，留下非框架键
+//!     - name: non_per_seat_env_in_tables
+//!       what: 从指定表的 .env 取出非每席键（值原样），供 overlay 保留
 //! boundary:
 //!   - 不写盘
 //!   - 不数 grok 席位个数
@@ -89,6 +91,49 @@ pub(crate) fn strip_per_seat_keys_from_toml(text: &str) -> (String, Vec<String>)
     (out, removed)
 }
 
+fn toml_env_value(rest: &str) -> String {
+    let rest = rest.trim();
+    rest.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(rest)
+        .to_string()
+}
+
+/// Keys in `tables*.env` that are **not** per-seat. Unknown keys must be
+/// kept — detection failure does not authorize deletion.
+pub(crate) fn non_per_seat_env_in_tables(
+    text: &str,
+    tables: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut in_target_env = false;
+    let mut out = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let name = &trimmed[1..trimmed.len() - 1];
+            in_target_env = name.ends_with(".env")
+                && tables
+                    .iter()
+                    .any(|table| name == *table || name.starts_with(&format!("{table}.")));
+            continue;
+        }
+        if !in_target_env {
+            continue;
+        }
+        let Some((key, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || is_per_seat_env_key(key) {
+            continue;
+        }
+        out.entry(key.to_string())
+            .or_insert_with(|| toml_env_value(rest));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +207,36 @@ TEAM_AGENT_AUTH_MODE = "not-in-env-table"
         assert!(
             !cleaned.contains("impostor"),
             "stripped values must not be rewritten; cleaned={cleaned}"
+        );
+    }
+
+    #[test]
+    fn non_per_seat_scan_keeps_unknown_keys_from_named_tables_only() {
+        let text = r#"
+[mcp_servers.keep-me.env]
+GROK_FOLDER_TRUST = "other-table"
+
+[mcp_servers.team_orchestrator.env]
+TEAM_AGENT_ID = "stale"
+GROK_FOLDER_TRUST = "1"
+TEAM_AGENT_WORKSPACE = "/ws"
+USER_EXTRA = "keep"
+"#;
+        let kept = non_per_seat_env_in_tables(text, &["mcp_servers.team_orchestrator"]);
+        assert_eq!(kept.get("GROK_FOLDER_TRUST").map(String::as_str), Some("1"));
+        assert_eq!(kept.get("USER_EXTRA").map(String::as_str), Some("keep"));
+        assert_eq!(
+            kept.get("TEAM_AGENT_WORKSPACE").map(String::as_str),
+            Some("/ws")
+        );
+        assert!(
+            !kept.contains_key("TEAM_AGENT_ID"),
+            "per-seat keys are not preserved; kept={kept:?}"
+        );
+        assert_ne!(
+            kept.get("GROK_FOLDER_TRUST").map(String::as_str),
+            Some("other-table"),
+            "only the named table is read; kept={kept:?}"
         );
     }
 }

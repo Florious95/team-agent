@@ -454,16 +454,24 @@ pub fn apply_grok_mcp_overlay(
         })
         .unwrap_or_default();
 
-    // Per-seat keys live on the pane env. The directory-scoped toml is a
-    // last-writer slot: keep only WORKSPACE (and the launch command).
+    // Per-seat keys live on the pane env. Unknown keys on the existing
+    // table stay: a full stanza rewrite must not treat "not in our list"
+    // as permission to delete.
     reconcile_grok_toml_per_seat_keys(workspace)?;
-    let mut env = env;
-    env.retain(|key, value| !super::is_per_seat_env_key(key) && !value.trim().is_empty());
-
-    let stanza = render_grok_team_agent_stanza(command, &args, &env);
     let dir = workspace.join(".grok");
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let preserved = super::non_per_seat_env_in_tables(
+        &existing,
+        &["mcp_servers.team_orchestrator", "mcp_servers.team-agent"],
+    );
+    let mut env = env;
+    env.retain(|key, value| !super::is_per_seat_env_key(key) && !value.trim().is_empty());
+    for (key, value) in preserved {
+        env.entry(key).or_insert(value);
+    }
+
+    let stanza = render_grok_team_agent_stanza(command, &args, &env);
     // 同时摘掉新表和 0.5.67 误写的 [mcp_servers.team-agent]，否则改名后两套
     // team MCP 并存，grok 会列出两份指向同一进程的工具。
     let body = upsert_toml_table_prefixes(

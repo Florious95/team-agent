@@ -266,7 +266,8 @@ pub(crate) use agent_state::{
 
 mod grok_per_seat;
 pub(crate) use grok_per_seat::{
-    is_per_seat_env_key, per_seat_keys_in_toml, strip_per_seat_keys_from_toml,
+    is_per_seat_env_key, non_per_seat_env_in_tables, per_seat_keys_in_toml,
+    strip_per_seat_keys_from_toml,
 };
 
 mod mcp_config;

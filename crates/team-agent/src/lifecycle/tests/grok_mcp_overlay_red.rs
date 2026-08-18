@@ -244,6 +244,42 @@ fn leftover_per_seat_key_is_cleared_before_start() {
 }
 
 #[test]
+fn overlay_preserves_unknown_env_keys_on_the_shared_table() {
+    let ws = tmp_dir("grok-mcp-keep-unknown");
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        r#"[mcp_servers.team_orchestrator]
+command = "/old/team-agent"
+
+[mcp_servers.team_orchestrator.env]
+TEAM_AGENT_ID = "stale-id"
+GROK_FOLDER_TRUST = "1"
+USER_EXTRA = "keep-me"
+TEAM_AGENT_WORKSPACE = "/stale-ws"
+"#,
+    )
+    .unwrap();
+
+    apply_grok_mcp_overlay(&ws, &sample_mcp_config("keep-seat", "/ws-keep"))
+        .expect("overlay must keep unknown keys while dropping per-seat ones");
+    let text = std::fs::read_to_string(grok.join("config.toml")).unwrap();
+    assert!(
+        !text.contains("TEAM_AGENT_ID") && !text.contains("stale-id"),
+        "per-seat keys must leave; text={text}"
+    );
+    assert!(
+        text.contains("GROK_FOLDER_TRUST = \"1\"") && text.contains("USER_EXTRA = \"keep-me\""),
+        "unknown env keys must survive the stanza rewrite with the same value; text={text}"
+    );
+    assert!(
+        text.contains("TEAM_AGENT_WORKSPACE = \"/ws-keep\""),
+        "incoming workspace must win over the stale disk value; text={text}"
+    );
+}
+
+#[test]
 #[serial(env)]
 fn grok_untrusted_folder_refuses_to_start() {
     let ws = tmp_dir("grok-untrusted");
