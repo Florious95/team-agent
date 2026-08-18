@@ -97,3 +97,4 @@ mod cursor_mcp_overlay;
 mod communication_mode_runtime_contract_red;
 mod mcp_tool_name_format_red;
 mod clone_fork_copilot_perms_red;
+mod clone_agent_preserves_source_tools;
