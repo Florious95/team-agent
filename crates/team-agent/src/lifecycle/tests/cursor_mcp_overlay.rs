@@ -15,10 +15,12 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::lifecycle::{
-    apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,
-    physical_workspace_path, LifecycleError,
+    apply_cursor_mcp_overlay, apply_cursor_subscription_proxy_env,
+    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, physical_workspace_path,
+    LifecycleError,
 };
 use team_agent::provider::McpConfig;
 use team_agent::transport::test_support::OfflineTransport;
@@ -153,6 +155,31 @@ fn cursor_workspace_flag_is_rewritten_to_physical_path() {
     apply_cursor_workspace_physical_path(&mut argv, &ws);
     let physical = physical_workspace_path(&ws);
     assert_eq!(argv[2], physical.to_string_lossy().as_ref());
+}
+
+#[test]
+#[serial(env)]
+fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
+    let prev = std::env::var("HTTPS_PROXY").ok();
+    std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:9");
+    let mut env = std::collections::BTreeMap::new();
+    let presence = apply_cursor_subscription_proxy_env(&mut env);
+    let has_key = env.contains_key("HTTPS_PROXY");
+    let value_len = env.get("HTTPS_PROXY").map(String::len);
+    match prev {
+        Some(value) => std::env::set_var("HTTPS_PROXY", value),
+        None => std::env::remove_var("HTTPS_PROXY"),
+    }
+    assert!(
+        presence.https_proxy,
+        "presence must be true when the process has HTTPS_PROXY"
+    );
+    assert!(has_key, "subscription env must receive the proxy key");
+    assert_eq!(
+        value_len,
+        Some(18),
+        "copied value length must match the fixture"
+    );
 }
 
 #[test]

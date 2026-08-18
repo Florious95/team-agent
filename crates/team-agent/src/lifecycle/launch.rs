@@ -292,6 +292,7 @@ pub(crate) use worker_env::{
     fill_spawn_placeholders, fill_spawn_placeholders_full, inherited_env_with_team_overrides,
     persist_command_plan_state, spawn_timestamp,
 };
+pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 
 mod identity;
 pub(super) use identity::*;

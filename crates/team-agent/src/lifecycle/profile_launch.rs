@@ -424,8 +424,9 @@ fn provider_env_exports(
                 }
             }
         }
-        // 0.5.67: grok/cursor_agent 一期无 profile exports (走 subscription
-        // 已登录态或 BYOK 由上层编排)。Cursor 的 proxy env TODO 见 cursor_agent.rs。
+        // grok/cursor_agent 一期无 profile exports（subscription 已登录态）。
+        // Cursor 订阅席的代理透传不在这里：profile 只服务 compatible-api。
+        // 订阅路径见 apply_cursor_subscription_proxy_env（只记有无，不记值）。
         Provider::Grok | Provider::CursorAgent => {}
         Provider::Fake => {}
     }
@@ -500,9 +501,9 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
         // C-7-1 cr verdict: 一期 subscription-only(已登录态),exports/unsets 空;
         // BYOK(COPILOT_PROVIDER_*)二期立项时单独 cr verdict 再开。
         Provider::Copilot => {}
-        // 0.5.67: grok 无 env 需 unset; cursor 一期也走空 unset。Cursor 的
-        // HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY unset TODO 见 cursor_agent.rs
-        // (global-agent 只接受 http:// 协议 proxy, runtime 注入 https:// 会 crash)。
+        // grok 无 env 需 unset。cursor 订阅席必须保留代理键（TUI 连云要用）；
+        // `--print` 路径会因 https:// 方案撞 GLOBAL_AGENT，但主路径是 TUI。
+        // 禁止在这里 unset 代理。
         Provider::Grok => {}
         Provider::CursorAgent => {}
         Provider::Fake => {}

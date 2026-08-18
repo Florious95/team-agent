@@ -269,6 +269,16 @@ pub(super) fn spawn_agents(
             apply_cursor_mcp_overlay(workspace, &mcp_config)?;
             enable_cursor_workspace_mcp(workspace)?;
             apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+            let proxy = apply_cursor_subscription_proxy_env(&mut env);
+            let event_log = crate::event_log::EventLog::new(workspace);
+            let _ = event_log.write(
+                "provider.cursor.proxy_presence",
+                serde_json::json!({
+                    "agent_id": agent_id_raw,
+                    "https_proxy": proxy.https_proxy,
+                    "no_proxy": proxy.no_proxy,
+                }),
+            );
         }
         // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
         if matches!(provider, Provider::Grok) {
