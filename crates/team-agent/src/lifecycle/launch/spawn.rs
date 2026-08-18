@@ -261,9 +261,14 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+        // Cursor: role 经 .cursor/rules；MCP 身份必须写进 mcp.json env
+        // （不继承父进程 TEAM_AGENT_*）。--workspace 钉物理路径。
+        // 不设 grok 那种 cwd 独占闸：每席一份 --workspace 即每席一份 json。
         if matches!(provider, Provider::CursorAgent) {
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
+            apply_cursor_mcp_overlay(workspace, &mcp_config)?;
+            enable_cursor_workspace_mcp(workspace)?;
+            apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
         }
         // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
         if matches!(provider, Provider::Grok) {

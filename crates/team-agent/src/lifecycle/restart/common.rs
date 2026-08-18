@@ -339,13 +339,15 @@ pub(super) fn spawn_agent_window(
             &mut env,
         )?;
     }
-    // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
     if provider == crate::provider::Provider::CursorAgent {
         crate::lifecycle::launch::apply_cursor_agent_rules_overlay(
             workspace,
             agent_id.as_str(),
             &system_prompt,
         )?;
+        crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace)?;
+        crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
     }
     if provider == crate::provider::Provider::Grok {
         crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
