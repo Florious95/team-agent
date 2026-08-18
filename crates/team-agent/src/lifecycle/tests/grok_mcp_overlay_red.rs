@@ -96,9 +96,9 @@ TEAM_AGENT_WORKSPACE = "/stale-ws"
 }
 
 #[test]
-fn grok_overlay_refuses_to_write_per_seat_keys_into_shared_toml() {
+fn grok_overlay_clears_existing_per_seat_keys_instead_of_writing_them() {
     // 已废除的行为：旧实现把每席键迁进共享 toml（目录作用域 ⇒ 所有 grok 席互相继承），此断言证明它确实没了。
-    let ws = tmp_dir("grok-mcp-refuse-per-seat");
+    let ws = tmp_dir("grok-mcp-clear-per-seat");
     let grok = ws.join(".grok");
     std::fs::create_dir_all(&grok).unwrap();
     std::fs::write(
@@ -114,14 +114,50 @@ TEAM_AGENT_AUTH_MODE = "subscription"
     )
     .unwrap();
 
-    let err = apply_grok_mcp_overlay(&ws, &sample_mcp_config("migrated-seat", "/ws-migrated"))
-        .expect_err("writing per-seat keys into the shared grok toml must be refused");
-    let text = err.to_string();
+    apply_grok_mcp_overlay(&ws, &sample_mcp_config("migrated-seat", "/ws-migrated"))
+        .expect("leftover per-seat keys must be cleared, not refuse the overlay");
+    let text = std::fs::read_to_string(grok.join("config.toml")).unwrap();
     assert!(
-        text.contains("TEAM_AGENT_ID")
-            || text.contains("TEAM_AGENT_OWNER_TEAM_ID")
-            || text.contains("TEAM_AGENT_AUTH_MODE"),
-        "refusal must name the per-seat key; err={text}"
+        !text.contains("TEAM_AGENT_ID")
+            && !text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            && !text.contains("TEAM_AGENT_AUTH_MODE")
+            && !text.contains("stale-id")
+            && text.contains("TEAM_AGENT_WORKSPACE = \"/ws-migrated\""),
+        "overlay must strip leftover per-seat keys and not write incoming ones; text={text}"
+    );
+    let events = team_agent::event_log::EventLog::new(&ws)
+        .tail(0)
+        .expect("events");
+    let cleared = events.iter().find(|event| {
+        event.get("event").and_then(serde_json::Value::as_str)
+            == Some("lifecycle.grok_toml.per_seat_keys_cleared")
+    });
+    let cleared =
+        cleared.unwrap_or_else(|| panic!("cleanup must leave an audit event; events={events:?}"));
+    let keys = cleared
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        keys.iter().any(|key| key.as_str() == Some("TEAM_AGENT_ID"))
+            && keys
+                .iter()
+                .any(|key| key.as_str() == Some("TEAM_AGENT_OWNER_TEAM_ID"))
+            && keys
+                .iter()
+                .any(|key| key.as_str() == Some("TEAM_AGENT_AUTH_MODE")),
+        "audit must name the cleared keys; event={cleared}"
+    );
+    let serialized = cleared.to_string();
+    assert!(
+        !serialized.contains("stale-id") && !serialized.contains("stale-team"),
+        "audit must not carry key values; event={cleared}"
+    );
+    assert_eq!(
+        cleared.get("path").and_then(serde_json::Value::as_str),
+        Some(grok.join("config.toml").to_string_lossy().as_ref()),
+        "audit must name the file; event={cleared}"
     );
 }
 
@@ -171,18 +207,22 @@ fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
 }
 
 #[test]
-fn second_grok_refuses_only_when_toml_has_a_per_seat_key() {
+#[serial(env)]
+fn leftover_per_seat_key_is_cleared_before_start() {
     let ws = tmp_dir("grok-cwd-per-seat");
+    let home = tmp_dir("grok-cwd-per-seat-home");
+    seed_grok_home(&home, Some(&ws));
+    let _guard = HomeGuard::set(&home);
     let grok = ws.join(".grok");
     std::fs::create_dir_all(&grok).unwrap();
     std::fs::write(
         grok.join("config.toml"),
-        "[mcp_servers.team_orchestrator.env]\nTEAM_AGENT_FUTURE_SEAT_KEY = \"leaked\"\n",
+        "[mcp_servers.keep-me.env]\nTEAM_AGENT_FUTURE_SEAT_KEY = \"leaked\"\nGROK_FOLDER_TRUST = \"1\"\n",
     )
     .unwrap();
     let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
 
-    let err = quick_start_with_transport_in_workspace(
+    quick_start_with_transport_in_workspace(
         &ws,
         &team,
         None,
@@ -190,15 +230,16 @@ fn second_grok_refuses_only_when_toml_has_a_per_seat_key() {
         Some("grokteam"),
         &OfflineTransport::new(),
     )
-    .expect_err("a leftover per-seat key must refuse another grok seat");
-    let text = err.to_string();
+    .expect("leftover per-seat keys must be cleared, not refuse start");
+
+    let text = std::fs::read_to_string(ws.join(".grok/config.toml")).unwrap_or_default();
     assert!(
-        text.contains("per-seat") && text.contains("TEAM_AGENT_FUTURE_SEAT_KEY"),
-        "error must name the per-seat key, not seat count; err={text}"
+        !text.contains("TEAM_AGENT_FUTURE_SEAT_KEY") && !text.contains("leaked"),
+        "upgrade migration must drop the leftover per-seat key; text={text}"
     );
     assert!(
-        !text.contains("already occupies this workspace"),
-        "must not use the retired seat-count error; err={text}"
+        text.contains("GROK_FOLDER_TRUST"),
+        "non-framework keys must stay; text={text}"
     );
 }
 

@@ -40,6 +40,9 @@ pub mod event_names {
     pub const DISPLAY_ADAPTIVE_BLOCKED: &str = "display.adaptive_blocked";
     pub const DISPLAY_ADAPTIVE_REBUILT: &str = "display.adaptive_rebuilt";
     pub const DISPLAY_ADAPTIVE_CLOSED: &str = "display.adaptive_closed";
+    /// Directory-scoped grok toml dropped leftover per-seat `TEAM_AGENT_*` keys.
+    /// Fields: `path` (file), `keys` (names only — never values).
+    pub const GROK_TOML_PER_SEAT_KEYS_CLEARED: &str = "lifecycle.grok_toml.per_seat_keys_cleared";
 }
 
 // ===========================================================================

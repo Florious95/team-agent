@@ -93,8 +93,6 @@ pub fn launch_with_transport_in_workspace(
     let text = std::fs::read_to_string(spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    // Grok cwd 冲突在写 events / spawn overlay 之前拒绝，避免回滚半截配置。
-    ensure_exclusive_grok_cwd(workspace, "", Some(&spec))?;
     // 0.5.66 §3.2 跨 workspace 兼容警示:leader argv 带 bypass flag 但当前团队
     // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
     // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。
@@ -267,14 +265,16 @@ pub(crate) use agent_state::{
 };
 
 mod grok_per_seat;
-pub(crate) use grok_per_seat::{is_per_seat_env_key, per_seat_keys_in_toml};
+pub(crate) use grok_per_seat::{
+    is_per_seat_env_key, per_seat_keys_in_toml, strip_per_seat_keys_from_toml,
+};
 
 mod mcp_config;
 pub use mcp_config::apply_grok_mcp_overlay;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust, grok_shared_cwd_error,
-    point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
+    ensure_grok_login_and_folder_trust, grok_shared_cwd_error, point_native_mcp_config_at_file,
+    reconcile_grok_toml_per_seat_keys, resolve_mcp_config, write_worker_mcp_config,
     write_worker_mcp_config_for_provider,
 };
 

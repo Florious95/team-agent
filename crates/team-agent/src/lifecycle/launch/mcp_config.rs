@@ -198,14 +198,12 @@ fn spec_grok_ids(spec: &Value) -> Vec<String> {
     ids
 }
 
-/// Refuse a grok launch only when the directory-scoped toml still carries
-/// per-seat keys. Seat count is not a reason: identity lives on pane env.
-/// The per-seat test is [`super::is_per_seat_env_key`] — same one status uses.
-pub(crate) fn ensure_exclusive_grok_cwd(
-    workspace: &Path,
-    _incoming_agent_id: &str,
-    _spec: Option<&Value>,
-) -> Result<(), LifecycleError> {
+/// Reconcile `<cwd>/.grok/config.toml` before any grok start: drop leftover
+/// framework per-seat keys (`is_per_seat_env_key`), leave user/shared keys,
+/// emit an audit event with names only. Hung only from
+/// [`apply_grok_mcp_overlay`] — the unique writer, so launch/restart/resume
+/// all pass through. Clean-failure keeps the previous refuse shape.
+pub(crate) fn reconcile_grok_toml_per_seat_keys(workspace: &Path) -> Result<(), LifecycleError> {
     let path = workspace.join(".grok").join("config.toml");
     if !path.exists() {
         return Ok(());
@@ -222,18 +220,57 @@ pub(crate) fn ensure_exclusive_grok_cwd(
     if keys.is_empty() {
         return Ok(());
     }
+    let (cleaned, removed) = super::strip_per_seat_keys_from_toml(&text);
+    let dir = workspace.join(".grok");
+    if let Err(_error) = write_grok_config_toml(&dir, &cleaned) {
+        return Err(refuse_dirty_grok_toml(workspace, &keys));
+    }
+    let after =
+        std::fs::read_to_string(&path).map_err(|_| refuse_dirty_grok_toml(workspace, &keys))?;
+    if !super::per_seat_keys_in_toml(&after).is_empty() {
+        return Err(refuse_dirty_grok_toml(workspace, &keys));
+    }
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            crate::lifecycle::types::event_names::GROK_TOML_PER_SEAT_KEYS_CLEARED,
+            serde_json::json!({
+                "path": path.display().to_string(),
+                "keys": removed,
+            }),
+        )
+        .map_err(|error| {
+            LifecycleError::RequirementUnmet(format!(
+                "error: cannot audit grok shared-slot cleanup ({})\n\
+                 reason: {error}\n\
+                 action: fix permissions on .team/logs then retry",
+                path.display()
+            ))
+        })?;
+    Ok(())
+}
+
+fn refuse_dirty_grok_toml(workspace: &Path, keys: &[(String, String)]) -> LifecycleError {
     let named = keys
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(", ");
-    Err(LifecycleError::RequirementUnmet(format!(
+    LifecycleError::RequirementUnmet(format!(
         "error: grok shared slot still carries per-seat keys ({named})\n\
          reason: .grok/config.toml is directory-scoped; per-seat keys would be inherited by every grok seat\n\
          workspace: {}\n\
          action: remove per-seat keys from the toml (identity belongs on pane env)",
         workspace.display()
-    )))
+    ))
+}
+
+fn write_grok_config_toml(dir: &Path, body: &str) -> Result<PathBuf, std::io::Error> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("config.toml");
+    let tmp = dir.join("config.toml.tmp");
+    std::fs::write(&tmp, body.as_bytes())?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
 }
 
 pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
@@ -366,8 +403,8 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
 /// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
 /// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
 ///
-/// Exclusive-cwd check runs here so restart cannot skip it.
-/// Incoming seat is `TEAM_AGENT_ID` on the resolved MCP env (self-restart is allowed).
+/// Unique writer of `<cwd>/.grok/config.toml`. Reconcile leftover per-seat
+/// keys here so restart/resume cannot skip the upgrade migration.
 ///
 /// `McpConfig.raw` 与写出的 grok 表名都必须是 `team_orchestrator`，与
 /// `worker_command_context` 契约（grok: `team_orchestrator__send_message`）对齐。
@@ -417,21 +454,14 @@ pub fn apply_grok_mcp_overlay(
         })
         .unwrap_or_default();
 
-    let incoming = env.get("TEAM_AGENT_ID").map(String::as_str).unwrap_or("");
-    ensure_exclusive_grok_cwd(workspace, incoming, None)?;
-
     // Per-seat keys live on the pane env. The directory-scoped toml is a
     // last-writer slot: keep only WORKSPACE (and the launch command).
+    reconcile_grok_toml_per_seat_keys(workspace)?;
     let mut env = env;
-    env.remove("TEAM_AGENT_ID");
-    env.remove("TEAM_AGENT_OWNER_TEAM_ID");
-    env.remove("TEAM_AGENT_AUTH_MODE");
-    env.retain(|_, value| !value.trim().is_empty());
+    env.retain(|key, value| !super::is_per_seat_env_key(key) && !value.trim().is_empty());
 
     let stanza = render_grok_team_agent_stanza(command, &args, &env);
     let dir = workspace.join(".grok");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     // 同时摘掉新表和 0.5.67 误写的 [mcp_servers.team-agent]，否则改名后两套
@@ -441,10 +471,7 @@ pub fn apply_grok_mcp_overlay(
         &["mcp_servers.team_orchestrator", "mcp_servers.team-agent"],
         &stanza,
     );
-    let tmp = dir.join("config.toml.tmp");
-    std::fs::write(&tmp, body.as_bytes())
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, &path)
+    write_grok_config_toml(&dir, &body)
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
     Ok(())
 }
