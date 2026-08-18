@@ -399,9 +399,24 @@
               "status": "stopped"
             }
           },
+          // grok_slot ← 77bddb95 / 0c319cca (identity: status_port/snapshot.rs + compact.rs:17)
+          "grok_slot": {
+            "consistent": true,
+            "disk_auth_mode": null,
+            "disk_owner_team_id": null,
+            "disk_team_agent_id": null,
+            "expected_auth_mode": null,
+            "expected_owner_team_id": "teamdir",
+            "live_seats": [],
+            "pre_first_turn": [],
+            "readable": true,
+            "reason": "toml carries no per-seat identity keys; identity inherits from pane env"
+          },
           "leader_attach_command": "tmux -S <TMP>/tmux-<UID>/ta-<SOCKET> attach -t team-phasegolden:leader",
           "not_ready": {
             "agents": [],
+            // not_ready.next_action ← 080903a2 (leaderch compact.rs:70-74 when reasons contain leader_receiver_unbound)
+            "next_action": "claim-leader",
             "reasons": [
               "tmux_session_missing",
               "workers_not_spawned",
@@ -542,6 +557,19 @@
             "schema_ok": true,
             "service_available": true,
             "status": "running"
+          },
+          // grok_slot ← 77bddb95 / 0c319cca (identity: status_port/snapshot.rs + compact.rs:17)
+          "grok_slot": {
+            "consistent": true,
+            "disk_auth_mode": null,
+            "disk_owner_team_id": null,
+            "disk_team_agent_id": null,
+            "expected_auth_mode": null,
+            "expected_owner_team_id": "teamdir",
+            "live_seats": [],
+            "pre_first_turn": [],
+            "readable": true,
+            "reason": "toml carries no per-seat identity keys; identity inherits from pane env"
           },
           "incomplete_session_capture_agents": [],
           "is_external_leader": false,
@@ -721,11 +749,17 @@
             "cli_prompt_ready": true,
             "incomplete_session_capture_agents": [],
             "mcp_ready": true,
+            // readiness.next_action ← 080903a2 snapshot.rs:105
+            "next_action": "claim-leader",
             "pending_session_agent_ids": [],
             "process_started": false,
             "ready": false,
+            // readiness.reason ← 080903a2 snapshot.rs:106-108
+            "reason": "leader registry does not authorize this workspace",
             "session_capture_complete": true,
             "session_capture_incomplete": false,
+            // readiness.state ← 080903a2 snapshot.rs:104
+            "state": "leader_receiver_unbound",
             "task_prompt_delivered": false
           },
           "reminder": "To wait for results use --watch-result or team-agent collect. Do not capture-pane worker terminals.",
