@@ -5,7 +5,10 @@ use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 /// `remove_agent(workspace, agent_id, from_spec, force, team)`(`lifecycle/agents.py:22`)。
-/// 从 spec/state/team_state/agent_health 原子摘除；role markdown 是用户资产，始终保留。
+/// 从 spec/state/team_state/agent_health 原子摘除。
+/// 托管目录 `.team/dynamic-role-files/` 下的物化副本随席位清掉；托管目录之外的
+/// `--role-file` 仍是用户资产，不删。A-28 对托管文件「默认保留」的承诺已由
+/// `ledger.seat-supply-prereq` 推翻。
 /// `_RemoveRollback` 字节级快照回滚全部运行时变更。未传 from_spec 确认 / 运行中未传 force → 拒绝。
 pub fn remove_agent(
     workspace: &Path,
@@ -552,6 +555,7 @@ fn remove_agent_inner(
     // after the stop (stop_agent persisted it); otherwise the originally-resolved projection drives the
     // removal. Either way we operate on the PROJECTION, never a raw load_runtime_state.
     let working_state = state;
+    let recorded_role_file = recorded_dynamic_role_file(&working_state, agent_id);
     let mut stopped = false;
     let mut cleared_locations = Vec::new();
     if force {
@@ -620,10 +624,16 @@ fn remove_agent_inner(
         "team.spec.yaml",
         None,
     )?;
-    // Role markdown is user-owned input, including files under the registered
-    // dynamic-role path. Removing a seat only unregisters runtime state/spec;
-    // cleanup is intentionally not part of the default operation.
-    let role_file_removed = false;
+    // Managed copies under `.team/dynamic-role-files/` are framework residue
+    // and must not block the next same-id clone. External --role-file paths
+    // stay user-owned. Classify by the path's directory (do not follow a
+    // last-component symlink); unlink with remove_file so only the link dies.
+    let role_file_removed = clear_managed_role_residue(
+        paths.run_workspace,
+        agent_id,
+        recorded_role_file.as_deref(),
+        &mut cleared_locations,
+    )?;
     let agent_health_deleted = delete_agent_health(paths.run_workspace, team_key, agent_id)?;
     cleared_locations.push(serde_json::json!("agent_health"));
     write_remove_step_event(
@@ -661,6 +671,94 @@ struct RemoveSuccess {
     stopped: bool,
     role_file_removed: bool,
     cleared_locations: Vec<serde_json::Value>,
+}
+
+fn recorded_dynamic_role_file(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+) -> Option<std::path::PathBuf> {
+    state
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("dynamic_role_file"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn resolve_role_path(workspace: &Path, role_file: &Path) -> std::path::PathBuf {
+    if role_file.is_absolute() {
+        role_file.to_path_buf()
+    } else {
+        workspace.join(role_file)
+    }
+}
+
+fn default_managed_role_file(workspace: &Path, agent_id: &AgentId) -> std::path::PathBuf {
+    workspace
+        .join(".team")
+        .join("dynamic-role-files")
+        .join(format!("{}.md", agent_id.as_str()))
+}
+
+/// Same prefix rule as `role_source_ownership`, but canonicalize the parent
+/// only. Following the last component would classify a managed symlink whose
+/// target lives outside the managed dir as external, and leave residue.
+fn role_path_is_managed(workspace: &Path, role_file: &Path) -> bool {
+    let managed_root = workspace.join(".team").join("dynamic-role-files");
+    let Ok(root) = std::fs::canonicalize(&managed_root) else {
+        return false;
+    };
+    let abs = resolve_role_path(workspace, role_file);
+    let Some(parent) = abs.parent() else {
+        return false;
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(parent_canon) => parent_canon.starts_with(&root),
+        Err(_) => false,
+    }
+}
+
+fn unlink_role_path(path: &Path) -> Result<bool, LifecycleError> {
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(LifecycleError::StatePersist(format!(
+            "inspect managed role file {}: {err}",
+            path.display()
+        ))),
+        Ok(_) => std::fs::remove_file(path).map(|_| true).map_err(|err| {
+            LifecycleError::StatePersist(format!(
+                "remove managed role file {}: {err}",
+                path.display()
+            ))
+        }),
+    }
+}
+
+fn clear_managed_role_residue(
+    workspace: &Path,
+    agent_id: &AgentId,
+    recorded: Option<&Path>,
+    cleared_locations: &mut Vec<serde_json::Value>,
+) -> Result<bool, LifecycleError> {
+    let target = match recorded {
+        Some(recorded) => {
+            let abs = resolve_role_path(workspace, recorded);
+            if !role_path_is_managed(workspace, &abs) {
+                return Ok(false);
+            }
+            abs
+        }
+        None => default_managed_role_file(workspace, agent_id),
+    };
+    if !unlink_role_path(&target)? {
+        return Ok(false);
+    }
+    let resource = target.to_string_lossy().into_owned();
+    write_remove_step_event(workspace, agent_id, "role_file", &resource, None)?;
+    cleared_locations.push(serde_json::json!(resource));
+    Ok(true)
 }
 
 fn write_remove_step_event(

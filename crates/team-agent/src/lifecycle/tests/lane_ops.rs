@@ -1390,9 +1390,11 @@ fn remove_preserves_external_role_source_for_both_flag_forms() {
     }
 }
 
-// A-28 RED: the role markdown recorded for a seat is still a user asset. The
-// default remove path must unregister the seat without deleting the managed
-// registration-path document.
+// A-28 was: default remove must preserve registered managed markdown.
+// ledger.seat-supply-prereq overturned that for files under
+// `.team/dynamic-role-files/` (framework materialization, not user asset).
+// Keep the test name; flip the assertion. External --role-file is covered
+// by `remove_preserves_external_role_source_for_both_flag_forms`.
 #[test]
 fn remove_agent_preserves_registered_role_markdown_by_default() {
     let ws = lanea_ws_agents(json!({
@@ -1417,15 +1419,13 @@ fn remove_agent_preserves_registered_role_markdown_by_default() {
         None,
         &LaneTransport::new("team-laneateam", &[]),
     );
-    assert!(result.is_ok(), "remove-agent should unregister the seat: {result:?}");
     assert!(
-        role.exists(),
-        "A-28: remove-agent must preserve the registered role markdown by default"
+        result.is_ok(),
+        "remove-agent should unregister the seat: {result:?}"
     );
-    assert_eq!(
-        std::fs::read(&role).unwrap(),
-        original,
-        "A-28: remove-agent must preserve the registered role markdown by default"
+    assert!(
+        !role.exists(),
+        "managed role markdown must be gone after remove-agent so the next same-id clone is not blocked"
     );
 }
 
@@ -1455,7 +1455,35 @@ fn remove_preserves_managed_path_symlink_escape() {
     );
     assert!(result.is_ok(), "remove failed: {result:?}");
     assert_eq!(std::fs::read(&external).unwrap(), b"external target\n");
-    assert!(managed.exists(), "symlink escape must be preserved");
+    assert!(
+        !managed.symlink_metadata().is_ok(),
+        "managed symlink must be unlinked; must not follow and delete the external target"
+    );
+}
+
+#[test]
+fn remove_agent_deletes_unrecorded_default_managed_role() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+    }));
+    let role = ws.join(".team").join("dynamic-role-files").join("alpha.md");
+    std::fs::create_dir_all(role.parent().unwrap()).unwrap();
+    std::fs::write(&role, b"unrecorded default managed copy\n").unwrap();
+
+    let result = remove_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        true,
+        true,
+        None,
+        &LaneTransport::new("team-laneateam", &[]),
+    );
+    assert!(result.is_ok(), "remove failed: {result:?}");
+    assert!(
+        !role.exists(),
+        "default managed path must be cleared even when state.dynamic_role_file is unset"
+    );
 }
 
 #[test]
