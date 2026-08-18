@@ -52,8 +52,8 @@ fn cursor_overlay_writes_identity_into_mcp_json_env() {
         "placeholders must already be resolved"
     );
     assert!(
-        !text.contains("team-agent"),
-        "legacy inbound key must not remain"
+        !text.contains("\"team-agent\""),
+        "legacy inbound key must not remain as a server name"
     );
 }
 
