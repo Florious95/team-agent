@@ -252,7 +252,7 @@ pub(crate) fn reconcile_grok_toml_per_seat_keys(workspace: &Path) -> Result<(), 
 fn refuse_dirty_grok_toml(workspace: &Path, keys: &[(String, String)]) -> LifecycleError {
     let named = keys
         .iter()
-        .map(|(key, value)| format!("{key}={value}"))
+        .map(|(key, _value)| key.as_str())
         .collect::<Vec<_>>()
         .join(", ");
     LifecycleError::RequirementUnmet(format!(
