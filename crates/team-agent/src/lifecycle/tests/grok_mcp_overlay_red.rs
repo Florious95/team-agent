@@ -61,10 +61,7 @@ args = ["stale"]
 enabled = true
 
 [mcp_servers.team-agent.env]
-TEAM_AGENT_ID = "stale-id"
 TEAM_AGENT_WORKSPACE = "/stale-ws"
-TEAM_AGENT_OWNER_TEAM_ID = "stale-team"
-TEAM_AGENT_AUTH_MODE = "subscription"
 "#,
     )
     .unwrap();
@@ -95,6 +92,36 @@ TEAM_AGENT_AUTH_MODE = "subscription"
     assert!(
         !text.contains("stale-id") && !text.contains("/old/team-agent"),
         "stale identity/command from the old table must not remain; text={text}"
+    );
+}
+
+#[test]
+fn grok_overlay_refuses_to_write_per_seat_keys_into_shared_toml() {
+    // 已废除的行为：旧实现把每席键迁进共享 toml（目录作用域 ⇒ 所有 grok 席互相继承），此断言证明它确实没了。
+    let ws = tmp_dir("grok-mcp-refuse-per-seat");
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        r#"[mcp_servers.team-agent]
+command = "/old/team-agent"
+
+[mcp_servers.team-agent.env]
+TEAM_AGENT_ID = "stale-id"
+TEAM_AGENT_OWNER_TEAM_ID = "stale-team"
+TEAM_AGENT_AUTH_MODE = "subscription"
+"#,
+    )
+    .unwrap();
+
+    let err = apply_grok_mcp_overlay(&ws, &sample_mcp_config("migrated-seat", "/ws-migrated"))
+        .expect_err("writing per-seat keys into the shared grok toml must be refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("TEAM_AGENT_ID")
+            || text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            || text.contains("TEAM_AGENT_AUTH_MODE"),
+        "refusal must name the per-seat key; err={text}"
     );
 }
 
