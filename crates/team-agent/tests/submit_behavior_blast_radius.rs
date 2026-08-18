@@ -16,7 +16,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use team_agent::provider::submit_now::{flush_explicit_queue, GROK_SEND_NOW_MARK};
+use team_agent::provider::submit_now::{
+    flush_explicit_queue, CURSOR_SEND_NOW_MARK, GROK_SEND_NOW_MARK,
+};
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
 use team_agent::transport::{Key, PaneId, Target, Transport};
 
@@ -43,7 +45,9 @@ impl CommandRunner for ScriptedRunner {
             *self.enters.lock().expect("enters") += 1;
             // After a send-now Enter, grok leaves the queue footer.
             let mut screen = self.screen.lock().expect("screen");
-            *screen = screen.replace(GROK_SEND_NOW_MARK, "");
+            *screen = screen
+                .replace(GROK_SEND_NOW_MARK, "")
+                .replace(CURSOR_SEND_NOW_MARK, "");
         }
         Ok(ok(""))
     }
@@ -95,5 +99,16 @@ fn grok_queue_mark_gets_send_now_enter() {
     assert!(
         n >= 1,
         "grok queue mark must be flushed by extra Enter (not re-paste); got {n}"
+    );
+}
+
+/// cursor 忙时页脚是 `enter send now`（大小写按屏上），同样只重按回车。
+#[test]
+fn cursor_queue_mark_gets_send_now_enter() {
+    let screen = format!("#1 follow-up\n{CURSOR_SEND_NOW_MARK} · ↑ select/edit · esc cancel\n");
+    let n = flush_enters(&screen);
+    assert!(
+        n >= 1,
+        "cursor queue mark must be flushed by extra Enter (not re-paste); got {n}"
     );
 }

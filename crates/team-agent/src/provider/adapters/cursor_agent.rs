@@ -1,32 +1,26 @@
+//! ---
+//! purpose: Cursor agent CLI argv；role 走 .cursor/rules，MCP 走 mcp.json overlay
+//! contract:
+//!   provides:
+//!     - name: cursor_agent_base_command
+//!       what: 只组已实测文档化 flag；mcp_config 不入 argv，由 launch overlay 写盘
+//! boundary:
+//!   - 不调未文档化 flag（--system-prompt / --allowed-tools）
+//!   - 不写 grok 那种 cwd 独占闸
+//!   - 不打印代理值
+//! maturity: wired
+//! ---
 //!
-//! purpose: Cursor `agent` CLI argv；role 走 workspace rules 文件，不入 argv
-//! contract: MCP 未实现。收到 mcp_config 必须 CapabilityUnsupported，不许静默丢弃
-//!   （否则会起出能收信、没有 send_message/report_result 的席位）
-//! boundary: 只服务 Provider::CursorAgent。不改 claude/codex/copilot/grok 路径
+//! Cursor `agent` CLI（与 `cursor-agent` 同二进制）。主路径与
+//! `.team/scripts/cursor_seat.sh` 实测一致：
+//!   `--trust --sandbox disabled --workspace <物理路径> [--force] [--model]`
+//! Role 不入 argv，写 `<workspace>/.cursor/rules/*.mdc` + `alwaysApply: true`。
+//! MCP 无 `--mcp-config`；身份必须写进 `.cursor/mcp.json` 的 env 表
+//! （cursor 不把父进程 TEAM_AGENT_* 传给 MCP 子进程）。
 //!
-//! Cursor `agent` CLI provider-local command builders + permission helpers.
-//!
-//! Mirrors `adapters/claude.rs` skeleton (0.5.67 provider-adapter step), with
-//! the append-system-prompt mechanism swapped for the Cursor workspace-rules
-//! file (方案 1 变体, smoke PASS 0.5.67-cursor-rules-smoke.md).
-//!
-//! Cursor `agent` CLI flag map (亲核 attest 0.5.67 + cursor-agent-full-help.txt):
-//!   bypass  → `--force`        ("Force allow commands unless explicitly denied"; alias `--yolo`)
-//!   model   → `--model <model>` (e.g. sonnet-4-thinking)
-//!   resume  → `--resume [chatId]` / `--continue`
-//!   workspace → `--workspace <path-or-name>` (defaults to cwd)
-//!   prompt  → positional (first arg)
-//!
-//! **No** `--session-id` / `--fork-session` / `--mcp-config` / `--disallowedTools`
-//! flags on the CLI → fresh spawn cannot pre-bind a session id (capture grabs
-//! chatId from the first transcript) and `native_mcp_config: false`.
-//!
-//! TODO(0.5.67): Cursor CLI 用 global-agent 库,只接受 http:// 协议的 proxy env。
-//! Team Agent runtime 注入 HTTPS_PROXY=https://... 会 crash。
-//! spawn 时必须 unset: HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/NO_PROXY (大小写各一份)。
-//! 或走 profile 里 PROXY_MODE=direct 让 profile.rs 兜底(未验证是否覆盖 subscription 路径)。
-//! 冒烟证据: .team/artifacts/0.5.67-cursor-rules-smoke.md
-//! (本 adapter 只管 argv;env 处理归 launch 路径 profile_env_unset,见 profile_launch.rs。)
+//! 隐藏 flag `--system-prompt` / `--allowed-tools` 实测存在但 help 未列，
+//! 随时可能消失。可以在注释里记录，代码里不许调。
+//! `--allowed-tools` 正反行为未验证，不写「支持工具白名单」。
 
 use crate::model::enums::AuthMode;
 use crate::provider::adapter::BasicProviderAdapter;
@@ -63,27 +57,25 @@ pub(crate) fn cursor_agent_base_command(
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["agent".to_string()];
+    // --trust 跳过 Workspace Trust 闸（已实测）。无此 flag 会停在 Do you trust。
+    argv.push("--trust".to_string());
     if cursor_agent_dangerous_auto_approve(tools) {
         argv.push("--force".to_string());
     }
+    // 与 cursor_seat.sh 主路径一致。沙箱实际隔离面未再拆，但 flag 本身已实测。
+    argv.push("--sandbox".to_string());
+    argv.push("disabled".to_string());
     if let Some(model) = model {
         argv.push("--model".to_string());
         argv.push(model.to_string());
     }
-    // Cursor `--effort` flag does not exist; the framework drops effort at the
-    // caller (warning event emitted before construct). Never invent a flag.
+    // Cursor `--effort` flag 不存在；框架在调用方丢掉 effort。绝不发明 flag。
     let _ = effort;
-    // append_system_prompt 方案 1 变体:system_prompt **不入 argv**,而是经 launch
-    // 路径写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`
-    // (worker_env::apply_cursor_agent_rules_overlay, 同 copilot AGENTS.md 机制)。
-    // argv 只带 `--workspace {workspace}`(placeholder 由 fill_spawn_placeholders 替换)。
-    if mcp_config.is_some() {
-        return Err(ProviderError::CapabilityUnsupported(
-            "cursor_agent MCP is not implemented; starting a cursor seat would receive mail with no send_message/report_result. action: use grok/claude/codex/copilot, or wait for a cursor MCP overlay"
-                .to_string(),
-        ));
-    }
-    let _ = (adapter, auth_mode, managed_mcp_config, system_prompt);
+    // system_prompt 不入 argv（help 无 --rules / --append-system-prompt）。
+    // launch 写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`。
+    // mcp_config 也不入 argv（无 --mcp-config）。launch 写 `.cursor/mcp.json`
+    // 并 `agent mcp enable team_orchestrator`。这里收下以免静默丢弃。
+    let _ = (adapter, auth_mode, mcp_config, managed_mcp_config, system_prompt);
     argv.push("--workspace".to_string());
     argv.push("{workspace}".to_string());
     Ok(argv)

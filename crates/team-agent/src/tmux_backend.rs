@@ -1138,6 +1138,23 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
 /// U1 #7: the exact delivery-token marker a token payload carries
 /// (`[team-agent-token:<id>]`). Use the full marker, not only the prefix, so an old
 /// scrollback token cannot verify a new message.
+/// Cursor Ink swallows Enter that arrives with the paste. Measured floor is
+/// 1s. Tests set TEAM_AGENT_TEST_TMP and skip the wait so the suite stays cheap.
+fn paste_to_submit_floor() -> Duration {
+    if std::env::var_os("TEAM_AGENT_TEST_TMP").is_some() {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(1)
+    }
+}
+
+fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant) {
+    let remain = paste_to_submit_floor().saturating_sub(pasted_at.elapsed());
+    if !remain.is_zero() {
+        std::thread::sleep(remain);
+    }
+}
+
 fn payload_token_marker(payload: &InjectPayload) -> Option<&str> {
     let text = payload.text()?;
     let start = text.find("[team-agent-token:")?;
@@ -2070,8 +2087,11 @@ impl Transport for TmuxBackend {
                 //
                 // Design truth source: .team/artifacts/E55-delivery-architecture-design.html
                 // Python parity: dynamic timeout max(2s, bytes/25000), poll 50ms.
+                // Cursor Ink：文本与 Enter 必须分开发且间隔 ≥1s，否则第一次
+                // Enter 被吞。token 可见性轮询的耗时算进这 1s；测试隔离下地板为 0。
                 // ═══════════════════════════════════════════════════════════
                 let inject_start = std::time::Instant::now();
+                let pasted_at = inject_start;
                 let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
 
                 // Phase 1: token visibility poll — wait for the pasted text to
@@ -2133,6 +2153,8 @@ impl Transport for TmuxBackend {
                         }),
                     });
                 }
+
+                sleep_remaining_paste_to_submit_floor(pasted_at);
 
                 let marker = payload_token_marker(payload);
                 let max_submit_attempts: u32 = 3;
