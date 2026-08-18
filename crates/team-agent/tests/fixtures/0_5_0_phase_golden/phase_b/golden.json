@@ -399,6 +399,8 @@
               "status": "stopped"
             }
           },
+          // grok_identity_slot_ok ← command ok stays true; slot health is this sibling
+          "grok_identity_slot_ok": true,
           // grok_slot ← 77bddb95 / 0c319cca (identity: status_port/snapshot.rs + compact.rs:17)
           "grok_slot": {
             "consistent": true,
@@ -558,6 +560,8 @@
             "service_available": true,
             "status": "running"
           },
+          // grok_identity_slot_ok ← command ok stays true; slot health is this sibling
+          "grok_identity_slot_ok": true,
           // grok_slot ← 77bddb95 / 0c319cca (identity: status_port/snapshot.rs + compact.rs:17)
           "grok_slot": {
             "consistent": true,

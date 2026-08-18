@@ -227,8 +227,8 @@ fn rm039_stat001_status_resolves_active_team_when_root_team_key_missing() {
 #[test]
 fn status_port_status_compact_json_shape_against_seeded_fixture() {
     // cmd_status json branch (detail=false) delegates status_port::status(compact=true).
-    // Compact slim is the original 7 keys plus `grok_slot`. `ok` follows grok
-    // identity-slot health (readable ∧ consistent), not a leftover constant.
+    // Compact slim is the original 7 keys plus `grok_slot` and
+    // `grok_identity_slot_ok`. `ok` is command success (always true here).
     let ws = seed_status_workspace();
     let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
         .expect("seeded fixture status should project a value");
@@ -242,6 +242,7 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
         "not_ready",
         "agents",
         "grok_slot",
+        "grok_identity_slot_ok",
     ]
     .iter()
     .copied()
@@ -249,7 +250,7 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
     let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(
         actual, expected,
-        "compact must expose the original 7 keys plus grok_slot (8); got {actual:?}"
+        "compact must expose the original 7 keys plus grok_slot and grok_identity_slot_ok (9); got {actual:?}"
     );
     let grok_slot = obj
         .get("grok_slot")
@@ -265,8 +266,14 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
             == Some(true);
     assert_eq!(
         obj.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "compact ok is command success and must stay true; grok_slot={grok_slot:?}"
+    );
+    assert_eq!(
+        obj.get("grok_identity_slot_ok")
+            .and_then(serde_json::Value::as_bool),
         Some(grok_ok),
-        "compact ok must follow grok_ok (readable∧consistent); grok_slot={grok_slot:?}"
+        "grok_identity_slot_ok must follow readable∧consistent; grok_slot={grok_slot:?}"
     );
     // Diagnostic keys must NOT leak into the default compact payload.
     for forbidden in [
@@ -300,10 +307,12 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
 }
 
 #[test]
-fn status_compact_ok_is_false_when_grok_identity_slot_mismatches() {
-    // 已废除的行为：旧实现的 `ok` 与 grok 身份槽健康无关，此断言证明它确实没了。
+fn status_compact_reports_identity_slot_health_on_grok_identity_slot_ok() {
+    // 已废除的行为：旧实现看不见 grok 身份槽。此墓碑留下槽健康断言。
+    // 2026-08-18 裁定：`ok` 是命令成功标志，成功投影必须恒真；身份槽健康
+    // 走顶层 `grok_identity_slot_ok`，不再重载 `ok`。
     // 2026-08-18 身份串台：judge-g 的产出从 developer-d61 的通道报出并占掉
-    // 后者 exactly-once report_result。那时 compact 若仍报 ok 就是一句谎。
+    // 后者 exactly-once report_result。那时若完全不报槽健康才是一句谎。
     let ws = seed_status_workspace();
     let grok = ws.join(".grok");
     std::fs::create_dir_all(&grok).unwrap();
@@ -317,8 +326,14 @@ fn status_compact_ok_is_false_when_grok_identity_slot_mismatches() {
         .expect("mismatched grok slot must still project compact status");
     assert_eq!(
         v.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "successful status must keep ok=true; slot health is a sibling key; got {v}"
+    );
+    assert_eq!(
+        v.get("grok_identity_slot_ok")
+            .and_then(serde_json::Value::as_bool),
         Some(false),
-        "identity-slot mismatch must force compact ok=false; got {v}"
+        "identity-slot mismatch must force grok_identity_slot_ok=false; got {v}"
     );
     assert_eq!(
         v.pointer("/grok_slot/consistent")

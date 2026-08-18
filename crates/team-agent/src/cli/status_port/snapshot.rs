@@ -110,10 +110,11 @@ impl RuntimeSnapshot {
             }
         }
         let grok_slot = crate::cli::grok_slot_report(workspace, state).to_json();
-        let grok_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
+        let grok_identity_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool)
+            == Some(true)
             && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
         let full = crate::redaction::redact_external_value(&json!({
-            "ok": grok_ok,
+            "ok": true,
             "team": state.pointer("/leader/id").cloned().unwrap_or_else(|| json!("leader")),
             "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
             "leader_topology": leader_topology,
@@ -142,6 +143,7 @@ impl RuntimeSnapshot {
             "coordinator": coordinator_health_value(health),
             "runtime": runtime_block,
             "grok_slot": grok_slot,
+            "grok_identity_slot_ok": grok_identity_slot_ok,
             "reminder": crate::cli::STATUS_REMINDER,
             "last_events": Value::Array(
                 crate::event_log::EventLog::new(workspace)

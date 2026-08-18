@@ -5,16 +5,17 @@ pub(super) fn compact_status(full: Value) -> Value {
     let not_ready = compact_not_ready(&full);
     let ready = compact_ready(&full, &not_ready);
     let grok_slot = full.get("grok_slot").cloned().unwrap_or(Value::Null);
-    let grok_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
+    let grok_identity_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
         && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
     json!({
-        "ok": grok_ok,
+        "ok": true,
         "team": full.get("team").cloned().unwrap_or(Value::Null),
         "session_name": full.get("session_name").cloned().unwrap_or(Value::Null),
         "leader_attach_command": full.get("leader_attach_command").cloned().unwrap_or(Value::Null),
         "ready": ready,
         "not_ready": not_ready,
         "grok_slot": grok_slot,
+        "grok_identity_slot_ok": grok_identity_slot_ok,
         "agents": compact_agents(full.get("agents")),
     })
 }
