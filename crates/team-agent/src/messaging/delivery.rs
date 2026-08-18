@@ -15,6 +15,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension};
 
@@ -514,13 +515,19 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
-    let inject_report = match transport.inject_with_submit_observer(
-        &target,
-        &payload,
-        Key::Enter,
-        true,
-        Some(&submit_observer),
-    ) {
+    let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
+        paste_to_submit_floor_for_recipient(state, &message.recipient),
+        || {
+            transport.inject_with_submit_observer(
+                &target,
+                &payload,
+                Key::Enter,
+                true,
+                Some(&submit_observer),
+            )
+        },
+    );
+    let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
@@ -2100,6 +2107,23 @@ fn recipient_pane_has_actionable_startup_prompt(
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
         Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
+    }
+}
+
+fn paste_to_submit_floor_for_recipient(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Duration {
+    let provider = state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .and_then(|agent| agent.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_canonical_provider);
+    match provider {
+        Some(Provider::CursorAgent) => crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR,
+        _ => Duration::ZERO,
     }
 }
 

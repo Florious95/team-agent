@@ -362,6 +362,54 @@ pub(super) fn parse_copilot_mcp_list_server_names(text: &str) -> Vec<String> {
     out
 }
 
+/// Subscription seats inherit parent env, but that is implicit. Cursor cloud
+/// on this host is blocked without a proxy; `profile_launch` copies these
+/// keys only on the compatible-api path. Copy them explicitly here so a
+/// subscription cursor seat sees the same keys. Values may contain
+/// credentials — callers must only log presence/length, never the value.
+const CURSOR_PROXY_KEYS: &[&str] = &[
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorProxyPresence {
+    pub https_proxy: bool,
+    pub no_proxy: bool,
+}
+
+pub fn apply_cursor_subscription_proxy_env(
+    env: &mut BTreeMap<String, String>,
+) -> CursorProxyPresence {
+    let mut https_proxy = false;
+    let mut no_proxy = false;
+    for key in CURSOR_PROXY_KEYS {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        if key.eq_ignore_ascii_case("HTTPS_PROXY") {
+            https_proxy = true;
+        }
+        if key.eq_ignore_ascii_case("NO_PROXY") {
+            no_proxy = true;
+        }
+        env.entry((*key).to_string()).or_insert(value);
+    }
+    CursorProxyPresence {
+        https_proxy,
+        no_proxy,
+    }
+}
+
 pub(crate) fn apply_profile_launch_env(
     env: &mut BTreeMap<String, String>,
     profile_launch: &crate::provider::ProviderProfileLaunch,

@@ -348,8 +348,20 @@ fn test_cursor_agent_build_command_includes_workspace_flag() {
         "cursor argv must carry `--workspace {{workspace}}`: {argv:?}"
     );
     assert!(
+        argv_contains_adjacent(&argv, &["--trust"]),
+        "cursor argv must carry documented --trust: {argv:?}"
+    );
+    assert!(
+        argv_contains_adjacent(&argv, &["--sandbox", "disabled"]),
+        "cursor argv must carry documented --sandbox disabled: {argv:?}"
+    );
+    assert!(
         !argv.iter().any(|a| a == "--rules" || a == "--append-system-prompt"),
         "cursor append-system-prompt must NOT go on argv (workspace rules file): {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--system-prompt" || a == "--allowed-tools"),
+        "undocumented flags must stay off the main path: {argv:?}"
     );
 }
 
@@ -379,7 +391,7 @@ fn test_cursor_agent_build_command_bypass_flag_when_dangerous() {
 }
 
 #[test]
-fn test_cursor_agent_refuses_mcp_config_loudly() {
+fn test_cursor_agent_accepts_mcp_config_without_putting_it_on_argv() {
     let adapter = get_adapter(Provider::CursorAgent);
     let cfg = McpConfig {
         raw: serde_json::json!({
@@ -389,17 +401,36 @@ fn test_cursor_agent_refuses_mcp_config_loudly() {
             }
         }),
     };
-    let err = adapter
+    let argv = adapter
         .build_command(AuthMode::Subscription, Some(&cfg), None, None)
-        .expect_err("cursor must not silently drop mcp_config");
-    let text = err.to_string();
+        .expect("cursor MCP is launch overlay, not an argv capability hole");
     assert!(
-        text.to_ascii_lowercase().contains("mcp") && text.contains("not implemented"),
-        "cursor MCP hole must be a loud capability error; got {text}"
+        !argv.iter().any(|a| a == "--mcp-config" || a.contains("mcp")),
+        "cursor has no --mcp-config flag; overlay writes .cursor/mcp.json: {argv:?}"
     );
     assert!(
-        text.contains("action:"),
-        "cursor MCP error must give a next step; got {text}"
+        argv_contains_adjacent(&argv, &["--workspace", "{workspace}"]),
+        "workspace flag must survive an mcp_config argument: {argv:?}"
+    );
+}
+
+#[test]
+fn test_cursor_agent_refuses_mcp_config_loudly() {
+    // 已废除的行为：旧实现收到 mcp_config 就返回 CapabilityUnsupported
+    // （「MCP is not implemented」），此断言证明它确实没了。
+    let adapter = get_adapter(Provider::CursorAgent);
+    let cfg = McpConfig {
+        raw: serde_json::json!({
+            "team_orchestrator": {
+                "command": "/bin/team-agent",
+                "args": ["mcp-server"]
+            }
+        }),
+    };
+    let result = adapter.build_command(AuthMode::Subscription, Some(&cfg), None, None);
+    assert!(
+        !matches!(result, Err(ProviderError::CapabilityUnsupported(_))),
+        "feeding mcp_config must not return CapabilityUnsupported; got {result:?}"
     );
 }
 

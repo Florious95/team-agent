@@ -279,6 +279,12 @@ pub(crate) use mcp_config::{
     write_worker_mcp_config_for_provider,
 };
 
+mod cursor_mcp;
+pub use cursor_mcp::{
+    apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,
+    enable_cursor_workspace_mcp, physical_workspace_path,
+};
+
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
@@ -287,6 +293,7 @@ pub(crate) use worker_env::{
     fill_spawn_placeholders, fill_spawn_placeholders_full, inherited_env_with_team_overrides,
     persist_command_plan_state, spawn_timestamp,
 };
+pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 
 mod identity;
 pub(super) use identity::*;

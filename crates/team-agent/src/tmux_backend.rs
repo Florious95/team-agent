@@ -37,6 +37,7 @@ use std::io::{Read, Write};
 // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md` §Batch 1.
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -1138,6 +1139,38 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
 /// U1 #7: the exact delivery-token marker a token payload carries
 /// (`[team-agent-token:<id>]`). Use the full marker, not only the prefix, so an old
 /// scrollback token cannot verify a new message.
+/// Measured cursor-agent 2026.08.11 floor: text and first Enter ≥1s apart
+/// (phase0 M2-5/M2-6; `.team/scripts/cursor_send.sh`).
+pub const CURSOR_PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_secs(1);
+
+thread_local! {
+    static PASTE_TO_SUBMIT_FLOOR: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+/// Run `f` with a paste→Enter floor. Delivery sets 1s only for CursorAgent.
+/// Tests pass a small non-zero Duration to cover the sleep branch.
+/// Default is ZERO — claude/codex/grok and unset callers pay nothing.
+/// This is not TEAM_AGENT_TEST_TMP (that var is a path, always set in seats).
+pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> R {
+    PASTE_TO_SUBMIT_FLOOR.with(|cell| {
+        let previous = cell.replace(floor);
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+pub(crate) fn current_paste_to_submit_floor() -> Duration {
+    PASTE_TO_SUBMIT_FLOOR.with(Cell::get)
+}
+
+pub(crate) fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant, floor: Duration) {
+    let remain = floor.saturating_sub(pasted_at.elapsed());
+    if !remain.is_zero() {
+        std::thread::sleep(remain);
+    }
+}
+
 fn payload_token_marker(payload: &InjectPayload) -> Option<&str> {
     let text = payload.text()?;
     let start = text.find("[team-agent-token:")?;
@@ -2070,8 +2103,11 @@ impl Transport for TmuxBackend {
                 //
                 // Design truth source: .team/artifacts/E55-delivery-architecture-design.html
                 // Python parity: dynamic timeout max(2s, bytes/25000), poll 50ms.
+                // Cursor Ink：文本与 Enter 必须分开发且间隔 ≥1s，否则第一次
+                // Enter 被吞。token 可见性轮询的耗时算进这 1s；测试隔离下地板为 0。
                 // ═══════════════════════════════════════════════════════════
                 let inject_start = std::time::Instant::now();
+                let pasted_at = inject_start;
                 let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
 
                 // Phase 1: token visibility poll — wait for the pasted text to
@@ -2133,6 +2169,11 @@ impl Transport for TmuxBackend {
                         }),
                     });
                 }
+
+                sleep_remaining_paste_to_submit_floor(
+                    pasted_at,
+                    current_paste_to_submit_floor(),
+                );
 
                 let marker = payload_token_marker(payload);
                 let max_submit_attempts: u32 = 3;
