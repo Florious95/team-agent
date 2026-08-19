@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+/**
+ * purpose: place the Team Agent runtime and login wrappers via the npx installer
+ * contract: wrappers land only in the declared bin dir (~/.local/bin or --prefix/bin); installer-managed wrappers recorded in the manifest or recognized by marker are rewritten onto this install's runtime; a non-writable declared dir fails closed with ACTION
+ * boundary: never selects a PATH entry as the install target; never creates wrappers in third-party package dirs; does not treat host login PATH order as a landing picker
+ */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -119,7 +124,7 @@ Usage:
   npx @team-agent/installer@latest uninstall
 
 Options:
-  --prefix <dir>       fallback wrapper prefix when no writable PATH dir exists, default ~/.local
+  --prefix <dir>       declared wrapper prefix (wrappers go in <dir>/bin), default ~/.local
   --runtime-dir <dir>  stable runtime root, default ~/.team-agent/runtime
   --purge-runtime      uninstall also removes the runtime root
 `);
@@ -128,6 +133,7 @@ Options:
 function install(argv) {
   const opts = parseOptions(argv);
   const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
+  const prevManifest = readInstallManifest(runtimeRoot);
   const installTarget = resolveInstallBinDir({ env: process.env, home: os.homedir(), prefix: opts.prefix });
   const binDir = installTarget.binDir;
   const version = packageJson.version || "dev";
@@ -161,6 +167,7 @@ function install(argv) {
     home: os.homedir(),
     binDir,
     runtimeBinary,
+    recordedBinDirs: recordedManagedBinDirs(prevManifest),
     log: (line) => console.log(line),
   });
   installSkills(runtimeBinary);
@@ -172,6 +179,11 @@ function install(argv) {
     installedAt: new Date().toISOString(),
     installTargetKind: installTarget.kind,
     pathShadowRepairs: shadowRepairs.map((repair) => repair.file),
+    managedBinDirs: uniqueDirs([
+      binDir,
+      ...recordedManagedBinDirs(prevManifest),
+      ...shadowRepairs.map((repair) => repair.binDir),
+    ]),
   });
 
   const teamAgent = path.join(binDir, "team-agent");
@@ -299,31 +311,69 @@ function parseOptions(argv) {
   return opts;
 }
 
+export function declaredInstallBinDir(options = {}) {
+  const home = options.home || os.homedir();
+  const prefix = options.prefix
+    ? path.resolve(expandHomeFor(options.prefix, home))
+    : path.join(home, ".local");
+  return path.join(prefix, "bin");
+}
+
 export function resolveInstallBinDir(options = {}) {
   const env = options.env || process.env;
   const home = options.home || os.homedir();
-  const entries = uniquePathEntries(env.PATH || "", home);
-  for (const entry of entries) {
-    if (isVersionManagedPath(entry) || !canWriteDir(entry) || hasForeignWrapper(entry)) {
-      continue;
-    }
-    return { binDir: entry, kind: "path", readyNow: true, rc: null };
+  const binDir = path.resolve(declaredInstallBinDir(options));
+  try {
+    fs.mkdirSync(binDir, { recursive: true });
+  } catch (error) {
+    throw declaredBinDirUnwritableError(binDir, "create", error);
+  }
+  if (!canWriteDir(binDir)) {
+    throw declaredBinDirUnwritableError(binDir, "write");
   }
 
-  for (const entry of entries) {
-    if (isVersionManagedPath(entry) || !isReasonableUserBinDir(entry, home) || !canWriteDir(entry) || hasForeignWrapper(entry)) {
-      continue;
-    }
-    return { binDir: entry, kind: "path_user", readyNow: true, rc: null };
+  const onPath = uniquePathEntries(env.PATH || "", home).includes(binDir);
+  if (onPath) {
+    return { binDir, kind: "declared", readyNow: true, rc: null };
   }
-
-  const fallbackPrefix = options.prefix
-    ? path.resolve(expandHomeFor(options.prefix, home))
-    : path.join(home, ".local");
-  const binDir = path.join(fallbackPrefix, "bin");
-  fs.mkdirSync(binDir, { recursive: true });
   const rc = ensureBinDirOnShellRc(binDir, { env, home });
   return { binDir, kind: "shell_rc", readyNow: false, rc };
+}
+
+function declaredBinDirUnwritableError(binDir, op, cause) {
+  const detail = cause instanceof Error ? cause.message : cause ? String(cause) : "permission denied";
+  return new Error(
+    [
+      `ERROR: cannot ${op} Team Agent wrapper directory ${binDir}`,
+      `ACTION: make it writable (\`mkdir -p ${binDir} && chmod u+w ${binDir}\`), or rerun with --prefix <writable-dir>`,
+      `LOG: declared wrapper dir is the only landing; installer does not fall back to a PATH entry (${detail})`,
+    ].join("\n"),
+  );
+}
+
+export function recordedManagedBinDirs(manifest) {
+  const dirs = [];
+  if (!manifest || typeof manifest !== "object") {
+    return dirs;
+  }
+  if (typeof manifest.binDir === "string" && manifest.binDir) {
+    dirs.push(manifest.binDir);
+  }
+  if (Array.isArray(manifest.managedBinDirs)) {
+    for (const dir of manifest.managedBinDirs) {
+      if (typeof dir === "string" && dir) {
+        dirs.push(dir);
+      }
+    }
+  }
+  if (Array.isArray(manifest.pathShadowRepairs)) {
+    for (const file of manifest.pathShadowRepairs) {
+      if (typeof file === "string" && file) {
+        dirs.push(path.dirname(file));
+      }
+    }
+  }
+  return uniqueDirs(dirs);
 }
 
 export function repairPathShadowingTeamAgentCommands(options = {}) {
@@ -337,42 +387,50 @@ export function repairPathShadowingTeamAgentCommands(options = {}) {
   }
   const installedWrapper = path.join(binDir, "team-agent");
   const repairs = [];
-  const candidates = pathShadowRepairCandidates(env.PATH || "", home, binDir);
-  log?.(`path-shadow: scanning ${candidates.length} candidate bin dirs before ${binDir}`);
+  const recordedBinDirs = options.recordedBinDirs || recordedManagedBinDirs(options.manifest);
+  const candidates = pathShadowRepairCandidates(env.PATH || "", home, binDir, recordedBinDirs);
+  log?.(`path-shadow: scanning ${candidates.length} candidate bin dirs for managed wrappers`);
   for (const candidateDir of candidates) {
     const entry = candidateDir.dir;
-    const candidate = path.join(entry, "team-agent");
     if (isVersionManagedPath(entry)) {
-      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=version-managed-path`);
+      log?.(`path-shadow: skip ${path.join(entry, "team-agent")} source=${candidateDir.source} reason=version-managed-path`);
       continue;
     }
-    if (!fs.existsSync(candidate)) {
-      if (candidateDir.source === "home-local-bin") {
-        log?.(`path-shadow: checked ${candidate} source=${candidateDir.source} reason=not-found`);
+    for (const name of WRAPPER_NAMES) {
+      const candidate = path.join(entry, name);
+      if (!fs.existsSync(candidate)) {
+        if (name === "team-agent" && candidateDir.source === "home-local-bin") {
+          log?.(`path-shadow: checked ${candidate} source=${candidateDir.source} reason=not-found`);
+        }
+        continue;
       }
-      continue;
+      log?.(`path-shadow: found ${candidate} source=${candidateDir.source}`);
+      if (!isExecutableFile(candidate)) {
+        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=not-executable-file`);
+        continue;
+      }
+      if (sameFile(candidate, installedWrapper) && name === "team-agent") {
+        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=installed-wrapper`);
+        continue;
+      }
+      if (sameFile(candidate, runtimeBinary)) {
+        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=runtime-binary`);
+        continue;
+      }
+      if (!isInstallerManagedWrapper(candidate)) {
+        log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=not-installer-managed`);
+        continue;
+      }
+      const extraArgs = name === "team_orchestrator" ? ["mcp-server"] : name === "team-agent-coordinator" ? ["coordinator"] : [];
+      try {
+        writeExecWrapper(candidate, runtimeBinary, extraArgs, { allowForeign: true });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`failed to update PATH-shadowing team-agent at ${candidate}: ${detail}`);
+      }
+      log?.(`path-shadow: updated ${candidate} source=${candidateDir.source} to runtime shim`);
+      repairs.push({ file: candidate, binDir: entry, source: candidateDir.source });
     }
-    log?.(`path-shadow: found ${candidate} source=${candidateDir.source}`);
-    if (!isExecutableFile(candidate)) {
-      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=not-executable-file`);
-      continue;
-    }
-    if (sameFile(candidate, installedWrapper)) {
-      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=installed-wrapper`);
-      continue;
-    }
-    if (sameFile(candidate, runtimeBinary)) {
-      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=runtime-binary`);
-      continue;
-    }
-    try {
-      writeExecWrapper(candidate, runtimeBinary, [], { allowForeign: true });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to update PATH-shadowing team-agent at ${candidate}: ${detail}`);
-    }
-    log?.(`path-shadow: updated ${candidate} source=${candidateDir.source} to runtime shim`);
-    repairs.push({ file: candidate, binDir: entry, source: candidateDir.source });
   }
   if (repairs.length === 0) {
     log?.("path-shadow: no stale team-agent command repaired");
@@ -434,16 +492,7 @@ export function parseTeamAgentVersion(output) {
   return bare ? bare[1] : null;
 }
 
-function shadowingPathEntries(searchPath, home, binDir) {
-  const entries = uniquePathEntries(searchPath, home);
-  const installedIndex = entries.findIndex((entry) => path.resolve(entry) === path.resolve(binDir));
-  if (installedIndex === -1) {
-    return entries;
-  }
-  return entries.slice(0, installedIndex);
-}
-
-function pathShadowRepairCandidates(searchPath, home, binDir) {
+function pathShadowRepairCandidates(searchPath, home, binDir, recordedBinDirs = []) {
   const candidates = [];
   const seen = new Set();
   const add = (dir, source) => {
@@ -454,15 +503,34 @@ function pathShadowRepairCandidates(searchPath, home, binDir) {
     seen.add(resolved);
     candidates.push({ dir: resolved, source });
   };
-  for (const entry of shadowingPathEntries(searchPath, home, binDir)) {
-    add(entry, "path-before-install");
+  for (const entry of uniquePathEntries(searchPath, home)) {
+    add(entry, "path");
   }
 
   const homeLocalBin = path.join(home, ".local", "bin");
-  if (!sameFile(homeLocalBin, binDir)) {
-    add(homeLocalBin, "home-local-bin");
+  add(homeLocalBin, "home-local-bin");
+  add(binDir, "declared-bin");
+  for (const dir of recordedBinDirs) {
+    add(dir, "manifest-recorded");
   }
   return candidates;
+}
+
+function uniqueDirs(dirs) {
+  const seen = new Set();
+  const out = [];
+  for (const dir of dirs) {
+    if (typeof dir !== "string" || !dir) {
+      continue;
+    }
+    const resolved = path.resolve(dir);
+    if (seen.has(resolved)) {
+      continue;
+    }
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
 }
 
 function isExecutableFile(file) {
@@ -513,11 +581,6 @@ function isVersionManagedPath(dir) {
   ].some((marker) => value.includes(marker));
 }
 
-function isReasonableUserBinDir(dir, home) {
-  const relative = path.relative(home, dir);
-  return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 function canWriteDir(dir) {
   try {
     const probe = path.join(dir, `.team-agent-write-test-${process.pid}-${Date.now()}`);
@@ -527,13 +590,6 @@ function canWriteDir(dir) {
   } catch {
     return false;
   }
-}
-
-function hasForeignWrapper(binDir) {
-  return WRAPPER_NAMES.some((name) => {
-    const file = path.join(binDir, name);
-    return fs.existsSync(file) && !isInstallerManagedWrapper(file);
-  });
 }
 
 function isInstallerManagedWrapper(file) {
