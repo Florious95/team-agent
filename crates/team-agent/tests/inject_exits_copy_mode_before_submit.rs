@@ -34,7 +34,11 @@ fn short_tmux_socket(tag: &str) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     let pid = std::process::id();
     let n = N.fetch_add(1, Ordering::Relaxed);
-    format!("/private/tmp/ta-copymode-{tag}-{pid}-{n}.sock")
+    // 866939b1 used /private/tmp (macOS). grok-bot cannot mkdir /private.
+    std::env::temp_dir()
+        .join(format!("ta-copymode-{tag}-{pid}-{n}.sock"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn tmux(socket: &str, args: &[&str]) -> std::process::Output {
