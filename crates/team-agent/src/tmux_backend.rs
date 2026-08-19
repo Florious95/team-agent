@@ -4,8 +4,14 @@
 //!   provides:
 //!     - name: TmuxBackend
 //!       what: Transport 的 tmux 实现，inject/send_keys 取 pane 输入锁
+//!     - name: submit-consumption-verdict
+//!       what: token 仍在框且无 Working ⇒ SubmitConsumptionUnverified
+//!     - name: submit-retry-after-unconsumed
+//!       what: 未消费且 pane 处于 copy-mode 时 -X cancel 后只重发 C-m，直到消费或预算尽
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
+//!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
+//!   - 重试不重粘、不用 Escape/Ctrl-C；已消费不追加回车
 //! maturity: wired
 //! ---
 //!
@@ -35,9 +41,9 @@ use std::io::{Read, Write};
 // "tmux" shellouts that compile on Windows but return runtime errors
 // honestly (tmux binary absent → typed subprocess error).
 // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md` §Batch 1.
+use std::cell::Cell;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -45,10 +51,10 @@ use std::time::{Duration, Instant};
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
-    tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, AttachOutcome, BackendKind,
-    CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
-    PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
+    tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv, tmux_spawn_argv, AttachOutcome,
+    BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage,
+    InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
     TransportError, TurnVerification, WindowName,
 };
 
@@ -1218,6 +1224,11 @@ fn pre_submit_token_visible(
 }
 
 const TOKEN_POST_SUBMIT_READBACK_POLLS: u32 = 5;
+/// Extra C-m after confirmation says unconsumed, only while pane is in
+/// copy-mode (keyboard channel occupied). Not a busy/idle skip: inject
+/// already happened. Budget is a cap, not a reason to extra-Enter on a
+/// free channel (that would duplicate-submit a healthy pane).
+const COPY_MODE_ENTER_RETRY_BUDGET: u32 = 3;
 
 /// Some non-echo panes, including the integration harness' `stty -echo; cat`, only
 /// render the injected line after the submit key. If pre-submit readback missed the
@@ -2097,9 +2108,10 @@ impl Transport for TmuxBackend {
                 //   Phase 1 — token visibility poll (dynamic timeout based on
                 //     payload size, 50ms interval, replaces the fixed 125ms
                 //     appear_gate)
-                //   Phase 2 — Escape (if bracketed+Text+Enter) + Enter + poll
-                //     token disappeared from bottom 3 lines. On failure:
-                //     re-check → Escape+Enter → poll. Up to 3 attempts.
+                //   Phase 2 — one submit (`C-m` for Key::Enter) + poll.
+                //     If unconsumed AND pane is in copy-mode: `-X cancel`
+                //     then C-m only (never re-paste, never Escape).
+                //     Healthy pane that consumed on first C-m stops there.
                 //
                 // Design truth source: .team/artifacts/E55-delivery-architecture-design.html
                 // Python parity: dynamic timeout max(2s, bytes/25000), poll 50ms.
@@ -2108,7 +2120,7 @@ impl Transport for TmuxBackend {
                 // ═══════════════════════════════════════════════════════════
                 let inject_start = std::time::Instant::now();
                 let pasted_at = inject_start;
-                let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
+                let submit_argv = tmux_send_submit_argv(&pane, submit);
 
                 // Phase 1: token visibility poll — wait for the pasted text to
                 // become visible in the pane before submitting. Dynamic timeout
@@ -2137,7 +2149,7 @@ impl Transport for TmuxBackend {
                     None
                 };
 
-                // Phase 2: submit_and_verify — unified Escape+Enter+poll loop.
+                // Phase 2: one C-m submit + optional consumption poll. Escape unused.
                 let use_escape =
                     bracketed && payload.text().is_some() && matches!(submit, Key::Enter);
                 let escape_argv = if use_escape {
@@ -2170,13 +2182,12 @@ impl Transport for TmuxBackend {
                     });
                 }
 
-                sleep_remaining_paste_to_submit_floor(
-                    pasted_at,
-                    current_paste_to_submit_floor(),
-                );
+                sleep_remaining_paste_to_submit_floor(pasted_at, current_paste_to_submit_floor());
 
                 let marker = payload_token_marker(payload);
-                let max_submit_attempts: u32 = 3;
+                // First C-m is unconditional. Extra C-m only after
+                // unconsumed + copy-mode (see COPY_MODE_ENTER_RETRY_BUDGET).
+                let max_submit_attempts: u32 = 1 + COPY_MODE_ENTER_RETRY_BUDGET;
                 let mut consumption_attempts: u32 = 0;
                 let mut consumed: Option<bool> = None;
                 let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
@@ -2223,6 +2234,18 @@ impl Transport for TmuxBackend {
                                     break;
                                 }
                             }
+                        }
+                        // Channel restore, not a busy/idle branch: extra
+                        // Enter only lands if copy-mode is no longer eating it.
+                        match pane_mode_from_raw(
+                            self.query(target, PaneField::PaneMode).ok().flatten(),
+                        ) {
+                            Some(PaneMode::Copy) => {
+                                let cancel_argv =
+                                    crate::transport::tmux_cancel_mode_argv(&pane, PaneMode::Copy);
+                                let _ = self.run_ok(&cancel_argv);
+                            }
+                            _ => break,
                         }
                     }
 
@@ -2308,31 +2331,28 @@ impl Transport for TmuxBackend {
                 // `submit_verification`; the prints only spammed
                 // coordinator.log without additive signal. Behavior
                 // is byte-identical.
+                // consumed=false: token still in composer. Paste landing
+                // (`any_attempt_matched`) is A, not submit. Only a Working
+                // signal counts as consumption. Else say unverified.
+                let _ = any_attempt_matched;
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                    Some(false) => {
-                        if any_attempt_matched {
-                            SubmitVerification::EnterSentWithoutPlaceholderCheck
-                        } else {
-                            match self.capture(target, CaptureRange::Tail(15)) {
-                                Ok(cap) => {
-                                    attempts_detail.push(submit_attempt_observation(
-                                        consumption_attempts.max(1),
-                                        &cap,
-                                        marker,
-                                        inject_start.elapsed().as_millis() as u64,
-                                    ));
-                                    let busy = provider_busy_signal_in_tail(&cap.text);
-                                    if busy {
-                                        SubmitVerification::EnterSentWithoutPlaceholderCheck
-                                    } else {
-                                        SubmitVerification::SubmitConsumptionUnverified
-                                    }
-                                }
-                                Err(_) => SubmitVerification::SubmitConsumptionUnverified,
+                    Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
+                        Ok(cap) => {
+                            attempts_detail.push(submit_attempt_observation(
+                                consumption_attempts.max(1),
+                                &cap,
+                                marker,
+                                inject_start.elapsed().as_millis() as u64,
+                            ));
+                            if provider_busy_signal_in_tail(&cap.text) {
+                                SubmitVerification::EnterSentWithoutPlaceholderCheck
+                            } else {
+                                SubmitVerification::SubmitConsumptionUnverified
                             }
                         }
-                    }
+                        Err(_) => SubmitVerification::SubmitConsumptionUnverified,
+                    },
                     None => submit_verification_for_key(submit),
                 };
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;

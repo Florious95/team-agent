@@ -832,6 +832,7 @@ pub enum PaneMode {
 /// 把抽象 `Key` 翻译成 tmux send-keys 字面键名(各后端翻译,不透传字面量;§gap-5)。
 /// tmux:Enter/Up/Down/Left/Right/数字字符/C-c;CancelMode 不是单键(走 cancel_mode_argv)。
 /// 真相源:codex.py:266 `send-keys -t %7 Down Enter`、tmux send-keys 键名约定。
+/// 菜单/方向键序列继续用这里的 `Enter`。投递提交键走 [`tmux_submit_key_name`]。
 pub fn tmux_key_name(key: Key) -> &'static str {
     match key {
         Key::Enter => "Enter",
@@ -875,6 +876,29 @@ pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
             .map(str::to_string),
     );
     argv
+}
+
+/// 投递提交键的 tmux 拼写。
+///
+/// ledger.p0enter 锁定对：`C-j`/LF 5/5 不成回合，`C-m`/CR 5/5 成回合。
+/// `send-keys Enter` 在 raw PTY 上也是 `0d`，但提交路径只发锁定阳性名
+/// `C-m`，避免落到 LF 族。菜单 `send_keys([Down, Enter])` 不走这里。
+pub fn tmux_submit_key_name(key: Key) -> &'static str {
+    match key {
+        Key::Enter => "C-m",
+        other => tmux_key_name(other),
+    }
+}
+
+/// 投递提交：`send-keys -t <pane> <submit-spelling>`。
+pub fn tmux_send_submit_argv(pane: &PaneId, submit: Key) -> Vec<String> {
+    vec![
+        "tmux".to_string(),
+        "send-keys".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        tmux_submit_key_name(submit).to_string(),
+    ]
 }
 
 /// CancelMode 在 tmux 上按 pane mode 分派退出键(tmux_io.py:419-426)。
@@ -1056,8 +1080,9 @@ pub fn tmux_inject_text_argv(
 
 /// 空文本 inject:纯 `send-keys -t <target> <submit_key>`,**禁** buffer 路径
 /// (tmux 拒空 buffer 会卡 trust prompt;tmux_io.py:42)。
+/// `Key::Enter` 在此译成锁定阳性 `C-m`，不是菜单用的 `Enter`。
 pub fn tmux_empty_inject_argv(pane: &PaneId, submit: Key) -> Vec<String> {
-    tmux_send_keys_argv(pane, &[submit])
+    tmux_send_submit_argv(pane, submit)
 }
 
 /// capture 出口规范化(§4b,design line 399-400):逐行 rstrip 行尾空白 +
