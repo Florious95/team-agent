@@ -1,3 +1,7 @@
+//! purpose: contracts that tests touching product side effects stay inside one hermetic HOME/registry/socket/env boundary
+//! contract: R1-R6 source guards; R6 needles match as identifiers, not as substrings of longer names
+//! boundary: does not own HermeticTestEnv; does not drop or whitelist R6 needles
+//!
 //! task#8 RED contract: tests that exercise Team Agent product side effects
 //! must run inside one HOME/registry/socket/env hermetic boundary.
 //!
@@ -233,6 +237,40 @@ fn r6_static_guard_rejects_dangerous_tests_without_hermetic_boundary() {
     );
 }
 
+#[test]
+fn r6_mcp_tool_name_literal_is_not_message_plane_send() {
+    let source = r#"
+        assert!(prompt.contains("mcp__team_orchestrator__send_message"));
+        assert!(prompt.contains("team_orchestrator__send_message"));
+    "#;
+    assert!(
+        static_guard_offenders([(
+            "synthetic_mcp_tool_name_literal.rs".to_string(),
+            source.to_string()
+        )])
+        .is_empty(),
+        "MCP tool-name literals are not the send_message surface"
+    );
+}
+
+#[test]
+fn r6_bare_send_message_identifier_without_hermetic_is_still_offender() {
+    let source = r#"
+        fn tap() {
+            let _ = send_message("to", "body");
+        }
+    "#;
+    let offenders = static_guard_offenders([(
+        "synthetic_bare_send_message.rs".to_string(),
+        source.to_string(),
+    )]);
+    assert!(
+        offenders.iter().any(|offender| offender.path == "synthetic_bare_send_message.rs"
+            && offender.signals.contains(&"send_message")),
+        "bare send_message identifier without HermeticTestEnv must remain an offender; offenders={offenders:?}"
+    );
+}
+
 fn assert_contains_all(label: &str, source: &str, needles: &[&str], message: &str) {
     let missing = needles
         .iter()
@@ -315,8 +353,28 @@ fn dangerous_signals(source: &str) -> Vec<&'static str> {
         "attach-leader",
     ]
     .into_iter()
-    .filter(|needle| source.contains(needle))
+    .filter(|needle| contains_identifier(source, needle))
     .collect()
+}
+
+fn contains_identifier(source: &str, ident: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = source[start..].find(ident) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !is_ident_char(bytes[idx - 1]);
+        let after = idx + ident.len();
+        let after_ok = after == bytes.len() || !is_ident_char(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = idx + 1;
+    }
+    false
+}
+
+fn is_ident_char(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_')
 }
 
 fn dangerous_test_files() -> Vec<(String, String)> {

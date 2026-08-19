@@ -1,7 +1,7 @@
 //! purpose: worker 契约里的 MCP 工具名必须按 provider 实测书写形式渲染
 //! contract:
-//!   claude → mcp__team_orchestrator__{send_message,report_result}
-//!   grok   → team_orchestrator__{send_message,report_result}
+//!   claude → mcp__team_orchestrator__send_message / mcp__team_orchestrator__report_result
+//!   grok   → team_orchestrator__send_message / team_orchestrator__report_result
 //!   已验证 provider 的渲染结果不得再含 `team_orchestrator.` 点号
 //! boundary: 只钉 compile_worker_system_prompt 字面；未验证 provider 不在此猜形式
 
