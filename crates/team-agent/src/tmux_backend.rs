@@ -4,8 +4,13 @@
 //!   provides:
 //!     - name: TmuxBackend
 //!       what: Transport 的 tmux 实现，inject/send_keys 取 pane 输入锁
+//!     - name: submit-consumption-verdict
+//!       what: token 仍在框且无 Working ⇒ SubmitConsumptionUnverified
+//!     - name: pre-submit-copy-mode-cancel
+//!       what: 每次 Enter 前查 pane_in_mode，非 0 先 send-keys -X cancel
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
+//!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
 //! maturity: wired
 //! ---
 //!
@@ -45,7 +50,8 @@ use std::time::{Duration, Instant};
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
-    tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, AttachOutcome, BackendKind,
+    tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv, tmux_spawn_argv, AttachOutcome,
+    BackendKind,
     CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
     PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
     SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
@@ -2120,7 +2126,7 @@ impl Transport for TmuxBackend {
                 // ═══════════════════════════════════════════════════════════
                 let inject_start = std::time::Instant::now();
                 let pasted_at = inject_start;
-                let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
+                let submit_argv = tmux_send_submit_argv(&pane, submit);
 
                 // Phase 1: token visibility poll — wait for the pasted text to
                 // become visible in the pane before submitting. Dynamic timeout
@@ -2334,31 +2340,28 @@ impl Transport for TmuxBackend {
                 // `submit_verification`; the prints only spammed
                 // coordinator.log without additive signal. Behavior
                 // is byte-identical.
+                // consumed=false: token still in composer. Paste landing
+                // (`any_attempt_matched`) is A, not submit. Only a Working
+                // signal counts as consumption. Else say unverified.
+                let _ = any_attempt_matched;
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                    Some(false) => {
-                        if any_attempt_matched {
-                            SubmitVerification::EnterSentWithoutPlaceholderCheck
-                        } else {
-                            match self.capture(target, CaptureRange::Tail(15)) {
-                                Ok(cap) => {
-                                    attempts_detail.push(submit_attempt_observation(
-                                        consumption_attempts.max(1),
-                                        &cap,
-                                        marker,
-                                        inject_start.elapsed().as_millis() as u64,
-                                    ));
-                                    let busy = provider_busy_signal_in_tail(&cap.text);
-                                    if busy {
-                                        SubmitVerification::EnterSentWithoutPlaceholderCheck
-                                    } else {
-                                        SubmitVerification::SubmitConsumptionUnverified
-                                    }
-                                }
-                                Err(_) => SubmitVerification::SubmitConsumptionUnverified,
+                    Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
+                        Ok(cap) => {
+                            attempts_detail.push(submit_attempt_observation(
+                                consumption_attempts.max(1),
+                                &cap,
+                                marker,
+                                inject_start.elapsed().as_millis() as u64,
+                            ));
+                            if provider_busy_signal_in_tail(&cap.text) {
+                                SubmitVerification::EnterSentWithoutPlaceholderCheck
+                            } else {
+                                SubmitVerification::SubmitConsumptionUnverified
                             }
                         }
-                    }
+                        Err(_) => SubmitVerification::SubmitConsumptionUnverified,
+                    },
                     None => submit_verification_for_key(submit),
                 };
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;

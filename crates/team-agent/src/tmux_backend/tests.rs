@@ -1031,11 +1031,10 @@ fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
 // no longer in the bottom 5 lines of the pane = composer cleared).
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// 0.3.30 false-negative fix: token seen during post-submit consumption
-/// polling proves the paste landed after Enter was sent. If it never
-/// scrolls away, that is slow provider output, not transport failure.
+/// ledger.inject-fix: paste landing is not submit. Token still in the
+/// composer and no Working signal ⇒ SubmitConsumptionUnverified.
 #[test]
-fn e46_post_submit_matched_token_without_scroll_is_verified() {
+fn e46_post_submit_matched_token_without_scroll_is_unverified() {
     let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
     let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
     let report = be
@@ -1048,16 +1047,16 @@ fn e46_post_submit_matched_token_without_scroll_is_verified() {
         .expect("inject runs");
     assert_eq!(
         report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "0.3.30: post-submit matched=true is delivery proof even when \
-             the token stays in the bottom capture window. Got {:?}",
+        SubmitVerification::SubmitConsumptionUnverified,
+        "token still in composer and no Working signal must be unverified, \
+             not EnterSentWithoutPlaceholderCheck. Got {:?}",
         report.submit_verification
     );
     assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
     let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert!(
         diagnostics.attempts_detail.iter().any(|obs| obs.matched),
-        "the positive verdict must be backed by a post-submit matched observation"
+        "the unverified verdict must still record that paste landed"
     );
 }
 

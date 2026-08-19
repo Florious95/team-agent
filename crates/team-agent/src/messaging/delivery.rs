@@ -649,6 +649,7 @@ pub fn deliver_pending_message(
     if let Some(error) = submit_observer.take_error() {
         return Err(error);
     }
+    persist_submit_verification(workspace, message_id, &inject_report);
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
     // A successful tmux command is never provider-acceptance proof. Leader and
@@ -950,6 +951,26 @@ pub fn requeue_worker_target_missing_messages(
     }
     let _ = workspace;
     Ok(ids)
+}
+
+/// 把 post-Enter 消费判定落到 workspace，供确认面扫盘。
+///
+/// //! purpose: persist SubmitVerification after inject
+/// //! contract: file contains Debug variant name (SubmitConsumptionUnverified / EnterSentWithoutPlaceholderCheck)
+/// //! boundary: write failure must not fail delivery
+fn persist_submit_verification(workspace: &Path, message_id: &str, report: &InjectReport) {
+    let dir = workspace.join(".team").join("runtime");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = serde_json::json!({
+        "message_id": message_id,
+        "submit_verification": format!("{:?}", report.submit_verification),
+        "inject_verification": format!("{:?}", report.inject_verification),
+        "submit_verified": inject_submit_verified(report),
+        "attempts": report.attempts,
+    });
+    let _ = std::fs::write(dir.join("submit-verification.json"), format!("{body}\n"));
 }
 
 /// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
@@ -2110,10 +2131,7 @@ fn recipient_pane_has_actionable_startup_prompt(
     }
 }
 
-fn paste_to_submit_floor_for_recipient(
-    state: &serde_json::Value,
-    recipient: &str,
-) -> Duration {
+fn paste_to_submit_floor_for_recipient(state: &serde_json::Value, recipient: &str) -> Duration {
     let provider = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
