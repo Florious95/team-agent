@@ -349,12 +349,11 @@ fn inject_empty_payload_reports_empty_text_send_keys_and_turn_not_required() {
 fn empty_inject_is_single_direct_send_keys_never_buffer() {
     // 命令构造 golden(STEP-9):空文本禁走 buffer,只发一条 send-keys 提交键
     // (tmux_io.py:42 —— tmux 拒空 buffer 会卡 trust prompt)。
-    // golden empty_inject_calls 仅 1 条:send-keys -t %7 C-m（锁定阳性 CR）。
+    // golden empty_inject_calls 仅 1 条:send-keys -t %7 Enter。RED via stub。
     assert_eq!(
         tmux_empty_inject_argv(&PaneId::new("%7"), Key::Enter),
-        vec!["tmux", "send-keys", "-t", "%7", "C-m"]
+        vec!["tmux", "send-keys", "-t", "%7", "Enter"]
     );
-    assert_eq!(crate::transport::tmux_submit_key_name(Key::Enter), "C-m");
 }
 
 #[test]

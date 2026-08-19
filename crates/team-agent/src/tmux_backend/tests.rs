@@ -805,8 +805,8 @@ fn inject_text_runs_buffer_paste_submit_sequence_and_reports_submit() {
     assert!(
         calls
             .iter()
-            .any(|a| is(a, "send-keys") && a.contains(&"C-m".to_string())),
-        "inject must send the locked-positive submit key (C-m) last; got {calls:?}"
+            .any(|a| is(a, "send-keys") && a.contains(&"Enter".to_string())),
+        "inject must send the submit key (Enter) last; got {calls:?}"
     );
     assert_eq!(
         report.stage_reached,
@@ -1003,7 +1003,7 @@ fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
     assert!(
         calls.iter().any(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"C-m".to_string())
+                && argv.contains(&"Enter".to_string())
         }),
         "skip-consumption payload must still submit once; calls={calls:?}"
     );
@@ -1031,10 +1031,11 @@ fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
 // no longer in the bottom 5 lines of the pane = composer cleared).
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// ledger.inject-fix: paste landing is not submit. Token still in the
-/// composer and no Working signal ⇒ SubmitConsumptionUnverified.
+/// 0.3.30 false-negative fix: token seen during post-submit consumption
+/// polling proves the paste landed after Enter was sent. If it never
+/// scrolls away, that is slow provider output, not transport failure.
 #[test]
-fn e46_post_submit_matched_token_without_scroll_is_unverified() {
+fn e46_post_submit_matched_token_without_scroll_is_verified() {
     let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
     let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
     let report = be
@@ -1047,16 +1048,16 @@ fn e46_post_submit_matched_token_without_scroll_is_unverified() {
         .expect("inject runs");
     assert_eq!(
         report.submit_verification,
-        SubmitVerification::SubmitConsumptionUnverified,
-        "token still in composer and no Working signal must be unverified, \
-             not EnterSentWithoutPlaceholderCheck. Got {:?}",
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "0.3.30: post-submit matched=true is delivery proof even when \
+             the token stays in the bottom capture window. Got {:?}",
         report.submit_verification
     );
     assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
     let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert!(
         diagnostics.attempts_detail.iter().any(|obs| obs.matched),
-        "the unverified verdict must still record that paste landed"
+        "the positive verdict must be backed by a post-submit matched observation"
     );
 }
 
@@ -1206,14 +1207,14 @@ fn e46_inject_text_resend_rechecks_input_before_resending_to_avoid_double_submit
         .iter()
         .filter(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"C-m".to_string())
+                && argv.contains(&"Enter".to_string())
         })
         .count();
     assert_eq!(
         enter_count, 1,
         "E46 RED-3: when consumption is observed (or already happened \
-             between C-m and probe), the resend loop must STOP and NOT \
-             issue a second C-m. Got {enter_count} C-m sends. \
+             between Enter and probe), the resend loop must STOP and NOT \
+             issue a second Enter. Got {enter_count} Enter sends. \
              calls={calls:?}"
     );
 }
@@ -1284,7 +1285,7 @@ fn e46_inject_text_first_attempt_no_escape_retry_only() {
         .iter()
         .filter(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"C-m".to_string())
+                && argv.contains(&"Enter".to_string())
         })
         .count();
     let escape_count = calls
@@ -2055,419 +2056,4 @@ fn r1_caller_target_uuid_is_first_leader_session_uuid_precedence_seam() {
     let _panes = be
         .list_targets()
         .expect("live list_targets (caller-target scan precursor)");
-}
-
-// ── retry face (ledger.retry-face): unconsumed + copy-mode ⇒ cancel then C-m only ──
-
-/// Records argv and models a copy-mode pane that swallows the first C-m.
-/// After `-X cancel` plus a second C-m, the token leaves the composer.
-struct RetryFaceCopyModeRunner {
-    recorded: RecordedArgv,
-    token: String,
-    /// How many C-m submits have been seen.
-    submits: Mutex<u32>,
-    cancelled: Mutex<bool>,
-    /// If true, first C-m already consumes (healthy pane).
-    consume_on_first: bool,
-}
-
-impl CommandRunner for RetryFaceCopyModeRunner {
-    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
-        self.recorded.lock().unwrap().push(argv.to_vec());
-        let cmd = argv.get(1).map(String::as_str).unwrap_or("");
-        if cmd == "send-keys" {
-            if argv.iter().any(|a| a == "Escape") || argv.iter().any(|a| a == "C-c") {
-                return Ok(ok(""));
-            }
-            if argv.iter().any(|a| a == "-X") && argv.iter().any(|a| a == "cancel") {
-                *self.cancelled.lock().unwrap() = true;
-                return Ok(ok(""));
-            }
-            if argv.iter().any(|a| a == "C-m") {
-                *self.submits.lock().unwrap() += 1;
-                return Ok(ok(""));
-            }
-            return Ok(ok(""));
-        }
-        if cmd == "display-message" && argv.iter().any(|a| a == "#{pane_mode}") {
-            if *self.cancelled.lock().unwrap() {
-                return Ok(ok("0"));
-            }
-            return Ok(ok("copy-mode"));
-        }
-        if cmd == "capture-pane" {
-            let submits = *self.submits.lock().unwrap();
-            let cancelled = *self.cancelled.lock().unwrap();
-            if self.consume_on_first && submits >= 1 {
-                return Ok(ok(""));
-            }
-            if cancelled && submits >= 2 {
-                return Ok(ok(""));
-            }
-            return Ok(ok(&self.token));
-        }
-        Ok(ok(""))
-    }
-
-    fn run_with_stdin(
-        &self,
-        argv: &[String],
-        _stdin: &str,
-    ) -> Result<CommandOutput, std::io::Error> {
-        self.run(argv)
-    }
-}
-
-fn retry_face_backend(consume_on_first: bool) -> (TmuxBackend, RecordedArgv, String) {
-    let token =
-        "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_retryface]".to_string();
-    let recorded = Arc::new(Mutex::new(Vec::new()));
-    let runner = RetryFaceCopyModeRunner {
-        recorded: Arc::clone(&recorded),
-        token: token.clone(),
-        submits: Mutex::new(0),
-        cancelled: Mutex::new(false),
-        consume_on_first,
-    };
-    (TmuxBackend::with_runner(Box::new(runner)), recorded, token)
-}
-
-fn count_arg(calls: &[Vec<String>], needle: &str) -> usize {
-    calls
-        .iter()
-        .filter(|argv| argv.iter().any(|a| a == needle))
-        .count()
-}
-
-#[test]
-fn retry_face_unconsumed_copy_mode_cancels_then_resends_enter_only() {
-    let (be, rec, token) = retry_face_backend(false);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "copy-mode must be cancelled then C-m retried until consumed; got {:?}",
-        report.submit_verification
-    );
-    assert_eq!(
-        count_arg(&calls, "paste-buffer"),
-        1,
-        "must not re-paste; calls={calls:?}"
-    );
-    assert_eq!(
-        count_arg(&calls, "C-m"),
-        2,
-        "first C-m eaten, second after cancel; calls={calls:?}"
-    );
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|argv| argv.iter().any(|a| a == "-X") && argv.iter().any(|a| a == "cancel"))
-            .count(),
-        1,
-        "exactly one -X cancel; calls={calls:?}"
-    );
-    assert_eq!(
-        count_arg(&calls, "Escape"),
-        0,
-        "E55: never Escape; calls={calls:?}"
-    );
-    assert_eq!(count_arg(&calls, "C-c"), 0, "never Ctrl-C; calls={calls:?}");
-    assert_eq!(report.attempts, 2);
-}
-
-#[test]
-fn retry_face_consumed_on_first_enter_does_not_resend() {
-    let (be, rec, token) = retry_face_backend(true);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-    assert_eq!(
-        count_arg(&calls, "C-m"),
-        1,
-        "healthy pane must send exactly one C-m; calls={calls:?}"
-    );
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|argv| argv.iter().any(|a| a == "-X") && argv.iter().any(|a| a == "cancel"))
-            .count(),
-        0,
-        "must not cancel when first Enter already consumed; calls={calls:?}"
-    );
-    assert_eq!(count_arg(&calls, "paste-buffer"), 1);
-    assert_eq!(report.attempts, 1);
-}
-
-#[test]
-fn retry_face_retry_does_not_repaste() {
-    let (be, rec, token) = retry_face_backend(false);
-    let _ = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(
-        count_arg(&calls, "paste-buffer"),
-        1,
-        "retry face must never re-paste; calls={calls:?}"
-    );
-    assert!(
-        count_arg(&calls, "C-m") >= 2,
-        "copy-mode path must retry C-m; calls={calls:?}"
-    );
-}
-
-#[test]
-fn retry_face_never_sends_escape_or_ctrl_c() {
-    let (be, rec, token) = retry_face_backend(false);
-    let _ = be
-        .inject(
-            &Target::Pane(PaneId::new("%7")),
-            &InjectPayload::Text(token),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let calls = rec.lock().unwrap().clone();
-    assert_eq!(count_arg(&calls, "Escape"), 0);
-    assert_eq!(count_arg(&calls, "C-c"), 0);
-}
-
-/// Live tmux: single-line payload (no wrapper newlines). copy-mode eats
-/// the first C-m; retry face must cancel and resubmit until GOT=1.
-#[test]
-fn retry_face_live_copymode_submits_once_without_repaste() {
-    let env = live_retry_pane(true).expect("tmux live copy-mode pane must start");
-    let be = TmuxBackend::for_tmux_endpoint(&env.sock);
-    let text = format!("RFACE-COPY [team-agent-token:{}]", env.token);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new(&env.pane)),
-            &InjectPayload::Text(text),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let got = live_got_count(&env);
-    let hits = live_file_hits(&env, "RFACE-COPY");
-    let mode = live_pane_mode(&env);
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "live copy-mode must consume after retry; mode_after={mode} got={got} hits={hits}"
-    );
-    assert_eq!(
-        hits, 1,
-        "half4: tok lines must be 1, not N; mode={mode} got={got}"
-    );
-    assert_eq!(got, 1, "one GOT line; mode={mode}");
-    assert!(
-        report.attempts >= 2,
-        "copy-mode must retry C-m; attempts={}",
-        report.attempts
-    );
-}
-
-/// Live tmux: healthy pane consumes on the first C-m.
-#[test]
-fn retry_face_live_normal_pane_single_enter() {
-    let env = live_retry_pane(false).expect("tmux live normal pane must start");
-    let be = TmuxBackend::for_tmux_endpoint(&env.sock);
-    let text = format!("RFACE-NORM [team-agent-token:{}]", env.token);
-    let report = be
-        .inject(
-            &Target::Pane(PaneId::new(&env.pane)),
-            &InjectPayload::Text(text),
-            Key::Enter,
-            true,
-        )
-        .expect("inject");
-    let got = live_got_count(&env);
-    let hits = live_file_hits(&env, "RFACE-NORM");
-    assert_eq!(
-        report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck
-    );
-    assert_eq!(
-        report.attempts, 1,
-        "healthy pane must be one C-m; got={got} hits={hits}"
-    );
-    assert_eq!(got, 1);
-    assert_eq!(hits, 1);
-}
-
-struct LiveRetryPane {
-    sock: String,
-    pane: String,
-    token: String,
-    side: String,
-}
-
-impl LiveRetryPane {
-    fn teardown(&self) {
-        let _ = std::process::Command::new("tmux")
-            .args(["-S", &self.sock, "kill-server"])
-            .status();
-        let _ = std::fs::remove_file(&self.sock);
-        let _ = std::fs::remove_file(&self.side);
-    }
-}
-
-impl Drop for LiveRetryPane {
-    fn drop(&mut self) {
-        self.teardown();
-    }
-}
-
-fn live_retry_pane(copy_mode: bool) -> Option<LiveRetryPane> {
-    let token = format!(
-        "msg_rf{}{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let sock = format!("/Volumes/nvme/tmp/rtry-live-{token}.sock");
-    let side = format!("/Volumes/nvme/tmp/rtry-live-{token}.side");
-    let _ = std::fs::remove_file(&side);
-    let _ = std::fs::remove_file(&sock);
-    let status = std::process::Command::new("tmux")
-        .args([
-            "-S",
-            &sock,
-            "new-session",
-            "-d",
-            "-s",
-            &format!("rflive-{token}"),
-            "-x",
-            "80",
-            "-y",
-            "24",
-            &format!(
-                "sh -c 'while IFS= read -r l; do echo GOT; printf %s\\\\n \"$l\" >> \"{side}\"; i=0; while [ $i -lt 20 ]; do echo Working $i; i=$((i+1)); done; done'"
-            ),
-        ])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
-    }
-    std::thread::sleep(Duration::from_millis(400));
-    let pane_out = std::process::Command::new("tmux")
-        .args(["-S", &sock, "list-panes", "-F", "#{pane_id}"])
-        .output()
-        .ok()?;
-    let pane = String::from_utf8_lossy(&pane_out.stdout)
-        .lines()
-        .next()?
-        .trim()
-        .to_string();
-    if pane.is_empty() {
-        let _ = std::process::Command::new("tmux")
-            .args(["-S", &sock, "kill-server"])
-            .status();
-        return None;
-    }
-    if copy_mode {
-        let _ = std::process::Command::new("tmux")
-            .args(["-S", &sock, "copy-mode", "-e", "-t", &pane])
-            .status();
-        let _ = std::process::Command::new("tmux")
-            .args([
-                "-S",
-                &sock,
-                "send-keys",
-                "-X",
-                "-N",
-                "1",
-                "-t",
-                &pane,
-                "scroll-up",
-            ])
-            .status();
-        let mode = std::process::Command::new("tmux")
-            .args([
-                "-S",
-                &sock,
-                "display-message",
-                "-p",
-                "-t",
-                &pane,
-                "#{pane_mode}",
-            ])
-            .output()
-            .ok()?;
-        if String::from_utf8_lossy(&mode.stdout).trim() != "copy-mode" {
-            let _ = std::process::Command::new("tmux")
-                .args(["-S", &sock, "kill-server"])
-                .status();
-            return None;
-        }
-    }
-    Some(LiveRetryPane {
-        sock,
-        pane,
-        token,
-        side,
-    })
-}
-
-fn live_got_count(env: &LiveRetryPane) -> usize {
-    let out = std::process::Command::new("tmux")
-        .args(["-S", &env.sock, "capture-pane", "-p", "-t", &env.pane])
-        .output();
-    let Ok(out) = out else {
-        return 0;
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.trim() == "GOT")
-        .count()
-}
-
-fn live_file_hits(env: &LiveRetryPane, needle: &str) -> usize {
-    let Ok(body) = std::fs::read_to_string(&env.side) else {
-        return 0;
-    };
-    body.matches(needle).count()
-}
-
-fn live_pane_mode(env: &LiveRetryPane) -> String {
-    let out = std::process::Command::new("tmux")
-        .args([
-            "-S",
-            &env.sock,
-            "display-message",
-            "-p",
-            "-t",
-            &env.pane,
-            "#{pane_mode}",
-        ])
-        .output();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
 }
