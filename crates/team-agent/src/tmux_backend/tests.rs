@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1094,17 +1095,10 @@ fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
     );
 }
 
-/// 0.3.27: empty pane captures → consumption poll sees "no token in
-/// bottom 5" → consumed=true → EnterSentWithoutPlaceholderCheck. This is
-/// the generous default for panes where the capture can't distinguish
-/// "token consumed" from "token never landed" (empty mock, MCP sim).
-/// SubmitConsumptionUnverified only fires when the grace fallback
-/// explicitly rejects (token_visible_for_report=false AND consumed=false
-/// at the same time — a state that requires the token to be in the pane
-/// during consumption poll but absent during Phase 1, which is a
-/// contradictory mock state that doesn't arise in production).
+/// NeverSeen + 无占位符：空 pane 不得再把「token 不在底部」写成 consumed。
+/// 旧默认 EnterSentWithoutPlaceholderCheck 就是折叠恒真的同构。
 #[test]
-fn e46_inject_text_with_empty_pane_defaults_to_consumed() {
+fn e46_inject_text_with_empty_pane_is_unverified() {
     let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_empty]";
     let (be, _rec) = backend_with(MockResp::Out(ok("")), vec![]);
     let report = be
@@ -1117,9 +1111,9 @@ fn e46_inject_text_with_empty_pane_defaults_to_consumed() {
         .expect("inject runs");
     assert_eq!(
         report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "0.3.27: empty pane → consumption poll sees no token in bottom → \
-             consumed=true → EnterSentWithoutPlaceholderCheck. Got {:?}",
+        SubmitVerification::SubmitConsumptionUnverified,
+        "empty pane / token never visible / no pasted #N ⇒ unverified, \
+             not EnterSentWithoutPlaceholderCheck. Got {:?}",
         report.submit_verification
     );
 }
@@ -1425,16 +1419,13 @@ fn e50_inject_paste_prompt_path_populates_submit_diagnostics_per_attempt() {
             true,
         )
         .expect("inject");
-    // Fix-B: token payload → E46 token path. The submit verification is
-    // either EnterSentWithoutPlaceholderCheck (consumed) or
-    // SubmitConsumptionUnverified (not consumed). With the mock returning
-    // pasted-content text (no token in tail), consumed = true.
+    // token 从未可见 + composer 里仍有 pasted content（无 #N）→ 不得报已消费。
     assert_eq!(
         report.submit_verification,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "E50 PR-2 Fix-B: token payload that went through the E46 gate \
-             and was consumed (token not in bottom 5 lines) must report \
-             EnterSentWithoutPlaceholderCheck; got {:?}",
+        SubmitVerification::SubmitConsumptionUnverified,
+        "folded placeholder still in composer (no #N, token never seen) \
+             must be unverified, not vacuous EnterSentWithoutPlaceholderCheck; \
+             got {:?}",
         report.submit_verification
     );
     let diagnostics = report.submit_diagnostics.expect("diagnostics");
@@ -2055,4 +2046,250 @@ fn r1_caller_target_uuid_is_first_leader_session_uuid_precedence_seam() {
     let _panes = be
         .list_targets()
         .expect("live list_targets (caller-target scan precursor)");
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// pasted-signal: 折叠占位符正信号 + token NeverSeen 三态
+// ═════════════════════════════════════════════════════════════════════════
+
+struct FoldedPasteRunner {
+    recorded: RecordedArgv,
+    pre_submit: String,
+    post_submit: String,
+    submitted: AtomicBool,
+}
+
+impl CommandRunner for FoldedPasteRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        // 投递提交键是 C-m（tmux_send_submit_argv），不是字面量 Enter。
+        if argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "C-m" || a == "Enter")
+        {
+            self.submitted.store(true, Ordering::SeqCst);
+        }
+        let stdout = match argv.get(1).map(String::as_str) {
+            Some("capture-pane") => {
+                if self.submitted.load(Ordering::SeqCst) {
+                    self.post_submit.clone()
+                } else {
+                    self.pre_submit.clone()
+                }
+            }
+            Some("display-message") => "0\n".to_string(),
+            _ => String::new(),
+        };
+        Ok(ok(&stdout))
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
+fn backend_folded(pre_submit: &str, post_submit: &str) -> (TmuxBackend, RecordedArgv) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = FoldedPasteRunner {
+        recorded: Arc::clone(&recorded),
+        pre_submit: pre_submit.to_string(),
+        post_submit: post_submit.to_string(),
+        submitted: AtomicBool::new(false),
+    };
+    (TmuxBackend::with_runner(Box::new(runner)), recorded)
+}
+
+/// 修复前尺子：token 不在底部 15 行 ⇒ consumed。折叠占位符会打中这条恒真。
+fn unfixed_vacuous_consumed(text: &str, marker: &str) -> bool {
+    !super::token_in_bottom_n(text, marker, 15)
+}
+
+#[test]
+fn pasted_signal_unfixed_predicate_treats_folded_placeholder_as_consumed() {
+    let folded = "❯ [Pasted text #1 +8 lines]\n";
+    let marker = "[team-agent-token:msg_fold]";
+    assert!(
+        unfixed_vacuous_consumed(folded, marker),
+        "causal: pre-fix !token_in_bottom_n is vacuously true on a folded composer"
+    );
+    assert_eq!(
+        super::consumption_from_capture(folded, marker, false, Some(1)),
+        Some(false),
+        "post-fix NeverSeen + #1 still in composer must NOT be consumed"
+    );
+}
+
+#[test]
+fn pasted_signal_never_seen_without_placeholder_is_not_consumed() {
+    let marker = "[team-agent-token:msg_empty]";
+    assert_eq!(
+        super::token_sighting(false, false),
+        super::TokenSighting::NeverSeen
+    );
+    assert_eq!(
+        super::consumption_from_capture("", marker, false, None),
+        Some(false)
+    );
+}
+
+#[test]
+fn pasted_signal_never_seen_placeholder_id_gone_is_consumed() {
+    let marker = "[team-agent-token:msg_fold]";
+    let after = "assistant reply\n❯ \n";
+    assert_eq!(
+        super::consumption_from_capture(after, marker, false, Some(7)),
+        Some(true),
+        "NeverSeen but latched #7 left composer ⇒ consumed (positive signal)"
+    );
+}
+
+#[test]
+fn pasted_signal_never_seen_wrong_id_is_consumed() {
+    let marker = "[team-agent-token:msg_fold]";
+    let other = "❯ [Pasted text #2 +3 lines]\n";
+    assert_eq!(
+        super::consumption_from_capture(other, marker, false, Some(1)),
+        Some(true),
+        "our #1 gone, a later #2 in composer still means ours submitted"
+    );
+}
+
+#[test]
+fn pasted_signal_never_seen_no_id_cannot_claim_consumed() {
+    let marker = "[team-agent-token:msg_fold]";
+    let gone = "❯ \n";
+    assert_eq!(
+        super::consumption_from_capture(gone, marker, false, None),
+        Some(false),
+        "no #N latched: disappearance is unverified, not consumed"
+    );
+}
+
+#[test]
+fn pasted_signal_seen_token_then_gone_is_consumed() {
+    let marker = "[team-agent-token:msg_short]";
+    assert_eq!(
+        super::token_sighting(false, true),
+        super::TokenSighting::Gone
+    );
+    assert_eq!(
+        super::consumption_from_capture("❯ \n", marker, true, None),
+        Some(true)
+    );
+}
+
+#[test]
+fn pasted_signal_seen_token_still_present_is_not_consumed() {
+    let marker = "[team-agent-token:msg_short]";
+    let still = format!("❯ ping {marker}\n");
+    assert_eq!(
+        super::token_sighting(true, true),
+        super::TokenSighting::Visible
+    );
+    assert_eq!(
+        super::consumption_from_capture(&still, marker, true, None),
+        Some(false)
+    );
+}
+
+#[test]
+fn pasted_signal_marker_some_observation_records_composer_placeholder() {
+    use crate::transport::CapturedText;
+    let cap = CapturedText {
+        text: "❯ [Pasted text #4 +12 lines]\n".to_string(),
+        range: CaptureRange::Tail(40),
+    };
+    let obs = super::submit_attempt_observation(1, &cap, Some("[team-agent-token:msg_x]"), 10);
+    assert!(
+        obs.matched,
+        "marker Some must still walk pasted_prompt_match / composer placeholder; obs={obs:?}"
+    );
+    assert_eq!(obs.matched_literal.as_deref(), Some("pasted text"));
+}
+
+#[test]
+fn pasted_signal_inject_folded_enter_not_effective_is_unverified() {
+    let token_text = "Team Agent message from leader:\nline1\nline2\nline3\nline4\nline5\n\n[team-agent-token:msg_fold_stay]";
+    let placeholder = "❯ [Pasted text #4 +6 lines]\n";
+    let (be, _rec) = backend_folded(placeholder, placeholder);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified,
+        "folded + Enter not effective (#4 stays) must be unverified; got {:?}",
+        report.submit_verification
+    );
+}
+
+#[test]
+fn pasted_signal_inject_folded_enter_effective_is_consumed() {
+    let token_text = "Team Agent message from leader:\nline1\nline2\nline3\nline4\nline5\n\n[team-agent-token:msg_fold_go]";
+    let placeholder = "❯ [Pasted text #4 +6 lines]\n";
+    // 只有 #4 离开 composer；不加 Working，否则 busy 升级会让半三不经正信号就绿。
+    let after = "assistant reply\n❯ \n";
+    let (be, _rec) = backend_folded(placeholder, after);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "folded + Enter effective (#4 left composer) must be consumed; got {:?}",
+        report.submit_verification
+    );
+}
+
+#[test]
+fn pasted_signal_inject_short_token_visible_consumed_matches_pre_fix() {
+    let token_text = "ping [team-agent-token:msg_short_ok]";
+    let (be, _rec) = backend_folded(token_text, "❯ \n");
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "short visible token then gone must stay consumed; got {:?}",
+        report.submit_verification
+    );
+}
+
+#[test]
+fn pasted_signal_inject_short_token_visible_unconsumed_matches_pre_fix() {
+    let token_text = "ping [team-agent-token:msg_short_stay]";
+    let (be, _rec) = backend_folded(token_text, token_text);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified,
+        "short visible token still in composer must stay unverified; got {:?}",
+        report.submit_verification
+    );
 }
