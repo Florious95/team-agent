@@ -2116,7 +2116,7 @@ fn pasted_signal_unfixed_predicate_treats_folded_placeholder_as_consumed() {
         "causal: pre-fix !token_in_bottom_n is vacuously true on a folded composer"
     );
     assert_eq!(
-        super::consumption_from_capture(folded, marker, false, Some(1)),
+        super::consumption_from_capture(folded, marker, false, Some(super::PasteLatch::HashId(1))),
         Some(false),
         "post-fix NeverSeen + #1 still in composer must NOT be consumed"
     );
@@ -2140,7 +2140,7 @@ fn pasted_signal_never_seen_placeholder_id_gone_is_consumed() {
     let marker = "[team-agent-token:msg_fold]";
     let after = "assistant reply\n❯ \n";
     assert_eq!(
-        super::consumption_from_capture(after, marker, false, Some(7)),
+        super::consumption_from_capture(after, marker, false, Some(super::PasteLatch::HashId(7))),
         Some(true),
         "NeverSeen but latched #7 left composer ⇒ consumed (positive signal)"
     );
@@ -2151,7 +2151,7 @@ fn pasted_signal_never_seen_wrong_id_is_consumed() {
     let marker = "[team-agent-token:msg_fold]";
     let other = "❯ [Pasted text #2 +3 lines]\n";
     assert_eq!(
-        super::consumption_from_capture(other, marker, false, Some(1)),
+        super::consumption_from_capture(other, marker, false, Some(super::PasteLatch::HashId(1))),
         Some(true),
         "our #1 gone, a later #2 in composer still means ours submitted"
     );
@@ -2291,5 +2291,300 @@ fn pasted_signal_inject_short_token_visible_unconsumed_matches_pre_fix() {
         SubmitVerification::SubmitConsumptionUnverified,
         "short visible token still in composer must stay unverified; got {:?}",
         report.submit_verification
+    );
+}
+
+fn count_submit_enters(calls: &[Vec<String>]) -> usize {
+    calls
+        .iter()
+        .filter(|argv| {
+            argv.get(1).map(String::as_str) == Some("send-keys")
+                && argv.iter().any(|a| a == "C-m" || a == "Enter")
+        })
+        .count()
+}
+
+/// 外部队 2026-08-19 屏面原文，一字不改。
+const GROK_INCIDENT_LINE: &str = "│ ❯ [Pasted: 42 lines]           │";
+
+fn grok_raw_unfolded_paste(marker: &str) -> String {
+    let mut lines = Vec::new();
+    for i in 0..20 {
+        lines.push(format!("payload line {i}"));
+    }
+    lines.push(format!("token {marker}"));
+    lines.join("\n")
+}
+
+struct RawThenFoldRunner {
+    recorded: RecordedArgv,
+    raw: String,
+    folded: String,
+    after_submit: String,
+    captures: Mutex<u32>,
+    fold_after: u32,
+    submitted: AtomicBool,
+}
+
+impl CommandRunner for RawThenFoldRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        if argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "C-m" || a == "Enter")
+        {
+            self.submitted.store(true, Ordering::SeqCst);
+        }
+        let stdout = match argv.get(1).map(String::as_str) {
+            Some("capture-pane") => {
+                if self.submitted.load(Ordering::SeqCst) {
+                    self.after_submit.clone()
+                } else {
+                    let mut n = self.captures.lock().unwrap();
+                    *n = n.saturating_add(1);
+                    if *n > self.fold_after {
+                        self.folded.clone()
+                    } else {
+                        self.raw.clone()
+                    }
+                }
+            }
+            Some("display-message") => "0\n".to_string(),
+            _ => String::new(),
+        };
+        Ok(ok(&stdout))
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
+fn backend_raw_then_fold(
+    raw: &str,
+    folded: &str,
+    after_submit: &str,
+    fold_after: u32,
+) -> (TmuxBackend, RecordedArgv) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = RawThenFoldRunner {
+        recorded: Arc::clone(&recorded),
+        raw: raw.to_string(),
+        folded: folded.to_string(),
+        after_submit: after_submit.to_string(),
+        captures: Mutex::new(0),
+        fold_after,
+        submitted: AtomicBool::new(false),
+    };
+    (TmuxBackend::with_runner(Box::new(runner)), recorded)
+}
+
+#[test]
+fn grok_fold_literal_locks_external_team_line() {
+    let prompt =
+        super::pasted_prompt_in_composer(GROK_INCIDENT_LINE, 15).expect("lock grok incident line");
+    assert_eq!(prompt.literal, "pasted:");
+    assert_eq!(prompt.id, None, "grok fold has no #N");
+    assert_eq!(prompt.line_count, Some(42));
+    let matched = super::pasted_prompt_match(GROK_INCIDENT_LINE).expect("match");
+    assert_eq!(matched.0, "pasted:");
+}
+
+#[test]
+fn grok_fold_three_tui_literals_lock() {
+    let grok = super::pasted_prompt_in_composer(GROK_INCIDENT_LINE, 15).unwrap();
+    let claude = super::pasted_prompt_in_composer("❯ [Pasted text #4 +12 lines]\n", 15).unwrap();
+    let codex = super::pasted_prompt_in_composer("❯ [Pasted content #2 +3 lines]\n", 15).unwrap();
+    assert_eq!(grok.literal, "pasted:");
+    assert_eq!(claude.literal, "pasted text");
+    assert_eq!(claude.id, Some(4));
+    assert_eq!(codex.literal, "pasted content");
+    assert_eq!(codex.id, Some(2));
+}
+
+#[test]
+fn grok_fold_same_line_count_still_unconsumed() {
+    let marker = "[team-agent-token:msg_grok]";
+    assert_eq!(
+        super::consumption_from_capture(
+            GROK_INCIDENT_LINE,
+            marker,
+            false,
+            Some(super::PasteLatch::GrokLineCount(42))
+        ),
+        Some(false)
+    );
+}
+
+#[test]
+fn grok_fold_line_count_gone_is_consumed() {
+    let marker = "[team-agent-token:msg_grok]";
+    assert_eq!(
+        super::consumption_from_capture(
+            "Waiting for response\n❯ \n",
+            marker,
+            false,
+            Some(super::PasteLatch::GrokLineCount(42))
+        ),
+        Some(true)
+    );
+}
+
+#[test]
+fn grok_fold_different_n_is_not_same_paste() {
+    let marker = "[team-agent-token:msg_grok]";
+    let other = "│ ❯ [Pasted: 10 lines]           │";
+    assert_eq!(
+        super::consumption_from_capture(
+            other,
+            marker,
+            false,
+            Some(super::PasteLatch::GrokLineCount(42))
+        ),
+        Some(false),
+        "different N must not claim the latched paste consumed"
+    );
+    assert!(
+        !super::should_resubmit_enter(other, marker, Some(super::PasteLatch::GrokLineCount(42))),
+        "different N is not the same paste; do not hammer Enter"
+    );
+}
+
+#[test]
+fn grok_fold_no_latch_cannot_claim_consumed() {
+    let marker = "[team-agent-token:msg_grok]";
+    assert_eq!(
+        super::consumption_from_capture("❯ \n", marker, false, None),
+        Some(false)
+    );
+}
+
+#[test]
+fn grok_fold_inject_stays_retries_while_identity_present() {
+    let token_text = "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_grok_stay]";
+    let (be, rec) = backend_folded(GROK_INCIDENT_LINE, GROK_INCIDENT_LINE);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        3,
+        "same grok N still in composer must retry Enter up to cap; calls={calls:?}"
+    );
+}
+
+#[test]
+fn grok_fold_inject_leaves_consumed_one_enter() {
+    let token_text = "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_grok_go]";
+    let (be, rec) = backend_folded(GROK_INCIDENT_LINE, "Waiting for response\n❯ \n");
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "fold left composer after one Enter; no empty-composer hammer; calls={calls:?}"
+    );
+}
+
+#[test]
+fn grok_fold_unverified_without_identity_one_enter() {
+    let token_text = "Team Agent message from leader:\nhi\n\n[team-agent-token:msg_grok_empty]";
+    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "no latch / empty composer: one Enter then stop; calls={calls:?}"
+    );
+}
+
+#[test]
+fn grok_fold_does_not_enter_before_fold_on_raw_tall_paste() {
+    let marker = "[team-agent-token:msg_grok_early]";
+    let token_text = format!("Team Agent message from leader:\n{}\n\n{marker}", "x\n".repeat(20));
+    let raw = grok_raw_unfolded_paste(marker);
+    assert!(
+        !super::paste_ready_for_enter(&raw, marker),
+        "raw tall paste with token is not ready"
+    );
+    assert!(super::paste_ready_for_enter(GROK_INCIDENT_LINE, marker));
+    let (be, rec) = backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, "Waiting for response\n❯ \n", 2);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck
+    );
+    let calls = rec.lock().unwrap().clone();
+    let submit_index = calls
+        .iter()
+        .position(|argv| {
+            argv.get(1).map(String::as_str) == Some("send-keys")
+                && argv.iter().any(|a| a == "C-m" || a == "Enter")
+        })
+        .expect("must submit");
+    let captures_before: Vec<&Vec<String>> = calls[..submit_index]
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("capture-pane"))
+        .collect();
+    assert!(
+        captures_before.len() > 2,
+        "must keep polling until fold, not Enter on first token; calls={calls:?}"
+    );
+    assert_eq!(count_submit_enters(&calls), 1);
+}
+
+#[test]
+fn grok_fold_worker_text_payload_polls_consumption() {
+    assert!(
+        !InjectPayload::Text("worker [team-agent-token:x]".to_string()).skip_consumption_poll(),
+        "worker Text path poll_consumption=true; submit_attempt_limit is 3 not 1"
+    );
+    assert!(
+        InjectPayload::TextSkipConsumptionPoll("leader [team-agent-token:x]".to_string())
+            .skip_consumption_poll(),
+        "leader skip path is the only poll_consumption=false arm"
     );
 }

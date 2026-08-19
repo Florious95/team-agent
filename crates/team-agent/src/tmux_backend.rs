@@ -5,7 +5,7 @@
 //!     - name: TmuxBackend
 //!       what: Transport 的 tmux 实现，inject/send_keys 取 pane 输入锁
 //!     - name: submit-consumption-verdict
-//!       what: token 见过再消失，或本次 #N 占位符从 composer 消失 ⇒ 已消费；token 从未可见且无正信号 ⇒ 未证实
+//!       what: token 见过再消失，或本次占位符身份（#N / grok 行数）从 composer 消失 ⇒ 已消费；无身份时只按一次回车
 //!     - name: token-sighting
 //!       what: Visible / Gone / NeverSeen 三态接到判定（不只进报告）
 //!     - name: pre-submit-copy-mode-cancel
@@ -1315,14 +1315,25 @@ pub(crate) enum TokenSighting {
     NeverSeen,
 }
 
-/// purpose: composer 区折叠占位符（含可选 #N）
-/// contract: 只看底部 n 非空行；id 来自 `pasted text #N` / `pasted content #N`
+/// purpose: composer 区折叠占位符（含可选 #N 或 grok 行数）
+/// contract: 只看底部 n 非空行；id 来自 `pasted text #N` / `pasted content #N`；
+///   grok `[Pasted: N lines]` 无 #N，用 line_count 当身份，不得把「有占位符」当成同一次
 /// boundary: scrollback 里的旧占位符不算
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ComposerPastedPrompt {
     pub literal: &'static str,
     pub id: Option<u32>,
+    pub line_count: Option<u32>,
     pub from_bottom: u32,
+}
+
+/// purpose: 本次粘贴在 composer 上的可锁定身份
+/// contract: HashId = claude/codex `#N`；GrokLineCount = grok `[Pasted: N lines]` 的 N
+/// boundary: 无 #N 时禁止用「任意占位符」冒充 HashId
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PasteLatch {
+    HashId(u32),
+    GrokLineCount(u32),
 }
 
 fn parse_pasted_hash_id(lower_line: &str) -> Option<u32> {
@@ -1341,11 +1352,30 @@ fn parse_pasted_hash_id(lower_line: &str) -> Option<u32> {
     None
 }
 
+fn parse_grok_pasted_line_count(lower_line: &str) -> Option<u32> {
+    // grok: `[pasted: 42 lines]` — 冒号紧跟 pasted，没有 `#N`
+    let idx = lower_line.find("pasted:")?;
+    let rest = lower_line.get(idx.saturating_add("pasted:".len())..)?;
+    let rest = rest.trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let after = rest.get(digits.len()..)?.trim_start();
+    if after.starts_with("lines") || after.starts_with("line") {
+        digits.parse().ok()
+    } else {
+        None
+    }
+}
+
 fn pasted_literal_in_line(lower_line: &str) -> Option<&'static str> {
     if lower_line.contains("pasted content") {
         Some("pasted content")
     } else if lower_line.contains("pasted text") {
         Some("pasted text")
+    } else if parse_grok_pasted_line_count(lower_line).is_some() {
+        Some("pasted:")
     } else {
         None
     }
@@ -1367,6 +1397,7 @@ pub(crate) fn pasted_prompt_in_composer(text: &str, n: usize) -> Option<Composer
             return Some(ComposerPastedPrompt {
                 literal,
                 id: parse_pasted_hash_id(&lower),
+                line_count: parse_grok_pasted_line_count(&lower),
                 from_bottom,
             });
         }
@@ -1375,11 +1406,15 @@ pub(crate) fn pasted_prompt_in_composer(text: &str, n: usize) -> Option<Composer
     None
 }
 
-fn latch_paste_id(text: &str, current: Option<u32>) -> Option<u32> {
+fn latch_paste(text: &str, current: Option<PasteLatch>) -> Option<PasteLatch> {
     if current.is_some() {
         return current;
     }
-    pasted_prompt_in_composer(text, 15).and_then(|p| p.id)
+    let prompt = pasted_prompt_in_composer(text, 15)?;
+    if let Some(id) = prompt.id {
+        return Some(PasteLatch::HashId(id));
+    }
+    prompt.line_count.map(PasteLatch::GrokLineCount)
 }
 
 fn token_sighting(token_now: bool, token_ever_visible: bool) -> TokenSighting {
@@ -1392,15 +1427,63 @@ fn token_sighting(token_now: bool, token_ever_visible: bool) -> TokenSighting {
     }
 }
 
-fn consumption_from_placeholder(text: &str, tracked_paste_id: Option<u32>) -> Option<bool> {
+fn consumption_from_placeholder(text: &str, tracked: Option<PasteLatch>) -> Option<bool> {
     let prompt = pasted_prompt_in_composer(text, 15);
-    match (tracked_paste_id, prompt) {
-        (Some(id), Some(p)) if p.id == Some(id) => Some(false),
-        (Some(_), Some(p)) if p.id.is_some() => Some(true),
-        (Some(_), Some(_)) => Some(false),
-        (Some(_), None) => Some(true),
+    match (tracked, prompt) {
+        (Some(PasteLatch::HashId(id)), Some(p)) if p.id == Some(id) => Some(false),
+        (Some(PasteLatch::HashId(_)), Some(p)) if p.id.is_some() => Some(true),
+        (Some(PasteLatch::HashId(_)), Some(_)) => Some(false),
+        (Some(PasteLatch::HashId(_)), None) => Some(true),
+        (Some(PasteLatch::GrokLineCount(n)), Some(p)) if p.line_count == Some(n) => Some(false),
+        // 不同 N：不能把「上一贴走了」写成已消费（无 #N，换行数 ≠ 同一次）
+        (Some(PasteLatch::GrokLineCount(_)), Some(_)) => Some(false),
+        (Some(PasteLatch::GrokLineCount(_)), None) => Some(true),
         (None, _) => Some(false),
     }
+}
+
+/// purpose: 无身份时禁止把「未证实」升级成连按回车
+/// contract: 只有 token 仍在 composer，或锁定的 #N / grok 行数仍在，才重按
+/// boundary: 不重粘文本；不把不同 grok N 当成可重按的同一次
+pub(crate) fn should_resubmit_enter(
+    text: &str,
+    marker: &str,
+    tracked: Option<PasteLatch>,
+) -> bool {
+    if token_in_bottom_n(text, marker, 15) {
+        return true;
+    }
+    let Some(prompt) = pasted_prompt_in_composer(text, 15) else {
+        return false;
+    };
+    match tracked {
+        Some(PasteLatch::HashId(id)) => prompt.id == Some(id),
+        Some(PasteLatch::GrokLineCount(n)) => prompt.line_count == Some(n),
+        None => false,
+    }
+}
+
+/// purpose: Phase 1 判定 TUI 侧注入已完成、可以按回车
+/// contract: composer 已有折叠占位符 ⇒ 完成；短贴 token 可见且不是待折叠高块 ⇒ 完成
+/// boundary: token 出现在未折叠的高块里不算完成（按早了）
+pub(crate) fn paste_ready_for_enter(text: &str, marker: &str) -> bool {
+    if pasted_prompt_in_composer(text, 15).is_some() {
+        return true;
+    }
+    text.contains(marker) && !raw_multiline_still_unfolded(text, marker)
+}
+
+fn raw_multiline_still_unfolded(text: &str, marker: &str) -> bool {
+    if pasted_prompt_in_composer(text, 15).is_some() {
+        return false;
+    }
+    if !text.contains(marker) {
+        return false;
+    }
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        > 15
 }
 
 /// purpose: 把 token 三态 + 本次 #N 占位符合成消费判定
@@ -1412,13 +1495,13 @@ pub(crate) fn consumption_from_capture(
     text: &str,
     marker: &str,
     token_ever_visible: bool,
-    tracked_paste_id: Option<u32>,
+    tracked: Option<PasteLatch>,
 ) -> Option<bool> {
     let token_now = token_in_bottom_n(text, marker, 15);
     match token_sighting(token_now, token_ever_visible) {
         TokenSighting::Visible => Some(false),
         TokenSighting::Gone => Some(true),
-        TokenSighting::NeverSeen => consumption_from_placeholder(text, tracked_paste_id),
+        TokenSighting::NeverSeen => consumption_from_placeholder(text, tracked),
     }
 }
 
@@ -1529,6 +1612,11 @@ pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
         "pasted content"
     } else if lower.contains("pasted text") {
         "pasted text"
+    } else if text
+        .lines()
+        .any(|line| parse_grok_pasted_line_count(&line.to_ascii_lowercase()).is_some())
+    {
+        "pasted:"
     } else {
         return None;
     };
@@ -1539,7 +1627,13 @@ pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
         .collect();
     let mut from_bottom: u32 = 0;
     for line in non_empty.iter().rev() {
-        if line.to_ascii_lowercase().contains(lit) {
+        let line_lower = line.to_ascii_lowercase();
+        let hit = if lit == "pasted:" {
+            parse_grok_pasted_line_count(&line_lower).is_some()
+        } else {
+            line_lower.contains(lit)
+        };
+        if hit {
             return Some((lit, from_bottom));
         }
         from_bottom = from_bottom.saturating_add(1);
@@ -2265,16 +2359,19 @@ impl Transport for TmuxBackend {
                 };
                 let poll_start = std::time::Instant::now();
                 let mut token_ever_visible = false;
-                let mut tracked_paste_id: Option<u32> = None;
+                let mut tracked_paste: Option<PasteLatch> = None;
                 token_visible_for_report = if let Some(m) = payload_token_marker(payload) {
                     let mut visible = false;
                     while poll_start.elapsed().as_millis() < token_poll_timeout_ms as u128 {
                         match self.capture(target, CaptureRange::Tail(80)) {
                             Ok(cap) => {
-                                tracked_paste_id = latch_paste_id(&cap.text, tracked_paste_id);
+                                tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 if cap.text.contains(m) {
                                     visible = true;
                                     token_ever_visible = true;
+                                }
+                                // 折叠占位符出现 = TUI 侧注入完成。token 出现在未折叠高块里不算完成。
+                                if paste_ready_for_enter(&cap.text, m) {
                                     break;
                                 }
                             }
@@ -2361,7 +2458,7 @@ impl Transport for TmuxBackend {
                                 if cap.text.contains(m) {
                                     token_ever_visible = true;
                                 }
-                                tracked_paste_id = latch_paste_id(&cap.text, tracked_paste_id);
+                                tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 let obs = submit_attempt_observation(
                                     attempt_index,
                                     &cap,
@@ -2373,15 +2470,19 @@ impl Transport for TmuxBackend {
                                 }
                                 attempts_detail.push(obs);
                                 // NeverSeen 不得把 token 缺席写成 consumed；
-                                // 见过再消失，或本次 #N 占位符离开 composer，才停手。
+                                // 见过再消失，或本次占位符身份离开 composer，才停手。
                                 if consumption_from_capture(
                                     &cap.text,
                                     m,
                                     token_ever_visible,
-                                    tracked_paste_id,
+                                    tracked_paste,
                                 ) == Some(true)
                                 {
                                     consumed = Some(true);
+                                    break;
+                                }
+                                if !should_resubmit_enter(&cap.text, m, tracked_paste) {
+                                    consumed = Some(false);
                                     break;
                                 }
                             }
@@ -2446,7 +2547,7 @@ impl Transport for TmuxBackend {
                                     if cap.text.contains(m) {
                                         token_ever_visible = true;
                                     }
-                                    tracked_paste_id = latch_paste_id(&cap.text, tracked_paste_id);
+                                    tracked_paste = latch_paste(&cap.text, tracked_paste);
                                     let obs = submit_attempt_observation(
                                         attempt_index,
                                         &cap,
@@ -2461,7 +2562,7 @@ impl Transport for TmuxBackend {
                                         &cap.text,
                                         m,
                                         token_ever_visible,
-                                        tracked_paste_id,
+                                        tracked_paste,
                                     ) == Some(true)
                                     {
                                         found_consumed = true;
