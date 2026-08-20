@@ -214,8 +214,7 @@ pub(super) fn spawn_agent_window(
         safety
     } else {
         detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
-            agent,
-            provider,
+            agent, provider,
         )?;
         &detected_safety
     };
@@ -843,15 +842,16 @@ pub(super) fn save_restart_projected_state_with_capture_backfill_skip(
     topology_authority_agent_ids: &[&str],
 ) -> Result<(), LifecycleError> {
     sync_restart_team_projections(state, team_key);
-    crate::state::repository::StateRepository::new(workspace).save(
-        crate::state::repository::StateWriteIntent::RestartTeam {
-            team_key,
-            topology_authority_agent_ids,
-            skip_capture_backfill_agent_ids,
-        },
-        state,
-    )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::RestartTeam {
+                team_key,
+                topology_authority_agent_ids,
+                skip_capture_backfill_agent_ids,
+            },
+            state,
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 pub(super) fn restart_projection_team_key(state: &serde_json::Value, team: Option<&str>) -> String {
@@ -1124,7 +1124,24 @@ pub(super) fn resume_backing_probe_for_agent(
             }
             copilot_session_store_has_session(session_id.as_str())
         }
-        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
+        Provider::Grok => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            match crate::provider::session_scan::grok::grok_session_dir(
+                &spawn_cwd,
+                session_id.as_str(),
+            ) {
+                Some(dir) => {
+                    checked_paths.push(dir.clone());
+                    crate::provider::session_scan::grok::grok_session_archive_present(&dir)
+                }
+                None => false,
+            }
+        }
+        Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic

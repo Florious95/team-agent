@@ -77,7 +77,11 @@ pub(crate) fn is_claude_family(provider: Provider) -> bool {
 pub(crate) fn requires_resume_backing(provider: Provider) -> bool {
     matches!(
         provider,
-        Provider::Codex | Provider::Claude | Provider::ClaudeCode | Provider::Copilot
+        Provider::Codex
+            | Provider::Claude
+            | Provider::ClaudeCode
+            | Provider::Copilot
+            | Provider::Grok
     )
 }
 
