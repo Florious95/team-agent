@@ -578,6 +578,11 @@ impl ProviderAdapter for BasicProviderAdapter {
             // mcp_config inline 形态由 build_command 写入,launch 路径会用
             // point_native_mcp_config_at_file 重写为 @<file> 形(§C1 note)。
             Provider::Grok => {
+                // Align with Claude/Copilot: the UUID on `--session-id` is
+                // also the capture hint. `CommandPlan::argv_only` used to
+                // drop expected_session_id, so `_pending_session_id` was
+                // never written and restart could not resume.
+                let expected = next_session_token();
                 let mut argv = grok_base_command(
                     self,
                     ctx.auth_mode,
@@ -590,8 +595,13 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.effort,
                 )?;
                 argv.push("--session-id".to_string());
-                argv.push(next_session_token());
-                Ok(CommandPlan::argv_only(argv))
+                argv.push(expected.clone());
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: None,
+                    managed_mcp_config: false,
+                })
             }
             Provider::Copilot => {
                 let expected = next_session_token();

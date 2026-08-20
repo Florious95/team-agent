@@ -66,6 +66,7 @@ mod g1_silent_faces;
 mod grok_effort_argv_red;
 mod grok_mcp_overlay_red;
 mod grok_require_explicit_model_red;
+mod grok_restart_resume_red;
 mod harvest2_a_batch_red;
 mod host_cotenant_death_p0_contract;
 mod lane_ops;

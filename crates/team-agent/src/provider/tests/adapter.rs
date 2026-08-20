@@ -435,6 +435,42 @@ fn test_cursor_agent_refuses_mcp_config_loudly() {
 }
 
 #[test]
+fn test_grok_build_command_plan_binds_expected_session_id_to_argv() {
+    let adapter = get_adapter(Provider::Grok);
+    let plan = adapter
+        .build_command_plan(ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: None,
+            model: Some("grok-4.6"),
+            tools: &[],
+            profile_launch: None,
+            agent_id_hint: Some("w1"),
+            effort: None,
+        })
+        .expect("grok plan");
+    let sid = plan
+        .expected_session_id
+        .as_ref()
+        .map(|s| s.as_str())
+        .expect("grok fresh plan must carry expected_session_id");
+    assert!(
+        !sid.is_empty(),
+        "expected_session_id must be a non-empty uuid"
+    );
+    assert!(
+        argv_contains_adjacent(&plan.argv, &["--session-id", sid]),
+        "argv --session-id must match expected_session_id; argv={:?}",
+        plan.argv
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--resume"),
+        "fresh grok plan must not include --resume; argv={:?}",
+        plan.argv
+    );
+}
+
+#[test]
 fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
     use crate::provider::adapters::grok::{grok_tool_mapping, GrokToolMapping};
     assert_eq!(

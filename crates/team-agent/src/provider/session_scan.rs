@@ -14,6 +14,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod common;
 pub(crate) mod copilot;
+pub(crate) mod grok;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureSessionContext {
@@ -40,6 +41,9 @@ pub(crate) fn scan_session_candidates_once(
 ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
     if matches!(provider, Provider::Copilot) {
         return Ok(copilot::scan_session_store(context));
+    }
+    if matches!(provider, Provider::Grok) {
+        return Ok(grok::scan_session_store(context));
     }
     if matches!(provider, Provider::Claude | Provider::ClaudeCode)
         && context.expected_session_id.is_some()
