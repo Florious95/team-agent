@@ -42,6 +42,19 @@ fn percent_encode_unreserved(raw: &str) -> String {
     out
 }
 
+/// ---
+/// purpose: 由 spawn cwd 与 session id 派生 ~/.grok/sessions 下的存档目录
+/// params:
+///   spawn_cwd: 席位工作目录；canonicalize 后再 percent-encode
+///   session_id: 框架预定 uuid；空或含路径分隔则拒绝
+/// returns: HOME 下对应目录路径；HOME 缺失或 id 非法则 None
+/// contract:
+///   provides:
+///     - name: grok_session_dir
+///       what: 只派生路径，不创建目录、不读存档
+/// boundary:
+///   - 不枚举其它 uuid，不读会话文件
+/// ---
 pub(crate) fn grok_session_dir(spawn_cwd: &Path, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty()
         || session_id.contains('/')
@@ -64,6 +77,18 @@ pub(crate) fn grok_session_dir(spawn_cwd: &Path, session_id: &str) -> Option<Pat
     )
 }
 
+/// ---
+/// purpose: 只凭 marker 文件存在性判断 grok 会话存档是否可 resume
+/// params:
+///   dir: grok_session_dir 给出的目录
+/// returns: 目录存在且含 events.jsonl 或 chat_history.jsonl 或 summary.json
+/// contract:
+///   provides:
+///     - name: grok_session_archive_present
+///       what: 用 is_file 判 backing，不打开正文
+/// boundary:
+///   - 不读 jsonl / summary 内容
+/// ---
 pub(crate) fn grok_session_archive_present(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
@@ -73,6 +98,18 @@ pub(crate) fn grok_session_archive_present(dir: &Path) -> bool {
         .any(|name| dir.join(name).is_file())
 }
 
+/// ---
+/// purpose: 按 pending expected_session_id 捕获唯一 grok 磁盘存档
+/// params:
+///   context: 含 spawn_cwd 与 expected_session_id 的捕获上下文
+/// returns: 命中则一条 FsWatch 候选，否则空向量
+/// contract:
+///   provides:
+///     - name: scan_session_store
+///       what: expected id 与目录对齐才捕获
+/// boundary:
+///   - 无 pending id 不扫描；不拾取同 cwd 其它会话
+/// ---
 pub(super) fn scan_session_store(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
     let Some(expected) = context.expected_session_id.as_ref() else {
         return Vec::new();
