@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
@@ -15,7 +17,8 @@ use crate::model::pane_authority_refusal as pane_refusal;
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::{
-    PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport, WindowName,
+    CaptureRange, PaneId, PaneInfo, PaneLiveness, SessionName, SpawnResult, Target, Transport,
+    WindowName,
 };
 
 use super::helpers::{
@@ -398,7 +401,7 @@ fn execute_leader_plan_after_ambient_authority(
     } else if plan.is_external_leader {
         persist_external_leader_topology_marker(plan, workspace)?;
     }
-    let process = run_leader_argv(&argv, &plan.leader_env, plan, workspace)?;
+    let process = run_leader_argv(&argv, &plan.leader_env, plan, workspace, None)?;
     let code = process.status.code();
     if !process.status.success() {
         return Err(LeaderError::Start(leader_launcher_failure(&process)));
@@ -1085,7 +1088,20 @@ fn execute_managed_leader_plan_attempt(
         workspace.to_path_buf(),
         spawned.pane_id.as_str().to_string(),
     );
-    let process = match run_leader_argv(&plan.argv, &BTreeMap::new(), plan, workspace) {
+    let process = match run_leader_argv(
+        &plan.argv,
+        &BTreeMap::new(),
+        plan,
+        workspace,
+        Some(ManagedAttachWatch {
+            transport: &transport,
+            spawned: &spawned,
+            session,
+            session_existed_before,
+            workspace,
+            provider_label: provider_command_name(plan.provider),
+        }),
+    ) {
         Ok(process) => process,
         Err(error) => {
             cleanup_managed_leader_resources(
@@ -1099,6 +1115,14 @@ fn execute_managed_leader_plan_attempt(
             return Err(error);
         }
     };
+    if process.intentional_teardown {
+        return Ok(LeaderLaunchOutcome {
+            status: LeaderLaunchStatus::Exited,
+            exit_code: Some(0),
+            session_name: plan.session_name.clone(),
+            reason: None,
+        });
+    }
     let code = process.status.code();
     if !process.status.success() {
         cleanup_managed_leader_resources(
@@ -1200,6 +1224,115 @@ fn ensure_managed_leader_pane(
     }
 }
 
+struct ManagedAttachWatch<'a> {
+    transport: &'a dyn Transport,
+    spawned: &'a SpawnResult,
+    session: &'a SessionName,
+    session_existed_before: bool,
+    workspace: &'a Path,
+    provider_label: &'a str,
+}
+
+#[cfg(unix)]
+static MANAGED_ATTACH_TEARDOWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+struct ManagedTermGuard {
+    old: libc::sighandler_t,
+}
+
+#[cfg(unix)]
+impl ManagedTermGuard {
+    fn install() -> Self {
+        MANAGED_ATTACH_TEARDOWN.store(false, Ordering::SeqCst);
+        let handler = managed_term_handler as *const () as libc::sighandler_t;
+        let old = unsafe { libc::signal(libc::SIGTERM, handler) };
+        Self { old }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ManagedTermGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGTERM, self.old);
+        }
+        MANAGED_ATTACH_TEARDOWN.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn managed_term_handler(_: libc::c_int) {
+    MANAGED_ATTACH_TEARDOWN.store(true, Ordering::SeqCst);
+}
+
+fn managed_attach_should_teardown(watch: &ManagedAttachWatch<'_>) -> bool {
+    let marker = crate::tmux_backend::leader_provider_exit_marker(watch.provider_label);
+    let target = Target::Pane(watch.spawned.pane_id.clone());
+    if let Ok(cap) = watch.transport.capture(&target, CaptureRange::Tail(80)) {
+        if cap.text.contains(&marker) || cap.text.contains("[team-agent] Provider exited") {
+            return true;
+        }
+    }
+    matches!(
+        leader_provider_health(
+            watch.transport,
+            &watch.spawned.pane_id,
+            watch.provider_label
+        ),
+        LeaderProviderHealth::ProviderExited | LeaderProviderHealth::Unreachable
+    )
+}
+
+fn clear_managed_leader_receiver_pane(workspace: &Path, pane_id: &str) {
+    let Ok(mut state) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    let mut changed = false;
+    if let Some(teams) = state.get_mut("teams").and_then(serde_json::Value::as_object_mut) {
+        for (_key, team) in teams.iter_mut() {
+            let Some(team_obj) = team.as_object_mut() else {
+                continue;
+            };
+            if let Some(recv) = team_obj
+                .get_mut("leader_receiver")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if recv.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane_id) {
+                    recv.insert("status".to_string(), serde_json::json!("exited"));
+                    recv.remove("pane_id");
+                    recv.remove("pane");
+                    changed = true;
+                }
+            }
+            if let Some(owner) = team_obj
+                .get_mut("team_owner")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if owner.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane_id) {
+                    owner.remove("pane_id");
+                    changed = true;
+                }
+            }
+        }
+    }
+    if !changed {
+        return;
+    }
+    let team_key = state
+        .get("active_team_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("current")
+        .to_string();
+    let _ = crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::LeaderStartBinding {
+            team_key: &team_key,
+            transport_kind: "managed",
+        },
+        &state,
+    );
+}
+
 fn cleanup_managed_leader_resources(
     transport: &dyn Transport,
     session: &SessionName,
@@ -1208,23 +1341,36 @@ fn cleanup_managed_leader_resources(
     workspace: &Path,
     reason: &str,
 ) {
-    let (action, result) = if session_existed_before {
-        (
-            "kill_pane",
-            transport
-                .kill_pane(&spawned.pane_id)
-                .map(|_| "ok".to_string())
-                .unwrap_or_else(|error| error.to_string()),
-        )
-    } else {
-        (
-            "kill_session",
-            transport
-                .kill_session(session)
-                .map(|_| "ok".to_string())
-                .unwrap_or_else(|error| error.to_string()),
-        )
+    // Own window only — never kill-server (same socket may host other teams).
+    // Last window in the session lets tmux destroy the session itself.
+    let window_target = Target::SessionWindow {
+        session: spawned.session.clone(),
+        window: spawned.window.clone(),
     };
+    let window_result = transport
+        .kill_window(&window_target)
+        .map(|_| "ok".to_string())
+        .unwrap_or_else(|error| error.to_string());
+    let mut action = "kill_window".to_string();
+    let mut result = window_result;
+    if !session_existed_before {
+        match transport.list_windows(session) {
+            Ok(windows) if windows.is_empty() => {
+                let session_result = transport
+                    .kill_session(session)
+                    .map(|_| "ok".to_string())
+                    .unwrap_or_else(|error| error.to_string());
+                action = "kill_window+kill_session".to_string();
+                result = format!("{result};kill_session={session_result}");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                action = "kill_window+list_windows_err".to_string();
+                result = format!("{result};list_windows={error}");
+            }
+        }
+    }
+    clear_managed_leader_receiver_pane(workspace, spawned.pane_id.as_str());
     write_leader_startup_prompt_event(
         workspace,
         "leader.launcher.rollback",
@@ -1908,6 +2054,7 @@ fn run_leader_argv(
     env: &BTreeMap<String, String>,
     plan: &LeaderStartPlan,
     workspace: &Path,
+    managed_watch: Option<ManagedAttachWatch<'_>>,
 ) -> Result<LeaderProcessExit, LeaderError> {
     let Some(program) = argv.first() else {
         return Err(LeaderError::Start(
@@ -2013,7 +2160,13 @@ fn run_leader_argv(
     if plan.mode == LeaderStartMode::ExecProvider {
         spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());
     }
-    let status = child.wait().map_err(LeaderError::Io)?;
+    #[cfg(unix)]
+    let _term_guard = managed_watch.as_ref().map(|_| ManagedTermGuard::install());
+    let (status, intentional_teardown) = if let Some(watch) = managed_watch.as_ref() {
+        wait_managed_attach_child(&mut child, watch)?
+    } else {
+        (child.wait().map_err(LeaderError::Io)?, false)
+    };
     let stdout = match stdout_reader {
         Some(reader) => match reader.join() {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -2050,7 +2203,67 @@ fn run_leader_argv(
         status,
         stderr,
         diagnostics_path,
+        intentional_teardown,
     })
+}
+
+fn wait_managed_attach_child(
+    child: &mut std::process::Child,
+    watch: &ManagedAttachWatch<'_>,
+) -> Result<(std::process::ExitStatus, bool), LeaderError> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(LeaderError::Io)? {
+            return Ok((status, false));
+        }
+        let signalled = {
+            #[cfg(unix)]
+            {
+                MANAGED_ATTACH_TEARDOWN.load(Ordering::SeqCst)
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        };
+        if signalled || managed_attach_should_teardown(watch) {
+            let reason = if signalled {
+                "launcher_signal"
+            } else {
+                "provider_exited"
+            };
+            cleanup_managed_leader_resources(
+                watch.transport,
+                watch.session,
+                watch.spawned,
+                watch.session_existed_before,
+                watch.workspace,
+                reason,
+            );
+            let status = terminate_managed_attach_child(child)?;
+            return Ok((status, true));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn terminate_managed_attach_child(
+    child: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, LeaderError> {
+    if let Some(status) = child.try_wait().map_err(LeaderError::Io)? {
+        return Ok(status);
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(50));
+        if let Some(status) = child.try_wait().map_err(LeaderError::Io)? {
+            return Ok(status);
+        }
+    }
+    let _ = child.kill();
+    child.wait().map_err(LeaderError::Io)
 }
 
 fn launcher_diagnostics_path(workspace: &Path) -> PathBuf {
@@ -2092,6 +2305,7 @@ struct LeaderProcessExit {
     status: std::process::ExitStatus,
     stderr: String,
     diagnostics_path: PathBuf,
+    intentional_teardown: bool,
 }
 
 fn push_bounded_stderr(captured: &mut Vec<u8>, chunk: &[u8]) {
@@ -2411,6 +2625,8 @@ mod tests {
         targets: Vec<PaneInfo>,
         window_options: Mutex<Vec<(String, String)>>,
         window_option_error: Mutex<Option<String>>,
+        kills: Mutex<Vec<String>>,
+        windows: Mutex<Vec<WindowName>>,
     }
 
     impl ScriptedTransport {
@@ -2422,6 +2638,8 @@ mod tests {
                 targets: Vec::new(),
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(None),
+                kills: Mutex::new(Vec::new()),
+                windows: Mutex::new(Vec::new()),
             }
         }
 
@@ -2433,6 +2651,8 @@ mod tests {
                 targets: Vec::new(),
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(None),
+                kills: Mutex::new(Vec::new()),
+                windows: Mutex::new(Vec::new()),
             }
         }
 
@@ -2444,6 +2664,8 @@ mod tests {
                 targets,
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(None),
+                kills: Mutex::new(Vec::new()),
+                windows: Mutex::new(Vec::new()),
             }
         }
 
@@ -2457,6 +2679,8 @@ mod tests {
                 targets: Vec::new(),
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(Some(error.to_string())),
+                kills: Mutex::new(Vec::new()),
+                windows: Mutex::new(Vec::new()),
             }
         }
 
@@ -2470,6 +2694,20 @@ mod tests {
         /// All `set-window-option option value` pairs, in call order.
         fn window_options(&self) -> Vec<(String, String)> {
             match self.window_options.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn record_kill(&self, action: &str) {
+            match self.kills.lock() {
+                Ok(mut guard) => guard.push(action.to_string()),
+                Err(poisoned) => poisoned.into_inner().push(action.to_string()),
+            }
+        }
+
+        fn kills(&self) -> Vec<String> {
+            match self.kills.lock() {
                 Ok(guard) => guard.clone(),
                 Err(poisoned) => poisoned.into_inner().clone(),
             }
@@ -2578,7 +2816,10 @@ mod tests {
         }
 
         fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
-            Ok(Vec::new())
+            match self.windows.lock() {
+                Ok(guard) => Ok(guard.clone()),
+                Err(poisoned) => Ok(poisoned.into_inner().clone()),
+            }
         }
 
         fn set_session_env(
@@ -2618,11 +2859,22 @@ mod tests {
             Ok(())
         }
 
-        fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        fn kill_server(&self) -> Result<(), TransportError> {
+            self.record_kill("kill_server");
             Ok(())
         }
 
-        fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+        fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
+            self.record_kill(&format!("kill_session:{}", session.as_str()));
+            Ok(())
+        }
+
+        fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+            self.record_kill(&format!("kill_window:{target:?}"));
+            match self.windows.lock() {
+                Ok(mut guard) => guard.clear(),
+                Err(poisoned) => poisoned.into_inner().clear(),
+            }
             Ok(())
         }
 
@@ -3154,5 +3406,148 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&workspace).ok();
+    }
+
+    #[test]
+    fn cleanup_managed_leader_kills_own_window_not_server() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-cleanup-own-window-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let spawned = managed_spawn_result();
+        let transport = ScriptedTransport::with_liveness(PaneLiveness::Live);
+        super::cleanup_managed_leader_resources(
+            &transport,
+            &spawned.session,
+            &spawned,
+            false,
+            &workspace,
+            "test_own_window",
+        );
+        let kills = transport.kills();
+        assert!(
+            kills.iter().any(|k| k.starts_with("kill_window:")),
+            "cleanup must kill the launched window: {kills:?}"
+        );
+        assert!(
+            !kills.iter().any(|k| k == "kill_server"),
+            "cleanup must not kill-server: {kills:?}"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn cleanup_managed_leader_clears_stale_pane_pointer() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-cleanup-pane-pointer-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(workspace.join(".team").join("runtime")).unwrap();
+        let state = serde_json::json!({
+            "active_team_key": "current",
+            "teams": {
+                "current": {
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%42",
+                        "pane": "%42"
+                    },
+                    "team_owner": { "pane_id": "%42" }
+                }
+            }
+        });
+        std::fs::write(
+            crate::state::persist::runtime_state_path(&workspace),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        super::clear_managed_leader_receiver_pane(&workspace, "%42");
+        let loaded = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        let recv = &loaded["teams"]["current"]["leader_receiver"];
+        assert_eq!(recv["status"], serde_json::json!("exited"));
+        assert!(recv.get("pane_id").is_none(), "dangling pane_id must be gone: {recv}");
+        assert!(
+            loaded["teams"]["current"]["team_owner"].get("pane_id").is_none(),
+            "owner pane_id must be gone: {loaded}"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn managed_attach_teardown_detects_provider_exit_marker() {
+        let spawned = managed_spawn_result();
+        let transport = ScriptedTransport::new(vec![
+            "[team-agent] claude exited with 1\n[team-agent] Provider exited; this pane no longer accepts input.".to_string(),
+        ]);
+        let watch = super::ManagedAttachWatch {
+            transport: &transport,
+            spawned: &spawned,
+            session: &spawned.session,
+            session_existed_before: false,
+            workspace: Path::new("/tmp"),
+            provider_label: "claude",
+        };
+        assert!(
+            super::managed_attach_should_teardown(&watch),
+            "exit marker in capture must trigger teardown"
+        );
+    }
+
+    #[test]
+    fn managed_attach_teardown_does_not_fire_on_live_provider_screen() {
+        let spawned = managed_spawn_result();
+        let transport = ScriptedTransport::new(vec!["Welcome to Claude Code".to_string()]);
+        let watch = super::ManagedAttachWatch {
+            transport: &transport,
+            spawned: &spawned,
+            session: &spawned.session,
+            session_existed_before: false,
+            workspace: Path::new("/tmp"),
+            provider_label: "claude",
+        };
+        assert!(
+            !super::managed_attach_should_teardown(&watch),
+            "live welcome screen must not teardown"
+        );
+    }
+
+    #[test]
+    fn managed_attach_wait_watches_provider_exit_grep_guard() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let start_rs = manifest.join("src").join("leader").join("start.rs");
+        let contents = std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
+        let start = contents
+            .find("fn run_leader_argv(")
+            .expect("run_leader_argv must exist");
+        let end = contents[start + 1..]
+            .find("\nfn ")
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(contents.len());
+        let body = &contents[start..end];
+        assert!(
+            body.contains("wait_managed_attach_child"),
+            "managed attach wait must watch provider lifetime; body excerpt: {body}"
+        );
+        let cleanup = contents
+            .find("fn cleanup_managed_leader_resources(")
+            .expect("cleanup_managed_leader_resources must exist");
+        let cleanup_end = contents[cleanup + 1..]
+            .find("\nfn ")
+            .map(|offset| cleanup + 1 + offset)
+            .unwrap_or(contents.len());
+        let cleanup_body = &contents[cleanup..cleanup_end];
+        assert!(
+            !cleanup_body.contains("kill_server"),
+            "cleanup must not call kill_server; body excerpt: {cleanup_body}"
+        );
+        assert!(
+            cleanup_body.contains("kill_window"),
+            "cleanup must kill own window; body excerpt: {cleanup_body}"
+        );
+        assert!(
+            cleanup_body.contains("clear_managed_leader_receiver_pane"),
+            "cleanup must clear state.json pane pointer; body excerpt: {cleanup_body}"
+        );
     }
 }
