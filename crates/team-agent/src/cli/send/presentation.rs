@@ -3,6 +3,7 @@ use crate::cli::{CliError, CmdOutput, CmdResult, ExitCode};
 use crate::messaging::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessageTarget, SendOptions,
 };
+use crate::transport::{turn_verification_wire, TurnVerification};
 use serde_json::{json, Value};
 
 pub(super) fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> Value {
@@ -113,6 +114,11 @@ pub(super) fn delivery_outcome_json(
         "stage": outcome.stage.map(delivery_stage_wire),
         "reason": outcome.reason.map(delivery_refusal_wire),
         "channel": outcome.channel,
+        "turn_verification": turn_verification_wire(
+            outcome
+                .turn_verification
+                .unwrap_or(TurnVerification::NotYetObserved),
+        ),
     })
 }
 
@@ -183,7 +189,7 @@ pub(super) fn send_human_output(value: &Value) -> String {
         send_human_field(value, "message_id"),
         format!("target: {}", send_human_target(value)),
     ];
-    for key in ["verification", "stage", "reason", "channel"] {
+    for key in ["verification", "stage", "reason", "channel", "turn_verification"] {
         if !value.get(key).is_none_or(Value::is_null) {
             parts.push(send_human_field(value, key));
         }

@@ -94,6 +94,27 @@ fn turn_verification_serde_snake_case_byte_locked() {
 }
 
 #[test]
+fn turn_verification_wire_never_defaults_started() {
+    use crate::transport::turn_verification_wire;
+    assert_eq!(
+        turn_verification_wire(TurnVerification::NotYetObserved),
+        "not_yet_observed"
+    );
+    assert_eq!(
+        turn_verification_wire(TurnVerification::LeaderNewTurnBoundaryMissing),
+        "leader_new_turn_boundary_missing"
+    );
+    assert_eq!(
+        turn_verification_wire(TurnVerification::LeaderNewTurnBoundaryVerified),
+        "leader_new_turn_boundary_verified"
+    );
+    assert_ne!(
+        turn_verification_wire(TurnVerification::NotYetObserved),
+        "leader_new_turn_boundary_verified"
+    );
+}
+
+#[test]
 fn submit_verification_wire_strings_byte_locked() {
     // 09-transport.md 表 §39 + tmux_io.py:64/215-221 + tmux_prompt.py:304/313。
     // SubmitVerification 携 Key 模板,Python 是散字符串 → 这里钉死 to-wire 映射。

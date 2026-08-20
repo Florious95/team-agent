@@ -215,6 +215,7 @@ pub fn send_message(
                 reason: Some(crate::messaging::DeliveryRefusal::EmptyTargetList),
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: None,
             });
         }
         MessageTarget::Fanout(recipients) => {
@@ -353,6 +354,7 @@ pub fn send_message(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -407,6 +409,7 @@ fn persist_stored_only_send(
         reason: None,
         channel: Some(presentation.effective_sink.as_str().to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -455,6 +458,7 @@ fn refused_outcome_with_id(reason: DeliveryRefusal, message_id: Option<String>) 
         reason: Some(reason),
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -472,6 +476,7 @@ fn refused_outcome_with_verification(
         reason: Some(reason),
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -555,6 +560,7 @@ fn coordinator_unavailable_outcome(
             reason: Some(DeliveryRefusal::CoordinatorUnavailable),
             channel: Some("coordinator_unavailable".to_string()),
             ack_forced_off: false,
+            turn_verification: None,
         },
     }))
 }
@@ -580,6 +586,7 @@ fn rebind_required_outcome_with_verification(
         reason: Some(DeliveryRefusal::LeaderNotAttached),
         channel: Some("rebind_required".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -812,6 +819,7 @@ pub(crate) fn session_drift_refusal(
         reason: Some(DeliveryRefusal::SessionDrift),
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     }))
 }
 
@@ -933,5 +941,6 @@ fn fanout_send(
             channel_label.to_string()
         }),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }

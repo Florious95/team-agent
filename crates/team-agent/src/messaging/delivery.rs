@@ -27,8 +27,9 @@ use crate::provider::wire::{
     is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
 };
 use crate::transport::{
-    submit_verification_wire, InjectPayload, InjectReport, InjectVerification, Key, PaneId,
-    PaneInfo, SessionName, SubmitObserver, SubmitVerification, Target, Transport, WindowName,
+    submit_verification_wire, turn_verification_wire, InjectPayload, InjectReport,
+    InjectVerification, Key, PaneId, PaneInfo, SessionName, SubmitObserver, SubmitVerification,
+    Target, Transport, WindowName,
 };
 
 use super::helpers::{message_exists, MessageStatusShadow};
@@ -87,6 +88,7 @@ pub fn deliver_stored_message(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -195,6 +197,7 @@ pub fn deliver_pending_message(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
     let message = message_for_delivery(store, message_id)?;
@@ -209,6 +212,7 @@ pub fn deliver_pending_message(
             reason: Some(DeliveryRefusal::UnknownRecipient),
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
     let mut canonical_owner_team_id = message.owner_team_id.clone();
@@ -297,6 +301,7 @@ pub fn deliver_pending_message(
             reason: Some(DeliveryRefusal::MessageAlreadyClaimed),
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
     if message.recipient == "leader" {
@@ -327,6 +332,7 @@ pub fn deliver_pending_message(
                 reason: Some(DeliveryRefusal::LeaderNotAttached),
                 channel: Some("rebind_required".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             });
         };
         if let Some(outcome) = leader_receiver_transport_conflict_outcome(
@@ -358,6 +364,7 @@ pub fn deliver_pending_message(
                     reason: None,
                     channel: Some("rebind_required".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
             crate::messaging::LeaderChannelResolution::Unbound(reason) => {
@@ -397,6 +404,7 @@ pub fn deliver_pending_message(
                     reason: Some(refusal),
                     channel: Some("rebind_required".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
         }
@@ -444,6 +452,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: None,
             });
         }
     };
@@ -492,6 +501,7 @@ pub fn deliver_pending_message(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
     let rendered = render_message(
@@ -586,6 +596,7 @@ pub fn deliver_pending_message(
                     reason: Some(DeliveryRefusal::LeaderNotAttached),
                     channel: Some("rebind_required".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
             if transport_error_is_target_missing(&error) {
@@ -630,6 +641,7 @@ pub fn deliver_pending_message(
                     reason: None,
                     channel: None,
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
             store.mark(message_id, "target_resolved", Some(&reason))?;
@@ -643,6 +655,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: None,
             });
         }
     };
@@ -650,6 +663,7 @@ pub fn deliver_pending_message(
         return Err(error);
     }
     persist_submit_verification(workspace, message_id, &inject_report);
+    let turn_verification = inject_report.turn_verification;
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
     // A successful tmux command is never provider-acceptance proof. Leader and
@@ -704,6 +718,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: Some(turn_verification),
             });
         }
         store.mark(message_id, "submitted_unverified", Some(&reason))?;
@@ -717,6 +732,7 @@ pub fn deliver_pending_message(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: Some(turn_verification),
         });
     }
     // S1-CAPTURE-001 (0.4.8, CR M4 Claude phase-1): for Claude/ClaudeCode
@@ -782,6 +798,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: Some(turn_verification),
             });
         }
     }
@@ -794,7 +811,9 @@ pub fn deliver_pending_message(
                     "leader_receiver.receipt_source_unavailable",
                     serde_json::json!({"message_id": message_id}),
                 )?;
-                return Ok(leader_receipt_source_unavailable_outcome(message_id));
+                let mut outcome = leader_receipt_source_unavailable_outcome(message_id);
+                outcome.turn_verification = Some(turn_verification);
+                return Ok(outcome);
             }
             LeaderReceiptObservation::TokenAbsent => {
                 store.mark(message_id, "submitted_pending_acceptance", None)?;
@@ -805,10 +824,12 @@ pub fn deliver_pending_message(
                         "reason": "provider_receipt_not_observed",
                     }),
                 )?;
-                return Ok(leader_acceptance_pending_outcome(
+                let mut outcome = leader_acceptance_pending_outcome(
                     message_id,
                     "submitted_pending_acceptance",
-                ));
+                );
+                outcome.turn_verification = Some(turn_verification);
+                return Ok(outcome);
             }
             LeaderReceiptObservation::TokenObserved => {}
         }
@@ -831,6 +852,7 @@ pub fn deliver_pending_message(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: Some(turn_verification),
     };
     stamp_first_send_at_if_leader_to_worker_scoped(
         workspace,
@@ -913,6 +935,7 @@ pub(crate) fn mark_worker_target_missing(
         reason: Some(DeliveryRefusal::TmuxTargetMissing),
         channel: Some("delivery_blocked".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -967,6 +990,7 @@ fn persist_submit_verification(workspace: &Path, message_id: &str, report: &Inje
         "message_id": message_id,
         "submit_verification": format!("{:?}", report.submit_verification),
         "inject_verification": format!("{:?}", report.inject_verification),
+        "turn_verification": turn_verification_wire(report.turn_verification),
         "submit_verified": inject_submit_verified(report),
         "attempts": report.attempts,
     });
@@ -1087,6 +1111,7 @@ fn deliver_leader_via_app_server(
                 reason: None,
                 channel: Some("codex_app_server".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
         Err(error) => app_server_delivery_failure(
@@ -1133,6 +1158,7 @@ fn app_server_delivery_failure(
                 reason: Some(DeliveryRefusal::RecipientBusy),
                 channel: Some("leader_busy".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
         crate::codex_app_server::AppServerError::ThreadStale { expected, actual } => {
@@ -1172,6 +1198,7 @@ fn app_server_delivery_failure(
                 reason: Some(DeliveryRefusal::MissingPermissions),
                 channel: Some("codex_app_server".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
         crate::codex_app_server::AppServerError::ProtocolMismatch(_)
@@ -1224,6 +1251,7 @@ fn rebind_required_outcome(message_id: &str, action: &str) -> DeliveryOutcome {
         reason: Some(DeliveryRefusal::LeaderNotAttached),
         channel: Some("rebind_required".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -1627,6 +1655,7 @@ fn leader_receiver_transport_conflict_outcome(
                 reason: Some(DeliveryRefusal::LeaderNotAttached),
                 channel: Some("rebind_required".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             }));
         }
     }
@@ -2212,6 +2241,7 @@ fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> Delivery
         reason: None,
         channel: Some("leader_acceptance_pending".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -2226,6 +2256,7 @@ pub(crate) fn leader_receipt_source_unavailable_outcome(message_id: &str) -> Del
         reason: None,
         channel: Some("leader_receipt_source_unavailable".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -2267,6 +2298,7 @@ fn observe_pending_leader_acceptance(
         reason: None,
         channel: Some("leader_receiver".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2297,6 +2329,7 @@ pub fn handle_trust_retry_needed(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
     let next_attempt = payload.attempt.saturating_add(1);
@@ -2337,6 +2370,7 @@ pub fn handle_trust_retry_needed(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2834,6 +2868,7 @@ fn refuse_owner_team_resolution(
         reason: Some(refusal),
         channel: Some("owner_team_resolution".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2891,6 +2926,7 @@ pub fn retry_injection_after_trust_auto_answer(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 

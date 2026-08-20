@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{
-    current_paste_to_submit_floor, sleep_remaining_paste_to_submit_floor,
+    current_paste_to_submit_floor, observe_turn_from_capture, sleep_remaining_paste_to_submit_floor,
     with_paste_to_submit_floor, CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend,
     PANE_BINDING_NONCE_METADATA_KEY,
 };
@@ -1053,7 +1053,11 @@ fn e46_post_submit_matched_token_without_scroll_is_unverified() {
              not EnterSentWithoutPlaceholderCheck. Got {:?}",
         report.submit_verification
     );
-    assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+    assert_eq!(
+        report.turn_verification,
+        TurnVerification::LeaderNewTurnBoundaryMissing,
+        "token still in composer and no busy must report 没开跑, not unknown/started"
+    );
     let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert!(
         diagnostics.attempts_detail.iter().any(|obs| obs.matched),
@@ -1079,6 +1083,11 @@ fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
         SubmitVerification::EnterSentWithoutPlaceholderCheck,
         "busy provider state means the turn is being processed even if \
              the token has not yet scrolled out of the bottom capture"
+    );
+    assert_eq!(
+        report.turn_verification,
+        TurnVerification::LeaderNewTurnBoundaryVerified,
+        "live Working signal is 开跑; must not stay not_yet_observed"
     );
     let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert!(
@@ -2586,5 +2595,242 @@ fn grok_fold_worker_text_payload_polls_consumption() {
         InjectPayload::TextSkipConsumptionPoll("leader [team-agent-token:x]".to_string())
             .skip_consumption_poll(),
         "leader skip path is the only poll_consumption=false arm"
+    );
+}
+
+const G4_TOKEN: &str = "[team-agent-token:msg_g4]";
+
+#[test]
+fn g4_turn_grok_unsubmitted_paste_is_missing() {
+    let text = "│ ❯ [Pasted: 42 lines]           │";
+    assert_eq!(
+        observe_turn_from_capture(text, Some(G4_TOKEN)),
+        TurnVerification::LeaderNewTurnBoundaryMissing
+    );
+}
+
+#[test]
+fn g4_turn_claude_unsubmitted_paste_is_missing() {
+    let text = "❯ pasted text #4 +12 lines";
+    assert_eq!(
+        observe_turn_from_capture(text, Some(G4_TOKEN)),
+        TurnVerification::LeaderNewTurnBoundaryMissing
+    );
+}
+
+#[test]
+fn g4_turn_cursor_unsubmitted_token_is_missing() {
+    let text = format!("❯ {G4_TOKEN}");
+    assert_eq!(
+        observe_turn_from_capture(&text, Some(G4_TOKEN)),
+        TurnVerification::LeaderNewTurnBoundaryMissing
+    );
+}
+
+#[test]
+fn g4_turn_claude_spinner_is_verified() {
+    let text = "✶ Thinking…\nesc to interrupt";
+    assert_eq!(
+        observe_turn_from_capture(text, Some(G4_TOKEN)),
+        TurnVerification::LeaderNewTurnBoundaryVerified
+    );
+}
+
+#[test]
+fn g4_turn_cursor_processing_is_verified() {
+    let text = "processing\n❯ ";
+    assert_eq!(
+        observe_turn_from_capture(text, Some(G4_TOKEN)),
+        TurnVerification::LeaderNewTurnBoundaryVerified
+    );
+}
+
+#[test]
+fn g4_turn_grok_working_is_verified() {
+    let text = "working\n❯ ";
+    assert_eq!(
+        observe_turn_from_capture(text, Some(G4_TOKEN)),
+        TurnVerification::LeaderNewTurnBoundaryVerified
+    );
+}
+
+#[test]
+fn g4_turn_empty_composer_without_busy_is_unknown() {
+    assert_eq!(
+        observe_turn_from_capture("❯ ", Some(G4_TOKEN)),
+        TurnVerification::NotYetObserved,
+        "empty composer and no busy is 不知道, never 开跑"
+    );
+}
+
+#[test]
+fn g4_turn_inject_grok_incident_line_does_not_report_started() {
+    let token_text =
+        "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_inject]";
+    let (be, _rec) = backend_with(MockResp::Out(ok(GROK_INCIDENT_LINE)), vec![]);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject runs");
+    assert_ne!(
+        report.turn_verification,
+        TurnVerification::LeaderNewTurnBoundaryVerified,
+        "unsubmitted grok paste must not report 开跑"
+    );
+    assert_eq!(
+        report.turn_verification,
+        TurnVerification::LeaderNewTurnBoundaryMissing
+    );
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified
+    );
+}
+
+#[test]
+fn g4_turn_inject_consumed_without_busy_is_unknown() {
+    let token_text =
+        "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_gone]";
+    let visible = ok(token_text);
+    let queued = vec![
+        MockResp::Out(ok("")),
+        MockResp::Out(ok("")),
+        MockResp::Out(ok("")),
+        MockResp::Out(visible.clone()),
+        MockResp::Out(visible),
+        MockResp::Out(ok("")),
+        MockResp::Out(ok("")),
+    ];
+    let (be, _rec) = backend_with(MockResp::Out(ok("❯ ")), queued);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject runs");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "token gone is still consumed/delivered; that is not 开跑"
+    );
+    assert_eq!(
+        report.turn_verification,
+        TurnVerification::NotYetObserved,
+        "composer empty without busy is 不知道, not 开跑"
+    );
+}
+
+/// capture-pane 一律失败；其它 tmux 命令成功。用于「读数拿不到」而不是「读数不一样」。
+struct CapturePaneFailRunner {
+    recorded: RecordedArgv,
+}
+
+impl CommandRunner for CapturePaneFailRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        if argv.get(1).map(String::as_str) == Some("capture-pane") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "mock capture missing",
+            ));
+        }
+        Ok(ok(""))
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
+fn backend_capture_pane_fail() -> (TmuxBackend, RecordedArgv) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = CapturePaneFailRunner {
+        recorded: Arc::clone(&recorded),
+    };
+    (TmuxBackend::with_runner(Box::new(runner)), recorded)
+}
+
+/// P0 unknown-not-success: capture() Err 是「没能判断」，不得与 Some(true) 同值。
+/// 齿覆盖「读数拿不到」，不是「读数不一样」。
+#[test]
+fn p0_capture_failure_is_unverified_not_enter_sent() {
+    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_cap_fail]";
+    let (be, rec) = backend_capture_pane_fail();
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject runs");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified,
+        "consumed=None (capture missing) must not share \
+         EnterSentWithoutPlaceholderCheck with Some(true); got {:?}",
+        report.submit_verification
+    );
+    assert!(
+        !crate::messaging::delivery::inject_submit_verified(&report),
+        "no positive consumption signal ⇒ submit_verified must be false; report={report:?}"
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "capture retry must not send extra Enter; calls={calls:?}"
+    );
+}
+
+/// P0: capture 失败先重读再判；重试计入 attempts；不重粘文本。
+#[test]
+fn p0_capture_failure_retries_read_and_counts_attempts() {
+    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_cap_retry]";
+    let (be, rec) = backend_capture_pane_fail();
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject runs");
+    assert!(
+        report.attempts > 1,
+        "capture failure must retry the read and count it in attempts; got attempts={}",
+        report.attempts
+    );
+    let calls = rec.lock().unwrap().clone();
+    let captures = calls
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("capture-pane"))
+        .count();
+    assert!(
+        captures >= 2,
+        "must re-read capture after failure; capture-pane count={captures} calls={calls:?}"
+    );
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "retry is capture-only; extra Enter is forbidden; calls={calls:?}"
+    );
+    let pastes = calls
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("paste-buffer"))
+        .count();
+    assert_eq!(
+        pastes, 1,
+        "must not re-paste on capture failure; paste-buffer count={pastes}"
     );
 }

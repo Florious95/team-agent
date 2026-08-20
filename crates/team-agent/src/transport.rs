@@ -1129,6 +1129,18 @@ pub fn submit_verification_wire(v: SubmitVerification) -> String {
     }
 }
 
+/// purpose: TurnVerification 的 send JSON / persist 用词
+/// contract: 与 serde snake_case 一致；未知必须是 not_yet_observed，不得写成 verified
+/// boundary: 不是投递闸门（Gap42）
+pub fn turn_verification_wire(v: TurnVerification) -> &'static str {
+    match v {
+        TurnVerification::LeaderNewTurnBoundaryVerified => "leader_new_turn_boundary_verified",
+        TurnVerification::LeaderNewTurnBoundaryMissing => "leader_new_turn_boundary_missing",
+        TurnVerification::NotYetObserved => "not_yet_observed",
+        TurnVerification::NotRequired => "not_required",
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RED contracts — step 9 transport(ROUND-0).
 //

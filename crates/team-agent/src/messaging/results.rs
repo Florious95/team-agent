@@ -940,6 +940,7 @@ fn report_result_for_owner_team_inner(
                 reason: Some(crate::messaging::DeliveryRefusal::LeaderNotAttached),
                 channel: Some("codex_app_server".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             }
         }
         Err(error) => {
@@ -1005,6 +1006,7 @@ fn report_result_for_owner_team_inner(
                         reason: None,
                         channel: Some("leader_receiver".to_string()),
                         ack_forced_off: false,
+                        turn_verification: None,
                     };
                     break;
                 }
@@ -1035,6 +1037,7 @@ fn report_result_for_owner_team_inner(
                         reason: None,
                         channel: Some("leader_receiver".to_string()),
                         ack_forced_off: false,
+                        turn_verification: None,
                     };
                     break;
                 }
@@ -1051,6 +1054,7 @@ fn report_result_for_owner_team_inner(
                         reason: None,
                         channel: Some("leader_receiver".to_string()),
                         ack_forced_off: false,
+                        turn_verification: None,
                     };
                     break;
                 }

@@ -5,14 +5,20 @@
 //!     - name: TmuxBackend
 //!       what: Transport 的 tmux 实现，inject/send_keys 取 pane 输入锁
 //!     - name: submit-consumption-verdict
-//!       what: token 见过再消失，或本次占位符身份（#N / grok 行数）从 composer 消失 ⇒ 已消费；无身份时只按一次回车
+//!       what: token 见过再消失，或本次占位符身份（#N / grok 行数）从 composer 消失 ⇒ 已消费；无身份时只按一次回车；consumed=None（capture 失败/读数拿不到）⇒ SubmitConsumptionUnverified，不得与 Some(true) 同值
 //!     - name: token-sighting
 //!       what: Visible / Gone / NeverSeen 三态接到判定（不只进报告）
 //!     - name: pre-submit-copy-mode-cancel
 //!       what: 每次 Enter 前查 pane_in_mode，非 0 先 send-keys -X cancel
+//!     - name: turn-inbox-vs-run
+//!       what: busy ⇒ Verified(开跑)；composer 仍有本次粘贴且无 busy ⇒ Missing(没开跑)；其余 NotYetObserved(不知道)
+//!     - name: capture-fail-retry
+//!       what: post-Enter capture 失败只重读 capture，计入 attempts，不重粘、不加 Enter
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
 //!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
+//!   - 不把「没能判断」(consumed=None) 落到成功值
+//!   - turn_verification 不是投递闸门；分辨不出不得报开跑
 //! maturity: wired
 //! ---
 //!
@@ -1488,9 +1494,9 @@ fn raw_multiline_still_unfolded(text: &str, marker: &str) -> bool {
 
 /// purpose: 把 token 三态 + 本次 #N 占位符合成消费判定
 /// contract:
-///   Some(true)=已消费；Some(false)=未消费（含 NeverSeen 且无正信号 → 未证实走 false，
-///   好让 SubmitConsumptionUnverified 开火，而不是 None→delivered）
-/// boundary: 不修 BUSY 入队；Working 信号由调用方在 Some(false) 之后看
+///   Some(true)=已消费；Some(false)=未消费（含 NeverSeen 且无正信号 → 未证实走 false）
+///   None 不由本函数产生；调用方在 capture 失败时保持 None，必须落到 Unverified
+/// boundary: 不修 BUSY 入队；Working 信号由调用方在 Some(false) 之后看；None 不得当成功
 pub(crate) fn consumption_from_capture(
     text: &str,
     marker: &str,
@@ -1525,6 +1531,7 @@ fn provider_busy_signal_in_tail(text: &str) -> bool {
             let lower = line.to_ascii_lowercase();
             lower.contains("working")
                 || lower.contains("thinking")
+                || lower.contains("processing")
                 || lower.contains("esc to interrupt")
                 || line.contains('●')
                 || line.contains('⏳')
@@ -1540,7 +1547,42 @@ fn provider_busy_signal_in_tail(text: &str) -> bool {
                 || line.contains('⠏')
                 || line.contains('✶')
                 || line.contains('✢')
+                || line.contains('✻')
+                || line.contains('✽')
+                || line.contains('✳')
         })
+}
+
+/// purpose: 入箱 vs 开跑（G4）。给定最近一次 pane 尾，回答席位是否因此开跑。
+/// contract:
+///   - LeaderNewTurnBoundaryVerified = 底部 busy 信号
+///   - LeaderNewTurnBoundaryMissing = composer 仍有本次粘贴（占位符或 token）且无 busy
+///   - NotYetObserved = 其余（含 composer 已空但无 busy）→ 不知道，不得报开跑
+/// boundary: 不是 SubmitVerification / 不是投递闸门；不许用过了 N 秒来判
+pub(crate) fn observe_turn_from_capture(text: &str, marker: Option<&str>) -> TurnVerification {
+    if provider_busy_signal_in_tail(text) {
+        return TurnVerification::LeaderNewTurnBoundaryVerified;
+    }
+    let paste_still = pasted_prompt_in_composer(text, 15).is_some();
+    let token_still = marker
+        .map(|m| token_in_bottom_n(text, m, 15))
+        .unwrap_or(false);
+    if paste_still || token_still {
+        return TurnVerification::LeaderNewTurnBoundaryMissing;
+    }
+    TurnVerification::NotYetObserved
+}
+
+fn turn_verification_for_payload(
+    payload: &InjectPayload,
+    last_text: Option<&str>,
+) -> TurnVerification {
+    match payload {
+        InjectPayload::Empty => TurnVerification::NotRequired,
+        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => {
+            observe_turn_from_capture(last_text.unwrap_or(""), payload_token_marker(payload))
+        }
+    }
 }
 
 fn submit_attempt_observation(
@@ -1812,6 +1854,9 @@ const PASTED_CONTENT_SUBMIT_ATTEMPTS: u32 = 3;
 /// submission when the first Enter was consumed but our readback was slow.
 const POST_SUBMIT_CONSUMPTION_ATTEMPTS: u32 = 3;
 const POST_SUBMIT_CONSUMPTION_POLL_MS: u64 = 60;
+/// post-Enter `capture()` 失败时只重读、不重按。计入 `InjectReport.attempts`。
+const POST_SUBMIT_CAPTURE_RETRY: u32 = 4;
+const POST_SUBMIT_CAPTURE_RETRY_MS: u64 = 20;
 
 /// E46 (0.3.24 bug#5, C5 provider-agnostic detector): the pane's input region
 /// is "consumed" when the token text that was just visible BEFORE the Enter
@@ -2425,6 +2470,7 @@ impl Transport for TmuxBackend {
                 let marker = payload_token_marker(payload);
                 let max_submit_attempts: u32 = 3;
                 let mut consumption_attempts: u32 = 0;
+                let mut capture_retries: u32 = 0;
                 let mut consumed: Option<bool> = None;
                 let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
                 let mut any_attempt_matched = false;
@@ -2437,6 +2483,8 @@ impl Transport for TmuxBackend {
                     {
                         notify_submit_observer(observer);
                         consumption_attempts = 1;
+                        // 跳过消费门（leader skip）不是「没能判断」；保持既有 EnterSent。
+                        consumed = Some(true);
                     }
                 }
                 let submit_attempt_limit = if poll_consumption {
@@ -2514,8 +2562,7 @@ impl Transport for TmuxBackend {
                     }
 
                     // Enter — send-keys failure is degraded (tmux may not have
-                    // the pane in sim/test env). Break to consumed=None path
-                    // which returns EnterSentWithoutPlaceholderCheck.
+                    // the pane in sim/test env). Break to consumed=None → Unverified.
                     if self
                         .run_inject_stage(&submit_argv, InjectStage::Submit)
                         .is_err()
@@ -2536,14 +2583,18 @@ impl Transport for TmuxBackend {
                         }
                     }
 
-                    // Poll: token 三态 + 本次 #N 占位符。Capture failures → consumed=None.
+                    // Poll: token 三态 + 本次 #N 占位符。
+                    // Capture failures → 只重读 capture，绝不重粘、不加 Enter；读不到则 None。
                     if let Some(m) = marker {
                         let mut found_consumed = false;
-                        let mut capture_failed = false;
+                        let mut saw_capture = false;
+                        let mut consecutive_capture_failures: u32 = 0;
                         for _ in 0..12 {
                             std::thread::sleep(Duration::from_millis(100));
                             match self.capture(target, CaptureRange::Tail(40)) {
                                 Ok(cap) => {
+                                    consecutive_capture_failures = 0;
+                                    saw_capture = true;
                                     if cap.text.contains(m) {
                                         token_ever_visible = true;
                                     }
@@ -2570,12 +2621,19 @@ impl Transport for TmuxBackend {
                                     }
                                 }
                                 Err(_) => {
-                                    capture_failed = true;
-                                    break;
+                                    capture_retries = capture_retries.saturating_add(1);
+                                    consecutive_capture_failures =
+                                        consecutive_capture_failures.saturating_add(1);
+                                    if consecutive_capture_failures >= POST_SUBMIT_CAPTURE_RETRY {
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(
+                                        POST_SUBMIT_CAPTURE_RETRY_MS,
+                                    ));
                                 }
                             }
                         }
-                        if capture_failed {
+                        if !saw_capture {
                             consumed = None;
                             break;
                         }
@@ -2584,8 +2642,9 @@ impl Transport for TmuxBackend {
                             break;
                         }
                     } else {
-                        // Non-token payload: single Enter, no consumption check.
-                        consumed = None;
+                        // Non-token payload: single Enter, no consumption check
+                        // (0.3.27). Not 「没能判断」— 本门不覆盖无 token 路径。
+                        consumed = Some(true);
                         break;
                     }
                 }
@@ -2601,10 +2660,14 @@ impl Transport for TmuxBackend {
                 // (`any_attempt_matched`) is A, not submit. Only a Working
                 // signal counts as consumption. Else say unverified.
                 let _ = any_attempt_matched;
+                let mut last_turn_text = attempts_detail
+                    .last()
+                    .map(|obs| obs.pane_tail_excerpt.clone());
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
                     Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
                         Ok(cap) => {
+                            last_turn_text = Some(cap.text.clone());
                             attempts_detail.push(submit_attempt_observation(
                                 consumption_attempts.max(1),
                                 &cap,
@@ -2619,7 +2682,7 @@ impl Transport for TmuxBackend {
                         }
                         Err(_) => SubmitVerification::SubmitConsumptionUnverified,
                     },
-                    None => submit_verification_for_key(submit),
+                    None => SubmitVerification::SubmitConsumptionUnverified,
                 };
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
                 return Ok(InjectReport {
@@ -2629,13 +2692,11 @@ impl Transport for TmuxBackend {
                         token_visible_for_report,
                     ),
                     submit_verification,
-                    turn_verification: match payload {
-                        InjectPayload::Empty => TurnVerification::NotRequired,
-                        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => {
-                            TurnVerification::NotYetObserved
-                        }
-                    },
-                    attempts: consumption_attempts,
+                    turn_verification: turn_verification_for_payload(
+                        payload,
+                        last_turn_text.as_deref(),
+                    ),
+                    attempts: consumption_attempts.saturating_add(capture_retries),
                     submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
                         appear_gate_elapsed_ms: 0,
                         appear_gate_matched: false,
@@ -2652,12 +2713,7 @@ impl Transport for TmuxBackend {
                 token_visible_for_report,
             ),
             submit_verification: submit_verification_for_key(submit),
-            turn_verification: match payload {
-                InjectPayload::Empty => TurnVerification::NotRequired,
-                InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => {
-                    TurnVerification::NotYetObserved
-                }
-            },
+            turn_verification: turn_verification_for_payload(payload, None),
             attempts: 1,
             // E50 PR-1: Empty payload / non-Text fallthrough path — no submit
             // diagnostics applicable.
