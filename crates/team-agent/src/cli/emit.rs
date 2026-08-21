@@ -45,7 +45,7 @@ fn emit_with_json_order(
 }
 
 ///
-/// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude/copilot passthrough 早返回 →
+/// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude/copilot/grok/cursor passthrough 早返回 →
 /// 解析 argv 到 subcommand → 调对应 handler → 异常落盘 + 信封 + `ExitCode::Error` →
 /// `consume_leader_inbox_summary` → `emit` → `result.ok is False ? Error : Ok`。
 /// **行为入口**:契约可端到端跑 argv→(stdout, exit code)。
@@ -262,7 +262,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
 const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start"];
 // Command grammar, not provider identity parsing: these are top-level CLI
 // passthrough verbs for starting a leader under a provider executable.
-const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot"];
+const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot", "grok", "cursor"];
 
 fn is_leader_passthrough_command(command: &str) -> bool {
     LEADER_PASSTHROUGH_COMMANDS.contains(&command)
@@ -310,7 +310,7 @@ fn default_help() -> String {
         "Guided recovery",
         &["claim-leader", "takeover", "attach-leader"],
     );
-    out.push_str("\nProvider launchers:\n  team-agent codex|claude|copilot ...\n");
+    out.push_str("\nProvider launchers:\n  team-agent codex|claude|copilot|grok|cursor ...\n");
     out.push_str("\nRun `team-agent <command> --help` for command flags.");
     out
 }

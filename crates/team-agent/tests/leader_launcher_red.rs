@@ -142,7 +142,7 @@ fn cli_leader_launcher_does_not_mutate_canonical_owner_binding() {
 #[test]
 #[serial(env)]
 fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
-    for command in ["codex", "claude", "copilot"] {
+    for command in ["codex", "claude", "copilot", "grok", "cursor"] {
         let workspace = tmp_dir(&format!("external-opt-out-{command}"));
         let fake = FakeLauncherTools::new(&workspace);
         let _env = EnvGuard::set([
@@ -653,7 +653,7 @@ while :; do sleep 1; done
                 provider_log.display()
             ),
         );
-        for command in ["codex", "copilot"] {
+        for command in ["codex", "copilot", "grok", "agent"] {
             write_executable(
                 &bin.join(command),
                 &format!(
