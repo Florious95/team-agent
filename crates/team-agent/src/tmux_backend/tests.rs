@@ -2320,6 +2320,18 @@ fn count_submit_enters(calls: &[Vec<String>]) -> usize {
         .count()
 }
 
+fn count_paste_stage(calls: &[Vec<String>]) -> usize {
+    calls
+        .iter()
+        .filter(|argv| {
+            matches!(
+                argv.get(1).map(String::as_str),
+                Some("load-buffer") | Some("set-buffer") | Some("paste-buffer")
+            )
+        })
+        .count()
+}
+
 /// Inject runner that reports a fixed `#{pane_mode}` and a token that disappears after C-m.
 struct ModePasteRunner {
     recorded: RecordedArgv,
@@ -3028,6 +3040,109 @@ fn grok_fold_does_not_enter_before_fold_on_raw_tall_paste() {
         "must keep polling until fold, not Enter on first token; calls={calls:?}"
     );
     assert_eq!(count_submit_enters(&calls), 1);
+}
+
+/// 悬案B 主嫌：token 见过又消失（Gone）时 composer 仍有 grok 折叠占位符。
+/// 修前 Gone 无条件 Some(true)。本测试必须先红。
+#[test]
+fn gone_with_grok_placeholder_still_in_composer_must_not_be_consumed() {
+    let cap = "some transcript line\n> [Pasted: 27 lines]\nEnter:send  Esc:cancel\n";
+    let marker = "[team-agent-token:deadbeef]";
+    assert_eq!(
+        super::token_sighting(false, true),
+        super::TokenSighting::Gone
+    );
+    let got = super::consumption_from_capture(
+        cap,
+        marker,
+        true,
+        Some(super::PasteLatch::GrokLineCount(27)),
+    );
+    assert_eq!(
+        got,
+        Some(false),
+        "Gone must re-check PasteLatch: placeholder still in composer must not be consumed, got {got:?}"
+    );
+}
+
+#[test]
+fn gone_with_grok_kb_placeholder_still_in_composer_must_not_be_consumed() {
+    let cap = "│ ❯ [Pasted: 13 KB]                                                          │\n Enter:send\n";
+    let marker = "[team-agent-token:kbform]";
+    let prompt = super::pasted_prompt_in_composer(cap, 15).expect("KB form is grok fold");
+    assert_eq!(prompt.literal, "pasted:");
+    assert_eq!(prompt.line_count, Some(13));
+    let got = super::consumption_from_capture(
+        cap,
+        marker,
+        true,
+        Some(super::PasteLatch::GrokLineCount(13)),
+    );
+    assert_eq!(
+        got,
+        Some(false),
+        "Gone + [Pasted: 13 KB] still in composer must not be consumed, got {got:?}"
+    );
+}
+
+#[test]
+fn gone_empty_composer_without_latch_stays_consumed_for_claude() {
+    let marker = "[team-agent-token:msg_short]";
+    assert_eq!(
+        super::consumption_from_capture("❯ \n", marker, true, None),
+        Some(true),
+        "claude short token gone + empty composer + no latch must stay consumed"
+    );
+}
+
+/// 样本#5 归因钉：重试只重按 Enter，不得再 load/set/paste-buffer。
+#[test]
+fn grok_fold_raw_then_fold_placeholder_stays_retries_enter_not_repaste() {
+    let marker = "[team-agent-token:msg_grok_reappear]";
+    let token_text = format!("Team Agent message from leader:\n{}\n\n{marker}", "x\n".repeat(20));
+    let raw = grok_raw_unfolded_paste(&marker);
+    let (be, rec) = backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, GROK_INCIDENT_LINE, 2);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified,
+        "raw visible then folded, placeholder stays: must not false-green delivered; got {:?}",
+        report.submit_verification
+    );
+    let calls = rec.lock().unwrap().clone();
+    let enters = count_submit_enters(&calls);
+    assert!(
+        enters >= 2,
+        "placeholder still in composer must retry Enter; got {enters} calls={calls:?}"
+    );
+    let paste_n = count_paste_stage(&calls);
+    let first_enter = calls.iter().position(|argv| {
+        argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "C-m" || a == "Enter")
+    });
+    let paste_after_enter = first_enter.map(|i| {
+        calls[i + 1..]
+            .iter()
+            .filter(|argv| {
+                matches!(
+                    argv.get(1).map(String::as_str),
+                    Some("load-buffer") | Some("set-buffer") | Some("paste-buffer")
+                )
+            })
+            .count()
+    });
+    assert_eq!(
+        paste_after_enter,
+        Some(0),
+        "retry must not re-paste (inject contract); paste_n={paste_n} calls={calls:?}"
+    );
 }
 
 #[test]

@@ -2220,9 +2220,19 @@ fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool
     )
 }
 
-fn paste_to_submit_floor_for_recipient(state: &serde_json::Value, recipient: &str) -> Duration {
+/// ---
+/// purpose: paste→Enter 地板按收件人 provider 选择
+/// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
+/// boundary: 不改 cursor 单回车闸；不把地板套到 claude/codex
+/// ---
+pub(crate) fn paste_to_submit_floor_for_recipient(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Duration {
     match recipient_provider(state, recipient) {
-        Some(Provider::CursorAgent) => crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR,
+        Some(Provider::CursorAgent) | Some(Provider::Grok) => {
+            crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR
+        }
         _ => Duration::ZERO,
     }
 }
@@ -3159,4 +3169,37 @@ fn rollout_tail_contains_result(
     file.take(tail_bytes).read_to_end(&mut buf)?;
     let haystack = String::from_utf8_lossy(&buf);
     Ok(haystack.contains(needle))
+}
+
+#[cfg(test)]
+mod paste_floor_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn state_with_provider(provider: &str) -> serde_json::Value {
+        serde_json::json!({
+            "agents": { "w1": { "provider": provider } }
+        })
+    }
+
+    #[test]
+    fn grok_paste_to_submit_floor_matches_cursor() {
+        let grok = paste_to_submit_floor_for_recipient(&state_with_provider("grok"), "w1");
+        let cursor = paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
+        assert_eq!(grok, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
+        assert_eq!(cursor, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
+        assert_eq!(grok, cursor);
+    }
+
+    #[test]
+    fn claude_and_codex_paste_to_submit_floor_stays_zero() {
+        assert_eq!(
+            paste_to_submit_floor_for_recipient(&state_with_provider("claude"), "w1"),
+            Duration::ZERO
+        );
+        assert_eq!(
+            paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
+            Duration::ZERO
+        );
+    }
 }
