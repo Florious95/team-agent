@@ -14,6 +14,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod common;
 pub(crate) mod copilot;
+pub(crate) mod cursor;
 pub(crate) mod grok;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +45,9 @@ pub(crate) fn scan_session_candidates_once(
     }
     if matches!(provider, Provider::Grok) {
         return Ok(grok::scan_session_store(context));
+    }
+    if matches!(provider, Provider::CursorAgent) {
+        return Ok(cursor::scan_session_store(context));
     }
     if matches!(provider, Provider::Claude | Provider::ClaudeCode)
         && context.expected_session_id.is_some()

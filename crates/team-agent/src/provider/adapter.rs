@@ -405,6 +405,9 @@ impl ProviderAdapter for BasicProviderAdapter {
             // 标"weak / no auth-status command available";Compatible/Official 走 BYOK
             // 路径,有 COPILOT_PROVIDER_BASE_URL 时已脱离 GitHub 登录通道。
             Provider::Copilot => copilot_auth_hint(auth_mode),
+            // Cursor: 登录探测未接。U-17 前不得把未观测写成 Present（shim 对
+            // `cursor-agent status` 会假绿 Logged in）。缺键 ≠ 已知未登录，故不用 Missing。
+            Provider::CursorAgent => AuthHintStatus::Unknown,
             _ => match auth_mode {
                 AuthMode::Subscription => AuthHintStatus::Present,
                 AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
@@ -617,6 +620,27 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(CommandPlan {
                     argv,
                     expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: None,
+                    managed_mcp_config: false,
+                })
+            }
+            Provider::CursorAgent => {
+                // U-01 create-chat 无登录超时；禁止发明 --session-id。
+                // pending 只能是 CLI chatId，本拍不造假 uuid。
+                let argv = cursor_agent_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch
+                        .is_some_and(|profile| profile.managed_mcp_config),
+                    ctx.effort,
+                )?;
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: None,
                     provider_projects_root: None,
                     managed_mcp_config: false,
                 })
@@ -912,6 +936,33 @@ impl ProviderAdapter for BasicProviderAdapter {
                 )?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
+                Ok(CommandPlan::argv_only(argv))
+            }
+            Provider::CursorAgent => {
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "cursor_agent resume requires chatId; empty --resume is forbidden (picker)".to_string(),
+                    ));
+                };
+                let raw = session_id.as_str();
+                if raw.is_empty() || raw.contains('/') || raw.contains('\\') || raw.contains('\0') {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "cursor_agent resume rejected forged or empty chatId".to_string(),
+                    ));
+                }
+                let mut argv = cursor_agent_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch
+                        .is_some_and(|profile| profile.managed_mcp_config),
+                    ctx.effort,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(raw.to_string());
                 Ok(CommandPlan::argv_only(argv))
             }
             _ => self
@@ -1218,11 +1269,17 @@ impl ProviderAdapter for BasicProviderAdapter {
                 r"working|processing",
                 r"Error|panic",
             ),
-            // Grok/Cursor: 暂无专有 status 正则, 沿用 generic (idle `>`, busy
-            // working/processing, error Traceback) — 与 GeminiCli 同级降级。
-            Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => {
+            // Grok: 暂无专有 status 正则, 沿用 generic。
+            Provider::Grok | Provider::GeminiCli | Provider::Fake => {
                 patterns(r">", r"working|processing", r"Error|Traceback")
             }
+            // Cursor: U-15 未过前不得用 generic `>` 单独判已证实 idle。
+            // 字面量 `cursor-idle-unset-until-u15` 不会出现在屏上。
+            Provider::CursorAgent => patterns(
+                r"cursor-idle-unset-until-u15",
+                r"cursor-busy-unset-until-u15",
+                r"Error|Traceback",
+            ),
         }
     }
 

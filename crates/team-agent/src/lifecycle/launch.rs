@@ -282,7 +282,7 @@ pub(crate) use mcp_config::{
 mod cursor_mcp;
 pub use cursor_mcp::{
     apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,
-    enable_cursor_workspace_mcp, physical_workspace_path,
+    enable_cursor_workspace_mcp, physical_workspace_path, refuse_second_cursor_occupant,
 };
 
 mod worker_env;

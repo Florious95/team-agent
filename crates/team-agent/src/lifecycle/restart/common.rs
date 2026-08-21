@@ -340,6 +340,11 @@ pub(super) fn spawn_agent_window(
     }
     // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
     if provider == crate::provider::Provider::CursorAgent {
+        crate::lifecycle::launch::refuse_second_cursor_occupant(
+            workspace,
+            agent_id.as_str(),
+            None,
+        )?;
         crate::lifecycle::launch::apply_cursor_agent_rules_overlay(
             workspace,
             agent_id.as_str(),
@@ -1141,7 +1146,19 @@ pub(super) fn resume_backing_probe_for_agent(
                 None => false,
             }
         }
-        Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
+        Provider::CursorAgent => {
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                checked_paths.push(home.join(".cursor").join("chats"));
+            }
+            match crate::provider::session_scan::cursor::cursor_session_dir(session_id.as_str()) {
+                Some(dir) => {
+                    checked_paths.push(dir.clone());
+                    crate::provider::session_scan::cursor::cursor_session_archive_present(&dir)
+                }
+                None => false,
+            }
+        }
+        Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic

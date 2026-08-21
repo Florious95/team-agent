@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: A16-capability-matrix-behavior
-//!       what: grok/claude subscription 真注入斜杠命令；compatible_api 拒；未验证 provider 拒且理由是未验证
+//!       what: grok/claude subscription 真注入斜杠命令；compatible_api 拒；未验证 provider 拒且理由是未验证；cursor 拒且理由是不支持
 //! boundary:
 //!   - 不把 in_window_fork_command 查表当通过
 //!   - 基线红必须是断言失败，不是 unresolved import
@@ -199,7 +199,7 @@ fn claude_compatible_api_is_refused_as_unsupported_auth() {
 
 #[test]
 fn unverified_providers_are_refused_as_unverified_not_unsupported() {
-    for provider in ["codex", "copilot", "cursor_agent", "gemini_cli"] {
+    for provider in ["codex", "copilot", "gemini_cli"] {
         let ws = seat_ws(provider, provider, "subscription");
         let (result, injected) = fork_on(&ws, "forked from\n");
         let err = match result {
@@ -221,4 +221,28 @@ fn unverified_providers_are_refused_as_unverified_not_unsupported() {
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
+}
+
+#[test]
+fn cursor_agent_fork_is_unsupported_not_unverified() {
+    let ws = seat_ws("cursor_agent", "cursor_agent", "subscription");
+    let (result, injected) = fork_on(&ws, "forked from\n");
+    let err = match result {
+        Err(error) => error,
+        Ok(ok) => panic!("cursor_agent must refuse fork, got {ok:?}"),
+    };
+    assert!(
+        !injected.iter().any(|t| t == "/fork" || t == "/branch"),
+        "cursor_agent must not inject a slash command; got {injected:?}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("does not support native session fork"),
+        "cursor_agent fork must be unsupported (no fork flag; slash unverified); got {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("unverified") && !text.contains("未验证"),
+        "must not leave cursor on the unverified arm; got {text}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
 }
