@@ -1,3 +1,35 @@
+//! ---
+//! purpose: spec 的读取改写与 runtime state 初值物化，含 quick-start 的 owner 种入
+//! contract:
+//!   provides:
+//!     - name: initial_runtime_state
+//!       what: 由 spec 生成首份 runtime state 树，并种入 launched owner
+//!     - name: write_spec_atomic
+//!       what: 先写同目录临时文件再 rename，避免留下半截 spec
+//!     - name: spec_session_name
+//!       what: 取 runtime.session_name，缺省由 team 名派生
+//!     - name: spec_agents
+//!       what: 取 spec 里全部 agent id
+//!     - name: spec_routes
+//!       what: 对 spec 里每个 task 算出路由决策
+//!     - name: effective_runtime_config_for_worker_spawn
+//!       what: 由单个 agent 的 dangerously_skip_permissions 定出 bypass 审批结论
+//!   depends:
+//!     - crate::state::projection
+//!     - crate::state::identity
+//!     - crate::state::ownership
+//!     - crate::model::yaml
+//!     - crate::model::routing
+//!     - crate::provider::bypass_flags
+//!     - crate::lifecycle::launch::identity
+//!     - crate::lifecycle::launch::leader_context
+//!     - crate::lifecycle::launch::worker_env
+//! boundary:
+//!   - 只生成与改写数据，不 spawn 进程也不开显示
+//!   - bypass 只认单个 agent 自己的声明，不从 runtime 配置或 leader argv 全队继承
+//!   - spec 写盘一律走原子替换，不做就地截断写
+//! maturity: wired
+//! ---
 //!
 //! unit-8 (Stage 3) — `lifecycle::launch::spec_state` phase boundary.
 //!
@@ -40,6 +72,12 @@ use super::leader_context::{
 };
 use super::worker_env::spawn_timestamp;
 
+/// ---
+/// purpose: 由 spec 生成首份 runtime state 树
+/// params:
+///   team_key: 本团队的 runtime 键
+/// returns: 含 spec_path、workspace、team_dir、session_name、leader、agents、tasks 与 display_backend 的 state；随后按环境种入 launched owner，种不到则种一份 unbound owner
+/// ---
 pub(super) fn initial_runtime_state(
     spec: &Value,
     spec_path: &Path,
@@ -113,6 +151,12 @@ pub(super) fn initial_runtime_state(
     state
 }
 
+/// ---
+/// purpose: 从环境里的 caller 身份种入 launched owner
+/// params:
+///   state: 待改写的 state，成功时写入 owner 与 leader receiver
+/// returns: true 表示已种入，取不到 caller 身份或无 pane 时为 false
+/// ---
 pub(super) fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> bool {
     let team_id = crate::state::projection::team_state_key(state);
     let Ok(caller) = crate::state::identity::caller_identity_from_env(
@@ -130,6 +174,13 @@ pub(super) fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> boo
     )
 }
 
+/// ---
+/// purpose: 用给定的 caller 身份与 pane provider 查询函数种入 owner 与 leader receiver
+/// params:
+///   caller: 调用方身份，pane_id 为空则不种
+///   lookup_pane_provider: 由 pane 反查 provider 的函数，便于测试替换
+/// returns: true 表示已写入 owner 记录
+/// ---
 pub(super) fn seed_launched_owner_from_caller_with_provider_lookup(
     state: &mut serde_json::Value,
     caller: crate::state::owner_gate::CallerIdentity,
@@ -186,6 +237,10 @@ pub(super) fn seed_launched_owner_from_caller_with_provider_lookup(
     true
 }
 
+/// ---
+/// purpose: 判断环境里是否带有任一 leader 身份变量
+/// returns: pane id、session uuid、其 override 或 provider 任一非空即 true
+/// ---
 pub(super) fn has_positive_caller_leader_env() -> bool {
     env_nonempty("TEAM_AGENT_LEADER_PANE_ID")
         || env_nonempty("TEAM_AGENT_LEADER_SESSION_UUID")
@@ -193,12 +248,20 @@ pub(super) fn has_positive_caller_leader_env() -> bool {
         || env_nonempty("TEAM_AGENT_LEADER_PROVIDER")
 }
 
+/// ---
+/// purpose: 判断某环境变量存在且非空
+/// returns: 存在且非空为 true
+/// ---
 pub(super) fn env_nonempty(key: &str) -> bool {
     std::env::var(key)
         .ok()
         .is_some_and(|value| !value.is_empty())
 }
 
+/// ---
+/// purpose: 把 spec 的 tasks 列表转成 JSON 数组
+/// returns: 转换后的数组，没有 tasks 时为空数组
+/// ---
 pub(super) fn spec_tasks_json(spec: &Value) -> serde_json::Value {
     spec.get("tasks")
         .and_then(Value::as_list)
@@ -206,6 +269,10 @@ pub(super) fn spec_tasks_json(spec: &Value) -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!([]))
 }
 
+/// ---
+/// purpose: 把 YAML 值递归转成等价 JSON 值
+/// returns: 结构与标量一一对应的 JSON
+/// ---
 pub(super) fn yaml_value_to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -226,6 +293,11 @@ pub(super) fn yaml_value_to_json(value: &Value) -> serde_json::Value {
     }
 }
 
+/// ---
+/// purpose: 原子写 spec，先写带进程号后缀的临时文件再 rename 覆盖
+/// returns: 成功返回空值
+/// errors: 建父目录、写临时文件或 rename 失败时返回 StatePersist；rename 失败会删掉临时文件且原 spec 不动
+/// ---
 ///
 /// Set `runtime.session_name` on the compiled spec to `session_name`, creating the
 /// `runtime` map and/or the `session_name` entry if absent. Used by quick-start to
@@ -252,10 +324,18 @@ pub(crate) fn write_spec_atomic(spec_path: &Path, spec: &Value) -> Result<(), Li
     Ok(())
 }
 
+/// ---
+/// purpose: 就地把 spec 的 runtime.session_name 改成给定值
+/// ---
 pub(crate) fn override_spec_session_name(spec: &mut Value, session_name: &str) {
     override_spec_runtime_str(spec, "session_name", session_name);
 }
 
+/// ---
+/// purpose: 就地把 spec 里 team.workspace 与各 agent 的 working_directory 改成给定路径
+/// params:
+///   spec: 非 Map 时不动；只改已存在的字段，不新建
+/// ---
 pub(crate) fn override_spec_workspace(spec: &mut Value, workspace: &Path) {
     let workspace_s = workspace.to_string_lossy().to_string();
     let Value::Map(root) = spec else { return };
@@ -276,10 +356,19 @@ pub(crate) fn override_spec_workspace(spec: &mut Value, workspace: &Path) {
     }
 }
 
+/// ---
+/// purpose: 就地把 spec 的 runtime.display_backend 改成给定值
+/// ---
 pub(super) fn override_spec_display_backend(spec: &mut Value, display_backend: &str) {
     override_spec_runtime_str(spec, "display_backend", display_backend);
 }
 
+/// ---
+/// purpose: 就地写 spec 的 runtime 段下某个字符串字段
+/// params:
+///   spec: 非 Map 时不动
+/// returns: runtime 段缺失则新建，已存在同名键则覆盖，runtime 是非 Map 值则整段替换
+/// ---
 pub(super) fn override_spec_runtime_str(spec: &mut Value, key: &str, value: &str) {
     let Value::Map(root) = spec else { return };
     let runtime_slot = root
@@ -306,6 +395,10 @@ pub(super) fn override_spec_runtime_str(spec: &mut Value, key: &str, value: &str
     }
 }
 
+/// ---
+/// purpose: 定出本 spec 的 tmux session 名
+/// returns: runtime.session_name 的非空值；缺失时由 team.name 派生，team 名也缺失时用 agent 兜底
+/// ---
 pub(super) fn spec_session_name(spec: &Value) -> SessionName {
     if let Some(name) = spec
         .get("runtime")
@@ -325,6 +418,10 @@ pub(super) fn spec_session_name(spec: &Value) -> SessionName {
     SessionName::new(format!("team-{team_name}"))
 }
 
+/// ---
+/// purpose: 把 spec_session_name 以更宽可见性转出，供 layout 复用同一份实现
+/// returns: 同 spec_session_name
+/// ---
 ///
 /// 0.3.28 layout step 1: pub re-export of `spec_session_name` for the new
 /// `layout::sessions::worker_session_name` to delegate to. Single underlying
@@ -333,6 +430,10 @@ pub fn worker_session_name_pub(spec: &Value) -> SessionName {
     spec_session_name(spec)
 }
 
+/// ---
+/// purpose: 取出 spec 里全部 agent id
+/// returns: 按 spec 顺序的 agent id，无 id 字段的条目被跳过
+/// ---
 pub(super) fn spec_agents(spec: &Value) -> Vec<AgentId> {
     spec_agent_values(spec)
         .into_iter()
@@ -340,6 +441,10 @@ pub(super) fn spec_agents(spec: &Value) -> Vec<AgentId> {
         .collect()
 }
 
+/// ---
+/// purpose: 取出 spec 里全部 agent id 的集合，便于成员判定
+/// returns: 有序集合
+/// ---
 ///
 /// Bug 1 (0.4.2): expose spec agent id set so the restart path can filter
 /// state.agents to only the agents currently defined in the rebuilt spec.
@@ -351,6 +456,10 @@ pub(crate) fn spec_agent_id_set(spec: &Value) -> std::collections::BTreeSet<Stri
         .collect()
 }
 
+/// ---
+/// purpose: 取出 spec 的 agents 列表原始节点
+/// returns: 节点引用列表，字段缺失或类型不对时为空
+/// ---
 pub(super) fn spec_agent_values(spec: &Value) -> Vec<&Value> {
     spec.get("agents")
         .and_then(Value::as_list)
@@ -358,6 +467,10 @@ pub(super) fn spec_agent_values(spec: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
+/// ---
+/// purpose: 对 spec 里每个 task 算出路由决策
+/// returns: 每个 task 的选中 agent 与理由，manual_override 恒为 false
+/// ---
 pub(super) fn spec_routes(spec: &Value) -> Vec<RoutingDecision> {
     spec.get("tasks")
         .and_then(Value::as_list)
@@ -378,6 +491,10 @@ pub(super) fn spec_routes(spec: &Value) -> Vec<RoutingDecision> {
         .unwrap_or_default()
 }
 
+/// ---
+/// purpose: 定出默认承接人
+/// returns: routing.default_assignee，缺失时取第一个 agent
+/// ---
 pub(super) fn spec_default_assignee(spec: &Value) -> Option<AgentId> {
     spec.get("routing")
         .and_then(|v| v.get("default_assignee"))
@@ -386,6 +503,12 @@ pub(super) fn spec_default_assignee(spec: &Value) -> Option<AgentId> {
         .or_else(|| spec_agents(spec).into_iter().next())
 }
 
+/// ---
+/// purpose: 由单个 YAML agent 的 dangerously_skip_permissions 定出 bypass 审批结论
+/// returns: 字段为 true 时 enabled 且来源记 RuntimeConfig，并带上该 provider 的 bypass argv；否则 Disabled
+/// errors: 当前实现不产生 Err
+/// contract_id: lifecycle.spec_state.effective_runtime_config
+/// ---
 /// 0.5.66 bypass 单源:从**单个 agent**(yaml spec)的 `dangerously_skip_permissions` 构造
 /// `DangerousApproval`(取代旧"runtime config + leader argv"全队一份)。
 /// true → source=RuntimeConfig(角色声明即用户明确同意,coordinator 的
@@ -423,6 +546,12 @@ pub(crate) fn effective_runtime_config_for_worker_spawn(
     })
 }
 
+/// ---
+/// purpose: 同上，但读的是 runtime state 里的 JSON agent 节点
+/// returns: 同 YAML 版
+/// errors: 当前实现不产生 Err
+/// contract_id: lifecycle.spec_state.effective_runtime_config
+/// ---
 /// 0.5.66 bypass 单源:restart/state 路径的 serde_json 版(agent 来自 state JSON)。
 pub(crate) fn effective_runtime_config_for_worker_spawn_json(
     agent: &serde_json::Value,
@@ -457,6 +586,10 @@ pub(crate) fn effective_runtime_config_for_worker_spawn_json(
     })
 }
 
+/// ---
+/// purpose: 给出 provider 的稳定 wire 名
+/// returns: 与 spec 写法一致的小写下划线名
+/// ---
 pub(crate) fn provider_display_str(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
@@ -470,6 +603,10 @@ pub(crate) fn provider_display_str(provider: Provider) -> &'static str {
     }
 }
 
+/// ---
+/// purpose: 由 team 目录推出 workspace 根
+/// returns: 解析成功用解析值，失败时退到 team 目录的父目录，没有父目录则用 team 目录本身
+/// ---
 pub(super) fn team_workspace(team_dir: &Path) -> PathBuf {
     crate::model::paths::team_workspace(team_dir).unwrap_or_else(|_| {
         team_dir

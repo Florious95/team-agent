@@ -39,10 +39,17 @@ pub(super) struct MaterializedRole {
 }
 
 impl MaterializedRole {
+/// ---
+/// purpose: 取物化出来的角色文件路径
+/// returns: 落盘路径
+/// ---
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
 
+/// ---
+/// purpose: 标记该文件由调用方接管，Drop 时不再删除
+/// ---
     pub(super) fn keep(&mut self) {
         self.keep = true;
     }
@@ -56,6 +63,15 @@ impl Drop for MaterializedRole {
     }
 }
 
+/// ---
+/// purpose: 读源席最新角色文件，改名后物化到托管目录
+/// params:
+///   state: 用于找源席的 dynamic_role_file，找不到时退到 team 目录下的同名 md
+///   as_agent_id: 新席位名，写进 front matter 的 name
+///   label: 非空时覆盖 front matter 的 role
+/// returns: 物化结果，未调用 keep 时 Drop 会删掉该文件
+/// errors: 源文件缺失、未声明 name 或声明与源席不符时返回 Compile；目标已存在返回 RequirementUnmet；建目录或写盘失败返回 StatePersist
+/// ---
 pub(super) fn materialize_latest_role(
     run_workspace: &Path,
     team_dir: &Path,

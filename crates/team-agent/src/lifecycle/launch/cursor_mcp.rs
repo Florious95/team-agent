@@ -38,6 +38,10 @@ const REQUIRED_IDENTITY_KEYS: &[&str] = &[
     "TEAM_AGENT_AUTH_MODE",
 ];
 
+/// ---
+/// purpose: 给出 workspace 的物理路径
+/// returns: 能 canonicalize 就用它，否则原样返回
+/// ---
 pub fn physical_workspace_path(workspace: &Path) -> PathBuf {
     std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
 }
@@ -135,6 +139,13 @@ fn agent_is_paused_yaml(agent: &YamlValue) -> bool {
     matches!(agent.get("paused"), Some(YamlValue::Bool(true)))
 }
 
+/// ---
+/// purpose: 写 workspace 下 cursor 会读的 mcp.json，env 里必须带席位身份键
+/// params:
+///   mcp_config: 已解析的 MCP 配置，须含 team_orchestrator 与 command
+/// returns: 写出的文件路径
+/// errors: 缺条目或缺 command 时返回 StatePersist，写盘失败也返回 StatePersist
+/// ---
 pub fn apply_cursor_mcp_overlay(
     workspace: &Path,
     mcp_config: &crate::provider::McpConfig,
@@ -232,6 +243,10 @@ pub fn apply_cursor_mcp_overlay(
     Ok(path)
 }
 
+/// ---
+/// purpose: 组出启用 team_orchestrator 的 cursor 命令行
+/// returns: 不带 workspace 参数的 argv，该命令按进程工作目录分片
+/// ---
 pub fn cursor_mcp_enable_argv() -> Vec<String> {
     vec![
         command_name(Provider::CursorAgent).to_string(),
@@ -241,6 +256,11 @@ pub fn cursor_mcp_enable_argv() -> Vec<String> {
     ]
 }
 
+/// ---
+/// purpose: 在物理工作目录下执行 cursor 的 MCP 启用命令
+/// returns: 测试隔离环境或显式跳过标志下直接成功，避免写用户全局配置
+/// errors: 命令跑不起来或退出码非零时返回 RequirementUnmet，错误里只记输出长度不记内容
+/// ---
 pub fn enable_cursor_workspace_mcp(workspace: &Path) -> Result<(), LifecycleError> {
     if skip_cursor_mcp_enable() {
         return Ok(());
@@ -280,6 +300,11 @@ pub fn enable_cursor_workspace_mcp(workspace: &Path) -> Result<(), LifecycleErro
     )))
 }
 
+/// ---
+/// purpose: 把 argv 里 workspace 参数的值换成物理路径
+/// params:
+///   argv: 就地改写；没有该参数时什么都不做
+/// ---
 pub fn apply_cursor_workspace_physical_path(argv: &mut [String], workspace: &Path) {
     let physical = physical_workspace_path(workspace);
     let Some(index) = argv.iter().position(|arg| arg == "--workspace") else {

@@ -1,3 +1,24 @@
+//! ---
+//! purpose: coordinator 的共享数据面——协议常量、Pid/WorkspacePath newtype、健康与启停的穷尽状态 enum、metadata/schema/report 结构、以及跨子系统注入用的 trait 占位
+//! contract:
+//!   provides:
+//!     - name: as_str
+//!       what: 把 binary-identity relation 与 metadata mismatch reason 映射成稳定 wire 字符串
+//!     - name: as_path
+//!       what: 从 WorkspacePath newtype 取回底层路径
+//!   depends:
+//!     - crate::model::enums
+//!     - crate::model::ids
+//!     - crate::provider
+//!     - crate::message_store
+//!     - crate::event_log
+//! boundary:
+//!   - 只定义形状，不含任何判定、I/O 或事件写入
+//!   - as_str 的返回值是对外稳定契约：已发布的字符串只可新增不可改写
+//!   - ProviderRegistry / MarkerStore 只是注入点，实现体不在本模块
+//! maturity: wired
+//! ---
+//!
 //! coordinator 共享数据面:常量 / newtype / 穷尽 enum / metadata / schema health /
 //! report 结构 / abnormal-track 数据型 / WatchCursor / cross-dep 占位。
 
@@ -42,9 +63,19 @@ pub const ROTATION_MARKER: &str =
 pub struct Pid(pub u32);
 
 impl Pid {
+    /// ---
+    /// purpose: 把裸 OS pid 包成 newtype，杜绝与其他 int id 混传
+    /// params:
+    ///   pid: OS 进程号，不做存活或有效性校验
+    /// returns: 承载该 pid 的 newtype
+    /// ---
     pub fn new(pid: u32) -> Self {
         Self(pid)
     }
+    /// ---
+    /// purpose: 取回底层裸 pid，供需要 OS 接口的调用方使用
+    /// returns: 构造时传入的 pid 原值
+    /// ---
     pub fn get(self) -> u32 {
         self.0
     }
@@ -62,9 +93,19 @@ impl std::fmt::Display for Pid {
 pub struct WorkspacePath(pub PathBuf);
 
 impl WorkspacePath {
+    /// ---
+    /// purpose: 把一个路径包成 workspace newtype，作为 tick/health/start/stop 的统一 key
+    /// params:
+    ///   p: workspace 根路径。调用方负责先 resolve；本构造不做规范化也不校验存在性
+    /// returns: 承载该路径的 newtype
+    /// ---
     pub fn new(p: impl Into<PathBuf>) -> Self {
         Self(p.into())
     }
+    /// ---
+    /// purpose: 借出底层路径，供文件系统与子进程参数使用
+    /// returns: 构造时传入的路径原值的借用
+    /// ---
     pub fn as_path(&self) -> &Path {
         &self.0
     }
@@ -200,6 +241,10 @@ pub enum CoordinatorBinaryIdentityRelation {
 }
 
 impl CoordinatorBinaryIdentityRelation {
+    /// ---
+    /// purpose: 把「调用方二进制相对 daemon 二进制」的关系映射成稳定 wire 字符串
+    /// returns: 五个稳定串之一（same / caller_newer_than_daemon / daemon_newer_than_caller / same_version_path_mismatch / unknown）；这些值进事件与 status 输出，已发布的不可改写
+    /// ---
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Same => "same",
@@ -225,6 +270,10 @@ pub enum CoordinatorMetadataMismatchReason {
 }
 
 impl CoordinatorMetadataMismatchReason {
+    /// ---
+    /// purpose: 把 coordinator metadata 被拒的原因映射成稳定 wire 字符串
+    /// returns: 七个稳定串之一（metadata_missing / pid_mismatch / protocol_version_mismatch / message_store_schema_version_mismatch / binary_identity_missing / binary_version_mismatch / binary_path_mismatch）；进 HealthReport 与事件，已发布的不可改写
+    /// ---
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MetadataMissing => "metadata_missing",

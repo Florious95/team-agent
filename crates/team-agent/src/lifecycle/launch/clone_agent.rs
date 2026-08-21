@@ -16,6 +16,15 @@ use std::path::Path;
 
 use super::*;
 
+/// ---
+/// purpose: 以源席最新角色文件另起一席，不继承源会话
+/// params:
+///   source_agent_id: 源席位，只借它的角色文件与工具集
+///   as_agent_id: 新席位名
+///   label: 新席位的角色标签
+/// returns: clone 报告
+/// errors: 选不到 team 返回 TeamSelect，源席不存在返回 RequirementUnmet，角色物化与加席错误透传
+/// ---
 pub fn clone_agent(
     workspace: &Path,
     source_agent_id: &AgentId,

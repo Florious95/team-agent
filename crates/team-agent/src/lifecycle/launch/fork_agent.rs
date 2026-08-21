@@ -9,6 +9,7 @@
 //!   depends:
 //!     - crate::lifecycle::lock
 //!     - crate::lifecycle::pane_input_lock
+//!     - crate::lifecycle::profile_launch
 //!     - crate::transport::Transport
 //! boundary:
 //!   - 不 spawn 新 pane，不改 TEAM_AGENT_ID / MCP / 席位名
@@ -36,6 +37,10 @@ pub struct InWindowFork {
     pub screen_mark: &'static str,
 }
 
+/// ---
+/// purpose: 给出该 provider 与鉴权方式下窗口内 fork 用的斜杠命令与成功标记
+/// returns: 已实测验证的组合返回命令与屏幕标记，其余一律 None
+/// ---
 /// Official in-window fork. None = unverified or unsupported-auth.
 /// grok `/fork` mark `forked from` (2026-08-17).
 /// claude `/branch` mark `Branched conversation` (Claude Code v2.1.181, 2026-08-17).
@@ -54,6 +59,10 @@ pub fn in_window_fork(provider: Provider, auth: AuthMode) -> Option<InWindowFork
     }
 }
 
+/// ---
+/// purpose: 只取窗口内 fork 的斜杠命令
+/// returns: 有已验证组合时返回命令，否则 None
+/// ---
 pub fn in_window_fork_command(provider: Provider, auth: AuthMode) -> Option<&'static str> {
     in_window_fork(provider, auth).map(|spec| spec.command)
 }
@@ -73,6 +82,15 @@ fn refuse_missing_in_window_fork(provider: Provider, provider_raw: &str) -> Life
     }
 }
 
+/// ---
+/// purpose: 在源席窗口内注入官方斜杠命令完成就地分身
+/// params:
+///   source_agent_id: 被 fork 的席位
+///   as_agent_id: 新席位名
+///   transport: 目标 team 实际使用的 transport
+/// returns: fork 报告，屏幕出现该 provider 的实测标记才记为已验证
+/// errors: 选不到 team 返回 TeamSelect，provider 或鉴权方式未验证返回 Provider，注入失败返回 LifecycleError
+/// ---
 pub fn fork_agent_with_transport(
     workspace: &Path,
     source_agent_id: &AgentId,

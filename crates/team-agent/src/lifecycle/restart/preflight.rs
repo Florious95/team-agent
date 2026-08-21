@@ -1,3 +1,18 @@
+//! ---
+//! purpose: restart 拆除 worker session 之前的身份守卫，防止误杀 leader 会话
+//! contract:
+//!   provides:
+//!     - name: SessionPreflight
+//!       what: 守卫结论，通过或指出 worker session 名其实是 leader 会话名
+//!     - name: check_session_preflight
+//!       what: 纯函数检查 state 里的 session 名字段
+//!   depends:
+//!     - crate::layout::RuntimeSessions
+//! boundary:
+//!   - 纯计算，不做 IO 也不改 state
+//!   - 只判这一种异常，其他 session 异常不在本守卫范围
+//! maturity: wired
+//! ---
 //! unit-3 (Stage 1) — restart preflight session-identity guard.
 //!
 //! Single check that runs BEFORE the worker-session teardown in
@@ -27,12 +42,22 @@ pub enum SessionPreflight {
 }
 
 impl SessionPreflight {
+/// ---
+/// purpose: 判断守卫是否放行
+/// returns: 结论为 Ok 时为 true
+/// ---
     /// True when the preflight passed and the caller may proceed.
     pub fn is_ok(&self) -> bool {
         matches!(self, SessionPreflight::Ok)
     }
 }
 
+/// ---
+/// purpose: 检查 state 里的 session 名，决定接下来的 worker session 拆除是否安全
+/// params:
+///   state: runtime state
+/// returns: 发现 worker session 名带 leader 前缀时返回拒绝结论并附名字与原因，否则 Ok
+/// ---
 /// Inspect `state.json` and decide whether the upcoming worker-session
 /// kill is safe. Pure: no I/O, no mutation.
 pub fn check_session_preflight(state: &serde_json::Value) -> SessionPreflight {

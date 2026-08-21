@@ -1,3 +1,30 @@
+//! ---
+//! purpose: Windows ConPTY shim 的生命周期主人——定位并启动 windows-shim.exe、做 Hello 握手、把可复用的连接与 pid/pipe 名记进 state
+//! contract:
+//!   provides:
+//!     - name: ensure_shim_running
+//!       what: 幂等入口：state 里记的 shim 还活着就重连，否则新起一个并握手
+//!     - name: reconnect_recorded_shim
+//!       what: 只按 state 记的 pipe 名重连并重做 Hello，绝不新起进程
+//!     - name: recorded_shim_pid
+//!       what: 读 state.transport.shim.pid，供停机路由
+//!     - name: recorded_shim_pipe_name
+//!       what: 读 state.transport.shim.pipe_name，供重连路由
+//!     - name: mark_transport_unavailable
+//!       what: shim 不可达时发 stale 家族事件并清掉 state 里的 pipe_ready
+//!   depends:
+//!     - conpty_transport
+//!     - crate::state::repository
+//!     - crate::state::persist
+//!     - crate::event_log
+//!     - crate::platform::process
+//! boundary:
+//!   - pipe_token 绝不落 state：只经子进程环境变量传递并留在本进程内存里，state 只记 pid/pipe_name/pipe_ready
+//!   - 终态失败不静默回落 tmux，交由调用方按传输不可用处理
+//!   - 重连只证明线协议可用，不做新的令牌认证
+//!   - 整个文件仅在 Windows 编译；非 Windows 调用方必须自己 cfg 门控
+//! maturity: wired
+//! ---
 //!
 //! Windows ConPTY shim lifecycle manager.
 //!
@@ -75,16 +102,28 @@ pub struct ShimHandle {
 impl ShimHandle {
     /// The connected pipe client, ready for the factory to wire into
     /// `ConPtyBackend`. Callable exactly once — takes ownership.
+    /// ---
+    /// purpose: 取走已完成 Hello 握手的管道客户端，交给传输后端接线
+    /// returns: 首次调用返回客户端并转移所有权；再次调用为 None
+    /// ---
     pub fn take_client(&mut self) -> Option<NamedPipeClient> {
         self.client.take()
     }
 
     /// The shim pid (for status + shutdown routing).
+    /// ---
+    /// purpose: 给出 shim 进程号，用于状态展示与停机路由
+    /// returns: 启动时记下的 pid；子进程句柄已被 detach 或 drop 后该值仍可读
+    /// ---
     pub fn pid(&self) -> u32 {
         self.pid
     }
 
     /// The pipe name the shim listens on.
+    /// ---
+    /// purpose: 给出 shim 正在监听的命名管道名
+    /// returns: 形如 team-agent-conpty-<hash>-<team> 的管道全名
+    /// ---
     pub fn pipe_name(&self) -> &str {
         &self.pipe_name
     }
@@ -95,6 +134,11 @@ impl ShimHandle {
     /// an explicit `platform::process::terminate_pid` via
     /// `recorded_shim_pid`. Without this call, going out of scope
     /// would terminate the shim and orphan every worker.
+    /// ---
+    /// purpose: 放弃对 shim 子进程的所有权，使本句柄析构时不再杀它
+    /// returns: shim 的 pid，供调用方日后按精确 pid 显式终止
+    /// ---
+    /// 不调用它就让句柄离开作用域，会连带杀掉 shim 并使全部 worker 变成孤儿。
     pub fn detach(mut self) -> u32 {
         // Forget the child so its own Drop doesn't run either. The
         // shim survives until an explicit kill.
@@ -453,6 +497,12 @@ fn finalize(
 /// `None` when no shim is currently registered (Unix / never-launched
 /// Windows worker). Callers use `platform::process::terminate_pid`
 /// on the returned pid.
+/// ---
+/// purpose: 从 state 读出已登记的 shim 进程号
+/// params:
+///   workspace: workspace 根
+/// returns: state.transport.shim.pid 存在且能转成 u32 时给值；没有登记过 shim（未起过或非 Windows 队）时为 None。只读状态，不做存活探测
+/// ---
 pub fn recorded_shim_pid(workspace: &Path) -> Option<u32> {
     let state = crate::state::repository::StateRepository::new(workspace)
         .load_workspace_if_exists_without_migrations()
@@ -466,6 +516,12 @@ pub fn recorded_shim_pid(workspace: &Path) -> Option<u32> {
 }
 
 /// Read `state.transport.shim.pipe_name` for reconnect routing.
+/// ---
+/// purpose: 从 state 读出已登记的 shim 管道名
+/// params:
+///   workspace: workspace 根
+/// returns: state.transport.shim.pipe_name 的字符串值；未登记时为 None
+/// ---
 pub fn recorded_shim_pipe_name(workspace: &Path) -> Option<String> {
     let state = crate::state::repository::StateRepository::new(workspace)
         .load_workspace_if_exists_without_migrations()
@@ -497,6 +553,15 @@ pub fn recorded_shim_pipe_name(workspace: &Path) -> Option<String> {
 /// This gives the "coord can die, shim survives" invariant: a fresh
 /// coord that finds a live shim just reconnects; a fresh coord that
 /// finds no shim spawns one.
+/// ---
+/// purpose: 保证本 (workspace, team) 有一个可用的 shim——这是 coordinator 侧唯一的 shim 所有权入口
+/// params:
+///   workspace: workspace 根
+///   team_key: 目标 team，进 Hello 请求的作用域
+///   workspace_hash: 管道名里用的 workspace 摘要
+/// returns: 已登记 pid 还活着且重连成功 → 复用原进程的句柄（不拥有子进程）；否则新起一个并握手，返回拥有子进程的句柄
+/// errors: 找不到 shim 可执行文件、spawn 失败、连接超时、Hello 失败或落盘 state 失败时返回对应 ShimError。重连失败不算错误，会直接落到新起那条路
+/// ---
 pub fn ensure_shim_running(
     workspace: &Path,
     team_key: &str,
@@ -541,6 +606,15 @@ pub fn ensure_shim_running(
 /// Handle returned from this fn has no owned child (the shim is
 /// somebody else's — usually a previous coord instance). `detach()`
 /// on the handle is a no-op for the child.
+/// ---
+/// purpose: 只重连 state 里已登记的 shim 并重做 Hello，用来证明线协议仍然可用
+/// params:
+///   workspace: workspace 根
+///   team_key: 目标 team，进 Hello 请求的作用域
+///   _workspace_hash: 未使用；管道名直接取自 state，不再重算
+/// returns: 连上且 Hello 回 ok 时给出不拥有子进程的句柄，对它调 detach 对子进程是空操作
+/// errors: state 里没有管道名或多次连接均失败 → ConnectTimeout；连上但 Hello 回 ok=false → HelloFailed。本函数绝不新起进程
+/// ---
 pub fn reconnect_recorded_shim(
     workspace: &Path,
     team_key: &str,
@@ -630,6 +704,14 @@ fn reconnect_hello(client: &mut NamedPipeClient, team_key: &str) -> Result<(), S
 /// The Windows-only `#[cfg]` gate is at the mod level (see
 /// `coordinator/mod.rs`); on Unix this file isn't compiled, so
 /// downstream callers must cfg-gate their reference themselves.
+/// ---
+/// purpose: 把「shim 不可达」这件事诚实地写出去——发 stale 家族事件，并清掉 state 里的就绪位
+/// params:
+///   workspace: workspace 根
+///   reason: 不可达原因，同时进事件与 state.transport.shim.unavailable_reason
+/// returns: 状态里本来就没有 shim 块时也返回 Ok。事件写入是尽力而为，写不出去不影响返回；清状态才是权威动作
+/// errors: 读写 state 失败时返回 StateError；state JSON 损坏时按空状态继续
+/// ---
 pub fn mark_transport_unavailable(workspace: &Path, reason: &str) -> Result<(), StateError> {
     // Best-effort event emission — a failed event write should not
     // fail the caller. The state-clearing step below is authoritative.

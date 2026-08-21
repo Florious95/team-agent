@@ -1,3 +1,23 @@
+//! ---
+//! purpose: 从 spec 里的一个 agent 定义，编译出 worker 启动所需的系统提示词与工具串
+//! contract:
+//!   provides:
+//!     - name: WorkerCommandAgent
+//!       what: 从 YAML 或 JSON 读出的单 agent 命令上下文
+//!     - name: compile_worker_system_prompt
+//!       what: 按身份、runtime 契约、通信模式、角色正文、输出契约、权限说明拼系统提示词
+//!     - name: resolved_tool_strings_for_command
+//!       what: 解析出该 agent 的工具串，声明了 bypass 时追加 dangerous_auto_approve 哨兵
+//!   depends:
+//!     - crate::model::permissions
+//!     - crate::communication_mode
+//!     - crate::provider::bypass_flags
+//! boundary:
+//!   - 只产出字符串，不 spawn 进程、不写盘
+//!   - bypass 只认 agent 自身声明，不从 team/runtime/leader argv 继承
+//!   - provider 没有 bypass argv 定义时报错，不静默降级
+//! maturity: wired
+//! ---
 use std::path::Path;
 
 use crate::communication_mode::CommunicationMode;
@@ -47,6 +67,16 @@ pub(crate) struct WorkerCommandAgent {
 }
 
 impl WorkerCommandAgent {
+/// ---
+/// purpose: 从 spec 的 YAML agent 节点读出命令上下文
+/// params:
+///   agent: 单个 agent 的 YAML 节点
+///   fallback_id: agent 节点没写 id 时的兜底 id
+///   provider: 已解析的 provider
+/// returns: 填好的 WorkerCommandAgent
+/// errors: communication_mode 取值非法时返回 LifecycleError
+/// contract_id: lifecycle.worker_command_agent.from_source
+/// ---
     pub(crate) fn from_yaml(
         agent: &crate::model::yaml::Value,
         fallback_id: Option<&str>,
@@ -101,6 +131,16 @@ impl WorkerCommandAgent {
         })
     }
 
+/// ---
+/// purpose: 从 runtime state 的 JSON agent 节点读出命令上下文
+/// params:
+///   agent: 单个 agent 的 JSON 节点
+///   fallback_id: agent 节点没写 id 时的兜底 id
+///   provider: 已解析的 provider
+/// returns: 填好的 WorkerCommandAgent
+/// errors: communication_mode 取值非法时返回 LifecycleError
+/// contract_id: lifecycle.worker_command_agent.from_source
+/// ---
     pub(crate) fn from_json(
         agent: &serde_json::Value,
         fallback_id: Option<&str>,
@@ -156,6 +196,11 @@ impl WorkerCommandAgent {
     }
 }
 
+/// ---
+/// purpose: 拼出 worker 的系统提示词，身份段必须排在最前
+/// returns: 各段以空行分隔的提示词，空段被丢弃
+/// errors: 角色正文读取失败或权限解析失败时返回 LifecycleError
+/// ---
 pub(crate) fn compile_worker_system_prompt(
     agent: &WorkerCommandAgent,
 ) -> Result<String, LifecycleError> {
@@ -184,6 +229,13 @@ pub(crate) fn compile_worker_system_prompt(
         .join("\n\n"))
 }
 
+/// ---
+/// purpose: 解析该 agent 最终生效的工具串
+/// params:
+///   provider: 用于查 bypass argv 定义的 provider
+/// returns: 排序后的工具串；agent 声明 bypass 时末尾追加 dangerous_auto_approve
+/// errors: 权限解析失败，或声明了 bypass 但该 provider 没有 bypass argv 定义时返回 RequirementUnmet
+/// ---
 pub(crate) fn resolved_tool_strings_for_command(
     agent: &WorkerCommandAgent,
     provider: Provider,

@@ -1,7 +1,31 @@
+//! ---
+//! purpose: plan 多 stage 状态机的建立与按 report_result 的被动推进
+//! contract:
+//!   provides:
+//!     - name: start_plan
+//!       what: 读 plan 文件、建 PlanState 并落盘，对已存在的 plan 幂等返回其状态
+//!     - name: handle_report_result
+//!       what: 扫 orchestrator 目录里 running 的 plan，条件命中则推进或完成
+//!   depends:
+//!     - crate::lifecycle::helpers
+//!     - crate::model::yaml
+//!     - crate::model::paths
+//! boundary:
+//!   - 只推进状态机与落盘，不向席位投递 prompt
+//!   - 条件文法是封闭集，不做自由表达式求值
+//! maturity: wired
+//! ---
 use super::*;
 
 // ── lifecycle::orchestrator —— plan 多 stage 状态机(起步与推进)─────────────
 
+/// ---
+/// purpose: 读 plan 文件并建立 PlanState 落盘
+/// params:
+///   start: 当前实现未使用
+/// returns: 已有状态文件时返回它的进度；否则新建 Running 状态并返回，当前 stage 为 1
+/// errors: plan 文件不存在、读不出、YAML 非法、id 不合法或没有 stage 时返回 InvalidPlan 或 InvalidPlanId
+/// ---
 /// `start_plan(workspace, plan_path, start)`(`orchestrator/__init__.py:26`)。load_plan
 /// (YAML 校验)→ 持久化 PlanState → 派发首 stage。对已 running/halted/completed 幂等返回。
 pub(crate) fn start_plan(
@@ -54,6 +78,13 @@ pub(crate) fn start_plan(
     })
 }
 
+/// ---
+/// purpose: 收到 report_result 后推进匹配的 plan
+/// params:
+///   envelope: report_result 信封，条件按其字段取值比对
+/// returns: 命中则返回推进后的 Running 或 Completed，否则 NoMatch；orchestrator 目录不存在时也返回 NoMatch
+/// errors: 目录项读不出或任一状态文件解析失败时返回 InvalidPlan
+/// ---
 /// `handle_report_result(workspace, envelope)`(`orchestrator/__init__.py:79`)。被 step11
 /// report_result 路径调用以推进 stage;条件匹配 → 推进/完成,否则 `NoMatch`。
 pub(crate) fn handle_report_result(

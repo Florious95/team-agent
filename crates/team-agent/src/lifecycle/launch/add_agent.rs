@@ -1,3 +1,28 @@
+//! ---
+//! purpose: 动态角色文档加一席，失败按快照回滚；force 变体先摘旧席再加
+//! contract:
+//!   provides:
+//!     - name: add_agent
+//!       what: 编译角色进 runtime spec 并起席，失败回滚 spec 与 state
+//!     - name: add_agent_force
+//!       what: 先快照并摘除同名旧席，再走正常加席，失败按快照恢复
+//!     - name: add_agent_with_transport_at_paths
+//!       what: 加席的实体实现，含 owner 门、重名拒绝、原子写 spec 与起席
+//!   depends:
+//!     - crate::lifecycle::lock
+//!     - crate::lifecycle::restart
+//!     - crate::lifecycle::restart::remove
+//!     - crate::compiler
+//!     - crate::state::selector
+//!     - crate::state::projection
+//!     - crate::state::persist
+//!     - crate::tmux_backend
+//! boundary:
+//!   - 不拷贝外部角色文件进 team 目录，就地读取编译
+//!   - 起席一律走 restart 的 start_agent_at_paths，本文件不直接 spawn
+//!   - 回滚只恢复 spec 字节与 runtime state，不回收已 spawn 的 pane
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +39,15 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 加一席的默认入口，解析活跃 team、拿生命周期锁、路由到该 team 实际使用的 tmux socket
+/// params:
+///   role_file_path: 外部角色文档路径，就地读取不拷贝
+///   open_display: 是否为新席开显示
+/// returns: 新席的环境与启动模式
+/// errors: 选不到 team 返回 TeamSelect，角色文件缺失或编译失败返回 Compile，重名返回 RequirementUnmet
+/// contract_id: lifecycle.add_agent.entry
+/// ---
 /// `add_agent(workspace, agent_id, role_file_path, open_display, team)`
 /// (`lifecycle/operations.py:143`)。动态 role doc 编译进 spec + 起 worker;失败**字节级回滚**
 /// spec_yaml / workspace_state / **team_state.md** / role_file(Gap 15.11),每步发
@@ -85,6 +119,14 @@ pub fn add_agent(
     )
 }
 
+/// ---
+/// purpose: 强制重建一席，先快照旧席再摘除再加回
+/// params:
+///   force: 为假时直接退回普通 add_agent
+/// returns: 新席的环境与启动模式
+/// errors: 任一步失败都按快照恢复，恢复本身再出错时错误里附 rollback_errors
+/// contract_id: lifecycle.add_agent.force_entry
+/// ---
 /// Reconcile a single existing/inconsistent seat, then reuse the normal add
 /// path. The external role source is preserved by remove-agent ownership
 /// checks, so this is a one-command force-recreate rather than a team restart.
@@ -128,6 +170,12 @@ pub fn add_agent_force(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的加席入口，归一 workspace 并拿锁后转实体实现
+/// returns: 新席的环境与启动模式
+/// errors: 归一 workspace 失败返回 StatePersist，其余透传
+/// contract_id: lifecycle.add_agent.entry
+/// ---
 /// `add_agent` with an injected transport — after the recompile+write, wires the new worker spawn
 /// (via start_agent_with_transport) + start_coordinator (rt-host-a sweep: recompiled but never spawned).
 pub(crate) fn add_agent_with_transport(
@@ -157,6 +205,14 @@ pub(crate) fn add_agent_with_transport(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的强制重建入口
+/// params:
+///   force: 为假时退回普通 add_agent_with_transport
+/// returns: 新席的环境与启动模式
+/// errors: 归一 workspace 失败返回 StatePersist，其余透传
+/// contract_id: lifecycle.add_agent.force_entry
+/// ---
 pub(crate) fn add_agent_with_transport_force(
     workspace: &Path,
     agent_id: &AgentId,
@@ -195,6 +251,11 @@ pub(crate) fn add_agent_with_transport_force(
     )
 }
 
+/// ---
+/// purpose: 已持锁状态下的强制重建，先校验替换源可用再消费旧席
+/// returns: 新席报告；成功后还要过快照的一致性校验
+/// errors: 角色文件不存在先行返回 Compile；摘除、加回或一致性校验失败时按快照恢复并返回错误
+/// ---
 pub(super) fn force_recreate_with_transport_locked(
     run_workspace: &Path,
     team_dir: &Path,
@@ -256,6 +317,10 @@ pub(super) fn force_recreate_with_transport_locked(
     }
 }
 
+/// ---
+/// purpose: 把原始错误与回滚过程中的错误合成一个对外错误
+/// returns: 回滚干净时原样返回原始错误；否则包成 StatePersist 并附 rollback_errors
+/// ---
 pub(super) fn force_recreate_rollback_error<T>(
     agent_id: &AgentId,
     error: LifecycleError,
@@ -271,6 +336,11 @@ pub(super) fn force_recreate_rollback_error<T>(
     }
 }
 
+/// ---
+/// purpose: 测试用注入点，按环境变量在 spawn 之后制造一次失败
+/// returns: 环境变量未设或为空时直接成功
+/// errors: 设了非空值时返回 StatePersist
+/// ---
 pub(super) fn maybe_fail_force_recreate_after_spawn() -> Result<(), LifecycleError> {
     let Ok(reason) = std::env::var("TEAM_AGENT_TEST_FAIL_FORCE_RECREATE_AFTER_SPAWN") else {
         return Ok(());
@@ -283,6 +353,14 @@ pub(super) fn maybe_fail_force_recreate_after_spawn() -> Result<(), LifecycleErr
     )))
 }
 
+/// ---
+/// purpose: 加席的实体实现，含 owner 门、重名拒绝、重编译 spec 原子写、席位 state upsert 与起席
+/// params:
+///   run_workspace: 已归一的 run workspace
+///   team_dir: 角色定义所在目录，编译 team 用它
+/// returns: 新席的环境与启动模式
+/// errors: owner 门不过或重名返回 RequirementUnmet，角色文件缺失或编译不一致返回 Compile，state 与 spawn 失败先回滚再透传原错
+/// ---
 pub(super) fn add_agent_with_transport_at_paths(
     run_workspace: &Path,
     team_dir: &Path,

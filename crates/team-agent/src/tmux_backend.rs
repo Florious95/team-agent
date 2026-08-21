@@ -241,6 +241,11 @@ pub(crate) enum RuntimeTmuxEndpointSource {
 }
 
 impl RuntimeTmuxEndpointSource {
+    /// ---
+    /// purpose: endpoint 来源的稳定诊断拼写,让日志能分清 endpoint 是从 state 读的还是 workspace 兜底算的
+    /// returns: state.tmux_endpoint / state.tmux_socket / workspace_fallback 三者之一
+    /// boundary: 只标来源,不表示该 endpoint 上真的有 tmux server
+    /// ---
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::StateTmuxEndpoint => "state.tmux_endpoint",
@@ -259,6 +264,11 @@ pub(crate) struct RuntimeTmuxBackendSelection {
 impl TmuxBackend {
     /// Backend bound to the real `tmux` subprocess on the SHARED default socket (no `-L`).
     /// Non-team callers + existing argv/unit tests stay unaffected.
+    /// ---
+    /// purpose: 构造绑在共享默认 socket 上的真实 tmux 后端(argv 不带 -L / -S)
+    /// returns: 用 RealCommandRunner 执行、无 socket、无事件 workspace 的后端
+    /// boundary: 不属于任何 team,故 kill_server 对它是 no-op;不写 events.jsonl(没有 workspace)
+    /// ---
     pub fn new() -> Self {
         Self {
             runner: Box::new(RealCommandRunner),
@@ -270,6 +280,13 @@ impl TmuxBackend {
     /// CP-1 team backend: bound to the real `tmux` subprocess on a PER-WORKSPACE socket, derived
     /// deterministically from the canonicalized workspace path so the leader CLI, the daemon, and
     /// every later op (spawn / inject / has_session / kill) hit the SAME `tmux -L <socket>` server.
+    /// ---
+    /// purpose: 构造绑在「按 workspace 派生的专属 socket」上的真实 tmux 后端
+    /// params:
+    ///   workspace: 工作区路径;socket 名由它经 socket_name_for_workspace 确定性派生
+    /// returns: socket 为 Name(ta-xxxxxxxxxxxx)、事件写入该 workspace 的后端
+    /// boundary: 只决定「连哪台 server」,不创建 server、不验证 socket 是否存在(探测见 socket_probe_missing_for_workspace)
+    /// ---
     pub fn for_workspace(workspace: &Path) -> Self {
         Self {
             runner: Box::new(RealCommandRunner),
@@ -280,6 +297,13 @@ impl TmuxBackend {
         }
     }
 
+    /// ---
+    /// purpose: 按给定短 socket 名构造真实 tmux 后端
+    /// params:
+    ///   socket: 短 socket 名;空串或 "default" 视为「用共享默认 socket」
+    /// returns: socket 名非空且非 default 时绑 Name(socket),否则等价于 new()
+    /// boundary: 不识别绝对路径(会被原样当短名走 -L);要按路径寻址请用 for_tmux_endpoint;不设事件 workspace
+    /// ---
     pub(crate) fn for_socket_name(socket: &str) -> Self {
         if socket.is_empty() || socket == "default" {
             Self::new()
@@ -292,6 +316,13 @@ impl TmuxBackend {
         }
     }
 
+    /// ---
+    /// purpose: 按 endpoint 字符串构造真实 tmux 后端,自动分辨绝对路径与短名
+    /// params:
+    ///   endpoint: 绝对路径 ⇒ 直接当 socket 路径;短名 ⇒ 先解析成已存在或默认根下的路径;空串 / "default" ⇒ 共享默认 socket
+    /// returns: 解析成功时绑 Path(...);短名解析不出路径时退回 new()
+    /// boundary: 只解析寻址,不探活、不创建 server;不设事件 workspace
+    /// ---
     pub(crate) fn for_tmux_endpoint(endpoint: &str) -> Self {
         if endpoint.is_empty() || endpoint == "default" {
             Self::new()
@@ -314,6 +345,15 @@ impl TmuxBackend {
         }
     }
 
+    /// ---
+    /// purpose: 把 leader 认领的绑定 nonce 写进 pane 级 tmux 用户选项,给「这个 pane 实例是不是我绑的那个」留可核凭据
+    /// params:
+    ///   pane: 目标 pane 标识
+    ///   nonce: 本次绑定的凭据串,原样写入,不做格式校验
+    /// returns: 写入命令成功即 Ok
+    /// errors: tmux set-option 非 0 或子进程失败时返回 TransportError
+    /// boundary: 只写不读、不比对;写的是 pane 级(-p)选项,随 pane 消亡,不跨 socket;不判断该 nonce 是否已被别人占用
+    /// ---
     pub(crate) fn set_pane_binding_nonce(
         &self,
         pane: &PaneId,
@@ -332,6 +372,13 @@ impl TmuxBackend {
     }
 
     /// Backend with an injected runner (tests: canned/recording tmux output). Shared default socket.
+    /// ---
+    /// purpose: 用注入的 runner 构造后端(测试用录制/罐装 tmux 输出),绑共享默认 socket
+    /// params:
+    ///   runner: 替代 RealCommandRunner 的执行 seam
+    /// returns: 无 socket、无事件 workspace 的后端
+    /// boundary: runner 注入是本文件唯一的 OS 边界替换 seam(with_runner_for_workspace / with_runner_for_tmux_endpoint 同用);不改变任何 argv 构造逻辑
+    /// ---
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
         Self {
             runner,
@@ -342,6 +389,14 @@ impl TmuxBackend {
 
     /// Backend with an injected runner bound to a per-workspace socket (tests: assert the `-L` is in
     /// the recorded argv for a workspace-bound backend).
+    /// ---
+    /// purpose: 用注入的 runner 构造绑 workspace 专属 socket 的后端(测试断言 -L 确实进了 argv)
+    /// params:
+    ///   runner: 执行 seam
+    ///   workspace: socket 名与事件落盘位置的来源
+    /// returns: socket 为 Name(派生名)、事件写入该 workspace 的后端
+    /// boundary: socket 名派生与 for_workspace 完全同源,不允许出现第二套派生规则
+    /// ---
     pub fn with_runner_for_workspace(runner: Box<dyn CommandRunner>, workspace: &Path) -> Self {
         Self {
             runner,
@@ -352,6 +407,14 @@ impl TmuxBackend {
         }
     }
 
+    /// ---
+    /// purpose: 用注入的 runner 构造按 endpoint 寻址的后端
+    /// params:
+    ///   runner: 执行 seam
+    ///   endpoint: 绝对路径 ⇒ Path(...);空串 / "default" ⇒ 无 socket;短名 ⇒ 解析成路径,解析不出则无 socket
+    /// returns: 按上述分支绑定 socket 的后端;不设事件 workspace
+    /// boundary: 分支与 for_tmux_endpoint 语义一致但顺序不同(此处先判绝对路径),两者都不探活
+    /// ---
     pub fn with_runner_for_tmux_endpoint(runner: Box<dyn CommandRunner>, endpoint: &str) -> Self {
         if Path::new(endpoint).is_absolute() {
             Self {
@@ -383,6 +446,14 @@ impl TmuxBackend {
     }
 
     /// Build the exact argv that a workspace-bound tmux backend will execute.
+    /// ---
+    /// purpose: 算出「workspace 绑定后端实际会执行的那条 argv」,供诊断与提示文案复用
+    /// params:
+    ///   workspace: 决定注入哪个 -L socket
+    ///   argv: 原始 argv;首元素为 "tmux" 时才会被插入 socket 参数
+    /// returns: 插好 socket 参数的 argv;非 tmux argv 原样返回
+    /// boundary: 只构造不执行;结果必须与真实执行走的 tmux_argv 完全一致,否则提示会骗人
+    /// ---
     pub fn argv_for_workspace(workspace: &Path, argv: &[String]) -> Vec<String> {
         Self::for_workspace(workspace).tmux_argv(argv)
     }
@@ -415,6 +486,13 @@ impl TmuxBackend {
     /// `tmux -L <socket> kill-server` (CP-1 cleanup): best-effort teardown of the per-team server on
     /// shutdown so per-team sockets do not orphan. No-op (and never errors) for a default-socket
     /// backend, and a "no server" failure is ignored.
+    /// ---
+    /// purpose: 收尾时尽力拆掉本 team 专属的 tmux server,避免 socket 变孤儿
+    /// boundary:
+    ///   - 默认 socket 后端直接返回,绝不拆共享 server
+    ///   - 只在 list_targets 证明 server 为空时才拆;列举失败按「未证明所有权」处理,倒向不拆;有事件 workspace 时才写 tmux.kill_server_skipped_nonempty_or_unknown 事件(按 endpoint / 短名构造的后端没有,静默跳过)
+    ///   - 尽力而为:执行结果被丢弃,不返回错误、不重试
+    /// ---
     pub fn kill_server(&self) {
         if self.socket.is_none() {
             return;
@@ -445,6 +523,14 @@ impl TmuxBackend {
     }
 }
 
+/// ---
+/// purpose: 选出运行期该用的 tmux 后端——优先跟随 state 里持久化的 endpoint,没有才按 workspace 派生
+/// params:
+///   workspace: 兜底派生 socket 的来源
+///   state: 运行期状态 JSON;从中读 tmux_endpoint,其次 tmux_socket
+/// returns: 后端 + 实际使用的 endpoint + 来源标记(三者一并返回,便于日志说清为什么连这台)
+/// boundary: 只做选择,不探活、不创建 server;state 里的 endpoint 即便已失效也照选,失败留给后续命令暴露
+/// ---
 pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
@@ -465,6 +551,16 @@ pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
     }
 }
 
+/// ---
+/// purpose: 同 tmux_backend_for_runtime_state_or_workspace,但用注入的 runner,给测试断言选择逻辑
+/// params:
+///   runner: 执行 seam
+///   workspace: 兜底派生 socket 的来源
+///   state: 运行期状态 JSON
+/// returns: 后端 + 实际使用的 endpoint + 来源标记
+/// cfg: test
+/// boundary: 仅测试编译;选择分支必须与生产版本同构,否则测的不是同一件事
+/// ---
 #[cfg(test)]
 pub(crate) fn tmux_backend_with_runner_for_runtime_state_or_workspace(
     runner: Box<dyn CommandRunner>,
@@ -519,6 +615,13 @@ fn runtime_tmux_endpoint_from_state(
 /// identical workspace identity. Adding a wrapper (not calling
 /// `socket_name_for_workspace` directly outside this file) keeps the
 /// existing internal API stable.
+/// ---
+/// purpose: 对外暴露「workspace 身份短哈希」,让 tmux 与 ConPTY 两个后端看到同一个 workspace 身份
+/// params:
+///   workspace: 工作区路径;先 canonicalize 再哈希
+/// returns: 12 位十六进制串,即 socket 名去掉 ta- 前缀的部分
+/// boundary: 与 socket_name_for_workspace 同源,禁止另起一套哈希;canonicalize 失败时退回原始路径参与哈希,故未落盘的路径可能与落盘后不同值
+/// ---
 pub fn workspace_short_hash_pub(workspace: &Path) -> String {
     // The tmux short-socket name is `ta-<12 hex>`; the workspace-hash
     // used by the ConPTY workspace identity is the raw 12-hex portion
@@ -531,6 +634,13 @@ pub fn workspace_short_hash_pub(workspace: &Path) -> String {
 /// Public re-export of the crate-private `runtime_tmux_endpoint_from_state`
 /// probe. `transport_factory` uses this to spot the legacy tmux endpoint
 /// in `state` without duplicating the field-precedence logic.
+/// ---
+/// purpose: 对外暴露 state 里 tmux endpoint 的读取与字段优先级,避免调用方各写一份
+/// params:
+///   state: 运行期状态 JSON
+/// returns: Some((endpoint, 来源标记)) 当 tmux_endpoint 或 tmux_socket 非空;两者都缺或为空则 None
+/// boundary: 只读字段不探活;返回值里不会出现 workspace_fallback(那是选后端时才产生的来源)
+/// ---
 pub fn runtime_tmux_endpoint_from_state_pub(
     state: Option<&serde_json::Value>,
 ) -> Option<(String, &'static str)> {
@@ -544,6 +654,16 @@ pub fn runtime_tmux_endpoint_from_state_pub(
     })
 }
 
+/// ---
+/// purpose: 由 workspace 路径确定性派生短 socket 名,保证 CLI、daemon 与后续每条命令都落到同一台 tmux server
+/// params:
+///   workspace: 工作区路径;先 canonicalize,失败则退回原始路径
+/// returns: ta- 加 12 位十六进制(FNV-1a 低 48 位)
+/// boundary:
+///   - 必须短:AF_UNIX 路径长度有限,不能拿 session 名当 socket 名
+///   - 用固定 FNV-1a 而非 std 默认哈希(后者跨版本不稳定)
+///   - 只算名字,不判断该 socket 是否存在
+/// ---
 pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
     let canonical = workspace
         .canonicalize()
@@ -553,10 +673,24 @@ pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
     format!("ta-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
 }
 
+/// ---
+/// purpose: 给出 workspace 专属 socket 的文件路径
+/// params:
+///   workspace: 工作区路径
+/// returns: 已存在的 socket 路径优先;否则给默认根下的预期路径;Windows 上恒为 None
+/// boundary: 返回 Some 不代表 socket 存在(可能只是「按约定应该在这」);要判存在用 socket_probe_missing_for_workspace
+/// ---
 pub(crate) fn socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
     socket_path_for_name(&socket_name_for_workspace(workspace))
 }
 
+/// ---
+/// purpose: 探测 workspace 专属 socket 当前是否不存在
+/// params:
+///   workspace: 工作区路径
+/// returns: 在已知 socket 根下都找不到该名字时为 true
+/// boundary: 只看文件是否存在,不连不握手——socket 文件在但 server 已死也会报 false
+/// ---
 pub(crate) fn socket_probe_missing_for_workspace(workspace: &Path) -> bool {
     existing_socket_path_for_workspace(workspace).is_none()
 }
@@ -565,6 +699,14 @@ fn existing_socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
     existing_socket_path_for_name(&socket_name_for_workspace(workspace))
 }
 
+/// ---
+/// purpose: 把短 socket 名解析成文件路径
+/// params:
+///   socket_name: 短名;空串、"default"、绝对路径三种输入都视为「无短名可解析」
+/// returns: 已存在则返回实际路径;否则 Unix 上给 /tmp/tmux-<uid>/<name> 预期路径,Windows 上 None
+/// cfg: unix 分支读 geteuid;not(unix) 分支恒 None
+/// boundary: 不创建目录、不创建 socket;返回 Some 不代表文件存在
+/// ---
 pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     if socket_name.is_empty() || socket_name == "default" || Path::new(socket_name).is_absolute() {
         return None;
@@ -604,6 +746,13 @@ fn existing_socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     None
 }
 
+/// ---
+/// purpose: socket 找不到时给操作者的可执行提示,把期望的 socket 名与找过的目录都写出来
+/// params:
+///   workspace: 工作区路径,用于派生 socket 名
+/// returns: 含 socket 名、已搜索根目录列表与下一步命令的单行提示
+/// boundary: 只生成文案,不重试、不修复、不创建 socket
+/// ---
 pub(crate) fn socket_missing_hint_for_workspace(workspace: &Path) -> String {
     let socket_name = socket_name_for_workspace(workspace);
     let roots = tmux_socket_roots()
@@ -616,6 +765,15 @@ pub(crate) fn socket_missing_hint_for_workspace(workspace: &Path) -> String {
     )
 }
 
+/// ---
+/// purpose: 生成让操作者手工 attach 到指定窗口的 tmux 命令行(按 workspace 派生 socket)
+/// params:
+///   workspace: 决定 -S 后面的 socket 路径
+///   session_name: attach 目标 session
+///   window_name: attach 目标 window
+/// returns: 完整命令字符串;socket 路径解析不出时 None
+/// boundary: 只生成文案、不执行、不验证 session/window 是否存在;endpoint 已持久化在 state 里时应改用 attach_command_for_runtime_state_or_workspace,否则会指到错误的 socket
+/// ---
 pub(crate) fn attach_command_for_workspace(
     workspace: &Path,
     session_name: &SessionName,
@@ -630,6 +788,14 @@ pub(crate) fn attach_command_for_workspace(
     ))
 }
 
+/// ---
+/// purpose: 同 attach_command_for_workspace,但只到 session 一级(不指定 window)
+/// params:
+///   workspace: 决定 -S 后面的 socket 路径
+///   session_name: attach 目标 session
+/// returns: 完整命令字符串;socket 路径解析不出时 None
+/// boundary: 只生成文案、不执行、不验证 session 是否存在
+/// ---
 pub(crate) fn attach_command_for_session(
     workspace: &Path,
     session_name: &SessionName,
@@ -642,6 +808,14 @@ pub(crate) fn attach_command_for_session(
     ))
 }
 
+/// ---
+/// purpose: 按 transport 自报的 endpoint 生成 attach 命令,保证提示指向它真正在用的那台 server
+/// params:
+///   transport: 提供 tmux_endpoint 的传输后端
+///   session_name: attach 目标 session
+/// returns: 完整命令字符串;后端报不出 endpoint(非 tmux / 测试替身)时 None
+/// boundary: 只生成文案、不执行;endpoint 是绝对路径用 -S、短名用 -L,由 attach_command_for_endpoint_session 分辨
+/// ---
 pub(crate) fn attach_command_for_transport_session(
     transport: &dyn crate::transport::Transport,
     session_name: &SessionName,
@@ -656,6 +830,16 @@ pub(crate) fn attach_command_for_transport_session(
 /// socket — otherwise operators are told to attach to a socket where the
 /// session does not exist. Falls back to workspace-hash when state has no
 /// persisted endpoint.
+/// ---
+/// purpose: 生成 attach 到指定窗口的命令,优先跟随 state 里持久化的 endpoint,没有才回落 workspace 派生 socket
+/// params:
+///   workspace: 回落路径的来源
+///   state: 运行期状态 JSON;从中读 tmux_endpoint / tmux_socket
+///   session_name: attach 目标 session
+///   window_name: attach 目标 window
+/// returns: 完整命令字符串;两条路都算不出 socket 时 None
+/// boundary: 只生成文案、不执行、不验证目标存在;endpoint 是绝对路径用 -S、短名用 -L
+/// ---
 pub(crate) fn attach_command_for_runtime_state_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
@@ -679,6 +863,15 @@ pub(crate) fn attach_command_for_runtime_state_or_workspace(
     attach_command_for_workspace(workspace, session_name, window_name)
 }
 
+/// ---
+/// purpose: 同 attach_command_for_runtime_state_or_workspace,但只到 session 一级
+/// params:
+///   workspace: 回落路径的来源
+///   state: 运行期状态 JSON
+///   session_name: attach 目标 session
+/// returns: 完整命令字符串;两条路都算不出 socket 时 None
+/// boundary: 只生成文案、不执行、不验证 session 存在
+/// ---
 pub(crate) fn attach_command_for_runtime_state_session_or_workspace(
     workspace: &Path,
     state: Option<&serde_json::Value>,
@@ -699,6 +892,15 @@ fn attach_command_for_endpoint_session(endpoint: &str, session_name: &SessionNam
     format!("tmux {flag} {endpoint} attach -t {}", session_name.as_str())
 }
 
+/// ---
+/// purpose: 为一组窗口批量生成 attach 命令
+/// params:
+///   workspace: 决定 socket 路径
+///   session_name: attach 目标 session
+///   window_names: 待生成的窗口名序列
+/// returns: 生成成功的命令列表;算不出 socket 的条目被静默丢弃,故长度可能短于入参
+/// boundary: 只生成文案、不执行;丢弃发生在整体层面(socket 算不出就一条都没有),调用方不能假定下标与入参对齐
+/// ---
 pub(crate) fn attach_commands_for_windows<'a>(
     workspace: &Path,
     session_name: &SessionName,
@@ -712,6 +914,12 @@ pub(crate) fn attach_commands_for_windows<'a>(
         .collect()
 }
 
+/// ---
+/// purpose: 列出本机可能放 tmux socket 的根目录
+/// returns: Unix 上为 /tmp/tmux-<uid> 加 TMPDIR/tmux-<uid>(排序去重);Windows 上为空
+/// cfg: unix 读 geteuid 与 TMPDIR;not(unix) 返回空表示「本平台无此约定」
+/// boundary: 只列约定目录,不验证目录存在、不列举里面的 socket(那是 tmux_socket_endpoints)
+/// ---
 pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
     // Batch 1: `/tmp/tmux-<uid>` root enumeration is Unix-only tmux
     // convention. On Windows return empty so the caller loops zero
@@ -734,6 +942,12 @@ pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
     }
 }
 
+/// ---
+/// purpose: 枚举本机所有已存在的 tmux socket 路径
+/// returns: 各 socket 根下真正是 socket 文件的绝对路径,排序去重;Windows 上为空
+/// cfg: unix 才用 is_socket 过滤;not(unix) 直接跳过(该平台 socket 根为空)
+/// boundary: 只看文件类型,不连不握手——列出的 socket 可能属于已死的 server;不做任何删除
+/// ---
 pub(crate) fn tmux_socket_endpoints() -> Vec<String> {
     let mut endpoints = Vec::new();
     for root in tmux_socket_roots() {
@@ -770,6 +984,11 @@ pub(crate) fn tmux_socket_endpoints() -> Vec<String> {
     endpoints
 }
 
+/// ---
+/// purpose: 从当前进程所在的 tmux 环境($TMUX)反推它连的是哪个 socket
+/// returns: $TMUX 首段是绝对路径时返回该路径;$TMUX 未设 / 为空 / 首段非绝对路径时 None
+/// boundary: 读进程环境,只在自己就跑在 tmux 里时有意义;不校验该 socket 仍可用
+/// ---
 pub(crate) fn socket_name_from_tmux_env() -> Option<String> {
     let tmux = std::env::var("TMUX")
         .ok()
@@ -1197,6 +1416,14 @@ thread_local! {
 /// Tests pass a small non-zero Duration to cover the sleep branch.
 /// Default is ZERO — claude/codex and unset callers pay nothing.
 /// This is not TEAM_AGENT_TEST_TMP (that var is a path, always set in seats).
+/// ---
+/// purpose: 在 f 执行期间设定「粘贴到回车之间至少等多久」的地板,退出时恢复原值
+/// params:
+///   floor: 本次生效的最小间隔;ZERO 表示不等
+///   f: 在该地板下执行的闭包
+/// returns: 原样返回 f 的返回值
+/// boundary: thread_local 作用域,不跨线程;只设阈值,真正的等待发生在 sleep_remaining_paste_to_submit_floor;默认 ZERO,只有 delivery 对 cursor 才设 1s
+/// ---
 pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> R {
     PASTE_TO_SUBMIT_FLOOR.with(|cell| {
         let previous = cell.replace(floor);
@@ -1206,6 +1433,11 @@ pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> 
     })
 }
 
+/// ---
+/// purpose: 读当前线程生效的粘贴到回车地板
+/// returns: 当前地板;未设过则为 ZERO
+/// boundary: 只读不改;ZERO 表示「不等」,不是「未配置」——两者在此不做区分
+/// ---
 pub(crate) fn current_paste_to_submit_floor() -> Duration {
     PASTE_TO_SUBMIT_FLOOR.with(Cell::get)
 }
@@ -1224,10 +1456,23 @@ pub fn with_cursor_single_enter<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     })
 }
 
+/// ---
+/// purpose: 读当前线程的 cursor 单回车闸开关
+/// returns: 打开为 true;默认关
+/// boundary: 只读不改;开关只影响重按 Enter 的判据来源,不改变首次 Enter
+/// ---
 pub(crate) fn cursor_single_enter_enabled() -> bool {
     CURSOR_SINGLE_ENTER.with(Cell::get)
 }
 
+/// ---
+/// purpose: 补齐粘贴到回车之间还差的等待时间
+/// params:
+///   pasted_at: 粘贴完成的时刻
+///   floor: 要求的最小间隔
+/// returns: 无返回值;已过地板则立即返回,否则阻塞剩余时长
+/// boundary: 阻塞当前线程;只保证「不早于」,不保证 TUI 真的处理完粘贴
+/// ---
 pub(crate) fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant, floor: Duration) {
     let remain = floor.saturating_sub(pasted_at.elapsed());
     if !remain.is_zero() {
@@ -1430,9 +1675,15 @@ fn pasted_literal_in_line(lower_line: &str) -> Option<&'static str> {
     }
 }
 
+/// ---
 /// purpose: 只在 composer（底部 n 非空行）认折叠占位符
-/// contract: 返回字面量 + 可选 #N；没有占位符则 None
-/// boundary: 不替代 token 路径；#N 缺失时调用方必须保守，不得报已消费
+/// params:
+///   text: 已规范化的 pane 尾文本
+///   n: 只看倒数 n 个非空行；超出这一窗口的占位符视为 transcript 残留，不算
+/// returns: 命中则给出字面量、可选编号、可选 grok 行数、距底行数；否则 None
+/// contract: 返回字面量 + 可选编号；没有占位符则 None
+/// boundary: 不替代 token 路径；编号缺失时调用方必须保守，不得报已消费
+/// ---
 pub(crate) fn pasted_prompt_in_composer(text: &str, n: usize) -> Option<ComposerPastedPrompt> {
     let mut from_bottom = 0u32;
     for line in text
@@ -1491,9 +1742,16 @@ fn consumption_from_placeholder(text: &str, tracked: Option<PasteLatch>) -> Opti
     }
 }
 
+/// ---
 /// purpose: 无身份时禁止把「未证实」升级成连按回车
-/// contract: 只有 token 仍在 composer，或锁定的 #N / grok 行数仍在，才重按
-/// boundary: 不重粘文本；不把不同 grok N 当成可重按的同一次
+/// params:
+///   text: 最近一次 pane 尾文本
+///   marker: 本条消息的投递 token 完整标记
+///   tracked: 本次粘贴已锁定的占位符身份（编号或 grok 行数）；None 表示没锁到身份
+/// returns: true 才允许再按一次 Enter
+/// contract: 只有 token 仍在 composer 底 15 非空行，或锁定的占位符身份仍在，才重按
+/// boundary: 不重粘文本；不把不同 grok 行数当成可重按的同一次；tracked 为 None 时占位符路径一律不重按（token 仍在底 15 非空行的重按与 tracked 无关）
+/// ---
 pub(crate) fn should_resubmit_enter(text: &str, marker: &str, tracked: Option<PasteLatch>) -> bool {
     if token_in_bottom_n(text, marker, 15) {
         return true;
@@ -1520,9 +1778,15 @@ pub(crate) fn should_resubmit_enter_cursor(text: &str, marker: &str) -> bool {
     token_in_bottom_n(text, marker, 5)
 }
 
+/// ---
 /// purpose: Phase 1 判定 TUI 侧注入已完成、可以按回车
+/// params:
+///   text: 最近一次 pane 尾文本
+///   marker: 本条消息的投递 token 完整标记
+/// returns: true 表示可以进入提交阶段
 /// contract: composer 已有折叠占位符 ⇒ 完成；短贴 token 可见且不是待折叠高块 ⇒ 完成
-/// boundary: token 出现在未折叠的高块里不算完成（按早了）
+/// boundary: token 出现在未折叠的高块里不算完成（按早了）；只判「能不能按」，不判「按了有没有成」
+/// ---
 pub(crate) fn paste_ready_for_enter(text: &str, marker: &str) -> bool {
     if pasted_prompt_in_composer(text, 15).is_some() {
         return true;
@@ -1540,12 +1804,20 @@ fn raw_multiline_still_unfolded(text: &str, marker: &str) -> bool {
     text.lines().filter(|line| !line.trim().is_empty()).count() > 15
 }
 
+/// ---
 /// purpose: 把 token 三态 + 本次 #N / grok 占位符合成消费判定
+/// params:
+///   text: 最近一次 pane 尾文本
+///   marker: 本条消息的投递 token 完整标记
+///   token_ever_visible: 本次注入期间是否曾在 pane 上见过该 token
+///   tracked: 本次粘贴锁定的占位符身份；None 表示没锁到
+/// returns: Some(true) 已消费；Some(false) 未消费；本函数不产生 None
 /// contract:
 ///   Some(true)=已消费；Some(false)=未消费（含 NeverSeen 且无正信号 → 未证实走 false）
 ///   Gone 必须先复核 PasteLatch 身份：占位符仍在 composer ⇒ 未消费
 ///   None 不由本函数产生；调用方在 capture 失败时保持 None，必须落到 Unverified
 /// boundary: 不修 BUSY 入队；Working 信号由调用方在 Some(false) 之后看；None 不得当成功
+/// ---
 pub(crate) fn consumption_from_capture(
     text: &str,
     marker: &str,
@@ -1620,12 +1892,20 @@ fn provider_busy_signal_in_tail(text: &str) -> bool {
         })
 }
 
+/// ---
 /// purpose: 入箱 vs 开跑（G4）。给定最近一次 pane 尾，回答席位是否因此开跑。
+/// params:
+///   text: 最近一次 pane 尾文本
+///   marker: 本条消息的投递 token 完整标记；None 表示本次载荷没有 token 可查
+/// returns: 三态观测值，绝不返回 NotRequired（那是空载荷路径由调用方直接给的）
 /// contract:
 ///   - LeaderNewTurnBoundaryVerified = 底部 busy 信号
 ///   - LeaderNewTurnBoundaryMissing = composer 仍有本次粘贴（占位符或 token）且无 busy
 ///   - NotYetObserved = 其余（含 composer 已空但无 busy）→ 不知道，不得报开跑
-/// boundary: 不是 SubmitVerification / 不是投递闸门；不许用过了 N 秒来判
+/// boundary:
+///   - 不是 SubmitVerification / 不是投递闸门；不许用过了 N 秒来判
+///   - busy 判据是底 15 非空行的宽子串匹配，正文或 transcript 残留可让它假阳，判定强度到此为止
+/// ---
 pub(crate) fn observe_turn_from_capture(text: &str, marker: Option<&str>) -> TurnVerification {
     if provider_busy_signal_in_tail(text) {
         return TurnVerification::LeaderNewTurnBoundaryVerified;
@@ -1715,6 +1995,15 @@ fn pasted_prompt_in_bottom(text: &str, n: usize) -> bool {
 /// where it remains in the last 80 lines. The current matcher cannot
 /// distinguish that from a live placeholder; this fn surfaces the data
 /// the operator needs to see (PR-2 will USE it to fix the criterion).
+/// ---
+/// purpose: 在整段 pane 尾里找折叠占位符字面量,并给出它距底部多少非空行
+/// params:
+///   text: pane 尾文本;不限窗口,整段都找
+/// returns: Some((命中的字面量, 距底非空行数));无命中则 None;字面量只出现在被裁掉的空白行时保守记为 0
+/// boundary:
+///   - 只做取证不做判定:距底行数大说明多半在 transcript 而非 composer,但本函数不替调用方下结论
+///   - 与 pasted_prompt_in_composer 不同——后者限定底部窗口,是判定用;本函数不限窗口,是诊断用
+/// ---
 pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
     let lower = text.to_ascii_lowercase();
     let lit = if lower.contains("pasted content") {
@@ -1760,6 +2049,17 @@ pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
 ///   4. Cap at ~1200 bytes (UTF-8 safe truncation).
 /// Returns `(excerpt, line_count)`. Designed to be CHEAP — no regex crate
 /// dependency, simple byte scanning.
+/// ---
+/// purpose: 把 pane 抓屏加工成可安全写进 events.jsonl 的摘录
+/// params:
+///   raw: 原始抓屏文本
+///   tail_lines: 只保留倒数这么多非空行
+/// returns: (脱敏并截断后的摘录, 实际保留的行数)
+/// boundary:
+///   - 只做四件事:剥 ANSI、取尾部、脱敏常见密钥形状、按 1200 字节在字符边界截断
+///   - 脱敏是形状匹配,不是完备保证;非常见形状的凭据不会被识别
+///   - 输出仍是消息正文的一部分,只落本地事件文件,不外传
+/// ---
 pub(crate) fn scrub_pane_excerpt(raw: &str, tail_lines: usize) -> (String, u32) {
     let stripped = strip_ansi_escapes_inplace(raw);
     let lines: Vec<&str> = stripped
@@ -2009,6 +2309,15 @@ pub const LEADER_PROVIDER_EXIT_MARKER_SUFFIX: &str = "exited with";
 /// 0.4.x (CR R6): build the leader exit marker text for `provider_label`.
 /// Used by both the shell wrapper (printf source) and the health check
 /// (capture substring) so they cannot drift.
+/// ---
+/// purpose: 单一来源地拼出 leader pane 的 provider 退出标记文本
+/// params:
+///   provider_label: 人类可读的 provider 名,原样嵌入标记
+/// returns: 前缀 + provider 名 + 后缀 拼成的标记(不含退出码,退出码由 shell 的 printf 补)
+/// boundary:
+///   - 写标记的 shell wrapper 与读标记的健康检查必须都用这一个函数,禁止各写一份字面量
+///   - 这是内容信号:pane 里出现同样文本(如 cat 日志)就会误触发,判定强度到此为止
+/// ---
 pub fn leader_provider_exit_marker(provider_label: &str) -> String {
     format!(
         "{LEADER_PROVIDER_EXIT_MARKER_PREFIX} {provider_label} {LEADER_PROVIDER_EXIT_MARKER_SUFFIX}"
@@ -2027,6 +2336,14 @@ pub fn leader_provider_exit_marker(provider_label: &str) -> String {
 ///
 /// Returns `(session_name, Some(pane_id))` when the ambient tmux
 /// responds, or `None` if `$TMUX` is unset / `display-message` fails.
+/// ---
+/// purpose: 探出当前 leader 进程正待在哪个环境 tmux 的哪个 session / pane 里
+/// returns: Some((session 名, 可选 pane 标识));TMUX 与 TMUX_PANE 都未设,或所有探测命令都失败或解析不出时 None(仅 TMUX_PANE 在设时仍会带 -t 探测)
+/// boundary:
+///   - 本文件唯一允许绕过 socket 绑定后端、直接 Command::new("tmux") 的例外,因为它的任务就是发现「我在哪」
+///   - 依次试 TMUX_PANE 定位与无 -t 的当前 pane,取第一个能解析出的结果;失败静默跳到下一条,不报错
+///   - 只读不写,不 attach、不改任何 tmux 状态
+/// ---
 pub fn probe_ambient_leader_pane_info() -> Option<(String, Option<String>)> {
     let pane = std::env::var("TMUX_PANE")
         .ok()
@@ -2106,6 +2423,15 @@ pub const WORKER_PROVIDER_EXIT_MARKER_SUFFIX: &str = "exited with";
 /// 0.5.39 Slice 2: build the worker exit marker text for `provider_label`.
 /// Used by both the worker shell wrapper (printf source) and future
 /// status/classifier code (capture substring) so they cannot drift.
+/// ---
+/// purpose: 单一来源地拼出 worker pane 的 provider 退出标记文本
+/// params:
+///   provider_label: 人类可读的 provider 名,原样嵌入标记
+/// returns: worker 专用前缀 + provider 名 + 后缀;与 leader 标记刻意不同,便于分清是哪种 pane 掉回 shell
+/// boundary:
+///   - 写标记的 worker shell wrapper 与读标记的分类代码必须都用这一个函数
+///   - 同为内容信号,pane 里出现同样文本即误触发
+/// ---
 pub fn worker_provider_exit_marker(provider_label: &str) -> String {
     format!(
         "{WORKER_PROVIDER_EXIT_MARKER_PREFIX} {provider_label} {WORKER_PROVIDER_EXIT_MARKER_SUFFIX}"
@@ -2119,6 +2445,20 @@ pub fn worker_provider_exit_marker(provider_label: &str) -> String {
 /// cascade into whole-server death). When the provider exits, the worker
 /// pane remains alive with an explicit worker exit marker, then runs an
 /// inert `sh` tail that does not read terminal input.
+/// ---
+/// purpose: 拼出 worker pane 的 shell 启动行,让 provider 作为子进程运行,退出后 pane 不塌成 [exited]
+/// params:
+///   argv: provider 启动命令,逐项做 shell 引用
+///   cwd: 进程工作目录
+///   env: 要导出的环境变量;键若出现在 env_unset 中则跳过,保证 unset 赢
+///   env_unset: 必须真正 unset 的键;先 unset 再导出
+///   provider_label: 嵌入退出标记的 provider 名
+/// returns: 单条 shell 命令行,依次为 cd、unset、env 导出与 provider(不带 exec)、printf 退出标记、exec 惰性 sh 尾巴
+/// boundary:
+///   - 只拼字符串,不执行、不 spawn
+///   - 与 leader 版的唯一实质差异是退出标记前缀;结构必须保持一致
+///   - 惰性尾巴不读 pane 标准输入,故该 pane 之后收到的注入不会被任何进程消费
+/// ---
 pub fn worker_shell_wrapper_command(
     argv: &[String],
     cwd: &Path,
@@ -2170,6 +2510,20 @@ pub fn worker_shell_wrapper_command(
 ///
 /// `provider_label` is a human-readable provider name (e.g. "claude",
 /// "codex") embedded in the exit marker for diagnostics.
+/// ---
+/// purpose: 拼出 leader pane 的 shell 启动行,让 provider 作为子进程运行,退出后 pane 保留并显示退出标记
+/// params:
+///   argv: provider 启动命令,逐项做 shell 引用
+///   cwd: 进程工作目录
+///   env: 要导出的环境变量;键若出现在 env_unset 中则跳过,保证 unset 赢
+///   env_unset: 必须真正 unset 的键;先 unset 再导出
+///   provider_label: 嵌入退出标记的 provider 名
+/// returns: 单条 shell 命令行,四段依次为 cd、unset、env 导出与 provider(刻意不带 exec)、printf 退出标记加 exec 惰性 sh 尾巴
+/// boundary:
+///   - 只拼字符串,不执行、不 spawn
+///   - 刻意不用 exec:用了 provider 就成了 pane 主进程,退出即塌成 [exited]
+///   - 退出标记文本必须来自 leader_provider_exit_marker,禁止在此写字面量
+/// ---
 pub fn leader_shell_wrapper_command(
     argv: &[String],
     cwd: &Path,

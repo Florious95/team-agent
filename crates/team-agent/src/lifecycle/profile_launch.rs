@@ -1,3 +1,29 @@
+//! ---
+//! purpose: 由 agent 的 profile 声明推出 provider 启动所需的环境覆盖、环境清除与命令覆写
+//! contract:
+//!   provides:
+//!     - name: prepare_provider_profile_launch
+//!       what: 从 YAML agent 节点算出 ProviderProfileLaunch
+//!     - name: prepare_provider_profile_launch_from_json
+//!       what: 从 runtime state 的 JSON agent 节点算出同一结果
+//!     - name: load_profile
+//!       what: 按查找顺序找到 profile env 文件并解析成键值
+//!     - name: provider_env_unsets
+//!       what: 该 provider 与 auth_mode 下必须清除的环境变量集，worker 与 leader 共用这一份
+//!     - name: profile_proxy_mode
+//!       what: 读出 profile 的代理模式，缺省 inherit
+//!     - name: parse_auth_mode
+//!       what: 把 auth_mode 字符串解析成枚举，未知值返回 None
+//!   depends:
+//!     - crate::provider
+//!     - crate::model::enums
+//!     - std::fs
+//! boundary:
+//!   - 只读 profile 文件，不改写也不创建 profile
+//!   - 不把密钥值写进事件或错误消息
+//!   - provider 的环境清除集只此一份，leader 侧不得另建
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -37,6 +63,15 @@ struct AgentProfileInput {
     model_source: Option<String>,
 }
 
+/// ---
+/// purpose: 从 YAML agent 节点准备 provider 启动参数，profile 目录用默认查找顺序
+/// params:
+///   agent_id: agent 节点没写 id 时的兜底 id
+///   mcp_config: 需要托管 MCP 配置时传入，否则 None
+/// returns: 环境覆盖、环境清除、命令覆写与 claude 配置目录
+/// errors: profile 找不到、必填键缺失或写 runtime env 文件失败时返回 LifecycleError
+/// contract_id: lifecycle.profile_launch.prepare
+/// ---
 pub(crate) fn prepare_provider_profile_launch(
     workspace: &Path,
     agent_id: &str,
@@ -46,6 +81,14 @@ pub(crate) fn prepare_provider_profile_launch(
     prepare_provider_profile_launch_with_profile_dir(workspace, agent_id, agent, None, mcp_config)
 }
 
+/// ---
+/// purpose: 同上，但允许指定优先查找的 profile 目录
+/// params:
+///   profile_dir: 优先查找目录；agent 节点里的 _profile_dir 优先于它
+/// returns: 环境覆盖、环境清除、命令覆写与 claude 配置目录
+/// errors: 同 prepare_provider_profile_launch
+/// contract_id: lifecycle.profile_launch.prepare
+/// ---
 pub(crate) fn prepare_provider_profile_launch_with_profile_dir(
     workspace: &Path,
     agent_id: &str,
@@ -94,6 +137,12 @@ pub(crate) fn prepare_provider_profile_launch_with_profile_dir(
     prepare_profile_launch(workspace, input, mcp_config)
 }
 
+/// ---
+/// purpose: 从 runtime state 的 JSON agent 节点准备 provider 启动参数
+/// returns: 环境覆盖、环境清除、命令覆写与 claude 配置目录
+/// errors: 同 prepare_provider_profile_launch
+/// contract_id: lifecycle.profile_launch.prepare
+/// ---
 pub(crate) fn prepare_provider_profile_launch_from_json(
     workspace: &Path,
     agent_id: &str,
@@ -199,6 +248,14 @@ fn prepare_profile_launch(
     })
 }
 
+/// ---
+/// purpose: 按查找目录顺序定位 profile env 文件并解析成键值表
+/// params:
+///   name: profile 名，先找 name.env 再找 name.example.env
+///   profile_dir: 优先查找目录，None 表示只用默认顺序
+/// returns: 命中的文件路径与解析出的键值
+/// errors: 所有目录都没命中返回 RequirementUnmet，读文件失败返回 StatePersist
+/// ---
 pub(crate) fn load_profile(
     workspace: &Path,
     name: &str,
@@ -433,6 +490,10 @@ fn provider_env_exports(
     exports
 }
 
+/// ---
+/// purpose: 给出该 provider 与 auth_mode 下必须从子进程环境里清掉的变量名集
+/// returns: 变量名集合；claude 系清掉会让子进程并入父会话的那组标识
+/// ---
 /// 0.4.x (CR C-1): exposed as `pub(crate)` so the leader launcher
 /// (leader/start.rs) can reuse the SAME Claude/Codex/Copilot env-unset set
 /// used by worker spawn. Single source of truth — adding a new provider env
@@ -902,6 +963,12 @@ fn compatible_api_network_exports(
         .collect()
 }
 
+/// ---
+/// purpose: 读出 profile 声明的代理模式
+/// params:
+///   values: 已解析的 profile 键值，先看 PROXY_MODE 再看 NETWORK_MODE
+/// returns: 小写去空白后的模式串，两个键都没有时为 inherit
+/// ---
 pub(crate) fn profile_proxy_mode(values: &BTreeMap<String, String>) -> String {
     values
         .get("PROXY_MODE")
@@ -930,6 +997,12 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
     }
 }
 
+/// ---
+/// purpose: 取 profile 里某个规范键，取不到时按该键的已知别名回退
+/// params:
+///   key: 规范键名，API_KEY BASE_URL MODEL 各有一组别名，其余键不回退
+/// returns: 命中的非空值
+/// ---
 pub(crate) fn profile_value_or_alternate<'a>(
     values: &'a BTreeMap<String, String>,
     key: &str,
@@ -960,6 +1033,10 @@ pub(crate) fn profile_value_or_alternate<'a>(
         })
 }
 
+/// ---
+/// purpose: 在两个显式给定的键之间取第一个非空值
+/// returns: 命中的非空值，两个都空则 None
+/// ---
 pub(crate) fn value_or_alternate<'a>(
     values: &'a BTreeMap<String, String>,
     primary: &str,
@@ -972,6 +1049,10 @@ pub(crate) fn value_or_alternate<'a>(
         .map(String::as_str)
 }
 
+/// ---
+/// purpose: 取 profile 里声明的模型名
+/// returns: MODEL 的非空值，没有时取 ANTHROPIC_MODEL
+/// ---
 pub(crate) fn profile_model(values: &BTreeMap<String, String>) -> Option<&str> {
     values
         .get("MODEL")
@@ -993,6 +1074,12 @@ fn effective_profile_or_agent_model<'a>(
 
 pub(crate) use crate::provider::wire::parse_provider;
 
+/// ---
+/// purpose: 把 auth_mode 字符串解析成枚举
+/// params:
+///   raw: 只接受 subscription、official_api、compatible_api
+/// returns: 对应枚举；未知取值返回 None，由调用方决定兜底
+/// ---
 pub(crate) fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     match raw {
         "subscription" => Some(AuthMode::Subscription),

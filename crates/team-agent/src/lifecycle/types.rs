@@ -1,3 +1,27 @@
+//! ---
+//! purpose: lifecycle 的数据类型集中定义，newtype、枚举、报告结构、错误与事件名常量
+//! contract:
+//!   provides:
+//!     - name: PlanId
+//!       what: 受正则约束的 plan 标识，构造时拒斜杠空格与路径穿越
+//!     - name: PlanCondition
+//!       what: plan 推进条件的封闭文法，只认 any 与 report_result 字段相等
+//!     - name: LifecycleError
+//!       what: 本模块所有对外错误的统一枚举
+//!     - name: CoordinatorStartSummary
+//!       what: coordinator 启动结果在 lifecycle 报告里的投影
+//!     - name: event_names
+//!       what: lifecycle/restart/display 稳定事件名常量集
+//!   depends:
+//!     - crate::model::ids
+//!     - crate::provider
+//!     - crate::transport
+//!     - crate::coordinator
+//! boundary:
+//!   - 只定义类型与解析，不做 IO、不 spawn、不落盘
+//!   - 事件名只声明常量，实际写事件由各行为文件负责
+//! maturity: wired
+//! ---
 //! lifecycle 数据类型:newtype / enum / data struct / error / outcome-report 集中定义。
 
 use std::collections::BTreeMap;
@@ -57,6 +81,14 @@ pub mod event_names {
 pub struct PlanId(String);
 
 impl PlanId {
+/// ---
+/// purpose: 校验并构造 PlanId
+/// params:
+///   raw: 原始 plan 名，首字符须字母数字，其余只许字母数字与下划线点横线，长度不超过 64
+/// returns: 通过校验的 PlanId
+/// errors: 不满足上述形状时返回 InvalidPlanId
+/// contract_id: lifecycle.types.plan_id_parse
+/// ---
     /// `sanitize_plan_id`(`orchestrator/state.py:18`):正则校验,失败 → `Err`。
     pub fn parse(raw: &str) -> Result<Self, LifecycleError> {
         let mut chars = raw.chars();
@@ -73,6 +105,10 @@ impl PlanId {
             )))
         }
     }
+/// ---
+/// purpose: 取 PlanId 的原始字符串
+/// returns: 构造时保存的原文
+/// ---
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -95,6 +131,12 @@ pub struct CoordinatorStartSummary {
 }
 
 impl CoordinatorStartSummary {
+/// ---
+/// purpose: 把 coordinator 的 StartReport 投影成 lifecycle 报告用的摘要
+/// params:
+///   report: coordinator 启动返回的原始报告
+/// returns: 摘要，status 已转成稳定 wire 字符串，binary_identity_relation 原样带出
+/// ---
     pub fn from_start_report(report: &crate::coordinator::StartReport) -> Self {
         Self {
             ok: report.ok,
@@ -120,6 +162,10 @@ fn coordinator_start_status_wire(status: crate::coordinator::StartOutcome) -> &'
     }
 }
 
+/// ---
+/// purpose: 把 coordinator 启动摘要序列化成 JSON 对象
+/// returns: 含 ok、status、pid、binary 路径与版本、rotation_reason、binary_identity_relation 的 JSON
+/// ---
 pub fn coordinator_start_summary_value(summary: &CoordinatorStartSummary) -> serde_json::Value {
     serde_json::json!({
         "ok": summary.ok,
@@ -145,6 +191,10 @@ impl std::fmt::Display for PlanId {
 pub struct DisplaySessionName(pub String);
 
 impl DisplaySessionName {
+/// ---
+/// purpose: 取 ghostty 派生 display session 名的原始字符串
+/// returns: 内部保存的名字
+/// ---
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -356,6 +406,14 @@ pub enum PlanCondition {
 }
 
 impl PlanCondition {
+/// ---
+/// purpose: 解析 plan 推进条件的封闭文法
+/// params:
+///   expr: any，或 report_result.<字段> == <值>，值须带单引号或双引号
+/// returns: Any 或 FieldEq
+/// errors: 前缀不对、缺等号、字段名非法或值未带引号时返回 InvalidPlan
+/// contract_id: lifecycle.types.plan_condition_parse
+/// ---
     /// 解析封闭条件文法。越界 raise `InvalidPlan`(`orchestrator/plan.py:_is_supported_condition`)。
     pub fn parse(expr: &str) -> Result<Self, LifecycleError> {
         let trimmed = expr.trim();
