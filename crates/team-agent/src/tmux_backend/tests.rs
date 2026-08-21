@@ -765,13 +765,20 @@ fn capture_argv_and_normalizes_scrollback() {
 // ── 5a. send_keys: argv = tmux_send_keys_argv ──────────────────────────────────────────────────
 #[test]
 fn send_keys_argv_matches_builder() {
-    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
+    let (be, rec) = backend_with(MockResp::Out(ok("0\n")), vec![]);
     let pane = PaneId::new("%7");
     be.send_keys(&Target::Pane(pane.clone()), &[Key::Enter])
         .expect("send_keys");
+    let calls = rec.lock().unwrap().clone();
+    let submit = calls.iter().find(|argv| {
+        argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "Enter")
+            && !argv.iter().any(|a| a == "-l")
+    });
     assert_eq!(
-        rec.lock().unwrap()[0],
-        tmux_send_keys_argv(&pane, &[Key::Enter])
+        submit.cloned().as_ref(),
+        Some(&tmux_send_keys_argv(&pane, &[Key::Enter])),
+        "Enter 键组仍走 tmux_send_keys_argv；prepare 只允许前缀 mode-query/201~; calls={calls:?}"
     );
 }
 
