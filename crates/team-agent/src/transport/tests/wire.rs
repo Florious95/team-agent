@@ -541,6 +541,10 @@ fn cancel_mode_is_noop_on_non_tmux_backends() {
         tmux_cancel_mode_argv(&PaneId::new("%7"), PaneMode::Unknown),
         vec!["tmux", "send-keys", "-t", "%7", "-X", "cancel"]
     );
+    assert_eq!(
+        tmux_close_bracketed_paste_argv(&PaneId::new("%7")),
+        vec!["tmux", "send-keys", "-t", "%7", "-l", "\u{1b}[201~"]
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════

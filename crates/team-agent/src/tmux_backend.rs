@@ -9,7 +9,7 @@
 //!     - name: token-sighting
 //!       what: Visible / Gone / NeverSeen 三态接到判定（不只进报告）
 //!     - name: pre-submit-copy-mode-cancel
-//!       what: 每次 Enter 前查 pane_in_mode，非 0 先 send-keys -X cancel
+//!       what: 统一 prepare_pane_for_submit：Enter 前 cancel 一切非 0 pane_mode（按真实 mode 分派）并字面闭合 CSI 201~（不是 Escape）；A1 Empty / A3 skip-poll / A4 Phase2 / A6 send_keys(含 Enter) 都走这里
 //!     - name: turn-inbox-vs-run
 //!       what: busy ⇒ Verified(开跑)；composer 仍有本次粘贴且无 busy ⇒ Missing(没开跑)；其余 NotYetObserved(不知道)
 //!     - name: capture-fail-retry
@@ -50,9 +50,9 @@ use std::io::{Read, Write};
 // "tmux" shellouts that compile on Windows but return runtime errors
 // honestly (tmux binary absent → typed subprocess error).
 // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md` §Batch 1.
+use std::cell::Cell;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -61,10 +61,9 @@ use crate::model::enums::PaneLiveness;
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
     tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv, tmux_spawn_argv, AttachOutcome,
-    BackendKind,
-    CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
-    PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
+    BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage,
+    InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
     TransportError, TurnVerification, WindowName,
 };
 
@@ -353,10 +352,7 @@ impl TmuxBackend {
         }
     }
 
-    pub fn with_runner_for_tmux_endpoint(
-        runner: Box<dyn CommandRunner>,
-        endpoint: &str,
-    ) -> Self {
+    pub fn with_runner_for_tmux_endpoint(runner: Box<dyn CommandRunner>, endpoint: &str) -> Self {
         if Path::new(endpoint).is_absolute() {
             Self {
                 runner,
@@ -1069,16 +1065,36 @@ impl TmuxBackend {
         }
     }
 
-    /// P0 copy-mode: pane 是否处于 copy-mode（非 0）。best-effort，查询失败 → None。
+    /// 任意非 0 tmux mode。best-effort，查询失败 → None。
     ///
     /// Cherry-pick 866939b1 冲突裁定：本线没有 `inject_journal` 模块（modify/delete），
-    /// 不复活整份 journal；只留下提交前检测所需的 `pane_in_mode`。
+    /// 不复活整份 journal。`pane_mode_from_raw` 识别 copy/tree/view/client；
+    /// 一切 Some(mode) 都算在 mode（头注释「非 0 先 cancel」）。
     fn pane_in_mode(&self, target: &Target) -> Option<bool> {
         let raw = self.query(target, PaneField::PaneMode).ok().flatten()?;
-        Some(matches!(
-            pane_mode_from_raw(Some(raw)),
-            Some(PaneMode::Copy | PaneMode::Unknown)
-        ))
+        Some(pane_mode_from_raw(Some(raw)).is_some())
+    }
+
+    fn pane_mode(&self, target: &Target) -> Option<PaneMode> {
+        let raw = self.query(target, PaneField::PaneMode).ok().flatten()?;
+        pane_mode_from_raw(Some(raw))
+    }
+
+    /// 发 Enter 前归零接收态。A1/A3/A4/A6 唯一入口。
+    ///
+    /// 1. 非 0 pane_mode → `tmux_cancel_mode_argv`（按真实 mode 分派，不是硬编码 Copy）
+    /// 2. 字面 CSI 201~ 闭合未完成的 bracketed paste（不是 Escape 键）
+    /// cancel/闭合失败不 fail 提交。E55：不送 Escape/C-c。
+    fn prepare_pane_for_submit(&self, target: &Target, close_bracketed_paste: bool) {
+        let pane = pane_from_target(target);
+        if let Some(mode) = self.pane_mode(target) {
+            let argv = crate::transport::tmux_cancel_mode_argv(&pane, mode);
+            let _ = self.run_inject_stage(&argv, InjectStage::Submit);
+        }
+        if close_bracketed_paste {
+            let argv = crate::transport::tmux_close_bracketed_paste_argv(&pane);
+            let _ = self.run_inject_stage(&argv, InjectStage::Submit);
+        }
     }
 }
 
@@ -1472,11 +1488,7 @@ fn consumption_from_placeholder(text: &str, tracked: Option<PasteLatch>) -> Opti
 /// purpose: 无身份时禁止把「未证实」升级成连按回车
 /// contract: 只有 token 仍在 composer，或锁定的 #N / grok 行数仍在，才重按
 /// boundary: 不重粘文本；不把不同 grok N 当成可重按的同一次
-pub(crate) fn should_resubmit_enter(
-    text: &str,
-    marker: &str,
-    tracked: Option<PasteLatch>,
-) -> bool {
+pub(crate) fn should_resubmit_enter(text: &str, marker: &str, tracked: Option<PasteLatch>) -> bool {
     if token_in_bottom_n(text, marker, 15) {
         return true;
     }
@@ -1519,10 +1531,7 @@ fn raw_multiline_still_unfolded(text: &str, marker: &str) -> bool {
     if !text.contains(marker) {
         return false;
     }
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
-        > 15
+    text.lines().filter(|line| !line.trim().is_empty()).count() > 15
 }
 
 /// purpose: 把 token 三态 + 本次 #N 占位符合成消费判定
@@ -2391,6 +2400,7 @@ impl Transport for TmuxBackend {
         let mut token_visible_for_report: Option<bool> = None;
         match payload {
             InjectPayload::Empty => {
+                self.prepare_pane_for_submit(target, matches!(submit, Key::Enter));
                 let argv = tmux_empty_inject_argv(&pane, submit);
                 self.run_ok(&argv)?;
                 notify_submit_observer(observer);
@@ -2474,6 +2484,7 @@ impl Transport for TmuxBackend {
                 // the entire submit_and_verify loop — single send, no consumption
                 // check, KeySentAfterVisibleToken verification.
                 if !matches!(submit, Key::Enter) {
+                    self.prepare_pane_for_submit(target, false);
                     self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
                     notify_submit_observer(observer);
                     let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
@@ -2495,10 +2506,7 @@ impl Transport for TmuxBackend {
                     });
                 }
 
-                sleep_remaining_paste_to_submit_floor(
-                    pasted_at,
-                    current_paste_to_submit_floor(),
-                );
+                sleep_remaining_paste_to_submit_floor(pasted_at, current_paste_to_submit_floor());
 
                 let marker = payload_token_marker(payload);
                 let max_submit_attempts: u32 = 3;
@@ -2510,6 +2518,7 @@ impl Transport for TmuxBackend {
 
                 let poll_consumption = !payload.skip_consumption_poll();
                 if !poll_consumption {
+                    self.prepare_pane_for_submit(target, true);
                     if self
                         .run_inject_stage(&submit_argv, InjectStage::Submit)
                         .is_ok()
@@ -2589,19 +2598,10 @@ impl Transport for TmuxBackend {
                     // send Enter, never Escape.
                     let _ = escape_argv;
 
-                    // P0 copy-mode (leader 100% 复现):pane 处于 copy-mode 时 Enter 被
-                    // copy-mode 吃掉(既不提交也不换行,tmux 却 rc=0,框架误以为成功)。
-                    // 每次按 Enter 前检测 pane_in_mode,非 0 先 `send-keys -X cancel`
-                    // 退出 copy-mode 再 Enter。copy-mode 不是忙闲,注入仍无条件进行;
-                    // cancel 失败不得让注入失败(copy-mode 未退出则 Enter 被吃,但
-                    // 不因此抛错——流水里如实记录)。
-                    if let Some(mode) = self.pane_in_mode(target) {
-                        if mode {
-                            let cancel_argv =
-                                crate::transport::tmux_cancel_mode_argv(&pane, PaneMode::Copy);
-                            let _ = self.run_inject_stage(&cancel_argv, InjectStage::Submit);
-                        }
-                    }
+                    // 发前归零接收态（tmux mode + 未闭合 bracketed paste）。
+                    // 所有 Enter 路径的收敛点：prepare_pane_for_submit。
+                    // mode 不是忙闲；cancel 失败不得让注入失败。E55: 不送 Escape/C-c。
+                    self.prepare_pane_for_submit(target, true);
 
                     // Enter — send-keys failure is degraded (tmux may not have
                     // the pane in sim/test env). Break to consumed=None → Unverified.
@@ -2784,6 +2784,9 @@ impl Transport for TmuxBackend {
                 return self.run_ok(&argv);
             }
             return Ok(());
+        }
+        if keys.iter().any(|k| matches!(k, Key::Enter)) {
+            self.prepare_pane_for_submit(target, true);
         }
         let argv = tmux_send_keys_argv(&pane, keys);
         self.run_ok(&argv)

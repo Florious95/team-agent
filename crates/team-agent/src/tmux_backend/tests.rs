@@ -15,10 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{
-    current_paste_to_submit_floor, observe_turn_from_capture, sleep_remaining_paste_to_submit_floor,
-    with_cursor_single_enter, with_paste_to_submit_floor, CommandOutput, CommandRunner,
-    RealCommandRunner, TmuxBackend,
-    PANE_BINDING_NONCE_METADATA_KEY,
+    current_paste_to_submit_floor, observe_turn_from_capture,
+    sleep_remaining_paste_to_submit_floor, with_cursor_single_enter, with_paste_to_submit_floor,
+    CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
 };
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
@@ -2314,6 +2313,339 @@ fn count_submit_enters(calls: &[Vec<String>]) -> usize {
         .count()
 }
 
+/// Inject runner that reports a fixed `#{pane_mode}` and a token that disappears after C-m.
+struct ModePasteRunner {
+    recorded: RecordedArgv,
+    pre_submit: String,
+    post_submit: String,
+    submitted: AtomicBool,
+    pane_mode: String,
+}
+
+impl CommandRunner for ModePasteRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        if argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "C-m" || a == "Enter")
+        {
+            self.submitted.store(true, Ordering::SeqCst);
+        }
+        let stdout = match argv.get(1).map(String::as_str) {
+            Some("capture-pane") => {
+                if self.submitted.load(Ordering::SeqCst) {
+                    self.post_submit.clone()
+                } else {
+                    self.pre_submit.clone()
+                }
+            }
+            Some("display-message") => format!("{}\n", self.pane_mode),
+            _ => String::new(),
+        };
+        Ok(ok(&stdout))
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
+fn backend_mode(pane_mode: &str, token_text: &str) -> (TmuxBackend, RecordedArgv) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = ModePasteRunner {
+        recorded: Arc::clone(&recorded),
+        pre_submit: token_text.to_string(),
+        post_submit: "❯ \n".to_string(),
+        submitted: AtomicBool::new(false),
+        pane_mode: pane_mode.to_string(),
+    };
+    (TmuxBackend::with_runner(Box::new(runner)), recorded)
+}
+
+fn first_submit_index(calls: &[Vec<String>]) -> Option<usize> {
+    calls.iter().position(|argv| {
+        argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "C-m" || a == "Enter")
+    })
+}
+
+fn inject_send_keys_before_first_enter(calls: &[Vec<String>]) -> Vec<Vec<String>> {
+    let Some(i) = first_submit_index(calls) else {
+        return Vec::new();
+    };
+    calls[..i]
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("send-keys"))
+        .cloned()
+        .collect()
+}
+
+fn assert_no_e55_keys(calls: &[Vec<String>]) {
+    for argv in calls {
+        if argv.get(1).map(String::as_str) != Some("send-keys") {
+            continue;
+        }
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a == "Escape" || a == "C-c" || a == "C-C"),
+            "E55: inject must not send Escape/C-c; argv={argv:?}"
+        );
+    }
+}
+
+fn inject_token_for(tag: &str) -> String {
+    format!("ping [team-agent-token:msg_{tag}]")
+}
+
+fn argv_closes_bracketed_paste(argv: &[String]) -> bool {
+    argv.get(1).map(String::as_str) == Some("send-keys")
+        && argv.iter().any(|a| a == "-l")
+        && argv.iter().any(|a| a.contains("[201~"))
+}
+
+/// PR-18: tree-mode 必须在第一次 Enter 前 send-keys q。修坏：只对 Copy|Unknown cancel。
+#[test]
+fn inject_cancels_tree_mode_with_q_before_enter() {
+    let token = inject_token_for("tree_q");
+    let (be, rec) = backend_mode("tree-mode", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token.clone()),
+            Key::Enter,
+            false,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.iter().any(|a| a == "q") && !argv.iter().any(|a| a == "-X")),
+        "tree-mode must send-keys q before first Enter; before={before:?} calls={calls:?}"
+    );
+    assert!(
+        !before.iter().any(|argv| argv.iter().any(|a| a == "-X")),
+        "tree-mode must not use copy-mode -X cancel; before={before:?}"
+    );
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "consumed after cancel+Enter; calls={calls:?}"
+    );
+}
+
+/// copy-mode 回归：仍走 -X cancel，不得改成 q。
+#[test]
+fn inject_cancels_copy_mode_with_x_cancel_before_enter() {
+    let token = inject_token_for("copy_x");
+    let (be, rec) = backend_mode("copy-mode", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token.clone()),
+            Key::Enter,
+            false,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.iter().any(|a| a == "-X") && argv.iter().any(|a| a == "cancel")),
+        "copy-mode must keep -X cancel before Enter; before={before:?} calls={calls:?}"
+    );
+}
+
+/// pane_mode=0 是输入就绪，不得 cancel。
+#[test]
+fn inject_skips_cancel_when_pane_mode_is_zero() {
+    let token = inject_token_for("mode0");
+    let (be, rec) = backend_mode("0", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token.clone()),
+            Key::Enter,
+            false,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        !before
+            .iter()
+            .any(|argv| argv.iter().any(|a| a == "q" || a == "-X")),
+        "pane_mode=0 must not send mode-cancel; before={before:?}"
+    );
+    assert!(
+        before.iter().any(|argv| argv_closes_bracketed_paste(argv)),
+        "mode=0 still closes unclosed bracketed paste before Enter; before={before:?}"
+    );
+}
+
+#[test]
+fn inject_cancels_view_mode_with_q_before_enter() {
+    let token = inject_token_for("view_q");
+    let (be, rec) = backend_mode("view-mode", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token.clone()),
+            Key::Enter,
+            false,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.last().map(String::as_str) == Some("q")),
+        "view-mode must send-keys q before Enter; before={before:?}"
+    );
+}
+
+#[test]
+fn inject_cancels_client_mode_with_d_before_enter() {
+    let token = inject_token_for("client_d");
+    let (be, rec) = backend_mode("client-mode", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token.clone()),
+            Key::Enter,
+            false,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.last().map(String::as_str) == Some("d")),
+        "client-mode must send-keys d before Enter; before={before:?}"
+    );
+}
+
+/// 未闭合 bracketed paste：发前字面 CSI 201~，不是 Escape。
+#[test]
+fn inject_closes_unclosed_bracketed_paste_with_csi201_not_escape() {
+    let token = inject_token_for("paste201");
+    let (be, rec) = backend_mode("0", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token.clone()),
+            Key::Enter,
+            true,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before.iter().any(|argv| argv_closes_bracketed_paste(argv)),
+        "unclosed paste must close with CSI 201~ before Enter; before={before:?}"
+    );
+}
+
+/// A1 Empty / trust 路径也必须经过 prepare。
+#[test]
+fn empty_inject_cancels_tree_mode_before_cm() {
+    let (be, rec) = backend_mode("tree-mode", "");
+    be.inject(
+        &Target::Pane(PaneId::new("%7")),
+        &InjectPayload::Empty,
+        Key::Enter,
+        false,
+    )
+    .expect("empty inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.last().map(String::as_str) == Some("q")),
+        "A1 Empty must cancel tree-mode before C-m; before={before:?} calls={calls:?}"
+    );
+}
+
+/// A3 skip-consumption（leader 投递）也必须经过 prepare。
+#[test]
+fn skip_consumption_cancels_tree_mode_before_cm() {
+    let token = inject_token_for("skip_tree");
+    let (be, rec) = backend_mode("tree-mode", &token);
+    with_paste_to_submit_floor(Duration::ZERO, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::TextSkipConsumptionPoll(token.clone()),
+            Key::Enter,
+            false,
+        )
+    })
+    .expect("skip inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.last().map(String::as_str) == Some("q")),
+        "A3 skip-poll must cancel tree-mode before C-m; before={before:?}"
+    );
+}
+
+/// A6 send_keys([Enter]) 与 C 块 8 个调用方：含 Enter 的键组先 prepare。
+#[test]
+fn send_keys_enter_cancels_tree_mode_before_enter() {
+    let (be, rec) = backend_mode("tree-mode", "");
+    be.send_keys(&Target::Pane(PaneId::new("%7")), &[Key::Enter])
+        .expect("send_keys");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.last().map(String::as_str) == Some("q")),
+        "send_keys(Enter) must cancel tree-mode first; before={before:?} calls={calls:?}"
+    );
+}
+
+#[test]
+fn send_keys_down_enter_cancels_tree_mode_before_group() {
+    let (be, rec) = backend_mode("tree-mode", "");
+    be.send_keys(&Target::Pane(PaneId::new("%7")), &[Key::Down, Key::Enter])
+        .expect("send_keys");
+    let calls = rec.lock().unwrap().clone();
+    assert_no_e55_keys(&calls);
+    let before = inject_send_keys_before_first_enter(&calls);
+    assert!(
+        before
+            .iter()
+            .any(|argv| argv.last().map(String::as_str) == Some("q")),
+        "Down+Enter must cancel tree-mode before the key group; before={before:?}"
+    );
+}
+
 /// 外部队 2026-08-19 屏面原文，一字不改。
 const GROK_INCIDENT_LINE: &str = "│ ❯ [Pasted: 42 lines]           │";
 
@@ -2512,12 +2844,8 @@ const CURSOR_BUSY_AFTER_SUBMIT: &str = "\
 
 #[test]
 fn cursor_single_enter_busy_transcript_placeholder_does_not_retry() {
-    let token_text =
-        "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_busy]";
-    let (be, rec) = backend_folded(
-        "[Pasted text #1 +46 lines]\n",
-        CURSOR_BUSY_AFTER_SUBMIT,
-    );
+    let token_text = "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_busy]";
+    let (be, rec) = backend_folded("[Pasted text #1 +46 lines]\n", CURSOR_BUSY_AFTER_SUBMIT);
     let report = with_cursor_single_enter(true, || {
         be.inject(
             &Target::Pane(PaneId::new("%7")),
@@ -2543,12 +2871,8 @@ fn cursor_single_enter_busy_transcript_placeholder_does_not_retry() {
 
 #[test]
 fn cursor_single_enter_off_still_retries_on_transcript_placeholder() {
-    let token_text =
-        "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_ctrl]";
-    let (be, rec) = backend_folded(
-        "[Pasted text #1 +46 lines]\n",
-        CURSOR_BUSY_AFTER_SUBMIT,
-    );
+    let token_text = "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_ctrl]";
+    let (be, rec) = backend_folded("[Pasted text #1 +46 lines]\n", CURSOR_BUSY_AFTER_SUBMIT);
     let _report = be
         .inject(
             &Target::Pane(PaneId::new("%7")),
@@ -2656,14 +2980,18 @@ fn grok_fold_unverified_without_identity_one_enter() {
 #[test]
 fn grok_fold_does_not_enter_before_fold_on_raw_tall_paste() {
     let marker = "[team-agent-token:msg_grok_early]";
-    let token_text = format!("Team Agent message from leader:\n{}\n\n{marker}", "x\n".repeat(20));
+    let token_text = format!(
+        "Team Agent message from leader:\n{}\n\n{marker}",
+        "x\n".repeat(20)
+    );
     let raw = grok_raw_unfolded_paste(marker);
     assert!(
         !super::paste_ready_for_enter(&raw, marker),
         "raw tall paste with token is not ready"
     );
     assert!(super::paste_ready_for_enter(GROK_INCIDENT_LINE, marker));
-    let (be, rec) = backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, "Waiting for response\n❯ \n", 2);
+    let (be, rec) =
+        backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, "Waiting for response\n❯ \n", 2);
     let report = be
         .inject(
             &Target::Pane(PaneId::new("%7")),
@@ -2775,8 +3103,7 @@ fn g4_turn_empty_composer_without_busy_is_unknown() {
 
 #[test]
 fn g4_turn_inject_grok_incident_line_does_not_report_started() {
-    let token_text =
-        "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_inject]";
+    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_inject]";
     let (be, _rec) = backend_with(MockResp::Out(ok(GROK_INCIDENT_LINE)), vec![]);
     let report = be
         .inject(
@@ -2803,8 +3130,7 @@ fn g4_turn_inject_grok_incident_line_does_not_report_started() {
 
 #[test]
 fn g4_turn_inject_consumed_without_busy_is_unknown() {
-    let token_text =
-        "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_gone]";
+    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_g4_gone]";
     let visible = ok(token_text);
     let queued = vec![
         MockResp::Out(ok("")),
