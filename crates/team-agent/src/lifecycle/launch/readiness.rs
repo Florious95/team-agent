@@ -1,3 +1,22 @@
+//! ---
+//! purpose: 起队后的就绪判定，含 worker 状态汇总与 leader 收件可达性
+//! contract:
+//!   provides:
+//!     - name: quick_start_worker_readiness
+//!       what: 汇总各席位状态给出就绪结论
+//!     - name: quick_start_session_capture_incomplete_agents
+//!       what: 列出会话捕获尚未收敛的席位
+//!     - name: launched_team_receiver_is_attached
+//!       what: 以宿主注册表为准判断 leader 收件是否已挂上
+//!   depends:
+//!     - crate::state::persist
+//!     - crate::session_capture
+//!     - crate::leader::registry
+//! boundary:
+//!   - 可达性以宿主注册表为权威，workspace state 只是副本
+//!   - 判不出来一律当作未挂上，不乐观放行
+//! maturity: wired
+//! ---
 //! unit-8 (Stage 3) — `lifecycle::launch::readiness` phase boundary.
 //!
 //! Dedicated home for coordinator-start + readiness-verdict computation.
@@ -20,6 +39,12 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 由 runtime state 汇总该团队的就绪结论
+/// params:
+///   team_key: 团队键，teams 表里没有时退到顶层 state
+/// returns: 有非 running 席位时返回 Degraded 并列出它们，否则返回 PendingToolLoad
+/// ---
 pub(super) fn quick_start_worker_readiness(
     workspace: &Path,
     team_key: &str,
@@ -66,6 +91,10 @@ pub(super) fn quick_start_worker_readiness(
     }
 }
 
+/// ---
+/// purpose: 列出会话捕获尚未收敛的席位
+/// returns: 席位 id 列表；读不出 state 时为空
+/// ---
 pub(super) fn quick_start_session_capture_incomplete_agents(
     workspace: &Path,
     team_key: &str,
@@ -81,6 +110,10 @@ pub(super) fn quick_start_session_capture_incomplete_agents(
     crate::session_capture::incomplete_interacted_resumable_agent_ids(team_state)
 }
 
+/// ---
+/// purpose: 判断该团队的 leader 收件端是否真的挂上了
+/// returns: 注册表明确记为 attached 且 state 可读时为 true；未绑定或判不出一律 false
+/// ---
 /// Host registry is the deliverability authority. Workspace `state.json`
 /// is only a copy. Detection failure is unbound, never attached.
 pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {

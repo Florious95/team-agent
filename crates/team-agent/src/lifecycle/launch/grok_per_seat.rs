@@ -17,6 +17,10 @@
 //! maturity: wired
 //! ---
 
+/// ---
+/// purpose: 判断某环境键是否属于每席私有
+/// returns: 以 TEAM_AGENT_ 起头且不是 TEAM_AGENT_WORKSPACE 时为 true
+/// ---
 /// Shared identity keys belong on pane env. The only TEAM_AGENT_* key
 /// allowed in the directory-scoped grok toml is WORKSPACE (same cwd).
 pub(crate) fn is_per_seat_env_key(key: &str) -> bool {
@@ -24,6 +28,10 @@ pub(crate) fn is_per_seat_env_key(key: &str) -> bool {
     key.starts_with("TEAM_AGENT_") && key != "TEAM_AGENT_WORKSPACE"
 }
 
+/// ---
+/// purpose: 扫出 toml 里所有 env 表中的每席键
+/// returns: 首次出现顺序的键值对，值已去掉引号
+/// ---
 pub(crate) fn per_seat_keys_in_toml(text: &str) -> Vec<(String, String)> {
     let mut in_env_table = false;
     let mut out = Vec::new();
@@ -58,6 +66,10 @@ pub(crate) fn per_seat_keys_in_toml(text: &str) -> Vec<(String, String)> {
     out
 }
 
+/// ---
+/// purpose: 从所有 env 表里删掉每席键
+/// returns: 删后的全文，以及被删键名的首次出现顺序列表，不含值
+/// ---
 /// Drop per-seat `TEAM_AGENT_*` assignments from any `*.env` table.
 /// Other keys (`TEAM_AGENT_WORKSPACE`, `GROK_FOLDER_TRUST`, user keys) stay.
 /// Returned names are first-seen order, values never included.
@@ -100,6 +112,12 @@ fn toml_env_value(rest: &str) -> String {
         .to_string()
 }
 
+/// ---
+/// purpose: 取出指定表的 env 段里非每席的键值
+/// params:
+///   tables: 目标表名前缀，只看这些表下的 env 段
+/// returns: 键到值的有序映射，供覆盖写入时保留用户键
+/// ---
 /// Keys in `tables*.env` that are **not** per-seat. Unknown keys must be
 /// kept — detection failure does not authorize deletion.
 pub(crate) fn non_per_seat_env_in_tables(

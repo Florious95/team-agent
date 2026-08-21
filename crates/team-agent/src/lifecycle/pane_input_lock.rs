@@ -38,6 +38,12 @@ pub(crate) struct PaneInputLockGuard {
     file: Option<std::fs::File>,
 }
 
+/// ---
+/// purpose: 取 pane 输入锁；拿不到或超时则告警后放行，绝不无限等待
+/// params:
+///   request: 携带可选 workspace、目标 pane 键与操作名
+/// returns: Some 表示已持锁，None 表示无 workspace 可锁或已超时放行
+/// ---
 /// Acquire the pane lock or proceed after the hard timeout.
 ///
 /// On timeout / lock I/O failure: emit [`PANE_INPUT_LOCK_TIMEOUT_EVENT`] (stderr + events.jsonl)

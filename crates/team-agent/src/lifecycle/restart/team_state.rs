@@ -1,5 +1,27 @@
+//! ---
+//! purpose: 把 spec 与 runtime state 渲染成人读的 team_state.md
+//! contract:
+//!   provides:
+//!     - name: write_team_state
+//!       what: 按固定版式写出目标、成员、任务图、阻塞与下一步
+//!   depends:
+//!     - crate::model::yaml
+//!     - std::fs
+//! boundary:
+//!   - 只渲染与落盘，不改 runtime state
+//!   - 版式与分节顺序是对外契约，不随手调整
+//! maturity: wired
+//! ---
 use super::*;
 
+/// ---
+/// purpose: 渲染并写出 team_state.md
+/// params:
+///   spec: 提供团队名、目标、成员与兜底任务列表
+///   state: 提供 session 名、leader 收件端、各席位状态与任务实况，任务以 state 为先
+/// returns: 写出的文件路径，路径取 spec 的 context.state_file，缺省为 team_state.md
+/// errors: 建目录或写文件失败时返回 StatePersist
+/// ---
 pub(crate) fn write_team_state(
     workspace: &Path,
     spec: &YamlValue,

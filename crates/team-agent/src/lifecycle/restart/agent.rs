@@ -1,9 +1,52 @@
+//! ---
+//! purpose: 单席位的起、停与重置，全部在 workspace 级生命周期锁下串行
+//! contract:
+//!   provides:
+//!     - name: start_agent
+//!       what: 起或复活一席，按四象限定出 resume 或 fresh
+//!     - name: stop_agent
+//!       what: 停一席，按 pane、同角色残留 pane、窗口三级收敛并取排空证据
+//!     - name: reset_agent
+//!       what: 必须显式丢弃会话，停席后换血再起
+//!     - name: start_agent_at_paths
+//!       what: 起席的实体实现，owner 门、暂停判定、启动模式决策与落 state
+//!     - name: drain_old_pane_and_pid
+//!       what: 有界轮询等旧 pane 与旧进程消失，产出可核的证据载荷
+//!   depends:
+//!     - crate::lifecycle::lock
+//!     - crate::lifecycle::restart::selection
+//!     - crate::lifecycle::restart::remove
+//!     - crate::lifecycle::restart::team_state
+//!     - crate::lifecycle::launch
+//!     - crate::state::projection
+//!     - crate::state::persist
+//!     - crate::platform::process
+//!     - crate::lifecycle::profile_launch
+//!     - crate::lifecycle::worker_command_context
+//!     - crate::event_log::EventLog
+//! boundary:
+//!   - 每个对外入口先取 workspace 级生命周期锁，本文件不做无锁写
+//!   - owner 门先于未知席位报错，权限判定不被存在性判定绕过
+//!   - reset 未显式丢弃会话时直接拒绝，不擅自换血
+//!   - 排空是有界等待，等不到只如实记录，不无限阻塞
+//! maturity: wired
+//! ---
 use super::common::*;
 use super::selection::decide_start_mode;
 use super::team_state::write_team_state;
 use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
+/// ---
+/// purpose: 起或复活一席的对外入口
+/// params:
+///   force: 窗口已存在时也重起
+///   open_display: 是否开显示
+///   allow_fresh: resume 依据缺失时允许改跑全新会话
+/// returns: Running、Noop 或 Paused
+/// errors: 选不到 team 返回 TeamSelect，owner 门不过返回 OwnerRefused，席位不存在返回 RequirementUnmet
+/// contract_id: lifecycle.start_agent.entry
+/// ---
 /// `start_agent(workspace, agent_id, force, open_display, allow_fresh, team)`
 /// (`lifecycle/start.py:72`)。`_runtime_lock("start-agent")` 下串行:resume-or-fresh
 /// 决策、resume 窗口退出回退 fresh、起后投递 pending message、起 coordinator。
@@ -39,6 +82,12 @@ pub fn start_agent(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的起席入口；未指定 team 且解析失败时退回把入参 workspace 当作两个路径
+/// returns: Running、Noop 或 Paused
+/// errors: 指定了 team 而解析失败时透传该错误，其余同 start_agent
+/// contract_id: lifecycle.start_agent.entry
+/// ---
 /// `start_agent` with an injected transport — wires the single-worker resume/fresh spawn +
 /// start_coordinator (rt-host-a sweep: was a stub returning RequirementUnmet at the spawn boundary).
 #[allow(clippy::too_many_arguments)]
@@ -80,6 +129,14 @@ pub(crate) fn start_agent_with_transport(
     )
 }
 
+/// ---
+/// purpose: 起席的实体实现，读团队作用域 state、过 owner 门、定启动模式、spawn 并标记已起
+/// params:
+///   spec_workspace: spec 所在目录，用于补回席位的命令上下文
+///   open_display: 当前实现未直接使用，仅参与自适应布局判定
+/// returns: 席位暂停时直接返回 Paused，其余按启动模式返回 Running 或 Noop
+/// errors: 读 state 失败返回 StatePersist，owner 门不过返回 OwnerRefused，席位不存在返回 RequirementUnmet
+/// ---
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_agent_at_paths(
     workspace: &Path,
@@ -788,6 +845,13 @@ fn tmux_start_mode_for_spawn(
 // 0.4.6 Stage 1: reset/start clean-boundary helpers
 // ═══════════════════════════════════════════════════════════════════════
 
+/// ---
+/// purpose: 有界轮询等待旧 pane 不可达且旧进程退出
+/// params:
+///   old_pane: 旧 pane，None 视作已死
+///   old_pid: 旧进程号，None 视作已退出
+/// returns: 证据载荷，含两者是否确认消失与实际等待毫秒数；到上限仍未消失也照实返回
+/// ---
 /// Bounded polling: wait for the old pane to become unreachable AND, when
 /// possible, for the old pane_pid to exit. Returns a JSON evidence blob
 /// recording the observed transition for events.
@@ -830,6 +894,10 @@ pub(super) fn drain_old_pane_and_pid(
     })
 }
 
+/// ---
+/// purpose: 尽力探测某进程号是否还活着
+/// returns: 由平台层给出的判定
+/// ---
 /// Best-effort liveness probe for a pid.
 ///
 /// 0.5.x Windows portability Batch 3: routes through
@@ -843,6 +911,10 @@ pub(super) fn pid_is_alive(pid: u32) -> bool {
     crate::platform::process::pid_is_alive(pid)
 }
 
+/// ---
+/// purpose: 从 state 里读该席位的 pane 进程号
+/// returns: 存在且是无符号整数时返回它，否则 None
+/// ---
 /// Read state.agents[agent_id].pane_pid (u32) from the runtime state.
 pub(super) fn state_pane_pid(state: &serde_json::Value, agent_id: &AgentId) -> Option<u32> {
     state
@@ -853,6 +925,10 @@ pub(super) fn state_pane_pid(state: &serde_json::Value, agent_id: &AgentId) -> O
         .map(|p| p as u32)
 }
 
+/// ---
+/// purpose: 算出该席位下一次的 spawn 世代号
+/// returns: 当前值加一，缺失时按 0 起算；世代号用于把捕获与事件归因到本次进程
+/// ---
 /// Read + increment state.agents[agent_id].spawn_epoch. The epoch is a
 /// monotonic counter persisted with the agent row that uniquely tags each
 /// fresh-start / reset / restart cycle. Subsequent capture / event /
@@ -869,6 +945,12 @@ pub(super) fn next_spawn_epoch(state: &serde_json::Value, agent_id: &AgentId) ->
     current.saturating_add(1)
 }
 
+/// ---
+/// purpose: 停一席的对外入口
+/// returns: 停止报告
+/// errors: 选不到 team 返回 TeamSelect，席位不存在返回 RequirementUnmet
+/// contract_id: lifecycle.stop_agent.entry
+/// ---
 /// `stop_agent(workspace, agent_id, team)`(`lifecycle/operations.py:62`)。
 /// owner-gate → kill window → **同时关显示** → 写 state。
 pub fn stop_agent(
@@ -895,6 +977,12 @@ pub fn stop_agent(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的停席入口
+/// returns: 停止报告
+/// errors: 同 stop_agent
+/// contract_id: lifecycle.stop_agent.entry
+/// ---
 pub(crate) fn stop_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
@@ -919,6 +1007,11 @@ pub(crate) fn stop_agent_with_transport(
     )
 }
 
+/// ---
+/// purpose: 停席的实体实现，解析席位、收敛杀 pane 与窗口、取排空证据后落 state
+/// returns: 停止报告；注意报告里的显示已关闭字段恒为真，不反映实际关显示结果
+/// errors: 席位解析不到实体返回 RequirementUnmet，写 state 失败返回 StatePersist
+/// ---
 pub(super) fn stop_agent_at_paths(
     workspace: &Path,
     spec_workspace: &Path,
@@ -1076,6 +1169,13 @@ pub(super) fn stop_agent_at_paths(
     })
 }
 
+/// ---
+/// purpose: 取团队作用域的投影 state，把选择拒绝转成带原因的错误
+/// params:
+///   team: 目标团队，None 时按唯一性选
+/// returns: 投影后的 state
+/// errors: 目标歧义或选不出时返回 TeamSelect 并在消息里带原因与细节，读取失败返回 StatePersist
+/// ---
 /// golden `resolve_team_scoped_state` (state.py:243): returns the team-scoped projected state, or
 /// surfaces the refusal dict (`team_target_ambiguous` / `team_target_unresolved`) as a typed error
 /// BEFORE the owner gate / unknown-worker raise (operations.py:64-66). The lifecycle return types are
@@ -1251,6 +1351,14 @@ fn mark_agent_started(
     Ok(())
 }
 
+/// ---
+/// purpose: 重置一席的对外入口
+/// params:
+///   discard_session: 必须为真，否则直接返回拒绝
+/// returns: 重置结果，未显式丢弃会话时返回 Refused
+/// errors: 选不到 team 返回 TeamSelect，其余透传实体实现
+/// contract_id: lifecycle.reset_agent.entry
+/// ---
 /// `reset_agent(workspace, agent_id, discard_session, open_display, team)`
 /// (`lifecycle/operations.py:102`)。discard + 重起;**未传 discard_session → 拒绝**。
 pub fn reset_agent(
@@ -1286,6 +1394,14 @@ pub fn reset_agent(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的重置入口
+/// params:
+///   discard_session: 必须为真，否则直接返回拒绝
+/// returns: 重置结果
+/// errors: 同 reset_agent
+/// contract_id: lifecycle.reset_agent.entry
+/// ---
 pub(crate) fn reset_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
@@ -1783,6 +1899,14 @@ fn write_stop_complete_event(
     Ok(())
 }
 
+/// ---
+/// purpose: 写一条停席排空证据事件
+/// params:
+///   target: 被停的目标描述
+///   drain: 排空证据载荷，其字段被并进事件顶层
+/// returns: 成功返回空值
+/// errors: 事件写入失败时返回 StatePersist
+/// ---
 /// 0.4.6 Stage 1: drain evidence for the old pane+pid after stop. Fires
 /// during reset/stop so operators can see whether the prior worker really
 /// went away or stuck around inside the resp budget.

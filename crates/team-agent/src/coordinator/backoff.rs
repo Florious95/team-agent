@@ -1,3 +1,29 @@
+//! ---
+//! purpose: coordinator daemon 进程的宿主——装配 transport/registry，跑主循环，把 tick 的崩溃收进退避与事件
+//! contract:
+//!   provides:
+//!     - name: run_daemon
+//!       what: `team-agent coordinator --workspace ..` 子进程入口：解析 transport、构造 Coordinator、进主循环
+//!     - name: backoff_sleep_sec
+//!       what: 连续失败次数到睡眠秒数的纯函数（5→10→20→40→60→60，封顶 BACKOFF_MAX_SEC）
+//!     - name: resolve_tick_interval
+//!       what: 解析 tick 间隔并顺带确保 message store schema 可打开
+//!   depends:
+//!     - super::health
+//!     - super::tick
+//!     - super::types
+//!     - super::conpty_shim
+//!     - crate::state::persist
+//!     - crate::transport_factory
+//!     - crate::tmux_backend
+//!     - crate::message_store
+//!     - crate::event_log
+//! boundary:
+//!   - 不做单次 tick 的编排内容，tick 体在 tick.rs
+//!   - 不决定健康与否，只消费 health.rs 的判定与路径
+//!   - transport 解析失败时降级为 tmux workspace 后端保活，但不静默——降级原因写进 boot metadata
+//! maturity: wired
+//! ---
 //!
 //! daemon 主循环面(`__main__.py`)—— 退避序列 + tick 间隔解析 + 子进程入口。
 
@@ -41,6 +67,13 @@ pub struct DaemonArgs {
 /// daemon 主循环(`main`,`__main__.py:25-98`)。写 pid/meta(source=boot)、装信号→STOP、孤儿自检、
 /// catch-all + 指数退避 + tick_error 去重/抑制、tick_recovered 重置、`result.stop || once` → break。
 /// §10:返 `Result`(顶层 bin 用 anyhow 收;§12 边界)。
+/// ---
+/// purpose: daemon 进程入口——解析 transport 后端、构造 Coordinator、跑主循环直到 stop 或 --once
+/// params:
+///   args: workspace（已 resolve）、once、tick_interval_sec、可选 team_key；team_key 为空时回落到 state.active_team_key
+/// returns: 主循环正常退出（收到 STOP、tick 报 stop、或 --once 跑完一轮）时为 Ok
+/// errors: 写 pid/metadata、事件日志或 tick 间隔解析失败时返回 DaemonError
+/// ---
 pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // CP-1: the daemon's whole tick surface (has_session / capture / inject / list_windows / kill)
     // runs through this backend. Prefer the persisted runtime endpoint so attached explicit-socket
@@ -123,6 +156,14 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     run_daemon_with_coordinator_and_boot_tmux(&args, &coordinator, Some(tmux_metadata))
 }
 
+/// ---
+/// purpose: 用调用方已装配好的 Coordinator 跑主循环（测试与内部复用入口，跳过 transport 解析）
+/// params:
+///   args: 与 run_daemon 同一份参数
+///   coordinator: 已注入 provider registry 与 transport 的实例
+/// returns: 与 run_daemon 相同的主循环退出语义
+/// errors: 同 run_daemon
+/// ---
 pub(crate) fn run_daemon_with_coordinator(
     args: &DaemonArgs,
     coordinator: &Coordinator,
@@ -520,6 +561,13 @@ fn current_ppid() -> u32 {
 
 /// 计算 tick 间隔(`_tick_interval`,`__main__.py:104-115`)。读 spec `runtime.tick_interval_sec`,
 /// 缺失/出错 → `DEFAULT_TICK_INTERVAL_SEC`;并确保 schema 存在(`MessageStore(workspace)`)。
+/// ---
+/// purpose: 取本 workspace 的 tick 间隔秒数，并顺带确保 message store schema 可打开
+/// params:
+///   workspace: 已 resolve 的 workspace 根
+/// returns: tick 间隔秒数；当前实现恒为 DEFAULT_TICK_INTERVAL_SEC（spec 覆盖尚未接线）
+/// errors: MessageStore::open 失败时返回 TickError
+/// ---
 pub(super) fn resolve_tick_interval(workspace: &WorkspacePath) -> Result<f64, TickError> {
     let _ = MessageStore::open(workspace.as_path())?;
     Ok(DEFAULT_TICK_INTERVAL_SEC)
@@ -527,6 +575,13 @@ pub(super) fn resolve_tick_interval(workspace: &WorkspacePath) -> Result<f64, Ti
 
 /// 退避序列(`__main__.py:65`):`min(interval * 2^min(failures-1, 5), 60.0)` → 5→10→20→40→60→60s。
 /// unit test 锁死本序列(card §85)。**纯函数,无 I/O,可直接 impl 钉死**(但 ROUND-0 仍占位)。
+/// ---
+/// purpose: 由连续失败次数算出本轮该睡多少秒的纯函数
+/// params:
+///   interval: 基准 tick 间隔秒数
+///   consecutive_failures: 至今连续失败次数；0 与 1 同视为首次失败
+/// returns: interval * 2^min(failures-1, 5)，上限 BACKOFF_MAX_SEC
+/// ---
 pub(super) fn backoff_sleep_sec(interval: f64, consecutive_failures: u32) -> f64 {
     let failures = consecutive_failures.saturating_sub(1).min(5);
     let exp = i32::try_from(failures).unwrap_or(5);

@@ -1,3 +1,23 @@
+//! ---
+//! purpose: adaptive 布局的窗格规划，定出每个席位落在哪个布局窗口的第几格
+//! contract:
+//!   provides:
+//!     - name: adaptive_layout_plan
+//!       what: 按每窗口容量把席位切成 team-w 序列的窗格安排
+//!     - name: adaptive_placement_for_agent
+//!       what: 为新席位在现有布局里找位置，找不到真实布局窗口时返回 None
+//!     - name: adaptive_existing_placement_for_agent
+//!       what: 为已有席位复原它的布局位置
+//!     - name: is_adaptive_layout_window_pub
+//!       what: 判断窗口名是否是规范的 team-w 布局窗口
+//!   depends:
+//!     - crate::transport::Transport
+//! boundary:
+//!   - 只算位置，不真开窗口也不 spawn
+//!   - 只有规范 team-w 名才算布局窗口，按席位命名的窗口一律不算
+//!   - 现场没有真实布局窗口时返回 None，不凭空造一个新布局窗口
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,6 +43,12 @@ pub(crate) struct LayoutPlacement {
     pub starts_window: bool,
 }
 
+/// ---
+/// purpose: 把一批席位按每窗口容量切成布局安排
+/// params:
+///   max_per_window: 每个布局窗口最多几格，小于 1 时按 1 处理
+/// returns: 与入参同序的安排，窗口名形如 team-w 加序号，每窗口第一格标记 starts_window
+/// ---
 pub(crate) fn adaptive_layout_plan(
     agent_ids: &[AgentId],
     max_per_window: usize,
@@ -47,6 +73,10 @@ pub(crate) fn adaptive_layout_plan(
 
 pub(crate) const ADAPTIVE_LAYOUT_MAX_PER_WINDOW: usize = 3;
 
+/// ---
+/// purpose: 判断该 state 是否在用 adaptive 布局
+/// returns: 顶层或 runtime 段的 display_backend 为 adaptive，或任一席位带非空 layout_window 时为 true
+/// ---
 pub(crate) fn state_uses_adaptive_layout(state: &serde_json::Value) -> bool {
     state
         .get("display_backend")
@@ -70,6 +100,12 @@ pub(crate) fn state_uses_adaptive_layout(state: &serde_json::Value) -> bool {
             })
 }
 
+/// ---
+/// purpose: 为新席位在现有 adaptive 布局里找一个位置
+/// params:
+///   transport: 用于取活 pane 与活窗口，交叉核对 state 里的窗口声明
+/// returns: 最后一个布局窗口未满则占它的下一格；已满则开下一个 team-w 窗口；现场没有任何真实布局窗口时返回 None
+/// ---
 pub(crate) fn adaptive_placement_for_agent(
     state: &serde_json::Value,
     transport: &dyn Transport,
@@ -191,6 +227,10 @@ pub(crate) fn adaptive_placement_for_agent(
     })
 }
 
+/// ---
+/// purpose: 复原已有席位的 adaptive 布局位置
+/// returns: 声明的窗口不是规范布局名时为 None；窗口已不在活窗口里则退回以 agent id 新开窗口；否则按该窗口现有 pane 数定格位
+/// ---
 pub(crate) fn adaptive_existing_placement_for_agent(
     state: &serde_json::Value,
     transport: &dyn Transport,
@@ -269,6 +309,12 @@ pub(crate) fn adaptive_existing_placement_for_agent(
     })
 }
 
+/// ---
+/// purpose: 从窗口名解析出布局序号
+/// params:
+///   window: 形如 team-w 加序号，可带后缀
+/// returns: 从 0 起的序号；前缀不符或序号为 0 时为 None
+/// ---
 pub(super) fn parse_team_layout_index(window: &str) -> Option<usize> {
     window
         .strip_prefix("team-w")
@@ -277,6 +323,11 @@ pub(super) fn parse_team_layout_index(window: &str) -> Option<usize> {
         .and_then(|idx| idx.checked_sub(1))
 }
 
+/// ---
+/// purpose: 判断窗口名是否是规范的 adaptive 布局窗口
+/// returns: 能解析出布局序号即为 true
+/// contract_id: lifecycle.layout.is_adaptive_layout_window
+/// ---
 /// E45 (0.3.24 bug#4, demo-director second-layer drift): a window name is a
 /// REAL adaptive layout window only when it matches the canonical
 /// `team-w<N>[-suffix]` shape (i.e. `parse_team_layout_index` returns Some).
@@ -290,6 +341,11 @@ pub(super) fn is_adaptive_layout_window(window: &str) -> bool {
     parse_team_layout_index(window).is_some()
 }
 
+/// ---
+/// purpose: 把上面的判定以更宽可见性转出，供 spawn 侧做兜底守卫
+/// returns: 同 is_adaptive_layout_window
+/// contract_id: lifecycle.layout.is_adaptive_layout_window
+/// ---
 /// Crate-public wrapper for the defensive guard at
 /// `restart/common.rs::spawn_agent_window`. Same semantics as the private
 /// helper above; promoted to `pub(crate)` so the spawn-time defence-in-depth
@@ -299,6 +355,10 @@ pub(crate) fn is_adaptive_layout_window_pub(window: &str) -> bool {
     is_adaptive_layout_window(window)
 }
 
+/// ---
+/// purpose: 在活窗口集合里找一个不冲突的布局窗口名
+/// returns: 基名未被占用就用基名，否则依次尝试加数字后缀
+/// ---
 pub(super) fn unique_layout_window_name(base: &str, live_windows: &BTreeSet<String>) -> WindowName {
     if !live_windows.contains(base) {
         return WindowName::new(base);

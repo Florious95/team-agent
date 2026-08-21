@@ -1,3 +1,28 @@
+//! ---
+//! purpose: leader pane 环境变量的校验，以及 quick-start 场景下 owner 与 provider 的归因
+//! contract:
+//!   provides:
+//!     - name: validate_active_leader_pane_env
+//!       what: TEAM_AGENT_LEADER_PANE_ID 指向死或不存在的 pane 时 fail-fast
+//!     - name: active_leader_pane_state_across_transports
+//!       what: 跨多个 tmux socket 汇总某 pane 的存活判定
+//!     - name: seed_unbound_launched_owner
+//!       what: 无 caller pane 时种入一份 unbound owner 与 receiver
+//!     - name: attributed_provider_for_pane_across_tmux_sockets
+//!       what: 跨所有 tmux socket 找到该 pane 并归因它的 provider
+//!   depends:
+//!     - crate::tmux_backend
+//!     - crate::transport::Transport
+//!     - crate::state::ownership
+//!     - crate::event_log::EventLog
+//!     - crate::leader
+//!     - crate::compiler
+//! boundary:
+//!   - 只在显式判定为 dead 或 absent 时拦截，Unknown 一律放行
+//!   - 归因不出 provider 时留空，绝不默认成某个 provider
+//!   - 只校验与归因，不 spawn、不改 pane
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +40,12 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 校验 TEAM_AGENT_LEADER_PANE_ID 指向的 pane 是否可用，不带 workspace 上下文
+/// returns: 通过返回空值
+/// errors: pane 明确为 dead 或 absent 时返回 RequirementUnmet，消息含 error/action/log 三行
+/// contract_id: lifecycle.leader_context.validate_leader_pane_env
+/// ---
 /// B-7 / 036b — TEAM_AGENT_LEADER_PANE_ID 主动路径 fail-fast helper。
 /// 入口形态(N38 三行式):
 ///   error  : `TEAM_AGENT_LEADER_PANE_ID points at a dead/absent pane: %<id>`
@@ -32,6 +63,12 @@ pub(crate) fn validate_active_leader_pane_env(
     validate_active_leader_pane_env_with_workspaces(transport, &[])
 }
 
+/// ---
+/// purpose: 同上，附带一个 workspace 用于写告警事件
+/// returns: 通过返回空值
+/// errors: 同 validate_active_leader_pane_env
+/// contract_id: lifecycle.leader_context.validate_leader_pane_env
+/// ---
 pub(crate) fn validate_active_leader_pane_env_with_workspace(
     transport: &dyn Transport,
     workspace: Option<&Path>,
@@ -40,6 +77,14 @@ pub(crate) fn validate_active_leader_pane_env_with_workspace(
     validate_active_leader_pane_env_with_workspaces(transport, &workspaces)
 }
 
+/// ---
+/// purpose: 校验 leader pane 环境变量的实体实现
+/// params:
+///   workspaces: 写格式告警事件的候选 workspace 列表，可为空
+/// returns: 环境变量未设或为空、pane 格式不合法、判定为 live 或 unknown 时都通过
+/// errors: pane 明确 dead 或 absent 时返回 RequirementUnmet
+/// contract_id: lifecycle.leader_context.validate_leader_pane_env
+/// ---
 pub(crate) fn validate_active_leader_pane_env_with_workspaces(
     transport: &dyn Transport,
     workspaces: &[&Path],
@@ -68,6 +113,12 @@ pub(crate) fn validate_active_leader_pane_env_with_workspaces(
     )))
 }
 
+/// ---
+/// purpose: pane id 格式不合法时写一条告警事件
+/// params:
+///   workspaces: 逐个去重后尝试写事件
+/// returns: 所有 workspace 都没写成时退回 stderr 打印
+/// ---
 pub(super) fn write_invalid_leader_pane_env_warning(workspaces: &[&Path], pane_id_raw: &str) {
     let message = "invalid pane id format, skipping validation";
     let mut wrote = false;
@@ -101,6 +152,12 @@ pub(super) fn write_invalid_leader_pane_env_warning(workspaces: &[&Path], pane_i
     }
 }
 
+/// ---
+/// purpose: TEAM.md 里写了 owner_team_id 时告知它被忽略
+/// params:
+///   runtime_team_key: 真正生效的 canonical 团队键
+/// returns: TEAM.md 没写该字段时什么都不做；否则打印三行提示并写 spec.field_ignored 事件
+/// ---
 pub(super) fn warn_ignored_owner_team_id(
     workspace: &Path,
     team_dir: &Path,
@@ -139,6 +196,10 @@ pub(crate) enum LeaderPaneEnvState {
     Unknown,
 }
 
+/// ---
+/// purpose: 定出校验用的 pane 状态
+/// returns: 格式不合法返回 Unknown；transport 探真实 socket 时跨 socket 判定，否则只问该 transport
+/// ---
 pub(super) fn leader_pane_env_state_for_validation(
     transport: &dyn Transport,
     pane: &crate::transport::PaneId,
@@ -152,11 +213,19 @@ pub(super) fn leader_pane_env_state_for_validation(
     active_leader_pane_state(transport, pane)
 }
 
+/// ---
+/// purpose: 判断字符串是否是 tmux pane id 形状
+/// returns: 以百分号起头且其后全为数字时为 true
+/// ---
 pub(super) fn is_tmux_pane_id_format(pane: &crate::transport::PaneId) -> bool {
     let pane = pane.as_str();
     pane.len() > 1 && pane.starts_with('%') && pane[1..].chars().all(|ch| ch.is_ascii_digit())
 }
 
+/// ---
+/// purpose: 枚举本机所有 tmux socket，跨 server 判定该 pane 的状态
+/// returns: 汇总后的状态
+/// ---
 pub(super) fn active_leader_pane_state_across_tmux_sockets(
     pane: &crate::transport::PaneId,
 ) -> LeaderPaneEnvState {
@@ -173,6 +242,10 @@ pub(super) fn active_leader_pane_state_across_tmux_sockets(
     )
 }
 
+/// ---
+/// purpose: 在多个 transport 上汇总某 pane 的状态
+/// returns: 任一为 Live 即 Live；否则有 Dead 报 Dead，有 Absent 报 Absent，全 Unknown 报 Unknown
+/// ---
 pub(crate) fn active_leader_pane_state_across_transports<'a>(
     transports: impl IntoIterator<Item = &'a dyn Transport>,
     pane: &crate::transport::PaneId,
@@ -196,6 +269,10 @@ pub(crate) fn active_leader_pane_state_across_transports<'a>(
     }
 }
 
+/// ---
+/// purpose: 在单个 transport 上判定 pane 状态
+/// returns: has_pane 给出确定答案时直接用，否则退到 liveness；两者都判不出时为 Unknown
+/// ---
 pub(super) fn active_leader_pane_state(
     transport: &dyn Transport,
     pane: &crate::transport::PaneId,
@@ -212,6 +289,13 @@ pub(super) fn active_leader_pane_state(
     }
 }
 
+/// ---
+/// purpose: 在没有 caller pane 的情况下种入一份 unbound owner 与 receiver
+/// params:
+///   launched: 待改写的 state
+///   launched_key: 团队键
+/// returns: 归因不出 provider 时直接返回不写，避免默认成某个 provider
+/// ---
 pub(super) fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &str) {
     let Some(owner) = unbound_launched_owner(launched, launched_key) else {
         return;
@@ -241,6 +325,10 @@ pub(super) fn seed_unbound_launched_owner(launched: &mut serde_json::Value, laun
     crate::state::ownership::write_owner(launched, launched_key, record);
 }
 
+/// ---
+/// purpose: 构造 unbound owner 记录
+/// returns: provider 归因成功且能派生出 leader session uuid 时给出 owner JSON，否则 None
+/// ---
 pub(super) fn unbound_launched_owner(
     launched: &serde_json::Value,
     launched_key: &str,
@@ -276,6 +364,10 @@ pub(super) fn unbound_launched_owner(
     }))
 }
 
+/// ---
+/// purpose: 归因 unbound owner 的 provider
+/// returns: 先用 state 里已写的 provider，其次按 owner 的 pane 跨 socket 归因；都失败为 None
+/// ---
 pub(super) fn unbound_launched_provider(launched: &serde_json::Value) -> Option<String> {
     if let Some(provider) = launched
         .get("team_owner")
@@ -296,12 +388,20 @@ pub(super) fn unbound_launched_provider(launched: &serde_json::Value) -> Option<
     attributed_provider_for_pane_across_tmux_sockets(&target).and_then(provider_wire_string)
 }
 
+/// ---
+/// purpose: 把 provider 枚举转成它的 wire 字符串
+/// returns: 序列化得到的字符串，转换失败为 None
+/// ---
 pub(super) fn provider_wire_string(provider: Provider) -> Option<String> {
     serde_json::to_value(provider)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
 }
 
+/// ---
+/// purpose: 跨本机所有 tmux socket 找到该 pane 并归因它的 provider
+/// returns: 找到且能归因时给出 provider，否则 None
+/// ---
 pub(super) fn attributed_provider_for_pane_across_tmux_sockets(pane: &PaneId) -> Option<Provider> {
     crate::tmux_backend::tmux_socket_endpoints()
         .into_iter()
@@ -315,6 +415,12 @@ pub(super) fn attributed_provider_for_pane_across_tmux_sockets(pane: &PaneId) ->
         .and_then(|info| crate::leader::attribute_pane_provider(&info))
 }
 
+/// ---
+/// purpose: 定出 caller 的 provider wire 名
+/// params:
+///   lookup_pane_provider: 由 pane 反查 provider 的函数，便于测试替换
+/// returns: caller 自报的 provider 优先，其次按 caller pane 反查；都不成为 None
+/// ---
 pub(super) fn caller_provider_for_seed_with_lookup(
     caller: &crate::state::owner_gate::CallerIdentity,
     lookup_pane_provider: impl Fn(&PaneId) -> Option<Provider>,
@@ -457,6 +563,12 @@ mod e22_unbound_owner_provider_tests {
     }
 }
 
+/// ---
+/// purpose: 判断该 pane 是否已经是别的团队的 owner pane
+/// params:
+///   launched_key: 本次团队键，比较时被排除
+/// returns: 存在另一团队的 team_owner.pane_id 等于它则为 true
+/// ---
 pub(super) fn owner_pane_belongs_to_other_team(
     existing: &serde_json::Value,
     launched_key: &str,

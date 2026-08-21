@@ -1,7 +1,39 @@
+//! ---
+//! purpose: restart 与 start 的纯决策层，定启动模式、first_send_at 分类与整队 resume 计划
+//! contract:
+//!   provides:
+//!     - name: decide_start_mode
+//!       what: 由 session_id 与 resume 依据决定 Resumed/Fresh/FreshAfterMissingRollout/Noop
+//!     - name: classify_first_send_at
+//!       what: 严格分类 first_send_at，绝不靠真值性
+//!     - name: restart_agent_has_context_to_preserve
+//!       what: 判断该席位是否有会被静默 fresh 丢掉的上下文
+//!     - name: classify_restart_plan
+//!       what: 纯计算出整队的 resume 决策、损坏条目与不可 resume 名单
+//!     - name: python_type_name
+//!       what: 给出与 Python 一致的类型名，用于审计载荷
+//!   depends:
+//!     - crate::provider::wire
+//! boundary:
+//!   - 纯计算，不 spawn、不 kill、不写盘
+//!   - 拒绝结论必须先于任何 teardown 产出，本层不执行任何破坏性动作
+//!   - 类型名用 Python 命名而非 serde 命名，保持与真相源一致
+//! maturity: wired
+//! ---
 use super::common::*;
 use super::*;
 use crate::provider::wire::{parse_canonical_provider, requires_resume_backing};
 
+/// ---
+/// purpose: 定出该席位这次的启动模式
+/// params:
+///   provider: provider wire 名，不支持 resume 时视为无 resume 依据
+///   session_id: 已记录的会话；为空直接 Fresh
+///   _rollout_path: 未参与判定
+///   rollout_exists: resume 依据是否存在
+///   allow_fresh: 依据缺失时是否允许改跑全新会话
+/// returns: 依据齐全为 Resumed；缺依据且允许时为 FreshAfterMissingRollout；缺依据且不允许时为 Noop
+/// ---
 /// bug-085 四象限 `start_mode` 决策(`start.py:179-188` + `_resume_rollout_missing` `start.py:66-69`),
 /// **从 start_agent 的整条 lock+spawn 路径里分离出的纯函数**(gate gap:porter 需要单元级 RED
 /// for `FreshAfterMissingRollout`,而 start_agent 全路径不可单测)。语义:
@@ -31,10 +63,20 @@ pub fn decide_start_mode(
     }
 }
 
+/// ---
+/// purpose: 判断该 provider 的 resume 是否必须有落盘依据
+/// returns: 能解析成规范 provider 且它要求依据时为 true
+/// ---
 pub(crate) fn resumable_provider_requires_backing(provider: &str) -> bool {
     parse_canonical_provider(provider).is_some_and(requires_resume_backing)
 }
 
+/// ---
+/// purpose: 严格分类 first_send_at 取值
+/// params:
+///   raw: 原始 JSON 值
+/// returns: 空值为 Absent，合法 ISO 时间串为 Valid，其余一切取值都是 Corrupt
+/// ---
 /// `first_send_at` 严格分类(`_classify_first_send_at`,`orchestration.py:399`)。
 /// **绝不靠 truthiness**:`""`/`0`/`False`/`"null"`/非 ISO → `Corrupt`。
 pub(crate) fn classify_first_send_at(raw: &serde_json::Value) -> FirstSendAtState {
@@ -54,6 +96,10 @@ pub(crate) fn classify_first_send_at(raw: &serde_json::Value) -> FirstSendAtStat
     }
 }
 
+/// ---
+/// purpose: 判断该席位是否有一旦静默 fresh 就会丢掉的上下文
+/// returns: first_send_at 合法、有 last_result_at 或标了已投递首任务，任一成立即 true
+/// ---
 /// RESTART-RESUME-001 (0.4.8): true if the agent has any signal of prior
 /// interaction whose context would be lost by silent fresh-start. Checks
 /// `first_send_at` (leader→worker delivery), `last_result_at` (worker
@@ -90,6 +136,12 @@ pub(crate) fn restart_agent_has_context_to_preserve(agent: &serde_json::Value) -
         .unwrap_or(false)
 }
 
+/// ---
+/// purpose: 判断该席位从未被捕获过会话，因而可以安全地直接 fresh
+/// params:
+///   session_id: 外部已知的会话 id，与席位行里的一并检查
+/// returns: 无会话且无待保留上下文时为 true
+/// ---
 /// RESTART-RESUME-001: an agent is "never-captured" when its session_id is
 /// absent AND there is no context to preserve. Such an agent is safe to
 /// auto-fresh without `--allow-fresh` and should NOT be required to capture
@@ -154,6 +206,10 @@ fn normalize_iso_separator(raw: &str) -> String {
     out
 }
 
+/// ---
+/// purpose: 给出与 Python 一致的类型名
+/// returns: NoneType、str、bool、list、dict、int 或 float
+/// ---
 /// Python `type(value).__name__` 映射(`orchestration.py:446`):corrupt first_send_at
 /// 条目的 `raw_first_send_at_type` golden。锁死跨语言一致:`null→"NoneType"`、`""/"x"→"str"`、
 /// `0/123→"int"`、`false→"bool"`、`[]→"list"`、`{}→"dict"`、float→`"float"`。
@@ -176,6 +232,14 @@ pub(crate) fn python_type_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// ---
+/// purpose: 纯计算出整队的 restart 计划
+/// params:
+///   allow_fresh: 允许无会话席位改跑全新会话
+/// returns: 每个非 paused 席位的 resume 决策、损坏的 first_send_at 条目与不可 resume 名单
+/// errors: 计算过程中的错误以 LifecycleError 返回
+/// contract_id: lifecycle.selection.classify_restart_plan
+/// ---
 /// Route B 全量验证(纯计算,**无破坏性副作用**;`_emit_resume_decisions` +
 /// `_collect_corrupt_first_send_at`,`orchestration.py:430/467`)。读 fixture state 的
 /// `agents.<id>`,对每非 paused worker:
@@ -193,6 +257,14 @@ pub(crate) fn classify_restart_plan(
     classify_restart_plan_with_resume_validation(None, state, allow_fresh)
 }
 
+/// ---
+/// purpose: 同上，并可带 workspace 以校验 resume 依据是否真的在盘上
+/// params:
+///   workspace: 给出时才做落盘依据校验
+/// returns: 同 classify_restart_plan
+/// errors: 计算过程中的错误以 LifecycleError 返回
+/// contract_id: lifecycle.selection.classify_restart_plan
+/// ---
 pub(crate) fn classify_restart_plan_with_resume_validation(
     workspace: Option<&Path>,
     state: &serde_json::Value,

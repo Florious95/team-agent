@@ -1,3 +1,32 @@
+//! ---
+//! purpose: 各 provider 的 MCP 配置落盘与 argv 指向，含 grok 目录作用域配置的清洗与前置检查
+//! contract:
+//!   provides:
+//!     - name: resolve_mcp_config
+//!       what: 把 MCP 配置里的 workspace、agent_id 与 team_id 占位符替换掉
+//!     - name: write_worker_mcp_config_for_provider
+//!       what: 写出 per-agent 的 MCP 配置文件，copilot 走字段名翻译
+//!     - name: apply_grok_mcp_overlay
+//!       what: 写 workspace 下 grok 的项目作用域配置，是该文件的唯一写者
+//!     - name: reconcile_grok_toml_per_seat_keys
+//!       what: 起 grok 席前清掉共享 toml 里遗留的 per-seat 键并留审计事件
+//!     - name: ensure_grok_login_and_folder_trust
+//!       what: grok 未登录或目录未信任时拒绝起席
+//!     - name: point_native_mcp_config_at_file
+//!       what: 把 argv 里的 MCP 配置参数改指到已落盘的文件
+//!   depends:
+//!     - crate::provider::McpConfig
+//!     - crate::model::permissions
+//!     - crate::event_log::EventLog
+//!     - crate::lifecycle::profile_launch
+//!     - std::fs
+//! boundary:
+//!   - 不读也不写 provider 的凭据文件，只判断登录态文件是否存在且非空
+//!   - 审计事件只落键名，不落键值
+//!   - 清洗共享 toml 时不删未知键，未知不等于可删
+//!   - 清洗后校验失败一律拒绝起席，不带着脏配置继续
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +43,10 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 把 MCP 配置里的占位符替换成本次 workspace、席位与团队
+/// returns: 替换后的配置
+/// ---
 pub(crate) fn resolve_mcp_config(
     config: crate::provider::McpConfig,
     workspace: &Path,
@@ -25,6 +58,10 @@ pub(crate) fn resolve_mcp_config(
     }
 }
 
+/// ---
+/// purpose: 递归替换 JSON 里字符串中的三个占位符
+/// returns: 同结构的新值，非字符串标量原样返回
+/// ---
 pub(super) fn resolve_mcp_placeholders(
     value: serde_json::Value,
     workspace: &Path,
@@ -57,6 +94,12 @@ pub(super) fn resolve_mcp_placeholders(
     }
 }
 
+/// ---
+/// purpose: 写出 per-agent 的 MCP 配置文件，不做 provider 特化
+/// returns: 写出的文件路径
+/// errors: 建目录、序列化或写文件失败时返回 StatePersist
+/// contract_id: lifecycle.mcp_config.write_worker_config
+/// ---
 pub(crate) fn write_worker_mcp_config(
     workspace: &Path,
     agent_id: &str,
@@ -65,6 +108,14 @@ pub(crate) fn write_worker_mcp_config(
     write_worker_mcp_config_for_provider(workspace, agent_id, config, None)
 }
 
+/// ---
+/// purpose: 写出 per-agent 的 MCP 配置文件，copilot 先把 type 字段翻成 transport
+/// params:
+///   provider: 为 copilot 时做字段名翻译，其余原样写
+/// returns: 写出的文件路径
+/// errors: 建目录、序列化或写文件失败时返回 StatePersist
+/// contract_id: lifecycle.mcp_config.write_worker_config
+/// ---
 /// C-3-4 cr verdict v2 — Copilot 的 mcp config schema 字段名是 `transport`
 /// (实测 cmd-mcp-add 原文取值 stdio|http|sse),不是 canonical 的 `type`。当
 /// provider==Copilot 时写出文件前先做 type→transport 翻译;其它 provider 不动。
@@ -198,6 +249,11 @@ fn spec_grok_ids(spec: &Value) -> Vec<String> {
     ids
 }
 
+/// ---
+/// purpose: 清掉 grok 共享 toml 里遗留的 per-seat 键，并写一条只含键名的审计事件
+/// returns: 文件不存在或本就没有 per-seat 键时直接成功
+/// errors: 文件读不出、清洗后仍残留或审计事件写不出时返回 RequirementUnmet
+/// ---
 /// Reconcile `<cwd>/.grok/config.toml` before any grok start: drop leftover
 /// framework per-seat keys (`is_per_seat_env_key`), leave user/shared keys,
 /// emit an audit event with names only. Hung only from
@@ -273,6 +329,12 @@ fn write_grok_config_toml(dir: &Path, body: &str) -> Result<PathBuf, std::io::Er
     Ok(path)
 }
 
+/// ---
+/// purpose: 构造同一 workspace 已被别的 grok 席占用的拒绝错误
+/// params:
+///   seats: 已占用该目录的席位名，写进错误正文
+/// returns: 带 error/reason/workspace/grok_seats 的 RequirementUnmet
+/// ---
 pub(crate) fn grok_shared_cwd_error(cwd: &Path, seats: &[String]) -> LifecycleError {
     LifecycleError::RequirementUnmet(format!(
         "error: grok seat already occupies this workspace\n\
@@ -318,6 +380,13 @@ fn grok_occupied_cwd_error(
     ))
 }
 
+/// ---
+/// purpose: 起 grok 席前确认已登录且该目录已被信任
+/// params:
+///   cwd: 席位的工作目录，用于判断目录信任
+/// returns: 通过返回空值；关闭 folder-trust 的环境变量下跳过信任检查
+/// errors: HOME 未设、登录态文件缺失或为空、目录未被信任时返回 RequirementUnmet
+/// ---
 /// 未登录 / 目录未信任时不许起出「能收信、没有手」的 grok 席。
 /// 登录态看 `$HOME/.grok/auth.json`；目录信任看 `$HOME/.grok/trusted_folders.toml`
 /// （与 grok `--trust` / `/hooks-trust` 同一份；未信任则项目作用域 MCP 不生效）。
@@ -399,6 +468,13 @@ fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
     out
 }
 
+/// ---
+/// purpose: 写 workspace 下 grok 的项目作用域 MCP 配置，服务名固定为 team_orchestrator
+/// params:
+///   mcp_config: 已解析的 MCP 配置，须含 team_orchestrator 条目与 command
+/// returns: 成功返回空值；写前先清 per-seat 键，已有表里的未知环境键会被保留
+/// errors: 缺条目或缺 command 时返回 StatePersist，清洗失败透传 RequirementUnmet，写文件失败返回 StatePersist
+/// ---
 /// Grok CLI 没有 `--mcp-config`。同 `apply_cursor_agent_rules_overlay`：launch
 /// 路径写一份 provider 实际会读的文件。Grok 只认项目作用域
 /// `<cwd>/.grok/config.toml`（`grok mcp add --scope project` 的产物）。
@@ -534,6 +610,10 @@ fn upsert_toml_table_prefixes(existing: &str, tables: &[&str], stanza: &str) -> 
     }
 }
 
+/// ---
+/// purpose: 把 MCP 配置里每个 server 的 type 字段名换成 transport
+/// returns: 同结构的新值，其余字段全部保留；非对象原样返回
+/// ---
 /// C-3-4 cr verdict v2 — McpConfig.raw 是 `{name: {type, command, args, env}}` 形;
 /// copilot mcp add schema 取 `transport` 替 `type`(stdio|http|sse 同值)。仅
 /// 字段名变换,其余字段全保留。
@@ -560,6 +640,12 @@ pub(super) fn copilot_translate_mcp_servers(raw: &serde_json::Value) -> serde_js
     serde_json::Value::Object(translated)
 }
 
+/// ---
+/// purpose: 把 argv 里 provider 原生的 MCP 配置参数改指到已落盘的文件
+/// params:
+///   argv: 就地改写；claude 系改 --mcp-config 的值，copilot 改 --additional-mcp-config 并加 @ 前缀
+/// returns: argv 里没有对应参数时什么都不做
+/// ---
 pub(crate) fn point_native_mcp_config_at_file(
     argv: &mut [String],
     provider: Provider,
@@ -589,6 +675,11 @@ pub(crate) fn point_native_mcp_config_at_file(
     }
 }
 
+/// ---
+/// purpose: 解析该席位的权限并序列化成 JSON
+/// returns: 含 agent_id、provider、排序后的工具串、逐工具的执行强度与是否有仅提示项
+/// errors: 权限解析失败时返回 ModelError
+/// ---
 pub(super) fn permissions_json(
     agent: &Value,
     id: &str,

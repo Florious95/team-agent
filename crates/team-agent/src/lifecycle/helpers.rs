@@ -1,3 +1,29 @@
+//! ---
+//! purpose: runtime 快照的诊断性落盘，以及 plan 状态文件的路径与读写
+//! contract:
+//!   provides:
+//!     - name: save_team_runtime_snapshot
+//!       what: 把 runtime state 以带 not_authoritative 标记的诊断副本写到 legacy 每 session 路径
+//!     - name: team_snapshot_path
+//!       what: 给出某 session 的诊断快照路径
+//!     - name: plan_state_path
+//!       what: 给出某 plan 的状态文件路径
+//!     - name: plan_lock_path
+//!       what: 给出某 plan 的锁文件路径
+//!     - name: read_plan_state
+//!       what: 读取并反序列化 plan 状态
+//!     - name: save_plan_state
+//!       what: 序列化 plan 状态并经临时文件 rename 落盘
+//!   depends:
+//!     - crate::state::persist
+//!     - crate::model::paths
+//!     - std::fs
+//! boundary:
+//!   - 快照文件不是权威 runtime state，产品写路径不得调用它
+//!   - plan 锁文件只被创建，本模块不对它加锁，也不提供并发互斥
+//!   - 不解释 plan 语义，只做路径、序列化与落盘
+//! maturity: wired
+//! ---
 //!
 //! lifecycle::helpers —— runtime snapshot 原子写(bug-084)+ plan-state 路径/读取。
 
@@ -7,6 +33,13 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+/// ---
+/// purpose: 把 runtime state 写成带诊断标记的每 session 快照副本
+/// params:
+///   state: 待快照的 runtime state，必须含 session_name 字段
+/// returns: 写出的快照文件路径
+/// errors: 缺 session_name、建目录、写临时文件或 rename 失败时返回 StatePersist
+/// ---
 ///
 /// `save_team_runtime_snapshot(workspace, state)` — Foundation-0 F0-2:
 /// this is now a **diagnostic-only** legacy per-session snapshot writer.
@@ -68,6 +101,12 @@ pub(crate) fn save_team_runtime_snapshot(
     Ok(path)
 }
 
+/// ---
+/// purpose: 给出某 session 的诊断快照文件路径
+/// params:
+///   session_name: 原始 session 名，非字母数字与下划线点横线的字符会被替换
+/// returns: runtime 目录下 teams 子目录中的 state.json 路径
+/// ---
 pub fn team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf {
     crate::model::paths::runtime_dir(workspace)
         .join("teams")
@@ -98,10 +137,18 @@ fn safe_snapshot_name(raw: &str) -> String {
     }
 }
 
+/// ---
+/// purpose: 给出某 plan 的状态文件路径
+/// returns: runtime 目录下 orchestrator 子目录中的 plan state 文件路径
+/// ---
 pub(crate) fn plan_state_path(workspace: &Path, plan_id: &PlanId) -> PathBuf {
     plan_state_dir(workspace).join(format!("plan-{}.state.json", plan_id.as_str()))
 }
 
+/// ---
+/// purpose: 给出某 plan 的锁文件路径
+/// returns: runtime 目录下 orchestrator 子目录中的 plan lock 文件路径
+/// ---
 pub(crate) fn plan_lock_path(workspace: &Path, plan_id: &PlanId) -> PathBuf {
     plan_state_dir(workspace).join(format!("plan-{}.lock", plan_id.as_str()))
 }
@@ -110,6 +157,11 @@ fn plan_state_dir(workspace: &Path) -> PathBuf {
     crate::model::paths::runtime_dir(workspace).join("orchestrator")
 }
 
+/// ---
+/// purpose: 从文件读取并反序列化 plan 状态
+/// returns: 解析出的 PlanState
+/// errors: 文件读不到或 JSON 不合法时都返回 InvalidPlan
+/// ---
 pub(crate) fn read_plan_state(path: &Path) -> Result<PlanState, LifecycleError> {
     let data = fs::read_to_string(path)
         .map_err(|e| LifecycleError::InvalidPlan(format!("plan not found: {e}")))?;
@@ -117,6 +169,11 @@ pub(crate) fn read_plan_state(path: &Path) -> Result<PlanState, LifecycleError> 
         .map_err(|e| LifecycleError::InvalidPlan(format!("invalid plan state: {e}")))
 }
 
+/// ---
+/// purpose: 序列化 plan 状态，经同目录临时文件 rename 落盘，并确保锁文件存在
+/// returns: 写出的 plan 状态文件路径
+/// errors: 建目录、创建锁文件、写临时文件或 rename 失败时返回 StatePersist
+/// ---
 pub(crate) fn save_plan_state(
     workspace: &Path,
     state: &PlanState,

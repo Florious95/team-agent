@@ -1,3 +1,32 @@
+//! ---
+//! purpose: 冷启后把席位实况投影进 runtime state，并做团队级合并、投影与 owner 清洗
+//! contract:
+//!   provides:
+//!     - name: persist_spawn_agent_state
+//!       what: 按 spawn 结果与 tmux 实况写出各席位状态，分 running/paused/spawn_failed
+//!     - name: save_launched_team_state_for_key
+//!       what: 把本次团队状态并入既有 state，投影后经 repository 落盘
+//!     - name: merge_workspace_team_state_with_key
+//!       what: 以显式团队键把本次状态并进 teams 表，不丢既有团队
+//!     - name: drop_worker_pane_seeded_owner
+//!       what: 识别出被 worker pane 误种的 owner 并改种 unbound owner
+//!   depends:
+//!     - crate::state::repository
+//!     - crate::state::projection
+//!     - crate::state::persist
+//!     - crate::state::ownership
+//!     - crate::tmux_backend
+//!     - crate::lifecycle::launch::agent_state
+//!     - crate::lifecycle::launch::identity
+//!     - crate::lifecycle::launch::leader_context
+//!     - crate::lifecycle::launch::spec_state
+//!     - crate::lifecycle::launch::worker_env
+//! boundary:
+//!   - 只写 state，不 spawn、不 kill、不开显示
+//!   - 落盘一律经 StateRepository 带写意图，不直接改文件
+//!   - owner 归属判不准时倒向 unbound，不认领他队的 pane
+//! maturity: wired
+//! ---
 //!
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +50,14 @@ use super::leader_context::{
 use super::spec_state::{has_positive_caller_leader_env, spec_agent_values};
 use super::worker_env::{agent_is_paused, spawn_timestamp_for_agent};
 
+/// ---
+/// purpose: 把本次 spawn 的结果写成 runtime state 里的各席位状态
+/// params:
+///   started: 本次 spawn 成功返回的席位
+///   transport: 用于查活窗口与 pane pid
+/// returns: 成功返回空值。spec 里 paused 的席位记 paused，spawn 后窗口不在的记 spawn_failed，其余记 running
+/// errors: 读或写 runtime state 失败时返回 StatePersist
+/// ---
 pub(super) fn persist_spawn_agent_state(
     workspace: &Path,
     spec_path: &Path,
@@ -148,6 +185,10 @@ pub(super) fn persist_spawn_agent_state(
     save_launched_team_state_for_key(workspace, &state, Some(&team_id), None)
 }
 
+/// ---
+/// purpose: 给出各已起席位对应 pane 的进程号
+/// returns: agent_id 到 pane pid 的映射，查不到的席位不出现
+/// ---
 pub(super) fn pane_pids_by_started_agent(
     transport: &dyn Transport,
     started: &[StartedAgent],
@@ -165,6 +206,10 @@ pub(super) fn pane_pids_by_started_agent(
         .collect()
 }
 
+/// ---
+/// purpose: 由 agent id 找出它这次 spawn 的目标 pane
+/// returns: 命中的 pane 串，找不到时为空串
+/// ---
 pub(super) fn agent_id_to_pane_id<'a>(started: &'a [StartedAgent], agent_id: &str) -> &'a str {
     started
         .iter()
@@ -173,6 +218,12 @@ pub(super) fn agent_id_to_pane_id<'a>(started: &'a [StartedAgent], agent_id: &st
         .unwrap_or("")
 }
 
+/// ---
+/// purpose: 不带显式团队键地保存本次团队状态
+/// returns: 成功返回空值
+/// errors: 落盘失败时返回 StatePersist
+/// contract_id: lifecycle.state_projection.save_launched_team_state
+/// ---
 pub(super) fn save_launched_team_state(
     workspace: &Path,
     launched: &serde_json::Value,
@@ -180,6 +231,15 @@ pub(super) fn save_launched_team_state(
     save_launched_team_state_for_key(workspace, launched, None, None)
 }
 
+/// ---
+/// purpose: 保存本次团队状态的实体实现，含团队键钉死、owner 清洗、合并与投影
+/// params:
+///   team_key: 显式团队键，为空则由 state 推算
+///   added_agent_id: 本次新增席位 id，写进写意图
+/// returns: 成功返回空值
+/// errors: 落盘失败时返回 StatePersist
+/// contract_id: lifecycle.state_projection.save_launched_team_state
+/// ---
 pub(super) fn save_launched_team_state_for_key(
     workspace: &Path,
     launched: &serde_json::Value,
@@ -240,6 +300,11 @@ pub(super) fn save_launched_team_state_for_key(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
+/// ---
+/// purpose: 本次状态没写 leader 拓扑字段时，从既有状态里补回来
+/// params:
+///   launched: 就地补 is_external_leader 与 leader_client，已有同名键不覆盖
+/// ---
 pub(super) fn preserve_existing_leader_topology(
     existing: &serde_json::Value,
     launched_key: &str,
@@ -262,6 +327,11 @@ pub(super) fn preserve_existing_leader_topology(
     }
 }
 
+/// ---
+/// purpose: 无 leader 身份环境且 owner pane 形如首席 pane 时改种 unbound owner
+/// params:
+///   launched: 就地改写
+/// ---
 pub(super) fn drop_bare_worker_seeded_owner(launched: &mut serde_json::Value, launched_key: &str) {
     if has_positive_caller_leader_env() {
         return;
@@ -276,6 +346,10 @@ pub(super) fn drop_bare_worker_seeded_owner(launched: &mut serde_json::Value, la
     }
 }
 
+/// ---
+/// purpose: 以显式团队键把本次状态并进 teams 表
+/// returns: 合并后的 state；既有顶层 session 名为空或团队键相同时保留既有 teams 并覆盖本键，否则以既有状态为底再补进本次团队
+/// ---
 pub(super) fn merge_workspace_team_state_with_key(
     existing: &serde_json::Value,
     launched: &serde_json::Value,
@@ -360,6 +434,11 @@ mod merge_workspace_team_state_with_key_tests {
     }
 }
 
+/// ---
+/// purpose: 把 teams 表里本团队的绑定字段提到顶层
+/// params:
+///   launched: 就地补 leader_receiver、team_owner 与 owner_epoch，已有同名键不覆盖
+/// ---
 pub(super) fn promote_launched_binding_from_team_entry(
     launched: &mut serde_json::Value,
     launched_key: &str,
@@ -383,6 +462,11 @@ pub(super) fn promote_launched_binding_from_team_entry(
     }
 }
 
+/// ---
+/// purpose: 顶层 owner 的 pane 不像真实 pane 时把顶层绑定字段整组删掉
+/// params:
+///   state: 就地删 leader_receiver、team_owner 与 owner_epoch
+/// ---
 pub(super) fn drop_unbound_top_level_owner(state: &mut serde_json::Value) {
     let pane = state
         .get("team_owner")
@@ -399,6 +483,12 @@ pub(super) fn drop_unbound_top_level_owner(state: &mut serde_json::Value) {
     }
 }
 
+/// ---
+/// purpose: 本次 owner 的 pane 已属于别的团队时，改种 unbound owner 或整组删除
+/// params:
+///   existing: 既有 state，用于判断 pane 归属
+///   launched: 就地改写
+/// ---
 pub(super) fn drop_foreign_seeded_owner(
     existing: &serde_json::Value,
     launched_key: &str,
@@ -434,6 +524,13 @@ pub(super) fn drop_foreign_seeded_owner(
     }
 }
 
+/// ---
+/// purpose: 识别 owner 是被 worker 自己的 pane 误种的情形并改种 unbound owner
+/// params:
+///   started: 本次起的席位，用于判断 pane 是否属于 worker
+///   worker_tmux_socket: worker 侧 socket 名，与调用方 socket 比对
+/// returns: 只有在无 leader 身份环境、pane 与调用方 TMUX_PANE 相同且看起来是 worker pane 时才改种
+/// ---
 pub(super) fn drop_worker_pane_seeded_owner(
     launched: &mut serde_json::Value,
     launched_key: &str,
@@ -466,6 +563,10 @@ pub(super) fn drop_worker_pane_seeded_owner(
     }
 }
 
+/// ---
+/// purpose: 判断某 pane 是否像本次起的 worker 的 pane
+/// returns: 形如首席 pane，或与任一席位目标互为前缀时为 true
+/// ---
 pub(super) fn seeded_pane_looks_like_worker(pane: &str, started: &[StartedAgent]) -> bool {
     pane.ends_with("-first")
         || started.iter().any(|agent| {
@@ -475,6 +576,10 @@ pub(super) fn seeded_pane_looks_like_worker(pane: &str, started: &[StartedAgent]
         })
 }
 
+/// ---
+/// purpose: 给出 worker 侧使用的 tmux socket 名
+/// returns: transport 是 tmux 后端时按 workspace 推出 socket 名，否则 None
+/// ---
 pub(super) fn launched_worker_tmux_socket(
     transport: &dyn Transport,
     workspace: &Path,
@@ -486,6 +591,10 @@ pub(super) fn launched_worker_tmux_socket(
     }
 }
 
+/// ---
+/// purpose: 判断两侧 socket 是否一致或不可判
+/// returns: 两侧都已知时比相等；调用方已知而 worker 未知时为 false；调用方未知时一律为 true
+/// ---
 pub(super) fn tmux_sockets_match_or_unknown(
     caller_socket: Option<&str>,
     worker_socket: Option<&str>,

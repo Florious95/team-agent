@@ -1,4 +1,42 @@
-//!
+//! ---
+//! purpose: 会话捕获通道——把「席位有 pending id 但还没有权威会话」这件事，经扫描候选 + 分配器，收敛成 state 上的原子四元组(session_id + rollout_path + captured_at + captured_via)，收敛不了就写明确的诊断态
+//! contract:
+//!   provides:
+//!     - name: capture_missing_provider_sessions_once
+//!       what: 单次捕获通道:挑 pending 席位 → adapter 扫候选 → 分配 → 写四元组或写 ambiguous/identity_mismatch/transcript_missing
+//!     - name: converge_missing_provider_sessions
+//!       what: 破坏性生命周期门用的有界收敛屏障:显式 deadline + poll_interval，反复调上一函数直到无缺口或超预算
+//!     - name: recover_resume_session_from_events
+//!       what: 从 event log 的 session.captured 记录补回缺失的四元组，captured_via=event_log_repair
+//!     - name: incomplete_resumable_agent_ids
+//!       what: 列出「provider 支持 resume 但四元组不完整」的席位 id，已排序
+//!     - name: incomplete_interacted_resumable_agent_ids
+//!       what: 上一条再筛「有过 first_send_at」的子集
+//!     - name: CapturePassReport
+//!       what: 单次捕获的结果面:changed/pending/assigned/ambiguous/identity_mismatches/capture_failures/candidate_count_by_agent/transcript_missing
+//!     - name: SessionConvergence
+//!       what: 收敛结果:converged 是否达成、changed、剩余 missing、预算与实耗
+//!     - name: SessionConvergenceProgress
+//!       what: 每轮回调给调用方的进度快照
+//!     - name: SESSION_CAPTURE_CONVERGENCE_DEADLINE_MS
+//!       what: 默认收敛预算 12s(restart 复用同一常量)
+//!     - name: SESSION_CAPTURE_CONVERGENCE_POLL_MS
+//!       what: 默认轮询间隔 250ms
+//!   requires:
+//!     - name: crate::provider::ProviderAdapter
+//!       what: 候选扫描一律经 adapter.capture_session_candidates，本文件不直接读 provider 存档
+//!     - name: crate::state::identity_keys::SessionAttributionKey
+//!       what: 分配器的 claimed 键空间(Session/Transcript × team-scoped/global)
+//!     - name: crate::event_log::EventLog
+//!       what: event-log 修复通道的事实源
+//! boundary:
+//!   - 四元组是原子的:缺 session_id 或 rollout_path 就整条不写，宁可留 pending 也不写半条
+//!   - 不发事件——transcript_missing 只进报告，事件由 coordinator tick 节流发出
+//!   - 不启动/销毁席位，不决定 restart 走向;只提供事实与诊断态
+//!   - capture_state 只是诊断字段，写它不等于写权威四元组
+//!   - 歧义只在 finalize_ambiguous=true 的那一趟才落盘;收敛超时的那趟不 finalize
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -96,6 +134,26 @@ pub struct SessionConvergenceProgress {
 /// unbounded wait: callers must pass an explicit `deadline` and `poll_interval`.
 /// Each poll runs the shared allocator once, reports progress, and sleeps until
 /// either all required agents have provider sessions or the deadline expires.
+/// ---
+/// purpose: 有界收敛屏障——在显式预算内反复跑单次捕获，直到调用方指定的必需席位都拿到会话，或预算耗尽
+/// params:
+///   state: 就地修改的 state JSON;每轮的写入都直接落在它上面
+///   adapter_for: provider → adapter 的工厂
+///   deadline: 总预算;绝不无限等待
+///   poll_interval: 轮询间隔;同时用作单次捕获的 timeout(取秒数，至少 1)
+///   missing_agent_ids: 由调用方定义「谁必须有会话」——本函数不自己判定必需集
+///   progress: 每轮回调;返回 Err 即整体中止并把该错误上抛
+/// returns: converged=true 表示 missing 已空;converged=false 表示预算到期仍有缺口，两者都是正常返回而非错误
+/// errors: 单次捕获的 ProviderError 与 progress 回调的错误都被转成 String 上抛
+/// contract:
+///   provides:
+///     - name: converge_missing_provider_sessions
+///       what: 只有 missing 清空后才会补跑一趟 finalize_ambiguous=true;超时路径不补跑
+/// boundary:
+///   - 不是机会式单次捕获，也不是无界等待——预算必须由调用方显式给出
+///   - 超时返回时歧义态未被 finalize:行上不会出现 attribution_ambiguous 标记;capture_state 保持前值(可能缺失)——非歧义的 pending 席位仍会被单次捕获写成 pending_first_turn / pending_context_fork / transcript_missing，这不受 finalize 开关控制
+///   - progress 只报告不决策;是否继续由预算决定
+/// ---
 pub fn converge_missing_provider_sessions<F, M, P>(
     state: &mut Value,
     adapter_for: &mut F,
@@ -167,6 +225,25 @@ where
     }
 }
 
+/// ---
+/// purpose: 跑一趟捕获——为每个还缺权威会话的席位扫候选、经分配器定归属，把能确定的写成原子四元组，把不能确定的写成诊断态
+/// params:
+///   state: 就地修改的 state JSON;无 agents 对象时直接返回空报告
+///   adapter_for: provider → adapter 的工厂;扫描一律经 adapter
+///   finalize_ambiguous: false 时歧义只进报告不落盘;true 时才把 attribution_ambiguous / capture_state 写进 agent 行
+///   timeout_s: 传给 adapter.capture_session_candidates 的单席位扫描预算
+/// returns: CapturePassReport;changed 表示 state 被改过，调用方据此决定是否持久化
+/// errors: 当前实现不产生 Err(Result 签名为与调用方同形);取不到 agents 视图返回空报告;单席位扫描失败进 capture_failures 且该席位保持 pending，不中断整趟
+/// contract:
+///   provides:
+///     - name: capture_missing_provider_sessions_once
+///       what: 写权威四元组的唯一常规通道(另一条是 event-log 修复)
+/// boundary:
+///   - 候选的 embedded worker id 与本席位不符 → 记 identity_mismatch 并跳过，绝不写会话
+///   - 候选 session id 与 pending expected id 不符 → 记 ambiguous 并跳过，绝不写会话
+///   - _pending_session_id 与行上 session_id 不一致时不 stamp captured——重开在途，旧会话不得被宣告为新席位的权威
+///   - 不发事件;transcript_missing 只进报告
+/// ---
 pub fn capture_missing_provider_sessions_once<F>(
     state: &mut Value,
     adapter_for: &mut F,
@@ -513,6 +590,19 @@ fn classify_pending_capture_state(
     }
 }
 
+/// ---
+/// purpose: 列出「provider 本可 resume、但会话事实还不完整」的席位——即捕获通道该继续照看的那批
+/// params:
+///   state: 只读的 state JSON;无 agents 对象时返回空
+/// returns: 按 agent id 升序的清单
+/// contract:
+///   provides:
+///     - name: incomplete_resumable_agent_ids
+///       what: 只读判定，不修改 state
+/// boundary:
+///   - 用全局 get_adapter 取 adapter，不接受注入——测试要替身请走 capture 通道那两个函数
+///   - 不区分「从没捕获过」与「捕获过但四元组残缺」，两者都在清单里
+/// ---
 pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
     let Some(agents) = state.get("agents").and_then(Value::as_object) else {
         return Vec::new();
@@ -531,6 +621,28 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
     out
 }
 
+/// ---
+/// purpose: 会话四元组缺失时的第二条修复通道——倒序翻 event log，用该席位最近一条可信的 session.captured 记录把行补全
+/// params:
+///   workspace: event log 所在工作区
+///   agent_id: 目标席位;事件的 agent_id 或 worker_id 命中即算该席位
+///   previous: 修复前的 agent 行;provider 字段决定要不要套 claude leader-marker 过滤
+///   adapter: 用于二次确认候选会话确实可 resume
+///   auth_mode: 传给 session_is_resumable 的鉴权模式
+///   exclude_session_ids: 调用方给出的黑名单(例如刚被判为不可用的会话)
+/// returns: Some(补好四元组的新行) 表示找到可用记录;None 表示没找到，或先撞上 discard.session_tombstone 而主动放弃
+/// errors: 读 event log 的 Io 错误、以及 session_is_resumable 的 ProviderError
+/// contract:
+///   provides:
+///     - name: recover_resume_session_from_events
+///       what: 修复结果一定是完整四元组;captured_at 缺事件 ts 时退到当前时间，captured_via 固定 event_log_repair
+/// boundary:
+///   - 只读 event log 与 rollout 路径存在性，不扫 provider 存档、不调分配器
+///   - 不走分配器的 claimed-key 冲突检查，只看 exclude_session_ids 与 tombstone
+///   - rollout_path 存在性用 exists()——对目录型 backing(grok/cursor)只要目录在就为真
+///   - claude 家族额外过滤 leader-marker transcript;其它 provider 无等价归属过滤
+///   - 修复成功会清掉 attribution_ambiguous 标记
+/// ---
 pub fn recover_resume_session_from_events(
     workspace: &Path,
     agent_id: &str,
@@ -647,6 +759,19 @@ fn event_rollout_path(event: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// ---
+/// purpose: 在「会话不完整」清单上再筛出真正被用过的席位——有 first_send_at 才算交互过
+/// params:
+///   state: 只读的 state JSON
+/// returns: 按 agent id 升序的子集
+/// contract:
+///   provides:
+///     - name: incomplete_interacted_resumable_agent_ids
+///       what: incomplete_resumable_agent_ids 的过滤视图，只读
+/// boundary:
+///   - 交互判据只看 first_send_at 非空，不看 last_result_at / pane 输出
+///   - 从没派过活的席位不进清单——沉默席位不算捕获失败
+/// ---
 pub fn incomplete_interacted_resumable_agent_ids(state: &Value) -> Vec<String> {
     let mut out = incomplete_resumable_agent_ids(state)
         .into_iter()
@@ -1397,6 +1522,20 @@ pub(crate) mod test_support {
     }
 
     impl CaptureCandidatesAdapter {
+        /// ---
+        /// purpose: 造一个可控的测试替身 adapter:指定 provider，并可让某个席位的候选扫描必定失败
+        /// params:
+        ///   provider: 替身自称的 provider
+        ///   fail_agent_id: 该席位的 capture_session_candidates 返回错误;None 表示都不失败
+        ///   error: 失败时携带的错误文本
+        /// returns: 未挂候选表的替身;候选表另经 with_candidates 注入
+        /// contract:
+        ///   provides:
+        ///     - name: new
+        ///       what: 纯构造，无 I/O
+        /// boundary:
+        ///   - 仅 cfg(test) 存在，不进产品二进制
+        /// ---
         pub(crate) fn new(provider: Provider, fail_agent_id: Option<&str>, error: &str) -> Self {
             Self {
                 provider,
@@ -1406,6 +1545,18 @@ pub(crate) mod test_support {
             }
         }
 
+        /// ---
+        /// purpose: 给测试替身挂一张 agent_id → 候选列表的表，用来构造分配器层面的交叉归属回归
+        /// params:
+        ///   candidates_by_agent: 按席位 id 索引的候选;未列入的席位仍返回空列表
+        /// returns: 挂好表的自身(builder 风格，消费 self)
+        /// contract:
+        ///   provides:
+        ///     - name: with_candidates
+        ///       what: 只改替身内部状态，不触发任何扫描
+        /// boundary:
+        ///   - 仅 cfg(test) 存在，不进产品二进制
+        /// ---
         pub(crate) fn with_candidates(
             mut self,
             candidates_by_agent: BTreeMap<String, Vec<CapturedSessionCandidate>>,

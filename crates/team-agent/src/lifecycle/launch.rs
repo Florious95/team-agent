@@ -28,6 +28,16 @@ use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
 
+/// ---
+/// purpose: 冷启全队的默认入口，按 spec 所在目录绑定 per-team tmux socket 后转 launch_with_transport
+/// params:
+///   spec_path: 已编译 spec 的路径，其父目录即 team 目录
+///   dry_run: 只出路由与权限，不 spawn 也不落盘
+///   auto_approve: 当前为 no-op
+///   skip_profile_smoke: 当前为 no-op
+/// returns: LaunchReport
+/// errors: 透传 launch_with_transport 的错误
+/// ---
 ///
 /// `launch(spec_path, dry_run, auto_approve, skip_profile_smoke)`(`launch/core.py:29`)。
 /// 冷启全队:路由 tasks、resolve 权限/危险审批门、session 冲突检查(冲突 →
@@ -52,6 +62,13 @@ pub fn launch(
     )
 }
 
+/// ---
+/// purpose: 由 spec 路径推出 workspace，再转 launch_with_transport_in_workspace
+/// params:
+///   transport: 已绑定 team socket 的 transport
+/// returns: LaunchReport
+/// errors: 透传 launch_with_transport_in_workspace 的错误
+/// ---
 pub(crate) fn launch_with_transport(
     spec_path: &Path,
     dry_run: bool,
@@ -71,6 +88,17 @@ pub(crate) fn launch_with_transport(
     )
 }
 
+/// ---
+/// purpose: 冷启全队的实体实现，编译 spec、检查 session 冲突、按序 spawn、落 state、出报告
+/// params:
+///   workspace: run workspace 根，事件与 state 都落在这里
+///   spec_path: 已编译 spec 的路径
+///   dry_run: 为真时不 spawn 不落盘，started 为空
+///   auto_approve: 未使用
+///   skip_profile_smoke: 未使用
+/// returns: LaunchReport，其中 leader_receiver_attached 恒 false、session_capture_incomplete_agents 恒空
+/// errors: spec 不存在或解析失败返回 Compile，tmux session 已存在返回 SessionConflict，spawn 与落 state 的错误透传
+/// ---
 pub fn launch_with_transport_in_workspace(
     workspace: &Path,
     spec_path: &Path,

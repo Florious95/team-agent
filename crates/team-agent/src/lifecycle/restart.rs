@@ -1,3 +1,21 @@
+//! ---
+//! purpose: restart 子模块的装配层，转出单席起停重置删、整队重建、plan halt 与 status
+//! contract:
+//!   provides:
+//!     - name: lifecycle_run_workspace
+//!       what: 把入参 workspace 归一成 canonical run workspace
+//!     - name: input_has_no_local_team_context
+//!       what: 入口早退门，判断给定目录附近有没有本地 team 上下文
+//!   depends:
+//!     - crate::model::paths
+//!     - crate::state::selector
+//!     - crate::state::persist
+//!     - crate::tmux_backend
+//! boundary:
+//!   - 本文件只做装配与路径解析，真正的行为在 agent/rebuild/remove/selection 等子文件
+//!   - 不直接拼 provider 命令，也不直接操作 pane
+//! maturity: wired
+//! ---
 //!
 //! lifecycle::restart —— 单 worker 起/停/重置/删 + 整队 Route B 重建 + plan halt/status。
 
@@ -92,6 +110,11 @@ pub use selection::decide_start_mode;
 pub(crate) use selection::classify_restart_plan_with_resume_validation;
 pub(crate) use team_state::write_team_state;
 
+/// ---
+/// purpose: 把调用方给的 workspace 归一成 canonical run workspace
+/// returns: 归一后的绝对路径
+/// errors: 归一失败时返回 StatePersist
+/// ---
 pub(crate) fn lifecycle_run_workspace(
     workspace: &Path,
 ) -> Result<std::path::PathBuf, LifecycleError> {
@@ -142,6 +165,12 @@ fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePath
     })
 }
 
+/// ---
+/// purpose: 判断给定目录既不含 team spec、也不含 .team、也不含 runtime state，且不在 .team 内外一层
+/// params:
+///   workspace: 已经过 canonical_run_workspace 归一的路径
+/// returns: true 表示这里没有本地 team 上下文，调用方应早退
+/// ---
 pub(crate) fn input_has_no_local_team_context(workspace: &Path) -> bool {
     !workspace.join("team.spec.yaml").exists()
         && !workspace.join(".team").exists()

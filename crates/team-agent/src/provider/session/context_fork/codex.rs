@@ -1,4 +1,25 @@
-//!
+//! ---
+//! purpose: codex 的 fork 两件事——把源 rollout 改写成新身份的快照物化出来(materialize)，再验证 CLI 确实认领了它(verify)
+//! contract:
+//!   provides:
+//!     - name: materialize_codex_fork
+//!       what: 读源 rollout 完整记录 → 改 session_meta.id 与 worker 身份 marker → no-clobber 硬链接发布 → 读回自证 → 把 plan 从 `codex fork` 改写成 `codex resume <新 id>`
+//!     - name: CodexForkMaterialization
+//!       what: 物化产物的 RAII 句柄:未 handoff 就 Drop 时删除目标文件
+//!     - name: verify_codex_fork
+//!       what: 有 expected id 时按精确路径+embedded 身份认领;无 expected id 时退到 legacy「唯一变过的新 rollout」路径
+//!   requires:
+//!     - name: crate::provider::session_scan
+//!       what: 认领新 rollout 靠一次性候选扫描，不自己解析目录
+//!     - name: crate::provider::adapter::ForkBackingMaterialization
+//!       what: 句柄实现的对外 trait(path/handoff)
+//! boundary:
+//!   - 改写只动 session_meta.payload.id 与恰好一处 worker 身份 marker;二者数量不是恰好各 1 就整体拒绝，绝不部分改写
+//!   - 发布用 create_new 临时文件 + hard_link，绝不覆盖已存在的目标路径
+//!   - 只服务 Provider::Codex
+//!   - 新 session id 是本地生成的 uuid-v7 形状串，不问 CLI 要
+//! maturity: wired
+//! ---
 use super::*;
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -11,6 +32,16 @@ pub(crate) struct CodexForkMaterialization {
 }
 
 impl CodexForkMaterialization {
+    /// ---
+    /// purpose: 暴露已物化的目标 rollout 路径，供调用方拼 resume 参数与做 fork 验证
+    /// returns: 物化目标文件的绝对路径;句柄还活着时该路径必然存在
+    /// contract:
+    ///   provides:
+    ///     - name: path
+    ///       what: 只借出路径，不转移所有权、不影响 Drop 时的删除决定
+    /// boundary:
+    ///   - 拿到路径不等于拿到保留承诺——不调 handoff 就仍会在 Drop 时被删
+    /// ---
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -38,6 +69,25 @@ impl Drop for CodexForkMaterialization {
     }
 }
 
+/// ---
+/// purpose: 为 codex fork 物化一份改写了会话身份的新 rollout，并把命令计划改成对该新会话的精确 resume
+/// params:
+///   source_path: 源 rollout 文件;新文件发布在它的同一父目录
+///   source_session_id: 源会话 id;源快照的 session_meta.payload.id 必须与之相等，否则拒绝
+///   source_agent_id: 源席位 id，用于定位待替换的 worker 身份 marker
+///   target_agent_id: 目标席位 id，替换后的 marker 内容，并参与读回自证
+///   plan: 就地改写;要求形如 `codex fork ... <source_session_id>`，会被改成 `codex resume ... <新 id>` 并设上 expected_session_id
+/// returns: RAII 句柄——未 handoff 即 Drop 时删除新文件，避免留下半成品存档
+/// errors: Io(源无父目录/源无完整 JSONL 记录/源某行非法 JSON/session_meta 缺 payload.id/id 与源不符/session_meta 或 marker 命中数不是恰好各 1/发布失败/读回身份不符);Command(plan 形状不是可转换的 codex fork)
+/// contract:
+///   provides:
+///     - name: materialize_codex_fork
+///       what: 写盘发生在此;读回校验失败会先删目标文件再返回错误
+/// boundary:
+///   - 只截到源文件最后一个换行处，绝不把半条正在写入的记录带进新快照
+///   - 不改源文件
+///   - 不启动进程、不调 codex CLI——只准备好 backing 与 argv
+/// ---
 pub(crate) fn materialize_codex_fork(
     source_path: &Path,
     source_session_id: &SessionId,
@@ -283,6 +333,27 @@ fn codex_session_v7() -> String {
     )
 }
 
+/// ---
+/// purpose: 验证 codex 已经在物化出来的那条 rollout 上开出了新会话，且该会话的 embedded 身份就是目标席位
+/// params:
+///   source_session_id: 源会话;目标等于它即拒绝
+///   plan: 无 expected_session_id 时整体退到 legacy 路径(靠「唯一一条变过的新 rollout」认领)
+///   before: spawn 前基线;legacy 路径用它排除源会话所在文件与未变文件
+///   expected_backing_path: 有 expected id 时必需——候选路径必须逐字节等于它，不做同目录择新
+///   agent_id: 候选的 embedded worker id 必须等于它，且 positive_agent_id_match 必须为真
+///   spawn_cwd: 构造扫描上下文
+///   spawned_at: 扫描的时间边界
+///   deadline: 轮询预算，每轮间隔 50ms
+/// returns: ContextForkProof，captured_via="context_fork_verified"、attribution_confidence="high"
+/// errors: Rejected(CaptureFailed) 当目标等于源 / 缺物化目标路径;Rejected 亦透传扫描期的 ProviderError;Timeout 当预算内没有满足全部条件的候选
+/// contract:
+///   provides:
+///     - name: verify_codex_fork
+///       what: 只读;认领判据是路径精确相等 + session id 等于 expected + embedded 身份等于 agent_id 三条同时成立
+/// boundary:
+///   - 不写 backing、不改 plan
+///   - legacy 路径(无 expected id)不做身份比对，只要求「不是源会话、不是基线里未变的文件、且全场恰好一条」——多于一条即不认领
+/// ---
 pub(super) fn verify_codex_fork(
     source_session_id: &SessionId,
     plan: &CommandPlan,

@@ -1,3 +1,25 @@
+//! ---
+//! purpose: 零配置一键起队入口，编译角色目录、起全队、判嵌套层级并给出 attach 指引
+//! contract:
+//!   provides:
+//!     - name: quick_start
+//!       what: 由角色目录一键起队
+//!     - name: quick_start_in_workspace_with_display_and_backend
+//!       what: 带显示开关与后端选择的起队入口
+//!     - name: quick_start_with_transport_in_workspace_with_display
+//!       what: 起队的实体实现，含 leader pane 校验、层级门与已有 runtime 的早退
+//!   depends:
+//!     - crate::compiler
+//!     - crate::state::persist
+//!     - crate::transport_factory
+//!     - crate::lifecycle::launch::identity
+//!     - crate::lifecycle::launch::quick_start_transport
+//! boundary:
+//!   - 只管初次起队，已有 runtime 时给出 restart 指引而不接管
+//!   - 显式指定非 tmux 后端时不静默退回 tmux，不可用就如实报错
+//!   - 团队嵌套超过两层直接拒绝
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +36,17 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 由角色目录推出 workspace 后一键起队
+/// params:
+///   agents_dir: 角色定义目录
+///   name: 请求的团队名
+///   yes: 免确认标志
+///   team_id: 显式团队键，优先于 name
+/// returns: 起队报告
+/// errors: 透传实体实现的错误
+/// contract_id: lifecycle.quick_start.entry
+/// ---
 /// `quick_start(agents_dir, name, yes, team_id)`(`diagnose/quick_start.py:18`)。
 /// 面向用户的零配置入口:编译 team_dir → `launch` → autobind leader receiver → 起
 /// coordinator → `wait_ready` 轮询就绪。归入 lifecycle module(不与 diagnose 混)。
@@ -27,6 +60,12 @@ pub fn quick_start(
     quick_start_in_workspace(&workspace, agents_dir, name, yes, team_id)
 }
 
+/// ---
+/// purpose: 在指定 workspace 起队，transport 优先复用调用方所在 tmux socket
+/// returns: 起队报告
+/// errors: 透传实体实现的错误
+/// contract_id: lifecycle.quick_start.entry
+/// ---
 pub(crate) fn quick_start_in_workspace(
     workspace: &Path,
     agents_dir: &Path,
@@ -39,6 +78,14 @@ pub(crate) fn quick_start_in_workspace(
     quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, team_id, &transport)
 }
 
+/// ---
+/// purpose: 带显示开关与后端字面量的起队入口
+/// params:
+///   open_display: 为假时把 spec 的显示后端改成 none
+///   backend: 未给或为 tmux 时走既有 tmux 路径，其余字面量经 transport 工厂解析
+/// returns: 起队报告
+/// errors: 后端字面量不认识时返回 TeamSelect；工厂拒绝或后端不可用时如实报错，不退回 tmux
+/// ---
 /// 0.5.x Phase 1d Batch 2: quick-start with an optional
 /// `--backend <tmux|conpty>` override. When `backend` is `None` or
 /// `Some("tmux")` the transport is the same one the legacy entrypoint
@@ -182,6 +229,12 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的起队入口，由角色目录推 workspace
+/// returns: 起队报告
+/// errors: 透传实体实现的错误
+/// contract_id: lifecycle.quick_start.entry
+/// ---
 pub(crate) fn quick_start_with_transport(
     agents_dir: &Path,
     name: Option<&str>,
@@ -193,6 +246,12 @@ pub(crate) fn quick_start_with_transport(
     quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, team_id, transport)
 }
 
+/// ---
+/// purpose: 带注入 transport 与显式 workspace 的起队入口，默认开显示
+/// returns: 起队报告
+/// errors: 透传实体实现的错误
+/// contract_id: lifecycle.quick_start.entry
+/// ---
 pub(crate) fn quick_start_with_transport_in_workspace(
     workspace: &Path,
     agents_dir: &Path,
@@ -206,6 +265,13 @@ pub(crate) fn quick_start_with_transport_in_workspace(
     )
 }
 
+/// ---
+/// purpose: 起队的实体实现，校验 leader pane、编译 spec、定团队键、判层级、必要时早退，然后起队并给 attach 指引
+/// params:
+///   open_display: 为假时把显示后端改成 none
+/// returns: 起队报告，含 session 名与 attach 命令
+/// errors: leader pane 环境无效返回 RequirementUnmet；角色目录不存在或编译失败返回 Compile；嵌套层级超限返回 RequirementUnmet；读 state 失败返回 StatePersist
+/// ---
 pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     workspace: &Path,
     agents_dir: &Path,

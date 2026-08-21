@@ -1,3 +1,43 @@
+//! ---
+//! purpose: coordinator daemon 的健康判定、幂等启停与只读观测面——pid/metadata/schema 三合一健康、spawn 与终止、runtime 路径、以及 team-agent watch 的事件渲染
+//! contract:
+//!   provides:
+//!     - name: coordinator_health
+//!       what: 由 pid 文件、coordinator.json 与 message store schema 合成 HealthReport，ok 与 service_available 分开表达
+//!     - name: start_coordinator
+//!       what: 幂等启动：已健康则 no-op，metadata 不兼容先停再起，schema 不兼容拒启并给修复 hint
+//!     - name: start_coordinator_with_team
+//!       what: 同上，并把 team_key 以 --team 传给子进程，免得 daemon 自己从 state 推
+//!     - name: stop_coordinator
+//!       what: 终止 daemon 并清 pid/meta；pid 文件缺失时用 ps 扫描发现流浪 coordinator
+//!     - name: collect_watch_lines
+//!       what: 从 events.jsonl 与结果表增量取出可渲染行，并推进 WatchCursor
+//!     - name: render_event_line
+//!       what: 把一条结构化事件渲染成人类可读行，不认识的事件返回 None
+//!     - name: run_watch
+//!       what: team-agent watch 主循环：反复 collect 后输出并 sleep
+//!     - name: coordinator_pid_path
+//!       what: coordinator.pid 的位置
+//!     - name: coordinator_meta_path
+//!       what: coordinator.json 的位置
+//!     - name: coordinator_log_path
+//!       what: coordinator.log 的位置
+//!   depends:
+//!     - super::types
+//!     - crate::message_store
+//!     - crate::db::schema
+//!     - crate::event_log
+//!     - crate::model::paths
+//!     - crate::packaging
+//!     - crate::platform::process
+//!     - crate::os_probe
+//! boundary:
+//!   - 不做 tick 编排，也不投递任何消息
+//!   - 不读 provider 凭据、不碰 .env；身份只取自当前可执行文件与已落盘 metadata
+//!   - 终止进程限定本 workspace：优先按本次判定拿到的精确 pid；pid 文件缺失时的流浪回收会按 ps 命令行匹配「coordinator --workspace <本 ws>」发现目标，仍不做跨 workspace 的 pkill/killall 泛清
+//!   - watch 侧只读：不重放已归档段，rotation 只插一条 marker 并重置 offset
+//! maturity: wired
+//! ---
 //!
 //! coordinator 健康/身份 & 只读可观测面:metadata 身份原语 + coordinator 路径 + watch 实时流。
 
@@ -27,6 +67,12 @@ use super::types::{
 // ===========================================================================
 
 /// `coordinator_health`(`lifecycle.py:38-46`):`running ∧ metadata_ok ∧ schema_ok` → typed report.
+/// ---
+/// purpose: 一次性判定本 workspace 的 coordinator daemon 是否健康
+/// params:
+///   workspace: workspace 根；pid/metadata 路径与 message store 都由它派生
+/// returns: HealthReport。ok = 进程在跑 ∧ metadata 三元全等 ∧ 二进制身份一致 ∧ schema 兼容；service_available 刻意排除二进制身份，表示「这个 daemon 还能处理本队队列」；status 区分 Missing / InvalidPid / Running / Stale
+/// ---
 pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
     let schema = message_store_schema_health(workspace);
     let current_binary_identity = current_coordinator_binary_identity();
@@ -73,6 +119,13 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
 
 /// `start_coordinator`(`lifecycle.py:49-121`):幂等 — 已健康 no-op(AlreadyRunning);metadata 不兼容
 /// 先 stop 再起;schema 不兼容拒启 + hint;否则 spawn `team-agent coordinator --workspace <ws>`。
+/// ---
+/// purpose: 不带 team_key 的幂等启动入口
+/// params:
+///   workspace: workspace 根
+/// returns: 与 start_coordinator_with_team(workspace, None) 完全一致
+/// errors: 同 start_coordinator_with_team
+/// ---
 pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, StartError> {
     start_coordinator_with_team(workspace, None)
 }
@@ -85,6 +138,14 @@ pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, Start
 ///
 /// Callers that CAN pass team_key (Batch 9 quick-start Windows path)
 /// SHOULD — that avoids Batch 8's F8 seed-state trap.
+/// ---
+/// purpose: 幂等启动 coordinator daemon 子进程，并把不兼容/需轮换的情形分成互不折叠的结局
+/// params:
+///   workspace: workspace 根
+///   team_key: 传给子进程的 --team；None 或空串时子进程回落到 state.active_team_key
+/// returns: StartReport。已健康 → AlreadyRunning（含「daemon 比调用方新，保留不动」这一支，rotation_reason=daemon_newer_than_caller）；schema 不兼容 → SchemaIncompatible 且 ok=false 并带修复 hint；在跑但 wire metadata 不兼容、或 metadata 指向调用方自身、或先停失败 → RestartIncompatibleStopFailed；成功 spawn → Started，因身份轮换而重起则为 StartedAfterRotation
+/// errors: 建目录、开日志、spawn、写 pid/metadata 或写事件失败时返回 StartError；「拒启」不是 Err，而是 ok=false 的报告
+/// ---
 pub fn start_coordinator_with_team(
     workspace: &WorkspacePath,
     team_key: Option<&str>,
@@ -322,6 +383,13 @@ fn detach_daemon_child(command: &mut Command) {
 fn detach_daemon_child(_command: &mut Command) {}
 
 /// `stop_coordinator`(`lifecycle.py:228-247`):SIGTERM pid + 清 pid/meta → typed report。
+/// ---
+/// purpose: 停掉本 workspace 的 coordinator daemon 并清掉 pid/meta 文件
+/// params:
+///   workspace: workspace 根
+/// returns: StopReport。pid 文件不存在时先尝试按 ps 发现流浪 coordinator，仍没有则 Missing；pid 文件内容非法 → 清文件并报 InvalidPidRemoved；终止成功 → Stopped；信号发不出去 → KillFailed
+/// errors: 删 pid/meta 文件失败时返回 StopError；本函数不写事件（EventLog 变体在此路径无产生点）
+/// ---
 pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopError> {
     let pid_path = coordinator_pid_path(workspace);
     if !pid_path.exists() {
@@ -498,6 +566,12 @@ fn terminate_pid(pid: Pid) -> bool {
 
 /// Public wrapper for diagnostic cleanup paths that must reuse coordinator
 /// shutdown's SIGTERM-then-SIGKILL semantics.
+/// ---
+/// purpose: 把 coordinator 停机用的「先温和后强制」终止语义暴露给诊断清理路径复用
+/// params:
+///   pid: 要终止的进程；只终止这棵进程树，不做名字匹配的批量清理
+/// returns: 超时窗口内整棵树都不再存活为 true
+/// ---
 pub fn terminate_pid_tree(pid: Pid) -> bool {
     terminate_pid(pid)
 }
@@ -607,6 +681,14 @@ fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
 /// `ps stat=` step has no analogue). This preserves the coordinator's
 /// "am I the owner" check without silently reporting stale pids as
 /// alive.
+/// ---
+/// purpose: 判断某 pid 是不是本 coordinator 还能拥有的活进程（Unix 实现）
+/// params:
+///   pid: 待判定进程号
+/// returns: 存活且非僵尸为 true。语义与通用存活探针不同：signal 返回 EPERM 一律判 false，因为 coordinator 只认自己能发信号的进程；另用 ps 的 stat 排掉僵尸
+/// errors: 除 EPERM/ESRCH 外的 signal 错误、以及 ps 探测失败时返回 io::Error
+/// cfg: unix
+/// ---
 #[cfg(unix)]
 pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
     let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
@@ -640,6 +722,14 @@ pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
 /// treats as `Live`; so on Windows the coordinator sees a process
 /// it can't query as still-running (safer than pretending it's gone
 /// and losing the ownership handle).
+/// ---
+/// purpose: 判断某 pid 是不是本 coordinator 还能拥有的活进程（非 Unix 实现）
+/// params:
+///   pid: 待判定进程号
+/// returns: 平台层报 Live 为 true，Dead 或 Unknown 均为 false。Windows 没有僵尸态，故不做 ps stat 那一步；平台层把拒绝访问算作 Live，于是查不动的进程仍被视为在跑
+/// errors: 平台层存活查询失败时返回 io::Error
+/// cfg: not(unix)
+/// ---
 #[cfg(not(unix))]
 pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
     match crate::platform::process::pid_liveness(pid.get())? {
@@ -650,11 +740,21 @@ pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
 }
 
 /// `read_coordinator_metadata`(`metadata.py:28-34`)。读 `coordinator.json`;损坏/缺失/非 dict → `None`。
+/// ---
+/// purpose: 读出已落盘的 coordinator.json
+/// params:
+///   workspace: workspace 根
+/// returns: 解析成功才有值；文件缺失、读不动或 JSON 形状不符一律为 None，绝不返回半份 metadata
+/// ---
 pub fn read_coordinator_metadata(workspace: &WorkspacePath) -> Option<CoordinatorMetadata> {
     let text = std::fs::read_to_string(coordinator_meta_path(workspace)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
+/// ---
+/// purpose: 给出「当前这个 CLI 二进制」的身份，用于和 daemon 已记录的身份比对
+/// returns: 路径取自当前可执行文件（尽量 canonicalize）而非 PATH 查找，版本取自编译进来的包版本；路径取不到时退化成 <unknown>。测试可用 TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY 覆盖，且只有两字段都非空才采信
+/// ---
 pub fn current_coordinator_binary_identity() -> CoordinatorBinaryIdentity {
     if let Ok(raw) = std::env::var("TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY") {
         if let Ok(identity) = serde_json::from_str::<CoordinatorBinaryIdentity>(&raw) {
@@ -675,10 +775,24 @@ pub fn current_coordinator_binary_identity() -> CoordinatorBinaryIdentity {
 
 /// `coordinator_metadata_ok` now includes daemon binary identity in addition
 /// to the original pid/protocol/schema tuple.
+/// ---
+/// purpose: 判断已落盘 metadata 是否与当前事实完全一致
+/// params:
+///   metadata: 已读出的 coordinator.json；None 视为不一致
+///   pid: 实际观测到的 daemon pid
+/// returns: pid、协议版本、message store schema 版本、以及 daemon 二进制身份四者全对才为 true
+/// ---
 pub fn coordinator_metadata_ok(metadata: Option<&CoordinatorMetadata>, pid: Pid) -> bool {
     coordinator_metadata_mismatch_reason(metadata, pid).is_none()
 }
 
+/// ---
+/// purpose: 给出 metadata 不一致的机器可读原因，而不是只给一个布尔
+/// params:
+///   metadata: 已读出的 coordinator.json；None 时原因为 MetadataMissing
+///   pid: 实际观测到的 daemon pid
+/// returns: 第一个不匹配项对应的原因；全部一致时为 None。先判 pid/协议/schema 这组线协议字段，再判二进制身份
+/// ---
 pub fn coordinator_metadata_mismatch_reason(
     metadata: Option<&CoordinatorMetadata>,
     pid: Pid,
@@ -833,6 +947,15 @@ fn path_matches(metadata_path: &str, path: &Path) -> bool {
 
 /// `write_coordinator_metadata`(`metadata.py:46-61`)。写 `coordinator.json`(pretty indent=2),
 /// `updated_at = now(utc).isoformat()`。
+/// ---
+/// purpose: 落盘 coordinator.json，把当前 daemon 的身份三元与二进制身份记下来
+/// params:
+///   workspace: workspace 根
+///   pid: 本次要记录的 daemon pid
+///   source: 这份 metadata 是 daemon 自举时写的还是 CLI start 时写的
+/// returns: 写成功返回 ()。协议版本与 schema 版本取自当前构建常量，updated_at 是写入时刻的 UTC
+/// errors: 建目录、序列化或写文件失败时返回 io::Error
+/// ---
 pub fn write_coordinator_metadata(
     workspace: &WorkspacePath,
     pid: Pid,
@@ -856,6 +979,12 @@ pub fn write_coordinator_metadata(
     std::fs::write(path, text)
 }
 
+/// ---
+/// purpose: 用「能不能真的打开本队 message store」来判 schema 兼容门
+/// params:
+///   workspace: workspace 根
+/// returns: 打开成功则 ok=true 且 error/action 为空；失败则 ok=false，带 InitFailed 原文与修复 hint。schema_version 恒为当前构建的版本号
+/// ---
 pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHealth {
     match MessageStore::open(workspace.as_path()) {
         Ok(_) => SchemaHealth {
@@ -894,16 +1023,34 @@ fn remove_file_if_exists(path: &Path) -> Result<(), std::io::Error> {
 // ===========================================================================
 
 /// `coordinator.pid` 路径(`paths.py:8`)= `runtime_dir(workspace)/coordinator.pid`。
+/// ---
+/// purpose: 给出 coordinator.pid 的位置
+/// params:
+///   workspace: workspace 根
+/// returns: runtime 目录下的 coordinator.pid；只算路径，不保证文件存在
+/// ---
 pub fn coordinator_pid_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.pid")
 }
 
 /// `coordinator.json` 路径(`paths.py:12`)。
+/// ---
+/// purpose: 给出 coordinator.json 的位置
+/// params:
+///   workspace: workspace 根
+/// returns: runtime 目录下的 coordinator.json；只算路径，不保证文件存在
+/// ---
 pub fn coordinator_meta_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.json")
 }
 
 /// `coordinator.log` 路径(`paths.py:16`)。
+/// ---
+/// purpose: 给出 coordinator.log 的位置
+/// params:
+///   workspace: workspace 根
+/// returns: runtime 目录下的 coordinator.log；daemon 子进程的 stdout/stderr 都追加到这里
+/// ---
 pub fn coordinator_log_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.log")
 }
@@ -915,6 +1062,16 @@ pub fn coordinator_log_path(workspace: &WorkspacePath) -> PathBuf {
 /// `collect_watch_lines`(`watch.py:40`)。tail events.jsonl(过滤 team)+ latest_results,
 /// 渲染人类可读行;处理 log rotation(ROTATION_MARKER + offset 重置,不重放历史段)。
 /// 推进 `cursor`。
+/// ---
+/// purpose: 增量取出自上次游标以来的可渲染 watch 行（事件 + 结果两路）
+/// params:
+///   workspace: workspace 根
+///   cursor: 可变游标，函数会推进 offset、已见结果 id 集合与归档签名
+///   store: 已打开的 message store，用于取结果行
+///   team: 只看这个 team 的事件；None 表示不过滤
+/// returns: 本次新增的渲染行，事件行在前、结果行在后；无新内容时为空 Vec
+/// errors: 读事件文件或查库失败时返回 WatchError
+/// ---
 pub fn collect_watch_lines(
     workspace: &WorkspacePath,
     cursor: &mut WatchCursor,
@@ -1031,6 +1188,12 @@ fn collect_result_lines(
 /// `render_event_line`(`watch.py:46-63`)。把一条 step 4 事件渲染成人类可读行;非可渲染事件 → `None`。
 /// 消费的事件类型:`result_received` / `leader_receiver.{injected,submitted}` / `send.failed` /
 /// `leader_receiver.rebind_required` / `leader.api_error`(card 表)。
+/// ---
+/// purpose: 把一条结构化事件渲染成一行人类可读文本
+/// params:
+///   event: 事件 JSON 对象；靠其中的 event 字段分派
+/// returns: 已知事件类型返回渲染行，其余一律 None（不猜、不打印原始 JSON）。摘要字段做长度截断
+/// ---
 pub fn render_event_line(event: &Value) -> Option<String> {
     let event_name = event.get("event").and_then(Value::as_str)?;
     match event_name {
@@ -1087,6 +1250,16 @@ pub fn render_event_line(event: &Value) -> Option<String> {
 
 /// `run_watch`(`watch.py:25`)。`team-agent watch` 主循环:反复 `collect_watch_lines` + 输出 + sleep。
 /// `output`/`sleep` 注入便于测试。§10 返 Result。
+/// ---
+/// purpose: team-agent watch 的主循环：反复增量收集、输出、休眠
+/// params:
+///   workspace: workspace 根
+///   team: 只看这个 team；None 表示不过滤
+///   interval_sec: 轮询间隔；非有限值或非正数时回落到内置默认
+///   output: 输出回调，注入以便测试；本函数自己不写 stdout
+/// returns: 循环结束时为 Ok。这是个长跑循环，正常运行期间不返回
+/// errors: 打开 message store 或某轮收集失败时返回 WatchError
+/// ---
 pub fn run_watch(
     workspace: &WorkspacePath,
     team: Option<&str>,
