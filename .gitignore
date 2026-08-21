@@ -2,7 +2,9 @@
 .env
 .env.*
 !.env.example
-docs/
+# Ignore docs/* but keep the public operator handbook (git cannot re-include
+# files under an ignored directory).
+docs/*
 !docs/reference/
 !docs/reference/**
 .claude/
