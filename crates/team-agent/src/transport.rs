@@ -901,6 +901,19 @@ pub fn tmux_send_submit_argv(pane: &PaneId, submit: Key) -> Vec<String> {
     ]
 }
 
+/// 闭合未完成的 bracketed paste：字面 CSI `ESC [ 201 ~`。
+/// 不是 `Escape` 键（E55：重试只重按回车，绝不送 Escape/C-c）。
+pub fn tmux_close_bracketed_paste_argv(pane: &PaneId) -> Vec<String> {
+    vec![
+        "tmux".to_string(),
+        "send-keys".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        "-l".to_string(),
+        "\u{1b}[201~".to_string(),
+    ]
+}
+
 /// CancelMode 在 tmux 上按 pane mode 分派退出键(tmux_io.py:419-426)。
 /// golden:Copy→`-X cancel`,Tree/View→`q`,Client→`d`,Unknown→`-X cancel`(+warn)。
 pub fn tmux_cancel_mode_argv(pane: &PaneId, mode: PaneMode) -> Vec<String> {
