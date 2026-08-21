@@ -7,6 +7,9 @@
 //! boundary:
 //!   - 不把物理 success 写成 delivered
 //!   - 不重粘文本
+//!   - error-bypass（target_resolved+error）只经 claim 原子闸，禁止旁路双投
+//!   - 物理 Enter 已出后 observer/state 落盘失败不得返 Err 重投
+//!   - 同 message_id 的 token 已在 pane/转录则拒绝二次注入
 //! maturity: wired
 //! ---
 //!
@@ -27,7 +30,7 @@ use crate::provider::wire::{
     is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
 };
 use crate::transport::{
-    submit_verification_wire, turn_verification_wire, InjectPayload, InjectReport,
+    submit_verification_wire, turn_verification_wire, CaptureRange, InjectPayload, InjectReport,
     InjectVerification, Key, PaneId, PaneInfo, SessionName, SubmitObserver, SubmitVerification,
     Target, Transport, WindowName,
 };
@@ -288,8 +291,6 @@ pub fn deliver_pending_message(
     }
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
-    } else if message.status == "target_resolved" && message.error.is_some() {
-        bump_delivery_attempts(store, message_id)?
     } else {
         return Ok(DeliveryOutcome {
             ok: false,
@@ -504,6 +505,29 @@ pub fn deliver_pending_message(
             turn_verification: None,
         });
     }
+    if token_already_visible(transport, state, &message.recipient, &target, message_id) {
+        event_log.write(
+            "delivery.duplicate_token_refused",
+            serde_json::json!({
+                "message_id": message_id,
+                "recipient": message.recipient,
+                "reason": "message_token_already_visible",
+            }),
+        )?;
+        store.mark(message_id, "delivered", None)?;
+        return Ok(DeliveryOutcome {
+            ok: true,
+            status: DeliveryStatus::AlreadyDelivered,
+            message_status: MessageStatusShadow("delivered".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some("message_token_already_visible".to_string()),
+            stage: Some(DeliveryStage::Submit),
+            reason: None,
+            channel: None,
+            ack_forced_off: false,
+            turn_verification: None,
+        });
+    }
     let rendered = render_message(
         &message.sender,
         message.task_id.as_deref(),
@@ -664,7 +688,9 @@ pub fn deliver_pending_message(
         }
     };
     if let Some(error) = submit_observer.take_error() {
-        return Err(error);
+        // Physical Enter already left the pane. Returning Err here used to leave
+        // the row retryable (target_resolved+error) so the next tick re-injected.
+        log_post_physical_submit_state_error(event_log, message_id, "submit_observer", &error)?;
     }
     persist_submit_verification(workspace, message_id, &inject_report);
     let turn_verification = inject_report.turn_verification;
@@ -828,10 +854,8 @@ pub fn deliver_pending_message(
                         "reason": "provider_receipt_not_observed",
                     }),
                 )?;
-                let mut outcome = leader_acceptance_pending_outcome(
-                    message_id,
-                    "submitted_pending_acceptance",
-                );
+                let mut outcome =
+                    leader_acceptance_pending_outcome(message_id, "submitted_pending_acceptance");
                 outcome.turn_verification = Some(turn_verification);
                 return Ok(outcome);
             }
@@ -858,13 +882,15 @@ pub fn deliver_pending_message(
         ack_forced_off: false,
         turn_verification: Some(turn_verification),
     };
-    stamp_first_send_at_if_leader_to_worker_scoped(
+    if let Err(error) = stamp_first_send_at_if_leader_to_worker_scoped(
         workspace,
         &message.sender,
         &message.recipient,
         canonical_owner_team_id.as_deref(),
-    )?;
-    record_turn_open_if_leader_to_worker_scoped(
+    ) {
+        log_post_physical_submit_state_error(event_log, message_id, "stamp_first_send_at", &error)?;
+    }
+    if let Err(error) = record_turn_open_if_leader_to_worker_scoped(
         workspace,
         &message.sender,
         &message.recipient,
@@ -872,7 +898,14 @@ pub fn deliver_pending_message(
         event_log,
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
-    )?;
+    ) {
+        log_post_physical_submit_state_error(
+            event_log,
+            message_id,
+            "turn_open_after_delivery",
+            &error,
+        )?;
+    }
     Ok(outcome)
 }
 
@@ -2075,23 +2108,6 @@ fn message_for_delivery(
     Ok(message)
 }
 
-fn bump_delivery_attempts(store: &MessageStore, message_id: &str) -> Result<u32, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    conn.execute(
-        "update messages
-         set delivery_attempts = delivery_attempts + 1,
-             updated_at = ?2
-         where message_id = ?1",
-        params![message_id, chrono::Utc::now().to_rfc3339()],
-    )?;
-    let attempts = conn.query_row(
-        "select delivery_attempts from messages where message_id = ?1",
-        params![message_id],
-        |row| row.get::<_, i64>(0),
-    )?;
-    Ok(attempts.max(0) as u32)
-}
-
 /// Pre-inject gate (Contract B): peek the recipient pane and answer "is there an
 /// actionable provider startup prompt right now (trust menu or update prompt)" using
 /// the SHARED provider/startup_prompt recognizers — no second classifier, no provider
@@ -2975,6 +2991,116 @@ fn claude_recipient_rollout(
 /// present" which forces the unverified path.
 fn rollout_tail_contains(path: &std::path::Path, needle: &str, tail_bytes: u64) -> bool {
     rollout_tail_contains_result(path, needle, tail_bytes).unwrap_or(false)
+}
+
+fn message_token_marker(message_id: &str) -> String {
+    format!("[team-agent-token:{message_id}]")
+}
+
+fn text_contains_message_token(text: &str, message_id: &str) -> bool {
+    !message_id.is_empty() && text.contains(&message_token_marker(message_id))
+}
+
+/// ---
+/// purpose: 同 message_id 已在 pane 或转录出现则视为已注入
+/// contract:
+///   provides:
+///     - name: token_already_visible
+///       what: capture 全文或 recipient rollout_path 尾含 `[team-agent-token:{id}]` 则为 true
+/// boundary:
+///   - capture 失败不当已见（倒向允许注入，避免丢信）
+///   - 不把 JSON 字段里的 message_id 当 pane token
+/// ---
+pub(crate) fn token_already_visible(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+    target: &Target,
+    message_id: &str,
+) -> bool {
+    if message_id.is_empty() {
+        return false;
+    }
+    let marker = message_token_marker(message_id);
+    match transport.capture(target, CaptureRange::Full) {
+        Ok(captured) if text_contains_message_token(&captured.text, message_id) => return true,
+        _ => {}
+    }
+    recipient_transcript_contains(state, recipient, &marker)
+}
+
+fn recipient_transcript_contains(state: &serde_json::Value, recipient: &str, marker: &str) -> bool {
+    for path in recipient_transcript_paths(state, recipient) {
+        if rollout_tail_contains(&path, marker, 64 * 1024) {
+            return true;
+        }
+    }
+    false
+}
+
+fn recipient_transcript_paths(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    let push = |paths: &mut Vec<std::path::PathBuf>, value: Option<&serde_json::Value>| {
+        if let Some(path) = value
+            .and_then(serde_json::Value::as_str)
+            .filter(|p| !p.is_empty())
+        {
+            paths.push(std::path::PathBuf::from(path));
+        }
+    };
+    if recipient == "leader" {
+        push(
+            &mut paths,
+            leader_receiver_record_path(state, "rollout_path"),
+        );
+    }
+    let agent = state.get("agents").and_then(|agents| agents.get(recipient));
+    push(
+        &mut paths,
+        agent.and_then(|agent| agent.get("rollout_path")),
+    );
+    paths
+}
+
+fn leader_receiver_record_path<'a>(
+    state: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get(field))
+        .or_else(|| {
+            let active = state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)?;
+            state
+                .get("teams")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|teams| teams.get(active))
+                .and_then(|team| team.get("leader_receiver"))
+                .and_then(|receiver| receiver.get(field))
+        })
+}
+
+fn log_post_physical_submit_state_error(
+    event_log: &EventLog,
+    message_id: &str,
+    stage: &str,
+    error: &MessagingError,
+) -> Result<(), MessagingError> {
+    event_log.write(
+        "delivery.post_submit_state_degraded",
+        serde_json::json!({
+            "message_id": message_id,
+            "stage": stage,
+            "error": error.to_string(),
+            "physical_submit": true,
+        }),
+    )?;
+    Ok(())
 }
 
 fn rollout_tail_contains_result(

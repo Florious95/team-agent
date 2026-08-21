@@ -400,6 +400,36 @@ pub fn deliver_to_leader_fallback_pane(
         });
     };
     let target = Target::Pane(PaneId::new(channel.pane_id));
+    if super::delivery::token_already_visible(
+        transport.as_ref(),
+        state,
+        "leader",
+        &target,
+        message_id,
+    ) {
+        event_log.write(
+            "leader_receiver.duplicate_token_refused",
+            serde_json::json!({
+                "message_id": message_id,
+                "result_id": result_id,
+                "pane_id": pane_id,
+                "reason": "message_token_already_visible",
+                "delivered_via": "fallback_pane",
+            }),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: true,
+            status: DeliveryStatus::AlreadyDelivered,
+            message_status: MessageStatusShadow("delivered".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some("message_token_already_visible".to_string()),
+            stage: Some(DeliveryStage::Submit),
+            reason: None,
+            channel: Some("fallback_pane".to_string()),
+            ack_forced_off: false,
+            turn_verification: None,
+        });
+    }
     let inject_result: Result<InjectReport, TransportError> =
         transport.inject(&target, &payload, Key::Enter, true);
 
@@ -667,7 +697,17 @@ fn message_already_delivered(
         .optional()?;
     Ok(matches!(
         status.as_deref(),
-        Some("delivered" | "acknowledged" | "submitted" | "submitted_unverified")
+        Some(
+            "delivered"
+                | "acknowledged"
+                | "submitted"
+                | "submitted_unverified"
+                | "submitted_pending_acceptance"
+                | "injected_awaiting_receipt"
+                | "visible"
+                | "injected"
+                | "consumed"
+        )
     ))
 }
 

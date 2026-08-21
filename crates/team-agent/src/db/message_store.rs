@@ -548,19 +548,26 @@ impl MessageStore {
 
     /// `claim_for_delivery` (`core.py:190-205`): atomic single-winner claim. Flips an
     /// eligible row (status ∈ pending/accepted/queued_until_idle/queued_until_start/
-    /// queued_stopped/queued_pane_missing) to `target_resolved`, `delivery_attempts +=
-    /// 1`. Returns `true` iff THIS update matched exactly one row.
+    /// queued_stopped/queued_pane_missing, **or** `target_resolved` with a non-null
+    /// error — the retry/error-bypass path) to `target_resolved`, clears `error`,
+    /// `delivery_attempts += 1`. Returns `true` iff THIS update matched exactly one
+    /// row. Clearing `error` is the CAS: a concurrent retry cannot also match
+    /// `error is not null`.
     pub fn claim_for_delivery(&self, message_id: &str) -> Result<bool, MessageStoreError> {
         let conn = crate::db::schema::open_db(&self.path)?;
         let rows = conn.execute(
             "update messages
              set status = 'target_resolved',
                  delivery_attempts = delivery_attempts + 1,
+                 error = null,
                  updated_at = ?2
              where message_id = ?1
-               and status in (
-                   'pending', 'accepted', 'queued_until_idle', 'queued_until_start',
-                   'queued_stopped', 'queued_pane_missing', ?3
+               and (
+                   status in (
+                       'pending', 'accepted', 'queued_until_idle', 'queued_until_start',
+                       'queued_stopped', 'queued_pane_missing', ?3
+                   )
+                   or (status = 'target_resolved' and error is not null)
                )",
             params![
                 message_id,
@@ -1136,6 +1143,33 @@ mod tests {
         s.mark(&mid, "failed", Some("boom")).unwrap();
         assert!(!s.claim_for_delivery(&mid).unwrap());
         assert_eq!(status_of(&read(&s), &mid), "failed");
+    }
+
+    #[test]
+    fn claim_for_delivery_error_retry_is_atomic_single_winner() {
+        let s = store();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
+        s.mark(&mid, "target_resolved", Some("probe_failed"))
+            .unwrap();
+        assert_eq!(
+            col_str(&read(&s), &mid, "error").as_deref(),
+            Some("probe_failed")
+        );
+        assert!(
+            s.claim_for_delivery(&mid).unwrap(),
+            "target_resolved+error must enter the claim gate, not a non-CAS bypass"
+        );
+        let c = read(&s);
+        assert_eq!(status_of(&c, &mid), "target_resolved");
+        assert_eq!(col_str(&c, &mid, "error"), None);
+        assert_eq!(col_i64(&c, &mid, "delivery_attempts"), 1);
+        assert!(
+            !s.claim_for_delivery(&mid).unwrap(),
+            "cleared error must lose the second claim"
+        );
+        assert_eq!(col_i64(&read(&s), &mid, "delivery_attempts"), 1);
     }
 
     #[test]
