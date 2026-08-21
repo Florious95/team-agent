@@ -22,6 +22,7 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+md5 = "0.7"
 regex.workspace = true
 chrono.workspace = true
 libc.workspace = true

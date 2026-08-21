@@ -317,6 +317,7 @@ pub fn send_message(
             None,
         );
     }
+    capture_missing_sessions_after_send(workspace);
     if let Some(CoordinatorUnavailableGate {
         mut outcome,
         persist: true,
@@ -356,6 +357,23 @@ pub fn send_message(
         ack_forced_off: false,
         turn_verification: None,
     })
+}
+
+fn capture_missing_sessions_after_send(workspace: &Path) {
+    let Ok(mut state) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    let Ok(report) = crate::session_capture::capture_missing_provider_sessions_once(
+        &mut state,
+        &mut crate::provider::get_adapter,
+        false,
+        0,
+    ) else {
+        return;
+    };
+    if report.changed || !report.assigned.is_empty() {
+        let _ = crate::state::persist::save_runtime_state(workspace, &state);
+    }
 }
 
 fn persist_stored_only_send(

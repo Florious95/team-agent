@@ -1147,16 +1147,28 @@ pub(super) fn resume_backing_probe_for_agent(
             }
         }
         Provider::CursorAgent => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            let rollout_ok = rollout_path.is_some_and(|path| {
+                crate::provider::session_scan::cursor::cursor_session_archive_present(path.as_path())
+            });
+            let discovered = crate::provider::session_scan::cursor::cursor_session_dir_for_cwd(
+                session_id.as_str(),
+                &spawn_cwd,
+            );
+            if let Some(dir) = discovered.as_ref() {
+                checked_paths.push(dir.clone());
+            }
             if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
                 checked_paths.push(home.join(".cursor").join("chats"));
             }
-            match crate::provider::session_scan::cursor::cursor_session_dir(session_id.as_str()) {
-                Some(dir) => {
-                    checked_paths.push(dir.clone());
-                    crate::provider::session_scan::cursor::cursor_session_archive_present(&dir)
-                }
-                None => false,
-            }
+            rollout_ok
+                || discovered.as_ref().is_some_and(|dir| {
+                    crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
+                })
         }
         Provider::GeminiCli | Provider::Fake => false,
     };

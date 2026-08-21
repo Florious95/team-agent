@@ -1,5 +1,5 @@
 //! ---
-//! purpose: 按 pending chatId 捕获 ~/.cursor/chats/ 存档，不读会话正文
+//! purpose: 捕获 ~/.cursor/chats/ 存档：pending chatId 或 workspace hex 下唯一新目录
 //! contract:
 //!   provides:
 //!     - name: cursor_session_dir
@@ -7,20 +7,21 @@
 //!     - name: cursor_session_archive_present
 //!       what: 只凭 marker 文件存在性判定 backing，不打开正文
 //!     - name: scan_session_store
-//!       what: expected_session_id 命中存档则返回唯一候选，否则空
+//!       what: pending 命中则返回该 id；否则仅当 spawn_cwd 的 md5 hex 下唯一新 marker 目录才捕获
 //!   requires:
-//!     - name: expected_session_id
-//!       what: 无 pending id 不扫描、不拾取同 HOME 其它 chats
+//!     - name: workspace-hex-or-pending
+//!       what: 无 pending 时只看 ~/.cursor/chats/<md5(canonical cwd)>/，不扫全库
 //! boundary:
 //!   - 只服务 Provider::CursorAgent
 //!   - 不发明 --session-id；不读 store.db/meta.json 正文
+//!   - 0 或 ≥2 个新目录 → 空向量，不拾取邻席
 //!   - 不改 grok/claude/codex/copilot 扫描
 //! maturity: wired
 //! ---
 
 use std::path::{Path, PathBuf};
 
-use crate::provider::types::{CaptureVia, CapturedSession, Confidence, RolloutPath};
+use crate::provider::types::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
 
 use super::{CaptureSessionContext, CapturedSessionCandidate};
 
@@ -103,36 +104,157 @@ pub(crate) fn cursor_session_dir(session_id: &str) -> Option<PathBuf> {
 }
 
 /// ---
-/// purpose: 按 pending expected_session_id 捕获唯一 cursor 磁盘存档
+/// purpose: 由 spawn_cwd 的 md5 hex + chatId 直达存档，避免全库枚举失败
 /// params:
-///   context: 含 expected_session_id 的捕获上下文
-/// returns: 命中则一条 FsWatch 候选，否则空向量
+///   session_id: CLI chatId；spawn_cwd: 席位物理 workspace
+/// returns: hex/uuid 含 marker 则该目录，否则回落 cursor_session_dir
 /// contract:
 ///   provides:
-///     - name: scan_session_store
-///       what: expected id 与目录对齐才捕获
+///     - name: cursor_session_dir_for_cwd
+///       what: 优先 ~/.cursor/chats/<md5(cwd)>/<chatId>/，再全库回落
 /// boundary:
-///   - 无 pending id 不扫描；不拾取既有 hex 会话
+///   - 不读正文；id 非法则 None
 /// ---
-pub(super) fn scan_session_store(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
-    let Some(expected) = context.expected_session_id.as_ref() else {
-        return Vec::new();
-    };
-    let Some(dir) = cursor_session_dir(expected.as_str()) else {
-        return Vec::new();
-    };
-    vec![CapturedSessionCandidate {
+pub(crate) fn cursor_session_dir_for_cwd(session_id: &str, spawn_cwd: &Path) -> Option<PathBuf> {
+    if !session_id_legal(session_id) {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let hex = workspace_chats_hex(spawn_cwd);
+    let nested = home
+        .join(".cursor")
+        .join("chats")
+        .join(hex)
+        .join(session_id);
+    if cursor_session_archive_present(&nested) {
+        return Some(nested);
+    }
+    cursor_session_dir(session_id)
+}
+
+fn candidate_for(
+    session_id: SessionId,
+    dir: PathBuf,
+    spawn_cwd: PathBuf,
+) -> CapturedSessionCandidate {
+    CapturedSessionCandidate {
         captured: CapturedSession {
-            session_id: Some(expected.clone()),
+            session_id: Some(session_id),
             rollout_path: Some(RolloutPath::new(dir)),
             captured_via: CaptureVia::FsWatch,
             attribution_confidence: Confidence::High,
-            spawn_cwd: context.spawn_cwd.clone(),
+            spawn_cwd,
         },
         embedded_agent_id: None,
         positive_agent_id_match: false,
         agent_path_match: false,
-    }]
+    }
+}
+
+fn workspace_chats_hex(spawn_cwd: &Path) -> String {
+    let canonical = std::fs::canonicalize(spawn_cwd).unwrap_or_else(|_| spawn_cwd.to_path_buf());
+    format!("{:x}", md5::compute(canonical.to_string_lossy().as_bytes()))
+}
+
+fn dir_mtime_passes(dir: &Path, spawned_at: Option<&str>) -> bool {
+    let Some(raw) = spawned_at else {
+        return true;
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return true;
+    };
+    let threshold = parsed.with_timezone(&chrono::Utc) - chrono::Duration::seconds(2);
+    let Ok(meta) = dir.metadata() else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    chrono::DateTime::<chrono::Utc>::from(mtime) >= threshold
+}
+
+/// ---
+/// purpose: 无 pending 时按 spawn_cwd 的 md5 hex 捕获唯一新 cursor 存档
+/// params:
+///   context: spawn_cwd + 可选 spawned_at
+/// returns: hex 下恰好一个通过时间窗的 marker 目录则一条候选，否则空
+/// contract:
+///   provides:
+///     - name: scan_unique_workspace_chat
+///       what: 只枚举 ~/.cursor/chats/<md5(cwd)>/，0 或 ≥2 不拾取
+/// boundary:
+///   - 不扫其它 hex；不读 marker 正文
+/// ---
+fn scan_unique_workspace_chat(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let hex = workspace_chats_hex(&context.spawn_cwd);
+    if hex.len() != 32 {
+        return Vec::new();
+    }
+    let root = home.join(".cursor").join("chats").join(&hex);
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut hits: Vec<(String, PathBuf)> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if !child.is_dir() {
+            continue;
+        }
+        let Some(name) = child.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !session_id_legal(name) {
+            continue;
+        }
+        if !cursor_session_archive_present(&child) {
+            continue;
+        }
+        if !dir_mtime_passes(&child, context.spawned_at.as_deref()) {
+            continue;
+        }
+        hits.push((name.to_string(), child));
+    }
+    if hits.len() != 1 {
+        return Vec::new();
+    }
+    let (sid, dir) = hits.remove(0);
+    vec![candidate_for(
+        SessionId::new(sid),
+        dir,
+        context.spawn_cwd.clone(),
+    )]
+}
+
+/// ---
+/// purpose: 按 pending chatId 或 workspace hex 唯一新目录捕获 cursor 存档
+/// params:
+///   context: 含 spawn_cwd；可选 expected_session_id / spawned_at
+/// returns: 命中则一条 FsWatch 候选，否则空向量
+/// contract:
+///   provides:
+///     - name: scan_session_store
+///       what: pending 优先；否则唯一新 hex 目录
+/// boundary:
+///   - 非唯一不拾取既有 hex 会话
+/// ---
+pub(super) fn scan_session_store(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
+    if let Some(expected) = context.expected_session_id.as_ref() {
+        let Some(dir) = cursor_session_dir(expected.as_str()) else {
+            return Vec::new();
+        };
+        return vec![candidate_for(
+            expected.clone(),
+            dir,
+            context.spawn_cwd.clone(),
+        )];
+    }
+    scan_unique_workspace_chat(context)
 }
 
 #[cfg(test)]
@@ -205,6 +327,98 @@ mod tests {
             expected_session_id: expected.map(SessionId::new),
             provider_projects_root: None,
         }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn cursor_unique_workspace_hex_dir_captures_without_pending() {
+        let base = tmp_root("unique-hex");
+        let home = base.join("home");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = std::fs::canonicalize(&cwd).unwrap();
+        let _guard = HomeGuard::set(&home);
+        let sid = "09d2aeaa-33ef-4148-a2e6-83a7c3775caa";
+        let hex = workspace_chats_hex(&cwd);
+        assert_eq!(hex.len(), 32);
+        let dir = seed_nested(&home, &hex, sid);
+        let out = scan_session_store(&ctx(&cwd, None));
+        assert_eq!(out.len(), 1, "unique hex uuid must capture; got {out:?}");
+        assert_eq!(out[0].captured.session_id.as_ref().unwrap().as_str(), sid);
+        assert_eq!(
+            out[0]
+                .captured
+                .rollout_path
+                .as_ref()
+                .map(|p| p.as_path().to_path_buf()),
+            Some(dir)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn cursor_two_workspace_hex_dirs_do_not_steal() {
+        let base = tmp_root("two-hex");
+        let home = base.join("home");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = std::fs::canonicalize(&cwd).unwrap();
+        let _guard = HomeGuard::set(&home);
+        let hex = workspace_chats_hex(&cwd);
+        seed_nested(&home, &hex, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        seed_nested(&home, &hex, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        let out = scan_session_store(&ctx(&cwd, None));
+        assert!(
+            out.is_empty(),
+            "two marker dirs under cwd hex must not bind; got {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn cursor_session_dir_for_cwd_hits_hex_layout() {
+        let base = tmp_root("for-cwd");
+        let home = base.join("home");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = std::fs::canonicalize(&cwd).unwrap();
+        let _guard = HomeGuard::set(&home);
+        let sid = "09d2aeaa-33ef-4148-a2e6-83a7c3775caa";
+        let hex = workspace_chats_hex(&cwd);
+        let dir = seed_nested(&home, &hex, sid);
+        assert_eq!(
+            cursor_session_dir_for_cwd(sid, &cwd).as_deref(),
+            Some(dir.as_path())
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn cursor_foreign_hex_is_ignored_when_cwd_hex_empty() {
+        let base = tmp_root("foreign-hex");
+        let home = base.join("home");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = std::fs::canonicalize(&cwd).unwrap();
+        let _guard = HomeGuard::set(&home);
+        seed_nested(
+            &home,
+            "ffffffffffffffffffffffffffffffff",
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        );
+        let out = scan_session_store(&ctx(&cwd, None));
+        assert!(
+            out.is_empty(),
+            "foreign hex must not bind empty cwd hex; got {out:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
