@@ -3455,14 +3455,14 @@ fn backend_clears_after_n_enters(
     (TmuxBackend::with_runner(Box::new(runner)), recorded)
 }
 
-fn wrapped_unverified_composer(marker: &str) -> String {
+fn wrapped_identity_with_skin(marker: &str, skin: &str) -> String {
     // tmux 80 列折行：单行不含完整 token，拼接后才含。
     let split_at = marker.len() / 2;
-    format!(
-        "tui-ready composer>\n{}\n{}\n",
-        &marker[..split_at],
-        &marker[split_at..]
-    )
+    format!("{skin}\n{}\n{}\n", &marker[..split_at], &marker[split_at..])
+}
+
+fn wrapped_unverified_composer(marker: &str) -> String {
+    wrapped_identity_with_skin(marker, "tui-ready composer>")
 }
 
 #[test]
@@ -3475,28 +3475,44 @@ fn should_resend_enter_after_unverified_true_on_wrapped_tui_token() {
     );
     assert!(
         super::should_resend_enter_after_unverified(&text, marker, None),
-        "joined composer + tui prompt must allow the one Unverified resend"
+        "joined token identity must allow the one Unverified resend"
+    );
+}
+
+#[test]
+fn should_resend_wrapped_identity_on_three_tui_skins() {
+    let marker = "[team-agent-token:msg_skins]";
+    for skin in ["❯ ", "> ", "ready."] {
+        let text = wrapped_identity_with_skin(marker, skin);
+        assert!(
+            super::should_resend_enter_after_unverified(&text, marker, None),
+            "skin {skin:?} with this-paste token must resend"
+        );
+    }
+}
+
+#[test]
+fn should_resend_false_when_payload_has_prompt_glyphs_but_identity_absent() {
+    let marker = "[team-agent-token:msg_glyph_fp]";
+    let text = "STARTED\nsleep holds pty\nsee composer> and ❯ in the payload\n>\n";
+    assert!(
+        !super::this_paste_identity_in_composer(text, marker, None),
+        "glyphs in payload are not this-paste identity"
+    );
+    assert!(
+        !super::should_resend_enter_after_unverified(text, marker, None),
+        "payload composer>/❯ must not by themselves trigger resend"
     );
 }
 
 #[test]
 fn should_resend_enter_after_unverified_true_when_unwrapped_token_still_in_tui() {
     let marker = "[team-agent-token:msg_still_tui]";
-    let text = format!("tui-ready composer>\n{marker}\n");
+    let text = format!("> {marker}\n");
     assert!(super::should_resubmit_enter(&text, marker, None));
     assert!(
         super::should_resend_enter_after_unverified(&text, marker, None),
-        "TUI composer residue after Unverified must still get one extra C-m"
-    );
-}
-
-#[test]
-fn should_resend_enter_after_unverified_false_on_busy_shell_without_composer() {
-    let marker = "[team-agent-token:msg_busy_shell]";
-    let text = format!("STARTED\nsleep holds pty\n{marker}\n");
-    assert!(
-        !super::should_resend_enter_after_unverified(&text, marker, None),
-        "shell echo is not TUI composer; extra Enter would duplicate"
+        "bare > skin with token identity still in composer must resend"
     );
 }
 
@@ -3504,8 +3520,8 @@ fn should_resend_enter_after_unverified_false_on_busy_shell_without_composer() {
 fn unverified_wrapped_token_resends_one_enter_then_consumes() {
     let marker = "[team-agent-token:msg_wrap_ok]";
     let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
-    let pending = wrapped_unverified_composer(marker);
-    let cleared = "tui-ready composer>\n";
+    let pending = wrapped_identity_with_skin(marker, "> ");
+    let cleared = "> \n";
     let (be, rec) = backend_clears_after_n_enters(&pending, cleared, 2);
     let report = be
         .inject(
@@ -3518,7 +3534,7 @@ fn unverified_wrapped_token_resends_one_enter_then_consumes() {
     assert_eq!(
         report.submit_verification,
         SubmitVerification::EnterSentWithoutPlaceholderCheck,
-        "Unverified + wrapped composer residue must resend one C-m then consume; got {:?}",
+        "Unverified + wrapped identity must resend one C-m then consume; got {:?}",
         report.submit_verification
     );
     let calls = rec.lock().unwrap().clone();
@@ -3535,10 +3551,10 @@ fn unverified_wrapped_token_resends_one_enter_then_consumes() {
 }
 
 #[test]
-fn busy_shell_without_tui_composer_does_not_resend_enter() {
+fn unverified_resend_skips_when_this_message_identity_absent() {
     let marker = "[team-agent-token:msg_busy_nodup]";
-    let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
-    let pending = "STARTED\nsleep holds pty\n";
+    let token_text = format!("Team Agent message from leader:\nline1 composer> ❯\n\n{marker}");
+    let pending = "STARTED\nsleep holds pty\ncomposer>\n❯\n>\n";
     let (be, rec) = backend_clears_after_n_enters(pending, pending, 99);
     let report = be
         .inject(
@@ -3551,13 +3567,101 @@ fn busy_shell_without_tui_composer_does_not_resend_enter() {
     assert_eq!(
         report.submit_verification,
         SubmitVerification::SubmitConsumptionUnverified,
-        "busy shell without TUI composer stays Unverified, no extra Enter; got {:?}",
+        "identity absent must stay Unverified, no extra Enter; got {:?}",
         report.submit_verification
     );
     let calls = rec.lock().unwrap().clone();
     assert_eq!(
         count_submit_enters(&calls),
         1,
-        "busy shell must not get the Unverified composer resend; calls={calls:?}"
+        "no this-paste identity ⇒ no Unverified resend; commenting the identity gate must turn this red (2+ C-m); calls={calls:?}"
+    );
+}
+
+#[test]
+fn unverified_identity_never_clears_hits_resend_cap_of_one() {
+    let marker = "[team-agent-token:msg_cap_lock]";
+    let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
+    let pending = wrapped_identity_with_skin(marker, "ready.");
+    let (be, rec) = backend_clears_after_n_enters(&pending, &pending, u32::MAX);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified,
+        "never-clear identity must not fake-consume; got {:?}",
+        report.submit_verification
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        2,
+        "cap must be exactly one extra C-m (1 inject + 1 resend); raising UNVERIFIED_COMPOSER_RESEND_MAX must turn this red; calls={calls:?}"
+    );
+    let pastes = calls
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("paste-buffer"))
+        .count();
+    assert_eq!(pastes, 1, "must not re-paste; paste-buffer count={pastes}");
+}
+
+#[test]
+fn unverified_wrapped_identity_resends_on_each_of_three_skins() {
+    for skin in ["❯ ", "> ", "ready."] {
+        let marker = format!(
+            "[team-agent-token:msg_skin_{}]",
+            skin.chars().next().unwrap() as u32
+        );
+        let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
+        let pending = wrapped_identity_with_skin(&marker, skin);
+        let cleared = format!("{skin}\n");
+        let (be, rec) = backend_clears_after_n_enters(&pending, &cleared, 2);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text),
+                Key::Enter,
+                true,
+            )
+            .expect("inject");
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "skin {skin:?} must consume after one extra C-m"
+        );
+        let n = count_submit_enters(&rec.lock().unwrap().clone());
+        assert_eq!(n, 2, "skin {skin:?} extra C-m; got {n}");
+    }
+}
+
+#[test]
+fn unverified_payload_glyphs_do_not_resend_without_identity() {
+    let marker = "[team-agent-token:msg_payload_glyph]";
+    let token_text = format!("Team Agent message from leader:\ncomposer> ❯\n\n{marker}");
+    let pending = "output\ncomposer> leftover from payload\n❯ quoted\n";
+    let (be, rec) = backend_clears_after_n_enters(pending, pending, 99);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "glyphs in payload must not cause extra C-m when token identity is gone; calls={calls:?}"
+    );
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified
     );
 }

@@ -17,13 +17,13 @@
 //!     - name: cursor-single-enter
 //!       what: TLS 打开时，busy 或 token 不在输入区（底部 5 非空行）则不重按 Enter；transcript 里的 pasted #N 不算输入框
 //!     - name: unverified-composer-resend
-//!       what: SubmitConsumptionUnverified 且 TUI composer 仍有本次文本（折行拼接也算）⇒ 只补一颗 C-m；达上限 1 或残留消失或已消费则停；普通 shell / 无 composer 残留 / busy 信号 ⇒ 不补
+//!       what: SubmitConsumptionUnverified 且本次身份（token 含折行拼接 / 锁定 #N / grok 行数）仍在 composer ⇒ 只补一颗 C-m；consumed=None 不补；达上限 1 或身份消失或已消费或 busy 则停。不认提示符皮肤。
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
 //!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
 //!   - 不把「没能判断」(consumed=None) 落到成功值
 //!   - turn_verification 不是投递闸门；分辨不出不得报开跑
-//!   - 补发只重按回车，不重粘、不用 Escape/C-c；闸是 composer 残留不是 pane 忙闲
+//!   - 补发只重按回车，不重粘、不用 Escape/C-c；闸是本次身份仍在 composer，不是提示符字符串、也不是 pane 忙闲
 //! maturity: wired
 //! ---
 //!
@@ -1522,24 +1522,23 @@ fn composer_joined(text: &str, n: usize) -> String {
     lines.concat()
 }
 
-fn tui_composer_present(text: &str) -> bool {
-    text.lines()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-        .take(15)
-        .any(|line| {
-            let lower = line.to_ascii_lowercase();
-            line.contains('❯')
-                || line.contains('›')
-                || lower.contains("composer>")
-                || lower.contains("tui-ready")
-        })
+/// ---
+/// purpose: 本次注入身份是否还在 composer（复用 token / #N / grok 行数，不认提示符皮肤）
+/// contract: 单行 token、折行拼接 token、或锁定的 PasteLatch 仍在底部 ⇒ true
+/// boundary: payload 里的 ❯/`composer>`/`>` 不算身份；无身份不得据此连按回车
+/// ---
+pub(crate) fn this_paste_identity_in_composer(
+    text: &str,
+    marker: &str,
+    tracked: Option<PasteLatch>,
+) -> bool {
+    should_resubmit_enter(text, marker, tracked) || composer_joined(text, 15).contains(marker)
 }
 
 /// ---
-/// purpose: Unverified 之后要不要补一颗 C-m（折行假阴，不是忙闲）
-/// contract: 无 busy、TUI composer 在、且（主循环尺子为真 或 折行拼接仍见 token）⇒ true；达上限由调用方停
-/// boundary: 不把普通 shell 回显当 composer；不重粘；主循环已按到 3 仍 Unverified 时也只再补这一颗
+/// purpose: Unverified 之后要不要补一颗 C-m（本次身份仍在，不是提示符长什么样）
+/// contract: 无 busy 且本次身份仍在 composer ⇒ true；达上限由调用方停
+/// boundary: consumed=None 不在这里决定（调用方不补）；不重粘；不把 payload 提示符字符当守卫
 /// ---
 pub(crate) fn should_resend_enter_after_unverified(
     text: &str,
@@ -1549,10 +1548,7 @@ pub(crate) fn should_resend_enter_after_unverified(
     if provider_busy_signal_in_tail(text) {
         return false;
     }
-    if !tui_composer_present(text) {
-        return false;
-    }
-    should_resubmit_enter(text, marker, tracked) || composer_joined(text, 15).contains(marker)
+    this_paste_identity_in_composer(text, marker, tracked)
 }
 
 /// ---
@@ -1971,7 +1967,7 @@ const POST_SUBMIT_CONSUMPTION_POLL_MS: u64 = 60;
 /// post-Enter `capture()` 失败时只重读、不重按。计入 `InjectReport.attempts`。
 const POST_SUBMIT_CAPTURE_RETRY: u32 = 4;
 const POST_SUBMIT_CAPTURE_RETRY_MS: u64 = 20;
-/// Unverified 之后、TUI composer 仍有本次文本时，只补这一颗回车。
+/// Unverified 之后、本次身份仍在 composer 时，只补这一颗回车。
 const UNVERIFIED_COMPOSER_RESEND_MAX: u32 = 1;
 
 /// E46 (0.3.24 bug#5, C5 provider-agnostic detector): the pane's input region
@@ -2806,12 +2802,14 @@ impl Transport for TmuxBackend {
                     },
                     None => SubmitVerification::SubmitConsumptionUnverified,
                 };
-                // Unverified + TUI composer 残留：只补一颗 C-m。闸是残留不是忙闲。
-                // cursor 单回车路径不走这里。终止：已消费 / 残留消失 / 达上限。
+                // Unverified + 本次身份仍在：只补一颗 C-m。身份拿不到（None）不补——
+                // 重复不可逆，滞留可人工救。cursor 单回车路径不走这里。
+                // 终止：已消费 / 身份消失 / 达上限 / busy。
                 if matches!(
                     submit_verification,
                     SubmitVerification::SubmitConsumptionUnverified
-                ) && !cursor_single_enter_enabled()
+                ) && consumed == Some(false)
+                    && !cursor_single_enter_enabled()
                 {
                     if let Some(m) = marker {
                         let mut leftover_resends = UNVERIFIED_COMPOSER_RESEND_MAX;
@@ -2839,9 +2837,7 @@ impl Transport for TmuxBackend {
                                 std::thread::sleep(Duration::from_millis(100));
                                 match self.capture(target, CaptureRange::Tail(40)) {
                                     Ok(cap) => {
-                                        if cap.text.contains(m)
-                                            || composer_joined(&cap.text, 15).contains(m)
-                                        {
+                                        if cap.text.contains(m) {
                                             token_ever_visible = true;
                                         }
                                         tracked_paste = latch_paste(&cap.text, tracked_paste);
@@ -2861,13 +2857,21 @@ impl Transport for TmuxBackend {
                                         ) == Some(true)
                                             || provider_busy_signal_in_tail(&cap.text)
                                         {
-                                            found_consumed = true;
-                                            break;
+                                            // Gone+无 latch 会把折行 token 写成已消费；身份仍在则不算。
+                                            if !this_paste_identity_in_composer(
+                                                &cap.text,
+                                                m,
+                                                tracked_paste,
+                                            ) {
+                                                found_consumed = true;
+                                                break;
+                                            }
                                         }
-                                        // 折行时整串 token 从未可见；补发后残留消失 = 提交成功。
-                                        if !should_resubmit_enter(&cap.text, m, tracked_paste)
-                                            && !composer_joined(&cap.text, 15).contains(m)
-                                        {
+                                        if !this_paste_identity_in_composer(
+                                            &cap.text,
+                                            m,
+                                            tracked_paste,
+                                        ) {
                                             found_consumed = true;
                                             break;
                                         }
