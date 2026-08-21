@@ -5,7 +5,7 @@
 //!     - name: TmuxBackend
 //!       what: Transport 的 tmux 实现，inject/send_keys 取 pane 输入锁
 //!     - name: submit-consumption-verdict
-//!       what: token 见过再消失，或本次占位符身份（#N / grok 行数）从 composer 消失 ⇒ 已消费；无身份时只按一次回车；consumed=None（capture 失败/读数拿不到）⇒ SubmitConsumptionUnverified，不得与 Some(true) 同值
+//!       what: token 见过再消失且本次占位符身份（#N / grok 行数或 KB）已离开 composer ⇒ 已消费；Gone 时占位符仍在 ⇒ 未消费；无身份时只按一次回车；consumed=None（capture 失败/读数拿不到）⇒ SubmitConsumptionUnverified，不得与 Some(true) 同值
 //!     - name: token-sighting
 //!       what: Visible / Gone / NeverSeen 三态接到判定（不只进报告）
 //!     - name: pre-submit-copy-mode-cancel
@@ -1185,6 +1185,7 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
 /// scrollback token cannot verify a new message.
 /// Measured cursor-agent 2026.08.11 floor: text and first Enter ≥1s apart
 /// (phase0 M2-5/M2-6; `.team/scripts/cursor_send.sh`).
+/// Grok uses the same 1s floor (悬案B：零地板时 Enter 落在折叠窗口内被吞).
 pub const CURSOR_PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_secs(1);
 
 thread_local! {
@@ -1192,9 +1193,9 @@ thread_local! {
     static CURSOR_SINGLE_ENTER: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Run `f` with a paste→Enter floor. Delivery sets 1s only for CursorAgent.
+/// Run `f` with a paste→Enter floor. Delivery sets 1s for CursorAgent and Grok.
 /// Tests pass a small non-zero Duration to cover the sleep branch.
-/// Default is ZERO — claude/codex/grok and unset callers pay nothing.
+/// Default is ZERO — claude/codex and unset callers pay nothing.
 /// This is not TEAM_AGENT_TEST_TMP (that var is a path, always set in seats).
 pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> R {
     PASTE_TO_SUBMIT_FLOOR.with(|cell| {
@@ -1371,7 +1372,7 @@ pub(crate) struct ComposerPastedPrompt {
 }
 
 /// purpose: 本次粘贴在 composer 上的可锁定身份
-/// contract: HashId = claude/codex `#N`；GrokLineCount = grok `[Pasted: N lines]` 的 N
+/// contract: HashId = claude/codex `#N`；GrokLineCount = grok `[Pasted: N lines|N KB]` 的 N
 /// boundary: 无 #N 时禁止用「任意占位符」冒充 HashId
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PasteLatch {
@@ -1396,7 +1397,7 @@ fn parse_pasted_hash_id(lower_line: &str) -> Option<u32> {
 }
 
 fn parse_grok_pasted_line_count(lower_line: &str) -> Option<u32> {
-    // grok: `[pasted: 42 lines]` — 冒号紧跟 pasted，没有 `#N`
+    // grok: `[pasted: 42 lines]` or `[pasted: 13 kb]` — 冒号紧跟 pasted，没有 `#N`
     let idx = lower_line.find("pasted:")?;
     let rest = lower_line.get(idx.saturating_add("pasted:".len())..)?;
     let rest = rest.trim_start();
@@ -1405,7 +1406,12 @@ fn parse_grok_pasted_line_count(lower_line: &str) -> Option<u32> {
         return None;
     }
     let after = rest.get(digits.len()..)?.trim_start();
-    if after.starts_with("lines") || after.starts_with("line") {
+    let unit_ok = after.starts_with("lines")
+        || after.starts_with("line")
+        || after.starts_with("kb")
+        || after.starts_with("mb")
+        || after.starts_with('b');
+    if unit_ok {
         digits.parse().ok()
     } else {
         None
@@ -1534,9 +1540,10 @@ fn raw_multiline_still_unfolded(text: &str, marker: &str) -> bool {
     text.lines().filter(|line| !line.trim().is_empty()).count() > 15
 }
 
-/// purpose: 把 token 三态 + 本次 #N 占位符合成消费判定
+/// purpose: 把 token 三态 + 本次 #N / grok 占位符合成消费判定
 /// contract:
 ///   Some(true)=已消费；Some(false)=未消费（含 NeverSeen 且无正信号 → 未证实走 false）
+///   Gone 必须先复核 PasteLatch 身份：占位符仍在 composer ⇒ 未消费
 ///   None 不由本函数产生；调用方在 capture 失败时保持 None，必须落到 Unverified
 /// boundary: 不修 BUSY 入队；Working 信号由调用方在 Some(false) 之后看；None 不得当成功
 pub(crate) fn consumption_from_capture(
@@ -1548,8 +1555,26 @@ pub(crate) fn consumption_from_capture(
     let token_now = token_in_bottom_n(text, marker, 15);
     match token_sighting(token_now, token_ever_visible) {
         TokenSighting::Visible => Some(false),
-        TokenSighting::Gone => Some(true),
+        TokenSighting::Gone => gone_consumption(text, tracked),
         TokenSighting::NeverSeen => consumption_from_placeholder(text, tracked),
+    }
+}
+
+/// ---
+/// purpose: Gone 分支在判已消费前复核 composer 占位符（PasteLatch 身份）
+/// contract: 锁定身份仍在，或未锁定但 grok `[Pasted: …]` 仍在 ⇒ Some(false)
+/// boundary: 空 composer + 无 grok 占位符保持 Some(true)（claude 短贴路径不变）
+/// ---
+fn gone_consumption(text: &str, tracked: Option<PasteLatch>) -> Option<bool> {
+    if tracked.is_some() {
+        return match consumption_from_placeholder(text, tracked) {
+            Some(false) => Some(false),
+            _ => Some(true),
+        };
+    }
+    match pasted_prompt_in_composer(text, 15) {
+        Some(p) if p.literal == "pasted:" => Some(false),
+        _ => Some(true),
     }
 }
 
