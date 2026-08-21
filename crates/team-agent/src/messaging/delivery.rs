@@ -8,7 +8,8 @@
 //!   - 不把物理 success 写成 delivered
 //!   - 不重粘文本
 //!   - error-bypass（target_resolved+error）只经 claim 原子闸，禁止旁路双投
-//!   - 物理 Enter 已出后 observer/state 落盘失败不得返 Err 重投
+//!   - 物理 Enter 已出（pane/转录已有 token）后 observer/state 落盘失败不得返 Err 重投
+//!   - 提交前持久化失败仍返 Err，由 batch 记 item_blocked 隔离
 //!   - 同 message_id 的 token 已在 pane/转录则拒绝二次注入
 //! maturity: wired
 //! ---
@@ -688,9 +689,18 @@ pub fn deliver_pending_message(
         }
     };
     if let Some(error) = submit_observer.take_error() {
-        // Physical Enter already left the pane. Returning Err here used to leave
-        // the row retryable (target_resolved+error) so the next tick re-injected.
-        log_post_physical_submit_state_error(event_log, message_id, "submit_observer", &error)?;
+        // Token on pane/transcript = physical Enter already out → degrade.
+        // Poison before submit (no token) still returns Err → item_blocked.
+        absorb_state_error_only_after_physical_submit(
+            transport,
+            state,
+            &message.recipient,
+            &target,
+            message_id,
+            event_log,
+            "submit_observer",
+            error,
+        )?;
     }
     persist_submit_verification(workspace, message_id, &inject_report);
     let turn_verification = inject_report.turn_verification;
@@ -888,7 +898,16 @@ pub fn deliver_pending_message(
         &message.recipient,
         canonical_owner_team_id.as_deref(),
     ) {
-        log_post_physical_submit_state_error(event_log, message_id, "stamp_first_send_at", &error)?;
+        absorb_state_error_only_after_physical_submit(
+            transport,
+            state,
+            &message.recipient,
+            &target,
+            message_id,
+            event_log,
+            "stamp_first_send_at",
+            error,
+        )?;
     }
     if let Err(error) = record_turn_open_if_leader_to_worker_scoped(
         workspace,
@@ -899,11 +918,15 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     ) {
-        log_post_physical_submit_state_error(
-            event_log,
+        absorb_state_error_only_after_physical_submit(
+            transport,
+            state,
+            &message.recipient,
+            &target,
             message_id,
+            event_log,
             "turn_open_after_delivery",
-            &error,
+            error,
         )?;
     }
     Ok(outcome)
@@ -3006,9 +3029,10 @@ fn text_contains_message_token(text: &str, message_id: &str) -> bool {
 /// contract:
 ///   provides:
 ///     - name: token_already_visible
-///       what: capture 全文或 recipient rollout_path 尾含 `[team-agent-token:{id}]` 则为 true
+///       what: capture Tail(80) 或 recipient rollout_path 尾含 `[team-agent-token:{id}]` 则为 true
 /// boundary:
 ///   - capture 失败不当已见（倒向允许注入，避免丢信）
+///   - 不请求 Full（wave-2：滚出屏的 trust 残渣不当成已见/可行动）
 ///   - 不把 JSON 字段里的 message_id 当 pane token
 /// ---
 pub(crate) fn token_already_visible(
@@ -3022,7 +3046,7 @@ pub(crate) fn token_already_visible(
         return false;
     }
     let marker = message_token_marker(message_id);
-    match transport.capture(target, CaptureRange::Full) {
+    match transport.capture(target, CaptureRange::Tail(80)) {
         Ok(captured) if text_contains_message_token(&captured.text, message_id) => return true,
         _ => {}
     }
@@ -3083,6 +3107,23 @@ fn leader_receiver_record_path<'a>(
                 .and_then(|team| team.get("leader_receiver"))
                 .and_then(|receiver| receiver.get(field))
         })
+}
+
+fn absorb_state_error_only_after_physical_submit(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+    target: &Target,
+    message_id: &str,
+    event_log: &EventLog,
+    stage: &str,
+    error: MessagingError,
+) -> Result<(), MessagingError> {
+    if token_already_visible(transport, state, recipient, target, message_id) {
+        log_post_physical_submit_state_error(event_log, message_id, stage, &error)
+    } else {
+        Err(error)
+    }
 }
 
 fn log_post_physical_submit_state_error(
