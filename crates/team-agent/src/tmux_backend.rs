@@ -14,6 +14,8 @@
 //!       what: busy ⇒ Verified(开跑)；composer 仍有本次粘贴且无 busy ⇒ Missing(没开跑)；其余 NotYetObserved(不知道)
 //!     - name: capture-fail-retry
 //!       what: post-Enter capture 失败只重读 capture，计入 attempts，不重粘、不加 Enter
+//!     - name: cursor-single-enter
+//!       what: TLS 打开时，busy 或 token 不在输入区（底部 5 非空行）则不重按 Enter；transcript 里的 pasted #N 不算输入框
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
 //!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
@@ -1171,6 +1173,7 @@ pub const CURSOR_PASTE_TO_SUBMIT_FLOOR: Duration = Duration::from_secs(1);
 
 thread_local! {
     static PASTE_TO_SUBMIT_FLOOR: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    static CURSOR_SINGLE_ENTER: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Run `f` with a paste→Enter floor. Delivery sets 1s only for CursorAgent.
@@ -1188,6 +1191,24 @@ pub fn with_paste_to_submit_floor<R>(floor: Duration, f: impl FnOnce() -> R) -> 
 
 pub(crate) fn current_paste_to_submit_floor() -> Duration {
     PASTE_TO_SUBMIT_FLOOR.with(Cell::get)
+}
+
+/// ---
+/// purpose: cursor 注入单回车闸（delivery 仅对 CursorAgent 打开）
+/// contract: 默认关；打开后重试 Enter 仅当 token 仍在输入区且无 busy
+/// boundary: 不改 claude/grok/codex 默认重试；测试隔离下默认关
+/// ---
+pub fn with_cursor_single_enter<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    CURSOR_SINGLE_ENTER.with(|cell| {
+        let previous = cell.replace(enabled);
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+pub(crate) fn cursor_single_enter_enabled() -> bool {
+    CURSOR_SINGLE_ENTER.with(Cell::get)
 }
 
 pub(crate) fn sleep_remaining_paste_to_submit_floor(pasted_at: Instant, floor: Duration) {
@@ -1467,6 +1488,18 @@ pub(crate) fn should_resubmit_enter(
         Some(PasteLatch::GrokLineCount(n)) => prompt.line_count == Some(n),
         None => false,
     }
+}
+
+/// ---
+/// purpose: cursor 重按 Enter 的核实：token 仍在输入框，且回合未在进行
+/// contract: busy ⇒ 不重按；token 不在底部 5 非空行 ⇒ 不重按
+/// boundary: 不把 transcript 里的 pasted #N 当输入框；不替代 claude/grok 的 should_resubmit_enter
+/// ---
+pub(crate) fn should_resubmit_enter_cursor(text: &str, marker: &str) -> bool {
+    if provider_busy_signal_in_tail(text) {
+        return false;
+    }
+    token_in_bottom_n(text, marker, 5)
 }
 
 /// purpose: Phase 1 判定 TUI 侧注入已完成、可以按回车
@@ -2529,7 +2562,16 @@ impl Transport for TmuxBackend {
                                     consumed = Some(true);
                                     break;
                                 }
-                                if !should_resubmit_enter(&cap.text, m, tracked_paste) {
+                                if cursor_single_enter_enabled() {
+                                    if provider_busy_signal_in_tail(&cap.text) {
+                                        consumed = Some(true);
+                                        break;
+                                    }
+                                    if !should_resubmit_enter_cursor(&cap.text, m) {
+                                        consumed = Some(false);
+                                        break;
+                                    }
+                                } else if !should_resubmit_enter(&cap.text, m, tracked_paste) {
                                     consumed = Some(false);
                                     break;
                                 }
@@ -2615,6 +2657,12 @@ impl Transport for TmuxBackend {
                                         token_ever_visible,
                                         tracked_paste,
                                     ) == Some(true)
+                                    {
+                                        found_consumed = true;
+                                        break;
+                                    }
+                                    if cursor_single_enter_enabled()
+                                        && provider_busy_signal_in_tail(&cap.text)
                                     {
                                         found_consumed = true;
                                         break;

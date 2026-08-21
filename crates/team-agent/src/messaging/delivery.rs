@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: deliver_stored_message
-//!       what: 单次物理注入；grok 队列默认再按回车顶出
+//!       what: 单次物理注入；grok 队列默认再按回车顶出；cursor 打开单回车闸且不 flush send-now
 //! boundary:
 //!   - 不把物理 success 写成 delivered
 //!   - 不重粘文本
@@ -525,23 +525,27 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
+    let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
     let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
         paste_to_submit_floor_for_recipient(state, &message.recipient),
         || {
-            transport.inject_with_submit_observer(
-                &target,
-                &payload,
-                Key::Enter,
-                true,
-                Some(&submit_observer),
-            )
+            crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
+                transport.inject_with_submit_observer(
+                    &target,
+                    &payload,
+                    Key::Enter,
+                    true,
+                    Some(&submit_observer),
+                )
+            })
         },
     );
     let inject_report = match inject_attempt {
         Ok(report) => {
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
-            if !crate::provider::submit_now::keep_provider_queue_requested() {
+            // cursor：第二下 Enter 打断进行中回合，不走 flush。
+            if !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
                 match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
                     Ok(flush) if flush.extra_enters > 0 => {
                         let _ = event_log.write(
@@ -2160,15 +2164,25 @@ fn recipient_pane_has_actionable_startup_prompt(
     }
 }
 
-fn paste_to_submit_floor_for_recipient(state: &serde_json::Value, recipient: &str) -> Duration {
-    let provider = state
+fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Provider> {
+    state
         .get("agents")
         .and_then(serde_json::Value::as_object)
         .and_then(|agents| agents.get(recipient))
         .and_then(|agent| agent.get("provider"))
         .and_then(serde_json::Value::as_str)
-        .and_then(parse_canonical_provider);
-    match provider {
+        .and_then(parse_canonical_provider)
+}
+
+fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool {
+    matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent)
+    )
+}
+
+fn paste_to_submit_floor_for_recipient(state: &serde_json::Value, recipient: &str) -> Duration {
+    match recipient_provider(state, recipient) {
         Some(Provider::CursorAgent) => crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR,
         _ => Duration::ZERO,
     }
