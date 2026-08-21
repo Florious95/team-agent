@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 docs/
+!docs/reference/
+!docs/reference/**
 .claude/
 __pycache__/
 *.py[cod]
