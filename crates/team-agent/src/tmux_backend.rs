@@ -16,11 +16,14 @@
 //!       what: post-Enter capture 失败只重读 capture，计入 attempts，不重粘、不加 Enter
 //!     - name: cursor-single-enter
 //!       what: TLS 打开时，busy 或 token 不在输入区（底部 5 非空行）则不重按 Enter；transcript 里的 pasted #N 不算输入框
+//!     - name: unverified-composer-resend
+//!       what: SubmitConsumptionUnverified 且 TUI composer 仍有本次文本（折行拼接也算）⇒ 只补一颗 C-m；达上限 1 或残留消失或已消费则停；普通 shell / 无 composer 残留 / busy 信号 ⇒ 不补
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
 //!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
 //!   - 不把「没能判断」(consumed=None) 落到成功值
 //!   - turn_verification 不是投递闸门；分辨不出不得报开跑
+//!   - 补发只重按回车，不重粘、不用 Escape/C-c；闸是 composer 残留不是 pane 忙闲
 //! maturity: wired
 //! ---
 //!
@@ -1508,6 +1511,50 @@ pub(crate) fn should_resubmit_enter(text: &str, marker: &str, tracked: Option<Pa
     }
 }
 
+fn composer_joined(text: &str, n: usize) -> String {
+    let mut lines: Vec<&str> = text
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(n)
+        .collect();
+    lines.reverse();
+    lines.concat()
+}
+
+fn tui_composer_present(text: &str) -> bool {
+    text.lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(15)
+        .any(|line| {
+            let lower = line.to_ascii_lowercase();
+            line.contains('❯')
+                || line.contains('›')
+                || lower.contains("composer>")
+                || lower.contains("tui-ready")
+        })
+}
+
+/// ---
+/// purpose: Unverified 之后要不要补一颗 C-m（折行假阴，不是忙闲）
+/// contract: 无 busy、TUI composer 在、且（主循环尺子为真 或 折行拼接仍见 token）⇒ true；达上限由调用方停
+/// boundary: 不把普通 shell 回显当 composer；不重粘；主循环已按到 3 仍 Unverified 时也只再补这一颗
+/// ---
+pub(crate) fn should_resend_enter_after_unverified(
+    text: &str,
+    marker: &str,
+    tracked: Option<PasteLatch>,
+) -> bool {
+    if provider_busy_signal_in_tail(text) {
+        return false;
+    }
+    if !tui_composer_present(text) {
+        return false;
+    }
+    should_resubmit_enter(text, marker, tracked) || composer_joined(text, 15).contains(marker)
+}
+
 /// ---
 /// purpose: cursor 重按 Enter 的核实：token 仍在输入框，且回合未在进行
 /// contract: busy ⇒ 不重按；token 不在底部 5 非空行 ⇒ 不重按
@@ -1924,6 +1971,8 @@ const POST_SUBMIT_CONSUMPTION_POLL_MS: u64 = 60;
 /// post-Enter `capture()` 失败时只重读、不重按。计入 `InjectReport.attempts`。
 const POST_SUBMIT_CAPTURE_RETRY: u32 = 4;
 const POST_SUBMIT_CAPTURE_RETRY_MS: u64 = 20;
+/// Unverified 之后、TUI composer 仍有本次文本时，只补这一颗回车。
+const UNVERIFIED_COMPOSER_RESEND_MAX: u32 = 1;
 
 /// E46 (0.3.24 bug#5, C5 provider-agnostic detector): the pane's input region
 /// is "consumed" when the token text that was just visible BEFORE the Enter
@@ -2736,7 +2785,7 @@ impl Transport for TmuxBackend {
                 let mut last_turn_text = attempts_detail
                     .last()
                     .map(|obs| obs.pane_tail_excerpt.clone());
-                let submit_verification = match consumed {
+                let mut submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
                     Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
                         Ok(cap) => {
@@ -2757,6 +2806,83 @@ impl Transport for TmuxBackend {
                     },
                     None => SubmitVerification::SubmitConsumptionUnverified,
                 };
+                // Unverified + TUI composer 残留：只补一颗 C-m。闸是残留不是忙闲。
+                // cursor 单回车路径不走这里。终止：已消费 / 残留消失 / 达上限。
+                if matches!(
+                    submit_verification,
+                    SubmitVerification::SubmitConsumptionUnverified
+                ) && !cursor_single_enter_enabled()
+                {
+                    if let Some(m) = marker {
+                        let mut leftover_resends = UNVERIFIED_COMPOSER_RESEND_MAX;
+                        while leftover_resends > 0 {
+                            leftover_resends -= 1;
+                            let Ok(cap) = self.capture(target, CaptureRange::Tail(15)) else {
+                                break;
+                            };
+                            last_turn_text = Some(cap.text.clone());
+                            if !should_resend_enter_after_unverified(&cap.text, m, tracked_paste) {
+                                break;
+                            }
+                            self.prepare_pane_for_submit(target, true);
+                            if self
+                                .run_inject_stage(&submit_argv, InjectStage::Submit)
+                                .is_err()
+                            {
+                                break;
+                            }
+                            notify_submit_observer(observer);
+                            consumption_attempts = consumption_attempts.saturating_add(1);
+                            let attempt_start = std::time::Instant::now();
+                            let mut found_consumed = false;
+                            for _ in 0..12 {
+                                std::thread::sleep(Duration::from_millis(100));
+                                match self.capture(target, CaptureRange::Tail(40)) {
+                                    Ok(cap) => {
+                                        if cap.text.contains(m)
+                                            || composer_joined(&cap.text, 15).contains(m)
+                                        {
+                                            token_ever_visible = true;
+                                        }
+                                        tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                        let obs = submit_attempt_observation(
+                                            consumption_attempts.max(1),
+                                            &cap,
+                                            marker,
+                                            attempt_start.elapsed().as_millis() as u64,
+                                        );
+                                        attempts_detail.push(obs);
+                                        last_turn_text = Some(cap.text.clone());
+                                        if consumption_from_capture(
+                                            &cap.text,
+                                            m,
+                                            token_ever_visible,
+                                            tracked_paste,
+                                        ) == Some(true)
+                                            || provider_busy_signal_in_tail(&cap.text)
+                                        {
+                                            found_consumed = true;
+                                            break;
+                                        }
+                                        // 折行时整串 token 从未可见；补发后残留消失 = 提交成功。
+                                        if !should_resubmit_enter(&cap.text, m, tracked_paste)
+                                            && !composer_joined(&cap.text, 15).contains(m)
+                                        {
+                                            found_consumed = true;
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            if found_consumed {
+                                submit_verification =
+                                    SubmitVerification::EnterSentWithoutPlaceholderCheck;
+                                break;
+                            }
+                        }
+                    }
+                }
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,

@@ -3099,7 +3099,10 @@ fn gone_empty_composer_without_latch_stays_consumed_for_claude() {
 #[test]
 fn grok_fold_raw_then_fold_placeholder_stays_retries_enter_not_repaste() {
     let marker = "[team-agent-token:msg_grok_reappear]";
-    let token_text = format!("Team Agent message from leader:\n{}\n\n{marker}", "x\n".repeat(20));
+    let token_text = format!(
+        "Team Agent message from leader:\n{}\n\n{marker}",
+        "x\n".repeat(20)
+    );
     let raw = grok_raw_unfolded_paste(&marker);
     let (be, rec) = backend_raw_then_fold(&raw, GROK_INCIDENT_LINE, GROK_INCIDENT_LINE, 2);
     let report = be
@@ -3390,5 +3393,171 @@ fn p0_capture_failure_retries_read_and_counts_attempts() {
     assert_eq!(
         pastes, 1,
         "must not re-paste on capture failure; paste-buffer count={pastes}"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Unverified 之后补一颗 C-m（TUI composer 残留 / 折行），busy-shell 不补
+// ═════════════════════════════════════════════════════════════════════════
+
+struct NthEnterClearRunner {
+    recorded: RecordedArgv,
+    pending: String,
+    cleared: String,
+    enters: std::sync::atomic::AtomicU32,
+    clear_after: u32,
+}
+
+impl CommandRunner for NthEnterClearRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        if argv.get(1).map(String::as_str) == Some("send-keys")
+            && argv.iter().any(|a| a == "C-m" || a == "Enter")
+        {
+            self.enters.fetch_add(1, Ordering::SeqCst);
+        }
+        let stdout = match argv.get(1).map(String::as_str) {
+            Some("capture-pane") => {
+                if self.enters.load(Ordering::SeqCst) >= self.clear_after {
+                    self.cleared.clone()
+                } else {
+                    self.pending.clone()
+                }
+            }
+            Some("display-message") => "0\n".to_string(),
+            _ => String::new(),
+        };
+        Ok(ok(&stdout))
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
+fn backend_clears_after_n_enters(
+    pending: &str,
+    cleared: &str,
+    clear_after: u32,
+) -> (TmuxBackend, RecordedArgv) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = NthEnterClearRunner {
+        recorded: Arc::clone(&recorded),
+        pending: pending.to_string(),
+        cleared: cleared.to_string(),
+        enters: std::sync::atomic::AtomicU32::new(0),
+        clear_after,
+    };
+    (TmuxBackend::with_runner(Box::new(runner)), recorded)
+}
+
+fn wrapped_unverified_composer(marker: &str) -> String {
+    // tmux 80 列折行：单行不含完整 token，拼接后才含。
+    let split_at = marker.len() / 2;
+    format!(
+        "tui-ready composer>\n{}\n{}\n",
+        &marker[..split_at],
+        &marker[split_at..]
+    )
+}
+
+#[test]
+fn should_resend_enter_after_unverified_true_on_wrapped_tui_token() {
+    let marker = "[team-agent-token:msg_wrap_gate]";
+    let text = wrapped_unverified_composer(marker);
+    assert!(
+        !super::should_resubmit_enter(&text, marker, None),
+        "per-line token_in_bottom_n must stay false on wrap"
+    );
+    assert!(
+        super::should_resend_enter_after_unverified(&text, marker, None),
+        "joined composer + tui prompt must allow the one Unverified resend"
+    );
+}
+
+#[test]
+fn should_resend_enter_after_unverified_true_when_unwrapped_token_still_in_tui() {
+    let marker = "[team-agent-token:msg_still_tui]";
+    let text = format!("tui-ready composer>\n{marker}\n");
+    assert!(super::should_resubmit_enter(&text, marker, None));
+    assert!(
+        super::should_resend_enter_after_unverified(&text, marker, None),
+        "TUI composer residue after Unverified must still get one extra C-m"
+    );
+}
+
+#[test]
+fn should_resend_enter_after_unverified_false_on_busy_shell_without_composer() {
+    let marker = "[team-agent-token:msg_busy_shell]";
+    let text = format!("STARTED\nsleep holds pty\n{marker}\n");
+    assert!(
+        !super::should_resend_enter_after_unverified(&text, marker, None),
+        "shell echo is not TUI composer; extra Enter would duplicate"
+    );
+}
+
+#[test]
+fn unverified_wrapped_token_resends_one_enter_then_consumes() {
+    let marker = "[team-agent-token:msg_wrap_ok]";
+    let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
+    let pending = wrapped_unverified_composer(marker);
+    let cleared = "tui-ready composer>\n";
+    let (be, rec) = backend_clears_after_n_enters(&pending, cleared, 2);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "Unverified + wrapped composer residue must resend one C-m then consume; got {:?}",
+        report.submit_verification
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        2,
+        "exactly one extra C-m after Unverified; calls={calls:?}"
+    );
+    let pastes = calls
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("paste-buffer"))
+        .count();
+    assert_eq!(pastes, 1, "must not re-paste; paste-buffer count={pastes}");
+}
+
+#[test]
+fn busy_shell_without_tui_composer_does_not_resend_enter() {
+    let marker = "[team-agent-token:msg_busy_nodup]";
+    let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
+    let pending = "STARTED\nsleep holds pty\n";
+    let (be, rec) = backend_clears_after_n_enters(pending, pending, 99);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified,
+        "busy shell without TUI composer stays Unverified, no extra Enter; got {:?}",
+        report.submit_verification
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "busy shell must not get the Unverified composer resend; calls={calls:?}"
     );
 }
