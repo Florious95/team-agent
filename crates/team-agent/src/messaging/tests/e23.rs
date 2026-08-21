@@ -18,6 +18,15 @@ fn e23_fallback_pane_has_single_shared_noisy_surface() {
                 .unwrap(),
         "primary-ok guard must run before any fallback audit/inject attempt"
     );
+    let already = leader_receiver
+        .split("fn message_already_delivered")
+        .nth(1)
+        .unwrap_or("");
+    assert!(
+        already.contains("submitted_pending_acceptance")
+            && already.contains("injected_awaiting_receipt"),
+        "fallback already-delivered set must include the live post-submit statuses, not only the dead string submitted"
+    );
 }
 
 #[test]
