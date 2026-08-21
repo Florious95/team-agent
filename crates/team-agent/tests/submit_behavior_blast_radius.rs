@@ -1,9 +1,9 @@
 //! ---
-//! purpose: 钉死 claude/codex 提交键次数不因 grok send-now 而增加
+//! purpose: 钉死 claude/codex 提交键次数不因 grok send-now 而增加；cursor 生产 flush 不加 Enter
 //! contract:
 //!   provides:
 //!     - name: A12-other-providers-submit-unchanged
-//!       what: 无 Enter:send now 时 flush 零次 send_keys；有标记时才额外回车
+//!       what: 无 Enter:send now 时 flush 零次 send_keys；grok 有标记才额外回车；cursor 页脚生产路径零次
 //! boundary:
 //!   - 不把符号存在当通过
 //! maturity: wired
@@ -17,10 +17,10 @@
 use std::sync::{Arc, Mutex};
 
 use team_agent::provider::submit_now::{
-    flush_explicit_queue_for, CURSOR_SEND_NOW_MARK, GROK_SEND_NOW_MARK,
+    flush_explicit_queue, flush_explicit_queue_for, CURSOR_SEND_NOW_MARK, GROK_SEND_NOW_MARK,
 };
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
-use team_agent::transport::{Key, PaneId, Target, Transport};
+use team_agent::transport::{PaneId, Target};
 
 struct ScriptedRunner {
     screen: Arc<Mutex<String>>,
@@ -61,7 +61,12 @@ fn backend(screen: &str, enters: &Arc<Mutex<u32>>) -> TmuxBackend {
 }
 
 fn flush_enters(screen: &str) -> u32 {
-    flush_enters_for(screen, &[GROK_SEND_NOW_MARK, CURSOR_SEND_NOW_MARK])
+    let enters = Arc::new(Mutex::new(0));
+    let be = backend(screen, &enters);
+    let target = Target::Pane(PaneId::new("%1"));
+    flush_explicit_queue(&be, &target).expect("flush");
+    let n = *enters.lock().expect("enters");
+    n
 }
 
 fn flush_enters_for(screen: &str, marks: &[&str]) -> u32 {
@@ -106,14 +111,14 @@ fn grok_queue_mark_gets_send_now_enter() {
     );
 }
 
-/// cursor 忙时页脚是 `enter send now`（大小写按屏上），同样只重按回车。
+/// cursor 忙时页脚 `enter send now`：第二下 Enter 打断进行中回合。生产 flush 不加键。
 #[test]
-fn cursor_queue_mark_gets_send_now_enter() {
+fn cursor_queue_mark_does_not_get_send_now_enter() {
     let screen = format!("#1 follow-up\n{CURSOR_SEND_NOW_MARK} · ↑ select/edit · esc cancel\n");
-    let n = flush_enters(&screen);
-    assert!(
-        n >= 1,
-        "cursor queue mark must be flushed by extra Enter (not re-paste); got {n}"
+    assert_eq!(
+        flush_enters(&screen),
+        0,
+        "cursor single-enter: production flush must not extra-Enter on cursor footer"
     );
 }
 

@@ -1,15 +1,16 @@
 //! ---
-//! purpose: grok/cursor 忙时默认把显式队列顶出去（再按回车）
+//! purpose: grok 忙时默认把显式队列顶出去（再按回车）
 //! contract:
 //!   provides:
 //!     - name: flush_explicit_queue
-//!       what: 屏幕出现 grok 或 cursor 的 send-now 标记时只重按回车直到消失
+//!       what: 屏幕出现 grok `Enter:send now` 时只重按回车直到消失；默认不认 cursor 页脚
 //!   depends:
 //!     - crate::transport::Transport
 //! boundary:
 //!   - 不重粘文本、不用 Escape、不用 Ctrl-C、不加自动重投
 //!   - 不按忙闲决定发不发；只在已经注入之后确认队列态
 //!   - 无标记时不改 claude/codex 提交行为
+//!   - cursor 第二下 Enter 会打断进行中回合；生产 flush 不带 cursor 标记
 //! maturity: wired
 //! ---
 
@@ -42,15 +43,11 @@ pub fn flush_explicit_queue(
     transport: &dyn Transport,
     target: &Target,
 ) -> Result<FlushReport, TransportError> {
-    flush_explicit_queue_for(
-        transport,
-        target,
-        &[GROK_SEND_NOW_MARK, CURSOR_SEND_NOW_MARK],
-    )
+    flush_explicit_queue_for(transport, target, &[GROK_SEND_NOW_MARK])
 }
 
-/// One detector path at a time. Production ORs both marks; tests enable
-/// a single mark so a false-positive cannot hide behind the other path.
+/// One detector path at a time. Production flush is grok-only.
+/// Tests enable a single mark so a false-positive cannot hide behind the other path.
 pub fn flush_explicit_queue_for(
     transport: &dyn Transport,
     target: &Target,
@@ -84,7 +81,7 @@ pub fn keep_provider_queue_requested() -> bool {
 }
 
 pub fn queue_mark_visible(text: &str) -> bool {
-    queue_mark_visible_for(text, &[GROK_SEND_NOW_MARK, CURSOR_SEND_NOW_MARK])
+    queue_mark_visible_for(text, &[GROK_SEND_NOW_MARK])
 }
 
 pub fn queue_mark_visible_for(text: &str, marks: &[&str]) -> bool {

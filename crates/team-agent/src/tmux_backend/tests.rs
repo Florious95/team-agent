@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use super::{
     current_paste_to_submit_floor, observe_turn_from_capture, sleep_remaining_paste_to_submit_floor,
-    with_paste_to_submit_floor, CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend,
+    with_cursor_single_enter, with_paste_to_submit_floor, CommandOutput, CommandRunner,
+    RealCommandRunner, TmuxBackend,
     PANE_BINDING_NONCE_METADATA_KEY,
 };
 use crate::model::enums::PaneLiveness;
@@ -2492,6 +2493,115 @@ fn grok_fold_inject_stays_retries_while_identity_present() {
         count_submit_enters(&calls),
         3,
         "same grok N still in composer must retry Enter up to cap; calls={calls:?}"
+    );
+}
+
+/// 2026-08-21 真机屏尾：折叠占位符还在 transcript，Working 已开。
+/// 非 cursor 路径会把 pasted #N 当成未消费而连按 Enter。
+const CURSOR_BUSY_AFTER_SUBMIT: &str = "\
+  [Pasted text #1 +46 lines]\n\
+\n\
+  T126S-34701-OK\n\
+\n\
+ ⠰⠰ Working  37 tokens\n\
+    Tip: Use /plan to plan execution and reach the right outcome faster.\n\
+\n\
+  → Add a follow-up                                             ctrl+c to stop\n\
+\n\
+  Cursor Grok 4.6 Extra High                                    Run Everything\n";
+
+#[test]
+fn cursor_single_enter_busy_transcript_placeholder_does_not_retry() {
+    let token_text =
+        "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_busy]";
+    let (be, rec) = backend_folded(
+        "[Pasted text #1 +46 lines]\n",
+        CURSOR_BUSY_AFTER_SUBMIT,
+    );
+    let report = with_cursor_single_enter(true, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+    })
+    .expect("inject");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "busy after first Enter is consumption for cursor; got {:?}",
+        report.submit_verification
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        1,
+        "cursor busy: at most one Enter; extra Enter interrupts. calls={calls:?}"
+    );
+}
+
+#[test]
+fn cursor_single_enter_off_still_retries_on_transcript_placeholder() {
+    let token_text =
+        "Team Agent message from leader:\nline1\n\n[team-agent-token:msg_cur_ctrl]";
+    let (be, rec) = backend_folded(
+        "[Pasted text #1 +46 lines]\n",
+        CURSOR_BUSY_AFTER_SUBMIT,
+    );
+    let _report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    assert_eq!(
+        count_submit_enters(&calls),
+        3,
+        "default path (claude/grok/codex) must keep retry cap; calls={calls:?}"
+    );
+}
+
+#[test]
+fn cursor_single_enter_retries_only_if_token_still_in_input() {
+    let marker = "[team-agent-token:msg_cur_idle]";
+    let token_text = format!("Team Agent message from leader:\nline1\n\n{marker}");
+    let still_in_input = format!("{marker}\n→ \n");
+    let (be, rec) = backend_folded(still_in_input.as_str(), still_in_input.as_str());
+    let _report = with_cursor_single_enter(true, || {
+        be.inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text),
+            Key::Enter,
+            true,
+        )
+    })
+    .expect("inject");
+    let calls = rec.lock().unwrap().clone();
+    let n = count_submit_enters(&calls);
+    assert!(
+        n >= 2,
+        "token still in cursor input box (no busy) may retry Enter; got {n} calls={calls:?}"
+    );
+}
+
+#[test]
+fn cursor_should_resubmit_false_when_busy_even_if_paste_placeholder_visible() {
+    let marker = "[team-agent-token:msg_cur_gate]";
+    assert!(
+        !super::should_resubmit_enter_cursor(CURSOR_BUSY_AFTER_SUBMIT, marker),
+        "busy + transcript placeholder must not resubmit on cursor"
+    );
+    assert!(
+        super::should_resubmit_enter(
+            CURSOR_BUSY_AFTER_SUBMIT,
+            marker,
+            Some(super::PasteLatch::HashId(1))
+        ),
+        "non-cursor detector still sees latched #1 as resubmit"
     );
 }
 
