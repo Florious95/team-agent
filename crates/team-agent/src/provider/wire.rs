@@ -82,6 +82,7 @@ pub(crate) fn requires_resume_backing(provider: Provider) -> bool {
             | Provider::ClaudeCode
             | Provider::Copilot
             | Provider::Grok
+            | Provider::CursorAgent
     )
 }
 
@@ -102,11 +103,10 @@ pub(crate) fn builtin_provider_model(provider: Provider) -> Option<&'static str>
     match provider {
         Provider::Claude | Provider::ClaudeCode => Some("claude-sonnet-4-6"),
         Provider::Codex => Some("gpt-5.5"),
-        // 0.5.67 Step 6: grok/cursor_agent 默认模型 hardcode。
-        //   grok: "grok-4"
-        //   cursor_agent: "sonnet-4-thinking" — TODO leader 醒后确认 (playbook Step 6)。
+        // grok: compiler 另有缺 model 硬闸，这里的 builtin 不再被 grok 角色吃到。
+        // cursor_agent: 禁止隐式默认（本机 shim 会剥 sonnet-4-thinking）；缺 model 编译失败。
         Provider::Grok => Some("grok-4"),
-        Provider::CursorAgent => Some("sonnet-4-thinking"),
+        Provider::CursorAgent => None,
         Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }

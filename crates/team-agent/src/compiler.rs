@@ -391,6 +391,7 @@ fn compile_role_agent_with_mode(
     let role = required_string(&meta, role_path, "role")?;
     let provider = required_string(&meta, role_path, "provider")?;
     require_explicit_grok_role_model(&meta, role_path, &provider)?;
+    require_explicit_cursor_role_model(&meta, role_path, &provider)?;
     let model = resolve_model(&meta, team_meta, &provider);
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
@@ -484,6 +485,15 @@ fn compile_role_agent_with_mode(
                 effort.as_str()
             )));
         }
+        if provider_enum == Provider::CursorAgent {
+            return Err(ModelError::Validation(format!(
+                "{}: cursor_agent does not support effort '{}'. \
+The Cursor CLI has no `--effort` flag; the framework must not drop the field and still launch. \
+Remove effort from the role file (do not map it into `--model[effort=]` until that form is measured).",
+                role_path.display(),
+                effort.as_str()
+            )));
+        }
         agent_items.push(("effort", Value::Str(effort.as_str().to_string())));
     }
     Ok(CompiledRole {
@@ -572,6 +582,29 @@ so the seat silently gets a model and context window that are not in the role fi
 while argv still looks normal. The role file must name the model itself; \
 built-in defaults, team-level defaults, and the Grok CLI global default are all implicit sources. Example:\n\
 model: grok-4.6",
+        path.display()
+    )))
+}
+
+/// 缺 model 时框架曾填 builtin `sonnet-4-thinking`，本机 shim 还会剥掉该默认。
+/// 角色必须自己写死；内建默认、team 级默认、CLI 全局默认都是隐式来源。
+fn require_explicit_cursor_role_model(
+    meta: &Value,
+    path: &Path,
+    provider: &str,
+) -> Result<(), ModelError> {
+    if parse_canonical_provider(provider) != Some(Provider::CursorAgent) {
+        return Ok(());
+    }
+    if string_field(meta, "model").is_some_and(|value| !value.trim().is_empty()) {
+        return Ok(());
+    }
+    Err(ModelError::Validation(format!(
+        "{}: missing front matter field model. \
+Without an explicit model the framework fills a built-in default (sonnet-4-thinking for cursor_agent), \
+so the seat silently gets a model that is not in the role file, while argv still looks normal. \
+The role file must name the model itself; built-in defaults, team-level defaults, and the Cursor CLI default are all implicit sources. Example:\n\
+model: sonnet-4-thinking",
         path.display()
     )))
 }

@@ -61,7 +61,7 @@ pub fn in_window_fork_command(provider: Provider, auth: AuthMode) -> Option<&'st
 fn refuse_missing_in_window_fork(provider: Provider, provider_raw: &str) -> LifecycleError {
     if matches!(
         provider,
-        Provider::Grok | Provider::Claude | Provider::ClaudeCode
+        Provider::Grok | Provider::Claude | Provider::ClaudeCode | Provider::CursorAgent
     ) {
         LifecycleError::Provider(format!(
             "{provider_raw} does not support native session fork"

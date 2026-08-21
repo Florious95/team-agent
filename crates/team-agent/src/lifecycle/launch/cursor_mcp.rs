@@ -10,8 +10,10 @@
 //!       what: 在物理工作目录跑 enable；测试隔离下跳过以免写 ~/.cursor
 //!     - name: physical_workspace_path
 //!       what: pwd -P 等价路径；mcp enable 按 getcwd 分片
+//!     - name: refuse_second_cursor_occupant
+//!       what: 同一物理 workspace 第二 CursorAgent 拒绝（mcp.json last-writer）
 //! boundary:
-//!   - 不抄 grok 的 cwd 独占闸（--workspace 是 per-invocation）
+//!   - 同 workspace 第二 CursorAgent 拒绝；U-07 过前不装「已支持多席」
 //!   - 不把身份从 json env 删掉（cursor 不继承父进程 TEAM_AGENT_*）
 //!   - 不写 ~/.cursor/mcp.json 全局文件
 //!   - 不调 --approve-mcps（未验证能代替 enable）
@@ -23,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::LifecycleError;
+use crate::model::yaml::Value as YamlValue;
 use crate::provider::wire::command_name;
 use crate::provider::Provider;
 
@@ -37,6 +40,99 @@ const REQUIRED_IDENTITY_KEYS: &[&str] = &[
 
 pub fn physical_workspace_path(workspace: &Path) -> PathBuf {
     std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
+}
+
+fn status_is_live(status: &str) -> bool {
+    !matches!(
+        status,
+        "stopped" | "stopping" | "removed" | "spawn_failed" | "failed"
+    )
+}
+
+fn agent_is_cursor(provider: Option<&str>) -> bool {
+    matches!(
+        provider.and_then(crate::lifecycle::profile_launch::parse_provider),
+        Some(Provider::CursorAgent)
+    )
+}
+
+/// ---
+/// purpose: 同一物理 workspace 拒绝第二 CursorAgent
+/// params:
+///   workspace: 物理工作目录
+///   incoming_id: 正要起的席位 id
+///   spec: 可选 yaml spec，用来在 state 尚未写入时看见第二席
+/// returns: 已有其它 CursorAgent 则 RequirementUnmet，文案含 TEAM_AGENT_ID 与 mcp.json
+/// contract:
+///   provides:
+///     - name: refuse_second_cursor_occupant
+///       what: mcp.json last-writer 闸；U-07 过前不装多席
+/// boundary:
+///   - 不改 grok 独占实现
+/// ---
+pub fn refuse_second_cursor_occupant(
+    workspace: &Path,
+    incoming_id: &str,
+    spec: Option<&YamlValue>,
+) -> Result<(), LifecycleError> {
+    let mut others = Vec::new();
+    if let Some(spec) = spec {
+        if let Some(agents) = spec.get("agents").and_then(YamlValue::as_list) {
+            for agent in agents {
+                let Some(id) = agent.get("id").and_then(YamlValue::as_str) else {
+                    continue;
+                };
+                if id == incoming_id {
+                    continue;
+                }
+                if agent_is_paused_yaml(agent) {
+                    continue;
+                }
+                if agent_is_cursor(agent.get("provider").and_then(YamlValue::as_str)) {
+                    others.push(id.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(state) = crate::state::persist::load_runtime_state(workspace) {
+        if let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) {
+            for (id, agent) in agents {
+                if id == incoming_id {
+                    continue;
+                }
+                let provider = agent.get("provider").and_then(serde_json::Value::as_str);
+                if !agent_is_cursor(provider) {
+                    continue;
+                }
+                let status = agent
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("running");
+                if status_is_live(status) {
+                    others.push(id.clone());
+                }
+            }
+        }
+    }
+    others.sort();
+    others.dedup();
+    if others.is_empty() {
+        return Ok(());
+    }
+    Err(LifecycleError::RequirementUnmet(format!(
+        "error: cursor_agent seat already occupies this workspace\n\
+         incoming: {incoming_id}\n\
+         occupants: {}\n\
+         reason: <workspace>/.cursor/mcp.json is directory-scoped; a second seat overwrites TEAM_AGENT_ID (last-writer)\n\
+         workspace: {}\n\
+         action: do not add another CursorAgent in this workspace until per-seat MCP identity is isolated",
+        others.join(", "),
+        workspace.display(),
+    )))
+}
+
+fn agent_is_paused_yaml(agent: &YamlValue) -> bool {
+    matches!(agent.get("paused"), Some(YamlValue::Bool(true)))
 }
 
 pub fn apply_cursor_mcp_overlay(

@@ -262,8 +262,9 @@ pub(super) fn spawn_agents(
         }
         // Cursor: role 经 .cursor/rules；MCP 身份必须写进 mcp.json env
         // （不继承父进程 TEAM_AGENT_*）。--workspace 钉物理路径。
-        // 不设 grok 那种 cwd 独占闸：每席一份 --workspace 即每席一份 json。
+        // mcp.json last-writer：同 workspace 第二 CursorAgent 拒绝。
         if matches!(provider, Provider::CursorAgent) {
+            refuse_second_cursor_occupant(workspace, agent_id_raw, Some(spec))?;
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
             apply_cursor_mcp_overlay(workspace, &mcp_config)?;
             enable_cursor_workspace_mcp(workspace)?;

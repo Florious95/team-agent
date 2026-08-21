@@ -471,6 +471,85 @@ fn test_grok_build_command_plan_binds_expected_session_id_to_argv() {
 }
 
 #[test]
+fn test_cursor_auth_hint_subscription_is_unknown_not_present() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let hint = adapter.auth_hint(AuthMode::Subscription);
+    assert_ne!(
+        hint,
+        crate::provider::types::AuthHintStatus::Present,
+        "U-17 前不得把未观测写成 Present"
+    );
+    assert_ne!(hint, crate::provider::types::AuthHintStatus::PresentWeak);
+    assert_eq!(hint, crate::provider::types::AuthHintStatus::Unknown);
+}
+
+#[test]
+fn test_cursor_fresh_plan_has_no_session_id_and_no_resume() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let plan = adapter
+        .build_command_plan(ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: None,
+            model: Some("sonnet-4-thinking"),
+            tools: &[],
+            profile_launch: None,
+            agent_id_hint: Some("w1"),
+            effort: None,
+        })
+        .expect("cursor plan");
+    assert!(
+        plan.expected_session_id.is_none(),
+        "U-01 未过不得造假 pending; got {:?}",
+        plan.expected_session_id
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--session-id" || a == "--resume" || a == "--continue"),
+        "fresh cursor argv must not invent session flags; argv={:?}",
+        plan.argv
+    );
+    assert!(
+        argv_contains_adjacent(&plan.argv, &["--trust"]),
+        "fresh cursor must keep --trust; argv={:?}",
+        plan.argv
+    );
+}
+
+#[test]
+fn test_cursor_resume_plan_requires_chat_id_and_never_emits_empty_resume() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let ctx = ProviderCommandContext {
+        auth_mode: AuthMode::Subscription,
+        mcp_config: None,
+        system_prompt: None,
+        model: Some("sonnet-4-thinking"),
+        tools: &[],
+        profile_launch: None,
+        agent_id_hint: Some("w1"),
+        effort: None,
+    };
+    let missing = adapter.build_resume_command_plan(None, ctx);
+    assert!(
+        matches!(missing, Err(ProviderError::ResumeUnavailable(_))),
+        "no chatId must not emit empty --resume; got {missing:?}"
+    );
+    let sid = SessionId::new("502896a1-72ba-4c53-9a86-b2da28780806");
+    let plan = adapter
+        .build_resume_command_plan(Some(&sid), ctx)
+        .expect("resume plan");
+    assert!(
+        argv_contains_adjacent(&plan.argv, &["--resume", sid.as_str()]),
+        "resume plan must hit CursorAgent --resume arm; argv={:?}",
+        plan.argv
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--session-id" || a == "--continue"),
+        "resume must not mint --session-id/--continue; argv={:?}",
+        plan.argv
+    );
+}
+
+#[test]
 fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
     use crate::provider::adapters::grok::{grok_tool_mapping, GrokToolMapping};
     assert_eq!(
