@@ -753,20 +753,43 @@ fn cmd_leader_passthrough_help_returns_none() {
     assert_eq!(r2.output, CmdOutput::None);
     let r3 = cmd_leader_passthrough("copilot", &["--help".into()], Path::new(".")).unwrap();
     assert_eq!(r3.output, CmdOutput::None);
+    let r4 = cmd_leader_passthrough("grok", &["-h".into()], Path::new(".")).unwrap();
+    assert_eq!(r4.output, CmdOutput::None);
+    let r5 = cmd_leader_passthrough("cursor", &["--help".into()], Path::new(".")).unwrap();
+    assert_eq!(r5.output, CmdOutput::None);
 }
 
 #[test]
 fn cmd_leader_passthrough_maps_copilot_provider() {
     assert_eq!(
         leader_passthrough_provider("codex"),
-        crate::model::enums::Provider::Codex
+        Some(crate::model::enums::Provider::Codex)
     );
     assert_eq!(
         leader_passthrough_provider("claude"),
-        crate::model::enums::Provider::ClaudeCode
+        Some(crate::model::enums::Provider::ClaudeCode)
     );
     assert_eq!(
         leader_passthrough_provider("copilot"),
-        crate::model::enums::Provider::Copilot
+        Some(crate::model::enums::Provider::Copilot)
     );
+}
+
+#[test]
+fn cmd_leader_passthrough_maps_grok_and_cursor_not_claude() {
+    assert_eq!(
+        leader_passthrough_provider("grok"),
+        Some(crate::model::enums::Provider::Grok)
+    );
+    assert_eq!(
+        leader_passthrough_provider("cursor"),
+        Some(crate::model::enums::Provider::CursorAgent)
+    );
+    assert_ne!(
+        leader_passthrough_provider("cursor"),
+        Some(crate::model::enums::Provider::ClaudeCode)
+    );
+    assert_eq!(leader_passthrough_provider("agent"), None);
+    assert_eq!(leader_passthrough_provider("cursor_agent"), None);
+    assert_eq!(leader_passthrough_provider("not-a-passthrough"), None);
 }
