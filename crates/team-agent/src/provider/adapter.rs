@@ -837,8 +837,10 @@ impl ProviderAdapter for BasicProviderAdapter {
                     false,
                     None,
                 )?;
-                argv.push("--resume".to_string());
-                argv.push(session_id.as_str().to_string());
+                // Put --resume immediately after `agent` so the CLI treats it as
+                // the session mode rather than a trailing flag after --workspace.
+                argv.insert(1, "--resume".to_string());
+                argv.insert(2, session_id.as_str().to_string());
                 Ok(argv)
             }
             Provider::GeminiCli | Provider::Fake => Err(ProviderError::ResumeUnavailable(format!(

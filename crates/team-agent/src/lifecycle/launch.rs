@@ -285,6 +285,8 @@ pub use cursor_mcp::{
     enable_cursor_workspace_mcp, physical_workspace_path, refuse_second_cursor_occupant,
 };
 
+mod cursor_create_chat;
+
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
