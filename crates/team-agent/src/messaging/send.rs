@@ -372,7 +372,14 @@ fn capture_missing_sessions_after_send(workspace: &Path) {
         return;
     };
     if report.changed || !report.assigned.is_empty() {
-        let _ = crate::state::persist::save_runtime_state(workspace, &state);
+        // The post-send capture backfill routes through `StateRepository` with
+        // the `MessagingSessionCapture` intent; dispatch is the same root
+        // helper this callsite used directly before, and the error is still
+        // ignored because the capture is best-effort.
+        let _ = crate::state::repository::StateRepository::new(workspace).save(
+            crate::state::repository::StateWriteIntent::MessagingSessionCapture,
+            &state,
+        );
     }
 }
 

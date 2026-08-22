@@ -235,6 +235,7 @@ pub enum StateWriteIntent<'a> {
     MessagingTurnArm {
         owner_team_id: Option<&'a str>,
     },
+    MessagingSessionCapture,
     ResultCollection {
         owner_team_id: Option<&'a str>,
     },
@@ -415,6 +416,10 @@ fn route_direct(
         },
         // MessagingTurnArm -> root save (messaging/activity.rs:83).
         StateWriteIntent::MessagingTurnArm { .. } => helper_write_root(workspace, state),
+        // MessagingSessionCapture -> root save; the post-send capture backfill
+        // at messaging/send.rs used the root helper directly before it was
+        // migrated onto the repository.
+        StateWriteIntent::MessagingSessionCapture => helper_write_root(workspace, state),
         // ResultCollection direct-write path uses `save_team_scoped_state`
         // when an owner_team_id is bound and `save_runtime_state` at the root
         // otherwise (messaging/results.rs:201/211). The reapply-shaped
