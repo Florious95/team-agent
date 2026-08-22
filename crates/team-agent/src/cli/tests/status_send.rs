@@ -679,8 +679,14 @@ fn cmd_send_default_human_output_is_one_line_without_false_delivered() {
         "channel:",
         "reminder:",
     ] {
+        // 字段级匹配，⛔ 不用裸 contains：人类输出以 " " 连接 `"{key}: {value}"`
+        // （send/presentation.rs 的 `parts.join(" ")` / `send_human_field`），
+        // 所以一个字段只可能出现在行首或某个空格之后。裸子串会让
+        // `turn_verification:` 误命中名单里的 `verification:`（该键由 ab2134c0
+        // 有意加进人类输出名单）——那是判据误伤，不是产品缺陷。
+        let present = text.starts_with(hidden) || text.contains(&format!(" {hidden}"));
         assert!(
-            !text.contains(hidden),
+            !present,
             "default send output should hide {hidden} unless needed; got {text}"
         );
     }
