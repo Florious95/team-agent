@@ -22,6 +22,7 @@ team-agent doctor --help
 **Operate**
 
 - Dispatch: `team-agent send TO MESSAGE` (positional TO; `--watch-result` is deprecated). After success, do not poll with `sleep` / `status` / `inbox` / `collect`.
+  TO has two co-equal logical forms: an **in-team short name** (`team-agent send reviewer "..."`) and a fully qualified `<workspace>::<team>/<agent>`. Use the qualified form across workspaces.
 - Inspect: `team-agent status` / `status --json`. `ok: true` plus `ready: false` is not a crash.
 - Lifecycle: `restart .` resumes a stopped team; `add-agent NAME --role-file FILE` adds or `--force` recreates one worker; `shutdown --workspace .` stops. Do not shutdown the whole team to add a worker.
 - Roles: every `agents/*.md` must declare boolean `dangerously_skip_permissions`. Never rewrite a user-supplied model id. Never read `.env` files.
