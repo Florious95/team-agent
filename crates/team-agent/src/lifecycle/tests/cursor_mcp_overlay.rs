@@ -272,9 +272,11 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
 
 fn tmp_dir(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
-    let root =
-        std::env::var("TEAM_AGENT_TEST_TMP").unwrap_or_else(|_| "/Volumes/nvme/tmp".to_string());
-    let dir = Path::new(&root).join(format!(
+    // 见 gate_fixtures::scratch_dir：⛔ 不硬编码绝对路径，默认标准临时目录。
+    let root = std::env::var_os("TEAM_AGENT_TEST_TMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = root.join(format!(
         "ta-rs-cursor-mcp-{tag}-{}-{}",
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
