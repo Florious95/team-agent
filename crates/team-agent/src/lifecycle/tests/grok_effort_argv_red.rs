@@ -70,6 +70,8 @@ fn grok_restart_keeps_declared_effort_medium() {
         first_spawn_argv(&first)
     );
 
+    seed_healthy_coordinator(&ws);
+
     let restart = OfflineTransport::new();
     restart_with_transport(&ws, true, Some("grokteam"), &restart)
         .expect("restart --allow-fresh must start the grok seat");
@@ -113,6 +115,36 @@ fn grok_medium_effort_no_longer_emits_unsupported_event() {
         !dropped,
         "grok medium must not emit provider.effort_unsupported; events={events:?}"
     );
+}
+
+/// restart 的就绪门要求 `coordinator_health().ok`，而单测里 `start_coordinator`
+/// spawn 的是 `std::env::current_exe()` —— 也就是 libtest 测试二进制本身，它一启动
+/// 就以 `Unrecognized option: 'workspace'` 退出并变成僵尸，`pid_is_running` 的
+/// `ps stat=` 一看到 `Z` 就判 not running。于是就绪门只能靠「抢在死婴被看到之前
+/// 探到它」这个竞态过关，慢机/高负载上必然超时。这里按本仓既有写法（见
+/// `copilot_provider_red.rs` / `restart_build_before_destroy_0540_contract.rs`）
+/// 预先把 pid 文件与 metadata 指向测试进程自己，让 `start_coordinator` 走
+/// `AlreadyRunning` 早返回，竞态被删掉而不是被调宽。
+fn seed_healthy_coordinator(workspace: &Path) {
+    let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let pid = crate::coordinator::Pid::new(std::process::id());
+    std::fs::create_dir_all(
+        crate::coordinator::coordinator_pid_path(&workspace)
+            .parent()
+            .unwrap(),
+    )
+    .unwrap();
+    crate::coordinator::write_coordinator_metadata(
+        &workspace,
+        pid,
+        crate::coordinator::MetadataSource::Boot,
+    )
+    .expect("write coordinator metadata");
+    std::fs::write(
+        crate::coordinator::coordinator_pid_path(&workspace),
+        pid.to_string(),
+    )
+    .expect("write coordinator pid");
 }
 
 fn seed_grok(tag: &str, effort: Option<&str>) -> (PathBuf, PathBuf, HomeGuard, PathBuf) {
