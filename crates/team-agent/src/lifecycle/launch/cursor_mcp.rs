@@ -3,19 +3,21 @@
 //! contract:
 //!   provides:
 //!     - name: apply_cursor_mcp_overlay
-//!       what: 写 <workspace>/.cursor/mcp.json，env 必须带 TEAM_AGENT_ID
+//!       what: 默认写 provider-config/<id>/cursor/.cursor/mcp.json；隔离关闭时写 workspace 文件
+//!     - name: apply_cursor_spawn_workspace_pointers
+//!       what: 隔离开时 --workspace 指 per-seat 工程根，--add-dir 指真 workspace
 //!     - name: cursor_mcp_enable_argv
 //!       what: 组 `agent mcp enable team_orchestrator`（不认 --workspace）
 //!     - name: enable_cursor_workspace_mcp
-//!       what: 在物理工作目录跑 enable；测试隔离下跳过以免写 ~/.cursor
+//!       what: 在工程根跑 enable；测试隔离下跳过以免写 ~/.cursor
 //!     - name: physical_workspace_path
 //!       what: pwd -P 等价路径；mcp enable 按 getcwd 分片
 //!     - name: refuse_second_cursor_occupant
-//!       what: 同一物理 workspace 第二 CursorAgent 拒绝（mcp.json last-writer）
+//!       what: 隔离不可用时拒绝第二席；隔离可用时放行
 //! boundary:
-//!   - 同 workspace 第二 CursorAgent 拒绝；U-07 过前不装「已支持多席」
+//!   - 隔离开启时同 workspace 允许多 CursorAgent；隔离关闭/失败仍 fail-closed
 //!   - 不把身份从 json env 删掉（cursor 不继承父进程 TEAM_AGENT_*）
-//!   - 不写 ~/.cursor/mcp.json 全局文件
+//!   - 不改 HOME，不写 ~/.cursor/mcp.json 全局文件
 //!   - 不调 --approve-mcps（未验证能代替 enable）
 //! maturity: wired
 //! ---
@@ -28,6 +30,10 @@ use crate::lifecycle::LifecycleError;
 use crate::model::yaml::Value as YamlValue;
 use crate::provider::wire::command_name;
 use crate::provider::Provider;
+
+use super::cursor_mcp_iso::{
+    cursor_mcp_isolation_enabled, cursor_mcp_project_dir, materialize_cursor_mcp_project,
+};
 
 /// Keys that must appear in mcp.json env. Cursor strips parent env down to
 /// HOME/PATH/TERM/… — TEAM_AGENT_ID only survives if it is in this table.
@@ -61,17 +67,18 @@ fn agent_is_cursor(provider: Option<&str>) -> bool {
 }
 
 /// ---
-/// purpose: 同一物理 workspace 拒绝第二 CursorAgent
+/// purpose: 同一物理 workspace 的第二 CursorAgent：隔离可用则放行，否则 fail-closed
 /// params:
 ///   workspace: 物理工作目录
 ///   incoming_id: 正要起的席位 id
 ///   spec: 可选 yaml spec，用来在 state 尚未写入时看见第二席
-/// returns: 已有其它 CursorAgent 则 RequirementUnmet，文案含 TEAM_AGENT_ID 与 mcp.json
+/// returns: 隔离关闭且已有其它 CursorAgent 则 RequirementUnmet
 /// contract:
 ///   provides:
 ///     - name: refuse_second_cursor_occupant
-///       what: mcp.json last-writer 闸；U-07 过前不装多席
+///       what: 共用 mcp.json last-writer 闸；隔离落地后不再挡第二席
 /// boundary:
+///   - 隔离失败/关闭时不改文案语义（仍点名 mcp.json last-writer）
 ///   - 不改 grok 独占实现
 /// ---
 pub fn refuse_second_cursor_occupant(
@@ -123,6 +130,9 @@ pub fn refuse_second_cursor_occupant(
     if others.is_empty() {
         return Ok(());
     }
+    if cursor_mcp_isolation_enabled() {
+        return Ok(());
+    }
     Err(LifecycleError::RequirementUnmet(format!(
         "error: cursor_agent seat already occupies this workspace\n\
          incoming: {incoming_id}\n\
@@ -140,16 +150,41 @@ fn agent_is_paused_yaml(agent: &YamlValue) -> bool {
 }
 
 /// ---
-/// purpose: 写 workspace 下 cursor 会读的 mcp.json，env 里必须带席位身份键
+/// purpose: 写 cursor 会读的 mcp.json；默认进 provider-config 工程根，关闭隔离时才写 workspace 文件
 /// params:
 ///   mcp_config: 已解析的 MCP 配置，须含 team_orchestrator 与 command
 /// returns: 写出的文件路径
-/// errors: 缺条目或缺 command 时返回 StatePersist，写盘失败也返回 StatePersist
+/// errors: 缺条目或缺 command 时返回 StatePersist；隔离建盘失败返回 RequirementUnmet
 /// ---
 pub fn apply_cursor_mcp_overlay(
     workspace: &Path,
     mcp_config: &crate::provider::McpConfig,
 ) -> Result<PathBuf, LifecycleError> {
+    let (command, args, env) = parse_orchestrator_env(mcp_config)?;
+    let agent_id = env
+        .get("TEAM_AGENT_ID")
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            LifecycleError::StatePersist(
+                "cursor MCP overlay missing resolved TEAM_AGENT_ID in json env \
+(cursor does not inherit parent TEAM_AGENT_* into the MCP child)"
+                    .to_string(),
+            )
+        })?;
+    let cursor_dir = if cursor_mcp_isolation_enabled() {
+        let project = materialize_cursor_mcp_project(workspace, agent_id)?;
+        scrub_workspace_orchestrator_mcp(workspace)?;
+        project.join(".cursor")
+    } else {
+        workspace.join(".cursor")
+    };
+    write_cursor_mcp_json_at(&cursor_dir, command, args, env)
+}
+
+fn parse_orchestrator_env(
+    mcp_config: &crate::provider::McpConfig,
+) -> Result<(String, Vec<String>, BTreeMap<String, String>), LifecycleError> {
     let server = mcp_config
         .raw
         .get("team_orchestrator")
@@ -165,7 +200,8 @@ pub fn apply_cursor_mcp_overlay(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             LifecycleError::StatePersist("cursor MCP overlay missing command".to_string())
-        })?;
+        })?
+        .to_string();
     let args = server
         .get("args")
         .and_then(serde_json::Value::as_array)
@@ -199,9 +235,16 @@ pub fn apply_cursor_mcp_overlay(
             }
         }
     }
+    Ok((command, args, env))
+}
 
-    let dir = workspace.join(".cursor");
-    std::fs::create_dir_all(&dir)
+fn write_cursor_mcp_json_at(
+    dir: &Path,
+    command: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+) -> Result<PathBuf, LifecycleError> {
+    std::fs::create_dir_all(dir)
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
     let path = dir.join("mcp.json");
     let mut root = read_existing_mcp_json(&path);
@@ -243,6 +286,28 @@ pub fn apply_cursor_mcp_overlay(
     Ok(path)
 }
 
+fn scrub_workspace_orchestrator_mcp(workspace: &Path) -> Result<(), LifecycleError> {
+    let path = workspace.join(".cursor").join("mcp.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut root = read_existing_mcp_json(&path);
+    let Some(servers) = root
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("mcpServers"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    servers.remove("team_orchestrator");
+    servers.remove("team-agent");
+    let body = serde_json::to_string_pretty(&root)
+        .map_err(|e| LifecycleError::StatePersist(format!("serialize cursor mcp.json: {e}")))?;
+    std::fs::write(&path, body.as_bytes())
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
+    Ok(())
+}
+
 /// ---
 /// purpose: 组出启用 team_orchestrator 的 cursor 命令行
 /// returns: 不带 workspace 参数的 argv，该命令按进程工作目录分片
@@ -257,21 +322,25 @@ pub fn cursor_mcp_enable_argv() -> Vec<String> {
 }
 
 /// ---
-/// purpose: 在物理工作目录下执行 cursor 的 MCP 启用命令
+/// purpose: 在工程根下执行 cursor 的 MCP 启用命令（getcwd 分片，不改 HOME）
 /// returns: 测试隔离环境或显式跳过标志下直接成功，避免写用户全局配置
 /// errors: 命令跑不起来或退出码非零时返回 RequirementUnmet，错误里只记输出长度不记内容
 /// ---
-pub fn enable_cursor_workspace_mcp(workspace: &Path) -> Result<(), LifecycleError> {
+pub fn enable_cursor_workspace_mcp(
+    workspace: &Path,
+    project_root: Option<&Path>,
+) -> Result<(), LifecycleError> {
     if skip_cursor_mcp_enable() {
         return Ok(());
     }
-    let physical = physical_workspace_path(workspace);
+    let physical = match project_root {
+        Some(root) => physical_workspace_path(root),
+        None => physical_workspace_path(workspace),
+    };
     let argv = cursor_mcp_enable_argv();
-    let output = Command::new(&argv[0])
-        .args(&argv[1..])
-        .current_dir(&physical)
-        .output()
-        .map_err(|e| {
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(&physical);
+    let output = cmd.output().map_err(|e| {
             LifecycleError::RequirementUnmet(format!(
                 "error: cannot run `{} mcp enable team_orchestrator`\n\
                  reason: {e}\n\
@@ -313,6 +382,36 @@ pub fn apply_cursor_workspace_physical_path(argv: &mut [String], workspace: &Pat
     if let Some(value) = argv.get_mut(index.saturating_add(1)) {
         *value = physical.to_string_lossy().into_owned();
     }
+}
+
+/// ---
+/// purpose: 隔离开时把 cursor --workspace 指到 per-seat 工程根，并用 --add-dir 挂上真 workspace
+/// params:
+///   argv: 就地改写（可能追加 --add-dir）
+///   workspace: 团队工作目录
+///   agent_id: 席位 id
+/// errors: 工程根路径非法时返回 RequirementUnmet
+/// ---
+pub fn apply_cursor_spawn_workspace_pointers(
+    argv: &mut Vec<String>,
+    workspace: &Path,
+    agent_id: &str,
+) -> Result<(), LifecycleError> {
+    if cursor_mcp_isolation_enabled() {
+        let project = physical_workspace_path(&cursor_mcp_project_dir(workspace, agent_id)?);
+        apply_cursor_workspace_physical_path(argv, &project);
+        let team = physical_workspace_path(workspace);
+        let already = argv
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && Path::new(&pair[1]) == team.as_path());
+        if !already {
+            argv.push("--add-dir".to_string());
+            argv.push(team.to_string_lossy().into_owned());
+        }
+    } else {
+        apply_cursor_workspace_physical_path(argv, workspace);
+    }
+    Ok(())
 }
 
 fn skip_cursor_mcp_enable() -> bool {

@@ -50,7 +50,7 @@ Frontmatter: `provider: cursor_agent` (not `cursor`; launcher verb is `team-agen
 
 `model:` is required (omit compile-fails; blocks a silent builtin `sonnet-4-thinking`). The flag stays on argv. Same-family catalog ids can change pane chrome. An id not in that provider's catalog silent-falls back (landing not stable; no events/stderr/pane warning). Pick names from the catalog; after spawn, `capture-pane` once for chrome. Do not treat the role field or pane chrome as proof of the live model.
 
-One `cursor_agent` per workspace. A second seat (including `add-agent --force` of a different id) fail-closes:
+One `cursor_agent` per **provider-config overlay** under `<workspace>/.team/runtime/provider-config/<id>/cursor`. Same workspace may run multiple cursor seats; each writes `TEAM_AGENT_ID` into that project's `.cursor/mcp.json`. Spawn points `--workspace` there and `--add-dir` at the real workspace. `HOME` stays the user home. If isolation is off or cannot be materialized, adding a second seat still fail-closes:
 
 ```
 error: cursor_agent seat already occupies this workspace
@@ -58,7 +58,7 @@ reason: <workspace>/.cursor/mcp.json is directory-scoped; a second seat overwrit
 action: do not add another CursorAgent in this workspace until per-seat MCP identity is isolated
 ```
 
-Several cursor seats → one workspace directory each. Same seat, fresh context → `reset-agent --discard-session`.
+Do not share `<workspace>/.cursor/mcp.json` for team_orchestrator identity. Same seat, fresh context → `reset-agent --discard-session`.
 
 `clone-agent` copies the source role (provider unchanged). Runtime add: `clone-agent` → `stop-agent` → `remove-agent --confirm` (deletes `.team/dynamic-role-files/`) → write the role file → `add-agent --role-file` → dispatch.
 

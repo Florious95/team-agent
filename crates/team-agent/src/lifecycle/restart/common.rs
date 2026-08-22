@@ -427,8 +427,20 @@ pub(super) fn spawn_agent_window(
             &system_prompt,
         )?;
         crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace)?;
-        crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+        let project = if crate::lifecycle::launch::cursor_mcp_isolation_enabled() {
+            Some(crate::lifecycle::launch::cursor_mcp_project_dir(
+                workspace,
+                agent_id.as_str(),
+            )?)
+        } else {
+            None
+        };
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, project.as_deref())?;
+        crate::lifecycle::launch::apply_cursor_spawn_workspace_pointers(
+            &mut plan.argv,
+            workspace,
+            agent_id.as_str(),
+        )?;
         crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
     }
     if provider == crate::provider::Provider::Grok {
