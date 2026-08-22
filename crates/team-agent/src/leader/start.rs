@@ -2455,6 +2455,25 @@ fn wait_managed_attach_child(
             }
         };
         if signalled || managed_attach_should_teardown(watch) {
+            // `managed_attach_should_teardown` costs a tmux round-trip, and the
+            // attach child can lose that race: it dies BY ITSELF inside the
+            // window (`open terminal failed: not a terminal`, or a client whose
+            // attach was rejected). Re-check before we touch anything. A child
+            // that already failed on its own was never torn down by us, so it
+            // must NOT be reported as an intentional teardown — its non-zero
+            // status has to reach the launcher failure path
+            // (`execute_managed_leader_plan_attempt`), which is what surfaces the
+            // error and drives attach recovery. Only the FAILING self-exit is
+            // diverted: a clean self-exit keeps the pre-existing behaviour
+            // (cleanup + intentional teardown + exit 0), and an explicit signal
+            // teardown stays intentional regardless.
+            if !signalled {
+                if let Some(status) = child.try_wait().map_err(LeaderError::Io)? {
+                    if !status.success() {
+                        return Ok((status, false));
+                    }
+                }
+            }
             let reason = if signalled {
                 "launcher_signal"
             } else {
