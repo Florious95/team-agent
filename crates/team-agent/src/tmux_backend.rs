@@ -17,13 +17,13 @@
 //!     - name: cursor-single-enter
 //!       what: TLS 打开时，busy 或 token 不在输入区（底部 5 非空行）则不重按 Enter；transcript 里的 pasted #N 不算输入框
 //!     - name: unverified-composer-resend
-//!       what: SubmitConsumptionUnverified 且本次身份（token 含折行拼接 / 锁定 #N / grok 行数）仍在 composer ⇒ 只补一颗 C-m；consumed=None 不补；达上限 1 或身份消失或已消费或 busy 则停。不认提示符皮肤。
+//!       what: SubmitConsumptionUnverified 且本次身份仍在 composer 且 A 的 should_resubmit_enter 为假（折行拼接缺口）⇒ 只补一颗 C-m；A 因 latch/底15 单行 token 已能重试（含打满 cap）时 B 不介入；consumed=None 不补；达上限 1 或身份消失或已消费或 busy 则停。不认提示符皮肤。
 //! boundary:
 //!   - 不把 fire-and-forget 报成 delivered
 //!   - 不把「粘贴命中」(any_attempt_matched) 当成已提交
 //!   - 不把「没能判断」(consumed=None) 落到成功值
 //!   - turn_verification 不是投递闸门；分辨不出不得报开跑
-//!   - 补发只重按回车，不重粘、不用 Escape/C-c；闸是本次身份仍在 composer，不是提示符字符串、也不是 pane 忙闲
+//!   - 补发只重按回车，不重粘、不用 Escape/C-c；闸是折行缺口（A 看不到、拼接身份还在），不是提示符字符串、也不是 pane 忙闲；A 已覆盖的 latch 滞留不走 B
 //! maturity: wired
 //! ---
 //!
@@ -1810,6 +1810,27 @@ pub(crate) fn should_resend_enter_after_unverified(
 }
 
 /// ---
+/// purpose: Unverified 补发 B 是否该介入——只补 A 的 should_resubmit_enter 看不到的折行缺口
+/// params:
+///   text: 最近一次 pane 尾文本
+///   marker: 本条消息的投递 token 完整标记
+///   tracked: 本次粘贴已锁定的占位符身份（编号或 grok 行数）；None 表示没锁到身份
+/// returns: true 才允许 B 再按一次 Enter
+/// contract: !busy 且 this_paste_identity_in_composer 且 !should_resubmit_enter ⇒ true
+/// boundary: A 已因 latch / 底15 单行 token 为真时不介入（含 A 已打满 cap）；不重粘；consumed=None 不在这里决定
+/// ---
+pub(crate) fn should_resend_unverified_wrap_gap(
+    text: &str,
+    marker: &str,
+    tracked: Option<PasteLatch>,
+) -> bool {
+    if should_resubmit_enter(text, marker, tracked) {
+        return false;
+    }
+    should_resend_enter_after_unverified(text, marker, tracked)
+}
+
+/// ---
 /// purpose: cursor 重按 Enter 的核实：token 仍在输入框，且回合未在进行
 /// contract: busy ⇒ 不重按；token 不在底部 5 非空行 ⇒ 不重按
 /// boundary: 不把 transcript 里的 pasted #N 当输入框；不替代 claude/grok 的 should_resubmit_enter
@@ -3156,9 +3177,10 @@ impl Transport for TmuxBackend {
                     },
                     None => SubmitVerification::SubmitConsumptionUnverified,
                 };
-                // Unverified + 本次身份仍在：只补一颗 C-m。身份拿不到（None）不补——
-                // 重复不可逆，滞留可人工救。cursor 单回车路径不走这里。
-                // 终止：已消费 / 身份消失 / 达上限 / busy。
+                // Unverified + 折行缺口：只补一颗 C-m。A 的 should_resubmit_enter
+                // 已为真（latch/底15 token，含打满 cap）时 B 不介入。身份拿不到
+                // （None）不补——重复不可逆，滞留可人工救。cursor 单回车不走这里。
+                // 终止：已消费 / 身份消失 / A 已覆盖 / 达上限 / busy。
                 if matches!(
                     submit_verification,
                     SubmitVerification::SubmitConsumptionUnverified
@@ -3173,7 +3195,7 @@ impl Transport for TmuxBackend {
                                 break;
                             };
                             last_turn_text = Some(cap.text.clone());
-                            if !should_resend_enter_after_unverified(&cap.text, m, tracked_paste) {
+                            if !should_resend_unverified_wrap_gap(&cap.text, m, tracked_paste) {
                                 break;
                             }
                             self.prepare_pane_for_submit(target, true);
