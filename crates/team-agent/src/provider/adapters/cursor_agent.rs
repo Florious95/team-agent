@@ -15,8 +15,10 @@
 //! `.team/scripts/cursor_seat.sh` 实测一致：
 //!   `--trust --sandbox disabled --workspace <物理路径> [--force] [--model]`
 //! Role 不入 argv，写 `<workspace>/.cursor/rules/*.mdc` + `alwaysApply: true`。
-//! MCP 无 `--mcp-config`；身份必须写进 `.cursor/mcp.json` 的 env 表
+//! MCP 无 `--mcp-config`；身份必须写进 per-seat
+//! `provider-config/<id>/cursor/.cursor/mcp.json` 的 env 表
 //! （cursor 不把父进程 TEAM_AGENT_* 传给 MCP 子进程）。
+//! spawn 把 `--workspace` 指到该工程根，并用 `--add-dir` 挂上真 workspace。
 //!
 //! 隐藏 flag `--system-prompt` / `--allowed-tools` 实测存在但 help 未列，
 //! 随时可能消失。可以在注释里记录，代码里不许调。
@@ -73,7 +75,8 @@ pub(crate) fn cursor_agent_base_command(
     let _ = effort;
     // system_prompt 不入 argv（help 无 --rules / --append-system-prompt）。
     // launch 写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`。
-    // mcp_config 也不入 argv（无 --mcp-config）。launch 写 `.cursor/mcp.json`
+    // mcp_config 也不入 argv（无 --mcp-config）。launch 写
+    // `.team/runtime/provider-config/<id>/cursor/.cursor/mcp.json`
     // 并 `agent mcp enable team_orchestrator`。这里收下以免静默丢弃。
     let _ = (adapter, auth_mode, mcp_config, managed_mcp_config, system_prompt);
     argv.push("--workspace".to_string());
