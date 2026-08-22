@@ -29,3 +29,27 @@ team-agent doctor --help
 **On failure:** if the CLI prints a structured `action`, run that `action` first, then stop. Do not guess flags. `coordinator.session_missing` is a self-healing transient — re-check `status --json`; do not shutdown because of it.
 
 The current user-facing agent is the leader (orchestrate only). Workers call `report_result` exactly once. Nested teams: `skills/team-agent/references/team-in-team.md`.
+
+## Provider Capability Matrix
+
+Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md`. These two are in the runtime but were missing from that table:
+
+| Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
+|---|---|---|---|---|
+| `grok` | yes (`--resume <id>`, archive-gated) | no | yes (role `model` required) | yes (`--fork-session` + new `--session-id`) |
+| `cursor_agent` | yes (argv `--resume <chatId>`, archive-gated) | no | yes (role `model` required) | **no — `CapabilityUnsupported`** |
+
+Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
+
+## Provider Prep
+
+### Cursor provider notes
+
+Frontmatter: `provider: cursor_agent` (not `cursor`; the launcher verb `team-agent cursor` is different), `auth_mode: subscription`, `name:` required (omit → `missing front matter field name`). Also required: `role:`, `model:`, `tools:`, `dangerously_skip_permissions:` (bool). Subscription needs no `profile`. One `cursor_agent` worker per workspace.
+
+`clone-agent` copies the source role file (provider unchanged). To add a cursor worker at runtime: `clone-agent` → `stop-agent` → `remove-agent --confirm` (deletes the managed file under `.team/dynamic-role-files/`) → write the new role file → `add-agent --role-file` → dispatch by hand.
+
+- Restart emits `--resume <chatId>` when `store.db`/`meta.json` exist; the gate does not read chat text. Persist anything that must survive restart.
+- Delivery sends one Enter; a second Enter interrupts the turn.
+- Role `model:` is passed as `--model`. A local shim strips the old builtin default (`sonnet-4-thinking`); the pane is the live model.
+- After spawn, the pane footer should show `Cursor Agent v<version>`. Do not use `strings` to probe the binary.
