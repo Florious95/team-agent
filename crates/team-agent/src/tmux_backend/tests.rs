@@ -22,9 +22,9 @@ use super::{
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv,
-    AttachOutcome, CaptureRange, InjectPayload, InjectStage, InjectVerification, Key, PaneField,
-    PaneId, SessionName, SetEnvOutcome, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    tmux_submit_key_name, AttachOutcome, CaptureRange, InjectPayload, InjectStage,
+    InjectVerification, Key, PaneField, PaneId, SessionName, SetEnvOutcome, SubmitVerification,
+    Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
 type RecordedArgv = Arc<Mutex<Vec<Vec<String>>>>;
@@ -811,9 +811,9 @@ fn inject_text_runs_buffer_paste_submit_sequence_and_reports_submit() {
         "inject must bracketed-paste (-p) the buffer to the pane; got {calls:?}"
     );
     assert!(
-        calls
-            .iter()
-            .any(|a| is(a, "send-keys") && a.contains(&"Enter".to_string())),
+        calls.iter().any(
+            |a| is(a, "send-keys") && a.contains(&tmux_submit_key_name(Key::Enter).to_string())
+        ),
         "inject must send the submit key (Enter) last; got {calls:?}"
     );
     assert_eq!(
@@ -1011,7 +1011,7 @@ fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
     assert!(
         calls.iter().any(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"Enter".to_string())
+                && argv.contains(&tmux_submit_key_name(Key::Enter).to_string())
         }),
         "skip-consumption payload must still submit once; calls={calls:?}"
     );
@@ -1216,7 +1216,7 @@ fn e46_inject_text_resend_rechecks_input_before_resending_to_avoid_double_submit
         .iter()
         .filter(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"Enter".to_string())
+                && argv.contains(&tmux_submit_key_name(Key::Enter).to_string())
         })
         .count();
     assert_eq!(
@@ -1294,7 +1294,7 @@ fn e46_inject_text_first_attempt_no_escape_retry_only() {
         .iter()
         .filter(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"Enter".to_string())
+                && argv.contains(&tmux_submit_key_name(Key::Enter).to_string())
         })
         .count();
     let escape_count = calls
