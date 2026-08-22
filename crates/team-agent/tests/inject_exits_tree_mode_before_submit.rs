@@ -173,9 +173,13 @@ fn inject_submits_message_when_pane_in_tree_mode() {
     );
 }
 
-/// 括号未闭合：reader 在 CSI 200~ 打开后把 CR 当字面量。inject 必须先 201~ 再提交。
+/// 用户裁定 2026-08-23：不发 ESC，也不发 ESC 的替代品（含字面 CSI 201~）。
+/// 发 ESC/CSI 的唯一好处是让消息当场直接上屏；本项目只要求「下一次工具调用时能上屏」
+/// ⇒ 不存在需要它才能满足的场景，发它没有收益，只有污染 composer 输入的风险。
+/// 本判据由「未闭合 paste 必须被 201~ 闭合后提交」翻面为「不再修复未闭合态」：
+/// 先在干净 pane 上做阳性对照（inject 必须上屏一次），再证明未闭合态下不上屏。
 #[test]
-fn inject_submits_when_bracketed_paste_left_open() {
+fn inject_sends_no_escape_when_bracketed_paste_left_open() {
     let inner = short_tmux_socket("paste-in");
     let script = concat!(
         "import sys\n",
@@ -218,6 +222,10 @@ fn inject_submits_when_bracketed_paste_left_open() {
         .next()
         .unwrap_or("%0")
         .to_string();
+    // 阳性对照：paste 未打开时，同一装置上 inject 必须上屏恰一次。
+    let ctl = "paste-closed-control-marker";
+    run_inject(&inner, &pane, ctl);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
     let _ = tmux(&inner, &["send-keys", "-t", &pane, "-l", "\u{1b}[200~OPEN"]);
     std::thread::sleep(std::time::Duration::from_millis(200));
     let msg = "paste-open-proof-marker";
@@ -229,13 +237,20 @@ fn inject_submits_when_bracketed_paste_left_open() {
     };
     let _ = tmux(&inner, &["kill-server"]);
     let _ = std::fs::remove_file(&script_path);
-    let got = cap
-        .lines()
-        .filter(|l| l.contains(&format!("GOT:[{msg}]")))
-        .count();
+    let count = |m: &str| {
+        cap.lines()
+            .filter(|l| l.contains(&format!("GOT:[{m}]")))
+            .count()
+    };
     assert_eq!(
-        got, 1,
-        "unclosed bracketed paste must be closed then submitted; cap={cap:?}"
+        count(ctl),
+        1,
+        "positive control: closed paste must still submit once; cap={cap:?}"
+    );
+    assert_eq!(
+        count(msg),
+        0,
+        "unclosed bracketed paste is no longer repaired: no ESC/CSI is sent; cap={cap:?}"
     );
 }
 

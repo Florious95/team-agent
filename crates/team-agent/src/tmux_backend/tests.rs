@@ -2420,12 +2420,6 @@ fn inject_token_for(tag: &str) -> String {
     format!("ping [team-agent-token:msg_{tag}]")
 }
 
-fn argv_closes_bracketed_paste(argv: &[String]) -> bool {
-    argv.get(1).map(String::as_str) == Some("send-keys")
-        && argv.iter().any(|a| a == "-l")
-        && argv.iter().any(|a| a.contains("[201~"))
-}
-
 /// PR-18: tree-mode 必须在第一次 Enter 前 send-keys q。修坏：只对 Copy|Unknown cancel。
 #[test]
 fn inject_cancels_tree_mode_with_q_before_enter() {
@@ -2508,9 +2502,12 @@ fn inject_skips_cancel_when_pane_mode_is_zero() {
             .any(|argv| argv.iter().any(|a| a == "q" || a == "-X")),
         "pane_mode=0 must not send mode-cancel; before={before:?}"
     );
+    // 用户裁定 2026-08-23：不发 ESC，也不发 ESC 的替代品（含字面 CSI 201~）。翻面同上。
     assert!(
-        before.iter().any(|argv| argv_closes_bracketed_paste(argv)),
-        "mode=0 still closes unclosed bracketed paste before Enter; before={before:?}"
+        !before
+            .iter()
+            .any(|argv| argv.iter().any(|a| a.contains('\u{1b}'))),
+        "mode=0 must not send any ESC/CSI byte before Enter; before={before:?}"
     );
 }
 
@@ -2562,9 +2559,12 @@ fn inject_cancels_client_mode_with_d_before_enter() {
     );
 }
 
-/// 未闭合 bracketed paste：发前字面 CSI 201~，不是 Escape。
+/// 用户裁定 2026-08-23：不发 ESC，也不发 ESC 的替代品（含字面 CSI 201~）。
+/// 发 ESC/CSI 的唯一好处是让消息当场直接上屏；本项目只要求「下一次工具调用时能上屏」
+/// ⇒ 不存在需要它才能满足的场景，发它没有收益，只有污染 composer 输入的风险。
+/// 本判据由「必须发 201~」翻面为「Enter 前不得发任何 ESC/CSI 字节」。
 #[test]
-fn inject_closes_unclosed_bracketed_paste_with_csi201_not_escape() {
+fn inject_sends_no_escape_bytes_before_enter() {
     let token = inject_token_for("paste201");
     let (be, rec) = backend_mode("0", &token);
     with_paste_to_submit_floor(Duration::ZERO, || {
@@ -2580,8 +2580,10 @@ fn inject_closes_unclosed_bracketed_paste_with_csi201_not_escape() {
     assert_no_e55_keys(&calls);
     let before = inject_send_keys_before_first_enter(&calls);
     assert!(
-        before.iter().any(|argv| argv_closes_bracketed_paste(argv)),
-        "unclosed paste must close with CSI 201~ before Enter; before={before:?}"
+        !before
+            .iter()
+            .any(|argv| argv.iter().any(|a| a.contains('\u{1b}'))),
+        "no ESC/CSI byte may be sent before Enter; before={before:?}"
     );
 }
 
