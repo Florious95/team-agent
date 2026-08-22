@@ -2,12 +2,14 @@
 # //!
 # //! purpose: 构造性接收态装置——隔离 tmux + fake-worker，经 team-agent send
 # //!          走框架注入。①主动 choose-tree 后注入（tree-mode，非用户样本复现）；
-# //!          ②发前必须字面闭合 CSI 201~（括号未闭合接收态）。修前红、修后绿。
+# //!          ②发前**不得**出现字面 CSI 201~ 等 ESC 字节（用户裁定 2026-08-23：
+# //!            不发 ESC，也不发 ESC 的替代品——ESC 的唯一好处是当场直接上屏，
+# //!            而本项目只要求「下一次工具调用时能上屏」⇒ 无收益、只有污染输入的风险）。
 # //! contract:
 # //!   provides:
 # //!     - name: treemode-eats-enter-repro
-# //!       what: 一条命令，退出码即判据；1=Enter 前无 q（tree）或无 CSI 201~；
-# //!             0=q+201~ 都在第一次 Enter 前且假工人消费了 token；2=不可判
+# //!       what: 一条命令，退出码即判据；1=Enter 前无 q（tree）或出现了 CSI 201~；
+# //!             0=q 在第一次 Enter 前、且全程无 201~、且假工人消费了 token；2=不可判
 # //!   requires:
 # //!     - name: team-agent-gauge
 # //!       what: 默认 ~/.team-agent/runtime/0.5.66/bin/team-agent
@@ -480,7 +482,7 @@ print("cancel_q", q)
 print("cancel_x", xcancel)
 print("csi201", csi201)
 print("first_enter_line", tail[first_enter])
-if q and csi201:
+if q and not csi201:
     raise SystemExit(0)
 raise SystemExit(1)
 PY
@@ -497,10 +499,10 @@ fi
 
 if [ "$argv_rc" -eq 0 ]; then
   if wait_token "$TREE_TOK" 20 >/dev/null; then
-    pass_ok "prepare_pane_for_submit: q+CSI201 before Enter; fake worker consumed $TREE_TOK (constructive choose-tree + unclosed-paste close)"
+    pass_ok "prepare_pane_for_submit: q before Enter and NO CSI201/ESC byte; fake worker consumed $TREE_TOK (constructive choose-tree)"
   else
-    unjudgeable "q+201~ sent before Enter but fake worker never consumed $TREE_TOK"
+    unjudgeable "q sent (and no 201~) before Enter but fake worker never consumed $TREE_TOK"
   fi
 fi
 
-fail_repro "inject sent Enter/C-m to $W1_PANE without prior tree cancel q and/or CSI 201~ (constructive choose-tree). after_mode=[$MODE_AFTER] log=$TA_TMUX_LOG"
+fail_repro "inject sent Enter/C-m to $W1_PANE without prior tree cancel q, and/or emitted a forbidden CSI 201~/ESC byte (constructive choose-tree). after_mode=[$MODE_AFTER] log=$TA_TMUX_LOG"

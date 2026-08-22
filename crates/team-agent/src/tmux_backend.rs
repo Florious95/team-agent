@@ -9,7 +9,7 @@
 //!     - name: token-sighting
 //!       what: Visible / Gone / NeverSeen 三态接到判定（不只进报告）
 //!     - name: pre-submit-copy-mode-cancel
-//!       what: 统一 prepare_pane_for_submit：Enter 前 cancel 一切非 0 pane_mode（按真实 mode 分派）并字面闭合 CSI 201~（不是 Escape）；A1 Empty / A3 skip-poll / A4 Phase2 / A6 send_keys(含 Enter) 都走这里
+//!       what: 统一 prepare_pane_for_submit：Enter 前 cancel 一切非 0 pane_mode（按真实 mode 分派）；⛔ 不发 ESC 也不发其替代品（含字面 CSI 201~，用户裁定 2026-08-23）；A1 Empty / A3 skip-poll / A4 Phase2 / A6 send_keys(含 Enter) 都走这里
 //!     - name: turn-inbox-vs-run
 //!       what: busy ⇒ Verified(开跑)；composer 仍有本次粘贴且无 busy ⇒ Missing(没开跑)；其余 NotYetObserved(不知道)
 //!     - name: capture-fail-retry
@@ -1305,16 +1305,16 @@ impl TmuxBackend {
     /// 发 Enter 前归零接收态。A1/A3/A4/A6 唯一入口。
     ///
     /// 1. 非 0 pane_mode → `tmux_cancel_mode_argv`（按真实 mode 分派，不是硬编码 Copy）
-    /// 2. 字面 CSI 201~ 闭合未完成的 bracketed paste（不是 Escape 键）
-    /// cancel/闭合失败不 fail 提交。E55：不送 Escape/C-c。
+    /// cancel 失败不 fail 提交。E55：不送 Escape/C-c。
+    ///
+    /// 用户裁定 2026-08-23：**不发 ESC，也不发 ESC 的替代品**（含字面 CSI 201~）。
+    /// 发 ESC/CSI 的唯一好处是让消息当场直接上屏；本项目只要求「下一次工具调用时能上屏」
+    /// ⇒ 不存在需要它才能满足的场景，发它没有收益，只有污染 composer 输入的风险。
     fn prepare_pane_for_submit(&self, target: &Target, close_bracketed_paste: bool) {
+        let _ = close_bracketed_paste;
         let pane = pane_from_target(target);
         if let Some(mode) = self.pane_mode(target) {
             let argv = crate::transport::tmux_cancel_mode_argv(&pane, mode);
-            let _ = self.run_inject_stage(&argv, InjectStage::Submit);
-        }
-        if close_bracketed_paste {
-            let argv = crate::transport::tmux_close_bracketed_paste_argv(&pane);
             let _ = self.run_inject_stage(&argv, InjectStage::Submit);
         }
     }
