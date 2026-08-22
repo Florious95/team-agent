@@ -2843,7 +2843,7 @@ fn grok_fold_inject_stays_retries_while_identity_present() {
     assert_eq!(
         count_submit_enters(&calls),
         3,
-        "same grok N still in composer must retry Enter up to cap; calls={calls:?}"
+        "same grok N still in composer must retry Enter up to cap=3; Unverified B must not add a 4th; invert wrap-gap guard must turn this red; calls={calls:?}"
     );
 }
 
@@ -3513,6 +3513,37 @@ fn should_resend_enter_after_unverified_true_when_unwrapped_token_still_in_tui()
     assert!(
         super::should_resend_enter_after_unverified(&text, marker, None),
         "bare > skin with token identity still in composer must resend"
+    );
+}
+
+#[test]
+fn wrap_gap_false_when_a_already_sees_grok_latch() {
+    let marker = "[team-agent-token:msg_grok_stay]";
+    let tracked = Some(super::PasteLatch::GrokLineCount(42));
+    assert!(super::should_resubmit_enter(
+        GROK_INCIDENT_LINE,
+        marker,
+        tracked
+    ));
+    assert!(super::should_resend_enter_after_unverified(
+        GROK_INCIDENT_LINE,
+        marker,
+        tracked
+    ));
+    assert!(
+        !super::should_resend_unverified_wrap_gap(GROK_INCIDENT_LINE, marker, tracked),
+        "A latch path already covers grok-fold stay; invert wrap-gap must turn this red"
+    );
+}
+
+#[test]
+fn wrap_gap_true_on_joined_token_a_cannot_see() {
+    let marker = "[team-agent-token:msg_wrap_gate]";
+    let text = wrapped_unverified_composer(marker);
+    assert!(!super::should_resubmit_enter(&text, marker, None));
+    assert!(
+        super::should_resend_unverified_wrap_gap(&text, marker, None),
+        "B must still cover the wrap gap A cannot see"
     );
 }
 
