@@ -103,25 +103,17 @@ fn read_src(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Drop `//` comments so a source-shape scan cannot be satisfied (or
-/// falsely tripped) by prose. Line structure is preserved.
-fn code_only(src: &str) -> String {
-    src.lines()
-        .map(|line| line.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Comment-free code with every whitespace character removed, so a shape
-/// scan matches the *token sequence* and not the indentation rustfmt
-/// happens to pick. `selected\n        .state\n        .get("agents")`,
+/// Source text with every whitespace character removed, so a shape scan
+/// matches the *token sequence* and not the indentation rustfmt happens to
+/// pick. `selected\n        .state\n        .get("agents")`,
 /// `selected\n            .state\n            .get("agents")` and
 /// `selected.state.get("agents")` all normalize to the same text.
+///
+/// Deliberately does NOT strip comments: cutting each line at `//` also cuts
+/// string literals that contain `//` (a URL), which loses real code and can
+/// flip a face green. Whitespace is the only thing this tooth may ignore.
 fn code_no_ws(src: &str) -> String {
-    code_only(src)
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect()
+    src.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 fn walk_texts(root: &Path) -> Vec<(PathBuf, String)> {
@@ -352,9 +344,9 @@ fn source_existence_uses_state_not_spec() {
     // Face 2 — the spec-based existence gate must be gone entirely, OR
     // demoted to a role/config readback (never a source-existence
     // authority).
-    let code = code_only(&fork_agent);
-    let spec_still_authoritative = code.contains("unknown worker agent id: {source_agent_id}")
-        && code.contains("find_spec_agent");
+    let spec_still_authoritative = fork_agent
+        .contains("unknown worker agent id: {source_agent_id}")
+        && fork_agent.contains("find_spec_agent");
     assert!(
         state_before_spec && !spec_still_authoritative,
         "fork source-existence authority mismatch with clone. locate §5.2: \
@@ -461,9 +453,12 @@ fn scanner_canaries_independent_of_product_state() {
             && code_no_ws(spec_authority).contains("find_spec_agent(&spec,source_agent_id)"),
         "matcher must still separate spec-authority from state-authority"
     );
+    // A `//` inside a string literal must not cost us the rest of the line:
+    // ignoring whitespace is allowed, dropping code is not.
+    let url_line = "let d = \"https://internal.example/agents\"; let agent = selected.state.get(\"agents\")";
     assert!(
-        !code_no_ws("// selected.state.get(\"agents\")").contains("state.get(\"agents\")"),
-        "a comment must never satisfy the state-authority shape"
+        code_no_ws(url_line).contains("state.get(\"agents\")"),
+        "a `//` inside a string literal must not hide the state-authority shape"
     );
     // Confirm src/tests roots resolve.
     assert!(
