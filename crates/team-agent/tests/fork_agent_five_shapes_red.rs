@@ -103,6 +103,27 @@ fn read_src(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// Drop `//` comments so a source-shape scan cannot be satisfied (or
+/// falsely tripped) by prose. Line structure is preserved.
+fn code_only(src: &str) -> String {
+    src.lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Comment-free code with every whitespace character removed, so a shape
+/// scan matches the *token sequence* and not the indentation rustfmt
+/// happens to pick. `selected\n        .state\n        .get("agents")`,
+/// `selected\n            .state\n            .get("agents")` and
+/// `selected.state.get("agents")` all normalize to the same text.
+fn code_no_ws(src: &str) -> String {
+    code_only(src)
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
 fn walk_texts(root: &Path) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     fn go(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
@@ -313,11 +334,16 @@ fn source_existence_uses_state_not_spec() {
     // BEFORE any spec resolution (the same authority clone uses at
     // clone_agent.rs:16-29). We scan the file top-to-bottom: the FIRST
     // occurrence of source-existence resolution must reference state.
-    let state_hit = fork_agent
-        .find("state\n            .get(\"agents\")")
-        .or_else(|| fork_agent.find("state.get(\"agents\")"))
-        .or_else(|| fork_agent.find(".agents.get(source_agent_id"));
-    let spec_hit = fork_agent.find("find_spec_agent(&spec, source_agent_id)");
+    // Both hits are taken on the same whitespace-free projection so the
+    // ordering below stays comparable and neither pattern is pinned to a
+    // particular indentation (0.5.x: rustfmt re-wrapped the chain from 12
+    // to 8 spaces and every pattern here went to `None` while the
+    // invariant itself still held).
+    let scan = code_no_ws(&fork_agent);
+    let state_hit = scan
+        .find("state.get(\"agents\")")
+        .or_else(|| scan.find(".agents.get(source_agent_id"));
+    let spec_hit = scan.find("find_spec_agent(&spec,source_agent_id)");
     let state_before_spec = match (state_hit, spec_hit) {
         (Some(s), Some(sp)) => s < sp,
         (Some(_), None) => true,
@@ -326,9 +352,9 @@ fn source_existence_uses_state_not_spec() {
     // Face 2 — the spec-based existence gate must be gone entirely, OR
     // demoted to a role/config readback (never a source-existence
     // authority).
-    let spec_still_authoritative = fork_agent
-        .contains("unknown worker agent id: {source_agent_id}")
-        && fork_agent.contains("find_spec_agent");
+    let code = code_only(&fork_agent);
+    let spec_still_authoritative = code.contains("unknown worker agent id: {source_agent_id}")
+        && code.contains("find_spec_agent");
     assert!(
         state_before_spec && !spec_still_authoritative,
         "fork source-existence authority mismatch with clone. locate §5.2: \
@@ -416,6 +442,28 @@ fn scanner_canaries_independent_of_product_state() {
          depends on can't tell 'good' from 'bad' text. This is an \
          independent canary (does not read product source) so it stays \
          valid regardless of what the fork refactor does."
+    );
+    // Tooth 4's matcher must be indentation-blind AND still able to tell
+    // state-authority from spec-authority. Independent canary: fixed text,
+    // no product source.
+    let twelve = "let agent = selected\n            .state\n            .get(\"agents\")";
+    let eight = "let agent = selected\n        .state\n        .get(\"agents\")";
+    let flat = "let agent = selected.state.get(\"agents\")";
+    for (label, text) in [("12", twelve), ("8", eight), ("flat", flat)] {
+        assert!(
+            code_no_ws(text).contains("state.get(\"agents\")"),
+            "state-authority shape must match at indentation `{label}`"
+        );
+    }
+    let spec_authority = "let agent = find_spec_agent(&spec, source_agent_id)";
+    assert!(
+        !code_no_ws(spec_authority).contains("state.get(\"agents\")")
+            && code_no_ws(spec_authority).contains("find_spec_agent(&spec,source_agent_id)"),
+        "matcher must still separate spec-authority from state-authority"
+    );
+    assert!(
+        !code_no_ws("// selected.state.get(\"agents\")").contains("state.get(\"agents\")"),
+        "a comment must never satisfy the state-authority shape"
     );
     // Confirm src/tests roots resolve.
     assert!(
