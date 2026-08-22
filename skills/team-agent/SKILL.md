@@ -37,7 +37,7 @@ Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md
 | Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
 |---|---|---|---|---|
 | `grok` | yes (`--resume <id>`, archive-gated) | no | yes (role `model` required) | yes (`--fork-session` + new `--session-id`) |
-| `cursor_agent` | yes (argv `--resume <chatId>`, archive-gated) | no | yes (role `model` required) | **no — `CapabilityUnsupported`** |
+| `cursor_agent` | yes (argv `--resume <chatId>`, archive-gated) | no | required on role (omit fails compile); do not treat as the live model | **no — `CapabilityUnsupported`** |
 
 Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
 
@@ -45,11 +45,22 @@ Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
 
 ### Cursor provider notes
 
-Frontmatter: `provider: cursor_agent` (not `cursor`; the launcher verb `team-agent cursor` is different), `auth_mode: subscription`, `name:` required (omit → `missing front matter field name`). Also required: `role:`, `model:`, `tools:`, `dangerously_skip_permissions:` (bool). Subscription needs no `profile`. One `cursor_agent` worker per workspace.
+Frontmatter: `provider: cursor_agent` (not `cursor`; launcher verb is `team-agent cursor`), `auth_mode: subscription`, `name:` required (omit → `missing front matter field name`). Also required: `role:`, `tools:`, `dangerously_skip_permissions:` (bool). Subscription needs no `profile`.
 
-`clone-agent` copies the source role file (provider unchanged). To add a cursor worker at runtime: `clone-agent` → `stop-agent` → `remove-agent --confirm` (deletes the managed file under `.team/dynamic-role-files/`) → write the new role file → `add-agent --role-file` → dispatch by hand.
+`model:` is required — omit compile-fails (blocks a silent builtin `sonnet-4-thinking`). It does not decide the running model; do not assert from the field. Framework still puts it on `--model` argv. The pane is the live model.
+
+One `cursor_agent` per workspace. A second seat (including `add-agent --force` of a different id) fail-closes:
+
+```
+error: cursor_agent seat already occupies this workspace
+reason: <workspace>/.cursor/mcp.json is directory-scoped; a second seat overwrites TEAM_AGENT_ID (last-writer)
+action: do not add another CursorAgent in this workspace until per-seat MCP identity is isolated
+```
+
+Several cursor seats → one workspace directory each. Same seat, fresh context → `reset-agent --discard-session`.
+
+`clone-agent` copies the source role (provider unchanged). Runtime add: `clone-agent` → `stop-agent` → `remove-agent --confirm` (deletes `.team/dynamic-role-files/`) → write the role file → `add-agent --role-file` → dispatch.
 
 - Restart emits `--resume <chatId>` when `store.db`/`meta.json` exist; the gate does not read chat text. Persist anything that must survive restart.
 - Delivery sends one Enter; a second Enter interrupts the turn.
-- Role `model:` is passed as `--model`. A local shim strips the old builtin default (`sonnet-4-thinking`); the pane is the live model.
 - After spawn, the pane footer should show `Cursor Agent v<version>`. Do not use `strings` to probe the binary.
