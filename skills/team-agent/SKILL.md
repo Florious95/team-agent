@@ -37,7 +37,7 @@ Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md
 | Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
 |---|---|---|---|---|
 | `grok` | yes (`--resume <id>`, archive-gated) | no | yes (role `model` required) | yes (`--fork-session` + new `--session-id`) |
-| `cursor_agent` | yes (argv `--resume <chatId>`, archive-gated) | no | required on role (omit fails compile); do not treat as the live model | **no — `CapabilityUnsupported`** |
+| `cursor_agent` | yes (argv `--resume <chatId>`, archive-gated) | no | required on role; same-family catalog id can take effect; unknown id silent-fallback; pane chrome ≠ proven live | **no — `CapabilityUnsupported`** |
 
 Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
 
@@ -47,7 +47,7 @@ Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
 
 Frontmatter: `provider: cursor_agent` (not `cursor`; launcher verb is `team-agent cursor`), `auth_mode: subscription`, `name:` required (omit → `missing front matter field name`). Also required: `role:`, `tools:`, `dangerously_skip_permissions:` (bool). Subscription needs no `profile`.
 
-`model:` is required — omit compile-fails (blocks a silent builtin `sonnet-4-thinking`). It does not decide the running model; do not assert from the field. Framework still puts it on `--model` argv. The pane is the live model.
+`model:` is required (omit compile-fails; blocks a silent builtin `sonnet-4-thinking`). The flag stays on argv. Same-family catalog ids can change pane chrome. An id not in that provider's catalog silent-falls back (landing not stable; no events/stderr/pane warning). Pick names from the catalog; after spawn, `capture-pane` once for chrome. Do not treat the role field or pane chrome as proof of the live model.
 
 One `cursor_agent` per workspace. A second seat (including `add-agent --force` of a different id) fail-closes:
 
