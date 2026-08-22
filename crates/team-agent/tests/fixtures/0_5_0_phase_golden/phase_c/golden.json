@@ -966,6 +966,7 @@
           "stage": null,
           "status": "queued",
           "target": "w1",
+          "turn_verification": "not_yet_observed",
           "verification": null
         }
       },
