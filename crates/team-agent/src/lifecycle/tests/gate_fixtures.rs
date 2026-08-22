@@ -169,9 +169,12 @@ fn run_sh(script: &Path, log: &Path) -> Option<i32> {
 }
 
 fn scratch_dir() -> PathBuf {
+    // scratch 根必须可移植：CI(ubuntu) 上 `/Volumes/...` 不存在且 `/` 不可写，
+    // create_dir_all 直接 errno 13。⛔ 不硬编码任何绝对路径；默认走标准临时目录
+    // (`std::env::temp_dir()`，尊重 TMPDIR)，`TEAM_AGENT_TEST_TMP` 仍可覆盖。
     let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/Volumes/nvme/tmp"));
+        .unwrap_or_else(std::env::temp_dir);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
