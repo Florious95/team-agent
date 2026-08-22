@@ -23,10 +23,10 @@ use team_agent::message_store::MessageStore;
 use team_agent::messaging::deliver_pending_messages;
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
 use team_agent::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
-    WindowName,
+    tmux_submit_key_name, AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload,
+    InjectReport, InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 /// 0.3.27 UNIFIED pipeline: the old pasted-content-block detection branch is
@@ -328,10 +328,11 @@ fn first_send_enter_index(calls: &[Vec<String>]) -> Option<usize> {
 }
 
 fn send_enter_count(calls: &[Vec<String>]) -> usize {
+    let submit = tmux_submit_key_name(Key::Enter);
     calls
         .iter()
         .filter(|argv| {
-            is_tmux_subcommand(argv, "send-keys") && argv.iter().any(|arg| arg == "Enter")
+            is_tmux_subcommand(argv, "send-keys") && argv.iter().any(|arg| arg == submit)
         })
         .count()
 }
