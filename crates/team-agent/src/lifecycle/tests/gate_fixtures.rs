@@ -19,6 +19,7 @@
 //! maturity: wired
 //! ---
 
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -189,7 +190,7 @@ fn check_brief(task_md: &Path) -> GateVerdict {
 /// 拆成 spawn + wait_with_output 两步，正是为了让前两类可分。
 fn run_sh(script: &Path, log: &Path) -> Result<i32, ShFailure> {
     let name = script.display().to_string();
-    let child = Command::new("sh")
+    let child = Command::new(shell_for_this_call())
         .arg(script)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -215,6 +216,42 @@ fn run_sh(script: &Path, log: &Path) -> Result<i32, ShFailure> {
             script: name,
             signal: termination_signal(&output.status),
         })
+}
+
+/// 一个**绝对路径**的不存在解释器。绝对路径 ⇒ execvp 不查 PATH，必然 ENOENT。
+/// ⛔ 不用「unset PATH」那一招：unix 下 PATH 未设时 execvp 回落 confstr(_CS_PATH)，
+/// 仍能找到 /bin/sh，破坏是无效的。
+const UNSPAWNABLE_SHELL: &str = "/nonexistent-gate-fixtures/no-such-shell";
+
+thread_local! {
+    /// 只在**本线程**生效的量具破坏开关：列出「第几次 run_sh 调用该用坏解释器」。
+    /// 线程局部 ⇒ 不碰 PATH、不碰任何进程级环境，绝不外溢到并发跑的别的测试。
+    static BREAK_SH_ON_CALLS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static SH_CALL_SEQ: Cell<usize> = const { Cell::new(0) };
+}
+
+fn shell_for_this_call() -> &'static str {
+    let n = SH_CALL_SEQ.with(|seq| {
+        let n = seq.get();
+        seq.set(n + 1);
+        n
+    });
+    if BREAK_SH_ON_CALLS.with(|calls| calls.borrow().contains(&n)) {
+        UNSPAWNABLE_SHELL
+    } else {
+        "sh"
+    }
+}
+
+/// 在本线程内令第 `calls` 次 run_sh 调用的解释器起不来，跑完立刻复位。
+/// 用于在**健康环境**下主动造出「量具失效」，不依赖运行环境恰好坏掉。
+fn with_broken_sh_on<T>(calls: &[usize], body: impl FnOnce() -> T) -> T {
+    SH_CALL_SEQ.with(|seq| seq.set(0));
+    BREAK_SH_ON_CALLS.with(|c| *c.borrow_mut() = calls.to_vec());
+    let out = body();
+    BREAK_SH_ON_CALLS.with(|c| c.borrow_mut().clear());
+    SH_CALL_SEQ.with(|seq| seq.set(0));
+    out
 }
 
 #[cfg(unix)]
@@ -429,4 +466,93 @@ fn four_state_probe_red_is_not_collapsed_to_boolean() {
     assert_eq!(assert_probe_red(&green), GateVerdict::Fail);
     assert_eq!(assert_probe_red(&red), GateVerdict::Pass);
     assert_eq!(assert_probe_red(&unj), GateVerdict::Unjudgeable);
+}
+
+/// 齿：量具失效必须产生 ToolFailure，⛔ 不得塌回 Unjudgeable。
+///
+/// 这条守的是 fea1e2fd 新立的不变量本身。没有它，把三处
+/// `Err(f) => ToolFailure(f)` 改回 `Err(_) => Unjudgeable` 不会有任何测试报警，
+/// 那三条刚封住的恒绿空壳就会原样复活。
+///
+/// 破坏是**自己造的**（thread-local 把某一次 run_sh 的解释器换成绝对不存在的路径），
+/// 因此在健康环境下也能跑、也必须绿；⛔ 不依赖运行环境恰好坏掉。
+#[test]
+fn tool_failure_is_never_collapsed_into_unjudgeable() {
+    let dir = scratch_dir();
+    let two = write_sh(&dir, "u.sh", "exit 2");
+    let red = write_sh(&dir, "r.sh", "exit 1");
+    let mk = write_sh(&dir, "make_green.sh", "exit 0");
+
+    // 阳性对照：同一个 exit 2 探针，sh 健康时是真·不可判。
+    let healthy = assert_probe_red(&two);
+    assert_eq!(
+        healthy,
+        GateVerdict::Unjudgeable,
+        "阳性对照失效：健康 sh 下 exit 2 必须是 Unjudgeable"
+    );
+
+    // 齿① assert_probe_red 的那次 run_sh。
+    let t1 = with_broken_sh_on(&[0], || assert_probe_red(&two));
+    println!("[齿① assert_probe_red      ] {t1:?}");
+    assert_ne!(
+        t1,
+        GateVerdict::Unjudgeable,
+        "量具起不来被塌回 Unjudgeable：与探针自报 exit 2 无法区分。t1={t1:?}"
+    );
+    assert!(
+        matches!(t1, GateVerdict::ToolFailure(ShFailure::Spawn { .. })),
+        "量具起不来必须是 ToolFailure(Spawn)。t1={t1:?}"
+    );
+
+    // 齿② assert_probe_two_sided 第 1 次 run_sh（坏态探针）。
+    let t2 = with_broken_sh_on(&[0], || assert_probe_two_sided(&red, &mk));
+    println!("[齿② two_sided 坏态探针     ] {t2:?}");
+    assert_ne!(
+        t2,
+        GateVerdict::Unjudgeable,
+        "two_sided 第一次 run_sh 塌态。t2={t2:?}"
+    );
+    assert!(
+        matches!(t2, GateVerdict::ToolFailure(ShFailure::Spawn { .. })),
+        "t2={t2:?}"
+    );
+
+    // 齿③ 第 2 次 run_sh（阳性对照 make_green）——与「对照跑了但没成功」必须是两回事。
+    let t3 = with_broken_sh_on(&[1], || assert_probe_two_sided(&red, &mk));
+    println!("[齿③ two_sided make_green  ] {t3:?}");
+    assert_ne!(
+        t3,
+        GateVerdict::Unjudgeable,
+        "对照脚本起不来 ≠ 对照没做成，⛔ 不许同值。t3={t3:?}"
+    );
+    assert!(
+        matches!(t3, GateVerdict::ToolFailure(ShFailure::Spawn { .. })),
+        "t3={t3:?}"
+    );
+
+    // 齿④ 第 3 次 run_sh（修好后复跑探针）。
+    let flag = dir.join("fixed");
+    let probe = write_sh(
+        &dir,
+        "probe.sh",
+        &format!(
+            "if [ -f '{}' ]; then exit 0; else exit 1; fi",
+            flag.display()
+        ),
+    );
+    let mk2 = write_sh(&dir, "mk2.sh", &format!("touch '{}'", flag.display()));
+    let t4 = with_broken_sh_on(&[2], || assert_probe_two_sided(&probe, &mk2));
+    println!("[齿④ two_sided 复跑探针     ] {t4:?}");
+    assert_ne!(t4, GateVerdict::Unjudgeable, "t4={t4:?}");
+    assert!(
+        matches!(t4, GateVerdict::ToolFailure(ShFailure::Spawn { .. })),
+        "t4={t4:?}"
+    );
+
+    // 破坏开关必须已复位：紧接着的健康调用不得再坏。
+    assert_eq!(
+        assert_probe_red(&two),
+        GateVerdict::Unjudgeable,
+        "with_broken_sh_on 没复位，破坏外溢"
+    );
 }
