@@ -192,6 +192,9 @@ fn run_sh(script: &Path, log: &Path) -> Result<i32, ShFailure> {
     let name = script.display().to_string();
     let child = Command::new(shell_for_this_call())
         .arg(script)
+        // 钉死子 shell 自己的 PATH：它内部再解析裸名外部命令（如 touch）时不能继承
+        // 父进程当次可能已被并发测试改写的 PATH（绝对路径只保证这一次 spawn 本身不查 PATH）。
+        .env("PATH", "/usr/bin:/bin")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -239,7 +242,8 @@ fn shell_for_this_call() -> &'static str {
     if BREAK_SH_ON_CALLS.with(|calls| calls.borrow().contains(&n)) {
         UNSPAWNABLE_SHELL
     } else {
-        "sh"
+        // 绝对路径 ⇒ execve 不查 PATH：不与并发跑的、会原地改写进程级 PATH 的其它测试赛跑。
+        "/bin/sh"
     }
 }
 
