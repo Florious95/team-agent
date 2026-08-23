@@ -3,10 +3,20 @@
 //! Triage doc (sole basis): `.team/artifacts/med-triage-fixed-failure-sweep.md` §A-7.
 //! Python truth source: 0.2.11.
 //!
-//! - fork_agent drops `label` — agent_ops.rs:89-91 `let _ = label` vs Python
+//! - the NEW seat drops `label` — agent_ops.rs:89-91 `let _ = label` vs Python
 //!   operations.py:315 `new_agent["role"] = str(label or role or as_agent_id)`:
-//!   the label IS the forked agent's new role (it feeds the identity section of the
+//!   the label IS the new seat's role (it feeds the identity section of the
 //!   system prompt — same family as the B2 prompt-soul contract).
+//!   🔴 2026-08-23 REHOME: this was written on the MCP `fork_agent` tool. Per
+//!   `wiki/C1/分身与克隆.md` a fork produces a provider-opened UNNAMED window —
+//!   there is no new seat and no role label to carry, and `--as`/`as_agent_id`
+//!   is refused outright. The label⇒role requirement belongs to `clone`
+//!   (`clone_agent.rs` params: "label: 新席位的角色标签"), so the assertions now
+//!   run against the MCP `clone_agent` tool. ⛔ Rewritten, not carried across.
+//!   ⚠️ The cited triage doc `.team/artifacts/med-triage-fixed-failure-sweep.md`
+//!   could NOT be found in this repo (searched with `find`, positive control
+//!   passed) — the label three-way fallback rule above is sourced only from the
+//!   Python implementation and is flagged for human confirmation.
 //! - send fabricates a nonexistent message_id — tools.rs:194-196 invents
 //!   `mcp_<timestamp>` (and a poll_via hint pointing at it) when the delivery outcome
 //!   carries no id; Python tools.py:175-181 only returns accepted+poll_via for a REAL
@@ -151,7 +161,7 @@ fabricated={fabricated:?} body={} raw={}",
 /// (Python operations.py:315 `new_agent["role"] = str(label or role or as_agent_id)`).
 #[test]
 #[serial(a7_mcp)]
-fn a7_fork_agent_label_becomes_new_role() {
+fn a7_clone_agent_label_becomes_new_role() {
     let _home = hermetic_guard::HermeticTestEnv::enter("a7-fork-label");
     let harness = McpSimHarness::new();
     let _coordinator_guard = CoordinatorStopGuard {
@@ -220,69 +230,69 @@ exec sleep 300
     std::env::remove_var("TEAM_AGENT_LEADER_PANE_ID");
 
     let call = worker.call_tool(
-        "fork_agent",
+        "clone_agent",
         json!({
             "source_agent_id": "worker_a",
-            "as_agent_id": "worker_fork",
-            "label": "Custom Fork Role",
+            "as_agent_id": "worker_clone",
+            "label": "Custom Clone Role",
         }),
     );
     assert!(
         !call.is_error && call.body.get("ok") == Some(&json!(true)),
-        "fixture: fork_agent should succeed for the shimmed claude source with a session; \
+        "fixture: clone_agent should succeed for the shimmed claude source with a session; \
 body={} raw={}",
         call.body,
         call.raw
     );
 
     let state = harness.state_value();
-    let forked = state
-        .pointer("/teams/teamA/agents/worker_fork")
-        .expect("A-7: fork must be registered in the canonical selected team row");
-    let role = forked
+    let cloned = state
+        .pointer("/teams/teamA/agents/worker_clone")
+        .expect("A-7: clone must be registered in the canonical selected team row");
+    let role = cloned
         .get("role")
         .and_then(Value::as_str)
         .map(str::to_string);
     assert_eq!(
         role.as_deref(),
-        Some("Custom Fork Role"),
-        "A-7: label must become the forked agent's role (Python operations.py:315; the \
+        Some("Custom Clone Role"),
+        "A-7: label must become the NEW seat's role (Python operations.py:315; the \
 role feeds the compiled identity prompt — B2 family); state role={role:?} state={state}"
     );
     assert_eq!(
-        forked.get("window").and_then(Value::as_str),
-        Some("worker_fork"),
-        "A-7: canonical team registration must retain the spawned window tuple; forked={forked}"
+        cloned.get("window").and_then(Value::as_str),
+        Some("worker_clone"),
+        "A-7: canonical team registration must retain the spawned window tuple; cloned={cloned}"
     );
     assert!(
-        forked
+        cloned
             .get("pane_id")
             .and_then(Value::as_str)
             .is_some_and(|pane| pane.starts_with('%')),
-        "A-7: canonical team registration must retain the physical tmux pane id; forked={forked}"
+        "A-7: canonical team registration must retain the physical tmux pane id; cloned={cloned}"
     );
     assert_eq!(
         state.pointer("/teams/teamB"),
         Some(&sibling_before),
-        "A-7: teamA fork must preserve sibling teamB byte-for-byte"
+        "A-7: teamA clone must preserve sibling teamB byte-for-byte"
     );
 
     let send = worker.call_tool(
         "send_message",
-        json!({"to": "worker_fork", "content": "A-7 scoped fork reachability probe"}),
+        json!({"to": "worker_clone", "content": "A-7 scoped clone reachability probe"}),
     );
     assert_ne!(
         send.body.get("reason"),
         Some(&json!("target_not_in_team")),
-        "A-7: a successfully forked team member must pass the team membership gate immediately; body={} raw={}",
+        "A-7: a successfully cloned team member must pass the team membership gate immediately; body={} raw={}",
         send.body,
         send.raw
     );
-    let rows = harness.message_rows_containing("A-7 scoped fork reachability probe");
+    let rows = harness.message_rows_containing("A-7 scoped clone reachability probe");
     assert!(
         rows.iter()
             .any(|row| row.owner_team_id.as_deref() == Some("teamA")
-                && row.recipient == "worker_fork"),
+                && row.recipient == "worker_clone"),
         "A-7: the short-name send must resolve and persist under canonical teamA; rows={rows:?}"
     );
 }
