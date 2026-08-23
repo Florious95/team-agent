@@ -1,31 +1,51 @@
-//! Independent-verifier RED contract: `fork-agent` returning ok MUST yield a
-//! clone that is actually usable in the selected team scope.
+//! Independent-verifier contract: `clone-agent` returning ok MUST yield a NEW
+//! SEAT that is actually usable in the selected team scope.
 //!
-//! Case source (phenomenon only, information-isolated from owner locate/implement
-//! reasoning): `.team/artifacts/pipeline-runs/fork-team-scope-bug/case.md` —
-//! real-machine first use of fork: `fork-agent ... --team T` returned
-//! `ok:true`, the tmux window/pane physically exists, yet
-//! `send --to <clone> --team T` refuses `target_not_in_team`,
-//! `send --to-name 'ws::T/<clone>'` refuses `name_not_resolvable`, and
-//! `status --team T` does not list the clone. ok-but-unusable = false success.
+//! # 2026-08-23 rehome: this contract used to be written on `fork-agent`
 //!
-//! Contract (as assigned by leader): fork ok ⇒
-//!   1. clone is send-addressable by short id within the team,
-//!   2. clone is send-addressable by fully-qualified name,
-//!   3. clone is visible in team status,
-//!   4. clone can be retired (stop-agent succeeds).
+//! It was moved to `clone-agent` because the behaviour it asserts has no
+//! landing point in `fork` at all — see `wiki/C1/分身与克隆.md`:
+//!
+//! - `fork` injects the provider's own command (grok `/fork`, claude
+//!   `/branch`) into the SOURCE pane; the provider opens its own window, the
+//!   session id is provider-assigned, and **the window has no name**. So
+//!   "address the new thing by name / see it in status / retire it with
+//!   stop-agent" cannot be satisfied by fork — by design, not by defect
+//!   (`fork_agent.rs` reports `new_agent_id == source_agent_id` and
+//!   `session_id: None`, and refuses `--as <other>`).
+//! - `clone` goes through `add-agent`, materialises the role file, and
+//!   produces a NAMED new seat. Every claim below belongs here.
+//!
+//! ⛔ This is a rewrite to clone semantics, NOT the old fork fixture moved
+//! across: the fork-only scaffolding (seeding the source session backing
+//! tuple, so that fork had something to copy) is gone, because clone is
+//! zero-context by definition and consumes no source backing.
+//!
+//! Case source (phenomenon only): the injury this contract exists to prevent
+//! is recorded in `.team/artifacts/pipeline-runs/fork-team-scope-bug/case.md`
+//! — a real-machine run where creating a second seat returned `ok:true` and
+//! the tmux window/pane physically existed, yet `send --to <new> --team T`
+//! refused `target_not_in_team`, `send --to-name 'ws::T/<new>'` refused
+//! `name_not_resolvable`, and `status --team T` did not list it. The seat was
+//! registered in the ROOT agents map but not in the team scope, while `send`
+//! resolves by team scope. ok-but-unusable = false success. That registration
+//! path is what `clone-agent` uses today, so the case is still live here.
+//!
+//! Contract: clone ok ⇒
+//!   1. new seat is send-addressable by short id within the team,
+//!   2. new seat is send-addressable by fully-qualified name,
+//!   3. new seat is visible in team status,
+//!   4. new seat can be retired (stop-agent succeeds).
 //!
 //! Harness: real binary + real tmux on the team's own socket; provider is a
-//! `claude` PATH shim (repo convention for external CLIs — zero tokens); the
-//! source agent's session backing tuple is seeded as fixture prep because a
-//! real captured claude session cannot exist hermetically. All verbs the user
-//! runs are canonical: quick-start / fork-agent / send / status / stop-agent /
-//! shutdown.
+//! `claude` PATH shim (repo convention for external CLIs — zero tokens). All
+//! verbs the user runs are canonical: quick-start / clone-agent / send /
+//! status / stop-agent / shutdown.
 //!
-//! Frozen assertion source SHA256:
-//! `0422159c46da07e1878907bdd118fe59cc18319502ce75f4d8dcfb40ff597b73`.
-//! The workspace-local `claude` PATH shim keeps this contract CI-runnable and
-//! subscription-free; no assertion is host-only.
+//! ⚠️ The pre-rehome frozen assertion SHA256
+//! (`0422159c46da07e1878907bdd118fe59cc18319502ce75f4d8dcfb40ff597b73`)
+//! covered the fork-worded file and no longer applies; the four assertions
+//! themselves are carried over unchanged in substance.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -37,21 +57,21 @@ use hermetic_guard::HermeticTestEnv;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use serial_test::serial;
 
-const TEAM_NAME: &str = "forkscope";
+const TEAM_NAME: &str = "clonescope";
 const SOURCE: &str = "base";
-const CLONE: &str = "forked";
+const CLONE: &str = "cloned";
 
-struct ForkScopeCase {
+struct CloneScopeCase {
     env: HermeticTestEnv,
     workspace: PathBuf,
     shim_path: String,
     socket: PathBuf,
 }
 
-impl ForkScopeCase {
+impl CloneScopeCase {
     fn start(tag: &str) -> Self {
         let env = HermeticTestEnv::enter(tag);
         env.scrub_tmux();
@@ -72,8 +92,8 @@ impl ForkScopeCase {
         // `--team-id` pins the runtime team key to the spec name — the same
         // shape as the real-machine case (`--team-id scopeprobe`). Without it
         // the runtime key derives from the workspace dir and every later
-        // `--team forkscope` selector would exercise a different (pre-existing,
-        // out-of-case) spec-name-vs-runtime-key divergence instead of the fork
+        // `--team clonescope` selector would exercise a different (pre-existing,
+        // out-of-case) spec-name-vs-runtime-key divergence instead of the clone
         // registration path under test.
         let output = case.run_cli(&[
             "quick-start",
@@ -105,7 +125,6 @@ impl ForkScopeCase {
         );
         let mut case = case;
         case.socket = case.discover_socket();
-        case.seed_source_session_tuple();
         case
     }
 
@@ -141,68 +160,9 @@ impl ForkScopeCase {
         PathBuf::from(socket)
     }
 
-    fn state_path(&self) -> PathBuf {
-        self.workspace
-            .join(".team")
-            .join("runtime")
-            .join("state.json")
-    }
-
-    /// Fixture prep: a hermetic claude shim has no real captured session, so
-    /// seed the complete backing tuple (session_id + rollout_path +
-    /// captured_at + captured_via, rollout file existing on disk) into every
-    /// projection of the source agent row — simulating what session capture
-    /// records for a real worker.
-    fn seed_source_session_tuple(&self) {
-        let rollout = self.workspace.join("fixture-rollout.jsonl");
-        std::fs::write(&rollout, "{\"type\":\"fixture\"}\n").expect("write rollout fixture");
-        let raw = std::fs::read_to_string(self.state_path()).expect("read state.json");
-        let mut state: Value = serde_json::from_str(&raw).expect("parse state.json");
-        let tuple = json!({
-            "session_id": "sess-fork-scope-contract",
-            "rollout_path": rollout.to_string_lossy(),
-            "captured_at": "2026-07-17T00:00:00Z",
-            "captured_via": "contract-fixture"
-        });
-        let mut patched = 0;
-        if let Some(row) = state
-            .get_mut("agents")
-            .and_then(|a| a.get_mut(SOURCE))
-            .and_then(Value::as_object_mut)
-        {
-            for (key, value) in tuple.as_object().expect("tuple object") {
-                row.insert(key.clone(), value.clone());
-            }
-            patched += 1;
-        }
-        if let Some(teams) = state.get_mut("teams").and_then(Value::as_object_mut) {
-            for team in teams.values_mut() {
-                if let Some(row) = team
-                    .get_mut("agents")
-                    .and_then(|a| a.get_mut(SOURCE))
-                    .and_then(Value::as_object_mut)
-                {
-                    for (key, value) in tuple.as_object().expect("tuple object") {
-                        row.insert(key.clone(), value.clone());
-                    }
-                    patched += 1;
-                }
-            }
-        }
-        assert!(
-            patched >= 1,
-            "fixture: source agent row must exist in state.json to seed; state={state}"
-        );
-        std::fs::write(
-            self.state_path(),
-            serde_json::to_string_pretty(&state).expect("serialize state"),
-        )
-        .expect("write seeded state.json");
-    }
-
-    fn fork_clone(&self) -> Value {
+    fn clone_seat(&self) -> Value {
         let output = self.run_cli(&[
-            "fork-agent",
+            "clone-agent",
             SOURCE,
             "--as",
             CLONE,
@@ -215,7 +175,7 @@ impl ForkScopeCase {
         ]);
         let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
             panic!(
-                "fork-agent --json must emit JSON; stdout={} stderr={}",
+                "clone-agent --json must emit JSON; stdout={} stderr={}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             )
@@ -224,8 +184,8 @@ impl ForkScopeCase {
             output.status.success()
                 && value.get("ok").and_then(Value::as_bool) == Some(true)
                 && value.get("new_agent_id").and_then(Value::as_str) == Some(CLONE),
-            "fixture: fork-agent must report ok (the case phenomenon starts AFTER a \
-             reported-ok fork); code={:?} stdout={} stderr={}",
+            "fixture: clone-agent must report ok (the case phenomenon starts AFTER a \
+             reported-ok clone); code={:?} stdout={} stderr={}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -246,7 +206,7 @@ impl ForkScopeCase {
         let names = String::from_utf8_lossy(&windows.stdout);
         assert!(
             names.lines().any(|name| name == CLONE),
-            "fixture: fork ok must have physically created the clone window; windows={names}"
+            "fixture: clone ok must have physically created the new seat window; windows={names}"
         );
         value
     }
@@ -274,7 +234,7 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("TEAM.md"),
         format!(
-            "---\nname: {TEAM_NAME}\nobjective: fork-agent team-scope addressability contract.\nprovider: claude\n---\n"
+            "---\nname: {TEAM_NAME}\nobjective: clone-agent team-scope addressability contract.\nprovider: claude\n---\n"
         ),
     )
     .expect("write TEAM.md");
@@ -304,7 +264,7 @@ if [ -n "$sid" ]; then
   encoded=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
   dir="$HOME/.claude/projects/$encoded"
   mkdir -p "$dir"
-  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
+  printf '{"sessionId":"%s","type":"clone-backing"}\n' "$sid" > "$dir/$sid.jsonl"
 fi
 echo "claude shim ready"
 exec sleep 3600
@@ -330,18 +290,18 @@ fn json_stdout(output: &Output, context: &str) -> Value {
     })
 }
 
-/// RED 1 — short-id send within the team: after fork ok, `send <clone>
+/// RED 1 — short-id send within the team: after clone ok, `send <new seat>
 /// --team <team>` must accept the message (any delivery state), never refuse
 /// with `target_not_in_team`.
 #[test]
 #[serial(env)]
-fn fork_ok_clone_is_send_addressable_by_short_id_in_team() {
-    let case = ForkScopeCase::start("fts-red1");
-    case.fork_clone();
+fn clone_ok_new_seat_is_send_addressable_by_short_id_in_team() {
+    let case = CloneScopeCase::start("fts-red1");
+    case.clone_seat();
     let output = case.run_cli(&[
         "send",
         CLONE,
-        "fork scope probe",
+        "clone scope probe",
         "--workspace",
         case.workspace_str(),
         "--team",
@@ -354,7 +314,7 @@ fn fork_ok_clone_is_send_addressable_by_short_id_in_team() {
     let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
     assert!(
         ok && reason != "target_not_in_team",
-        "RED1: fork reported ok, so the clone must be addressable via \
+        "RED1: clone reported ok, so the new seat must be addressable via \
          `send {CLONE} --team {TEAM_NAME}`; got ok={ok} reason={reason} value={value}"
     );
     case.shutdown();
@@ -364,15 +324,15 @@ fn fork_ok_clone_is_send_addressable_by_short_id_in_team() {
 /// must resolve, never `name_not_resolvable`.
 #[test]
 #[serial(env)]
-fn fork_ok_clone_is_send_addressable_by_qualified_name() {
-    let case = ForkScopeCase::start("fts-red2");
-    case.fork_clone();
+fn clone_ok_new_seat_is_send_addressable_by_qualified_name() {
+    let case = CloneScopeCase::start("fts-red2");
+    case.clone_seat();
     let qualified = format!("{}::{}/{}", case.workspace_str(), TEAM_NAME, CLONE);
     let output = case.run_cli(&[
         "send",
         "--to-name",
         qualified.as_str(),
-        "qualified fork scope probe",
+        "qualified clone scope probe",
         "--workspace",
         case.workspace_str(),
         "--no-wait",
@@ -383,19 +343,19 @@ fn fork_ok_clone_is_send_addressable_by_qualified_name() {
     let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
     assert!(
         ok && reason != "name_not_resolvable",
-        "RED2: fork reported ok, so the stable qualified name `{qualified}` must \
+        "RED2: clone reported ok, so the stable qualified name `{qualified}` must \
          resolve; got ok={ok} reason={reason} value={value}"
     );
     case.shutdown();
 }
 
-/// RED 3 — team status visibility: `status --team <team>` must list the clone
+/// RED 3 — team status visibility: `status --team <team>` must list the new seat
 /// in the team-scoped agents projection.
 #[test]
 #[serial(env)]
-fn fork_ok_clone_is_visible_in_team_status() {
-    let case = ForkScopeCase::start("fts-red3");
-    case.fork_clone();
+fn clone_ok_new_seat_is_visible_in_team_status() {
+    let case = CloneScopeCase::start("fts-red3");
+    case.clone_seat();
     let output = case.run_cli(&[
         "status",
         "--workspace",
@@ -411,7 +371,7 @@ fn fork_ok_clone_is_visible_in_team_status() {
         .is_some_and(|agents| agents.contains_key(CLONE));
     assert!(
         listed,
-        "RED3: fork reported ok, so `status --team {TEAM_NAME}` must list the \
+        "RED3: clone reported ok, so `status --team {TEAM_NAME}` must list the \
          clone; agents={:?}",
         value
             .get("agents")
@@ -421,13 +381,13 @@ fn fork_ok_clone_is_visible_in_team_status() {
     case.shutdown();
 }
 
-/// RED 4 — retirement: a forked clone must be stoppable through the normal
+/// RED 4 — retirement: a cloned seat must be stoppable through the normal
 /// lifecycle verb; `stop-agent <clone> --team <team>` must succeed.
 #[test]
 #[serial(env)]
-fn fork_ok_clone_can_be_retired_with_stop_agent() {
-    let case = ForkScopeCase::start("fts-red4");
-    case.fork_clone();
+fn clone_ok_new_seat_can_be_retired_with_stop_agent() {
+    let case = CloneScopeCase::start("fts-red4");
+    case.clone_seat();
     let output = case.run_cli(&[
         "stop-agent",
         CLONE,
@@ -441,7 +401,7 @@ fn fork_ok_clone_can_be_retired_with_stop_agent() {
     let ok = value.get("ok").and_then(Value::as_bool) == Some(true);
     assert!(
         ok,
-        "RED4: fork reported ok, so the clone must be retirable via \
+        "RED4: clone reported ok, so the new seat must be retirable via \
          `stop-agent {CLONE} --team {TEAM_NAME}`; got value={value} stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );

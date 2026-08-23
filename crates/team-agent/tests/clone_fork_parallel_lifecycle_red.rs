@@ -174,6 +174,32 @@ impl Case {
         );
     }
 
+    /// 2026-08-23 rehome (R4 only): the identity/backing-uniqueness axis is a
+    /// `clone` concern — `fork` never produces a NEW named seat and reports
+    /// `session_id: None` by design (`wiki/C1/分身与克隆.md`). r5/r6 keep using
+    /// `fork()` below; only R4 moved.
+    fn clone_seat(&self, as_name: &str) -> Value {
+        let out = self.run(&[
+            "clone-agent",
+            SOURCE,
+            "--as",
+            as_name,
+            "--workspace",
+            self.ws(),
+            "--team",
+            TEAM_NAME,
+            "--no-display",
+            "--json",
+        ]);
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            json!({
+                "ok": out.status.success(),
+                "_exit": out.status.code(),
+                "_stderr": String::from_utf8_lossy(&out.stderr),
+            })
+        })
+    }
+
     fn fork(&self, as_name: &str) -> Value {
         let out = self.run(&[
             "fork-agent",
@@ -368,10 +394,20 @@ fn backing_of(row: &Value) -> Option<String> {
 /// The shim now emits a distinct NEW backing per fork (keyed to the predetermined
 /// --session-id) and every fork MUST report ok.
 ///
-/// RED cause unchanged @baseline: each fork reports ok:true (baseline never checks
-/// backing) with session_id=null, so the uniqueness assertions fire.
+/// 🔴 2026-08-23 REHOME to `clone-agent`: this axis was written on `fork`, but
+/// per `wiki/C1/分身与克隆.md` a fork produces a provider-opened, UNNAMED window
+/// whose session id the provider assigns and the framework never sees
+/// (`fork_agent.rs` reports `session_id: None`, `new_agent_id == source`).
+/// "N concurrent creations must yield pairwise-distinct NEW session ids" has no
+/// landing point there. `clone` is the verb whose session id is framework
+/// predetermined/captured, so the requirement lives here. The window/pane
+/// uniqueness assertions below remain a POSITIVE CONTROL (29bf8e6c) and move
+/// WITH the axis they guard — they are not left behind on fork as an ownerless
+/// scaffold.
+/// ⛔ Rewritten to clone semantics, not the fork fixture carried across:
+/// `clone_seat()` is a separate helper; r5/r6 keep the fork helper.
 #[test]
-fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
+fn r4_parallel_n_clones_have_pairwise_unique_new_sessions() {
     let case = Case::start("cf-r4");
     case.seed_source_tuple(&case.rollout_path());
     std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").expect("write rollout");
@@ -389,7 +425,7 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
                 let case = &case;
                 scope.spawn(move || {
                     barrier.wait();
-                    (n, case.fork(n))
+                    (n, case.clone_seat(n))
                 })
             })
             .collect();
@@ -402,8 +438,8 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
         assert_eq!(
             fork.get("ok").and_then(Value::as_bool),
             Some(true),
-            "fork {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
-             green). A refusal of a legitimate concurrent fork is itself the failure. fork={fork}"
+            "clone {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
+             green). A refusal of a legitimate concurrent clone is itself the failure. clone={fork}"
         );
     }
 

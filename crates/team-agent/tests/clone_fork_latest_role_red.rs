@@ -262,26 +262,31 @@ fn r10_clone_agent_is_a_discoverable_cli_verb() {
     );
 }
 
-/// R1 — fork materializes the LATEST source role file, not a stale compiled
-/// spec. We edit the source role body to carry a fresh marker AFTER quick-start
-/// (which compiled the original), then fork; the NEW agent's materialized role
-/// must contain the new marker. Baseline red: fork clones from the compiled
-/// spec, so the marker added after compilation is absent.
+/// R1 — `clone-agent` materializes the LATEST source role file, not a stale
+/// compiled spec. We edit the source role body to carry a fresh marker AFTER
+/// quick-start (which compiled the original), then clone; the NEW seat's
+/// materialized role must contain the new marker.
+///
+/// 2026-08-23 rehome: this was written on `fork-agent`. Per
+/// `wiki/C1/分身与克隆.md`, materializing a role file is `clone`'s mechanism —
+/// `fork` injects the provider's own command into the SOURCE pane and never
+/// materializes a role at all, so "the new role reflects the latest role file"
+/// has no landing point in fork. `clone_agent.rs` states the same contract in
+/// its own header: "用源席最新角色文件 add-agent".
+/// ⛔ Rewritten to clone semantics, not the fork fixture carried across: the
+/// source-backing seeding is gone because clone is zero-context and consumes
+/// no source session tuple.
 #[test]
-fn r1_fork_materializes_latest_source_role_file() {
+fn r1_clone_materializes_latest_source_role_file() {
     let mut case = Case::start("cf-r1");
     case.quick_start();
-    // Seed the source backing so the revised success-path shim lets the fork
-    // complete (without a valid source tuple the fork refuses before it ever
-    // materializes a role). The RED cause is unchanged by this.
-    case.seed_source_session_tuple();
 
     // Edit the SOURCE role file AFTER quick-start compiled the original body.
     let marker = "ROLE_REV_9F3K_LATEST";
     write_source_role(&case.workspace, &format!("SOURCE_ROLE_BODY_WITH {marker}"));
 
-    let fork = case.run(&[
-        "fork-agent",
+    let cloned = case.run(&[
+        "clone-agent",
         SOURCE,
         "--as",
         NEW,
@@ -292,18 +297,15 @@ fn r1_fork_materializes_latest_source_role_file() {
         "--no-display",
         "--json",
     ]);
-    // The command need not be green at baseline; what R1 pins is that IF a NEW
-    // role is materialized, it reflects the LATEST source role file. With the
-    // revised success-path shim the fork completes (exit 0) yet clones the role
-    // from the stale COMPILED SPEC, so the marker is absent — the RED cause is the
-    // compiled-spec projection, not a rollback. Read the materialized role for NEW
-    // and assert the fresh marker is present.
-    let _ = fork;
+    // What R1 pins is that IF a NEW role is materialized, it reflects the
+    // LATEST source role file — a stale compiled-spec projection must not win.
+    // Read the materialized role for NEW and assert the fresh marker is present.
+    let _ = cloned;
 
     let new_role_marker_present = materialized_role_contains(&case.workspace, NEW, marker);
     assert!(
         new_role_marker_present,
-        "fork must materialize NEW from the LATEST source role file (marker {marker} present); \
+        "clone must materialize NEW from the LATEST source role file (marker {marker} present); \
          a stale compiled-spec projection must not win. NEW materialized role did not carry the \
          marker edited into the source role file after quick-start."
     );

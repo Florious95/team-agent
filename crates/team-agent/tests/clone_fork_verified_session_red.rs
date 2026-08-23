@@ -173,6 +173,35 @@ impl Case {
         );
     }
 
+    /// 2026-08-23 fixture fix (r2b only): `fork` refuses `--as <other>` because
+    /// an in-place fork keeps the session on the source seat
+    /// (`fork_agent.rs`; `wiki/C1/分身与克隆.md`). The old fixture passed
+    /// `--as new_worker`, so r2b only ever saw the REFUSAL payload and its
+    /// assertion could never reach the success-path report. Run fork the way the
+    /// product supports it — `--as` equal to the source — so the report under
+    /// test is actually produced. ⛔ The assertion itself is untouched.
+    fn fork_in_place(&self) -> Value {
+        let out = self.run(&[
+            "fork-agent",
+            SOURCE,
+            "--as",
+            SOURCE,
+            "--workspace",
+            self.ws(),
+            "--team",
+            TEAM_NAME,
+            "--no-display",
+            "--json",
+        ]);
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            panic!(
+                "fork-agent --json must emit JSON; stdout={} stderr={}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    }
+
     fn fork(&self) -> Value {
         let out = self.run(&[
             "fork-agent",
@@ -245,10 +274,17 @@ fn write_claude_shim(workspace: &Path, emit_transcript: bool) -> PathBuf {
     // R3 teeth: with emit_transcript=false the shim ONLY spawns (sleeps) and
     // never writes any session backing — a spawn-without-transcript that the old
     // implementation would wrongly accept as a forked context.
+    // The tail is a stdin read-loop instead of `sleep` so the shim can answer
+    // the in-window fork command the product injects into the pane
+    // (`/branch` -> screen mark `Branched conversation`, see
+    // `lifecycle/launch/fork_agent.rs` `in_window_fork`). r2/r3 never inject
+    // anything, so for them the loop is just a live foreground process, exactly
+    // as `sleep` was.
+    let tail = "while IFS= read -r line; do\n  case \"$line\" in\n    */branch*) echo 'Branched conversation' ;;\n  esac\ndone\nexec sleep 3600\n";
     let body = if emit_transcript {
-        "#!/bin/sh\nmkdir -p \"$HOME/.claude/projects/shim\"\necho '{\"type\":\"shim\"}' > \"$HOME/.claude/projects/shim/session.jsonl\"\necho 'claude shim ready'\nexec sleep 3600\n"
+        format!("#!/bin/sh\nmkdir -p \"$HOME/.claude/projects/shim\"\necho '{{\"type\":\"shim\"}}' > \"$HOME/.claude/projects/shim/session.jsonl\"\necho 'claude shim ready'\n{tail}")
     } else {
-        "#!/bin/sh\necho 'claude shim ready'\nexec sleep 3600\n"
+        format!("#!/bin/sh\necho 'claude shim ready'\n{tail}")
     };
     std::fs::write(&shim, body).expect("write claude shim");
     #[cfg(unix)]
@@ -427,7 +463,7 @@ fn r2b_fork_report_schema_admits_typed_backing_state() {
     // baseline case will do — R2 (emit_transcript=true) is the closest
     // to the golden path.
     let case = Case::start("cf-r2b", true);
-    let fork = case.fork();
+    let fork = case.fork_in_place();
     let has_backing_state = fork
         .as_object()
         .map(|o| o.contains_key("backing_state"))
