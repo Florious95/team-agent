@@ -559,7 +559,7 @@ pub fn deliver_pending_message(
                     &target,
                     &payload,
                     Key::Enter,
-                    true,
+                    bracketed_paste_for_recipient(state, &message.recipient),
                     Some(&submit_observer),
                 )
             })
@@ -2220,6 +2220,30 @@ fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool
     )
 }
 
+/// Grok treats tmux's bracketed paste marker as a clipboard paste event, which
+/// can import the current clipboard image into its conversation. Keep the
+/// existing bracketed behavior for every other provider and for unknown
+/// provider records.
+pub(crate) fn bracketed_paste_for_recipient(state: &serde_json::Value, recipient: &str) -> bool {
+    let raw_provider = if recipient == "leader" {
+        state
+            .pointer("/leader_receiver/provider")
+            .or_else(|| state.pointer("/leader/provider"))
+    } else {
+        state
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|agents| agents.get(recipient))
+            .and_then(|agent| agent.get("provider"))
+    };
+    !matches!(
+        raw_provider
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_canonical_provider),
+        Some(Provider::Grok)
+    )
+}
+
 /// ---
 /// purpose: paste→Enter 地板按收件人 provider 选择
 /// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
@@ -3201,5 +3225,50 @@ mod paste_floor_tests {
             paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn grok_text_injection_disables_bracketed_paste_only_for_grok() {
+        assert!(!bracketed_paste_for_recipient(
+            &state_with_provider("grok"),
+            "w1"
+        ));
+        assert!(bracketed_paste_for_recipient(
+            &state_with_provider("claude"),
+            "w1"
+        ));
+        assert!(bracketed_paste_for_recipient(
+            &state_with_provider("codex"),
+            "w1"
+        ));
+    }
+
+    #[test]
+    fn grok_leader_receiver_disables_bracketed_paste() {
+        let state = serde_json::json!({
+            "leader_receiver": { "provider": "grok" }
+        });
+        assert!(!bracketed_paste_for_recipient(&state, "leader"));
+    }
+
+    #[test]
+    fn grok_text_injection_argv_has_no_bracketed_paste_flag() {
+        let grok_paste = crate::transport::tmux_inject_text_argv(
+            &PaneId::new("%7"),
+            "buffer",
+            "payload",
+            bracketed_paste_for_recipient(&state_with_provider("grok"), "w1"),
+        )[1]
+        .clone();
+        assert!(!grok_paste.iter().any(|arg| arg == "-p"));
+
+        let claude_paste = crate::transport::tmux_inject_text_argv(
+            &PaneId::new("%7"),
+            "buffer",
+            "payload",
+            bracketed_paste_for_recipient(&state_with_provider("claude"), "w1"),
+        )[1]
+        .clone();
+        assert!(claude_paste.iter().any(|arg| arg == "-p"));
     }
 }
