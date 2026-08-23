@@ -430,8 +430,12 @@ pub fn deliver_to_leader_fallback_pane(
             turn_verification: None,
         });
     }
-    let inject_result: Result<InjectReport, TransportError> =
-        transport.inject(&target, &payload, Key::Enter, true);
+    let inject_result: Result<InjectReport, TransportError> = transport.inject(
+        &target,
+        &payload,
+        Key::Enter,
+        super::delivery::bracketed_paste_for_recipient(state, "leader"),
+    );
 
     match inject_result {
         Ok(report) => {
