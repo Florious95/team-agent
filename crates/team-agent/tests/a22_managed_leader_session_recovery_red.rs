@@ -1,4 +1,11 @@
-//! A-22 RED: managed leader startup must recover a stale registered session.
+//! A-22: managed leader startup — attach-failure diagnostics and existing-session safety.
+//!
+//! 🔴 2026-08-23: this file used to be titled "must recover a stale registered
+//! session". That title stated a SELF-HEAL requirement the product does not have
+//! (`.team/artifacts/test-asset-liabilities.md:103-104`); the assertion carrying it
+//! was deleted from the first test. See that test's inline RETIRED note.
+//! ⚠️ 作用域：本次处置只碰第一个测试。`a22b_...rediscovers_after_selected_session_disappears`
+//! 未在派单范围内 ⇒ ⛔ 未动，其"重新发现"语义是否同源另议。
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -21,7 +28,7 @@ use hermetic_guard::HermeticTestEnv;
 
 #[test]
 #[serial(env)]
-fn a22_managed_start_recovers_stale_registered_leader_session() {
+fn a22_managed_start_attach_failure_persists_diagnostics_and_preserves_existing_session() {
     let env = HermeticTestEnv::enter("a22-stale-leader");
     let workspace = env.workspace("workspace");
     let backend = TmuxBackend::for_workspace(&workspace);
@@ -155,15 +162,22 @@ fn a22_managed_start_recovers_stale_registered_leader_session() {
         "A-22 attach-or-create failure must persist both child streams and startup stage; diagnostics={diagnostics:?}"
     );
 
-    let state = load_runtime_state(&workspace).expect("load refreshed state");
-    assert_eq!(
-        state["teams"]["current"]["leader_receiver"]["session_name"],
-        json!(existing.as_str()),
-        "A-22: stale registration must be refreshed to an existing leader session matched by prefix; state={state}"
-    );
+    // 🔴 2026-08-23 RETIRED:
+    //   assert_eq!(state[..]["leader_receiver"]["session_name"], json!(existing.as_str()),
+    //       "A-22: stale registration must be refreshed to an existing leader session
+    //        matched by prefix")
+    // It assumed a SELF-HEAL mechanism: 发现注册陈旧 ⇒ 探测哪个 session 还活着 ⇒ 覆盖注册.
+    // 落盘需求 (`.team/artifacts/test-asset-liabilities.md:103-104`, 用户原话):
+    // **从来没有设计过自愈，claim 就够了** ——「判活 → 决定覆盖」产品里不存在.
+    // 架构页同向 (`wiki/C3/所有权与租约.md:9/:17/:21`): 只有用户明确触发的绑定命令能改
+    // leader receiver；即使发现旧 pane 已死也无权进入写路径；输出要么完整绑定、要么明确
+    // 拒绝，**没有半成功**. 而本用例上面刚断言 attach 必须失败 ⇒ 它要的正是那个"半成功".
+    // ⇒ deleted, not weakened.
+    // ⚠️ ⛔ 未替换成反向断言（「失败后注册必须保持原样」/「必须清空」）——两者哪个正确
+    // **没有落盘**，判为「待向人确认」，⛔ 不由本格代裁。
     assert!(
         backend.has_session(&existing).unwrap_or(false),
-        "A-22: the matched existing leader session must survive attach failure"
+        "A-22: the pre-existing leader session must survive attach failure"
     );
 }
 
