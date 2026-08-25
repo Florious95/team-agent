@@ -47,6 +47,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde_json::{json, Value};
+use team_agent::lifecycle::ForkBackingState;
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
@@ -301,7 +302,7 @@ fn write_claude_shim(workspace: &Path, emit_transcript: bool) -> PathBuf {
 ///
 /// Admissible:
 ///   (V)  Verified              — ok:true + backing_state=="verified"
-///        (or absent) + non-null session_id/new_session_id distinct from source
+///        + non-null session_id/new_session_id distinct from source
 ///   (P)  Pending                — ok:true + backing_state=="pending_context_fork"
 ///        + all of session_id/new_session_id/backing_path null
 ///   (Ru) Refuse: unverified     — ok:false, error == "context_fork_unverified"
@@ -356,6 +357,14 @@ fn classify_fork_shape(fork: &Value) -> Result<ForkShape, String> {
         } else {
             ForkShape::RefuseOther
         });
+    }
+
+    // Classify failures before reading success-only fields. Transport errors
+    // do not carry backing_state and must remain valid error envelopes.
+    if backing_state.is_empty() {
+        return Err(format!(
+            "ok:true success report is missing the typed backing_state field. fork={fork}"
+        ));
     }
 
     // ok:true. Two admissible shapes: Verified or Pending.
@@ -450,33 +459,87 @@ fn r2_fork_ok_is_typed_verified_or_pending() {
     }
 }
 
-/// R2b (A 案 新增) — baseline enforcement that the report SCHEMA admits
-/// a `backing_state` field. Without a typed `backing_state` discriminant
-/// the Pending shape has no code representation, so 齿① typed Pending
-/// cannot be observed by any downstream consumer (silent Pending =
-/// forbidden by §7#4). Baseline red: `ForkAgentReport` at 5b847e4 does
-/// not include a `backing_state` key at all — the field is absent from
-/// every fork report, which means Pending is unrepresentable.
+fn serialized_fork_report(backing_state: ForkBackingState, session_id: Option<&str>) -> Value {
+    json!({
+        "ok": true,
+        "source_agent_id": SOURCE,
+        "new_agent_id": NEW,
+        "session_id": session_id,
+        "new_session_id": session_id,
+        "backing_state": serde_json::to_value(backing_state).expect("serialize backing state"),
+    })
+}
+
+fn assert_error_envelope(report: &Value) {
+    assert_eq!(
+        report.get("ok").and_then(Value::as_bool),
+        Some(false),
+        "fork failure must be classified by ok:false before success-only fields: {report}"
+    );
+    assert!(
+        report
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| !error.is_empty()),
+        "fork failure must expose an error string: {report}"
+    );
+}
+
+fn assert_backing_state_field(report: &Value) {
+    assert!(
+        matches!(
+            report.get("backing_state").and_then(Value::as_str),
+            Some("verified" | "pending_context_fork")
+        ),
+        "successful fork must carry a legal typed backing_state: {report}"
+    );
+}
+
+/// R2b (A 案新增) — the typed success schema must have positive controls for
+/// both Verified and Pending, while an error envelope is valid without any
+/// success-only fields. Removing backing_state from a success report is the
+/// mutation proof for the old false oracle.
 #[test]
 fn r2b_fork_report_schema_admits_typed_backing_state() {
-    // We probe by inspecting a real fork report's key set. Any successful
-    // baseline case will do — R2 (emit_transcript=true) is the closest
-    // to the golden path.
+    let verified = serialized_fork_report(ForkBackingState::Verified, Some("sess-cf-batch2-new"));
+    assert!(matches!(
+        classify_fork_shape(&verified),
+        Ok(ForkShape::Verified { .. })
+    ));
+
+    let pending = serialized_fork_report(ForkBackingState::PendingContextFork, None);
+    assert!(matches!(
+        classify_fork_shape(&pending),
+        Ok(ForkShape::Pending)
+    ));
+
+    let error = json!({"ok": false, "error": "context_fork_unverified"});
+    assert_error_envelope(&error);
+    assert!(matches!(
+        classify_fork_shape(&error),
+        Ok(ForkShape::RefuseUnverified)
+    ));
+
+    let mut missing_backing_state = verified.clone();
+    missing_backing_state
+        .as_object_mut()
+        .expect("success report object")
+        .remove("backing_state");
+    assert!(
+        classify_fork_shape(&missing_backing_state).is_err(),
+        "success schema mutation removing backing_state must be rejected: {missing_backing_state}"
+    );
+
+    // A real fork may fail before producing a success report (for example,
+    // when its transport endpoint is unavailable). Only inspect
+    // success-only schema fields after the positive ok:true gate.
     let case = Case::start("cf-r2b", true);
     let fork = case.fork_in_place();
-    let has_backing_state = fork
-        .as_object()
-        .map(|o| o.contains_key("backing_state"))
-        .unwrap_or(false);
-    assert!(
-        has_backing_state,
-        "fork report schema missing `backing_state` discriminant. 0.5.58 齿① \
-         typed Pending is only observable if the report exposes a \
-         backing_state field taking values \"verified\" | \
-         \"pending_context_fork\" (or the refuse arms). Without it, the \
-         Pending arm collapses back to indistinguishable ok:true — silent \
-         Pending is forbidden by §7#4. fork={fork}"
-    );
+    if fork.get("ok").and_then(Value::as_bool) != Some(true) {
+        assert_error_envelope(&fork);
+        return;
+    }
+    assert_backing_state_field(&fork);
 }
 
 /// R3 false-success + pending-vs-refuse teeth (A 案 co-revision) — a
