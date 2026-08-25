@@ -329,9 +329,10 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         .chain(live_help.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
-    if let Some(drift) = command_set_drift(&normative, &listed) {
+    if let Some(drift) = command_set_drift(&stale_allowed, &listed) {
         panic!(
-            "TOOTH-3A NORMATIVE-COMMAND RED: handbook canonical commands and the \
+            "TOOTH-3A COMMAND-AUTHORITY RED: handbook canonical commands plus exact \
+             live-help roots and the \
              three-bucket coverage manifest drifted; only marked handbook sections are \
              authoritative and compact SKILL commands are a subset; {drift}"
         );
