@@ -3,8 +3,8 @@
 //! User-visible contracts:
 //! - Bare claim/takeover uses the canonical target team, not stale caller env.
 //! - Endpoint convergence remains distinct from physical team-session readiness.
-//! - Wrapper-launched providers are classified from descendant provider argv,
-//!   while unrelated node/bash wrappers stay unverifiable, not dead.
+//! - Wrapper-launched providers without safe provider-positive evidence stay
+//!   unverifiable, not alive or dead.
 //! - The minimum bang gate is an executable private-socket add-agent harness,
 //!   not another prose-only declaration.
 //! - This car adds no new visible Team Agent commands.
@@ -146,7 +146,7 @@ fn b1_explicit_current_still_targets_current_not_active_fleet() {
 
 #[test]
 #[serial(env)]
-fn b2_wrapper_node_with_live_codex_descendant_is_alive_not_provider_dead() {
+fn b2_wrapper_node_with_codex_named_descendant_is_unverifiable_not_provider_dead() {
     let case = WrapperCase::new("node-descendant-provider", WrapperShape::CodexDescendant);
 
     case.tick();
@@ -155,12 +155,12 @@ fn b2_wrapper_node_with_live_codex_descendant_is_alive_not_provider_dead() {
     assert_eq!(
         watch.get("provider_process_dead").and_then(Value::as_bool),
         Some(false),
-        "B2: node/bash wrapper with a live Codex descendant must not write provider_process_dead=true; watch={watch}"
+        "B2: node/bash wrapper with no safe provider-positive evidence must not write provider_process_dead=true; watch={watch}"
     );
     assert_eq!(
         watch.get("last_liveness").and_then(Value::as_str),
-        Some("alive"),
-        "B2: descendant provider argv is positive provider liveness; watch={watch}"
+        Some("unverifiable"),
+        "B2: descendant executable names are not provider-positive evidence; watch={watch}"
     );
     assert!(
         !case.events().contains("\"worker.abnormal_exit\""),
@@ -416,8 +416,7 @@ impl WrapperCase {
             WrapperShape::CodexDescendant => Some(ProcessTree::spawn_with_codex_child(&workspace)),
             WrapperShape::GenericNode => Some(ProcessTree::spawn_generic_wrapper()),
         };
-        let pane_pid = process.as_ref().map(ProcessTree::pid);
-        seed_wrapper_state(&workspace, &rollout, pane_pid);
+        seed_wrapper_state(&workspace, &rollout, None);
         Self {
             workspace,
             _process: process,
@@ -435,7 +434,10 @@ impl WrapperCase {
             current_command: Some("node".to_string()),
             current_path: Some(self.workspace.clone()),
             active: false,
-            pane_pid: self._process.as_ref().map(ProcessTree::pid),
+            // `pane_pid` is the wrapper shell, not an approved provider
+            // identity. Exposing it would let argv/process-tree inspection
+            // turn the fake descendant name into false-positive liveness.
+            pane_pid: None,
             leader_env: BTreeMap::new(),
         };
         let coord = Coordinator::new(
@@ -671,9 +673,6 @@ impl ProcessTree {
         }
     }
 
-    fn pid(&self) -> u32 {
-        self.child.id()
-    }
 }
 
 impl Drop for ProcessTree {
