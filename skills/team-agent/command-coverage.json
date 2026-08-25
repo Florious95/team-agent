@@ -1,5 +1,22 @@
 {
   "schema_version": "team-agent-skill-command-coverage-v3",
+  "authority": {
+    "kind": "normative_handbook_plus_live_help",
+    "handbook": {
+      "path": "docs/reference/team-agent-operator.md",
+      "start_marker": "<!-- command-coverage:normative-start -->",
+      "end_marker": "<!-- command-coverage:normative-end -->"
+    },
+    "live_help": {
+      "argv": ["team-agent", "--help"],
+      "source": "exact_test_binary",
+      "root_command_policy": "canonical_handbook_commands_may_use_compatibility_forms"
+    },
+    "compact_skill_smoke": {
+      "path": "skills/team-agent/SKILL.md",
+      "policy": "quick_start_and_send_are_subset_only"
+    }
+  },
   "commands": [
     {
       "command": "team-agent add-agent <agent> --role-file <file>",
@@ -311,6 +328,20 @@
       "covered": false,
       "owner": "runtime-owner:messaging",
       "plan": "Execute the exact argv in an isolated coder fixture and bind assertions to blocked-before-watch or the same-message result closure."
+    },
+    {
+      "command": "team-agent send TO MESSAGE",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the compact-skill positional send smoke with representative target and message tokens, then bind delivery truth."
+    },
+    {
+      "command": "team-agent send reviewer \"...\"",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute the compact-skill reviewer send smoke and bind recipient and delivery fields."
     },
     {
       "command": "team-agent send reviewer \"Review this change\"",
