@@ -51,14 +51,14 @@ const CALLER_IDENTITY_ENVS: &[&str] = &[
 /// runtime paths do) or `std::env::temp_dir()` elsewhere. The directory is
 /// removed on `Drop` unless `TEAM_AGENT_KEEP_TEST_TMP=1` is set.
 pub struct TestWorkspace {
-    path: PathBuf,
-    ta_binary: Mutex<Option<PathBuf>>,
+    pub(crate) path: PathBuf,
+    pub(crate) ta_binary: Mutex<Option<PathBuf>>,
     /// 0.5.43 debt-sweep (§6.1): exact test-owned tmux sockets to
     /// clean at Drop. Populated by `register_owned_tmux_socket`. Drop
     /// runs `tmux -S <sock> kill-server` on each (never a host scan)
     /// BEFORE the workspace directory removal (verified by RED
     /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
-    owned_tmux_sockets: Mutex<Vec<PathBuf>>,
+    pub(crate) owned_tmux_sockets: Mutex<Vec<PathBuf>>,
 }
 
 impl TestWorkspace {
@@ -115,7 +115,7 @@ impl TestWorkspace {
         &self.path
     }
 
-    fn record_ta_binary(&self, path: &Path) {
+    pub(crate) fn record_ta_binary(&self, path: &Path) {
         let normalized = normalize_existing_path(path);
         if let Ok(mut slot) = self.ta_binary.lock() {
             *slot = Some(normalized);
@@ -333,7 +333,7 @@ impl TestWorkspace {
         }
     }
 
-    fn coordinator_pid_file(&self) -> PathBuf {
+    pub(crate) fn coordinator_pid_file(&self) -> PathBuf {
         self.path.join(".team/runtime/coordinator.pid")
     }
 
@@ -362,14 +362,14 @@ impl TestWorkspace {
         read_pid(&self.coordinator_pid_file()).is_some_and(|pid| self.pid_is_owned_coordinator(pid))
     }
 
-    fn pid_is_owned_coordinator(&self, pid: u32) -> bool {
+    pub(crate) fn pid_is_owned_coordinator(&self, pid: u32) -> bool {
         pid != std::process::id()
             && ps_command(pid)
                 .as_deref()
                 .is_some_and(|command| self.command_is_owned_coordinator(command))
     }
 
-    fn command_is_owned_coordinator(&self, command: &str) -> bool {
+    pub(crate) fn command_is_owned_coordinator(&self, command: &str) -> bool {
         let tokens = command.split_whitespace().collect::<Vec<_>>();
         if tokens.len() < 3 || !self.path_is_e2e_temp_workspace() {
             return false;
@@ -466,7 +466,7 @@ fn remove_workspace_dir(path: &Path) {
     }
 }
 
-fn read_pid(path: &Path) -> Option<u32> {
+pub(crate) fn read_pid(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| raw.trim().parse::<u32>().ok())
@@ -543,7 +543,7 @@ fn workspace_arg_matches(tokens: &[&str], candidates: &[String]) -> bool {
     false
 }
 
-fn normalize_existing_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_existing_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -561,7 +561,7 @@ fn is_installed_team_agent_binary(binary: &str) -> bool {
     binary == "/Users/alauda/.local/bin/team-agent" || binary.contains("/.team-agent/runtime/")
 }
 
-fn pid_is_running(pid: u32) -> bool {
+pub(crate) fn pid_is_running(pid: u32) -> bool {
     // 0.5.x Windows portability Batch 5: route through
     // `platform::process::pid_is_alive` — same shape on both
     // platforms. The former inline `libc::kill(pid, 0)` +
@@ -570,7 +570,7 @@ fn pid_is_running(pid: u32) -> bool {
     team_agent::platform::process::pid_is_alive(pid)
 }
 
-fn wait_until_pid_exits(pid: u32, timeout: Duration) -> bool {
+pub(crate) fn wait_until_pid_exits(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if !pid_is_running(pid) {
@@ -579,119 +579,6 @@ fn wait_until_pid_exits(pid: u32, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     !pid_is_running(pid)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn owned_coordinator_predicate_requires_debug_binary_and_e2e_workspace() {
-        let ws = TestWorkspace::new("cleanup-predicate");
-        let bin = ta_binary();
-        ws.record_ta_binary(&bin);
-        let workspace = ws.path().to_string_lossy();
-
-        let owned = format!("{} coordinator --workspace {workspace}", bin.display());
-        assert!(
-            ws.command_is_owned_coordinator(&owned),
-            "debug binary plus exact e2e temp workspace should be owned"
-        );
-
-        let platform_tmp_ws = TestWorkspace {
-            path: normalize_existing_path(&std::env::temp_dir())
-                .join(format!("ta-e2e-platform-{}-0", std::process::id())),
-            ta_binary: Mutex::new(Some(normalize_existing_path(&bin))),
-            owned_tmux_sockets: Mutex::new(Vec::new()),
-        };
-        let platform_tmp_owned = format!(
-            "{} coordinator --workspace {}",
-            bin.display(),
-            platform_tmp_ws.path().display()
-        );
-        assert!(
-            platform_tmp_ws.command_is_owned_coordinator(&platform_tmp_owned),
-            "debug binary plus exact platform temp e2e workspace should be owned"
-        );
-
-        let local =
-            format!("/Users/alauda/.local/bin/team-agent coordinator --workspace {workspace}");
-        assert!(
-            !ws.command_is_owned_coordinator(&local),
-            "installed local binary must never be owned by the E2E cleanup"
-        );
-
-        let runtime = format!(
-            "/Users/alauda/.team-agent/runtime/0.4.8/bin/team-agent coordinator --workspace {workspace}"
-        );
-        assert!(
-            !ws.command_is_owned_coordinator(&runtime),
-            "runtime-installed binary must never be owned by the E2E cleanup"
-        );
-
-        let real_workspace = format!(
-            "{} coordinator --workspace /Users/alauda/Documents/code/team-agent-public",
-            bin.display()
-        );
-        assert!(
-            !ws.command_is_owned_coordinator(&real_workspace),
-            "debug binary alone is not enough without the exact private e2e workspace"
-        );
-    }
-
-    #[test]
-    fn drop_stops_owned_coordinator_after_worker_is_stopped() {
-        let team_id = format!("cleanup{}", std::process::id());
-        let (workspace, coordinator_pid) = {
-            let ws = TestWorkspace::new("cleanup-drop").with_fake_spec(&["a"]);
-            let qs = quick_start_fake(&ws, &team_id);
-            assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
-
-            let stop = run_ta(
-                &ws,
-                &[
-                    "stop-agent",
-                    "a",
-                    "--workspace",
-                    ws.path().to_str().unwrap(),
-                    "--json",
-                ],
-            );
-            assert!(
-                stop.is_success(),
-                "stop-agent exit {}; stdout={} stderr={}",
-                stop.exit_code,
-                stop.stdout,
-                stop.stderr
-            );
-
-            wait_for_or_panic(
-                "coordinator pid file",
-                || read_pid(&ws.coordinator_pid_file()).is_some(),
-                Duration::from_secs(3),
-            );
-            let pid = read_pid(&ws.coordinator_pid_file()).expect("coordinator pid");
-            assert!(
-                ws.pid_is_owned_coordinator(pid),
-                "pid {pid} should be the workspace-owned debug coordinator"
-            );
-            assert!(
-                pid_is_running(pid),
-                "coordinator pid {pid} should be live before Drop"
-            );
-            (ws.path().to_path_buf(), pid)
-        };
-
-        assert!(
-            wait_until_pid_exits(coordinator_pid, Duration::from_secs(3)),
-            "coordinator pid {coordinator_pid} should be stopped by TestWorkspace::Drop"
-        );
-        assert!(
-            !workspace.exists(),
-            "workspace {} should be removed by TestWorkspace::Drop",
-            workspace.display()
-        );
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -728,7 +615,7 @@ impl TaResult {
 /// Locate the freshly-built `team-agent` binary that Cargo produces for this
 /// test. Cargo sets `CARGO_BIN_EXE_team-agent` for integration tests of the
 /// owning crate, which is the recommended modern API.
-fn ta_binary() -> PathBuf {
+pub(crate) fn ta_binary() -> PathBuf {
     let env_path = std::env::var_os("CARGO_BIN_EXE_team-agent")
         .map(PathBuf::from)
         .or_else(|| {
