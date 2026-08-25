@@ -186,6 +186,23 @@ impl SendPathCase {
             .collect()
     }
 
+    fn event_count(&self, event_name: &str, message_id: &str) -> usize {
+        std::fs::read_to_string(
+            self.workspace
+                .join(".team")
+                .join("logs")
+                .join("events.jsonl"),
+        )
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event.get("event").and_then(Value::as_str) == Some(event_name)
+                && event.get("message_id").and_then(Value::as_str) == Some(message_id)
+        })
+        .count()
+    }
+
     fn wait_status(&self, message_id: &str, wanted: &[&str], seconds: u64) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
         loop {
@@ -405,12 +422,82 @@ fn c4_coordinator_recovery_advances_same_row_without_replacement() {
     let case = SendPathCase::start("carc-c4");
     case.kill_coordinator();
 
-    let value = case.send_json(&["w1", "carc c4 probe", "--team", TEAM]);
-    let message_id = str_field(&value, "message_id")
-        .unwrap_or_else(|| panic!("C4 fixture: blocked send must persist an id: {value}"))
+    // The worker-origin primitive creates the durable coordinator blocker
+    // directly, without letting the CLI's loud ensure path recover the
+    // daemon before the row is persisted.
+    let blocked = team_agent::messaging::send_message(
+        &case.workspace,
+        &team_agent::messaging::MessageTarget::Single("w1".to_string()),
+        "carc c4 probe",
+        &team_agent::messaging::SendOptions {
+            origin: team_agent::messaging::SendOrigin::Mcp,
+            sender: team_agent::messaging::TrustedSender::from_runtime_identity(
+                team_agent::model::ids::AgentId::new("w2"),
+            ),
+            team: Some(team_agent::model::ids::TeamKey::new(TEAM)),
+            ..Default::default()
+        },
+    )
+    .expect("C4 fixture: blocked worker send must persist an id");
+    assert!(
+        blocked.ok,
+        "C4 fixture: worker send must be persisted: {blocked:?}"
+    );
+    let message_id = blocked
+        .message_id
+        .as_deref()
+        .unwrap_or_else(|| {
+            panic!("C4 fixture: blocked worker send must persist an id: {blocked:?}")
+        })
         .to_string();
+    assert_eq!(
+        blocked.status,
+        team_agent::messaging::DeliveryStatus::Blocked,
+        "C4 fixture: first row must remain deferred while coordinator is dead: {blocked:?}"
+    );
+    let before_rows = case.db_rows("carc c4 probe");
+    assert_eq!(before_rows.len(), 1, "C4: one deferred row before recovery");
+    assert_eq!(
+        before_rows[0].message_id, message_id,
+        "C4: original id before recovery"
+    );
+    assert_eq!(
+        before_rows[0].status.as_deref(),
+        Some("queued_coordinator_unavailable"),
+        "C4: first row must be parked by the coordinator blocker; rows={before_rows:?}"
+    );
+    assert_eq!(
+        case.event_count("message.delivered", &message_id),
+        0,
+        "C4: deferred row cannot have a delivered event before recovery"
+    );
+    // Let the killed daemon finish releasing its runtime files before the
+    // independent CLI process performs the recovery start.
+    std::thread::sleep(std::time::Duration::from_millis(250));
 
-    // Canonical recovery: the next command lazily ensures the coordinator.
+    // Canonical recovery trigger: a mutating send lazily ensures the
+    // coordinator. This is intentionally not `status`, which is read-only.
+    let trigger = case.send_json(&["w2", "carc c4 recovery trigger", "--team", TEAM]);
+    assert_eq!(
+        trigger.get("coordinator_auto_restarted"),
+        Some(&json!(true)),
+        "C4: trigger must prove loud coordinator recovery: {trigger}"
+    );
+    assert_eq!(
+        trigger.pointer("/coordinator/ok"),
+        Some(&json!(true)),
+        "C4: trigger must report successful coordinator start: {trigger}"
+    );
+    assert!(
+        trigger
+            .pointer("/coordinator/pid")
+            .and_then(Value::as_u64)
+            .is_some_and(|pid| pid > 0),
+        "C4: trigger must expose the recovered coordinator pid: {trigger}"
+    );
+
+    // Status is an observation only; it is valid here because the mutating
+    // trigger above already established the recovery boundary.
     let status_output = case.run_cli(&[
         "status",
         "--workspace",
@@ -418,10 +505,17 @@ fn c4_coordinator_recovery_advances_same_row_without_replacement() {
         "--team",
         TEAM,
         "--json",
+        "--detail",
     ]);
     assert!(
         !status_output.stdout.is_empty(),
-        "C4 fixture: status must run to re-ensure the coordinator"
+        "C4 fixture: status must expose coordinator health after the trigger"
+    );
+    let status = json_stdout(&status_output, "C4 status");
+    assert_eq!(
+        status.pointer("/coordinator/service_available"),
+        Some(&json!(true)),
+        "C4: coordinator health must be positive before row advancement: {status}"
     );
 
     let final_status = case.wait_status(
@@ -441,6 +535,11 @@ fn c4_coordinator_recovery_advances_same_row_without_replacement() {
         "C4: recovery must reuse the original row, never create a replacement; rows={rows:?}"
     );
     assert_eq!(rows[0].message_id, message_id, "C4: same id end to end");
+    assert_eq!(
+        case.event_count("message.delivered", &message_id),
+        1,
+        "C4: same row must produce exactly one delivered event"
+    );
     case.shutdown();
 }
 
