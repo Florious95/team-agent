@@ -7,67 +7,103 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
+use team_agent::coordinator::types::{ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::Coordinator;
 use team_agent::event_log::EventLog;
 use team_agent::message_store::MessageStore;
 use team_agent::messaging::{send_to_leader_receiver, DeliveryStatus};
 use team_agent::model::ids::TaskId;
+use team_agent::provider::ProviderAdapter;
 use team_agent::provider::{latest_explicit_error_fact, FactKind, Provider};
+use team_agent::transport::{
+    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
+    PaneField, PaneId, PaneInfo, PaneLiveness, SessionName, SetEnvOutcome, SpawnResult, Target,
+    Transport, TransportError, WindowName,
+};
 
 #[test]
-fn notification_abnormal_exit_matrix_requires_fresh_latest_explicit_error() {
+fn notification_abnormal_exit_real_tick_matrix_requires_fresh_latest_error_once() {
+    let workspace = temp_workspace("real-tick-matrix");
+    let rollout = workspace.join("rollout-w1.jsonl");
     let old = codex_failed_turn("turn-old");
     let new = codex_failed_turn("turn-new");
     let completed = codex_completed_turn("turn-complete");
+    std::fs::write(&rollout, &old).unwrap();
+    seed_abnormal_state(&workspace, &rollout, "alive");
+    let coordinator = abnormal_test_coordinator(&workspace);
 
-    let baseline = latest_explicit_error_fact(Provider::Codex, &old)
-        .expect("fixture precondition: failed turn is an explicit fault fact");
-    assert_eq!(baseline.kind, FactKind::Failed);
-
-    let fresh = latest_explicit_error_fact(Provider::Codex, &format!("{old}{new}"))
-        .expect("fixture precondition: latest failed turn remains an explicit fault fact");
+    coordinator.tick().unwrap();
+    let first_events = read_test_events(&workspace);
+    assert!(find_events(&first_events, "worker.abnormal_exit").is_empty());
     assert_eq!(
-        fresh.turn_id.as_ref().map(|id| id.as_str()),
-        Some("turn-new")
-    );
-    assert_ne!(fault_key(&fresh), fault_key(&baseline));
-
-    let unchanged = latest_explicit_error_fact(Provider::Codex, &format!("{old}{completed}"))
-        .expect("an older explicit error remains observable for stale recency");
-    assert_eq!(fault_key(&unchanged), fault_key(&baseline));
-
-    assert!(
-        latest_explicit_error_fact(Provider::Codex, &completed).is_none(),
-        "dead-only/completed transcript must contain no explicit provider error"
+        find_event(&first_events, "worker.abnormal_exit.check")["error_recency"],
+        "stale"
     );
 
-    let abnormal = source("src/coordinator/steps/abnormal.rs");
-    for needle in [
-        "latest_explicit_error_fact",
-        "abnormal_error_recency",
-        "ErrorRecency",
-        "fresh_error",
-        "abnormal_last_notified_key",
-        "mark_abnormal_notified",
-        "send_to_leader_receiver",
-        "worker.abnormal_exit",
-    ] {
-        assert!(
-            abnormal.contains(needle),
-            "abnormal path must retain the local behavior anchor: {needle}"
-        );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap()
+        .write_all(new.as_bytes())
+        .unwrap();
+    coordinator.tick().unwrap();
+    let fresh_events = read_test_events(&workspace);
+    let abnormal = find_event(&fresh_events, "worker.abnormal_exit");
+    assert_eq!(abnormal["turn_id"], "turn-new");
+    assert_eq!(abnormal["error_recency"], "fresh");
+    assert_eq!(abnormal["notification_status"], "queued");
+    assert_eq!(leader_abnormal_claims(&workspace), 1);
+    let (result_id, message_id) = leader_abnormal_claim(&workspace);
+    assert!(result_id.starts_with("worker.abnormal_exit:"));
+    assert_eq!(
+        abnormal["notification_message_id"].as_str(),
+        Some(message_id.as_str())
+    );
+    for event in find_events(&fresh_events, "deliver_to_leader.submit") {
+        assert_eq!(event["result_id"].as_str(), Some(result_id.as_str()));
     }
-    assert!(
-        abnormal.contains("abnormal_exit.single_signal_suppressed")
-            && abnormal.contains("dead_only"),
-        "dead-without-error must remain an auditable silent branch"
+
+    coordinator.tick().unwrap();
+    let repeated_events = read_test_events(&workspace);
+    assert_eq!(
+        find_events(&repeated_events, "worker.abnormal_exit").len(),
+        1
     );
-    assert!(
-        !abnormal.contains("process_abnormal_records"),
-        "the live path must not delegate to the retired generic abnormal processor"
+    assert_eq!(leader_abnormal_claims(&workspace), 1);
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap()
+        .write_all(completed.as_bytes())
+        .unwrap();
+    coordinator.tick().unwrap();
+    let stale_events = read_test_events(&workspace);
+    assert_eq!(find_events(&stale_events, "worker.abnormal_exit").len(), 1);
+    assert_eq!(
+        find_event(&stale_events, "worker.abnormal_exit.check")["notification"],
+        false
     );
+
+    let dead_workspace = temp_workspace("dead-only");
+    let dead_rollout = dead_workspace.join("rollout-w1.jsonl");
+    std::fs::write(&dead_rollout, completed).unwrap();
+    seed_abnormal_state(&dead_workspace, &dead_rollout, "dead");
+    abnormal_test_coordinator(&dead_workspace).tick().unwrap();
+    let dead_events = read_test_events(&dead_workspace);
+    assert!(find_events(&dead_events, "worker.abnormal_exit").is_empty());
+    assert_eq!(
+        find_event(&dead_events, "abnormal_exit.single_signal_suppressed")["reason"],
+        "dead_only"
+    );
+
+    std::fs::remove_dir_all(workspace).unwrap();
+    std::fs::remove_dir_all(dead_workspace).unwrap();
 }
 
 #[test]
@@ -159,62 +195,218 @@ fn notification_abnormal_exit_repeated_fresh_fingerprint_is_deduped_at_leader_fu
     std::fs::remove_dir_all(&workspace).unwrap();
 }
 
+struct NormalRegistry;
+
+impl ProviderRegistry for NormalRegistry {
+    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
+        team_agent::provider::get_adapter(provider)
+    }
+}
+
+#[derive(Default)]
+struct HermeticTransport;
+
+impl Transport for HermeticTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+
+    fn spawn_first(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        _argv: &[String],
+        _cwd: &Path,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        Err(unsupported())
+    }
+
+    fn spawn_into(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        _argv: &[String],
+        _cwd: &Path,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        Err(unsupported())
+    }
+
+    fn inject(
+        &self,
+        _target: &Target,
+        _payload: &InjectPayload,
+        _submit: Key,
+        _bracketed: bool,
+    ) -> Result<InjectReport, TransportError> {
+        Err(unsupported())
+    }
+
+    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
+    }
+
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
+        Ok(None)
+    }
+
+    fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+        Ok(PaneLiveness::Unknown)
+    }
+
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
+        Ok(true)
+    }
+
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    fn set_session_env(
+        &self,
+        _session: &SessionName,
+        _key: &str,
+        _value: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+
+    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+}
+
+fn unsupported() -> TransportError {
+    TransportError::MuxUnavailable {
+        backend: BackendKind::Tmux,
+        detail: "not part of abnormal notification fixture".to_string(),
+    }
+}
+
+fn abnormal_test_coordinator(workspace: &Path) -> Coordinator {
+    Coordinator::new(
+        WorkspacePath::new(workspace.to_path_buf()),
+        Box::new(NormalRegistry),
+        Box::new(HermeticTransport),
+    )
+}
+
+fn seed_abnormal_state(workspace: &Path, rollout: &Path, liveness: &str) {
+    team_agent::state::persist::save_runtime_state(
+        workspace,
+        &serde_json::json!({
+            "active_team_key": "team",
+            "agents": {
+                "w1": {
+                    "provider": "codex",
+                    "status": "running",
+                    "agent_id": "w1",
+                    "session_id": "session-w1",
+                    "rollout_path": rollout,
+                    "spawn_cwd": workspace,
+                    "spawn_epoch": 1,
+                    "process_liveness": liveness
+                }
+            }
+        }),
+    )
+    .unwrap();
+}
+
+fn read_test_events(workspace: &Path) -> Vec<serde_json::Value> {
+    let path = team_agent::model::paths::logs_dir(workspace).join("events.jsonl");
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn find_events(events: &[serde_json::Value], name: &str) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| event["event"] == name)
+        .cloned()
+        .collect()
+}
+
+fn find_event(events: &[serde_json::Value], name: &str) -> serde_json::Value {
+    events
+        .iter()
+        .rev()
+        .find(|event| event["event"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("missing event {name}: {events:?}"))
+}
+
+fn leader_abnormal_claims(workspace: &Path) -> i64 {
+    let store = MessageStore::open(workspace).unwrap();
+    let conn = Connection::open(store.db_path()).unwrap();
+    conn.query_row(
+        "select count(*) from leader_notification_log where result_id like 'worker.abnormal_exit:%'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn leader_abnormal_claim(workspace: &Path) -> (String, String) {
+    let store = MessageStore::open(workspace).unwrap();
+    let conn = Connection::open(store.db_path()).unwrap();
+    conn.query_row(
+        "select result_id, notified_message_id from leader_notification_log where result_id like 'worker.abnormal_exit:%'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
 #[test]
-fn notification_abnormal_exit_claude_api_error_shape_contract_is_single_source() {
-    let classify = source("src/provider/classify.rs");
-    let faults = source("src/provider/faults.rs");
-    let abnormal = source("src/coordinator/steps/abnormal.rs");
-    let mut failures = Vec::new();
-
-    if !classify.contains("claude_record_has_error_tool_result(record)")
-        || !classify.contains("claude_explicit_error_fact(record)")
-    {
-        failures.push(
-            "classify.rs must keep latest-record/tool_result gating and delegate Claude explicit errors to faults.rs"
-                .to_string(),
-        );
-    }
-    if classify.contains("isApiErrorMessage") || classify.contains("apiErrorStatus") {
-        failures.push(
-            "Claude assistant API-error shape must stay single-sourced in provider/faults.rs"
-                .to_string(),
-        );
-    }
-    for needle in [
-        "type",
-        "assistant",
-        "message",
-        "role",
-        "isApiErrorMessage",
-        "apiErrorStatus",
-        "requestId",
-    ] {
-        if !faults.contains(needle) {
-            failures.push(format!(
-                "provider/faults.rs missing assistant API-error gate: {needle}"
-            ));
-        }
-    }
-    for needle in ["subtype", "api_error", "level"] {
-        if !faults.contains(needle) {
-            failures.push(format!(
-                "provider/faults.rs must preserve old system/api_error branch: {needle}"
-            ));
-        }
-    }
-    for needle in ["apiErrorStatus", "error", "requestId", "assistant_uuid"] {
-        if !abnormal.contains(needle) {
-            failures.push(format!(
-                "worker.abnormal_exit payload missing structured field: {needle}"
-            ));
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "Claude assistant API-error classifier contract failed:\n{}",
-        failures.join("\n")
+fn notification_abnormal_exit_claude_api_error_shape_is_classified() {
+    let record = serde_json::json!({
+        "type": "assistant",
+        "uuid": "assistant-404",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "API Error"}]},
+        "error": "model_not_found",
+        "isApiErrorMessage": true,
+        "apiErrorStatus": 404,
+        "requestId": "req-404"
+    });
+    let fact = latest_explicit_error_fact(Provider::ClaudeCode, &format!("{record}\n"))
+        .expect("assistant API-error record is an explicit Claude fault");
+    assert_eq!(fact.kind, FactKind::Error);
+    assert_eq!(
+        fact.turn_id.as_ref().map(|id| id.as_str()),
+        Some("assistant-404")
     );
+    assert_eq!(fact.api_error_status, Some(404));
+    assert_eq!(fact.error.as_deref(), Some("model_not_found"));
+    assert_eq!(fact.request_id.as_deref(), Some("req-404"));
+    assert_eq!(fact.assistant_uuid.as_deref(), Some("assistant-404"));
 }
 
 fn codex_failed_turn(id: &str) -> String {
@@ -237,17 +429,6 @@ fn codex_completed_turn(id: &str) -> String {
             "params": {"turn": {"id": id, "status": "completed"}}
         })
     )
-}
-
-fn fault_key(fact: &team_agent::provider::FaultFact) -> (String, Option<String>) {
-    (
-        fact.signature.as_str().to_string(),
-        fact.turn_id.as_ref().map(|id| id.as_str().to_string()),
-    )
-}
-
-fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
 }
 
 fn temp_workspace(tag: &str) -> PathBuf {
