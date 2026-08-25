@@ -4,8 +4,7 @@
 //! session". That title stated a SELF-HEAL requirement the product does not have
 //! (`.team/artifacts/test-asset-liabilities.md:103-104`); the assertion carrying it
 //! was deleted from the first test. See that test's inline RETIRED note.
-//! ⚠️ 作用域：本次处置只碰第一个测试。`a22b_...rediscovers_after_selected_session_disappears`
-//! 未在派单范围内 ⇒ ⛔ 未动，其"重新发现"语义是否同源另议。
+//! ⚠️ 作用域：本次处置只重锚第二个测试的失败合同；不改产品自愈逻辑。
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -183,7 +182,7 @@ fn a22_managed_start_attach_failure_persists_diagnostics_and_preserves_existing_
 
 #[test]
 #[serial(env)]
-fn a22b_managed_attach_failure_rediscovers_after_selected_session_disappears() {
+fn a22b_managed_attach_failure_preserves_binding_after_selected_session_disappears() {
     let env = HermeticTestEnv::enter("a22b-attach-recovery");
     let workspace = env.workspace("workspace");
     let backend = TmuxBackend::for_workspace(&workspace);
@@ -391,16 +390,29 @@ exec \"$real\" -L \"$socket\" \"$@\"
         existing.as_str(),
         "retry must not reuse the selected session after it disappears"
     );
-    assert!(
-        retry_session.starts_with("team-agent-leader-claude_code-"),
-        "retry must use a discovered leader candidate or nonce: {retry_session}"
-    );
 
     let state = load_runtime_state(&workspace).expect("load refreshed A-22b state");
     assert_eq!(
         state["teams"]["current"]["leader_receiver"]["session_name"],
-        json!(retry_session),
-        "A-22b retry must refresh the binding before the second attach; state={state}"
+        json!("team-agent-leader-claude_code-stale-registration"),
+        "failed retry must not overwrite the original scalar binding; state={state}"
+    );
+    assert_eq!(
+        state["teams"]["current"]["leader_receiver"]["pane_id"],
+        json!("%stale"),
+        "failed retry must preserve the original scalar pane binding; state={state}"
+    );
+    assert!(
+        !state.to_string().contains(&retry_session),
+        "failed retry candidate must not remain in active binding state; candidate={retry_session} state={state}"
+    );
+    assert!(
+        !Command::new(&real_tmux)
+            .args(["-L", &endpoint, "has-session", "-t", &retry_session])
+            .status()
+            .expect("probe failed retry session")
+            .success(),
+        "failed retry resources must be cleaned up; session={retry_session}"
     );
     let combined = format!(
         "{}\n{}",
