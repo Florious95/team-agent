@@ -464,6 +464,73 @@ On success, `send --json` includes `message_id`. The deprecation warning itself 
 - `team-agent results --case CASE_ID` reads reported results for a case.
 - `team-agent compile` / `team-agent validate` are hidden from top-level `--help` but `--help` on those verbs works; use them to check role docs without launching.
 
+<!-- command-coverage:normative-start -->
+### Normative command inventory
+
+This inventory is the handbook authority for command coverage. Only the command
+lines between the two `command-coverage:normative-*` markers are canonical
+argv forms. Examples elsewhere in this handbook may be diagnostics, negative
+probes, historical observations, or prose and are not part of the inventory.
+
+```text
+team-agent add-agent <agent> --role-file <file>
+team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .
+team-agent approvals
+team-agent approvals <agent_id>
+team-agent approvals [coder]
+team-agent attach-leader
+team-agent claim-leader
+team-agent claude
+team-agent clone-agent <source> --as <new>
+team-agent codex
+team-agent codex --dangerously-bypass-approvals-and-sandbox
+team-agent collect
+team-agent doctor
+team-agent fork-agent <source> --as <new>
+team-agent inbox
+team-agent inbox coder
+team-agent profile doctor <name> --workspace . --json
+team-agent profile init <name> --auth-mode subscription --workspace .
+team-agent profile init claude-default --auth-mode subscription --workspace .
+team-agent profile init codex-default --auth-mode subscription --workspace .
+team-agent profile init deepseek --auth-mode compatible_api --workspace .
+team-agent profile show <name> --workspace . --json
+team-agent profile show deepseek --workspace . --json
+team-agent quick-start
+team-agent quick-start ./roles --team-id alpha
+team-agent quick-start .team/alpha
+team-agent quick-start .team/current
+team-agent quick-start <dir>
+team-agent remove-agent <agent> --workspace . --confirm
+team-agent reset-agent <agent> --discard-session
+team-agent restart
+team-agent restart .
+team-agent restart . --allow-fresh
+team-agent restart . --team <session_name_or_team_name>
+team-agent send --task task_initial "Start"
+team-agent send --watch-result
+team-agent send --watch-result coder "Do the bounded task"
+team-agent send TO MESSAGE
+team-agent send reviewer "..."
+team-agent send reviewer "Review this change"
+team-agent shutdown --workspace . --keep-logs
+team-agent start-agent <agent>
+team-agent start-agent <agent_id> --workspace .
+team-agent start-agent coder --workspace .
+team-agent status
+team-agent status --detail --json
+team-agent status --json
+team-agent status coder
+```
+
+The exact frozen CLI root help is a complementary public-surface authority:
+`team-agent --help` must expose the root verb for every canonical command that
+is not otherwise documented as a compatibility or provider form. The command
+coverage gate parses this output from the exact test binary; it never invokes a
+provider or treats a diagnostic example as a command approval.
+
+<!-- command-coverage:normative-end -->
+
 ## Restart Semantics
 
 `restart` takes one workspace argument. It preserves each worker's original provider. If a verified provider session exists, the worker resumes (`codex resume <id>` or `claude --resume <id>`). Claude sessions are considered resumable only after the provider has written a project transcript for that session; a freshly opened blank Claude window is not recorded as recovered context. If the stored id is stale, the runtime first tries to repair it from verified transcript history. If a stored session cannot be verified or repaired, restart fails closed instead of silently losing context; use `team-agent restart . --allow-fresh` only when the user explicitly accepts a fresh worker context. If multiple stopped teams in the same workspace have restart context, plain `team-agent restart .` fails and lists candidates; rerun with `--team <session_name_or_team_name>`. If no prior session id exists, that worker starts fresh and the event log records `restart.fresh_spawn`. Claude resume must run from the original cwd and the same provider transcript root; Team Agent stores `spawn_cwd` and compatible-API `claude_projects_root` for that.
