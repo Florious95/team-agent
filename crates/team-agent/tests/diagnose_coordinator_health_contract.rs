@@ -188,6 +188,25 @@ impl DiagnoseFixture {
         }
         save_runtime_state(&root, &state(&root)).expect("save state");
         let _ = load_runtime_state(&root).expect("apply runtime state migrations before snapshot");
+        let state = load_runtime_state(&root).expect("load canonical fixture state");
+        let team_key = team_agent::state::projection::team_state_key(&state);
+        let entry = team_agent::leader::registry::build_entry(
+            &root,
+            &team_key,
+            "direct_tmux",
+            json!({
+                "status": "attached",
+                "pane_id": "%1",
+                "authorized_team_workspace": root.to_string_lossy()
+            }),
+            0,
+            "diagnose-coordinator-health-fixture",
+            "2026-08-25T00:00:00Z".to_string(),
+        );
+        assert!(
+            team_agent::leader::registry::write_entry_best_effort(&entry).is_some(),
+            "hermetic HOME must accept a leaders/ registry write"
+        );
         Self {
             _env: env,
             workspace: WorkspacePath::new(root.clone()),
