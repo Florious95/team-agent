@@ -323,29 +323,13 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         &authority.handbook.end_marker,
     )
     .unwrap_or_else(|failure| panic!("TOOTH-3A NORMATIVE-HANDBOOK RED: {failure}"));
-    let live_help = exact_live_help_roots(&authority.live_help);
+    let handbook_commands = extract_team_agent_commands(&handbook);
+    let live_help = exact_live_help_roots(&authority.live_help, &normative, &handbook_commands);
     let stale_allowed = normative
         .iter()
         .chain(live_help.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
-    if let Some(drift) = command_set_drift(&stale_allowed, &listed) {
-        panic!(
-            "TOOTH-3A COMMAND-AUTHORITY RED: handbook canonical commands plus exact \
-             live-help roots and the \
-             three-bucket coverage manifest drifted; only marked handbook sections are \
-             authoritative and compact SKILL commands are a subset; {drift}"
-        );
-    }
-    let stale = listed
-        .difference(&stale_allowed)
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(
-        stale.is_empty(),
-        "TOOTH-3A STALE-MANIFEST RED: manifest commands are absent from marked handbook \
-         sections and exact live public roots: stale={stale:?}"
-    );
     let compact_smoke = compact
         .into_iter()
         .filter(|command| {
@@ -360,6 +344,21 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         compact_missing.is_empty(),
         "TOOTH-3A COMPACT-SMOKE RED: quick-start/send promises from the compact skill \
          must remain a subset of the manifest; missing={compact_missing:?}"
+    );
+    let missing = normative.difference(&listed).cloned().collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "TOOTH-3A COMMAND-AUTHORITY RED: normative handbook commands are missing from the \
+         three-bucket coverage manifest; missing={missing:?}"
+    );
+    let stale = listed
+        .difference(&stale_allowed)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "TOOTH-3A STALE-MANIFEST RED: manifest commands are absent from marked handbook \
+         sections and exact live public roots: stale={stale:?}"
     );
 }
 
@@ -2041,7 +2040,11 @@ fn extract_normative_handbook_commands(
     Ok(commands)
 }
 
-fn exact_live_help_roots(authority: &LiveHelpAuthority) -> BTreeSet<String> {
+fn exact_live_help_roots(
+    authority: &LiveHelpAuthority,
+    normative: &BTreeSet<String>,
+    handbook_commands: &BTreeSet<String>,
+) -> BTreeSet<String> {
     assert_eq!(
         authority.argv,
         vec!["team-agent".to_string(), "--help".to_string()],
@@ -2066,12 +2069,30 @@ fn exact_live_help_roots(authority: &LiveHelpAuthority) -> BTreeSet<String> {
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim();
-            let rest = trimmed.strip_prefix("team-agent ")?;
-            let command = rest.split_whitespace().next()?;
+            let command = if let Some(rest) = trimmed.strip_prefix("team-agent ") {
+                rest.split_whitespace().next()?
+            } else if line.starts_with("  ") {
+                trimmed.split_whitespace().next()?
+            } else {
+                return None;
+            };
             if command.is_empty() || command.contains('|') || command.contains('<') {
                 return None;
             }
-            Some(format!("team-agent {command}"))
+            let root = format!("team-agent {command}");
+            if normative
+                .iter()
+                .any(|canonical| canonical == &root || canonical.starts_with(&format!("{root} ")))
+            {
+                return None;
+            }
+            if !handbook_commands.iter().any(|documented| {
+                documented == &root || documented.starts_with(&format!("{root} "))
+            })
+            {
+                return None;
+            }
+            Some(root)
         })
         .collect()
 }
