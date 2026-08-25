@@ -7,107 +7,156 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use rusqlite::Connection;
+use team_agent::event_log::EventLog;
+use team_agent::message_store::MessageStore;
+use team_agent::messaging::{send_to_leader_receiver, DeliveryStatus};
+use team_agent::model::ids::TaskId;
 use team_agent::provider::{latest_explicit_error_fact, FactKind, Provider};
 
 #[test]
-fn notification_abnormal_exit_requires_fresh_latest_explicit_error_before_notifying_leader() {
-    let codex_failed = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "turn/completed",
-        "params": {"turn": {"id": "turn-failed", "status": "failed"}}
-    });
-    let fact = latest_explicit_error_fact(Provider::Codex, &format!("{codex_failed}\n"))
-        .expect("fixture precondition: latest explicit Codex failure is a fault fact");
-    assert_eq!(fact.kind, FactKind::Failed);
+fn notification_abnormal_exit_matrix_requires_fresh_latest_explicit_error() {
+    let old = codex_failed_turn("turn-old");
+    let new = codex_failed_turn("turn-new");
+    let completed = codex_completed_turn("turn-complete");
 
-    let src = production_sources();
-    let mut failures = Vec::new();
+    let baseline = latest_explicit_error_fact(Provider::Codex, &old)
+        .expect("fixture precondition: failed turn is an explicit fault fact");
+    assert_eq!(baseline.kind, FactKind::Failed);
 
-    if !src.contains("worker.abnormal_exit") {
-        failures.push(
-            "must emit a dedicated worker.abnormal_exit event for the deterministic notification class"
-                .to_string(),
-        );
-    }
-    if !src.contains("ErrorRecency")
-        || !src.contains("error_recency")
-        || !src.contains("fresh_error")
-    {
-        failures
-            .push("worker.abnormal_exit must persist/report explicit-error recency".to_string());
-    }
-    if !src.contains("latest_explicit_error_fact")
-        || !src.contains("turn_failed")
-        || !src.contains("api_error")
-    {
-        failures.push(
-            "worker.abnormal_exit must require the latest transcript/rollout fact to be an explicit error"
-                .to_string(),
-        );
-    }
-    if src.contains("error_only") {
-        failures.push(
-            "error_only suppression must be removed; stale/fresh error recency owns that path"
-                .to_string(),
-        );
-    }
-    if !src.contains("dead_only") || !src.contains("abnormal_exit.single_signal_suppressed") {
-        failures.push(
-            "dead-without-explicit-error must remain auditable as dead_only suppression"
-                .to_string(),
-        );
-    }
-    if !src.contains("send_to_leader_receiver") || !src.contains("deliver_to_leader.submit") {
-        failures.push(
-            "worker.abnormal_exit must notify through the shared N32 deliver-to-leader funnel"
-                .to_string(),
-        );
-    }
+    let fresh = latest_explicit_error_fact(Provider::Codex, &format!("{old}{new}"))
+        .expect("fixture precondition: latest failed turn remains an explicit fault fact");
+    assert_eq!(
+        fresh.turn_id.as_ref().map(|id| id.as_str()),
+        Some("turn-new")
+    );
+    assert_ne!(fault_key(&fresh), fault_key(&baseline));
+
+    let unchanged = latest_explicit_error_fact(Provider::Codex, &format!("{old}{completed}"))
+        .expect("an older explicit error remains observable for stale recency");
+    assert_eq!(fault_key(&unchanged), fault_key(&baseline));
 
     assert!(
-        failures.is_empty(),
-        "abnormal_exit fresh explicit-error notification contract failed:\n{}",
-        failures.join("\n")
+        latest_explicit_error_fact(Provider::Codex, &completed).is_none(),
+        "dead-only/completed transcript must contain no explicit provider error"
+    );
+
+    let abnormal = source("src/coordinator/steps/abnormal.rs");
+    for needle in [
+        "latest_explicit_error_fact",
+        "abnormal_error_recency",
+        "ErrorRecency",
+        "fresh_error",
+        "abnormal_last_notified_key",
+        "mark_abnormal_notified",
+        "send_to_leader_receiver",
+        "worker.abnormal_exit",
+    ] {
+        assert!(
+            abnormal.contains(needle),
+            "abnormal path must retain the local behavior anchor: {needle}"
+        );
+    }
+    assert!(
+        abnormal.contains("abnormal_exit.single_signal_suppressed")
+            && abnormal.contains("dead_only"),
+        "dead-without-error must remain an auditable silent branch"
+    );
+    assert!(
+        !abnormal.contains("process_abnormal_records"),
+        "the live path must not delegate to the retired generic abnormal processor"
     );
 }
 
 #[test]
-fn notification_abnormal_exit_contract_is_owned_by_the_fresh_error_path() {
-    let abnormal = source("src/coordinator/steps/abnormal.rs");
-    let mut failures = Vec::new();
-
-    for needle in [
-        "latest_explicit_error_fact",
-        "ErrorRecency",
-        "send_to_leader_receiver",
-        "worker.abnormal_exit",
-    ] {
-        if !abnormal.contains(needle) {
-            failures.push(format!("live fresh-error path missing anchor: {needle}"));
+fn notification_abnormal_exit_repeated_fresh_fingerprint_is_deduped_at_leader_funnel() {
+    let workspace = temp_workspace("dedupe-funnel");
+    let state = serde_json::json!({
+        "active_team_key": "team",
+        "team_owner": {"owner_epoch": 1, "leader_session_uuid": "leader-session"},
+        "leader_receiver": {
+            "owner_epoch": 1,
+            "leader_session_uuid": "leader-session",
+            "pane_id": "%leader"
         }
-    }
-    if abnormal.contains("process_abnormal_records") {
-        failures.push(
-            "live worker.abnormal_exit path must not delegate to the retired generic abnormal processor"
-                .to_string(),
-        );
-    }
-    if production_sources().contains("worker.abnormal_exit")
-        && !production_sources().contains("leader_notification_log")
-    {
-        failures.push(
-            "worker.abnormal_exit notification must share leader_notification_log/dedupe behavior with other leader-bound notifications"
-                .to_string(),
-        );
-    }
+    });
+    team_agent::state::persist::save_runtime_state(&workspace, &state).unwrap();
+    let event_log = EventLog::new(&workspace);
+    let result_id = "worker.abnormal_exit:w1:turn-new";
+    let content = "ABNORMAL_EXIT_FUNNEL_CANARY";
 
-    assert!(
-        failures.is_empty(),
-        "abnormal_exit must not be a renamed generic abnormal fact:\n{}",
-        failures.join("\n")
+    let first = send_to_leader_receiver(
+        &workspace,
+        &state,
+        "leader",
+        content,
+        Some(&TaskId::new("task-abnormal")),
+        "w1",
+        false,
+        Some(result_id),
+        &event_log,
+    )
+    .unwrap();
+    assert_eq!(first.status, DeliveryStatus::Queued);
+    let first_message_id = first.message_id.clone().expect("first message id");
+
+    let duplicate = send_to_leader_receiver(
+        &workspace,
+        &state,
+        "leader",
+        content,
+        Some(&TaskId::new("task-abnormal")),
+        "w1",
+        false,
+        Some(result_id),
+        &event_log,
+    )
+    .unwrap();
+    assert_eq!(duplicate.status, DeliveryStatus::AlreadyDelivered);
+    assert_eq!(
+        duplicate.message_id.as_deref(),
+        Some(first_message_id.as_str())
     );
+
+    let store = MessageStore::open(&workspace).unwrap();
+    let conn = Connection::open(store.db_path()).unwrap();
+    let claims: i64 = conn
+        .query_row(
+            "select count(*) from leader_notification_log where result_id = ?1",
+            [result_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claims, 1, "same fresh fingerprint has one leader claim");
+
+    let events = event_log.tail(32).unwrap();
+    let submit_events = events
+        .iter()
+        .filter(|event| event["event"] == "deliver_to_leader.submit")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        submit_events.len(),
+        2,
+        "both attempts must remain funnel-auditable"
+    );
+    assert!(
+        submit_events
+            .iter()
+            .all(|event| event["result_id"] == result_id),
+        "funnel events must preserve the abnormal fingerprint correlation"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "leader_receiver.queued")
+            .count(),
+        1,
+        "duplicate attempt must not create a second queued notification"
+    );
+
+    std::fs::remove_dir_all(&workspace).unwrap();
 }
 
 #[test]
@@ -168,31 +217,48 @@ fn notification_abnormal_exit_claude_api_error_shape_contract_is_single_source()
     );
 }
 
+fn codex_failed_turn(id: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {"turn": {"id": id, "status": "failed"}}
+        })
+    )
+}
+
+fn codex_completed_turn(id: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": {"turn": {"id": id, "status": "completed"}}
+        })
+    )
+}
+
+fn fault_key(fact: &team_agent::provider::FaultFact) -> (String, Option<String>) {
+    (
+        fact.signature.as_str().to_string(),
+        fact.turn_id.as_ref().map(|id| id.as_str().to_string()),
+    )
+}
+
 fn source(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
 }
 
-fn production_sources() -> String {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut out = String::new();
-    append_rs_sources(&root, &mut out);
-    out
-}
-
-fn append_rs_sources(path: &Path, out: &mut String) {
-    if path.is_dir() {
-        let mut entries = std::fs::read_dir(path)
-            .expect("read source dir")
-            .map(|entry| entry.expect("read source entry").path())
-            .collect::<Vec<_>>();
-        entries.sort();
-        for entry in entries {
-            append_rs_sources(&entry, out);
-        }
-        return;
-    }
-    if path.extension().and_then(|v| v.to_str()) == Some("rs") {
-        out.push_str(&std::fs::read_to_string(path).expect("read source file"));
-        out.push('\n');
-    }
+fn temp_workspace(tag: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "team-agent-notification-{tag}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    path
 }
