@@ -33,7 +33,9 @@ mod hermetic_guard;
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -604,38 +606,50 @@ fn perf_total_steady_state_second_tick_is_silent() {
 /// self-check predicate exists and is unit-locked (orphan.rs:19-25,
 /// coordinator/tests/basics.rs:206-212) but `run_daemon_with_coordinator`
 /// (backoff.rs:49-108) NEVER calls it — #264 silent-omission family (parts present,
-/// wiring missing). A daemon whose parent died (reparented to pid 1) and whose
-/// workspace was deleted must exit and write `coordinator.orphan_self_terminate`
-/// (Python __main__.py:44-59). Deterministic double-hop spawn: `sh -c '... &'` exits
-/// immediately, so the daemon is reparented to pid 1 by construction, not by race.
-/// The state carries no truthy session_name, so the tmux-session-missing stop gate
-/// never fires (matching the leaked-daemon real case).
+/// wiring missing). A daemon whose original parent has exited and whose workspace was
+/// deleted must exit and write `coordinator.orphan_self_terminate` (Python
+/// __main__.py:44-59). The fixture deliberately observes the parent transition rather
+/// than requiring a particular reaper PID: PID1 and subreaper/container hosts are both
+/// valid ways for the daemon to lose its original parent. The state carries no truthy
+/// session_name, so the tmux-session-missing stop gate never fires (matching the leaked
+/// daemon real case).
 #[test]
 fn p7_orphaned_coordinator_self_terminates_after_workspace_delete() {
-    // One bounded retry for the µs-scale capture race documented in run_orphan_scenario
-    // (events seen in neither the per-cycle capture nor the final read).
-    let mut last = run_orphan_scenario("p7-orphan-a");
-    if !(last.exited && last.events.contains("coordinator.orphan_self_terminate")) {
-        let retry = run_orphan_scenario("p7-orphan-b");
-        if retry.exited || !last.exited {
-            last = retry;
-        }
-    }
+    let fixtures = [
+        ("pid1-like", ParentFixture::Pid1Like),
+        ("alternate-parent", ParentFixture::AlternateParent),
+    ];
     let mut failures = Vec::new();
-    if !last.exited {
-        failures.push(
-            "P7: orphaned coordinator (ppid reparented to 1, workspace deleted) must \
+    for (tag, fixture) in fixtures {
+        // One bounded retry for the µs-scale capture race documented in
+        // run_orphan_scenario (events seen in neither the per-cycle capture nor the
+        // final read).
+        let mut last = run_orphan_scenario(&format!("p7-orphan-{tag}-a"), fixture);
+        if !(last.exited && last.events.contains("coordinator.orphan_self_terminate")) {
+            let retry = run_orphan_scenario(&format!("p7-orphan-{tag}-b"), fixture);
+            if retry.exited || !last.exited {
+                last = retry;
+            }
+        }
+        if !last.ownership_deleted {
+            failures.push(format!(
+                "P7 [{tag}]: the workspace ownership source must be deleted before the exit assertion"
+            ));
+        }
+        if !last.exited {
+            failures.push(format!(
+                "P7 [{tag}]: orphaned coordinator (original parent gone, workspace deleted) must \
 self-terminate within the poll window; it is still running (today: predicate never \
 wired into the daemon loop)"
-                .to_string(),
-        );
-    }
-    if !last.events.contains("coordinator.orphan_self_terminate") {
-        failures.push(format!(
-            "P7: the exit must be announced via coordinator.orphan_self_terminate \
+            ));
+        }
+        if !last.events.contains("coordinator.orphan_self_terminate") {
+            failures.push(format!(
+                "P7 [{tag}]: the exit must be announced via coordinator.orphan_self_terminate \
 (Python __main__.py:44-59 literal); captured events={:?}",
-            last.events.lines().rev().take(3).collect::<Vec<_>>()
-        ));
+                last.events.lines().rev().take(3).collect::<Vec<_>>()
+            ));
+        }
     }
     assert!(
         failures.is_empty(),
@@ -647,25 +661,69 @@ wired into the daemon loop)"
 struct OrphanRun {
     exited: bool,
     events: String,
+    ownership_deleted: bool,
 }
 
-/// Drive one orphan scenario: spawn (Python-shaped chain), wait for the reparent to
-/// pid 1, then keep the workspace deleted while polling. Each cycle CAPTURES the
-/// events file before deleting (the daemon recreates the dir to write the orphan
-/// event right before exiting); once the marker is seen we stop deleting so the file
-/// survives the final read. A µs-scale write-between-read-and-delete race remains —
-/// the caller retries the whole scenario once.
-fn run_orphan_scenario(tag: &str) -> OrphanRun {
+#[derive(Clone, Copy)]
+enum ParentFixture {
+    Pid1Like,
+    AlternateParent,
+}
+
+/// Drive one orphan scenario: spawn a controlled intermediate parent, prove the daemon
+/// is alive and its parent chain is readable, then wait for that parent relationship to
+/// change without asserting the replacement PID. Keep the workspace deleted while
+/// polling. Each cycle CAPTURES the events file before deleting (the daemon recreates
+/// the dir to write the orphan event right before exiting); once the marker is seen we
+/// stop deleting so the file survives the final read. A µs-scale write-between-read-
+/// and-delete race remains — the caller retries the whole scenario once.
+fn run_orphan_scenario(tag: &str, fixture: ParentFixture) -> OrphanRun {
     let ws = tmp_ws(tag);
     save_runtime_state(&ws, &json!({"agents": {}})).unwrap();
-    let daemon = spawn_detached_daemon(&ws, &["--tick-interval", "0.1"]);
-    wait_until(5_000, || ws.join(".team/runtime/coordinator.pid").exists());
+    let daemon = spawn_detached_daemon(&ws, &["--tick-interval", "0.1"], fixture);
+    let mut initial_chain = Vec::new();
     assert!(
-        wait_until(5_000, || parent_pid(daemon.pid) == Some(1)),
-        "fixture: daemon must reparent to pid 1 once the intermediate sh exits"
+        wait_until(5_000, || {
+            initial_chain = process_chain(daemon.pid);
+            pid_alive(daemon.pid)
+                && initial_chain
+                    .iter()
+                    .any(|snapshot| snapshot.pid == daemon.launcher_pid)
+        }),
+        "fixture: daemon must be alive under the controlled parent before ownership is removed"
+    );
+    assert!(
+        wait_until(5_000, || ws.join(".team/runtime/coordinator.pid").exists()),
+        "fixture: daemon must publish its coordinator pid before ownership is removed"
+    );
+    assert!(
+        initial_chain.len() >= 2,
+        "fixture: daemon must expose a controlled parent chain with safe fields; chain={initial_chain:?}"
+    );
+    assert_eq!(
+        initial_chain[0].pid, daemon.pid,
+        "fixture: process chain must start at the coordinator; chain={initial_chain:?}"
+    );
+    assert!(
+        initial_chain
+            .iter()
+            .all(|snapshot| !snapshot.etime.is_empty()
+                && !snapshot.stat.is_empty()
+                && !snapshot.comm.is_empty()),
+        "fixture: parent chain must include etime/stat/comm; chain={initial_chain:?}"
+    );
+    let original_parent = initial_chain[0].ppid;
+    assert!(
+        wait_until(5_000, || {
+            process_snapshot(daemon.pid)
+                .map(|snapshot| snapshot.ppid != original_parent)
+                .unwrap_or(false)
+        }),
+        "fixture: daemon must lose its original parent before ownership deletion; chain={initial_chain:?}"
     );
 
     let mut captured = String::new();
+    let mut ownership_deleted = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let exited = loop {
         let snapshot = events_text(&ws);
@@ -680,6 +738,7 @@ fn run_orphan_scenario(tag: &str) -> OrphanRun {
         }
         if !captured.contains("coordinator.orphan_self_terminate") {
             let _ = std::fs::remove_dir_all(&ws);
+            ownership_deleted = true;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
@@ -690,6 +749,7 @@ fn run_orphan_scenario(tag: &str) -> OrphanRun {
     OrphanRun {
         exited,
         events: captured,
+        ownership_deleted,
     }
 }
 
@@ -704,7 +764,11 @@ fn p7_f2_identical_tick_errors_are_deduped() {
     let state_path = runtime_state_path(&ws);
     std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     std::fs::write(&state_path, "{ this is not json").unwrap();
-    let daemon = spawn_detached_daemon(&ws, &["--tick-interval", "0.1"]);
+    let daemon = spawn_detached_daemon(
+        &ws,
+        &["--tick-interval", "0.1"],
+        ParentFixture::Pid1Like,
+    );
 
     // Wait until at least 3 error-cycle events exist (full or suppressed), then stop.
     wait_until(15_000, || {
@@ -736,57 +800,120 @@ events. events={}",
 
 struct DaemonHandle {
     pid: u32,
+    launcher_pid: u32,
+    launcher: Option<Child>,
 }
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
         // Teardown of the test's OWN daemon (never touches any live coordinator).
-        let _ = std::process::Command::new("kill")
-            .arg(self.pid.to_string())
-            .status();
+        if pid_alive(self.pid) {
+            let _ = std::process::Command::new("kill")
+                .arg(self.pid.to_string())
+                .status();
+        }
+        if let Some(mut launcher) = self.launcher.take() {
+            let _ = launcher.wait();
+        }
     }
 }
 
-/// Detached spawn replicating the PYTHON spawn-chain shape (leader adjudication, plan A):
-/// the intermediate `sh` must OUTLIVE the daemon's birth so the daemon's initial_ppid is
-/// the sh pid (NOT 1); when sh exits ~0.5s later the daemon reparents to pid 1 and the
-/// literal three-condition predicate (current != initial && current == 1 && !workspace)
-/// becomes satisfiable — an immediate-exit sh would give initial_ppid == 1 and make the
-/// Python-literal condition永假 (clashing with the basics.rs:206-212 predicate lock).
-fn spawn_detached_daemon(ws: &Path, extra: &[&str]) -> DaemonHandle {
+/// Detached spawn replicating the Python spawn-chain shape. The intermediate `sh` stays
+/// alive long enough for the daemon to capture a non-test parent, then exits. The test
+/// records the resulting parent transition but leaves the replacement parent (init,
+/// launchd, or a subreaper) platform-defined.
+fn spawn_detached_daemon(
+    ws: &Path,
+    extra: &[&str],
+    fixture: ParentFixture,
+) -> DaemonHandle {
     let bin = env!("CARGO_BIN_EXE_team-agent");
-    let line = format!(
+    let daemon_command = format!(
         "'{bin}' coordinator --workspace '{}' {} >/dev/null 2>&1 & echo $!; sleep 0.5",
         ws.to_string_lossy(),
         extra.join(" "),
     );
-    let out = std::process::Command::new("sh")
+    let line = match fixture {
+        ParentFixture::Pid1Like => daemon_command,
+        // A second shell gives the fixture a controlled alternate parent chain. The
+        // daemon still loses that chain naturally when the intermediate shell exits;
+        // no replacement PID is prescribed.
+        ParentFixture::AlternateParent => {
+            format!("sh -c \"{}\"", daemon_command.replace('$', "\\$"))
+        }
+    };
+    let mut launcher = std::process::Command::new("sh")
         .args(["-c", &line])
-        .output()
+        .stdout(Stdio::piped())
+        .spawn()
         .expect("spawn detached daemon");
-    let pid = String::from_utf8_lossy(&out.stdout)
+    let stdout = launcher.stdout.take().expect("launcher stdout");
+    let mut line_reader = BufReader::new(stdout);
+    let mut pid_line = String::new();
+    line_reader
+        .read_line(&mut pid_line)
+        .expect("daemon pid on stdout");
+    let pid = pid_line
         .trim()
         .parse::<u32>()
         .expect("daemon pid on stdout");
-    DaemonHandle { pid }
+    let launcher_pid = launcher.id();
+    DaemonHandle {
+        pid,
+        launcher_pid,
+        launcher: Some(launcher),
+    }
 }
 
-fn parent_pid(pid: u32) -> Option<u32> {
+#[derive(Debug, Clone)]
+struct ProcessSnapshot {
+    pid: u32,
+    ppid: u32,
+    etime: String,
+    stat: String,
+    comm: String,
+}
+
+/// Read only process identity fields. In particular, this intentionally does not read
+/// argv/cmdline: the parent-chain proof is limited to pid/ppid/etime/stat/comm.
+fn process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
     let out = std::process::Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .args(["-o", "pid=,ppid=,etime=,stat=,comm=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<u32>()
-        .ok()
+    let output = String::from_utf8_lossy(&out.stdout);
+    let mut fields = output
+        .split_whitespace()
+        .map(str::to_string);
+    Some(ProcessSnapshot {
+        pid: fields.next()?.parse().ok()?,
+        ppid: fields.next()?.parse().ok()?,
+        etime: fields.next()?,
+        stat: fields.next()?,
+        comm: fields.next()?,
+    })
+}
+
+fn process_chain(pid: u32) -> Vec<ProcessSnapshot> {
+    let mut chain = Vec::new();
+    let mut next = pid;
+    for _ in 0..8 {
+        let Some(snapshot) = process_snapshot(next) else {
+            break;
+        };
+        let parent = snapshot.ppid;
+        chain.push(snapshot);
+        if parent == 0 || parent == next {
+            break;
+        }
+        next = parent;
+    }
+    chain
 }
 
 fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
+    process_snapshot(pid)
+        .map(|snapshot| !snapshot.stat.starts_with('Z'))
         .unwrap_or(false)
 }
 
