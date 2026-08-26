@@ -46,6 +46,25 @@ fn rec_002_doctor_checks() {
         "unattached host doctor must retain the attachment repair: {j}"
     );
 
+    std::fs::remove_file(ws.path().join(".team/runtime/coordinator.json"))
+        .expect("remove coordinator metadata for destruction test");
+    let missing_metadata = run_ta(
+        &ws,
+        &[
+            "doctor",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        !missing_metadata.is_success(),
+        "missing coordinator metadata must fail host doctor: {missing_metadata:?}"
+    );
+    let missing_metadata_json = missing_metadata.json();
+    assert_json_field_eq_bool(&missing_metadata_json, "/ok", false);
+    assert_json_field_eq_str(&missing_metadata_json, "/error", "metadata_missing");
+
     let comms = run_ta(
         &ws,
         &[
