@@ -108,13 +108,99 @@ fn read_agent_session(
         .and_then(|agents| agents.get(agent_id.as_str()))?;
     let session = agent
         .get("session_id")
+        .or_else(|| agent.get("_pending_session_id"))
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| expected_session_from_events(workspace, agent_id))?;
     let backing = agent
         .get("rollout_path")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)?;
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| find_claude_backing(agent, &session, workspace));
+    let backing = backing?;
     let distinct = source_session_id.is_none_or(|source| source.as_str() != session);
-    (distinct && backing.is_file()).then(|| (SessionId::new(session), backing))
+    distinct.then(|| (SessionId::new(session), backing))
+}
+
+fn expected_session_from_events(workspace: &Path, agent_id: &AgentId) -> Option<String> {
+    let path = workspace.join(".team").join("logs").join("events.jsonl");
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().rev().find_map(|line| {
+        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        find_expected_session(&event, agent_id)
+    })
+}
+
+fn find_expected_session(value: &serde_json::Value, agent_id: &AgentId) -> Option<String> {
+    if let Some(object) = value.as_object() {
+        if object.get("agent_id").and_then(serde_json::Value::as_str) == Some(agent_id.as_str()) {
+            if let Some(session) = object
+                .get("expected_session_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(session.to_string());
+            }
+        }
+        for child in object.values() {
+            if let Some(session) = find_expected_session(child, agent_id) {
+                return Some(session);
+            }
+        }
+    } else if let Some(array) = value.as_array() {
+        for child in array {
+            if let Some(session) = find_expected_session(child, agent_id) {
+                return Some(session);
+            }
+        }
+    }
+    None
+}
+
+fn find_claude_backing(
+    agent: &serde_json::Value,
+    session_id: &str,
+    workspace: &Path,
+) -> Option<std::path::PathBuf> {
+    let root = agent
+        .get("claude_projects_root")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            agent
+                .get("profile_launch")
+                .and_then(|launch| launch.get("claude_projects_root"))
+                .and_then(serde_json::Value::as_str)
+                .map(std::path::PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".claude").join("projects"))
+        })?;
+    let file_name = format!("{session_id}.jsonl");
+    let mut pending = vec![root.clone()];
+    while let Some(path) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.file_name().and_then(|name| name.to_str()) == Some(&file_name) {
+                return path.is_file().then_some(path);
+            }
+            if path.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    let slug = workspace
+        .to_string_lossy()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    Some(root.join(slug).join(format!("{session_id}.jsonl")))
 }

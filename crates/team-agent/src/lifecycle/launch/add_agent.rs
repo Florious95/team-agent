@@ -89,12 +89,6 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &selected.run_workspace,
-        operation: "add-agent",
-        team: Some(selected.team_key.as_str()),
-        agent_id: Some(agent_id),
-    })?;
     // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
     let team_dir = selected.team_dir;
     // **0.3.24 add-agent socket drift fix**: route to the live team's persisted
@@ -188,12 +182,6 @@ pub(crate) fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &run_workspace,
-        operation: "add-agent",
-        team,
-        agent_id: Some(agent_id),
-    })?;
     add_agent_with_transport_at_paths(
         &run_workspace,
         workspace,
@@ -291,7 +279,7 @@ pub(super) fn force_recreate_with_transport_locked(
         let restore_errors = snapshot.restore(team, transport);
         return force_recreate_rollback_error(agent_id, error, restore_errors);
     }
-    let operation = add_agent_with_transport_at_paths(
+    let operation = add_agent_with_transport_at_paths_locked(
         run_workspace,
         team_dir,
         agent_id,
@@ -370,6 +358,67 @@ pub(super) fn add_agent_with_transport_at_paths(
     team: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<AddAgentReport, LifecycleError> {
+    let reservation = reserve_agent_with_transport_at_paths(
+        run_workspace,
+        team_dir,
+        agent_id,
+        role_file_path,
+        team,
+    )?;
+    start_reserved_agent(reservation, open_display, transport)
+}
+
+/// The force-recreate path already owns the lifecycle lock while it consumes
+/// and restores the old seat. Keep its historical lock-held implementation
+/// separate from the normal add/clone transaction.
+fn add_agent_with_transport_at_paths_locked(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
+    let reservation =
+        reserve_agent_locked(run_workspace, team_dir, agent_id, role_file_path, team)?;
+    start_reserved_agent(reservation, open_display, transport)
+}
+
+struct AgentReservation {
+    run_workspace: PathBuf,
+    team_key: String,
+    spec_path: PathBuf,
+    agent_id: AgentId,
+    token: String,
+    role_file: PathBuf,
+    session_id: Option<String>,
+    backing_path: Option<PathBuf>,
+}
+
+fn reserve_agent_with_transport_at_paths(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    team: Option<&str>,
+) -> Result<AgentReservation, LifecycleError> {
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: run_workspace,
+        operation: "add-agent-reserve",
+        team,
+        agent_id: Some(agent_id),
+    })?;
+    reserve_agent_locked(run_workspace, team_dir, agent_id, role_file_path, team)
+}
+
+fn reserve_agent_locked(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    team: Option<&str>,
+) -> Result<AgentReservation, LifecycleError> {
     let runtime_state = crate::state::persist::load_runtime_state(run_workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let canonical_team_key = team
@@ -417,16 +466,6 @@ pub(super) fn add_agent_with_transport_at_paths(
     inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
     // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
-    // E42 (0.3.24 P0): capture pre-write bytes for atomic rollback. If anything
-    // downstream of write_spec_atomic + upsert_agent_state_from_role + spawn
-    // fails, restore the prior bytes so the canonical spec / runtime state never
-    // get a half-written row that disagrees with what remove-agent can see.
-    let pre_spec_text = match std::fs::read_to_string(&spec_path) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(LifecycleError::StatePersist(format!("read spec: {e}"))),
-    };
-    let pre_runtime_state = crate::state::persist::load_runtime_state(run_workspace).ok();
     write_spec_atomic(&spec_path, &spec)?;
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
@@ -440,61 +479,572 @@ pub(super) fn add_agent_with_transport_at_paths(
         &meta,
         role_file_path,
     ) {
-        rollback_add_agent_atomic(
+        let _ = remove_reserved_agent(
             run_workspace,
             &spec_path,
-            pre_spec_text.as_deref(),
-            pre_runtime_state.as_ref(),
+            &canonical_team_key,
             agent_id,
             "state_upsert_failed",
+            None,
         );
         return Err(error);
     }
-    let started = match crate::lifecycle::restart::start_agent_at_paths(
+    let token = reservation_token(agent_id);
+    let mut state =
+        crate::state::projection::select_runtime_state(run_workspace, Some(&canonical_team_key))
+            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err(LifecycleError::StatePersist(format!(
+            "reservation row missing for agent {agent_id}"
+        )));
+    };
+    agent.insert(
+        "_lifecycle_reservation_token".to_string(),
+        serde_json::Value::String(token.clone()),
+    );
+    if let Err(error) = save_launched_team_state_for_key(
         run_workspace,
-        spec_path.parent().unwrap_or(team_dir),
-        agent_id,
-        false,
-        open_display,
-        true,
+        &state,
         Some(&canonical_team_key),
-        transport,
+        Some(agent_id.as_str()),
     ) {
-        Ok(started) => started,
-        Err(error) => {
-            rollback_add_agent_atomic(
-                run_workspace,
-                &spec_path,
-                pre_spec_text.as_deref(),
-                pre_runtime_state.as_ref(),
-                agent_id,
-                "start_agent_failed",
-            );
-            return Err(error);
+        return Err(error);
+    }
+    if let Err(error) = write_reservation_registry(run_workspace, agent_id, &token) {
+        let _ = remove_reserved_agent(
+            run_workspace,
+            &spec_path,
+            &canonical_team_key,
+            agent_id,
+            "reservation_registry_failed",
+            None,
+        );
+        return Err(error);
+    }
+    Ok(AgentReservation {
+        run_workspace: run_workspace.to_path_buf(),
+        team_key: canonical_team_key,
+        spec_path,
+        agent_id: agent_id.clone(),
+        token,
+        role_file: role_file_path.to_path_buf(),
+        session_id: None,
+        backing_path: None,
+    })
+}
+
+fn reservation_token(agent_id: &AgentId) -> String {
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        agent_id.as_str()
+    )
+}
+
+fn start_reserved_agent(
+    mut reservation: AgentReservation,
+    open_display: bool,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
+    let mut attempts = 0;
+    let started = loop {
+        match crate::lifecycle::restart::start_agent_at_paths(
+            &reservation.run_workspace,
+            reservation
+                .spec_path
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+            &reservation.agent_id,
+            false,
+            open_display,
+            true,
+            Some(&reservation.team_key),
+            transport,
+        ) {
+            Ok(started) => break started,
+            Err(error) if is_state_save_conflict(&error) && attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => {
+                let _ = finalize_agent_reservation(&reservation, true);
+                return Err(error);
+            }
         }
     };
+    let identity = match &started {
+        StartAgentOutcome::Running {
+            new_session_id,
+            rollout_path,
+            ..
+        } => new_session_id.as_ref().map(|session| {
+            (
+                session.as_str().to_string(),
+                rollout_path
+                    .as_ref()
+                    .map(|path| path.as_path().to_path_buf()),
+            )
+        }),
+        StartAgentOutcome::Noop { .. } => {
+            let session = expected_session_from_spawn_event(
+                &reservation.run_workspace,
+                &reservation.agent_id,
+            )
+            .unwrap_or_else(|| reservation.token.clone());
+            let backing = find_claude_backing(&reservation.run_workspace, &session);
+            Some((session, backing))
+        }
+        StartAgentOutcome::Paused { .. } => None,
+    };
+    let (session_id, backing_path) = identity.unwrap_or_else(|| {
+        let session = reservation.token.clone();
+        let backing = find_claude_backing(&reservation.run_workspace, &session);
+        (session, backing)
+    });
+    let backing_path = backing_path.or_else(|| {
+        let path = reservation
+            .run_workspace
+            .join(".team/runtime/clone-backings")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, b"{\"type\":\"clone-backing\"}\n").ok()?;
+        Some(path)
+    });
+    reservation.session_id = Some(session_id.clone());
+    reservation.backing_path = backing_path.clone();
+    persist_spawn_identity(&reservation, &session_id, backing_path.as_deref())?;
     let (env, start_mode) = match started {
         StartAgentOutcome::Running {
             env, start_mode, ..
         } => (env, start_mode),
         StartAgentOutcome::Noop { env, .. } => (env, StartMode::Noop),
         StartAgentOutcome::Paused { .. } => {
-            rollback_add_agent_atomic(
-                run_workspace,
-                &spec_path,
-                pre_spec_text.as_deref(),
-                pre_runtime_state.as_ref(),
-                agent_id,
-                "added_agent_paused",
-            );
+            let _ = finalize_agent_reservation(&reservation, true);
             return Err(LifecycleError::RequirementUnmet(format!(
-                "added agent {agent_id} is paused"
+                "added agent {} is paused",
+                reservation.agent_id
             )));
         }
     };
+    finalize_agent_reservation(&reservation, false)?;
     Ok(AddAgentReport {
         env,
         start_mode,
-        role_file: role_file_path.to_path_buf(),
+        role_file: reservation.role_file,
     })
+}
+
+fn expected_session_from_spawn_event(workspace: &Path, agent_id: &AgentId) -> Option<String> {
+    let path = crate::model::paths::logs_dir(workspace).join("events.jsonl");
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            (event.get("agent_id").and_then(serde_json::Value::as_str) == Some(agent_id.as_str()))
+                .then(|| {
+                    event
+                        .get("expected_session_id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|session| !session.is_empty())
+                        .map(str::to_string)
+                })
+                .flatten()
+        })
+}
+
+fn find_claude_backing(workspace: &Path, session_id: &str) -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".claude").join("projects"))
+    {
+        let mut pending = vec![root.clone()];
+        while let Some(path) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let child = entry.path();
+                if child.file_name().and_then(|name| name.to_str())
+                    == Some(&format!("{session_id}.jsonl"))
+                {
+                    return child.is_file().then_some(child);
+                }
+                if child.is_dir() {
+                    pending.push(child);
+                }
+            }
+        }
+        let slug = workspace
+            .to_string_lossy()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>();
+        let candidate = root.join(slug).join(format!("{session_id}.jsonl"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let fallback = workspace
+        .join(".team")
+        .join("runtime")
+        .join("clone-backings")
+        .join(format!("{session_id}.jsonl"));
+    std::fs::create_dir_all(fallback.parent()?).ok()?;
+    std::fs::write(&fallback, b"{\"type\":\"clone-backing\"}\n").ok()?;
+    Some(fallback)
+}
+
+fn persist_spawn_identity(
+    reservation: &AgentReservation,
+    session_id: &str,
+    backing_path: Option<&Path>,
+) -> Result<(), LifecycleError> {
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &reservation.run_workspace,
+        operation: "add-agent-identity",
+        team: Some(&reservation.team_key),
+        agent_id: Some(&reservation.agent_id),
+    })?;
+    if read_reservation_registry(&reservation.run_workspace, &reservation.agent_id)?.as_deref()
+        != Some(reservation.token.as_str())
+    {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "reservation owner mismatch for agent {}",
+            reservation.agent_id
+        )));
+    }
+    let mut state = crate::state::projection::select_runtime_state(
+        &reservation.run_workspace,
+        Some(&reservation.team_key),
+    )
+    .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(reservation.agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err(LifecycleError::StatePersist(format!(
+            "reservation row missing for agent {}",
+            reservation.agent_id
+        )));
+    };
+    agent.insert("session_id".to_string(), serde_json::json!(session_id));
+    if let Some(path) = backing_path {
+        agent.insert(
+            "rollout_path".to_string(),
+            serde_json::json!(path.to_string_lossy().to_string()),
+        );
+    }
+    write_identity_registry(
+        &reservation.run_workspace,
+        &reservation.agent_id,
+        session_id,
+        backing_path,
+    )?;
+    agent.insert(
+        "captured_via".to_string(),
+        serde_json::json!("clone-reservation"),
+    );
+    save_launched_team_state_for_key(
+        &reservation.run_workspace,
+        &state,
+        Some(&reservation.team_key),
+        Some(reservation.agent_id.as_str()),
+    )
+}
+
+fn is_state_save_conflict(error: &LifecycleError) -> bool {
+    matches!(error, LifecycleError::StatePersist(message) if message.contains("state save conflict"))
+}
+
+fn finalize_agent_reservation(
+    reservation: &AgentReservation,
+    rollback: bool,
+) -> Result<(), LifecycleError> {
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &reservation.run_workspace,
+        operation: if rollback {
+            "add-agent-rollback"
+        } else {
+            "add-agent-commit"
+        },
+        team: Some(&reservation.team_key),
+        agent_id: Some(&reservation.agent_id),
+    })?;
+    if rollback {
+        remove_reserved_agent(
+            &reservation.run_workspace,
+            &reservation.spec_path,
+            &reservation.team_key,
+            &reservation.agent_id,
+            "start_agent_failed",
+            Some(&reservation.token),
+        )
+    } else {
+        let mut state = crate::state::projection::select_runtime_state(
+            &reservation.run_workspace,
+            Some(&reservation.team_key),
+        )
+        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+        let Some(agent) = state
+            .get_mut("agents")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|agents| agents.get_mut(reservation.agent_id.as_str()))
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Err(LifecycleError::StatePersist(format!(
+                "reservation row missing at commit for agent {}",
+                reservation.agent_id
+            )));
+        };
+        if read_reservation_registry(&reservation.run_workspace, &reservation.agent_id)?.as_deref()
+            != Some(reservation.token.as_str())
+        {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "reservation owner mismatch for agent {}",
+                reservation.agent_id
+            )));
+        }
+        if agent.get("_lifecycle_reservation_token")
+            == Some(&serde_json::Value::String(reservation.token.clone()))
+        {
+            agent.remove("_lifecycle_reservation_token");
+        }
+        if let Some(session_id) = reservation.session_id.as_deref() {
+            agent.insert("session_id".to_string(), serde_json::json!(session_id));
+        }
+        if let Some(backing_path) = reservation.backing_path.as_ref() {
+            agent.insert(
+                "rollout_path".to_string(),
+                serde_json::json!(backing_path.to_string_lossy().to_string()),
+            );
+        }
+        apply_identity_registry(&mut state, &reservation.run_workspace);
+        save_launched_team_state_for_key(
+            &reservation.run_workspace,
+            &state,
+            Some(&reservation.team_key),
+            Some(reservation.agent_id.as_str()),
+        )?;
+        clear_reservation_registry(&reservation.run_workspace, &reservation.agent_id)
+    }
+}
+
+fn remove_reserved_agent(
+    run_workspace: &Path,
+    spec_path: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    reason: &str,
+    expected_token: Option<&str>,
+) -> Result<(), LifecycleError> {
+    let mut state = crate::state::projection::select_runtime_state(run_workspace, Some(team_key))
+        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let reserved = state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agents| agents.get(agent_id.as_str()));
+    let owned = match expected_token {
+        None => reserved.is_some(),
+        Some(expected) => reserved
+            .and_then(|agent| agent.get("_lifecycle_reservation_token"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|token| token == expected),
+    };
+    if !owned {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "reservation owner missing for agent {agent_id}"
+        )));
+    }
+    if let Some(agents) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        agents.remove(agent_id.as_str());
+    }
+    remove_agent_from_spec(spec_path, agent_id)?;
+    save_launched_team_state_for_key(run_workspace, &state, Some(team_key), None)?;
+    if expected_token.is_some() {
+        clear_reservation_registry(run_workspace, agent_id)?;
+    }
+    let _ = crate::event_log::EventLog::new(run_workspace).write(
+        "add_agent.rollback",
+        serde_json::json!({"agent_id": agent_id.as_str(), "reason": reason, "owner_scoped": true}),
+    );
+    Ok(())
+}
+
+fn reservation_registry_path(workspace: &Path) -> PathBuf {
+    crate::model::paths::runtime_dir(workspace).join("agent-reservations.json")
+}
+
+fn identity_registry_path(workspace: &Path) -> PathBuf {
+    crate::model::paths::runtime_dir(workspace).join("agent-identities.json")
+}
+
+fn write_identity_registry(
+    workspace: &Path,
+    agent_id: &AgentId,
+    session_id: &str,
+    backing_path: Option<&Path>,
+) -> Result<(), LifecycleError> {
+    let path = identity_registry_path(workspace);
+    let mut registry = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            .map_err(|error| {
+                LifecycleError::StatePersist(format!("read identity registry: {error}"))
+            })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
+    };
+    registry.insert(
+        agent_id.as_str().to_string(),
+        serde_json::json!({
+            "session_id": session_id,
+            "backing_path": backing_path.map(|path| path.to_string_lossy().to_string()),
+        }),
+    );
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&registry).map_err(|error| {
+            LifecycleError::StatePersist(format!("encode identity registry: {error}"))
+        })?,
+    )
+    .map_err(|error| LifecycleError::StatePersist(format!("write identity registry: {error}")))
+}
+
+fn apply_identity_registry(state: &mut serde_json::Value, workspace: &Path) {
+    let Ok(text) = std::fs::read_to_string(identity_registry_path(workspace)) else {
+        return;
+    };
+    let Ok(registry) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+    else {
+        return;
+    };
+    let Some(agents) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for (agent_id, identity) in registry {
+        let Some(agent) = agents
+            .get_mut(&agent_id)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        if let Some(session_id) = identity.get("session_id") {
+            agent.insert("session_id".to_string(), session_id.clone());
+        }
+        if let Some(backing_path) = identity.get("backing_path").filter(|path| !path.is_null()) {
+            agent.insert("rollout_path".to_string(), backing_path.clone());
+        }
+    }
+}
+
+fn read_reservation_registry(
+    workspace: &Path,
+    agent_id: &AgentId,
+) -> Result<Option<String>, LifecycleError> {
+    let path = reservation_registry_path(workspace);
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
+    };
+    let registry: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
+        .map_err(|error| {
+            LifecycleError::StatePersist(format!("read reservation registry: {error}"))
+        })?;
+    Ok(registry
+        .get(agent_id.as_str())
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
+}
+
+fn write_reservation_registry(
+    workspace: &Path,
+    agent_id: &AgentId,
+    token: &str,
+) -> Result<(), LifecycleError> {
+    let path = reservation_registry_path(workspace);
+    let mut registry = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            .map_err(|error| {
+                LifecycleError::StatePersist(format!("read reservation registry: {error}"))
+            })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
+    };
+    registry.insert(
+        agent_id.as_str().to_string(),
+        serde_json::Value::String(token.to_string()),
+    );
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&registry).map_err(|error| {
+            LifecycleError::StatePersist(format!("encode reservation registry: {error}"))
+        })?,
+    )
+    .map_err(|error| LifecycleError::StatePersist(format!("write reservation registry: {error}")))
+}
+
+fn clear_reservation_registry(workspace: &Path, agent_id: &AgentId) -> Result<(), LifecycleError> {
+    let path = reservation_registry_path(workspace);
+    let mut registry = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            .map_err(|error| {
+                LifecycleError::StatePersist(format!("read reservation registry: {error}"))
+            })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
+    };
+    registry.remove(agent_id.as_str());
+    if registry.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&registry).map_err(|error| {
+                LifecycleError::StatePersist(format!("encode reservation registry: {error}"))
+            })?,
+        )
+        .map_err(|error| {
+            LifecycleError::StatePersist(format!("write reservation registry: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn remove_agent_from_spec(spec_path: &Path, agent_id: &AgentId) -> Result<(), LifecycleError> {
+    let text = std::fs::read_to_string(spec_path)
+        .map_err(|e| LifecycleError::StatePersist(format!("read spec for rollback: {e}")))?;
+    let mut spec = crate::model::yaml::loads(&text)
+        .map_err(|e| LifecycleError::StatePersist(format!("parse spec for rollback: {e}")))?;
+    if let Value::Map(pairs) = &mut spec {
+        if let Some((_, Value::List(agents))) = pairs.iter_mut().find(|(key, _)| key == "agents") {
+            agents.retain(|agent| yaml_agent_id(agent) != Some(agent_id.as_str()));
+        }
+        if let Some((_, Value::Map(routing))) = pairs.iter_mut().find(|(key, _)| key == "routing") {
+            if let Some((_, Value::List(rules))) =
+                routing.iter_mut().find(|(key, _)| key == "rules")
+            {
+                rules.retain(|rule| yaml_route_assigns_to(rule) != Some(agent_id.as_str()));
+            }
+        }
+    }
+    write_spec_atomic(spec_path, &spec)
 }
