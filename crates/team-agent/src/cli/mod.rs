@@ -4141,7 +4141,13 @@ pub mod diagnose_port {
         let grok_slot = crate::cli::grok_slot_report(workspace, &state).to_json();
         let grok_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
             && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
-        let ok = ok && grok_slot_ok;
+        let coordinator_ok = health.ok;
+        let coordinator_error = health
+            .metadata_mismatch_reason
+            .clone()
+            .map(Value::String)
+            .unwrap_or_else(|| json!("coordinator_unhealthy"));
+        let ok = ok && grok_slot_ok && coordinator_ok;
         Ok(json!({
             "tmux": {
                 "installed": tmux_installed,
@@ -4161,6 +4167,8 @@ pub mod diagnose_port {
             "ok": ok,
             "error": if ok {
                 Value::Null
+            } else if !coordinator_ok {
+                coordinator_error
             } else if !grok_slot_ok {
                 grok_slot
                     .get("reason")
