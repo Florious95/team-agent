@@ -33,14 +33,16 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::coordinator::{
-    coordinator_health, coordinator_meta_path, coordinator_pid_path, stop_coordinator, Pid,
-    WorkspacePath, PROTOCOL_VERSION,
+    coordinator_health, coordinator_log_path, coordinator_meta_path, coordinator_pid_path,
+    stop_coordinator, Pid, WorkspacePath, PROTOCOL_VERSION,
 };
 use team_agent::db::schema::open_db;
 use team_agent::event_log::EventLog;
@@ -70,6 +72,17 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
     assert_no_delivered_rows(&fixture.root, "R1 RED");
     let ensured_pid = response_coordinator_pid(&body, "R1 RED");
     assert_ensure_event(&fixture.root, "missing", None, Some(ensured_pid), "R1 RED");
+    append_failure_facts(
+        &fixture,
+        "readiness_race",
+        ensured_pid,
+        None,
+        json!({
+            "decision": "stable_same_pid",
+            "samples_required": 3,
+            "health": health_facts(&coordinator_health(&fixture.workspace)),
+        }),
+    );
     assert!(
         coordinator_health(&fixture.workspace).ok,
         "R1 RED: successful loud ensure must leave current coordinator healthy; body={body}"
@@ -81,6 +94,16 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
 fn r2_current_caller_mutating_send_loudly_rotates_older_identity_coordinator() {
     let mut fixture = LoudEnsureFixture::active("r2-stale-identity");
     let previous_pid = fixture.spawn_stale_identity_process();
+    append_failure_facts(
+        &fixture,
+        "identity_mismatch",
+        previous_pid,
+        None,
+        json!({
+            "decision": "caller_newer_than_daemon",
+            "health": health_facts(&coordinator_health(&fixture.workspace)),
+        }),
+    );
 
     let body = fixture.send_worker_json("R2_LOUD_ROTATION");
 
@@ -259,6 +282,28 @@ fn r6_immediate_exit_must_not_claim_restart_and_keeps_control_child_visible() {
     assert!(
         fixture.has_event("coordinator.ensure_readiness_timeout"),
         "R6: timeout event must preserve last health evidence"
+    );
+    let coordinator_pid = response_coordinator_pid(&body, "R6");
+    append_failure_facts(
+        &fixture,
+        "product_crash",
+        coordinator_pid,
+        Some(control_pid),
+        json!({
+            "decision": "coordinator_dead_control_child_alive",
+            "product_fatal_event": fixture.has_event("coordinator.session_missing"),
+        }),
+    );
+    append_failure_facts(
+        &fixture,
+        "runner_child_policy",
+        coordinator_pid,
+        Some(control_pid),
+        json!({
+            "verdict": "not_proven",
+            "required": "coordinator_dead_and_control_child_dead_without_product_fatal",
+            "observed": "control_child_alive",
+        }),
     );
     assert!(
         fixture.pid_alive(control_pid),
@@ -767,6 +812,108 @@ fn events(root: &Path) -> Vec<Value> {
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect()
+}
+
+fn append_failure_facts(
+    fixture: &LoudEnsureFixture,
+    classification: &str,
+    child_pid: u32,
+    control_child_pid: Option<u32>,
+    decision: Value,
+) {
+    let metadata_path = coordinator_meta_path(&fixture.workspace);
+    let metadata = std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let log_path = coordinator_log_path(&fixture.workspace);
+    let child_alive = fixture.pid_alive(child_pid);
+    let control_child_alive = control_child_pid.map(|pid| fixture.pid_alive(pid));
+    let facts = json!({
+        "schema": "cg5-loud-ensure-facts-v1",
+        "classification": classification,
+        "workspace": fixture.root,
+        "child": {
+            "pid": child_pid,
+            "alive_by_kill_zero": child_alive,
+            "meta_path": metadata_path,
+            "meta": metadata,
+            "event_path": fixture.root.join(".team/logs/events.jsonl"),
+            "events": events(&fixture.root),
+            "stderr_path": log_path,
+            "stderr_capture": std::fs::read_to_string(&log_path).ok(),
+            "exit": {
+                "observed_dead": !child_alive,
+                "exit_code": Value::Null,
+                "status_source": "detached_child_kill_zero; wait status unavailable"
+            },
+            "cgroup": cgroup_facts(child_pid),
+        },
+        "control_child": control_child_pid.map(|pid| json!({
+            "pid": pid,
+            "alive_by_kill_zero": control_child_alive,
+            "exit_code": Value::Null,
+            "status_source": "test-owned sentinel; wait status unavailable",
+            "cgroup": cgroup_facts(pid),
+        })),
+        "decision": decision,
+    });
+    let path = evidence_path();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("open CG5 evidence {}: {error}", path.display()));
+    writeln!(file, "{facts}")
+        .unwrap_or_else(|error| panic!("write CG5 evidence {}: {error}", path.display()));
+}
+
+fn evidence_path() -> PathBuf {
+    std::env::var_os("TEAM_AGENT_CG5_EVIDENCE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let root = if cfg!(target_os = "macos") {
+                PathBuf::from("/private/tmp")
+            } else {
+                std::env::temp_dir()
+            };
+            root.join("cg5-loud-ensure-failure-facts.jsonl")
+        })
+}
+
+fn health_facts(health: &team_agent::coordinator::HealthReport) -> Value {
+    json!({
+        "ready": health.ok,
+        "status": format!("{:?}", health.status).to_ascii_lowercase(),
+        "pid": health.pid.map(|pid| pid.get()),
+        "process_running": health.process_running,
+        "metadata_ok": health.metadata_ok,
+        "wire_metadata_ok": health.wire_metadata_ok,
+        "binary_identity_ok": health.binary_identity_ok,
+        "binary_identity_relation": health.binary_identity_relation.as_str(),
+        "service_available": health.service_available,
+        "metadata_mismatch_reason": health.metadata_mismatch_reason,
+        "schema_ok": health.schema.ok,
+    })
+}
+
+fn cgroup_facts(pid: u32) -> Value {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/cgroup");
+        return json!({
+            "available": true,
+            "path": path,
+            "contents": std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok(),
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        json!({
+            "available": false,
+            "reason": "cgroup facts are not exposed on this platform",
+        })
+    }
 }
 
 fn parse_json_stdout(label: &str, output: Output) -> Value {
