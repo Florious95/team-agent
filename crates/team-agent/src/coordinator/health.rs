@@ -4,6 +4,8 @@
 //!   provides:
 //!     - name: coordinator_health
 //!       what: 由 pid 文件、coordinator.json 与 message store schema 合成 HealthReport，ok 与 service_available 分开表达
+//!     - name: wait_for_coordinator_health
+//!       what: 在 bounded poll window 内要求 expected pid 连续三次通过 canonical health
 //!     - name: start_coordinator
 //!       what: 幂等启动：已健康则 no-op，metadata 不兼容先停再起，schema 不兼容拒启并给修复 hint
 //!     - name: start_coordinator_with_team
@@ -46,7 +48,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -114,6 +116,45 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
         metadata_mismatch_reason: metadata_mismatch.map(|reason| reason.as_str().to_string()),
         current_binary_identity,
         schema,
+    }
+}
+
+const COORDINATOR_READINESS_BUDGET: Duration = Duration::from_secs(2);
+const COORDINATOR_READINESS_POLL: Duration = Duration::from_millis(100);
+const COORDINATOR_READINESS_CONSECUTIVE_SAMPLES: u8 = 3;
+
+/// Wait for a newly spawned coordinator to be stably healthy.
+///
+/// Each sample is the canonical `coordinator_health` report. A successful
+/// result therefore proves process liveness, pid/metadata/schema agreement,
+/// and binary identity for the expected child, rather than merely observing
+/// that `spawn` returned a pid. The last failed sample is returned on timeout
+/// so callers can preserve the actual mismatch instead of claiming readiness.
+pub fn wait_for_coordinator_health(
+    workspace: &WorkspacePath,
+    expected_pid: Pid,
+) -> Result<HealthReport, HealthReport> {
+    let deadline = Instant::now() + COORDINATOR_READINESS_BUDGET;
+    let mut consecutive_healthy = 0;
+    let mut last = coordinator_health(workspace);
+
+    loop {
+        let expected_pid_matches = last.pid == Some(expected_pid);
+        if last.ok && expected_pid_matches {
+            consecutive_healthy += 1;
+            if consecutive_healthy >= COORDINATOR_READINESS_CONSECUTIVE_SAMPLES {
+                return Ok(last);
+            }
+        } else {
+            consecutive_healthy = 0;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(last);
+        }
+        std::thread::sleep(COORDINATOR_READINESS_POLL.min(deadline - now));
+        last = coordinator_health(workspace);
     }
 }
 

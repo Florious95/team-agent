@@ -1,3 +1,18 @@
+//! ---
+//! purpose: loud coordinator ensure contract with an isolated stable-readiness fixture
+//! contract:
+//!   provides:
+//!     - missing/stale identity loud ensure and honest pending delivery assertions
+//!     - read-only coordinator health and dirty-topology refusal assertions
+//!   depends:
+//!     - tests::support::hermetic::HermeticTestEnv
+//!     - coordinator canonical health/start APIs
+//!   boundary:
+//!     - fixture owns its tmux socket and never touches ambient tmux resources
+//!     - no delivered claim is inferred from queue persistence
+//! maturity: wired
+//! ---
+//!
 //! 0.5.22 loud coordinator ensure RED contracts (te-owned).
 //!
 //! References:
@@ -211,6 +226,49 @@ fn r4_loud_ensure_does_not_bypass_dirty_topology_refusal() {
 }
 
 #[test]
+#[serial(env)]
+fn r6_immediate_exit_must_not_claim_restart_and_keeps_control_child_visible() {
+    let mut fixture = LoudEnsureFixture::immediate_exit("r6-immediate-exit");
+    let control_child = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn control-child sentinel");
+    let control_pid = control_child.id();
+    fixture.fixture_children.push(control_child);
+
+    let body = fixture.send_worker_json("R6_IMMEDIATE_EXIT");
+
+    assert_ne!(
+        body.get("coordinator_auto_restarted")
+            .and_then(Value::as_bool),
+        Some(true),
+        "R6: immediately exiting coordinator must not claim restart; body={body}"
+    );
+    assert_eq!(
+        body.pointer("/coordinator_readiness/ready")
+            .and_then(Value::as_bool),
+        Some(false),
+        "R6: readiness timeout must be explicit; body={body}"
+    );
+    assert_eq!(
+        body.pointer("/coordinator_readiness/last_health/status")
+            .and_then(Value::as_str),
+        Some("stale"),
+        "R6: last health must classify the dead coordinator; body={body}"
+    );
+    assert!(
+        fixture.has_event("coordinator.ensure_readiness_timeout"),
+        "R6: timeout event must preserve last health evidence"
+    );
+    assert!(
+        fixture.pid_alive(control_pid),
+        "R6: sibling control child must remain alive while coordinator exits"
+    );
+    assert_not_reported_delivered(&body, "R6");
+    assert_no_delivered_rows(&fixture.root, "R6");
+}
+
+#[test]
 fn r5_explicit_restart_start_report_semantics_remain_structured_guard() {
     let common = repo_file("crates/team-agent/src/lifecycle/restart/common.rs");
     let types = repo_file("crates/team-agent/src/lifecycle/types.rs");
@@ -251,6 +309,10 @@ impl LoudEnsureFixture {
         Self::with_state(tag, dirty_topology_state)
     }
 
+    fn immediate_exit(tag: &str) -> Self {
+        Self::with_state(tag, immediate_exit_state)
+    }
+
     fn with_state(tag: &str, state: fn(&Path) -> Value) -> Self {
         let env = hermetic_guard::HermeticTestEnv::enter(tag);
         let binary_match = cli_binary_path();
@@ -259,8 +321,49 @@ impl LoudEnsureFixture {
         let root = env.workspace(tag);
         std::fs::create_dir_all(team_agent::model::paths::runtime_dir(&root))
             .expect("create runtime dir");
+        let socket_root = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let socket = socket_root.join(format!(
+            "ta43-loud-{}-{}.sock",
+            std::process::id(),
+            root.file_name()
+                .expect("fixture root name")
+                .to_string_lossy()
+        ));
+        let socket_text = socket.to_str().expect("fixture socket utf8");
+        let tmux = Command::new("tmux")
+            .args([
+                "-S",
+                socket_text,
+                "new-session",
+                "-d",
+                "-s",
+                "loud-ensure-session",
+            ])
+            .output()
+            .expect("spawn isolated fixture tmux server");
+        assert!(
+            tmux.status.success(),
+            "isolated fixture tmux server must start: {}",
+            String::from_utf8_lossy(&tmux.stderr)
+        );
+        env.register_owned_tmux_socket(&socket);
         let _ = MessageStore::open(&root).expect("create message store");
-        save_runtime_state(&root, &state(&root)).expect("save runtime state");
+        let mut runtime_state = state(&root);
+        if runtime_state
+            .get("tmux_endpoint")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            runtime_state["tmux_endpoint"] = json!(socket_text);
+            runtime_state["tmux_socket"] = json!(socket_text);
+        }
+        save_runtime_state(&root, &runtime_state).expect("save runtime state");
         Self {
             _env: env,
             _binary_match_env: binary_match_env,
@@ -514,6 +617,13 @@ fn dirty_topology_state(root: &Path) -> Value {
     state["teams"][TEAM]["tmux_endpoint"] = state["tmux_endpoint"].clone();
     state["teams"][TEAM]["tmux_socket"] = state["tmux_socket"].clone();
     state["teams"][TEAM]["leader_receiver"] = state["leader_receiver"].clone();
+    state
+}
+
+fn immediate_exit_state(root: &Path) -> Value {
+    let mut state = active_runtime_state(root);
+    state["session_name"] = json!("missing-coordinator-session");
+    state["teams"][TEAM]["session_name"] = json!("missing-coordinator-session");
     state
 }
 
