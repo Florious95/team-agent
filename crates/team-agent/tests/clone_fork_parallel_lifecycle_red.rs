@@ -1,3 +1,19 @@
+//! ---
+//! purpose: clone/fork 并发生命周期契约，覆盖 canonical reservation、identity/backing uniqueness 与 source/rollback 隔离
+//! contract:
+//!   provides:
+//!     - name: R4-canonical-owner-reservation
+//!       what: readiness-positive N=3 与 focused selectors 共同约束唯一 identity/backing、owner commit/rollback 与重复拒绝
+//!   depends:
+//!     - crate::lifecycle::launch::clone_agent
+//!     - crate::state::projection
+//!     - crate::provider::session::capture
+//! boundary:
+//!   - shim 只提供 provider backing/readiness，不替代真实订阅实机验收
+//!   - 测试必须保留 N=3 barrier，不得串行化或放大 timeout
+//! maturity: wired
+//! ---
+//!
 //! agent-clone-fork · successor RED batch 3 (verifier) — R4 parallel N +
 //! R5 role-lifecycle rollback teeth + R6 source-immutability GUARDRAIL.
 //!
@@ -106,6 +122,12 @@ impl Case {
             .run_cli_env(&self.workspace, args, &[("PATH", self.shim_path.as_str())])
     }
 
+    fn run_env(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
+        let mut vars = vec![("PATH", self.shim_path.as_str())];
+        vars.extend_from_slice(extra);
+        self.env.run_cli_env(&self.workspace, args, &vars)
+    }
+
     fn quick_start(&mut self) {
         let out = self.run(&[
             "quick-start",
@@ -151,7 +173,7 @@ impl Case {
             "captured_at": "2026-07-21T00:00:00Z",
             "captured_via": "contract-fixture"
         });
-        let mut patch = |row: &mut Value| {
+        let patch = |row: &mut Value| {
             if let Some(obj) = row.as_object_mut() {
                 for (k, v) in tuple.as_object().unwrap() {
                     obj.insert(k.clone(), v.clone());
@@ -179,18 +201,25 @@ impl Case {
     /// `session_id: None` by design (`wiki/C1/分身与克隆.md`). r5/r6 keep using
     /// `fork()` below; only R4 moved.
     fn clone_seat(&self, as_name: &str) -> Value {
-        let out = self.run(&[
-            "clone-agent",
-            SOURCE,
-            "--as",
-            as_name,
-            "--workspace",
-            self.ws(),
-            "--team",
-            TEAM_NAME,
-            "--no-display",
-            "--json",
-        ]);
+        self.clone_seat_env(as_name, &[])
+    }
+
+    fn clone_seat_env(&self, as_name: &str, extra: &[(&str, &str)]) -> Value {
+        let out = self.run_env(
+            &[
+                "clone-agent",
+                SOURCE,
+                "--as",
+                as_name,
+                "--workspace",
+                self.ws(),
+                "--team",
+                TEAM_NAME,
+                "--no-display",
+                "--json",
+            ],
+            extra,
+        );
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
             json!({
                 "ok": out.status.success(),
@@ -323,9 +352,12 @@ if [ -n "$sid" ]; then
   enc=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
   dir="$HOME/.claude/projects/$enc"
   mkdir -p "$dir"
-  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
+  printf '{"sessionId":"%s","type":"user","cwd":"%s","message":{"role":"user","content":"ready"}}\n' "$sid" "$PWD" > "$dir/$sid.jsonl"
 fi
-echo 'claude shim ready'
+if [ -n "$TEAM_AGENT_TEST_SPAWN_COUNT_FILE" ]; then
+  printf '%s\n' "$sid" >> "$TEAM_AGENT_TEST_SPAWN_COUNT_FILE"
+fi
+echo 'Claude Code >'
 exec sleep 3600
 "#,
     )
@@ -365,6 +397,37 @@ fn backing_of(row: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+fn wait_for_file(path: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn canonical_spec_text(case: &Case) -> String {
+    std::fs::read_to_string(
+        case.workspace
+            .join(".team/runtime")
+            .join(TEAM_NAME)
+            .join("team.spec.yaml"),
+    )
+    .expect("canonical spec")
+}
+
+fn spec_has_agent(spec: &str, agent_id: &str) -> bool {
+    spec.contains(&format!("id: {agent_id}")) || spec.contains(&format!("id: \"{agent_id}\""))
+}
+
+fn spec_has_route(spec: &str, agent_id: &str) -> bool {
+    spec.contains(&format!("assign_to: {agent_id}"))
+        || spec.contains(&format!("assign_to: \"{agent_id}\""))
 }
 
 /// R4 — forking the same source N=3 must yield pairwise-distinct NEW session ids
@@ -528,6 +591,200 @@ fn r4_parallel_n_clones_have_pairwise_unique_new_sessions() {
         "N concurrent forks must own PAIRWISE-DISTINCT backings (independent context, not shared \
          rollout); got {backings:?}"
     );
+    let spec = canonical_spec_text(&case);
+    for name in names {
+        assert!(
+            rows.get(name)
+                .and_then(|row| row.get("_lifecycle_reservation_token"))
+                .is_none(),
+            "final row must clear reservation token for {name}"
+        );
+        assert!(spec_has_agent(&spec, name), "spec row for {name}");
+        assert!(spec_has_route(&spec, name), "routing row for {name}");
+    }
+    for forbidden in [
+        ".team/runtime/agent-reservations.json",
+        ".team/runtime/agent-identities.json",
+        ".team/runtime/clone-backings",
+    ] {
+        assert!(
+            !case.workspace.join(forbidden).exists(),
+            "canonical-state implementation must not create {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn r4_reservation_owner_commit_preserves_peers() {
+    let case = Case::start("cf-r4-owner-commit");
+    std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").unwrap();
+    case.seed_source_tuple(&case.rollout_path());
+    let source_before = source_snapshot(&case);
+    let ready = case.workspace.join("f1-reserved");
+    let proceed = case.workspace.join("f1-continue");
+    let ready_s = ready.to_string_lossy().to_string();
+    let proceed_s = proceed.to_string_lossy().to_string();
+
+    let (f1, f2, peer_before, source_before_finalize) = std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            case.clone_seat_env(
+                "f1",
+                &[
+                    ("TEAM_AGENT_TEST_PAUSE_AFTER_RESERVE_AGENT", "f1"),
+                    ("TEAM_AGENT_TEST_RESERVATION_READY_FILE", ready_s.as_str()),
+                    (
+                        "TEAM_AGENT_TEST_RESERVATION_CONTINUE_FILE",
+                        proceed_s.as_str(),
+                    ),
+                ],
+            )
+        });
+        wait_for_file(&ready);
+        let f2 = case.clone_seat("f2");
+        let peer_before = case.team_agent_rows().get("f2").cloned().unwrap();
+        let source_before_finalize = source_snapshot(&case);
+        std::fs::write(&proceed, "go").unwrap();
+        (
+            handle.join().unwrap(),
+            f2,
+            peer_before,
+            source_before_finalize,
+        )
+    });
+    assert_eq!(f1.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(f2.get("ok").and_then(Value::as_bool), Some(true));
+    let rows = case.team_agent_rows();
+    assert_eq!(rows.get("f2"), Some(&peer_before));
+    let source_after = source_snapshot(&case);
+    assert_eq!(source_after.0, source_before.0);
+    assert_eq!(source_after.1, source_before_finalize.1);
+    assert_eq!(source_after.2, source_before.2);
+}
+
+#[test]
+fn r4_reservation_owner_rollback_does_not_rollback_peers() {
+    let case = Case::start("cf-r4-owner-rollback");
+    std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").unwrap();
+    case.seed_source_tuple(&case.rollout_path());
+    let source_before = source_snapshot(&case);
+    let ready = case.workspace.join("f1-reserved");
+    let proceed = case.workspace.join("f1-continue");
+    let ready_s = ready.to_string_lossy().to_string();
+    let proceed_s = proceed.to_string_lossy().to_string();
+    let (f1, peers_before, source_before_rollback) = std::thread::scope(|scope| {
+        let f1 = scope.spawn(|| {
+            case.clone_seat_env(
+                "f1",
+                &[
+                    ("TEAM_AGENT_TEST_PAUSE_AFTER_RESERVE_AGENT", "f1"),
+                    ("TEAM_AGENT_TEST_RESERVATION_READY_FILE", ready_s.as_str()),
+                    (
+                        "TEAM_AGENT_TEST_RESERVATION_CONTINUE_FILE",
+                        proceed_s.as_str(),
+                    ),
+                    ("TEAM_AGENT_TEST_FAIL_RESERVED_AFTER_SPAWN_RECEIPT", "f1"),
+                ],
+            )
+        });
+        wait_for_file(&ready);
+        for name in ["f2", "f3"] {
+            let result = case.clone_seat(name);
+            assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        }
+        let rows = case.team_agent_rows();
+        let peers_before = ["f2", "f3"]
+            .into_iter()
+            .map(|name| (name, rows.get(name).cloned().unwrap()))
+            .collect::<Vec<_>>();
+        let source_before_rollback = source_snapshot(&case);
+        std::fs::write(&proceed, "go").unwrap();
+        (f1.join().unwrap(), peers_before, source_before_rollback)
+    });
+    assert_eq!(f1.get("ok").and_then(Value::as_bool), Some(false));
+    let rows = case.team_agent_rows();
+    assert!(!rows.contains_key("f1"));
+    for (name, peer_before) in peers_before {
+        assert_eq!(rows.get(name), Some(&peer_before));
+    }
+    let source_after = source_snapshot(&case);
+    assert_eq!(source_after.0, source_before.0);
+    assert_eq!(source_after.1, source_before_rollback.1);
+    assert_eq!(source_after.2, source_before.2);
+    let spec = canonical_spec_text(&case);
+    assert!(!spec_has_agent(&spec, "f1"));
+    assert!(spec_has_agent(&spec, "f2") && spec_has_agent(&spec, "f3"));
+}
+
+#[test]
+fn r4_reservation_rejects_duplicate_identity() {
+    let case = Case::start("cf-r4-duplicate");
+    std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").unwrap();
+    case.seed_source_tuple(&case.rollout_path());
+    let count = case.workspace.join("spawn-count");
+    let count_s = count.to_string_lossy().to_string();
+    let barrier = std::sync::Barrier::new(2);
+    let results: Vec<Value> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = &barrier;
+                scope.spawn(|| {
+                    barrier.wait();
+                    case.clone_seat_env(
+                        "dup",
+                        &[("TEAM_AGENT_TEST_SPAWN_COUNT_FILE", count_s.as_str())],
+                    )
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+            .count(),
+        1
+    );
+    assert_eq!(std::fs::read_to_string(count).unwrap().lines().count(), 1);
+    assert!(case.team_agent_rows().contains_key("dup"));
+}
+
+#[test]
+fn r4_after_reserve_failure_can_retry_without_residue() {
+    let case = Case::start("cf-r4-reserve-retry");
+    std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").unwrap();
+    case.seed_source_tuple(&case.rollout_path());
+    let failed = case.clone_seat_env("f1", &[("TEAM_AGENT_TEST_FAIL_AFTER_RESERVE", "f1")]);
+    assert_eq!(failed.get("ok").and_then(Value::as_bool), Some(false));
+    assert!(!case.team_agent_rows().contains_key("f1"));
+    assert!(!spec_has_agent(&canonical_spec_text(&case), "f1"));
+    let retried = case.clone_seat("f1");
+    assert_eq!(
+        retried.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "retry={retried}"
+    );
+}
+
+#[test]
+fn r4_save_conflict_after_spawn_retries_delta_without_respawn() {
+    let case = Case::start("cf-r4-save-conflict");
+    std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").unwrap();
+    case.seed_source_tuple(&case.rollout_path());
+    let count = case.workspace.join("spawn-count");
+    let count_s = count.to_string_lossy().to_string();
+    let result = case.clone_seat_env(
+        "f1",
+        &[
+            ("TEAM_AGENT_TEST_RESERVED_SAVE_CONFLICT_ONCE", "receipt:f1"),
+            ("TEAM_AGENT_TEST_SPAWN_COUNT_FILE", count_s.as_str()),
+        ],
+    );
+    assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(std::fs::read_to_string(count).unwrap().lines().count(), 1);
 }
 
 /// Snapshot of the SOURCE-owned bytes that a fork MUST NOT mutate: the source

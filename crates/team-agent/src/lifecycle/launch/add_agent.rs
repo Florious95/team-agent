@@ -1,9 +1,9 @@
 //! ---
-//! purpose: 动态角色文档加一席，失败按快照回滚；force 变体先摘旧席再加
+//! purpose: 动态角色文档以 canonical owner reservation 加一席；force 变体先摘旧席再加
 //! contract:
 //!   provides:
 //!     - name: add_agent
-//!       what: 编译角色进 runtime spec 并起席，失败回滚 spec 与 state
+//!       what: 短锁预留 canonical row，锁外起席，再短锁提交或按 owner 回滚
 //!     - name: add_agent_force
 //!       what: 先快照并摘除同名旧席，再走正常加席，失败按快照恢复
 //!     - name: add_agent_with_transport_at_paths
@@ -11,16 +11,17 @@
 //!   depends:
 //!     - crate::lifecycle::lock
 //!     - crate::lifecycle::restart
-//!     - crate::lifecycle::restart::remove
 //!     - crate::compiler
 //!     - crate::state::selector
 //!     - crate::state::projection
-//!     - crate::state::persist
+//!     - crate::state::repository
 //!     - crate::tmux_backend
 //! boundary:
 //!   - 不拷贝外部角色文件进 team 目录，就地读取编译
-//!   - 起席一律走 restart 的 start_agent_at_paths，本文件不直接 spawn
-//!   - 回滚只恢复 spec 字节与 runtime state，不回收已 spawn 的 pane
+//!   - canonical agents 行上的单一 owner token 是唯一 reservation 真相
+//!   - compile 在锁外；reserve/finalize/rollback 各自只持短 lifecycle lock
+//!   - 起席一律走 restart 的 start_reserved_agent_at_paths，本文件不直接 spawn
+//!   - 回滚只移除 token owner 的 row/spec delta，不恢复全量快照
 //! maturity: wired
 //! ---
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +41,7 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 use super::*;
 
 /// ---
-/// purpose: 加一席的默认入口，解析活跃 team、拿生命周期锁、路由到该 team 实际使用的 tmux socket
+/// purpose: 加一席的默认入口，解析活跃 team 并路由到该 team 实际使用的 tmux socket
 /// params:
 ///   role_file_path: 外部角色文档路径，就地读取不拷贝
 ///   open_display: 是否为新席开显示
@@ -49,9 +50,8 @@ use super::*;
 /// contract_id: lifecycle.add_agent.entry
 /// ---
 /// `add_agent(workspace, agent_id, role_file_path, open_display, team)`
-/// (`lifecycle/operations.py:143`)。动态 role doc 编译进 spec + 起 worker;失败**字节级回滚**
-/// spec_yaml / workspace_state / **team_state.md** / role_file(Gap 15.11),每步发
-/// `lifecycle.add_step_*` 事件(顺序被测试锁死)。
+/// (`lifecycle/operations.py:143`)。动态 role doc 在锁外编译，短锁写 canonical
+/// reservation，锁外起 worker，再短锁 finalize 或按 owner 精确回滚。
 pub fn add_agent(
     workspace: &Path,
     agent_id: &AgentId,
@@ -89,12 +89,6 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &selected.run_workspace,
-        operation: "add-agent",
-        team: Some(selected.team_key.as_str()),
-        agent_id: Some(agent_id),
-    })?;
     // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
     let team_dir = selected.team_dir;
     // **0.3.24 add-agent socket drift fix**: route to the live team's persisted
@@ -148,18 +142,12 @@ pub fn add_agent_force(
     )
     .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
     let canonical_team_key = selected.team_key.clone();
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &selected.run_workspace,
-        operation: "add-agent-force",
-        team: Some(canonical_team_key.as_str()),
-        agent_id: Some(agent_id),
-    })?;
     let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
         &selected.run_workspace,
         Some(canonical_team_key.as_str()),
     )
     .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
-    force_recreate_with_transport_locked(
+    force_recreate_with_transport(
         &selected.run_workspace,
         &selected.team_dir,
         agent_id,
@@ -188,12 +176,6 @@ pub(crate) fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &run_workspace,
-        operation: "add-agent",
-        team,
-        agent_id: Some(agent_id),
-    })?;
     add_agent_with_transport_at_paths(
         &run_workspace,
         workspace,
@@ -234,13 +216,7 @@ pub(crate) fn add_agent_with_transport_force(
     }
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &run_workspace,
-        operation: "add-agent-force",
-        team,
-        agent_id: Some(agent_id),
-    })?;
-    force_recreate_with_transport_locked(
+    force_recreate_with_transport(
         &run_workspace,
         workspace,
         agent_id,
@@ -252,11 +228,11 @@ pub(crate) fn add_agent_with_transport_force(
 }
 
 /// ---
-/// purpose: 已持锁状态下的强制重建，先校验替换源可用再消费旧席
+/// purpose: 强制重建，短锁消费旧席后释放，再走 canonical reservation 加席
 /// returns: 新席报告；成功后还要过快照的一致性校验
 /// errors: 角色文件不存在先行返回 Compile；摘除、加回或一致性校验失败时按快照恢复并返回错误
 /// ---
-pub(super) fn force_recreate_with_transport_locked(
+pub(super) fn force_recreate_with_transport(
     run_workspace: &Path,
     team_dir: &Path,
     agent_id: &AgentId,
@@ -273,20 +249,29 @@ pub(super) fn force_recreate_with_transport_locked(
             role_file_path.display()
         )));
     }
-    let snapshot = crate::lifecycle::restart::remove::ForceRecreateSnapshot::capture(
-        run_workspace,
-        agent_id,
-        team,
-        transport,
-    )?;
-    let remove = crate::lifecycle::restart::remove::remove_agent_with_transport_locked(
-        run_workspace,
-        agent_id,
-        true,
-        true,
-        team,
-        transport,
-    );
+    let (snapshot, remove) = {
+        let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+            workspace: run_workspace,
+            operation: "add-agent-force-remove",
+            team,
+            agent_id: Some(agent_id),
+        })?;
+        let snapshot = crate::lifecycle::restart::remove::ForceRecreateSnapshot::capture(
+            run_workspace,
+            agent_id,
+            team,
+            transport,
+        )?;
+        let remove = crate::lifecycle::restart::remove::remove_agent_with_transport_locked(
+            run_workspace,
+            agent_id,
+            true,
+            true,
+            team,
+            transport,
+        );
+        (snapshot, remove)
+    };
     if let Err(error) = remove {
         let restore_errors = snapshot.restore(team, transport);
         return force_recreate_rollback_error(agent_id, error, restore_errors);
@@ -377,27 +362,19 @@ pub(super) fn add_agent_with_transport_at_paths(
         .map(str::to_string)
         .or_else(|| explicit_active_team_key(&runtime_state))
         .unwrap_or_else(|| crate::state::projection::team_state_key(&runtime_state));
-    let owner_state =
-        crate::state::projection::select_runtime_state(run_workspace, Some(&canonical_team_key))
-            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    ensure_owner_allowed_for_state(&owner_state, Some(agent_id))?;
     if !role_file_path.exists() {
         return Err(LifecycleError::Compile(format!(
             "role file not found: {}",
             role_file_path.display()
         )));
     }
-    if runtime_agent_exists(&owner_state, agent_id) {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "agent id already exists: {agent_id}"
-        )));
-    }
-    // E5 Bug1:不再 copy role 文件进 <team_dir>/agents(自拷贝 O_TRUNC 截断反模式)。
-    // 就地读外部 role 文档编译,注入 base team spec 的 agents/routing。role 文件留在原处。
-    let mut spec = crate::compiler::compile_team(team_dir)
+    // Compile and materialize the role outside the workspace lifecycle lock.
+    // The exact source bytes are checked again while reserving so a concurrent
+    // role rewrite cannot commit a stale compilation.
+    let mut base_spec = crate::compiler::compile_team(team_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    override_spec_workspace(&mut spec, run_workspace);
-    let workspace_s = spec
+    override_spec_workspace(&mut base_spec, run_workspace);
+    let workspace_s = base_spec
         .get("team")
         .and_then(|team| team.get("workspace"))
         .and_then(Value::as_str)
@@ -414,43 +391,81 @@ pub(super) fn add_agent_with_transport_at_paths(
             compiled.id, agent_id
         )));
     }
-    inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
-    // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
-    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
-    // E42 (0.3.24 P0): capture pre-write bytes for atomic rollback. If anything
-    // downstream of write_spec_atomic + upsert_agent_state_from_role + spawn
-    // fails, restore the prior bytes so the canonical spec / runtime state never
-    // get a half-written row that disagrees with what remove-agent can see.
-    let pre_spec_text = match std::fs::read_to_string(&spec_path) {
-        Ok(text) => Some(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(LifecycleError::StatePersist(format!("read spec: {e}"))),
-    };
-    let pre_runtime_state = crate::state::persist::load_runtime_state(run_workspace).ok();
-    write_spec_atomic(&spec_path, &spec)?;
+    let role_bytes = std::fs::read(role_file_path)
+        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", role_file_path.display())))?;
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    // upsert writes status="starting" (E42) — start_agent_at_paths::mark_agent_started
-    // promotes to "running" on Ok. If anything fails between here and the Ok
-    // return below, rollback restores the captured pre-bytes.
+    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
+    let reservation_token = new_reservation_token(&canonical_team_key, agent_id);
+
+    let reserve_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: run_workspace,
+        operation: "add-agent-reserve",
+        team: Some(&canonical_team_key),
+        agent_id: Some(agent_id),
+    })?;
+    let owner_state =
+        crate::state::projection::select_runtime_state(run_workspace, Some(&canonical_team_key))
+            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    ensure_owner_allowed_for_state(&owner_state, Some(agent_id))?;
+    if runtime_agent_exists(&owner_state, agent_id) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "agent id already exists: {agent_id}"
+        )));
+    }
+    let current_role_bytes = std::fs::read(role_file_path)
+        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", role_file_path.display())))?;
+    if current_role_bytes != role_bytes {
+        return Err(LifecycleError::Compile(format!(
+            "role file changed while preparing add-agent: {}",
+            role_file_path.display()
+        )));
+    }
+    let mut spec = match std::fs::read_to_string(&spec_path) {
+        Ok(text) => yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => base_spec,
+        Err(error) => return Err(LifecycleError::StatePersist(format!("read spec: {error}"))),
+    };
+    let reservation_added_spec = !spec_agent_exists(&spec, agent_id.as_str());
+    inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
+    write_spec_atomic(&spec_path, &spec)?;
     if let Err(error) = upsert_agent_state_from_role(
         run_workspace,
         &canonical_team_key,
         agent_id,
         &meta,
         role_file_path,
+        &reservation_token,
     ) {
-        rollback_add_agent_atomic(
+        let _ = rollback_reserved_agent_locked(
             run_workspace,
             &spec_path,
-            pre_spec_text.as_deref(),
-            pre_runtime_state.as_ref(),
+            &canonical_team_key,
             agent_id,
+            &reservation_token,
+            true,
+            reservation_added_spec,
             "state_upsert_failed",
         );
         return Err(error);
     }
-    let started = match crate::lifecycle::restart::start_agent_at_paths(
+    drop(reserve_lock);
+
+    if let Err(error) = after_reserve_test_gate(agent_id) {
+        rollback_reserved_agent(
+            run_workspace,
+            &spec_path,
+            &canonical_team_key,
+            agent_id,
+            &reservation_token,
+            false,
+            reservation_added_spec,
+            "after_reserve_test_gate",
+        )?;
+        return Err(error);
+    }
+
+    let started = match crate::lifecycle::restart::start_reserved_agent_at_paths(
         run_workspace,
         spec_path.parent().unwrap_or(team_dir),
         agent_id,
@@ -459,17 +474,25 @@ pub(super) fn add_agent_with_transport_at_paths(
         true,
         Some(&canonical_team_key),
         transport,
+        &reservation_token,
     ) {
         Ok(started) => started,
         Err(error) => {
-            rollback_add_agent_atomic(
+            let rollback = rollback_reserved_agent(
                 run_workspace,
                 &spec_path,
-                pre_spec_text.as_deref(),
-                pre_runtime_state.as_ref(),
+                &canonical_team_key,
                 agent_id,
+                &reservation_token,
+                false,
+                reservation_added_spec,
                 "start_agent_failed",
             );
+            if let Err(rollback_error) = rollback {
+                return Err(LifecycleError::StatePersist(format!(
+                    "{error}; owner rollback failed: {rollback_error}"
+                )));
+            }
             return Err(error);
         }
     };
@@ -479,14 +502,16 @@ pub(super) fn add_agent_with_transport_at_paths(
         } => (env, start_mode),
         StartAgentOutcome::Noop { env, .. } => (env, StartMode::Noop),
         StartAgentOutcome::Paused { .. } => {
-            rollback_add_agent_atomic(
+            rollback_reserved_agent(
                 run_workspace,
                 &spec_path,
-                pre_spec_text.as_deref(),
-                pre_runtime_state.as_ref(),
+                &canonical_team_key,
                 agent_id,
+                &reservation_token,
+                false,
+                reservation_added_spec,
                 "added_agent_paused",
-            );
+            )?;
             return Err(LifecycleError::RequirementUnmet(format!(
                 "added agent {agent_id} is paused"
             )));
@@ -497,4 +522,177 @@ pub(super) fn add_agent_with_transport_at_paths(
         start_mode,
         role_file: role_file_path.to_path_buf(),
     })
+}
+
+static RESERVATION_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn new_reservation_token(team_key: &str, agent_id: &AgentId) -> String {
+    let sequence = RESERVATION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}:{}:{}:{nanos}:{sequence}",
+        team_key,
+        agent_id.as_str(),
+        std::process::id()
+    )
+}
+
+fn after_reserve_test_gate(agent_id: &AgentId) -> Result<(), LifecycleError> {
+    if std::env::var("TEAM_AGENT_TEST_FAIL_AFTER_RESERVE")
+        .ok()
+        .is_some_and(|target| target == agent_id.as_str())
+    {
+        return Err(LifecycleError::StatePersist(format!(
+            "injected failure after reserve for {agent_id}"
+        )));
+    }
+    if std::env::var("TEAM_AGENT_TEST_PAUSE_AFTER_RESERVE_AGENT")
+        .ok()
+        .is_none_or(|target| target != agent_id.as_str())
+    {
+        return Ok(());
+    }
+    let ready = std::env::var_os("TEAM_AGENT_TEST_RESERVATION_READY_FILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("reservation ready file not configured".to_string())
+        })?;
+    let proceed = std::env::var_os("TEAM_AGENT_TEST_RESERVATION_CONTINUE_FILE")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("reservation continue file not configured".to_string())
+        })?;
+    std::fs::write(&ready, agent_id.as_str())
+        .map_err(|e| LifecycleError::StatePersist(format!("write reserve test gate: {e}")))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !proceed.exists() {
+        if std::time::Instant::now() >= deadline {
+            return Err(LifecycleError::StatePersist(format!(
+                "reservation test gate timed out for {agent_id}"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn rollback_reserved_agent(
+    run_workspace: &Path,
+    spec_path: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    reservation_token: &str,
+    remove_spec_if_unowned: bool,
+    reservation_added_spec: bool,
+    reason: &str,
+) -> Result<(), LifecycleError> {
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: run_workspace,
+        operation: "add-agent-rollback",
+        team: Some(team_key),
+        agent_id: Some(agent_id),
+    })?;
+    rollback_reserved_agent_locked(
+        run_workspace,
+        spec_path,
+        team_key,
+        agent_id,
+        reservation_token,
+        remove_spec_if_unowned,
+        reservation_added_spec,
+        reason,
+    )
+}
+
+fn rollback_reserved_agent_locked(
+    run_workspace: &Path,
+    spec_path: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    reservation_token: &str,
+    remove_spec_if_unowned: bool,
+    reservation_added_spec: bool,
+    reason: &str,
+) -> Result<(), LifecycleError> {
+    let mut state = crate::state::projection::select_runtime_state(run_workspace, Some(team_key))
+        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let row = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()));
+    let owned = if let Some(row) = row {
+        let owner = row
+            .get(LIFECYCLE_RESERVATION_TOKEN)
+            .and_then(serde_json::Value::as_str);
+        if owner != Some(reservation_token) {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "reservation owner mismatch for {agent_id}"
+            )));
+        }
+        if let Some(agents) = state
+            .get_mut("agents")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            agents.remove(agent_id.as_str());
+        }
+        crate::state::repository::StateRepository::new(run_workspace)
+            .save(
+                crate::state::repository::StateWriteIntent::AgentRollback {
+                    team_key: Some(team_key),
+                    agent_id: agent_id.as_str(),
+                },
+                &state,
+            )
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        true
+    } else {
+        false
+    };
+    if (owned || remove_spec_if_unowned) && reservation_added_spec && spec_path.exists() {
+        let text = std::fs::read_to_string(spec_path)
+            .map_err(|e| LifecycleError::StatePersist(format!("read spec: {e}")))?;
+        let mut spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
+        remove_agent_from_spec(&mut spec, agent_id.as_str());
+        write_spec_atomic(spec_path, &spec)?;
+    }
+    if owned {
+        let instructions = run_workspace
+            .join(".team/runtime/copilot-instructions")
+            .join(agent_id.as_str());
+        match std::fs::remove_dir_all(&instructions) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(LifecycleError::StatePersist(format!(
+                    "remove reserved instructions: {error}"
+                )))
+            }
+        }
+    }
+    let _ = crate::event_log::EventLog::new(run_workspace).write(
+        "add_agent.rollback",
+        serde_json::json!({
+            "agent_id": agent_id.as_str(),
+            "reason": reason,
+            "owner_scoped": true,
+        }),
+    );
+    Ok(())
+}
+
+fn spec_agent_exists(spec: &Value, agent_id: &str) -> bool {
+    let Value::Map(pairs) = spec else {
+        return false;
+    };
+    pairs
+        .iter()
+        .find(|(key, _)| key == "agents")
+        .and_then(|(_, agents)| agents.as_list())
+        .is_some_and(|agents| {
+            agents
+                .iter()
+                .any(|agent| yaml_agent_id(agent) == Some(agent_id))
+        })
 }

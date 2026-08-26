@@ -1,3 +1,18 @@
+//! ---
+//! purpose: runtime state 原子持久化、并发合并与 canonical lifecycle topology 保护
+//! contract:
+//!   provides:
+//!     - name: save_runtime_state
+//!       what: state.json 原子保存与冲突保护
+//!   depends:
+//!     - crate::state::projection
+//!     - crate::platform::file_lock
+//!     - crate::event_log::EventLog
+//! boundary:
+//!   - roster stub 合并保留 canonical lifecycle reservation owner token，但不创建独立 registry
+//!   - provider/network 调用禁止进入持久化路径
+//! maturity: wired
+//! ---
 //!
 //! state.json 持久化(bug-084 韧性;真相源 `state.py:save_runtime_state` + `_self_heal_runtime_state`
 //! + `runtime.py:_runtime_lock`)。
@@ -48,7 +63,7 @@ const SESSION_STATE_FIELDS: [&str; 6] = [
 ];
 const LIVE_TOPOLOGY_FIELDS: [&str; 5] =
     ["pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"];
-const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
+const ROSTER_STUB_ALLOWLIST: [&str; 17] = [
     "agent_id",
     "provider",
     "auth_mode",
@@ -65,6 +80,7 @@ const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
     "claude_config_dir",
     "claude_projects_root",
     "profile_launch",
+    "_lifecycle_reservation_token",
 ];
 
 /// `state.py:_RUNTIME_STATE_CACHE`:进程级 path→state 缓存(deep-equal 早返回)。

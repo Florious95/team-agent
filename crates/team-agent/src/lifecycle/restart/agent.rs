@@ -10,6 +10,8 @@
 //!       what: 必须显式丢弃会话，停席后换血再起
 //!     - name: start_agent_at_paths
 //!       what: 起席的实体实现，owner 门、暂停判定、启动模式决策与落 state
+//!     - name: start_reserved_agent_at_paths
+//!       what: 锁外 spawn/readiness/capture，短锁写 receipt 并按 canonical owner token finalize
 //!     - name: drain_old_pane_and_pid
 //!       what: 有界轮询等旧 pane 与旧进程消失，产出可核的证据载荷
 //!   depends:
@@ -25,7 +27,7 @@
 //!     - crate::lifecycle::worker_command_context
 //!     - crate::event_log::EventLog
 //! boundary:
-//!   - 每个对外入口先取 workspace 级生命周期锁，本文件不做无锁写
+//!   - 普通对外入口先取 workspace 级生命周期锁；reservation 路径只在 receipt/finalize 持短锁
 //!   - owner 门先于未知席位报错，权限判定不被存在性判定绕过
 //!   - reset 未显式丢弃会话时直接拒绝，不擅自换血
 //!   - 排空是有界等待，等不到只如实记录，不无限阻塞
@@ -148,6 +150,63 @@ pub(crate) fn start_agent_at_paths(
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
 ) -> Result<StartAgentOutcome, LifecycleError> {
+    start_agent_at_paths_inner(
+        workspace,
+        spec_workspace,
+        agent_id,
+        force,
+        open_display,
+        allow_fresh,
+        team,
+        transport,
+        None,
+    )
+}
+
+/// ---
+/// purpose: 对 canonical reservation owner 执行锁外 spawn/readiness 与短锁 receipt/finalize
+/// params:
+///   reservation_token: 必须匹配目标 canonical agent row 的 owner token
+/// returns: 与普通 start 一致的 Running/Noop/Paused 结果，成功前清除 owner token
+/// errors: owner 不匹配、spawn/capture/finalize 失败时返回对应 LifecycleError
+/// ---
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_reserved_agent_at_paths(
+    workspace: &Path,
+    spec_workspace: &Path,
+    agent_id: &AgentId,
+    force: bool,
+    open_display: bool,
+    allow_fresh: bool,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+    reservation_token: &str,
+) -> Result<StartAgentOutcome, LifecycleError> {
+    start_agent_at_paths_inner(
+        workspace,
+        spec_workspace,
+        agent_id,
+        force,
+        open_display,
+        allow_fresh,
+        team,
+        transport,
+        Some(reservation_token),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_agent_at_paths_inner(
+    workspace: &Path,
+    spec_workspace: &Path,
+    agent_id: &AgentId,
+    force: bool,
+    open_display: bool,
+    allow_fresh: bool,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+    reservation_token: Option<&str>,
+) -> Result<StartAgentOutcome, LifecycleError> {
     let _ = open_display;
     let mut state = if team.is_some() {
         resolve_team_scoped_state_or_refuse(workspace, team)?
@@ -161,6 +220,9 @@ pub(crate) fn start_agent_at_paths(
         .and_then(|v| v.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?
         .clone();
+    if let Some(token) = reservation_token {
+        require_reservation_owner(&state, agent_id, token)?;
+    }
     let agent = rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, &raw_agent);
     if raw_agent
         .get("paused")
@@ -264,6 +326,36 @@ pub(crate) fn start_agent_at_paths(
         )));
     }
     if !force && agent_live {
+        if let Some(token) = reservation_token {
+            let team_key = restart_projection_team_key(&state, team);
+            mark_agent_running_noop(
+                &mut state,
+                agent_id,
+                &session_name,
+                &window,
+                noop_pane.as_ref(),
+            )?;
+            crate::lifecycle::restart::refresh_missing_provider_sessions(&mut state)?;
+            state = finalize_reserved_agent_state(workspace, &team_key, agent_id, token, &state)?;
+            replay_worker_target_missing_messages(
+                workspace, agent_id, &team_key, &state, transport,
+            )?;
+            let coordinator = start_coordinator_for_workspace(workspace, Some(&team_key))?;
+            let target = noop_pane
+                .as_ref()
+                .map(|pane| pane.pane_id.as_str())
+                .unwrap_or_else(|| window.as_str())
+                .to_string();
+            write_start_agent_noop_event(workspace, agent_id, &target, coordinator.ok)?;
+            return Ok(StartAgentOutcome::Noop {
+                env: AgentActionEnvelope {
+                    agent_id: agent_id.clone(),
+                    state_file: crate::state::persist::runtime_state_path(workspace),
+                    coordinator_started: coordinator.ok,
+                },
+                target,
+            });
+        }
         let old_binding = pane_binding_snapshot(&raw_agent);
         let refreshed_binding = noop_pane.as_ref().map(pane_binding_from_live);
         mark_agent_running_noop(
@@ -457,13 +549,29 @@ pub(crate) fn start_agent_at_paths(
     } else {
         Vec::new()
     };
-    save_restart_projected_state_with_capture_backfill_skip(
-        workspace,
-        &mut state,
-        &team_key,
-        &skip_capture_backfill,
-        &[agent_id.as_str()],
-    )?;
+    if let Some(token) = reservation_token {
+        match persist_reserved_spawn_and_finalize(workspace, &team_key, agent_id, token, &mut state)
+        {
+            Ok(finalized) => state = finalized,
+            Err(error) => {
+                if let Err(kill_error) = transport.kill_pane(&spawn.spawn.pane_id) {
+                    return Err(LifecycleError::StatePersist(format!(
+                        "{error}; failed to clean exact spawned pane {}: {kill_error}",
+                        spawn.spawn.pane_id.as_str()
+                    )));
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        save_restart_projected_state_with_capture_backfill_skip(
+            workspace,
+            &mut state,
+            &team_key,
+            &skip_capture_backfill,
+            &[agent_id.as_str()],
+        )?;
+    }
     write_start_agent_start_event(
         workspace,
         agent_id,
@@ -490,6 +598,192 @@ pub(crate) fn start_agent_at_paths(
         new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
     })
+}
+
+fn require_reservation_owner(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    reservation_token: &str,
+) -> Result<(), LifecycleError> {
+    let owner = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .and_then(|row| row.get(crate::lifecycle::launch::LIFECYCLE_RESERVATION_TOKEN))
+        .and_then(serde_json::Value::as_str);
+    if owner == Some(reservation_token) {
+        Ok(())
+    } else {
+        Err(LifecycleError::RequirementUnmet(format!(
+            "reservation owner mismatch for {agent_id}"
+        )))
+    }
+}
+
+fn reserved_candidate_row(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+) -> Result<serde_json::Value, LifecycleError> {
+    state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .cloned()
+        .ok_or_else(|| {
+            LifecycleError::StatePersist(format!("reserved agent {agent_id} row disappeared"))
+        })
+}
+
+fn replace_reserved_row(
+    state: &mut serde_json::Value,
+    agent_id: &AgentId,
+    row: serde_json::Value,
+) -> Result<(), LifecycleError> {
+    let agents = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| LifecycleError::StatePersist("runtime state agents missing".to_string()))?;
+    agents.insert(agent_id.as_str().to_string(), row);
+    Ok(())
+}
+
+fn persist_reserved_spawn_and_finalize(
+    workspace: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    reservation_token: &str,
+    spawned_state: &mut serde_json::Value,
+) -> Result<serde_json::Value, LifecycleError> {
+    let mut receipt_row = reserved_candidate_row(spawned_state, agent_id)?;
+    if let Some(row) = receipt_row.as_object_mut() {
+        row.insert("status".to_string(), serde_json::json!("starting"));
+        row.insert(
+            crate::lifecycle::launch::LIFECYCLE_RESERVATION_TOKEN.to_string(),
+            serde_json::json!(reservation_token),
+        );
+    }
+    let mut latest = {
+        let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+            workspace,
+            operation: "add-agent-spawn-receipt",
+            team: Some(team_key),
+            agent_id: Some(agent_id),
+        })?;
+        save_reserved_row_delta(
+            workspace,
+            team_key,
+            agent_id,
+            reservation_token,
+            receipt_row,
+            false,
+            "receipt",
+        )?
+    };
+
+    fail_reserved_after_spawn_receipt(agent_id)?;
+
+    // Existing provider adapters and capture allocator remain the only
+    // authority for session/backing adoption. A planned id stays pending when
+    // no scanner-verified backing exists.
+    if let Some(row) = latest
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        row.insert("status".to_string(), serde_json::json!("running"));
+    }
+    crate::lifecycle::restart::refresh_missing_provider_sessions(&mut latest)?;
+    finalize_reserved_agent_state(workspace, team_key, agent_id, reservation_token, &latest)
+}
+
+fn finalize_reserved_agent_state(
+    workspace: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    reservation_token: &str,
+    candidate_state: &serde_json::Value,
+) -> Result<serde_json::Value, LifecycleError> {
+    let mut candidate_row = reserved_candidate_row(candidate_state, agent_id)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace,
+        operation: "add-agent-finalize",
+        team: Some(team_key),
+        agent_id: Some(agent_id),
+    })?;
+    if let Some(row) = candidate_row.as_object_mut() {
+        row.insert("status".to_string(), serde_json::json!("running"));
+        row.remove(crate::lifecycle::launch::LIFECYCLE_RESERVATION_TOKEN);
+    }
+    save_reserved_row_delta(
+        workspace,
+        team_key,
+        agent_id,
+        reservation_token,
+        candidate_row,
+        true,
+        "finalize",
+    )
+}
+
+fn save_reserved_row_delta(
+    workspace: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    reservation_token: &str,
+    row: serde_json::Value,
+    reject_capture_collision: bool,
+    phase: &str,
+) -> Result<serde_json::Value, LifecycleError> {
+    for attempt in 0..2 {
+        let mut latest = resolve_team_scoped_state_or_refuse(workspace, Some(team_key))?;
+        require_reservation_owner(&latest, agent_id, reservation_token)?;
+        if reject_capture_collision
+            && crate::session_capture::captured_agent_row_collides(&latest, agent_id.as_str(), &row)
+        {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "captured session/backing collision for reserved agent {agent_id}"
+            )));
+        }
+        replace_reserved_row(&mut latest, agent_id, row.clone())?;
+        sync_restart_team_projections(&mut latest, team_key);
+        let injected_conflict = attempt == 0
+            && std::env::var("TEAM_AGENT_TEST_RESERVED_SAVE_CONFLICT_ONCE")
+                .ok()
+                .is_some_and(|target| target == format!("{phase}:{}", agent_id.as_str()));
+        let saved = if injected_conflict {
+            Err(crate::state::StateError::SaveConflict(format!(
+                "injected reserved {phase} conflict"
+            )))
+        } else {
+            crate::state::repository::StateRepository::new(workspace).save(
+                crate::state::repository::StateWriteIntent::RestartTeam {
+                    team_key,
+                    topology_authority_agent_ids: &[agent_id.as_str()],
+                    skip_capture_backfill_agent_ids: &[agent_id.as_str()],
+                },
+                &latest,
+            )
+        };
+        match saved {
+            Ok(()) => return Ok(latest),
+            Err(crate::state::StateError::SaveConflict(_)) if attempt == 0 => continue,
+            Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
+        }
+    }
+    Err(LifecycleError::StatePersist(format!(
+        "reserved {phase} state delta exhausted conflict retry for {agent_id}"
+    )))
+}
+
+fn fail_reserved_after_spawn_receipt(agent_id: &AgentId) -> Result<(), LifecycleError> {
+    if std::env::var("TEAM_AGENT_TEST_FAIL_RESERVED_AFTER_SPAWN_RECEIPT")
+        .ok()
+        .is_some_and(|target| target == agent_id.as_str())
+    {
+        return Err(LifecycleError::StatePersist(format!(
+            "injected failure after reserved spawn receipt for {agent_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn replay_worker_target_missing_messages(
