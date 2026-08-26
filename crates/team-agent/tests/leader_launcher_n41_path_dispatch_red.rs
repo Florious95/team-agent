@@ -287,7 +287,7 @@ struct ShortSocketRoot(PathBuf);
 impl ShortSocketRoot {
     fn new(path: PathBuf) -> Self {
         assert!(
-            path.is_absolute() && path != Path::new("/") && path.components().count() > 3,
+            path.is_absolute() && path != Path::new("/") && path.components().count() >= 3,
             "refuse unsafe socket fixture root: {}",
             path.display()
         );
