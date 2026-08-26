@@ -1,3 +1,16 @@
+//! ---
+//! purpose: Exercise default doctor host health separately from the explicit comms attachment gate
+//! contract:
+//!   provides:
+//!     - name: rec_002_doctor_checks
+//!       what: Verifies unattached and host-failure JSON/exit contracts for doctor
+//!   depends:
+//!     - crate::cli::diagnose_port::doctor
+//!     - crate::cli::diagnose::append_registry_channel_unbound_to_report
+//! boundary:
+//!   - Does not run full workspace verification or complete GitHub workflows
+//! maturity: wired
+//! ---
 //! E2E-REC-002 Doctor emits provider/coordinator/tmux health checks.
 
 use crate::framework::*;

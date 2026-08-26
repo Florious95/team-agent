@@ -1,3 +1,17 @@
+//! ---
+//! purpose: Read-only diagnose helpers for host readiness and leader attachment reporting
+//! contract:
+//!   provides:
+//!     - name: append_registry_channel_unbound_to_report
+//!       what: Adds actionable attachment diagnostics and repairs without mutating runtime state
+//!   depends:
+//!     - crate::state
+//!     - crate::lifecycle::launch
+//!     - crate::transport
+//! boundary:
+//!   - Does not make leader attachment a host-maintenance health prerequisite
+//! maturity: wired
+//! ---
 //!
 //! diagnose/preflight/wait-ready CLI helpers.
 use super::*;
@@ -372,6 +386,19 @@ fn live_leader_workspace_mismatch(
     Some((issue, repair))
 }
 
+/// ---
+/// purpose: Preserve actionable leader attachment diagnostics without changing host maintenance health
+/// contract:
+///   provides:
+///     - name: append_registry_channel_unbound_to_report
+///       what: Adds leader_not_attached and its recovery hint when the selected leader receiver is unbound
+///   depends:
+///     - crate::lifecycle::launch::launched_team_receiver_is_attached
+///     - crate::state::persist::load_runtime_state
+/// boundary:
+///   - Does not make an unattached leader the default doctor failure; the explicit comms gate remains hard
+/// maturity: wired
+/// ---
 pub(crate) fn append_registry_channel_unbound_to_report(
     workspace: &std::path::Path,
     team: Option<&str>,
