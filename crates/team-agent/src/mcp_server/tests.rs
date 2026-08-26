@@ -43,9 +43,14 @@ fn unique_ws(tag: &str) -> std::path::PathBuf {
     use std::io::ErrorKind;
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
+    let base = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        PathBuf::from("/tmp")
+    };
     loop {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
+        let p = base.join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
         match std::fs::create_dir(&p) {
             Ok(()) => return p,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
@@ -95,12 +100,14 @@ struct McpStateFixture {
 
 impl McpStateFixture {
     fn new(_tag: &str) -> Self {
-        let env_lock = MCP_FIXTURE_ENV_LOCK.lock().unwrap();
+        let env_lock = MCP_FIXTURE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seq = MCP_FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = if cfg!(target_os = "macos") {
             PathBuf::from("/private/tmp")
         } else {
-            std::env::temp_dir()
+            PathBuf::from("/tmp")
         };
         let raw_root = base.join(format!("ta-mcp-{}-{seq}", std::process::id()));
         std::fs::create_dir(&raw_root).unwrap();
