@@ -1,7 +1,6 @@
 name: Verify full workspace
 
 on:
-  pull_request:
   push:
     branches:
       - integration/0.5.x
@@ -10,6 +9,10 @@ on:
 
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.95.0"
 
 jobs:
   verify:
@@ -27,6 +30,23 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
+          cargo --version
+
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+
+      - name: Preflight tmux (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v tmux
+          tmux -V
 
       - name: Run Rust tests
         run: cargo test --workspace --all-targets --locked --no-fail-fast
