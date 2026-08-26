@@ -359,8 +359,8 @@ pub use add_agent::{add_agent, add_agent_force};
 pub(crate) use add_agent::{add_agent_with_transport, add_agent_with_transport_force};
 
 mod add_agent_state;
-pub(crate) use add_agent_state::inject_agent_into_spec;
 pub(super) use add_agent_state::*;
+pub(crate) use add_agent_state::{inject_agent_into_spec, LIFECYCLE_RESERVATION_TOKEN};
 
 mod fork_agent;
 pub(super) use fork_agent::*;

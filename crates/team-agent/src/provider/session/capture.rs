@@ -4,6 +4,8 @@
 //!   provides:
 //!     - name: capture_missing_provider_sessions_once
 //!       what: 单次捕获通道:挑 pending 席位 → adapter 扫候选 → 分配 → 写四元组或写 ambiguous/identity_mismatch/transcript_missing
+//!     - name: captured_agent_row_collides
+//!       what: 用同一分配器稳定键复核 finalize 候选行是否撞现有 identity/backing owner
 //!     - name: converge_missing_provider_sessions
 //!       what: 破坏性生命周期门用的有界收敛屏障:显式 deadline + poll_interval，反复调上一函数直到无缺口或超预算
 //!     - name: recover_resume_session_from_events
@@ -1379,6 +1381,28 @@ fn claimed_provider_session_keys(
         }
     }
     keys
+}
+
+/// ---
+/// purpose: 用 capture allocator 的稳定 identity/backing keys 检查 finalize 候选是否撞 peer
+/// params:
+///   candidate: 已由既有 provider capture 形成的完整候选 agent row
+/// returns: 候选任一稳定 key 已被其他 owner 占用时为 true
+/// ---
+pub(crate) fn captured_agent_row_collides(
+    state: &Value,
+    agent_id: &str,
+    candidate: &Value,
+) -> bool {
+    let Some(agents) = state.get("agents").and_then(Value::as_object) else {
+        return false;
+    };
+    let pending_ids = BTreeSet::from([agent_id.to_string()]);
+    let claimed = claimed_provider_session_keys(state, agents, &pending_ids);
+    let mut candidate_keys = BTreeSet::new();
+    let team_key = crate::state::projection::team_state_key(state);
+    push_provider_session_keys(&mut candidate_keys, &team_key, agent_id, candidate);
+    !candidate_keys.is_disjoint(&claimed)
 }
 
 fn push_provider_session_keys(

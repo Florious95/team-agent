@@ -1,3 +1,18 @@
+//! ---
+//! purpose: runtime state 原子持久化、并发合并与 canonical lifecycle topology 保护
+//! contract:
+//!   provides:
+//!     - name: save_runtime_state
+//!       what: state.json 原子保存与冲突保护
+//!   depends:
+//!     - crate::state::projection
+//!     - crate::platform::file_lock
+//!     - crate::event_log::EventLog
+//! boundary:
+//!   - 普通 stale writer 必须服从 canonical lifecycle reservation owner token 的有无与取值
+//!   - provider/network 调用禁止进入持久化路径
+//! maturity: wired
+//! ---
 //!
 //! state.json 持久化(bug-084 韧性;真相源 `state.py:save_runtime_state` + `_self_heal_runtime_state`
 //! + `runtime.py:_runtime_lock`)。
@@ -48,7 +63,7 @@ const SESSION_STATE_FIELDS: [&str; 6] = [
 ];
 const LIVE_TOPOLOGY_FIELDS: [&str; 5] =
     ["pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"];
-const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
+const ROSTER_STUB_ALLOWLIST: [&str; 17] = [
     "agent_id",
     "provider",
     "auth_mode",
@@ -65,6 +80,7 @@ const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
     "claude_config_dir",
     "claude_projects_root",
     "profile_launch",
+    "_lifecycle_reservation_token",
 ];
 
 /// `state.py:_RUNTIME_STATE_CACHE`:进程级 path→state 缓存(deep-equal 早返回)。
@@ -898,6 +914,7 @@ fn merge_agent_projection(
                     if !fields.is_empty() {
                         return Err(save_conflict(projection, agent_id, fields));
                     }
+                    sync_lifecycle_reservation_token_from_latest(existing.get_mut(), latest_agent);
                 }
                 if !skip_capture_backfill || !skip_capture_backfill_agent_ids.contains(agent_id) {
                     backfill_capture_fields(existing.get_mut(), latest_agent);
@@ -974,6 +991,22 @@ fn roster_stub(latest_agent: &Value) -> Option<Value> {
         }
     }
     (!stub.is_empty()).then(|| Value::Object(stub))
+}
+
+fn sync_lifecycle_reservation_token_from_latest(incoming_agent: &mut Value, latest_agent: &Value) {
+    const FIELD: &str = "_lifecycle_reservation_token";
+    let latest_token = latest_agent
+        .get(FIELD)
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty());
+    let Some(incoming) = incoming_agent.as_object_mut() else {
+        return;
+    };
+    if let Some(latest_token) = latest_token {
+        incoming.insert(FIELD.to_string(), Value::String(latest_token.to_string()));
+    } else {
+        incoming.remove(FIELD);
+    }
 }
 
 /// 0.4.6 tuple-atomic backfill (restart-persist-capture-contract-audit.md):
@@ -2003,13 +2036,8 @@ mod tests {
                 "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
             },
         });
-        save_runtime_state_with_lifecycle_topology_authority(
-            &ws,
-            &incoming,
-            "team-a",
-            &["target"],
-        )
-        .unwrap();
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
+            .unwrap();
         let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
         assert!(
             target.get("pane_id").is_none(),

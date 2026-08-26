@@ -2,12 +2,12 @@
 //! purpose: 加席过程中的 state 写入、spec 注入与失败回滚
 //! contract:
 //!   provides:
-//!     - name: rollback_add_agent_atomic
-//!       what: 尽力恢复 spec 字节与 runtime state，并写一条回滚事件
 //!     - name: upsert_agent_state_from_role
-//!       what: 由角色文档 front matter 写出该席位的 state 行
+//!       what: 由角色文档 front matter 写出带 owner token 的 starting 席位行
 //!     - name: inject_agent_into_spec
 //!       what: 把编译出的 agent 注入 spec 的 agents 与 routing 规则
+//!     - name: remove_agent_from_spec
+//!       what: 从最新 spec 精确移除一个 agent 及其 routing 规则
 //!     - name: runtime_agent_exists
 //!       what: 判断 state 里是否已有同 id 席位
 //!   depends:
@@ -16,7 +16,6 @@
 //!     - crate::lifecycle::restart::remove
 //!     - crate::event_log::EventLog
 //! boundary:
-//!   - 回滚是尽力而为，回滚自身的错误被吞掉，只在事件里如实记录成败
 //!   - 注入 spec 不落盘，落盘由调用方原子写
 //!   - 已存在同 id 的条目不重复注入
 //! maturity: wired
@@ -37,109 +36,7 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
-/// ---
-/// purpose: 加席失败后恢复 spec 与 runtime state，并给新席立墓碑防止被合并回来
-/// params:
-///   pre_spec_text: 写之前的 spec 字节；None 表示原本没有该文件，回滚即删除
-///   pre_runtime_state: 写之前的 runtime state；None 时改为从当前 state 里摘掉该席位
-///   reason: 写进回滚事件的原因串
-/// returns: 无返回值；回滚成败如实写进 add_agent.rollback 事件
-/// ---
-/// E42 (0.3.24 P0, double-spec deadlock): best-effort atomic rollback for a
-/// failed add-agent. Restores the canonical spec to its pre-write bytes (or
-/// removes the file if it didn't exist), and restores runtime state to its
-/// pre-write JSON (so the half-written `status:starting` row is gone). The
-/// caller propagates the ORIGINAL operation error after rollback; rollback
-/// errors are swallowed (best-effort, no panic).
-pub(super) fn rollback_add_agent_atomic(
-    run_workspace: &Path,
-    spec_path: &Path,
-    pre_spec_text: Option<&str>,
-    pre_runtime_state: Option<&serde_json::Value>,
-    agent_id: &AgentId,
-    reason: &str,
-) {
-    let _ = std::fs::remove_dir_all(
-        run_workspace
-            .join(".team/runtime/copilot-instructions")
-            .join(agent_id.as_str()),
-    );
-    let spec_restored = if let Some(text) = pre_spec_text {
-        std::fs::write(spec_path, text).is_ok()
-    } else {
-        std::fs::remove_file(spec_path)
-            .or_else(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            })
-            .is_ok()
-    };
-    // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.4):
-    // rollback must tombstone the newly-added agent so the persist merge
-    // does not re-attach a `roster_stub` from the latest on disk. Without
-    // the tombstone the half-added `agents.standards` / `teams.<key>.agents.standards`
-    // survives the restore-from-pre_state pass and the retry sees
-    // "agent id already exists".
-    let state_restored = if let Some(state) = pre_runtime_state {
-        crate::state::repository::StateRepository::new(run_workspace)
-            .save(
-                crate::state::repository::StateWriteIntent::AgentRollback {
-                    team_key: None,
-                    agent_id: agent_id.as_str(),
-                },
-                state,
-            )
-            .is_ok()
-    } else {
-        // No prior runtime state — drop just the agent we added (load → strip → save).
-        if let Ok(mut state) = crate::state::persist::load_runtime_state(run_workspace) {
-            if let Some(agents) = state
-                .get_mut("agents")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                agents.remove(agent_id.as_str());
-            }
-            if let Some(teams) = state
-                .get_mut("teams")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                for team in teams.values_mut() {
-                    if let Some(agents) = team
-                        .get_mut("agents")
-                        .and_then(serde_json::Value::as_object_mut)
-                    {
-                        agents.remove(agent_id.as_str());
-                    }
-                }
-            }
-            crate::state::repository::StateRepository::new(run_workspace)
-                .save(
-                    crate::state::repository::StateWriteIntent::AgentRollback {
-                        team_key: None,
-                        agent_id: agent_id.as_str(),
-                    },
-                    &state,
-                )
-                .is_ok()
-        } else {
-            false
-        }
-    };
-    let rollback_ok = spec_restored && state_restored;
-    let _ = crate::event_log::EventLog::new(run_workspace).write(
-        "add_agent.rollback",
-        serde_json::json!({
-            "agent_id": agent_id.as_str(),
-            "reason": reason,
-            "rollback_ok": rollback_ok,
-            "spec_restored": spec_restored,
-            "state_restored": state_restored,
-        }),
-    );
-}
+pub(crate) const LIFECYCLE_RESERVATION_TOKEN: &str = "_lifecycle_reservation_token";
 
 /// ---
 /// purpose: 由角色文档的 front matter 写出该席位的 state 行并落盘
@@ -155,6 +52,7 @@ pub(super) fn upsert_agent_state_from_role(
     agent_id: &AgentId,
     meta: &Value,
     dynamic_role_file: &Path,
+    reservation_token: &str,
 ) -> Result<(), LifecycleError> {
     let mut state =
         crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
@@ -199,6 +97,7 @@ pub(super) fn upsert_agent_state_from_role(
         "auth_mode": auth_mode,
         "role": role,
         "status": "starting",
+        LIFECYCLE_RESERVATION_TOKEN: reservation_token,
         "dynamic_role_file": dynamic_role_file.to_string_lossy().to_string(),
         "role_source_ownership": role_source_ownership(workspace, dynamic_role_file),
     });
@@ -249,6 +148,28 @@ pub(super) fn upsert_agent_state_from_role(
         Some(canonical_team_key),
         Some(agent_id.as_str()),
     )
+}
+
+/// ---
+/// purpose: 从最新 canonical spec 精确移除一个动态 agent 及其直接 routing rule
+/// params:
+///   spec: 就地改写的最新 canonical spec
+/// returns: 无返回值；不存在目标时为幂等 no-op
+/// ---
+/// Other agents and routing rules are preserved byte-for-value by mutating the
+/// parsed canonical document rather than restoring a pre-operation snapshot.
+pub(super) fn remove_agent_from_spec(spec: &mut Value, agent_id: &str) {
+    let Value::Map(pairs) = spec else {
+        return;
+    };
+    if let Some((_, Value::List(agents))) = pairs.iter_mut().find(|(key, _)| key == "agents") {
+        agents.retain(|agent| yaml_agent_id(agent) != Some(agent_id));
+    }
+    if let Some((_, Value::Map(routing))) = pairs.iter_mut().find(|(key, _)| key == "routing") {
+        if let Some((_, Value::List(rules))) = routing.iter_mut().find(|(key, _)| key == "rules") {
+            rules.retain(|rule| yaml_route_assigns_to(rule) != Some(agent_id));
+        }
+    }
 }
 
 /// ---

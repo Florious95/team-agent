@@ -74,11 +74,11 @@ pub(crate) mod remove;
 mod selection;
 mod team_state;
 
-pub(crate) use agent::start_agent_at_paths;
 pub use agent::{reset_agent, start_agent, stop_agent};
 pub(crate) use agent::{
     reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,
 };
+pub(crate) use agent::{start_agent_at_paths, start_reserved_agent_at_paths};
 pub(crate) use common::refresh_missing_provider_sessions;
 pub(crate) use common::restart_required_missing_session_agent_ids;
 pub(crate) use common::session_identity_probe_for_agent;
