@@ -1,4 +1,21 @@
-//!
+//! ---
+//! purpose: mutating send 的 coordinator loud-ensure 与 topology 前置门
+//! contract:
+//!   provides:
+//!     - name: loud_ensure_coordinator
+//!       what: 仅在 coordinator 通过 bounded stable health window 后报告自动重启
+//!     - name: append_loud_ensure_fields
+//!       what: 保持 accepted/pending delivery 语义并附加结构化 ensure 证据
+//!   depends:
+//!     - crate::coordinator::coordinator_health
+//!     - crate::coordinator::wait_for_coordinator_health
+//!     - crate::messaging
+//!   boundary:
+//!     - 不把 spawn 成功当作 coordinator ready
+//!     - 不把 queued/pending 当作 delivered
+//! maturity: wired
+//! ---
+
 use super::*;
 
 pub(super) fn dirty_topology_refusal_value(
@@ -57,6 +74,7 @@ pub(super) fn target_has_known_worker(state: &Value, target: &MessageTarget, sen
 pub(super) struct LoudEnsureResult {
     previous_status: String,
     start: crate::coordinator::StartReport,
+    readiness_timeout: Option<crate::coordinator::HealthReport>,
 }
 
 pub(super) fn loud_ensure_coordinator(
@@ -88,6 +106,7 @@ pub(super) fn loud_ensure_coordinator(
         return Ok(Some(LoudEnsureResult {
             previous_status,
             start,
+            readiness_timeout: None,
         }));
     }
     if matches!(
@@ -95,6 +114,36 @@ pub(super) fn loud_ensure_coordinator(
         crate::coordinator::StartOutcome::Started
             | crate::coordinator::StartOutcome::StartedAfterRotation
     ) {
+        let Some(expected_pid) = start.pid else {
+            let mut failed_start = start;
+            failed_start.ok = false;
+            return Ok(Some(LoudEnsureResult {
+                previous_status,
+                start: failed_start,
+                readiness_timeout: None,
+            }));
+        };
+        if let Err(last_health) =
+            crate::coordinator::wait_for_coordinator_health(&workspace, expected_pid)
+        {
+            let mut failed_start = start;
+            failed_start.ok = false;
+            crate::event_log::EventLog::new(&selected.run_workspace)
+                .write(
+                    "coordinator.ensure_readiness_timeout",
+                    json!({
+                        "coordinator_previous_status": previous_status,
+                        "expected_pid": expected_pid.get(),
+                        "last_health": coordinator_health_json(&last_health, Some(expected_pid)),
+                    }),
+                )
+                .map_err(|error| CliError::Runtime(error.to_string()))?;
+            return Ok(Some(LoudEnsureResult {
+                previous_status,
+                start: failed_start,
+                readiness_timeout: Some(last_health),
+            }));
+        }
         crate::event_log::EventLog::new(&selected.run_workspace)
             .write(
                 "coordinator.ensure_restarted",
@@ -112,6 +161,7 @@ pub(super) fn loud_ensure_coordinator(
         return Ok(Some(LoudEnsureResult {
             previous_status,
             start,
+            readiness_timeout: None,
         }));
     }
     Ok(None)
@@ -131,6 +181,22 @@ pub(super) fn append_loud_ensure_fields(value: &mut Value, ensure: Option<&LoudE
     let Some(ensure) = ensure else {
         return;
     };
+    if let Some(last_health) = ensure.readiness_timeout.as_ref() {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "coordinator".to_string(),
+                coordinator_start_json(&ensure.start),
+            );
+            obj.insert(
+                "coordinator_readiness".to_string(),
+                json!({
+                    "ready": false,
+                    "last_health": coordinator_health_json(last_health, ensure.start.pid),
+                }),
+            );
+        }
+        return;
+    }
     if !ensure.start.ok {
         return;
     }
@@ -145,6 +211,32 @@ pub(super) fn append_loud_ensure_fields(value: &mut Value, ensure: Option<&LoudE
             coordinator_start_json(&ensure.start),
         );
     }
+}
+
+fn coordinator_health_json(
+    health: &crate::coordinator::HealthReport,
+    expected_pid: Option<crate::coordinator::Pid>,
+) -> Value {
+    json!({
+        "ready": health.ok,
+        "status": coordinator_health_status_wire(health.status),
+        "pid": health.pid.map(|pid| pid.get()),
+        "expected_pid": expected_pid.map(|pid| pid.get()),
+        "pid_matches_expected": expected_pid.is_none_or(|pid| health.pid == Some(pid)),
+        "process_running": health.process_running,
+        "metadata_ok": health.metadata_ok,
+        "wire_metadata_ok": health.wire_metadata_ok,
+        "binary_identity_ok": health.binary_identity_ok,
+        "binary_identity_relation": health.binary_identity_relation.as_str(),
+        "service_available": health.service_available,
+        "metadata_mismatch_reason": health.metadata_mismatch_reason,
+        "schema": {
+            "ok": health.schema.ok,
+            "version": health.schema.schema_version,
+            "error": health.schema.error.as_ref().map(|error| format!("{error:?}")),
+            "action": health.schema.action,
+        },
+    })
 }
 
 pub(super) fn coordinator_start_json(report: &crate::coordinator::StartReport) -> Value {
