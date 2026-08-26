@@ -320,7 +320,14 @@ impl CommandRunner for SubmitWindowRunner {
         let stdout = if argv_contains(argv, "capture-pane") {
             self.capture_text()
         } else {
-            if argv_contains(argv, "send-keys") && argv.iter().any(|arg| arg == "Enter") {
+            if argv.get(1).map(String::as_str) == Some("set-buffer") {
+                *self.payload.lock().unwrap() = argv.last().cloned();
+            }
+            if argv_contains(argv, "send-keys")
+                && argv
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "Enter" | "C-m"))
+            {
                 self.enter_sent.store(true, Ordering::SeqCst);
             }
             String::new()
