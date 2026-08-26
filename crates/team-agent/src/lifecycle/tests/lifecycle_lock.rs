@@ -1,4 +1,18 @@
-use std::path::{Path, PathBuf};
+//! ---
+//! purpose: lifecycle lock behavior contracts
+//! contract:
+//!   provides:
+//!     - name: lifecycle-lock-timeout
+//!       what: a held workspace lock returns a typed timeout and release restores acquisition
+//!     - name: lifecycle-lock-held-long-event
+//!       what: a blocked waiter records holder and waiter diagnostics
+//! boundary:
+//!   - prove lock behavior through runtime outcomes, not production source text
+//!   - operation names remain internal diagnostic metadata
+//! maturity: wired
+//! ---
+
+use std::path::Path;
 use std::time::Duration;
 
 use super::*;
@@ -130,138 +144,6 @@ fn lifecycle_lock_long_held_event_records_holder_and_waiter() {
     );
 }
 
-#[test]
-fn lifecycle_lock_phase_b_golden_source_guard() {
-    r2_lifecycle_lock_exists_precondition();
-}
-
-#[test]
-fn r2_lifecycle_lock_exists_precondition() {
-    let src = manifest_src();
-    let lock = read_src("lifecycle/lock.rs");
-    assert!(
-        lock.contains("AGENT_LIFECYCLE_LOCK_NAME: &str = \"agent-lifecycle\""),
-        "lifecycle lock name constant must remain explicit"
-    );
-    assert!(
-        lock.contains("LIFECYCLE_LOCK_TIMEOUT: Duration = Duration::from_secs(30)"),
-        "lifecycle lock timeout constant must remain 30s"
-    );
-    assert!(
-        lock.contains("write_lock_held_long_event") && lock.contains("lifecycle.lock_held_long"),
-        "long-held lifecycle lock event must remain wired"
-    );
-
-    let state_hits = source_files(&src.join("state"))
-        .into_iter()
-        .filter(|path| {
-            let text = std::fs::read_to_string(path).unwrap();
-            text.contains("RuntimeLock::acquire") && text.contains("\"state-save\"")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        state_hits,
-        vec![src.join("state").join("persist.rs")],
-        "state-save lock must stay owned by state/persist.rs"
-    );
-
-    for path in source_files(&src.join("state")) {
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("LifecycleLock")
-                && !text.contains("acquire_agent_lifecycle_lock")
-                && !text.contains("agent-lifecycle"),
-            "state module must not acquire or know lifecycle lock: {}",
-            path.display()
-        );
-    }
-
-    for path in source_files(&src.join("coordinator")) {
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("acquire_agent_lifecycle_lock") && !text.contains("agent-lifecycle"),
-            "coordinator tick path must not block on lifecycle lock: {}",
-            path.display()
-        );
-    }
-
-    for path in source_files(&src) {
-        if path == src.join("state").join("persist.rs") || is_test_source(&path) {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !text.contains("RuntimeLock::acquire"),
-            "production source outside state/persist.rs must not acquire runtime locks directly: {}",
-            path.display()
-        );
-    }
-
-    for path in source_files(&src) {
-        if path.starts_with(src.join("state")) || path.starts_with(src.join("lifecycle")) {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).unwrap();
-        let lifecycle_topology_authority_entries = [
-            "save_runtime_state_with_lifecycle_topology_authority",
-            "save_team_scoped_state_with_lifecycle_topology_authority",
-            "save_runtime_state_with_team_tombstone_lifecycle_topology_authority",
-            "save_team_scoped_state_with_tombstone_lifecycle_topology_authority",
-        ];
-        assert!(
-            !lifecycle_topology_authority_entries
-                .iter()
-                .any(|entry| text.contains(entry)),
-            "lifecycle topology authority save entry must not be referenced outside lifecycle/state modules: {}",
-            path.display()
-        );
-    }
-
-    let agent = read_src("lifecycle/restart/agent.rs");
-    assert_public_operation(&agent, "start-agent");
-    assert_public_operation(&agent, "stop-agent");
-    assert_public_operation(&agent, "reset-agent");
-    assert_body_is_unlocked(&agent, "pub(crate) fn start_agent_at_paths");
-    assert_body_is_unlocked(&agent, "pub(super) fn stop_agent_at_paths");
-    assert_body_is_unlocked(&agent, "fn reset_agent_at_paths");
-
-    let remove = read_src("lifecycle/restart/remove.rs");
-    assert_public_operation(&remove, "remove-agent");
-    assert_body_is_unlocked(&remove, "fn remove_agent_at_paths");
-    assert!(
-        !remove.contains("start_agent_with_transport"),
-        "remove rollback runs while remove-agent holds the lifecycle lock; it must use lock-free start_agent_at_paths"
-    );
-
-    let launch = launch_source();
-    assert_public_operation(&launch, "add-agent");
-    assert_public_operation(&launch, "fork-agent");
-    assert_body_is_unlocked(&launch, "fn add_agent_with_transport_at_paths");
-
-    let rebuild = read_src("lifecycle/restart/rebuild.rs");
-    assert_public_operation(&rebuild, "restart");
-    let drop_idx = rebuild.find("drop(lifecycle_lock);").unwrap();
-    let coordinator_idx = rebuild
-        .find("start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))")
-        .unwrap();
-    let readiness_idx = rebuild.find("wait_restart_readiness_or_timeout(").unwrap();
-    assert!(
-        rebuild.contains("let lifecycle_lock = acquire_agent_lifecycle_lock")
-            && drop_idx < coordinator_idx
-            && coordinator_idx < readiness_idx,
-        "restart must release lifecycle lock before coordinator readiness wait"
-    );
-}
-
-fn is_test_source(path: &Path) -> bool {
-    path.components()
-        .any(|component| component.as_os_str() == "tests")
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"))
-}
-
 fn read_events(workspace: &Path) -> Vec<serde_json::Value> {
     let path = crate::model::paths::logs_dir(workspace).join("events.jsonl");
     std::fs::read_to_string(path)
@@ -269,76 +151,4 @@ fn read_events(workspace: &Path) -> Vec<serde_json::Value> {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
-}
-
-fn manifest_src() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
-}
-
-fn read_src(path: &str) -> String {
-    std::fs::read_to_string(manifest_src().join(path)).unwrap()
-}
-
-fn launch_source() -> String {
-    let src = manifest_src().join("lifecycle");
-    let mut files = vec![src.join("launch.rs")];
-    let mut siblings = std::fs::read_dir(src.join("launch"))
-        .expect("read launch module directory")
-        .map(|entry| entry.expect("read launch module entry").path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
-        .collect::<Vec<_>>();
-    siblings.sort();
-    files.extend(siblings);
-
-    files
-        .into_iter()
-        .map(|path| {
-            format!(
-                "\n// @source {}\n{}",
-                path.strip_prefix(&src).unwrap().display(),
-                std::fs::read_to_string(&path).expect("read launch source")
-            )
-        })
-        .collect()
-}
-
-fn source_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_rs_files(root, &mut out);
-    out.sort();
-    out
-}
-
-fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(root).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            collect_rs_files(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-}
-
-fn assert_public_operation(source: &str, operation: &str) {
-    assert!(
-        source.contains("acquire_agent_lifecycle_lock")
-            && source.contains(&format!("operation: \"{operation}\"")),
-        "public lifecycle entry must acquire lifecycle lock for {operation}"
-    );
-}
-
-fn assert_body_is_unlocked(source: &str, signature: &str) {
-    let body = source
-        .split_once(signature)
-        .unwrap_or_else(|| panic!("missing signature: {signature}"))
-        .1;
-    let body = body
-        .split_once("\n}\n")
-        .map(|(body, _)| body)
-        .unwrap_or(body);
-    assert!(
-        !body.contains("acquire_agent_lifecycle_lock"),
-        "{signature} must remain lock-free to avoid nested reset deadlocks"
-    );
 }

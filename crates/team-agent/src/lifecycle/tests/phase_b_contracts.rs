@@ -1,3 +1,19 @@
+//! ---
+//! purpose: phase B lifecycle mutation lock and reservation behavior contracts
+//! contract:
+//!   provides:
+//!     - name: add-agent-lock-mutation-barrier
+//!       what: add-agent ingress cannot mutate spec/state or spawn while the workspace lock is held
+//!     - name: add-agent-reservation-ownership
+//!       what: rollback preserves a reservation owned by another token
+//!     - name: add-agent-receipt-finalize
+//!       what: post-spawn receipt/finalize leaves only a locked running row
+//! boundary:
+//!   - assert runtime behavior and side effects, never source substrings
+//!   - add-agent phase names are internal diagnostics, not public operation names
+//! maturity: wired
+//! ---
+
 use super::agent_ops::lanea_team_ws;
 use super::lane_ops::{fork_ws, LaneHomeGuard, LaneTransport};
 use super::launch_spawn::{
@@ -141,6 +157,50 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
         "teamdir",
     ))
     .unwrap();
+
+    // The force ingress must take the canonical lock before consuming its old
+    // seat. A held lock therefore leaves every observable surface untouched.
+    let force_state_before =
+        crate::state::projection::select_runtime_state(&add_workspace, Some("teamdir")).unwrap();
+    let force_role = add_team.join("agents").join("implementer.md");
+    let force_held = hold_lifecycle_lock(&add_workspace, "test-holder", None);
+    let force_override = override_agent_lifecycle_lock_deadlines_for_test(
+        Duration::from_millis(120),
+        Duration::from_secs(5),
+    );
+    assert_lock_timeout(
+        crate::lifecycle::add_agent_with_transport_force(
+            &add_team,
+            &aid("implementer"),
+            &force_role,
+            false,
+            None,
+            true,
+            &add_transport,
+        ),
+        "add-agent-force-remove",
+    );
+    assert!(
+        add_transport.spawn_records().is_empty(),
+        "blocked force add must not spawn a window"
+    );
+    assert_eq!(
+        crate::state::projection::select_runtime_state(&add_workspace, Some("teamdir")).unwrap(),
+        force_state_before,
+        "blocked force add must not consume the existing state row"
+    );
+    assert_eq!(
+        std::fs::read_to_string(crate::model::paths::runtime_spec_path(
+            &add_workspace,
+            "teamdir",
+        ))
+        .unwrap(),
+        add_spec_before,
+        "blocked force add must not mutate spec"
+    );
+    drop(force_override);
+    drop(force_held);
+
     let held = hold_lifecycle_lock(&add_workspace, "add-agent", Some(&add_agent));
     let override_guard = override_agent_lifecycle_lock_deadlines_for_test(
         Duration::from_millis(120),
@@ -155,7 +215,7 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
             None,
             &add_transport,
         ),
-        "add-agent",
+        "add-agent-reserve",
     );
     assert!(
         add_transport.spawn_records().is_empty(),
@@ -309,6 +369,151 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
             .pointer("/agents/alpha")
             .is_none(),
         "released remove-agent must remove alpha"
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn add_agent_rollback_preserves_a_foreign_reservation() {
+    let _home = LaneHomeGuard::enter("phase-b-rollback-owner");
+    let (team, workspace, role, transport) = add_fixture();
+    let ready = workspace.join("reservation-ready");
+    let proceed = workspace.join("reservation-proceed");
+    let _pause = TestEnvGuard::set("TEAM_AGENT_TEST_PAUSE_AFTER_RESERVE_AGENT", "w2");
+    let _ready = TestEnvGuard::set(
+        "TEAM_AGENT_TEST_RESERVATION_READY_FILE",
+        ready.to_string_lossy().as_ref(),
+    );
+    let _continue = TestEnvGuard::set(
+        "TEAM_AGENT_TEST_RESERVATION_CONTINUE_FILE",
+        proceed.to_string_lossy().as_ref(),
+    );
+
+    let thread_team = team.clone();
+    let thread_role = role.clone();
+    let thread_transport = transport.clone();
+    let add = std::thread::spawn(move || {
+        crate::lifecycle::add_agent_with_transport(
+            &thread_team,
+            &aid("w2"),
+            &thread_role,
+            false,
+            None,
+            &thread_transport,
+        )
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !ready.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ready.exists(),
+        "reservation gate must observe the reserved row"
+    );
+
+    let mut foreign = crate::state::projection::select_runtime_state(&workspace, Some("teamdir"))
+        .expect("reserved team state");
+    foreign["agents"]["w2"]["_lifecycle_reservation_token"] = json!("foreign-owner-token");
+    foreign["teams"]["teamdir"]["agents"]["w2"]["_lifecycle_reservation_token"] =
+        json!("foreign-owner-token");
+    // Deliberately model a foreign writer at the canonical file boundary:
+    // normal stale-save merging preserves the latest owner token and would
+    // hide the ownership-mismatch path this tooth is meant to exercise.
+    std::fs::write(
+        crate::state::persist::runtime_state_path(&workspace),
+        serde_json::to_string_pretty(&foreign).unwrap(),
+    )
+    .expect("save foreign reservation owner");
+    let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+    assert_eq!(
+        persisted["agents"]["w2"]["_lifecycle_reservation_token"],
+        json!("foreign-owner-token"),
+        "foreign owner mutation must be durable before allowing rollback"
+    );
+    std::fs::write(&proceed, "continue").unwrap();
+
+    let result = add.join().expect("add thread");
+    assert!(
+        result
+            .as_ref()
+            .expect_err("foreign owner must reject rollback")
+            .to_string()
+            .contains("reservation owner mismatch"),
+        "rollback must report the owner mismatch: {result:?}"
+    );
+    let after = crate::state::projection::select_runtime_state(&workspace, Some("teamdir"))
+        .expect("state after owner mismatch");
+    assert_eq!(
+        after["agents"]["w2"]["_lifecycle_reservation_token"],
+        json!("foreign-owner-token"),
+        "rollback must not delete a foreign reservation"
+    );
+    assert!(
+        transport.spawn_records().is_empty(),
+        "owner mismatch must stop before spawn"
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn add_agent_receipt_failure_never_exposes_running_row() {
+    let _home = LaneHomeGuard::enter("phase-b-receipt-finalize");
+    let (team, workspace, role, transport) = add_fixture();
+    let spec_path = crate::model::paths::runtime_spec_path(&workspace, "teamdir");
+    let spec_before = std::fs::read_to_string(&spec_path).unwrap();
+    let _failure = TestEnvGuard::set("TEAM_AGENT_TEST_FAIL_RESERVED_AFTER_SPAWN_RECEIPT", "w2");
+    let result = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &aid("w2"),
+        &role,
+        false,
+        None,
+        &transport,
+    );
+    assert!(
+        result
+            .as_ref()
+            .expect_err("injected receipt failure must fail")
+            .to_string()
+            .contains("injected failure after reserved spawn receipt"),
+        "receipt failure should be the surfaced cause: {result:?}"
+    );
+    assert!(
+        !transport.spawn_records().is_empty(),
+        "receipt follows a real spawn"
+    );
+    let state = crate::state::projection::select_runtime_state(&workspace, Some("teamdir"))
+        .expect("state after receipt rollback");
+    assert!(
+        state["agents"].get("w2").is_none(),
+        "failed receipt must not expose a running reservation row"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&spec_path).unwrap(),
+        spec_before,
+        "receipt failure rollback must restore spec bytes"
+    );
+
+    drop(_failure);
+    let (team, workspace, role, transport) = add_fixture();
+    crate::lifecycle::add_agent_with_transport(&team, &aid("w2"), &role, false, None, &transport)
+        .expect("release from receipt failure permits finalize");
+    let state = crate::state::projection::select_runtime_state(&workspace, Some("teamdir"))
+        .expect("finalized state");
+    assert_eq!(state["agents"]["w2"]["status"], json!("running"));
+    assert!(
+        state["agents"]["w2"]
+            .get("_lifecycle_reservation_token")
+            .is_none(),
+        "finalize must consume the reservation token"
+    );
+    let lock_path = crate::lifecycle::lock::agent_lifecycle_lock_path(&workspace);
+    let lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(lock_path).unwrap()).unwrap();
+    assert_eq!(
+        lock["operation"],
+        json!("add-agent-finalize"),
+        "final running row must follow the finalize lock"
     );
 }
 
@@ -800,5 +1005,29 @@ fn pane_info(session: &str, window: &str, pane: &str, pid: u32) -> PaneInfo {
         active: false,
         pane_pid: Some(pid),
         leader_env: std::collections::BTreeMap::new(),
+    }
+}
+
+struct TestEnvGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl TestEnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 }
