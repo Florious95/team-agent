@@ -19,8 +19,14 @@
 //!     - hermetic workspace, HOME, and exact tmux endpoint ownership
 //!   depends:
 //!     - tests/support/hermetic.rs
-//!   boundary:
-//!     - never uses ambient serial-test locks or the default tmux server
+//! boundary:
+//!   - never uses ambient serial-test locks or the default tmux server
+//! arch:
+//!   allowed_dependencies:
+//!     - rusqlite
+//!     - serde_json
+//!     - serial_test
+//!     - std
 //! maturity: wired
 //! ---
 
@@ -33,7 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 use serial_test::serial;
 
@@ -202,6 +208,19 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         row.delivery_attempts, 0,
         "E6 e2e RED: queued mailbox must not be claimed/delivered before leader attach"
     );
+    assert_eq!(
+        row.error, None,
+        "E6 e2e RED: queued mailbox must not carry a failure before replay"
+    );
+    assert_eq!(
+        row.delivered_at, None,
+        "E6 e2e RED: queued mailbox must not carry a delivery timestamp before replay"
+    );
+    assert_event_for_message(
+        case.target_workspace(),
+        "leader_mailbox.queued_until_attach",
+        &message_id,
+    );
 
     let state = runtime_state(case.target_workspace());
     let session_name = state
@@ -241,6 +260,42 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         String::from_utf8_lossy(&attach.stderr)
     );
 
+    let attached_state = runtime_state(case.target_workspace());
+    let receiver = attached_state
+        .pointer(&format!("/teams/{}/leader_receiver", case.team_key))
+        .expect("attached leader receiver in state");
+    assert_eq!(
+        receiver.get("status").and_then(Value::as_str),
+        Some("attached")
+    );
+    assert_eq!(
+        receiver.get("pane_id").and_then(Value::as_str),
+        Some(pane.as_str())
+    );
+    assert_eq!(
+        receiver.get("session_name").and_then(Value::as_str),
+        Some(session_name.as_str())
+    );
+    assert_eq!(
+        receiver.get("tmux_socket").and_then(Value::as_str),
+        Some(tmux_socket.as_str())
+    );
+    assert_eq!(
+        receiver.get("window_name").and_then(Value::as_str),
+        Some("leader")
+    );
+    assert_eq!(
+        receiver.get("window_index").and_then(Value::as_str),
+        Some("1")
+    );
+    assert!(
+        receiver
+            .get("pane_tty")
+            .and_then(Value::as_str)
+            .is_some_and(|tty| !tty.is_empty()),
+        "E6 e2e RED: attached target must persist pane tty; receiver={receiver}"
+    );
+
     // Injection-case revision (MUST-10 boundary): attach must wake the mailbox
     // and physically inject, but a physical submit is not a provider receipt —
     // the SAME row parks as injected_awaiting_receipt, never jumps straight
@@ -271,6 +326,44 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     assert_eq!(
         rows_after_attach[0].message_id, message_id,
         "E6 e2e RED: attach replay must preserve the original queued message_id"
+    );
+    let row = &rows_after_attach[0];
+    assert_eq!(
+        row.delivery_attempts, 1,
+        "E6 e2e RED: attach replay must have exactly one winning claim; row={row:?}"
+    );
+    assert_eq!(
+        row.error.as_deref(),
+        Some("leader_receipt_source_unavailable"),
+        "E6 e2e RED: receipt-source failure must be persisted on the same row; row={row:?}"
+    );
+    assert_eq!(
+        row.delivered_at, None,
+        "E6 e2e RED: physical injection must not infer a provider receipt; row={row:?}"
+    );
+    let receipt = delivery_token(case.target_workspace(), &message_id)
+        .expect("delivery token for physically injected message");
+    assert_eq!(receipt.unique_token, message_id);
+    assert!(
+        !receipt.injected_at.is_empty(),
+        "delivery token must persist inject time"
+    );
+    assert_eq!(
+        receipt.consumed_at, None,
+        "source-unavailable receipt cannot be consumed"
+    );
+    assert_eq!(
+        receipt.failed_at, None,
+        "source-unavailable is not an inject failure"
+    );
+    assert_eq!(
+        receipt.failure_reason, None,
+        "source-unavailable has its own typed boundary"
+    );
+    assert_event_for_message(
+        case.target_workspace(),
+        "leader_receiver.receipt_source_unavailable",
+        &message_id,
     );
 }
 
@@ -314,6 +407,17 @@ struct MessageRow {
     recipient: Option<String>,
     status: Option<String>,
     delivery_attempts: i64,
+    delivered_at: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct DeliveryToken {
+    unique_token: String,
+    injected_at: String,
+    consumed_at: Option<String>,
+    failed_at: Option<String>,
+    failure_reason: Option<String>,
 }
 
 fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
@@ -324,7 +428,7 @@ fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
     let conn = Connection::open(db).expect("open team.db");
     let mut stmt = conn
         .prepare(
-            "select message_id, owner_team_id, recipient, status, delivery_attempts \
+            "select message_id, owner_team_id, recipient, status, delivery_attempts, delivered_at, error \
              from messages where content like ?1 order by created_at",
         )
         .expect("prepare message query");
@@ -335,11 +439,50 @@ fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
             recipient: row.get(2)?,
             status: row.get(3)?,
             delivery_attempts: row.get(4)?,
+            delivered_at: row.get(5)?,
+            error: row.get(6)?,
         })
     })
     .expect("query messages")
     .map(|row| row.expect("message row"))
     .collect()
+}
+
+fn delivery_token(workspace: &Path, message_id: &str) -> Option<DeliveryToken> {
+    let db = workspace.join(".team/runtime/team.db");
+    let conn = Connection::open(db).expect("open team.db");
+    conn.query_row(
+        "select unique_token, injected_at, consumed_at, failed_at, failure_reason \
+         from delivery_tokens where message_id = ?1",
+        [message_id],
+        |row| {
+            Ok(DeliveryToken {
+                unique_token: row.get(0)?,
+                injected_at: row.get(1)?,
+                consumed_at: row.get(2)?,
+                failed_at: row.get(3)?,
+                failure_reason: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .expect("query delivery token")
+}
+
+fn assert_event_for_message(workspace: &Path, event_name: &str, message_id: &str) {
+    let path = workspace.join(".team/logs/events.jsonl");
+    let matching = std::fs::read_to_string(&path)
+        .expect("read event log")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| {
+            event.get("event").and_then(Value::as_str) == Some(event_name)
+                && event.get("message_id").and_then(Value::as_str) == Some(message_id)
+        });
+    assert!(
+        matching.is_some(),
+        "E6 e2e RED: expected durable {event_name} event bound to message_id={message_id}"
+    );
 }
 
 fn wait_for_message_status(workspace: &Path, message_id: &str, status: &str) -> bool {
@@ -382,6 +525,12 @@ fn capture_pane(tmux_socket: &str, pane: &str) -> String {
         .args(["-S", tmux_socket, "capture-pane", "-p", "-t", pane])
         .output()
         .expect("tmux capture-pane");
+    assert!(
+        output.status.success(),
+        "E6 apparatus fixture-command failure: tmux capture-pane failed; socket={tmux_socket} pane={pane} code={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
@@ -534,7 +683,8 @@ impl E6Case {
             .expect("tmux new-window");
         assert!(
             output.status.success(),
-            "E6 e2e RED setup: tmux new-window leader failed; stderr={}",
+            "E6 apparatus fixture-command failure: tmux new-window leader failed; code={:?} stderr={}",
+            output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         );
         self.register_pane_pid(&String::from_utf8_lossy(&output.stdout).trim());
@@ -555,6 +705,12 @@ impl E6Case {
             ])
             .output()
             .expect("tmux pane pid");
+        assert!(
+            output.status.success(),
+            "E6 apparatus fixture-command failure: tmux display-message pane pid failed; pane={pane} code={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
         if let Ok(pid) = String::from_utf8_lossy(&output.stdout).trim().parse() {
             self.env.register_owned_pid(pid);
         }
