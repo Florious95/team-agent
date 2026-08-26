@@ -22,6 +22,12 @@ use crate::model::ids::TeamKey;
 use super::super::helpers::{ensure_object, object_fields, tool_runtime_error};
 use super::super::{ToolOk, ToolResult};
 
+/// ---
+/// purpose: append an MCP note to runtime state and render team_state.md
+/// params: workspace and owner team select the canonical run workspace
+/// returns: raw success fields including the rendered state_file path
+/// errors: path-rich persistence errors preserve the raw and resolved targets
+/// ---
 pub(crate) fn update_state(
     workspace: &Path,
     owner_team: Option<&TeamKey>,
@@ -184,6 +190,12 @@ fn is_missing_active_spec(err: &crate::state::StateError) -> bool {
     )
 }
 
+/// ---
+/// purpose: return status for the selected team in the canonical run workspace
+/// params: workspace and owner team constrain runtime-state selection
+/// returns: scoped status fields for the selected team
+/// errors: selection and status failures are returned as tool errors
+/// ---
 pub(crate) fn get_team_status(workspace: &Path, owner_team: Option<&TeamKey>) -> ToolResult {
     let selected = crate::state::selector::resolve_active_team(
         workspace,

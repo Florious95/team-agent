@@ -65,6 +65,7 @@
     // state_file survives. Rust runs compact_tool_result whose ok-whitelist DROPS
     // state_file (not a golden whitelist key), so the key vanishes.
     #[test]
+    #[serial_test::serial(env)]
     fn update_state_state_file_survives_no_compaction() {
         let fixture = McpStateFixture::new("writable");
         let expected = fixture.state_file("team_state.md");
@@ -85,6 +86,7 @@
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn update_state_canonical_remap_is_observable_and_owned() {
         let fixture = McpStateFixture::new("remap");
         let raw_workspace = fixture.workspace.join(".team");
@@ -106,6 +108,7 @@
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(env)]
     fn update_state_parent_0555_reports_paths_and_records_partial_commit() {
         let mut fixture = McpStateFixture::new("parent");
         let relative = "s/team_state.md";
@@ -129,6 +132,7 @@
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(env)]
     fn update_state_target_0444_reports_paths_and_records_partial_commit() {
         let mut fixture = McpStateFixture::new("target");
         let relative = "team_state.md";
@@ -145,6 +149,18 @@
         assert_eq!(std::fs::read_to_string(&expected).unwrap(), "fixture baseline\n");
         assert_runtime_note(&fixture.workspace, "target failure");
         assert!(fixture.under_root(&expected));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn update_state_fixture_destruction_removes_owned_root() {
+        let root = {
+            let fixture = McpStateFixture::new("destruction");
+            let root = fixture.root.clone();
+            assert!(root.exists());
+            root
+        };
+        assert!(!root.exists(), "fixture drop must remove its owned root");
     }
 
     fn assert_error_names_paths(message: &str, raw: &Path, resolved: &Path, state_file: &Path) {
