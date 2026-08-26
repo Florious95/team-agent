@@ -1,5 +1,20 @@
 //! S1a StateRepository RED contracts.
 //!
+//! ---
+//! purpose: cfg-aware direct state-save governance scanner
+//! contract:
+//!   provides:
+//!     - name: s1a_direct_save_scan
+//!       what: resolves Rust external modules and excludes only proven cfg(test) files
+//!   depends:
+//!     - name: state_save_allowlist
+//!       what: frozen direct-save rows and semantic intent catalog
+//! boundary:
+//!   - scanner scope is product modules reachable from src/lib.rs
+//!   - unsupported cfg or module-surface forms fail closed as unknown
+//! maturity: wired
+//! ---
+//!
 //! References:
 //! - `.team/artifacts/s1a-state-repository-design.md` section 5 baseline
 //!   allowlist and section 8 RED1-RED5.
@@ -446,28 +461,400 @@ impl DirectSaveCall {
 
 fn scan_product_state_saves() -> Vec<DirectSaveCall> {
     let src = repo_root().join("crates/team-agent/src");
+    let module_map = build_module_map(&src).expect("build product Rust module map");
+    assert!(
+        module_map.unknowns.is_empty(),
+        "S1A scanner module map is unknown; unsupported cfg/macro/include forms must be resolved or reported:\n{}",
+        module_map.unknowns.join("\n")
+    );
+    println!(
+        "S1A_MODULE_MAP production_files={} test_only_files={} unknowns=0",
+        module_map.production_files.len(),
+        module_map.test_only_files.len()
+    );
     let mut calls = Vec::new();
-    collect_state_save_calls(&src, &mut calls).expect("scan product source state-save callsites");
+    for path in module_map.production_files {
+        scan_file(&path, &mut calls).expect("scan product source state-save callsites");
+    }
     calls.sort();
     calls
 }
 
-fn collect_state_save_calls(dir: &Path, out: &mut Vec<DirectSaveCall>) -> std::io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            if path.components().any(|part| part.as_os_str() == "tests") {
+#[derive(Debug, Default)]
+struct ModuleMap {
+    production_files: BTreeSet<PathBuf>,
+    test_only_files: BTreeSet<PathBuf>,
+    unknowns: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ModuleDeclaration {
+    name: String,
+    reachability: CfgReachability,
+    path: Option<PathBuf>,
+    line: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CfgReachability {
+    Production,
+    TestOnly,
+    Unknown,
+}
+
+fn build_module_map(src: &Path) -> std::io::Result<ModuleMap> {
+    let mut map = ModuleMap::default();
+    let mut queue = vec![(src.join("lib.rs"), false)];
+    let mut visited = BTreeMap::<PathBuf, bool>::new();
+
+    while let Some((path, inherited_test_only)) = queue.pop() {
+        let test_only = inherited_test_only;
+        if let Some(previous_test_only) = visited.get(&path).copied() {
+            if previous_test_only && !test_only {
+                map.unknowns.push(format!(
+                    "{}: module is reached through both cfg(test) and production declarations",
+                    path.display()
+                ));
+            }
+            if previous_test_only || !test_only {
                 continue;
             }
-            collect_state_save_calls(&path, out)?;
+        }
+        visited.insert(path.clone(), test_only);
+        if test_only {
+            map.test_only_files.insert(path.clone());
+        } else {
+            map.production_files.insert(path.clone());
+        }
+
+        // Once a file is proven reachable only through cfg(test), its contents
+        // are not product code. Do not recursively interpret its test helpers
+        // as production modules; the parent declaration is the proof boundary.
+        if test_only {
             continue;
         }
-        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            scan_file(&path, out)?;
+
+        let source = fs::read_to_string(&path)?;
+        let (declarations, includes, source_unknowns) = parse_module_surface(&source, &path);
+        map.unknowns.extend(source_unknowns);
+        for include in includes {
+            match resolve_include(&path, &include.target) {
+                Ok(child) => queue.push((child, test_only)),
+                Err(reason) => map.unknowns.push(format!(
+                    "{}:{} include!({:?}): {reason}",
+                    path.display(),
+                    include.line,
+                    include.target
+                )),
+            }
+        }
+        for declaration in declarations {
+            let child = match resolve_module(&path, &declaration) {
+                Ok(child) => child,
+                Err(reason) => {
+                    map.unknowns.push(format!(
+                        "{}:{} mod {}: {reason}",
+                        path.display(),
+                        declaration.line,
+                        declaration.name
+                    ));
+                    continue;
+                }
+            };
+            let child_test_only =
+                test_only || declaration.reachability == CfgReachability::TestOnly;
+            queue.push((child, child_test_only));
         }
     }
-    Ok(())
+    Ok(map)
+}
+
+#[derive(Debug)]
+struct IncludeDirective {
+    target: String,
+    line: usize,
+}
+
+fn parse_module_surface(
+    source: &str,
+    path: &Path,
+) -> (Vec<ModuleDeclaration>, Vec<IncludeDirective>, Vec<String>) {
+    let mut declarations = Vec::new();
+    let mut includes = Vec::new();
+    let mut unknowns = Vec::new();
+    let mut pending_cfg = CfgReachability::Production;
+    let mut pending_path = None;
+    let mut pending_cfg_attr = false;
+    let mut macro_depth = None;
+
+    for (index, raw_line) in source.lines().enumerate() {
+        let line = index + 1;
+        let code = raw_line.split("//").next().unwrap_or("").trim();
+        if code.is_empty() {
+            continue;
+        }
+        if let Some(depth) = macro_depth.as_mut() {
+            if code.contains(" mod ") || code.starts_with("mod ") {
+                unknowns.push(format!(
+                    "{}:{} macro-generated module declaration is unsupported",
+                    path.display(),
+                    line
+                ));
+            }
+            *depth += brace_delta(code);
+            if *depth <= 0 {
+                macro_depth = None;
+            }
+            continue;
+        }
+        if code.contains("macro_rules!") {
+            let depth = brace_delta(code);
+            if depth > 0 {
+                macro_depth = Some(depth);
+            }
+            continue;
+        }
+        if code.contains("mod ") && code.contains('!') {
+            unknowns.push(format!(
+                "{}:{} macro-generated module declaration is unsupported",
+                path.display(),
+                line
+            ));
+            continue;
+        }
+
+        let mut remainder = code.to_string();
+        if let Some(start) = remainder.find("#[cfg(") {
+            if let Some(end) = remainder[start..].find(")]") {
+                let attr_end = start + end + 2;
+                pending_cfg = cfg_reachability(&remainder[start + 6..start + end]);
+                if pending_cfg == CfgReachability::Unknown {
+                    unknowns.push(format!(
+                        "{}:{} cfg expression is not provably production or test-only",
+                        path.display(),
+                        line
+                    ));
+                }
+                remainder = remainder[..start].to_string() + remainder[attr_end..].trim_start();
+            } else {
+                unknowns.push(format!(
+                    "{}:{} unterminated cfg attribute",
+                    path.display(),
+                    line
+                ));
+                continue;
+            }
+        }
+        if remainder.contains("#[cfg_attr") {
+            pending_cfg_attr = true;
+        }
+        if let Some(start) = remainder.find("#[path") {
+            if let Some(end) = remainder[start..].find(']') {
+                let attr_end = start + end + 1;
+                match remainder[start..attr_end]
+                    .split_once('=')
+                    .and_then(|(_, value)| parse_string_literal(value))
+                {
+                    Some(target) => pending_path = Some(PathBuf::from(target)),
+                    None => unknowns.push(format!(
+                        "{}:{} unsupported #[path] attribute",
+                        path.display(),
+                        line
+                    )),
+                }
+                remainder = remainder[..start].to_string() + remainder[attr_end..].trim_start();
+            }
+        }
+
+        for (target, include_line) in include_targets(&remainder, line, path, &mut unknowns) {
+            includes.push(IncludeDirective {
+                target,
+                line: include_line,
+            });
+        }
+
+        if let Some(name) = external_module_name(&remainder) {
+            if pending_cfg_attr {
+                unknowns.push(format!(
+                    "{}:{} cfg_attr affecting module reachability is unsupported",
+                    path.display(),
+                    line
+                ));
+            }
+            declarations.push(ModuleDeclaration {
+                name,
+                reachability: pending_cfg,
+                path: pending_path.take(),
+                line,
+            });
+            pending_cfg = CfgReachability::Production;
+            pending_cfg_attr = false;
+        } else if !remainder.starts_with("#[") && !remainder.is_empty() {
+            pending_cfg = CfgReachability::Production;
+            pending_path = None;
+            pending_cfg_attr = false;
+        }
+    }
+    (declarations, includes, unknowns)
+}
+
+fn cfg_reachability(expression: &str) -> CfgReachability {
+    let expression = expression.trim();
+    if expression == "test" || cfg_all_contains_test(expression) {
+        CfgReachability::TestOnly
+    } else if expression.starts_with("not(") {
+        CfgReachability::Production
+    } else if expression.contains("test") {
+        CfgReachability::Unknown
+    } else {
+        CfgReachability::Production
+    }
+}
+
+fn cfg_all_contains_test(expression: &str) -> bool {
+    let Some(inner) = expression
+        .strip_prefix("all(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let parts = split_cfg_args(inner);
+    !parts.is_empty()
+        && parts.iter().any(|part| part.trim() == "test")
+        && parts.iter().all(|part| {
+            let part = part.trim();
+            !part.starts_with("any(") && !part.starts_with("not(")
+        })
+}
+
+fn split_cfg_args(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(value[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if !value[start..].trim().is_empty() {
+        parts.push(value[start..].trim());
+    }
+    parts
+}
+
+fn external_module_name(code: &str) -> Option<String> {
+    let marker = code.find("mod ")?;
+    let prefix = code[..marker].trim();
+    if !matches!(
+        prefix,
+        "" | "pub" | "pub(crate)" | "pub(super)" | "pub(self)"
+    ) {
+        return None;
+    }
+    let rest = &code[marker + 4..];
+    let name_len = rest
+        .chars()
+        .take_while(|ch| *ch == '_' || ch.is_ascii_alphanumeric())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if name_len == 0 || !rest[name_len..].trim_start().starts_with(';') {
+        return None;
+    }
+    Some(rest[..name_len].to_string())
+}
+
+fn include_targets(
+    code: &str,
+    line: usize,
+    path: &Path,
+    unknowns: &mut Vec<String>,
+) -> Vec<(String, usize)> {
+    let mut targets = Vec::new();
+    let mut offset = 0;
+    while let Some(found) = code[offset..].find("include!(") {
+        let start = offset + found + "include!(".len();
+        let Some(end) = code[start..].find(')') else {
+            unknowns.push(format!("{}:{} unterminated include!", path.display(), line));
+            break;
+        };
+        let argument = code[start..start + end].trim();
+        if let Some(target) = parse_string_literal(argument) {
+            targets.push((target, line));
+        } else {
+            unknowns.push(format!(
+                "{}:{} include! argument is not a literal path",
+                path.display(),
+                line
+            ));
+        }
+        offset = start + end + 1;
+    }
+    targets
+}
+
+fn parse_string_literal(value: &str) -> Option<String> {
+    let value = value.trim();
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.replace("\\\"", "\""))
+}
+
+fn resolve_include(parent: &Path, target: &str) -> Result<PathBuf, String> {
+    let child = parent
+        .parent()
+        .ok_or_else(|| "parent has no directory".to_string())?
+        .join(target);
+    if child.is_file() {
+        Ok(child)
+    } else {
+        Err(format!(
+            "literal path does not resolve to a Rust source file: {}",
+            child.display()
+        ))
+    }
+}
+
+fn resolve_module(parent: &Path, declaration: &ModuleDeclaration) -> Result<PathBuf, String> {
+    if declaration.reachability == CfgReachability::Unknown {
+        return Err("cfg expression is not provably test-only".to_string());
+    }
+    if let Some(path) = &declaration.path {
+        let child = parent
+            .parent()
+            .ok_or_else(|| "parent has no directory".to_string())?
+            .join(path);
+        return child
+            .is_file()
+            .then_some(child.clone())
+            .ok_or_else(|| format!("#[path] does not resolve: {}", child.display()));
+    }
+    let base = parent
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name != "mod" && *name != "lib")
+        .map(|name| parent.parent().unwrap().join(name))
+        .unwrap_or_else(|| parent.parent().unwrap().to_path_buf());
+    let sibling = base.join(format!("{}.rs", declaration.name));
+    let directory = base.join(&declaration.name).join("mod.rs");
+    match (sibling.is_file(), directory.is_file()) {
+        (true, false) => Ok(sibling),
+        (false, true) => Ok(directory),
+        (false, false) => Err(format!(
+            "Rust sibling module is missing (tried {} and {})",
+            sibling.display(),
+            directory.display()
+        )),
+        (true, true) => Err(format!(
+            "Rust sibling module is ambiguous (both {} and {} exist)",
+            sibling.display(),
+            directory.display()
+        )),
+    }
 }
 
 fn scan_file(path: &Path, out: &mut Vec<DirectSaveCall>) -> std::io::Result<()> {
@@ -656,6 +1043,36 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("team-agent crate should live under crates/team-agent")
         .to_path_buf()
+}
+
+#[test]
+fn scanner_synthetic_external_cfg_test_and_production_modules_are_distinct() {
+    let (declarations, includes, unknowns) = parse_module_surface(
+        "#[cfg(test)] mod renamed_test;\nmod renamed_production;\n",
+        Path::new("synthetic/parent.rs"),
+    );
+    assert!(includes.is_empty());
+    assert!(unknowns.is_empty());
+    assert_eq!(declarations.len(), 2);
+    assert_eq!(declarations[0].reachability, CfgReachability::TestOnly);
+    assert_eq!(declarations[1].reachability, CfgReachability::Production);
+}
+
+#[test]
+fn scanner_synthetic_unsupported_cfg_and_include_are_unknown() {
+    let (_, _, unknowns) = parse_module_surface(
+        "#[cfg(any(test, unix))] mod maybe_test;\ninclude!(concat!(\"tests/\", \"fixture.rs\"));\n",
+        Path::new("synthetic/parent.rs"),
+    );
+    assert_eq!(
+        unknowns.len(),
+        2,
+        "unsupported module surface must be loud: {unknowns:?}"
+    );
+    assert!(unknowns.iter().any(|item| item.contains("cfg expression")));
+    assert!(unknowns
+        .iter()
+        .any(|item| item.contains("include! argument")));
 }
 
 fn normalize(value: &str) -> String {
