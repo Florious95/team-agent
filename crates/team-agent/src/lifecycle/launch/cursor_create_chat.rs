@@ -13,6 +13,7 @@
 //!   - 不发明 --session-id；不 pkill/killall；不 wait 子进程自行退出
 //!   - 不读 chats 正文、不打印 proxy 值
 //!   - 已有 expected_session_id 或 argv 已含 --resume 则不动
+//!   - shell stub 与 executable-bit 测试辅助仅在 Unix 编译；生产计划路径跨平台保持不变
 //!   - 2026-08-21 活体：create-chat 后 `--resume` 的存档在 pane stop 后被清；
 //!     TUI 自建会话能留盘。fresh 路径不调用本函数（走 scan 唯一 hex）。
 //! maturity: wired
@@ -157,9 +158,12 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[cfg(unix)]
     fn tmp_root(tag: &str) -> std::path::PathBuf {
         static CTR: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -173,6 +177,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn write_stub(dir: &Path, body: &str) -> std::path::PathBuf {
         let path = dir.join("agent");
         std::fs::write(&path, body).unwrap();
@@ -182,6 +187,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_chat_reads_first_line_and_kills_recorded_pid() {
         let base = tmp_root("ok");
@@ -199,6 +205,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_chat_rejects_non_uuid_first_line() {
         let base = tmp_root("bad");
