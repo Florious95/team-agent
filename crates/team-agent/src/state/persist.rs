@@ -4,6 +4,8 @@
 //!   provides:
 //!     - name: save_runtime_state
 //!       what: state.json 原子保存与冲突保护
+//!     - name: commit_runtime_state_and_artifact
+//!       what: 在 canonical state-save lock 内 prepare/promote/recover runtime 与渲染产物
 //!   depends:
 //!     - crate::state::projection
 //!     - crate::platform::file_lock
@@ -11,6 +13,7 @@
 //! boundary:
 //!   - 普通 stale writer 必须服从 canonical lifecycle reservation owner token 的有无与取值
 //!   - provider/network 调用禁止进入持久化路径
+//!   - canonical runtime load/save 在返回或改写 state 前恢复未完成的 update-state transaction
 //! maturity: wired
 //! ---
 //!
@@ -43,6 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::event_log::EventLog;
@@ -143,7 +147,37 @@ fn atomic_replace(from: &Path, to: &Path) -> io::Result<()> {
             return Err(io::Error::from_raw_os_error(errno));
         }
     }
-    std::fs::rename(from, to)
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let from = from
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let to = to
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(from.as_ptr()),
+                PCWSTR(to.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(|error| io::Error::from_raw_os_error(error.code().0))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
 }
 
 /// `_retryable_replace_error`:PermissionError 或 errno ∈ {EACCES, EPERM, EBUSY}。
@@ -218,6 +252,397 @@ impl Drop for RuntimeLock {
         // Best-effort unlock. OS releases on handle close if this fails.
         let _ = crate::platform::file_lock::unlock(&self.file);
     }
+}
+
+const UPDATE_STATE_TRANSACTION_DIR: &str = "update-state.transaction";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateStateTransactionManifest {
+    version: u8,
+    runtime_path: PathBuf,
+    artifact_path: PathBuf,
+    runtime_before_exists: bool,
+    artifact_before_exists: bool,
+}
+
+fn update_state_transaction_path(workspace: &Path) -> PathBuf {
+    runtime_dir(workspace).join(UPDATE_STATE_TRANSACTION_DIR)
+}
+
+fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn write_snapshot(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    use std::io::Write as _;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn unique_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        ".{name}.update-state-{}-{seq}.{suffix}",
+        std::process::id()
+    ))
+}
+
+fn replace_with_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let staged = unique_sibling(path, "tmp");
+    let result = (|| {
+        std::fs::write(&staged, bytes)?;
+        std::fs::File::open(&staged)?.sync_all()?;
+        atomic_replace(&staged, path)?;
+        sync_directory(parent)
+    })();
+    let _ = std::fs::remove_file(&staged);
+    result
+}
+
+fn restore_snapshot(path: &Path, bytes: Option<&[u8]>) -> io::Result<()> {
+    match bytes {
+        Some(bytes) => replace_with_bytes(path, bytes),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => path.parent().map_or(Ok(()), sync_directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn transaction_snapshot(path: &Path, name: &str, existed: bool) -> io::Result<Option<Vec<u8>>> {
+    if existed {
+        std::fs::read(path.join(name)).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn cleanup_update_state_transaction(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "transaction has no parent"))?;
+    let retired = unique_sibling(path, "retired");
+    match std::fs::rename(path, &retired) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    sync_directory(parent)?;
+    let _ = std::fs::remove_dir_all(retired);
+    Ok(())
+}
+
+fn recover_update_state_transaction_under_lock(workspace: &Path) -> Result<(), StateError> {
+    let transaction = update_state_transaction_path(workspace);
+    if !transaction.exists() {
+        return Ok(());
+    }
+    let manifest: UpdateStateTransactionManifest =
+        serde_json::from_slice(&std::fs::read(transaction.join("manifest.json"))?)?;
+    if manifest.version != 1 {
+        return Err(StateError::SaveFailed(format!(
+            "unsupported update-state transaction version {} at {}",
+            manifest.version,
+            transaction.display()
+        )));
+    }
+    let runtime_before = transaction_snapshot(
+        &transaction,
+        "runtime.before",
+        manifest.runtime_before_exists,
+    )?;
+    let runtime_after = transaction_snapshot(&transaction, "runtime.after", true)?;
+    let artifact_before = transaction_snapshot(
+        &transaction,
+        "artifact.before",
+        manifest.artifact_before_exists,
+    )?;
+    let artifact_after = transaction_snapshot(&transaction, "artifact.after", true)?;
+    let runtime_current = read_optional(&manifest.runtime_path)?;
+    let artifact_current = read_optional(&manifest.artifact_path)?;
+
+    if runtime_current == runtime_before {
+        if artifact_current != artifact_before {
+            restore_snapshot(&manifest.artifact_path, artifact_before.as_deref())?;
+        }
+        cleanup_update_state_transaction(&transaction)?;
+        return Ok(());
+    }
+    if runtime_current == runtime_after {
+        if artifact_current != artifact_after {
+            if artifact_current != artifact_before {
+                return Err(StateError::SaveConflict(format!(
+                    "update-state recovery artifact changed at {}",
+                    manifest.artifact_path.display()
+                )));
+            }
+            restore_snapshot(&manifest.artifact_path, artifact_after.as_deref())?;
+        }
+        if let Some(bytes) = runtime_after.as_deref() {
+            let recovered: Value = serde_json::from_slice(bytes)?;
+            cache_set(&manifest.runtime_path, &recovered);
+        }
+        cleanup_update_state_transaction(&transaction)?;
+        return Ok(());
+    }
+    Err(StateError::SaveConflict(format!(
+        "update-state recovery runtime changed at {}",
+        manifest.runtime_path.display()
+    )))
+}
+
+/// ---
+/// purpose: recover a published update-state transaction before canonical state is observed
+/// params: workspace identifies the canonical runtime and lock domain
+/// returns: success only after the two artifacts again form a committed or prior pair
+/// errors: lock, journal, conflict, and filesystem failures remain explicit
+/// ---
+pub(crate) fn recover_update_state_transaction(workspace: &Path) -> Result<(), StateError> {
+    if !update_state_transaction_path(workspace).exists() {
+        return Ok(());
+    }
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    recover_update_state_transaction_under_lock(workspace)
+}
+
+fn prepare_update_state_transaction(
+    workspace: &Path,
+    runtime_path: &Path,
+    runtime_before: Option<&[u8]>,
+    runtime_after: &[u8],
+    artifact_path: &Path,
+    artifact_before: Option<&[u8]>,
+    artifact_after: &[u8],
+) -> Result<PathBuf, StateError> {
+    let runtime_parent = runtime_dir(workspace);
+    std::fs::create_dir_all(&runtime_parent)?;
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let prepared = runtime_parent.join(format!(
+        ".{UPDATE_STATE_TRANSACTION_DIR}.{}-{seq}.tmp",
+        std::process::id()
+    ));
+    std::fs::create_dir(&prepared)?;
+    let result = (|| -> Result<(), StateError> {
+        if let Some(bytes) = runtime_before {
+            write_snapshot(&prepared.join("runtime.before"), bytes)?;
+        }
+        write_snapshot(&prepared.join("runtime.after"), runtime_after)?;
+        if let Some(bytes) = artifact_before {
+            write_snapshot(&prepared.join("artifact.before"), bytes)?;
+        }
+        write_snapshot(&prepared.join("artifact.after"), artifact_after)?;
+        let manifest = UpdateStateTransactionManifest {
+            version: 1,
+            runtime_path: runtime_path.to_path_buf(),
+            artifact_path: artifact_path.to_path_buf(),
+            runtime_before_exists: runtime_before.is_some(),
+            artifact_before_exists: artifact_before.is_some(),
+        };
+        write_snapshot(
+            &prepared.join("manifest.json"),
+            &serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        sync_directory(&prepared)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(&prepared);
+        return Err(error);
+    }
+    Ok(prepared)
+}
+
+fn probe_replace_without_touching_destination(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    if path.exists() {
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+    }
+    let probe = unique_sibling(path, "probe");
+    let result = (|| {
+        std::fs::write(&probe, bytes)?;
+        std::fs::File::open(&probe)?.sync_all()
+    })();
+    let _ = std::fs::remove_file(&probe);
+    result
+}
+
+/// Commit a note-shaped runtime mutation and its rendered artifact under the
+/// canonical state-save lock. The published transaction directory is the
+/// recovery record: canonical loads and saves recover it before observing or
+/// changing state.
+/// ---
+/// purpose: atomically commit canonical runtime state with one rendered artifact
+/// params: workspace and artifact path identify the pair; closures derive their next bytes
+/// returns: the exact runtime value durably read back with the rendered artifact
+/// errors: preparation, promotion, recovery, conflict, and readback failures remain explicit
+/// ---
+pub(crate) fn commit_runtime_state_and_artifact<M, R>(
+    workspace: &Path,
+    artifact_path: &Path,
+    mutate: M,
+    render: R,
+) -> Result<Value, StateError>
+where
+    M: FnOnce(&mut Value),
+    R: FnOnce(&Value) -> Result<Vec<u8>, StateError>,
+{
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    recover_update_state_transaction_under_lock(workspace)?;
+    let runtime_path = runtime_state_path(workspace);
+    let runtime_before = read_optional(&runtime_path)?;
+    let mut state = read_latest_state_under_lock(workspace, &runtime_path).unwrap_or_else(
+        || json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
+    );
+    mutate(&mut state);
+    migrate_state_identity(&mut state, &SystemEnv, workspace)?;
+    crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut state);
+    let runtime_after = serde_json::to_vec_pretty(&state)?;
+    let artifact_before = read_optional(artifact_path)?;
+    let artifact_after = render(&state)?;
+
+    probe_replace_without_touching_destination(artifact_path, &artifact_after)?;
+
+    let prepared = prepare_update_state_transaction(
+        workspace,
+        &runtime_path,
+        runtime_before.as_deref(),
+        &runtime_after,
+        artifact_path,
+        artifact_before.as_deref(),
+        &artifact_after,
+    )?;
+    #[cfg(test)]
+    if std::env::var_os("TEAM_AGENT_TEST_UPDATE_STATE_DENY_AFTER_PREPARE").is_some() {
+        cleanup_update_state_transaction(&prepared)?;
+        return Err(StateError::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "injected markdown denial after preparation",
+        )));
+    }
+    let transaction = update_state_transaction_path(workspace);
+    std::fs::rename(&prepared, &transaction)?;
+    sync_directory(transaction.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "transaction has no parent")
+    })?)?;
+
+    #[cfg(test)]
+    if let Some(pause) = std::env::var_os("TEAM_AGENT_TEST_UPDATE_STATE_PAUSE_AFTER_PREPARE") {
+        let pause = PathBuf::from(pause);
+        std::fs::create_dir_all(&pause)?;
+        std::fs::write(pause.join("entered"), b"prepared")?;
+        let started = Instant::now();
+        while !pause.join("release").exists() {
+            if started.elapsed() >= Duration::from_secs(5) {
+                cleanup_update_state_transaction(&transaction)?;
+                return Err(StateError::SaveFailed(
+                    "update-state test pause timed out".to_string(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    replace_with_bytes(&runtime_path, &runtime_after)?;
+    #[cfg(test)]
+    if std::env::var_os("TEAM_AGENT_TEST_UPDATE_STATE_CRASH_AFTER_RUNTIME").is_some() {
+        return Err(StateError::SaveFailed(
+            "injected crash after runtime promotion".to_string(),
+        ));
+    }
+
+    let artifact_result = {
+        #[cfg(test)]
+        if std::env::var_os("TEAM_AGENT_TEST_UPDATE_STATE_FAIL_ARTIFACT_PROMOTE").is_some() {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected artifact promotion failure",
+            ))
+        } else {
+            replace_with_bytes(artifact_path, &artifact_after)
+        }
+        #[cfg(not(test))]
+        {
+            replace_with_bytes(artifact_path, &artifact_after)
+        }
+    };
+    if let Err(error) = artifact_result {
+        restore_snapshot(&runtime_path, runtime_before.as_deref()).map_err(|rollback| {
+            StateError::SaveFailed(format!(
+                "artifact promotion failed: {error}; runtime rollback failed: {rollback}"
+            ))
+        })?;
+        restore_snapshot(artifact_path, artifact_before.as_deref()).map_err(|rollback| {
+            StateError::SaveFailed(format!(
+                "artifact promotion failed: {error}; artifact rollback failed: {rollback}"
+            ))
+        })?;
+        cleanup_update_state_transaction(&transaction)?;
+        if let Some(bytes) = runtime_before.as_deref() {
+            if let Ok(before) = serde_json::from_slice::<Value>(bytes) {
+                cache_set(&runtime_path, &before);
+            }
+        }
+        return Err(StateError::Io(error));
+    }
+
+    let readback_matches = read_optional(&runtime_path)
+        .and_then(|runtime| read_optional(artifact_path).map(|artifact| (runtime, artifact)))
+        .is_ok_and(|(runtime, artifact)| {
+            runtime == Some(runtime_after.clone()) && artifact == Some(artifact_after)
+        });
+    if !readback_matches {
+        restore_snapshot(&runtime_path, runtime_before.as_deref())?;
+        restore_snapshot(artifact_path, artifact_before.as_deref())?;
+        cleanup_update_state_transaction(&transaction)?;
+        if let Some(bytes) = runtime_before.as_deref() {
+            if let Ok(before) = serde_json::from_slice::<Value>(bytes) {
+                cache_set(&runtime_path, &before);
+            }
+        }
+        return Err(StateError::SaveFailed(
+            "update-state transaction readback mismatch; prior bytes restored".to_string(),
+        ));
+    }
+    cache_set(&runtime_path, &state);
+    // Both artifacts are already durably read back. A stale transaction
+    // directory is safe: the next canonical load/save recognizes the exact
+    // after/after state and retries cleanup without changing either artifact.
+    let _ = cleanup_update_state_transaction(&transaction);
+    Ok(state)
 }
 
 ///
@@ -363,6 +788,7 @@ fn save_runtime_state_with_merge_options(
     topology_update_agent_ids: &[&str],
     receiver_update_team_key: Option<&str>,
 ) -> Result<(), StateError> {
+    recover_update_state_transaction(workspace)?;
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
     // 我们 `&Value` 不可变 → 克隆后迁移,后续比较/写入/缓存/self-heal 全走 `migrated`。
@@ -409,6 +835,7 @@ fn save_runtime_state_with_merge_options(
     }
 
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    recover_update_state_transaction_under_lock(workspace)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1298,28 +1725,31 @@ fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
 
 pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
-    if !path.exists() {
-        if let Some(cached) = cache_get(&path) {
-            return Ok(cached);
+    let (state, changed) = {
+        let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+        recover_update_state_transaction_under_lock(workspace)?;
+        if !path.exists() {
+            let state = cache_get(&path).unwrap_or_else(|| {
+                json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null})
+            });
+            return Ok(state);
         }
-        return Ok(
-            json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
-        );
-    }
-    let text = std::fs::read_to_string(&path)?;
-    let mut state: Value = serde_json::from_str(&text)?;
-    normalize_agent_session_state(&mut state);
-    let mut changed = migrate_state_identity(&mut state, &SystemEnv, workspace)?;
-    if migrate_active_team_key(&mut state) {
-        changed = true;
-    }
-    // RM-039-STAT-001 second-round compat (architect verdict 2026-06-22):
-    // for states written before the launch-side `team_key` fix landed,
-    // promote `active_team_key` into root `team_key` so coordinator tick
-    // and status selector agree on which `teams` entry to read/write.
-    if migrate_team_key_to_match_active_team(&mut state) {
-        changed = true;
-    }
+        let text = std::fs::read_to_string(&path)?;
+        let mut state: Value = serde_json::from_str(&text)?;
+        normalize_agent_session_state(&mut state);
+        let mut changed = migrate_state_identity(&mut state, &SystemEnv, workspace)?;
+        if migrate_active_team_key(&mut state) {
+            changed = true;
+        }
+        // RM-039-STAT-001 second-round compat (architect verdict 2026-06-22):
+        // for states written before the launch-side `team_key` fix landed,
+        // promote `active_team_key` into root `team_key` so coordinator tick
+        // and status selector agree on which `teams` entry to read/write.
+        if migrate_team_key_to_match_active_team(&mut state) {
+            changed = true;
+        }
+        (state, changed)
+    };
     if changed {
         save_runtime_state(workspace, &state)?;
     }
@@ -1328,6 +1758,8 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
 }
 
 pub(crate) fn load_runtime_state_without_migrations(workspace: &Path) -> Result<Value, StateError> {
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    recover_update_state_transaction_under_lock(workspace)?;
     let path = runtime_state_path(workspace);
     if !path.exists() {
         return Ok(
@@ -1345,7 +1777,8 @@ pub(crate) fn save_runtime_state_without_migrations(
     state: &Value,
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
-    let _lock = RuntimeLock::acquire(workspace, "state-save-raw", 2.0)?;
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    recover_update_state_transaction_under_lock(workspace)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
