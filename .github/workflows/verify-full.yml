@@ -1,0 +1,32 @@
+name: Verify full workspace
+
+on:
+  pull_request:
+  push:
+    branches:
+      - integration/0.5.x
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Full Rust tests (${{ matrix.os }})
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-14
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Run Rust tests
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
