@@ -1,3 +1,22 @@
+//! ---
+//! purpose: 钉死 worker abnormal-exit 只有 fresh/latest explicit provider error 才经 N32 leader funnel 排队一次；stale 与 dead-only 必须静默。
+//! contract:
+//!   provides:
+//!     - name: T6-fresh-latest-error-leader-funnel
+//!       what: coordinator tick 以 fresh explicit error 通知 leader；重复 fingerprint 去重，stale/dead-only 不通知
+//!     - name: T6-claude-api-error-classification
+//!       what: Claude API-error record 保持 explicit error fact 的单一分类来源
+//!   depends:
+//!     - team_agent::coordinator::Coordinator::tick
+//!     - team_agent::messaging::send_to_leader_receiver
+//!     - team_agent::provider::latest_explicit_error_fact
+//!     - tests::support::hermetic::HermeticTestEnv
+//! boundary:
+//!   - 不改 abnormal-notification 产品路径，不恢复 global error_only scan
+//!   - MessageStore/workspace 必须在 HermeticTestEnv 后创建；不接触 ambient HOME/TMUX/registry
+//! maturity: wired
+//! ---
+//!
 //! #236 abnormal-exit notification contracts.
 //!
 //! User-facing invariant: a worker abnormal-exit notification is deterministic and zero-false-positive:
@@ -7,11 +26,16 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use hermetic_guard::HermeticTestEnv;
 use rusqlite::Connection;
+use serial_test::serial;
 use team_agent::coordinator::types::{ProviderRegistry, WorkspacePath};
 use team_agent::coordinator::Coordinator;
 use team_agent::event_log::EventLog;
@@ -27,8 +51,12 @@ use team_agent::transport::{
 };
 
 #[test]
+#[serial(env)]
 fn notification_abnormal_exit_real_tick_matrix_requires_fresh_latest_error_once() {
-    let workspace = temp_workspace("real-tick-matrix");
+    let case = HermeticTestEnv::enter("notification-abnormal-exit-matrix");
+    case.scrub_tmux();
+    case.assert_no_real_tmux();
+    let workspace = case.workspace("real-tick-matrix");
     let rollout = workspace.join("rollout-w1.jsonl");
     let old = codex_failed_turn("turn-old");
     let new = codex_failed_turn("turn-new");
@@ -90,7 +118,7 @@ fn notification_abnormal_exit_real_tick_matrix_requires_fresh_latest_error_once(
         false
     );
 
-    let dead_workspace = temp_workspace("dead-only");
+    let dead_workspace = case.workspace("dead-only");
     let dead_rollout = dead_workspace.join("rollout-w1.jsonl");
     std::fs::write(&dead_rollout, completed).unwrap();
     seed_abnormal_state(&dead_workspace, &dead_rollout, "dead");
@@ -101,14 +129,15 @@ fn notification_abnormal_exit_real_tick_matrix_requires_fresh_latest_error_once(
         find_event(&dead_events, "abnormal_exit.single_signal_suppressed")["reason"],
         "dead_only"
     );
-
-    std::fs::remove_dir_all(workspace).unwrap();
-    std::fs::remove_dir_all(dead_workspace).unwrap();
 }
 
 #[test]
+#[serial(env)]
 fn notification_abnormal_exit_repeated_fresh_fingerprint_is_deduped_at_leader_funnel() {
-    let workspace = temp_workspace("dedupe-funnel");
+    let case = HermeticTestEnv::enter("notification-abnormal-exit-dedupe");
+    case.scrub_tmux();
+    case.assert_no_real_tmux();
+    let workspace = case.workspace("dedupe-funnel");
     let state = serde_json::json!({
         "active_team_key": "team",
         "team_owner": {"owner_epoch": 1, "leader_session_uuid": "leader-session"},
@@ -157,6 +186,7 @@ fn notification_abnormal_exit_repeated_fresh_fingerprint_is_deduped_at_leader_fu
     );
 
     let store = MessageStore::open(&workspace).unwrap();
+    case.assert_store_under_root(&store);
     let conn = Connection::open(store.db_path()).unwrap();
     let claims: i64 = conn
         .query_row(
@@ -191,8 +221,6 @@ fn notification_abnormal_exit_repeated_fresh_fingerprint_is_deduped_at_leader_fu
         1,
         "duplicate attempt must not create a second queued notification"
     );
-
-    std::fs::remove_dir_all(&workspace).unwrap();
 }
 
 struct NormalRegistry;
@@ -429,17 +457,4 @@ fn codex_completed_turn(id: &str) -> String {
             "params": {"turn": {"id": id, "status": "completed"}}
         })
     )
-}
-
-fn temp_workspace(tag: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "team-agent-notification-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&path).unwrap();
-    path
 }
