@@ -1,4 +1,18 @@
-//!
+//! ---
+//! purpose: MCP update_state selection, runtime persistence, and team_state rendering
+//! contract:
+//!   provides:
+//!     - name: update_state
+//!       what: appends a note, saves runtime state, and returns the rendered state_file
+//!   depends:
+//!     - crate::state::selector
+//!     - crate::state::repository
+//!     - crate::lifecycle::restart::write_team_state
+//! boundary:
+//!   - error context reports raw workspace, resolved workspace, state path, and OS cause
+//!   - persistence ordering and transaction semantics remain unchanged
+//! maturity: wired
+//! ---
 use std::path::Path;
 
 use serde_json::Value;
@@ -49,8 +63,7 @@ pub(crate) fn update_state(
     })?;
     let spec_text = std::fs::read_to_string(&spec_path).map_err(tool_runtime_error)?;
     let spec = crate::model::yaml::loads(&spec_text).map_err(tool_runtime_error)?;
-    let path = crate::lifecycle::restart::write_team_state(spec_workspace, &spec, &state)
-        .map_err(tool_runtime_error)?;
+    let path = write_team_state_with_context(workspace, spec_workspace, &spec, &state)?;
     Ok(update_state_ok(path))
 }
 
@@ -81,12 +94,12 @@ fn update_state_without_spec(
         },
     )
     .map_err(tool_runtime_error)?;
-    let path = crate::lifecycle::restart::write_team_state(
+    let path = write_team_state_with_context(
+        workspace,
         &selected.run_workspace,
         &crate::model::yaml::Value::Null,
         &state,
-    )
-    .map_err(tool_runtime_error)?;
+    )?;
     Ok(update_state_ok(path))
 }
 
@@ -133,6 +146,34 @@ fn update_state_ok(path: std::path::PathBuf) -> ToolOk {
         Value::String(path.to_string_lossy().to_string()),
     );
     ToolOk { fields }
+}
+
+fn write_team_state_with_context(
+    raw_workspace: &Path,
+    resolved_workspace: &Path,
+    spec: &crate::model::yaml::Value,
+    state: &Value,
+) -> Result<std::path::PathBuf, super::super::types::ToolError> {
+    let relative = spec
+        .get("context")
+        .and_then(|value| value.get("state_file"))
+        .and_then(crate::model::yaml::Value::as_str)
+        .unwrap_or("team_state.md");
+    let resolved_state_file = resolved_workspace.join(relative);
+    crate::lifecycle::restart::write_team_state(resolved_workspace, spec, state).map_err(|error| {
+        let error_text = error.to_string();
+        let cause = error_text
+            .strip_prefix("state persistence failed: ")
+            .unwrap_or(&error_text);
+        let cause = cause.strip_prefix("write team_state: ").unwrap_or(cause);
+        let cause = cause.to_string();
+        tool_runtime_error(format!(
+            "raw={} resolved={} state={} cause={cause}",
+            raw_workspace.display(),
+            resolved_workspace.display(),
+            resolved_state_file.display(),
+        ))
+    })
 }
 
 fn is_missing_active_spec(err: &crate::state::StateError) -> bool {
