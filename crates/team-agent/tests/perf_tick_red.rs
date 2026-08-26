@@ -615,6 +615,32 @@ fn perf_total_steady_state_second_tick_is_silent() {
 /// daemon real case).
 #[test]
 fn p7_orphaned_coordinator_self_terminates_after_workspace_delete() {
+    // Linux CI hosts may run a subreaper as the container's PID 1.  In that
+    // topology an orphan is intentionally reparented to the subreaper rather
+    // than literal PID 1, while the frozen coordinator predicate requires the
+    // latter.  Run the real fixture in a private PID namespace so its init is
+    // a stable, controlled PID 1; no product code or oracle is relaxed.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("TEAM_AGENT_P7_IN_PID_NAMESPACE").is_none() {
+        let status = std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--pid", "--mount-proc", "--fork"])
+            .arg(std::env::current_exe().expect("locate perf_tick_red test binary"))
+            .args([
+                "--exact",
+                "p7_orphaned_coordinator_self_terminates_after_workspace_delete",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("TEAM_AGENT_P7_IN_PID_NAMESPACE", "1")
+            .status()
+            .expect("P7 fixture requires unshare for a PID1-owned namespace");
+        assert!(
+            status.success(),
+            "P7 PID1 namespace fixture failed with status {status}"
+        );
+        return;
+    }
+
     let fixtures = [
         ("pid1-like", ParentFixture::Pid1Like),
         ("alternate-parent", ParentFixture::AlternateParent),
@@ -829,9 +855,10 @@ fn spawn_detached_daemon(
 ) -> DaemonHandle {
     let bin = env!("CARGO_BIN_EXE_team-agent");
     let daemon_command = format!(
-        "'{bin}' coordinator --workspace '{}' {} >/dev/null 2>&1 & echo $!; sleep 0.5",
+        "'{bin}' coordinator --workspace '{}' {} >/dev/null 2>&1 & daemon=$!; echo $daemon; while [ ! -f '{}/.team/runtime/coordinator.pid' ]; do sleep 0.05; done; sleep 0.5",
         ws.to_string_lossy(),
         extra.join(" "),
+        ws.to_string_lossy(),
     );
     let line = match fixture {
         ParentFixture::Pid1Like => daemon_command,
