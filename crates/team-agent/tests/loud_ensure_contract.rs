@@ -7,9 +7,9 @@
 //!   depends:
 //!     - tests::support::hermetic::HermeticTestEnv
 //!     - coordinator canonical health/start APIs
-//!   boundary:
-//!     - fixture owns its tmux socket and never touches ambient tmux resources
-//!     - no delivered claim is inferred from queue persistence
+//! boundary:
+//!   - fixture owns its tmux socket and never touches ambient tmux resources
+//!   - no delivered claim is inferred from queue persistence
 //! maturity: wired
 //! ---
 //!

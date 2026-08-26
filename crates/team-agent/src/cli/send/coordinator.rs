@@ -10,14 +10,22 @@
 //!     - crate::coordinator::coordinator_health
 //!     - crate::coordinator::wait_for_coordinator_health
 //!     - crate::messaging
-//!   boundary:
-//!     - 不把 spawn 成功当作 coordinator ready
-//!     - 不把 queued/pending 当作 delivered
+//! boundary:
+//!   - 不把 spawn 成功当作 coordinator ready
+//!   - 不把 queued/pending 当作 delivered
 //! maturity: wired
 //! ---
 
 use super::*;
 
+/// ---
+/// purpose: 识别选定 team 是否存在 topology 冲突并构造发送拒绝
+/// params:
+///   selected: 已解析的 team 及其运行时状态
+///   requested_team: 用户请求的 team 名,用于修复提示
+/// returns: topology 冲突时返回结构化拒绝,否则 None
+/// boundary: 只读取 topology 状态并构造响应,不启动 coordinator、不写消息
+/// ---
 pub(super) fn dirty_topology_refusal_value(
     selected: &crate::state::selector::SelectedTeam,
     requested_team: Option<&str>,
@@ -57,6 +65,15 @@ pub(super) fn dirty_topology_refusal_value(
     }))
 }
 
+/// ---
+/// purpose: 判断发送目标是否命中选定 team 的已知 worker
+/// params:
+///   state: 选定 team 的运行时状态
+///   target: 单播、广播或 fanout 目标
+///   sender: 发送者 ID,广播时排除自身
+/// returns: 目标中至少一个已知 worker 时为 true
+/// boundary: 只读取状态,不解析其他 team 或修改运行时数据
+/// ---
 pub(super) fn target_has_known_worker(state: &Value, target: &MessageTarget, sender: &str) -> bool {
     let Some(agents) = state.get("agents").and_then(Value::as_object) else {
         return false;
@@ -77,6 +94,13 @@ pub(super) struct LoudEnsureResult {
     readiness_timeout: Option<crate::coordinator::HealthReport>,
 }
 
+/// ---
+/// purpose: 在持久化发送前确保目标 team 的 coordinator 通过稳定健康窗口
+/// params:
+///   selected: 已解析的目标 team 及其 workspace
+/// returns: 需要附加到发送响应的 ensure 结果,或无需 ensure 时 None
+/// boundary: 仅对 mutating send 做有界启动与健康等待;不改变 accepted/pending 为 delivered
+/// ---
 pub(super) fn loud_ensure_coordinator(
     selected: &crate::state::selector::SelectedTeam,
 ) -> Result<Option<LoudEnsureResult>, CliError> {
@@ -168,15 +192,33 @@ pub(super) fn loud_ensure_coordinator(
 }
 
 #[cfg(test)]
+/// ---
+/// purpose: 标记当前调用是否处于进程内测试替身
+/// returns: 测试构建中为 true
+/// boundary: 仅供 loud ensure 测试分支选择,不观测或修改 coordinator
+/// ---
 pub(super) fn in_process_unit_test() -> bool {
     true
 }
 
 #[cfg(not(test))]
+/// ---
+/// purpose: 标记当前调用是否处于进程内测试替身
+/// returns: 非测试构建中为 false
+/// boundary: 仅供 loud ensure 测试分支选择,不观测或修改 coordinator
+/// ---
 pub(super) fn in_process_unit_test() -> bool {
     false
 }
 
+/// ---
+/// purpose: 把 coordinator ensure 结果附加到发送响应
+/// params:
+///   value: 待补充字段的发送响应 JSON
+///   ensure: loud ensure 的结果,无 ensure 时保持响应不变
+/// returns: 通过原地修改附加 readiness 或自动重启证据
+/// boundary: 只装饰响应;不改变底层 delivery status 或 delivered 判定
+/// ---
 pub(super) fn append_loud_ensure_fields(value: &mut Value, ensure: Option<&LoudEnsureResult>) {
     let Some(ensure) = ensure else {
         return;
@@ -239,11 +281,25 @@ fn coordinator_health_json(
     })
 }
 
+/// ---
+/// purpose: 将 coordinator 启动报告转换为发送响应中的结构化 JSON
+/// params:
+///   report: coordinator 启动报告
+/// returns: 与生命周期启动摘要一致的 JSON 值
+/// boundary: 只做表示层转换,不启动、停止或检查 coordinator
+/// ---
 pub(super) fn coordinator_start_json(report: &crate::coordinator::StartReport) -> Value {
     let summary = crate::lifecycle::CoordinatorStartSummary::from_start_report(report);
     crate::lifecycle::coordinator_start_summary_value(&summary)
 }
 
+/// ---
+/// purpose: 将 coordinator 健康状态转换为稳定的 wire 字符串
+/// params:
+///   status: coordinator 健康状态枚举
+/// returns: missing、invalid_pid、running 或 stale
+/// boundary: 只做枚举到协议字符串的转换,不执行健康检查
+/// ---
 pub(super) fn coordinator_health_status_wire(
     status: crate::coordinator::CoordinatorHealthStatus,
 ) -> &'static str {
