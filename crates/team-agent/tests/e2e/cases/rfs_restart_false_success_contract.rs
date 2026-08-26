@@ -17,6 +17,7 @@ use crate::support::topology_issue_ids::{
     TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, TMUX_ENDPOINT_SOCKET_CONFLICT,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,7 +43,7 @@ fn rfs_restart_refuses_tmux_endpoint_socket_split_brain_before_ok() {
     write_split_brain_state(&ws, &old_socket, &new_socket);
 
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
-    let body = out.json();
+    let mut body = out.json();
     assert_eq!(
         body.pointer("/ok").and_then(Value::as_bool),
         Some(false),
@@ -54,21 +55,9 @@ fn rfs_restart_refuses_tmux_endpoint_socket_split_brain_before_ok() {
         Some(STATUS_REFUSED_DIRTY_TOPOLOGY),
         "RFS RED: split endpoint state must be classified as refused_dirty_topology, not a generic or successful restart; json={body}"
     );
-    assert_eq!(
-        body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(TMUX_ENDPOINT_SOCKET_CONFLICT),
-        "R1 RED: restart refusal /issues/0/id must name tmux_endpoint_socket_conflict; json={body}"
-    );
-    assert_eq!(
-        body.pointer("/issues/1/id").and_then(Value::as_str),
-        Some(LEADER_RECEIVER_SOCKET_MISMATCH),
-        "R1 RED: restart refusal /issues/1/id must name leader_receiver_socket_mismatch; json={body}"
-    );
-    assert_eq!(
-        body.pointer("/issues/2/id").and_then(Value::as_str),
-        Some(ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET),
-        "R1 RED: restart refusal /issues/2/id must name orphan_team_session_on_ignored_socket; json={body}"
-    );
+    reverse_issue_order(&mut body);
+    assert_issue_id(&body, TMUX_ENDPOINT_SOCKET_CONFLICT, "R1 RED");
+    assert_issue_id(&body, LEADER_RECEIVER_SOCKET_MISMATCH, "R1 RED");
     assert!(
         !restart_completed_ok_after_split(&ws),
         "RFS RED: restart.completed rc=ok must not be written for split-brain state"
@@ -104,7 +93,7 @@ fn rfs_refused_dirty_topology_event_precedes_any_spawn_argv_event() {
 }
 
 #[test]
-fn rfs_diagnose_reports_endpoint_socket_conflict_and_ignored_worker_session() {
+fn rfs_diagnose_reports_endpoint_socket_conflict_and_canonical_readiness() {
     let team_id = "rfs002";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
@@ -117,36 +106,62 @@ fn rfs_diagnose_reports_endpoint_socket_conflict_and_ignored_worker_session() {
     write_split_brain_state(&ws, &old_socket, &new_socket);
 
     let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
-    let body = out.json();
+    let mut body = out.json();
     assert_eq!(
         body.pointer("/ok").and_then(Value::as_bool),
         Some(false),
         "RFS RED: diagnose must mark endpoint/socket split-brain dirty; json={body}"
     );
-    assert_eq!(
-        body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(TMUX_ENDPOINT_SOCKET_CONFLICT),
-        "R3 RED: diagnose /issues/0/id must include tmux_endpoint_socket_conflict; json={body}"
+    reverse_issue_order(&mut body);
+    assert_issue_id(&body, TMUX_ENDPOINT_SOCKET_CONFLICT, "R3 RED");
+    assert_issue_id(&body, LEADER_RECEIVER_SOCKET_MISMATCH, "R3 RED");
+    assert_issue_id(&body, TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, "R3 RED");
+    assert_issue_id(&body, RECENT_COORDINATOR_SESSION_MISSING, "R3 RED");
+}
+
+#[test]
+fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
+    let team_id = "rfs008";
+    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
+    let ws_path = ws.path().to_str().unwrap();
+    let qs = quick_start_fake(&ws, team_id);
+    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    let old_socket = unique_socket("rfs008-old");
+    let new_socket = unique_socket("rfs008-new");
+    let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
+    let session_name = state_session_name(&ws);
+    create_dummy_session(&old_socket, &session_name, ws.path().to_path_buf());
+    assert_team_session_live_on_endpoint(&old_socket, &session_name);
+    create_dummy_session(&new_socket, "rfs008-leader-side", ws.path().to_path_buf());
+    write_split_brain_state(&ws, &old_socket, &new_socket);
+
+    let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
+    let mut body = out.json();
+    reverse_issue_order(&mut body);
+    assert_issue_id(
+        &body,
+        TMUX_ENDPOINT_SOCKET_CONFLICT,
+        "RFS orphan positive control",
     );
-    assert_eq!(
-        body.pointer("/issues/1/id").and_then(Value::as_str),
-        Some(LEADER_RECEIVER_SOCKET_MISMATCH),
-        "R3 RED: diagnose /issues/1/id must include leader_receiver_socket_mismatch; json={body}"
+    assert_issue_id(
+        &body,
+        LEADER_RECEIVER_SOCKET_MISMATCH,
+        "RFS orphan positive control",
     );
-    assert_eq!(
-        body.pointer("/issues/2/id").and_then(Value::as_str),
-        Some(ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET),
-        "R3 RED: diagnose /issues/2/id must include orphan_team_session_on_ignored_socket; json={body}"
+    assert_issue_id(
+        &body,
+        ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET,
+        "RFS orphan positive control",
     );
-    assert_eq!(
-        body.pointer("/issues/3/id").and_then(Value::as_str),
-        Some(TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET),
-        "R3 RED: diagnose /issues/3/id must include team_session_missing_on_canonical_socket; json={body}"
+    assert_issue_id(
+        &body,
+        TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET,
+        "RFS orphan positive control",
     );
-    assert_eq!(
-        body.pointer("/issues/4/id").and_then(Value::as_str),
-        Some(RECENT_COORDINATOR_SESSION_MISSING),
-        "R3 RED: diagnose /issues/4/id must include recent_coordinator_session_missing; json={body}"
+    assert_issue_id(
+        &body,
+        RECENT_COORDINATOR_SESSION_MISSING,
+        "RFS orphan positive control",
     );
 }
 
@@ -165,14 +180,13 @@ fn rfs_topology_invariant_blocks_same_pane_id_only_when_socket_matches() {
 
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
     let body = out.json();
-    assert_eq!(
-        body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(TMUX_ENDPOINT_SOCKET_CONFLICT),
-        "RFS RED: topology gate must reject the endpoint conflict itself. Bare pane-id collision text is insufficient and misleading when %0 exists on both sockets; json={body}"
+    assert_issue_id(
+        &body,
+        TMUX_ENDPOINT_SOCKET_CONFLICT,
+        "RFS RED: topology gate must reject the endpoint conflict itself. Bare pane-id collision text is insufficient and misleading when %0 exists on both sockets",
     );
-    assert_ne!(
-        body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(LEADER_PANE_ID_COLLIDES_WITH_AGENT),
+    assert!(
+        !issue_ids(&body).contains(LEADER_PANE_ID_COLLIDES_WITH_AGENT),
         "RFS RED: same bare pane id on different sockets must not be reported as LeaderPaneIdCollidesWithAgent; compare transport-typed bindings instead; json={body}"
     );
 }
@@ -207,9 +221,8 @@ fn rfs_same_bare_pane_id_on_different_sockets_is_not_a_4_tuple_collision() {
 
     let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
     let body = out.json();
-    assert_ne!(
-        body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(LEADER_PANE_ID_COLLIDES_WITH_AGENT),
+    assert!(
+        !issue_ids(&body).contains(LEADER_PANE_ID_COLLIDES_WITH_AGENT),
         "R5 guard: same bare %0 on different sockets is not a 4-tuple collision; diagnose must compare endpoint+session+window+pane_id, json={body}"
     );
 }
@@ -292,8 +305,7 @@ fn rfs_no_session_with_any_context_marker_still_refuses_without_allow_fresh() {
                 || body.pointer("/status").and_then(Value::as_str)
                     == Some(REASON_REFUSED_NO_SESSION_ID)
                 || body.pointer("/status").and_then(Value::as_str) == Some(STATUS_RESUME_NOT_READY)
-                || body.pointer("/issues/0/id").and_then(Value::as_str)
-                    == Some(REASON_REFUSED_NO_SESSION_ID),
+                || issue_ids(&body).contains(REASON_REFUSED_NO_SESSION_ID),
             "R7/R8 guard: refusal must name missing session context for marker {marker}; json={body}"
         );
     }
@@ -435,6 +447,69 @@ fn state_socket(ws: &TestWorkspace) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn state_session_name(ws: &TestWorkspace) -> String {
+    ws.read_state()
+        .get("session_name")
+        .and_then(Value::as_str)
+        .filter(|session| !session.is_empty())
+        .expect("state.session_name must be present for the RFS fixture")
+        .to_string()
+}
+
+fn assert_team_session_live_on_endpoint(endpoint: &str, session: &str) {
+    let listed = Command::new("tmux")
+        .args(["-S", endpoint, "list-sessions", "-F", "#{session_name}"])
+        .output()
+        .unwrap_or_else(|error| panic!("list-sessions {endpoint}: {error}"));
+    assert!(
+        listed.status.success(),
+        "RFS orphan positive control: list-sessions must prove endpoint server is alive; endpoint={endpoint} session={session} stdout={} stderr={}",
+        String::from_utf8_lossy(&listed.stdout),
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .any(|listed_session| listed_session == session),
+        "RFS orphan positive control: list-sessions must contain state.session_name; endpoint={endpoint} session={session} stdout={}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+
+    let has_session = Command::new("tmux")
+        .args(["-S", endpoint, "has-session", "-t", session])
+        .output()
+        .unwrap_or_else(|error| panic!("has-session {endpoint} {session}: {error}"));
+    assert!(
+        has_session.status.success(),
+        "RFS orphan positive control: has-session must prove state.session_name is alive on old endpoint; endpoint={endpoint} session={session} stdout={} stderr={}",
+        String::from_utf8_lossy(&has_session.stdout),
+        String::from_utf8_lossy(&has_session.stderr)
+    );
+}
+
+fn issue_ids(body: &Value) -> BTreeSet<&str> {
+    body.pointer("/issues")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|issue| issue.get("id").and_then(Value::as_str))
+        .collect()
+}
+
+fn assert_issue_id(body: &Value, expected: &str, context: &str) {
+    assert!(
+        issue_ids(body).contains(expected),
+        "{context}: issue id set must contain {expected}; json={body}"
+    );
+}
+
+fn reverse_issue_order(body: &mut Value) {
+    body.pointer_mut("/issues")
+        .and_then(Value::as_array_mut)
+        .expect("RFS issue oracle mutation requires an issues array")
+        .reverse();
 }
 
 fn restart_completed_ok_after_split(ws: &TestWorkspace) -> bool {
