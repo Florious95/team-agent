@@ -1,3 +1,15 @@
+//! ---
+//! purpose: shared caller-identity environment rehoming for leader tests
+//! contract:
+//!   provides:
+//!     - caller identity scrubbing and panic-safe environment restoration
+//!   depends:
+//!     - std process environment and filesystem primitives
+//!   boundary:
+//!     - test-only; restores every saved key and removes only owned roots
+//! maturity: wired
+//! ---
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
