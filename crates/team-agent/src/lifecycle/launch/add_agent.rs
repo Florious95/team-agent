@@ -11,6 +11,7 @@
 //!   depends:
 //!     - crate::lifecycle::lock
 //!     - crate::lifecycle::restart
+//!     - crate::lifecycle::restart::remove
 //!     - crate::compiler
 //!     - crate::state::selector
 //!     - crate::state::projection
@@ -21,7 +22,7 @@
 //!   - canonical agents 行上的单一 owner token 是唯一 reservation 真相
 //!   - compile 在锁外；reserve/finalize/rollback 各自只持短 lifecycle lock
 //!   - 起席一律走 restart 的 start_reserved_agent_at_paths，本文件不直接 spawn
-//!   - 回滚只移除 token owner 的 row/spec delta，不恢复全量快照
+//!   - 回滚只移除 token owner 的 row/spec delta，并复用既有 lifecycle tombstone 挡住 stale resurrection
 //! maturity: wired
 //! ---
 use std::collections::{BTreeMap, BTreeSet};
@@ -636,6 +637,18 @@ fn rollback_reserved_agent_locked(
             .and_then(serde_json::Value::as_object_mut)
         {
             agents.remove(agent_id.as_str());
+        }
+        crate::lifecycle::restart::remove::mark_agent_retired_in_state(&mut state, agent_id)?;
+        if let Some(entry) = state
+            .get_mut("agent_lifecycle")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|entries| entries.get_mut(agent_id.as_str()))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            entry.insert(
+                "reason".to_string(),
+                serde_json::json!("reservation-rollback"),
+            );
         }
         crate::state::repository::StateRepository::new(run_workspace)
             .save(

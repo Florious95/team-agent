@@ -9,7 +9,7 @@
 //!     - crate::platform::file_lock
 //!     - crate::event_log::EventLog
 //! boundary:
-//!   - roster stub 合并保留 canonical lifecycle reservation owner token，但不创建独立 registry
+//!   - 普通 stale writer 必须服从 canonical lifecycle reservation owner token 的有无与取值
 //!   - provider/network 调用禁止进入持久化路径
 //! maturity: wired
 //! ---
@@ -914,6 +914,7 @@ fn merge_agent_projection(
                     if !fields.is_empty() {
                         return Err(save_conflict(projection, agent_id, fields));
                     }
+                    sync_lifecycle_reservation_token_from_latest(existing.get_mut(), latest_agent);
                 }
                 if !skip_capture_backfill || !skip_capture_backfill_agent_ids.contains(agent_id) {
                     backfill_capture_fields(existing.get_mut(), latest_agent);
@@ -990,6 +991,22 @@ fn roster_stub(latest_agent: &Value) -> Option<Value> {
         }
     }
     (!stub.is_empty()).then(|| Value::Object(stub))
+}
+
+fn sync_lifecycle_reservation_token_from_latest(incoming_agent: &mut Value, latest_agent: &Value) {
+    const FIELD: &str = "_lifecycle_reservation_token";
+    let latest_token = latest_agent
+        .get(FIELD)
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty());
+    let Some(incoming) = incoming_agent.as_object_mut() else {
+        return;
+    };
+    if let Some(latest_token) = latest_token {
+        incoming.insert(FIELD.to_string(), Value::String(latest_token.to_string()));
+    } else {
+        incoming.remove(FIELD);
+    }
 }
 
 /// 0.4.6 tuple-atomic backfill (restart-persist-capture-contract-audit.md):
@@ -2019,13 +2036,8 @@ mod tests {
                 "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
             },
         });
-        save_runtime_state_with_lifecycle_topology_authority(
-            &ws,
-            &incoming,
-            "team-a",
-            &["target"],
-        )
-        .unwrap();
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
+            .unwrap();
         let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
         assert!(
             target.get("pane_id").is_none(),

@@ -270,6 +270,46 @@ impl Case {
         }
         serde_json::Map::new()
     }
+
+    fn save_state_with_reservation_token(&self, agent_id: &str, token: Option<&str>) {
+        let mut stale: Value =
+            serde_json::from_slice(&std::fs::read(self.state_path()).expect("read runtime state"))
+                .unwrap();
+        if let Some(row) = stale.pointer_mut(&format!("/agents/{agent_id}")) {
+            let row = row.as_object_mut().unwrap();
+            match token {
+                Some(token) => {
+                    row.insert(
+                        "_lifecycle_reservation_token".to_string(),
+                        Value::String(token.to_string()),
+                    );
+                }
+                None => {
+                    row.remove("_lifecycle_reservation_token");
+                }
+            }
+        }
+        if let Some(teams) = stale.get_mut("teams").and_then(Value::as_object_mut) {
+            for team in teams.values_mut() {
+                if let Some(row) = team.pointer_mut(&format!("/agents/{agent_id}")) {
+                    let row = row.as_object_mut().unwrap();
+                    match token {
+                        Some(token) => {
+                            row.insert(
+                                "_lifecycle_reservation_token".to_string(),
+                                Value::String(token.to_string()),
+                            );
+                        }
+                        None => {
+                            row.remove("_lifecycle_reservation_token");
+                        }
+                    }
+                }
+            }
+        }
+        team_agent::state::persist::save_runtime_state(&self.workspace, &stale)
+            .expect("generic stale save");
+    }
 }
 
 impl Drop for Case {
@@ -640,6 +680,7 @@ fn r4_reservation_owner_commit_preserves_peers() {
             )
         });
         wait_for_file(&ready);
+        case.save_state_with_reservation_token("f1", None);
         let f2 = case.clone_seat("f2");
         let peer_before = case.team_agent_rows().get("f2").cloned().unwrap();
         let source_before_finalize = source_snapshot(&case);
@@ -653,7 +694,14 @@ fn r4_reservation_owner_commit_preserves_peers() {
     });
     assert_eq!(f1.get("ok").and_then(Value::as_bool), Some(true));
     assert_eq!(f2.get("ok").and_then(Value::as_bool), Some(true));
+    case.save_state_with_reservation_token("f1", Some("stale-owner"));
     let rows = case.team_agent_rows();
+    assert!(
+        rows.get("f1")
+            .and_then(|row| row.get("_lifecycle_reservation_token"))
+            .is_none(),
+        "ordinary stale save must not restore a finalized reservation owner"
+    );
     assert_eq!(rows.get("f2"), Some(&peer_before));
     let source_after = source_snapshot(&case);
     assert_eq!(source_after.0, source_before.0);
