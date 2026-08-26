@@ -163,6 +163,36 @@
         assert!(!root.exists(), "fixture drop must remove its owned root");
     }
 
+    #[test]
+    #[serial_test::serial(env)]
+    fn update_state_fixture_panic_restores_env_and_allows_next_sibling() {
+        let previous_tmpdir = std::env::var_os("TMPDIR");
+        let mut panicked_root = None;
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let fixture = McpStateFixture::new("panic");
+            panicked_root = Some(fixture.root.clone());
+            panic!("fixture panic tooth");
+        }));
+        assert!(panic_result.is_err());
+        assert_eq!(std::env::var_os("TMPDIR"), previous_tmpdir);
+        assert!(!panicked_root.unwrap().exists());
+
+        let fixture = McpStateFixture::new("after-panic");
+        let tools = TeamOrchestratorTools::with_identity(
+            &fixture.workspace,
+            Some(AgentId::new("leader")),
+            None,
+        );
+        let result = tools
+            .update_state("after panic")
+            .expect("sibling must retain assertions");
+        let result = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            PathBuf::from(result["state_file"].as_str().unwrap()),
+            fixture.state_file("team_state.md")
+        );
+    }
+
     fn assert_error_names_paths(message: &str, raw: &Path, resolved: &Path, state_file: &Path) {
         assert!(message.contains(&format!("raw={}", raw.display())), "raw path missing: {message}");
         assert!(message.contains(&format!("resolved={}", resolved.display())), "resolved path missing: {message}");

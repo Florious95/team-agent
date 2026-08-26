@@ -230,12 +230,39 @@ pub(crate) fn persist_internal_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Deref;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn workspace(tag: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("ta-send-persist-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
-        path
+    struct TestWorkspace(PathBuf);
+
+    impl Deref for TestWorkspace {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn workspace(tag: &str) -> TestWorkspace {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let base = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else {
+            PathBuf::from("/tmp")
+        };
+        let path = base.join(format!(
+            "ta-send-persist-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        TestWorkspace(path)
     }
 
     #[test]
