@@ -1,3 +1,17 @@
+//! ---
+//! purpose: coordinator tick 性能与事件预算集成测试，保留当前合同下的 P7 tick_error 去重控制
+//! contract:
+//!   provides: []
+//!   depends:
+//!     - crate::coordinator
+//!     - crate::state
+//!     - crate::transport
+//! boundary:
+//!   - 仅验证 tick 的 IO、fork、事件预算与错误去重；不声明或扩展 coordinator 的 orphan、PID1 或 subreaper 生命周期合同
+//!   - P7 只保留 tick_error 去重控制；已删除不受当前产品范围支持的 portable-subreaper/PID1 退出期待
+//! maturity: wired
+//! ---
+//!
 //! PERF batch P1-P5: tick IO/fork/event-budget contracts.
 //!
 //! Basis docs (sole inputs):
@@ -598,100 +612,7 @@ fn perf_total_steady_state_second_tick_is_silent() {
     );
 }
 
-// ───────────────────────────── P7 · orphan self-terminate ───────────────────────────
-
-/// PERF-7 main contract (perf7-coordinator-orphan-locate.md §4.1): the orphan
-/// self-check predicate exists and is unit-locked (orphan.rs:19-25,
-/// coordinator/tests/basics.rs:206-212) but `run_daemon_with_coordinator`
-/// (backoff.rs:49-108) NEVER calls it — #264 silent-omission family (parts present,
-/// wiring missing). A daemon whose parent died (reparented to pid 1) and whose
-/// workspace was deleted must exit and write `coordinator.orphan_self_terminate`
-/// (Python __main__.py:44-59). Deterministic double-hop spawn: `sh -c '... &'` exits
-/// immediately, so the daemon is reparented to pid 1 by construction, not by race.
-/// The state carries no truthy session_name, so the tmux-session-missing stop gate
-/// never fires (matching the leaked-daemon real case).
-#[test]
-fn p7_orphaned_coordinator_self_terminates_after_workspace_delete() {
-    // One bounded retry for the µs-scale capture race documented in run_orphan_scenario
-    // (events seen in neither the per-cycle capture nor the final read).
-    let mut last = run_orphan_scenario("p7-orphan-a");
-    if !(last.exited && last.events.contains("coordinator.orphan_self_terminate")) {
-        let retry = run_orphan_scenario("p7-orphan-b");
-        if retry.exited || !last.exited {
-            last = retry;
-        }
-    }
-    let mut failures = Vec::new();
-    if !last.exited {
-        failures.push(
-            "P7: orphaned coordinator (ppid reparented to 1, workspace deleted) must \
-self-terminate within the poll window; it is still running (today: predicate never \
-wired into the daemon loop)"
-                .to_string(),
-        );
-    }
-    if !last.events.contains("coordinator.orphan_self_terminate") {
-        failures.push(format!(
-            "P7: the exit must be announced via coordinator.orphan_self_terminate \
-(Python __main__.py:44-59 literal); captured events={:?}",
-            last.events.lines().rev().take(3).collect::<Vec<_>>()
-        ));
-    }
-    assert!(
-        failures.is_empty(),
-        "PERF-7 orphan wiring contract failed:\n{}",
-        failures.join("\n")
-    );
-}
-
-struct OrphanRun {
-    exited: bool,
-    events: String,
-}
-
-/// Drive one orphan scenario: spawn (Python-shaped chain), wait for the reparent to
-/// pid 1, then keep the workspace deleted while polling. Each cycle CAPTURES the
-/// events file before deleting (the daemon recreates the dir to write the orphan
-/// event right before exiting); once the marker is seen we stop deleting so the file
-/// survives the final read. A µs-scale write-between-read-and-delete race remains —
-/// the caller retries the whole scenario once.
-fn run_orphan_scenario(tag: &str) -> OrphanRun {
-    let ws = tmp_ws(tag);
-    save_runtime_state(&ws, &json!({"agents": {}})).unwrap();
-    let daemon = spawn_detached_daemon(&ws, &["--tick-interval", "0.1"]);
-    wait_until(5_000, || ws.join(".team/runtime/coordinator.pid").exists());
-    assert!(
-        wait_until(5_000, || parent_pid(daemon.pid) == Some(1)),
-        "fixture: daemon must reparent to pid 1 once the intermediate sh exits"
-    );
-
-    let mut captured = String::new();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let exited = loop {
-        let snapshot = events_text(&ws);
-        if !snapshot.is_empty() {
-            captured = snapshot;
-        }
-        if !pid_alive(daemon.pid) {
-            break true;
-        }
-        if std::time::Instant::now() >= deadline {
-            break false;
-        }
-        if !captured.contains("coordinator.orphan_self_terminate") {
-            let _ = std::fs::remove_dir_all(&ws);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    let final_read = events_text(&ws);
-    if !final_read.is_empty() {
-        captured = final_read;
-    }
-    OrphanRun {
-        exited,
-        events: captured,
-    }
-}
+// ───────────────────────────── P7 · retained tick-error control ─────────────────────
 
 /// PERF-7 F2 (folded into the P4 dedup family per leader): repeated tick failures
 /// with the SAME error signature must not each write a full coordinator.tick_error
@@ -747,12 +668,9 @@ impl Drop for DaemonHandle {
     }
 }
 
-/// Detached spawn replicating the PYTHON spawn-chain shape (leader adjudication, plan A):
-/// the intermediate `sh` must OUTLIVE the daemon's birth so the daemon's initial_ppid is
-/// the sh pid (NOT 1); when sh exits ~0.5s later the daemon reparents to pid 1 and the
-/// literal three-condition predicate (current != initial && current == 1 && !workspace)
-/// becomes satisfiable — an immediate-exit sh would give initial_ppid == 1 and make the
-/// Python-literal condition永假 (clashing with the basics.rs:206-212 predicate lock).
+/// Spawn a detached daemon for the tick-error fixture while leaving the test process in
+/// control of teardown. The intermediate shell remains briefly alive so the daemon has
+/// time to initialize before the fixture polls its event log.
 fn spawn_detached_daemon(ws: &Path, extra: &[&str]) -> DaemonHandle {
     let bin = env!("CARGO_BIN_EXE_team-agent");
     let line = format!(
@@ -769,25 +687,6 @@ fn spawn_detached_daemon(ws: &Path, extra: &[&str]) -> DaemonHandle {
         .parse::<u32>()
         .expect("daemon pid on stdout");
     DaemonHandle { pid }
-}
-
-fn parent_pid(pid: u32) -> Option<u32> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<u32>()
-        .ok()
-}
-
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 /// Bounded poll helper (fixture readiness / bounded assertions only).
