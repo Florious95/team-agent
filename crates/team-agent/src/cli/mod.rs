@@ -1,3 +1,16 @@
+//! ---
+//! purpose: CLI command surface and stable JSON emission for team-agent diagnostics
+//! contract:
+//!   provides:
+//!     - name: doctor
+//!       what: Runs host maintenance checks and emits the stable diagnostic JSON surface
+//!   depends:
+//!     - crate::coordinator::health
+//!     - crate::cli::diagnose
+//! boundary:
+//!   - Does not own coordinator, lifecycle, or transport state
+//! maturity: wired
+//! ---
 //!
 //! step 14b · cli — `team-agent <subcommand>` clap 命令面(真相源 `cli/`)。
 //!
@@ -4089,6 +4102,20 @@ pub mod diagnose_port {
 
     ///
     /// `runtime.doctor(spec)` + schema 注入(`cmd_doctor` 默认分支)。
+    /// ---
+    /// purpose: Combine workspace, profile, coordinator, tmux, and grok-slot facts into the host doctor report
+    /// contract:
+    ///   provides:
+    ///     - name: doctor_host_report
+    ///       what: Projects coordinator health and host checks into stable stdout JSON and exit mapping
+    ///   depends:
+    ///     - crate::coordinator::coordinator_health
+    ///     - crate::cli::grok_slot_report
+    ///     - crate::cli::diagnose::append_registry_channel_unbound_to_report
+    /// boundary:
+    ///   - Host maintenance health is independent from leader attachment; comms attachment is gated separately
+    /// maturity: wired
+    /// ---
     pub fn doctor(workspace: &Path, spec: Option<&Path>) -> Result<Value, CliError> {
         let tmux_path = which_path("tmux");
         let tmux_installed = tmux_path.is_some();
