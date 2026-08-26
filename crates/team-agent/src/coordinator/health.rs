@@ -123,8 +123,16 @@ const COORDINATOR_READINESS_BUDGET: Duration = Duration::from_secs(2);
 const COORDINATOR_READINESS_POLL: Duration = Duration::from_millis(100);
 const COORDINATOR_READINESS_CONSECUTIVE_SAMPLES: u8 = 3;
 
-/// Wait for a newly spawned coordinator to be stably healthy.
-///
+/// ---
+/// purpose: 等待 newly spawned coordinator 在 bounded window 内稳定健康
+/// params:
+///   workspace: coordinator runtime workspace
+///   expected_pid: start report 返回的精确子进程 PID
+/// returns: 连续三次 canonical coordinator_health 且 PID 匹配则返回健康报告；超时返回最后一次健康报告
+/// boundary:
+///   - 只读轮询，不改变 coordinator 或 delivery 状态
+///   - timeout 保留最后 mismatch，禁止把 spawn 成功冒充 ready
+/// ---
 /// Each sample is the canonical `coordinator_health` report. A successful
 /// result therefore proves process liveness, pid/metadata/schema agreement,
 /// and binary identity for the expected child, rather than merely observing
