@@ -41,8 +41,8 @@ use super::StateError;
 // `save_team_scoped_state(` tokens that the governance scanner counts.
 #[allow(unused_imports)]
 use super::persist::{
-    load_runtime_state as helper_load_workspace,
-    runtime_state_path as helper_workspace_path, save_runtime_state as helper_write_root,
+    load_runtime_state as helper_load_workspace, runtime_state_path as helper_workspace_path,
+    save_runtime_state as helper_write_root,
     save_runtime_state_reapplying_after_conflict as helper_write_root_reapply,
     save_runtime_state_with_deleted_agents as helper_write_root_with_deleted_agents,
     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
@@ -90,14 +90,15 @@ impl<'a> StateRepository<'a> {
     /// Load the canonical workspace document without running read-time
     /// migrations. `None` preserves the legacy raw-reader distinction between
     /// a missing file and a present empty/default document.
-    pub fn load_workspace_if_exists_without_migrations(
-        &self,
-    ) -> Result<Option<Value>, StateError> {
+    pub fn load_workspace_if_exists_without_migrations(&self) -> Result<Option<Value>, StateError> {
+        super::persist::recover_update_state_transaction(self.workspace)?;
         if !helper_workspace_path(self.workspace).exists() {
             return Ok(None);
         }
         let text = std::fs::read_to_string(helper_workspace_path(self.workspace))?;
-        serde_json::from_str(&text).map(Some).map_err(StateError::from)
+        serde_json::from_str(&text)
+            .map(Some)
+            .map_err(StateError::from)
     }
 
     ///
@@ -137,6 +138,36 @@ impl<'a> StateRepository<'a> {
         F: FnOnce(&mut Value),
     {
         route_reapply(self.workspace, intent, state, reapply)
+    }
+
+    /// ---
+    /// purpose: commit an MCP state mutation together with its rendered artifact
+    /// params: intent identifies the writer while closures derive the two next artifacts
+    /// returns: the committed runtime value after persistence-layer readback
+    /// errors: rejects non-MCP intent and propagates transaction failures
+    /// ---
+    pub(crate) fn commit_update_state_artifact<M, R>(
+        &self,
+        intent: StateWriteIntent<'_>,
+        artifact_path: &Path,
+        mutate: M,
+        render: R,
+    ) -> Result<Value, StateError>
+    where
+        M: FnOnce(&mut Value),
+        R: FnOnce(&Value) -> Result<Vec<u8>, StateError>,
+    {
+        if !matches!(intent, StateWriteIntent::McpUpdateStateNote { .. }) {
+            return Err(StateError::SaveFailed(
+                "update-state artifact transaction requires McpUpdateStateNote intent".to_string(),
+            ));
+        }
+        super::persist::commit_runtime_state_and_artifact(
+            self.workspace,
+            artifact_path,
+            mutate,
+            render,
+        )
     }
 }
 
@@ -308,7 +339,12 @@ fn route_direct(
         // StartAgent - the launch add-agent tail lands via
         // `save_team_scoped_state_with_lifecycle_topology_authority` today.
         StateWriteIntent::StartAgent { team_key, .. } => {
-            helper_write_team_scoped_with_lifecycle_topology_authority(workspace, state, team_key, &[])
+            helper_write_team_scoped_with_lifecycle_topology_authority(
+                workspace,
+                state,
+                team_key,
+                &[],
+            )
         }
         // StopAgent uses the legacy helper family
         // `save_team_scoped_state_with_lifecycle_topology_authority`,
@@ -464,9 +500,7 @@ fn reapply_scope(intent: &StateWriteIntent<'_>) -> ReapplyScope {
                 owner_team_id: Some(_),
             }
             | StateWriteIntent::CoordinatorTick { .. }
-            | StateWriteIntent::McpUpdateStateNote {
-                team_key: Some(_),
-            }
+            | StateWriteIntent::McpUpdateStateNote { team_key: Some(_) }
     ) {
         ReapplyScope::Team
     } else {

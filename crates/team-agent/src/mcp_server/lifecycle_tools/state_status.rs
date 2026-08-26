@@ -3,17 +3,18 @@
 //! contract:
 //!   provides:
 //!     - name: update_state
-//!       what: appends a note, saves runtime state, and returns the rendered state_file
+//!       what: appends a note and commits runtime state with its rendered state artifact
 //!   depends:
 //!     - crate::state::selector
 //!     - crate::state::repository
 //!     - crate::lifecycle::restart::write_team_state
 //! boundary:
 //!   - error context reports raw workspace, resolved workspace, state path, and OS cause
-//!   - persistence ordering and transaction semantics remain unchanged
+//!   - success reads back both artifacts; rejection preserves their previous bytes
 //! maturity: wired
 //! ---
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -21,6 +22,8 @@ use crate::model::ids::TeamKey;
 
 use super::super::helpers::{ensure_object, object_fields, tool_runtime_error};
 use super::super::{ToolOk, ToolResult};
+
+static RENDER_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// ---
 /// purpose: append an MCP note to runtime state and render team_state.md
@@ -44,20 +47,6 @@ pub(crate) fn update_state(
         }
         Err(err) => return Err(tool_runtime_error(err)),
     };
-    let mut state = selected.state;
-    ensure_object(&mut state);
-    append_note(&mut state, note);
-    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
-        crate::state::repository::StateWriteIntent::McpUpdateStateNote {
-            team_key: Some(&selected.team_key),
-        },
-        &state,
-        |latest| {
-            ensure_object(latest);
-            append_note(latest, note);
-        },
-    )
-    .map_err(tool_runtime_error)?;
     let spec_path = selected
         .spec_path
         .ok_or_else(|| tool_runtime_error("active team spec not found for update_state"))?;
@@ -69,8 +58,15 @@ pub(crate) fn update_state(
     })?;
     let spec_text = std::fs::read_to_string(&spec_path).map_err(tool_runtime_error)?;
     let spec = crate::model::yaml::loads(&spec_text).map_err(tool_runtime_error)?;
-    let path = write_team_state_with_context(workspace, spec_workspace, &spec, &state)?;
-    Ok(update_state_ok(path))
+    commit_update_state(
+        workspace,
+        &selected.run_workspace,
+        spec_workspace,
+        &selected.team_key,
+        &spec,
+        note,
+        false,
+    )
 }
 
 fn update_state_without_spec(
@@ -84,29 +80,200 @@ fn update_state_without_spec(
         crate::state::selector::SelectorMode::RuntimeOnly,
     )
     .map_err(tool_runtime_error)?;
-    let mut state = selected.state;
-    ensure_object(&mut state);
-    seed_legacy_team_key(&mut state, &selected.run_workspace, &selected.team_key);
-    append_note(&mut state, note);
-    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
-        crate::state::repository::StateWriteIntent::McpUpdateStateNote {
-            team_key: Some(&selected.team_key),
-        },
-        &state,
-        |latest| {
-            ensure_object(latest);
-            seed_legacy_team_key(latest, &selected.run_workspace, &selected.team_key);
-            append_note(latest, note);
-        },
-    )
-    .map_err(tool_runtime_error)?;
-    let path = write_team_state_with_context(
+    commit_update_state(
         workspace,
         &selected.run_workspace,
+        &selected.run_workspace,
+        &selected.team_key,
         &crate::model::yaml::Value::Null,
-        &state,
-    )?;
-    Ok(update_state_ok(path))
+        note,
+        true,
+    )
+}
+
+fn commit_update_state(
+    raw_workspace: &Path,
+    runtime_workspace: &Path,
+    resolved_workspace: &Path,
+    team_key: &str,
+    spec: &crate::model::yaml::Value,
+    note: &str,
+    seed_legacy: bool,
+) -> ToolResult {
+    let state_file = state_file_path(resolved_workspace, spec);
+    validate_state_file_target(raw_workspace, resolved_workspace, &state_file)?;
+    crate::state::repository::StateRepository::new(runtime_workspace)
+        .commit_update_state_artifact(
+            crate::state::repository::StateWriteIntent::McpUpdateStateNote {
+                team_key: Some(team_key),
+            },
+            &state_file,
+            |state| mutate_update_note(state, runtime_workspace, team_key, note, seed_legacy),
+            |state| {
+                let projected = selected_state_for_render(state, team_key);
+                render_state_file(runtime_workspace, spec, &projected)
+            },
+        )
+        .map_err(|error| {
+            state_write_error(raw_workspace, resolved_workspace, &state_file, error)
+        })?;
+    Ok(update_state_ok(state_file))
+}
+
+fn state_file_path(resolved_workspace: &Path, spec: &crate::model::yaml::Value) -> PathBuf {
+    let relative = spec
+        .get("context")
+        .and_then(|value| value.get("state_file"))
+        .and_then(crate::model::yaml::Value::as_str)
+        .unwrap_or("team_state.md");
+    resolved_workspace.join(relative)
+}
+
+fn validate_state_file_target(
+    raw_workspace: &Path,
+    resolved_workspace: &Path,
+    state_file: &Path,
+) -> Result<(), super::super::types::ToolError> {
+    let relative = state_file
+        .strip_prefix(resolved_workspace)
+        .map_err(|error| state_write_error(raw_workspace, resolved_workspace, state_file, error))?;
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(state_write_error(
+            raw_workspace,
+            resolved_workspace,
+            state_file,
+            "state file escapes resolved workspace",
+        ));
+    }
+    let canonical_workspace = std::fs::canonicalize(resolved_workspace)
+        .map_err(|error| state_write_error(raw_workspace, resolved_workspace, state_file, error))?;
+    let mut ancestor = state_file.parent().ok_or_else(|| {
+        state_write_error(
+            raw_workspace,
+            resolved_workspace,
+            state_file,
+            "state file has no parent",
+        )
+    })?;
+    while !ancestor.exists() {
+        ancestor = ancestor.parent().ok_or_else(|| {
+            state_write_error(
+                raw_workspace,
+                resolved_workspace,
+                state_file,
+                "state file parent has no existing ancestor",
+            )
+        })?;
+    }
+    let canonical_ancestor = std::fs::canonicalize(ancestor)
+        .map_err(|error| state_write_error(raw_workspace, resolved_workspace, state_file, error))?;
+    if !canonical_ancestor.starts_with(&canonical_workspace) {
+        return Err(state_write_error(
+            raw_workspace,
+            resolved_workspace,
+            state_file,
+            "state file parent escapes resolved workspace",
+        ));
+    }
+    if state_file.exists() {
+        let canonical_state = std::fs::canonicalize(state_file).map_err(|error| {
+            state_write_error(raw_workspace, resolved_workspace, state_file, error)
+        })?;
+        if !canonical_state.starts_with(&canonical_workspace) {
+            return Err(state_write_error(
+                raw_workspace,
+                resolved_workspace,
+                state_file,
+                "state file escapes resolved workspace",
+            ));
+        }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state_file)
+            .map_err(|error| {
+                state_write_error(raw_workspace, resolved_workspace, state_file, error)
+            })?;
+        #[cfg(test)]
+        if std::env::var_os("TEAM_AGENT_TEST_UPDATE_STATE_FAIL_PREFLIGHT_AFTER_OPEN").is_some() {
+            return Err(state_write_error(
+                raw_workspace,
+                resolved_workspace,
+                state_file,
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected preflight failure after open",
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn render_state_file(
+    runtime_workspace: &Path,
+    spec: &crate::model::yaml::Value,
+    state: &Value,
+) -> Result<Vec<u8>, crate::state::StateError> {
+    let seq = RENDER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_root = crate::model::paths::runtime_dir(runtime_workspace)
+        .join(format!(".update-state-render-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&staging_root)?;
+    let result = crate::lifecycle::restart::write_team_state(&staging_root, spec, state)
+        .map_err(|error| crate::state::StateError::SaveFailed(error.to_string()))
+        .and_then(|path| std::fs::read(path).map_err(crate::state::StateError::from));
+    let _ = std::fs::remove_dir_all(&staging_root);
+    result
+}
+
+fn mutate_update_note(
+    state: &mut Value,
+    runtime_workspace: &Path,
+    team_key: &str,
+    note: &str,
+    seed_legacy: bool,
+) {
+    ensure_object(state);
+    let has_team = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .is_some_and(|teams| teams.contains_key(team_key));
+    if has_team {
+        let root_is_target = crate::state::projection::team_state_key(state) == team_key;
+        if root_is_target {
+            append_note(state, note);
+        }
+        if let Some(team) = state
+            .get_mut("teams")
+            .and_then(Value::as_object_mut)
+            .and_then(|teams| teams.get_mut(team_key))
+        {
+            ensure_object(team);
+            append_note(team, note);
+        }
+    } else {
+        if seed_legacy {
+            seed_legacy_team_key(state, runtime_workspace, team_key);
+        }
+        append_note(state, note);
+    }
+}
+
+fn selected_state_for_render(state: &Value, team_key: &str) -> Value {
+    if state
+        .get("teams")
+        .and_then(Value::as_object)
+        .is_some_and(|teams| teams.contains_key(team_key))
+    {
+        crate::state::projection::project_top_level_view(state, team_key)
+    } else {
+        state.clone()
+    }
 }
 
 fn append_note(state: &mut Value, note: &str) {
@@ -144,7 +311,21 @@ fn seed_legacy_team_key(state: &mut Value, run_workspace: &Path, team_key: &str)
     }
 }
 
-fn update_state_ok(path: std::path::PathBuf) -> ToolOk {
+fn state_write_error(
+    raw_workspace: &Path,
+    resolved_workspace: &Path,
+    state_file: &Path,
+    cause: impl std::fmt::Display,
+) -> super::super::types::ToolError {
+    tool_runtime_error(format!(
+        "raw={} resolved={} state={} cause={cause}",
+        raw_workspace.display(),
+        resolved_workspace.display(),
+        state_file.display(),
+    ))
+}
+
+fn update_state_ok(path: PathBuf) -> ToolOk {
     let mut fields = serde_json::Map::new();
     fields.insert("ok".to_string(), Value::Bool(true));
     fields.insert(
@@ -152,34 +333,6 @@ fn update_state_ok(path: std::path::PathBuf) -> ToolOk {
         Value::String(path.to_string_lossy().to_string()),
     );
     ToolOk { fields }
-}
-
-fn write_team_state_with_context(
-    raw_workspace: &Path,
-    resolved_workspace: &Path,
-    spec: &crate::model::yaml::Value,
-    state: &Value,
-) -> Result<std::path::PathBuf, super::super::types::ToolError> {
-    let relative = spec
-        .get("context")
-        .and_then(|value| value.get("state_file"))
-        .and_then(crate::model::yaml::Value::as_str)
-        .unwrap_or("team_state.md");
-    let resolved_state_file = resolved_workspace.join(relative);
-    crate::lifecycle::restart::write_team_state(resolved_workspace, spec, state).map_err(|error| {
-        let error_text = error.to_string();
-        let cause = error_text
-            .strip_prefix("state persistence failed: ")
-            .unwrap_or(&error_text);
-        let cause = cause.strip_prefix("write team_state: ").unwrap_or(cause);
-        let cause = cause.to_string();
-        tool_runtime_error(format!(
-            "raw={} resolved={} state={} cause={cause}",
-            raw_workspace.display(),
-            resolved_workspace.display(),
-            resolved_state_file.display(),
-        ))
-    })
 }
 
 fn is_missing_active_spec(err: &crate::state::StateError) -> bool {
