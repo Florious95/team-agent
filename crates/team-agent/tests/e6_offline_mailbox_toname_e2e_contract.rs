@@ -11,6 +11,18 @@
 //! queues one target `team.db` row as `queued_until_leader_attach`. Later
 //! `attach-leader` replays that same message id exactly once to the new leader
 //! pane.
+//!
+//! ---
+//! purpose: E6 real-CLI mailbox contract with an isolated tmux fixture
+//! contract:
+//!   provides:
+//!     - hermetic workspace, HOME, and exact tmux endpoint ownership
+//!   depends:
+//!     - tests/support/hermetic.rs
+//!   boundary:
+//!     - never uses ambient serial-test locks or the default tmux server
+//! maturity: wired
+//! ---
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -23,13 +35,16 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde_json::Value;
-use serial_test::{file_serial, serial};
+use serial_test::serial;
+
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     let case = E6Case::new("real-cli-mailbox");
     case.write_fake_team("twitter-autopub", "fake-worker");
@@ -371,23 +386,22 @@ fn capture_pane(tmux_socket: &str, pane: &str) -> String {
 }
 
 struct E6Case {
-    root: PathBuf,
+    env: HermeticTestEnv,
     home: PathBuf,
     target_workspace: PathBuf,
     sender_workspace: PathBuf,
     team_dir: PathBuf,
     team_key: String,
+    tmux_socket: PathBuf,
 }
 
 impl E6Case {
     fn new(tag: &str) -> Self {
+        let env = HermeticTestEnv::enter(&format!("e6-{tag}"));
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::var_os("TEAM_AGENT_TEST_TMPDIR")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-            .unwrap_or_else(std::env::temp_dir);
-        let root = base.join(format!("ta-e6-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = env
+            .root()
+            .join(format!("ta-e6-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&root).expect("create e6 test root");
         let home = root.join("home");
         let target_workspace = root.join("target-ws");
@@ -397,7 +411,6 @@ impl E6Case {
             std::fs::create_dir_all(dir).expect("create e6 test dir");
         }
         Self {
-            root,
             home,
             target_workspace: std::fs::canonicalize(target_workspace)
                 .expect("canonical target workspace"),
@@ -409,6 +422,8 @@ impl E6Case {
             // don't collide on a fixed key like "mail059". Session
             // names derived from team_key inherit the uniqueness.
             team_key: format!("mail059-{}-{n}", std::process::id()),
+            env,
+            tmux_socket: short_tmux_socket(&format!("e6-{tag}")),
         }
     }
 
@@ -466,7 +481,11 @@ impl E6Case {
         identity: Option<&str>,
     ) -> Output {
         let mut command = Command::new(bin());
-        command.args(args).current_dir(cwd).env("HOME", &self.home);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("TMUX", format!("{},12345,0", self.tmux_socket.display()));
         for key in [
             "TEAM_AGENT_LEADER_PANE_ID",
             "TEAM_AGENT_LEADER_SESSION_UUID",
@@ -518,7 +537,27 @@ impl E6Case {
             "E6 e2e RED setup: tmux new-window leader failed; stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
+        self.register_pane_pid(&String::from_utf8_lossy(&output.stdout).trim());
+        self.env.register_owned_tmux_socket(&self.tmux_socket);
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn register_pane_pid(&self, pane: &str) {
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                self.tmux_socket.to_str().expect("tmux socket utf8"),
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{pane_pid}",
+            ])
+            .output()
+            .expect("tmux pane pid");
+        if let Ok(pid) = String::from_utf8_lossy(&output.stdout).trim().parse() {
+            self.env.register_owned_pid(pid);
+        }
     }
 }
 
@@ -530,6 +569,7 @@ impl Drop for E6Case {
         // sockets — the fallback only kills the endpoint recorded in
         // the state file THIS fixture wrote.
         for workspace in [&self.target_workspace, &self.sender_workspace] {
+            register_persisted_pid(&self.env, workspace);
             let shutdown = Command::new(bin())
                 .args([
                     "shutdown",
@@ -540,36 +580,31 @@ impl Drop for E6Case {
                     "--json",
                 ])
                 .env("HOME", &self.home)
+                .env("TMUX", format!("{},12345,0", self.tmux_socket.display()))
                 .output();
-            if !matches!(&shutdown, Ok(out) if out.status.success()) {
-                if let Some(socket) = read_persisted_tmux_socket(workspace) {
-                    if let Some(socket_str) = socket.to_str() {
-                        let _ = Command::new("tmux")
-                            .args(["-S", socket_str, "kill-server"])
-                            .output();
-                    }
-                    let _ = std::fs::remove_file(&socket);
-                }
+            if !matches!(&shutdown, Ok(output) if output.status.success()) {
+                let _ = Command::new("tmux")
+                    .args([
+                        "-S",
+                        self.tmux_socket.to_str().expect("tmux socket utf8"),
+                        "kill-server",
+                    ])
+                    .output();
             }
         }
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
-fn read_persisted_tmux_socket(workspace: &Path) -> Option<PathBuf> {
+fn register_persisted_pid(env: &HermeticTestEnv, workspace: &Path) {
     let state_path = workspace.join(".team/runtime/state.json");
-    let text = std::fs::read_to_string(&state_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let socket = value
-        .get("tmux_socket")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            value
-                .get("tmux_endpoint")
-                .and_then(serde_json::Value::as_str)
-        })?;
-    if socket.is_empty() {
-        return None;
+    let Ok(_) = std::fs::read_to_string(&state_path) else {
+        return;
+    };
+    let pid_path = workspace.join(".team/runtime/coordinator.pid");
+    if let Some(pid) = std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|pid| pid.trim().parse().ok())
+    {
+        env.register_owned_pid(pid);
     }
-    Some(PathBuf::from(socket))
 }
