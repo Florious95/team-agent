@@ -19,6 +19,20 @@
 //!   checks observable twin-discrimination cells; nested diagnostic/control subtrees do not become
 //!   behavior evidence merely by containing the binding tokens. Provider launchers retain their
 //!   additional hermetic PATH shim and exact argv-log obligations.
+//!
+//! ---
+//! purpose: Keep documented launch/send smoke failures causally attributable
+//! contract:
+//!   provides:
+//!     - name: gate-hole launch and delivery teeth
+//!       what: Exercises the public path and durable worker/result obligations
+//!   depends:
+//!     - crate::framework::wait_for_delivery_or_panic
+//!     - messaging rows/events and fake-worker result store
+//! boundary:
+//!   - Test-only evidence and command coverage; no production delivery behavior
+//! maturity: wired
+//! ---
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -133,7 +147,10 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         .as_str()
         .expect("TOOTH-1: send must return message_id")
         .to_string();
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        &message_id,
+        "coder",
         "documented-path message delivered to coder",
         || {
             message_truth(ws.path(), &message_id)
@@ -212,7 +229,10 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         .to_string();
     let fake_worker_summary = format!("Fake worker handled message {message_id}");
 
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        &message_id,
+        "a",
         "message row recipient=a with delivered truth",
         || {
             message_truth(ws.path(), &message_id)
@@ -220,7 +240,10 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         },
         Duration::from_secs(10),
     );
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        &message_id,
+        "a",
         "fake worker received message token and reported a result",
         || {
             result_truth_for_message(ws.path(), &message_id).is_some_and(|truth| {

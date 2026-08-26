@@ -7,6 +7,21 @@
 //!
 //! User-visible contract: sending to worker `a`, or to a named leader binding,
 //! can never land in another worker's pane just because a state pane id is stale.
+//!
+//! ---
+//! purpose: Prove worker delivery target ownership and preserve physical timeout evidence
+//! contract:
+//!   provides:
+//!     - name: wleak delivery cases
+//!       what: Distinguishes stale, foreign, and physically valid tmux targets
+//!   depends:
+//!     - crate::framework::TestWorkspace
+//!     - messaging delivery events and team.db
+//!     - per-team tmux socket
+//! boundary:
+//!   - Test-only safety and metadata contracts; no production delivery edits
+//! maturity: wired
+//! ---
 
 use crate::framework::*;
 use crate::support::source_walker::source_tree;
@@ -47,7 +62,10 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("generated message id");
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        mid,
+        "a",
         "message reaches terminal status",
         || {
             matches!(
@@ -204,7 +222,10 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
         start.stderr
     );
 
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        mid,
+        "a",
         "same stale-blocked message id delivered after worker repair",
         || message_status(&ws, mid).as_deref() == Some("delivered"),
         Duration::from_secs(8),
@@ -259,7 +280,10 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("generated message id");
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        mid,
+        "a",
         "message.delivered event",
         || delivered_event(&ws, mid).is_some(),
         Duration::from_secs(6),
@@ -580,6 +604,7 @@ impl TmuxServerGuard {
             socket.contains("/ta-"),
             "test must only guard a private team-agent tmux socket, got {socket:?}"
         );
+        ws.register_owned_tmux_socket(PathBuf::from(&socket).as_path());
         Self { socket }
     }
 }

@@ -3,6 +3,23 @@
 //! framework uses `std::process::Command`, `serde_json`, and the existing
 //! `team-agent` binary built by `cargo test`.
 //!
+//! ---
+//! purpose: Hermetic macOS E2E fixture ownership and durable delivery timeout evidence
+//! contract:
+//!   provides:
+//!     - name: TestWorkspace
+//!       what: Owns exact coordinator and tmux resources and reaps them on drop
+//!     - name: wait_for_delivery_or_panic
+//!       what: Persists message, coordinator, event, and physical target facts before timeout panic
+//!   depends:
+//!     - crate::platform::process
+//!     - sqlite messages/events store
+//!     - tmux per-team endpoint
+//! boundary:
+//!   - Test-only fixture and evidence surface; no delivery product behavior
+//! maturity: wired
+//! ---
+//!
 //! All test helpers panic on programmer error (wrong binary path, write
 //! failure on a temp dir we own) and return `Result` / printable diagnostics
 //! when the SUT misbehaves.
@@ -14,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use rusqlite::Connection;
 use serde_json::Value;
 
 // ----------------------------------------------------------------------------
@@ -100,9 +118,22 @@ impl TestWorkspace {
             "refusing to register ambient TMUX endpoint as test-owned: {}",
             socket.display()
         );
+        let private_tmp_socket = socket.parent().is_some_and(|parent| {
+            let parent = normalize_existing_path(parent);
+            parent.parent() == Some(Path::new("/private/tmp"))
+                && parent
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("tmux-"))
+        }) && socket
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ta-"));
         assert!(
-            socket.is_absolute() && socket.exists() && socket.starts_with(&self.path),
-            "tmux endpoint must already exist under its owning E2E workspace: socket={} workspace={}",
+            socket.is_absolute()
+                && socket.exists()
+                && (socket.starts_with(&self.path) || private_tmp_socket),
+            "tmux endpoint must already exist under its owning E2E workspace or private ta-* root: socket={} workspace={}",
             socket.display(),
             self.path.display()
         );
@@ -883,6 +914,278 @@ pub fn wait_for_or_panic<F: FnMut() -> bool>(description: &str, predicate: F, ti
         "timed out after {:?} waiting for: {description}",
         timeout
     );
+}
+
+/// Poll a delivery predicate and preserve enough evidence to classify a
+/// timeout after `TestWorkspace` teardown removes the live fixture. The
+/// snapshot intentionally lives outside the workspace and is keyed by the
+/// exact message id; it is therefore safe for the controlled concurrent lane.
+/// ---
+/// purpose: Poll a message delivery obligation and retain timeout evidence
+/// contract:
+///   provides:
+///     - name: wait_for_delivery_or_panic
+///       what: Binds a delivery timeout to its row, coordinator, event, and physical target facts
+///   depends:
+///     - TestWorkspace-owned runtime files and tmux endpoint
+/// boundary:
+///   - Test-only timeout evidence; it does not alter delivery state
+/// maturity: wired
+/// ---
+pub fn wait_for_delivery_or_panic<F: FnMut() -> bool>(
+    ws: &TestWorkspace,
+    message_id: &str,
+    recipient: &str,
+    description: &str,
+    predicate: F,
+    timeout: Duration,
+) {
+    if wait_for(predicate, timeout, Duration::from_millis(100)) {
+        return;
+    }
+    let evidence = delivery_timeout_snapshot(ws, message_id, recipient, description, timeout);
+    let path = write_delivery_timeout_snapshot(&evidence);
+    panic!(
+        "timed out after {:?} waiting for: {description}; durable delivery evidence={}",
+        timeout,
+        path.display()
+    );
+}
+
+fn delivery_timeout_snapshot(
+    ws: &TestWorkspace,
+    message_id: &str,
+    recipient: &str,
+    description: &str,
+    timeout: Duration,
+) -> Value {
+    let state = ws.state_json_path();
+    let state_value = std::fs::read_to_string(&state)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .unwrap_or(Value::Null);
+    let db_path = ws.path().join(".team/runtime/team.db");
+    let row = Connection::open(&db_path)
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "select recipient, status, error, delivery_attempts, delivered_at \
+                 from messages where message_id = ?1",
+                [message_id],
+                |row| {
+                    Ok(serde_json::json!({
+                        "message_id": message_id,
+                        "recipient": row.get::<_, String>(0)?,
+                        "status": row.get::<_, String>(1)?,
+                        "error": row.get::<_, Option<String>>(2)?,
+                        "delivery_attempts": row.get::<_, i64>(3)?,
+                        "delivered_at": row.get::<_, Option<String>>(4)?,
+                    }))
+                },
+            )
+            .ok()
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "message_id": message_id,
+                "recipient": null,
+                "status": null,
+                "error": null,
+                "delivery_attempts": null,
+                "delivered_at": null,
+            })
+        });
+    let all_events = std::fs::read_to_string(ws.events_jsonl_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    let events = all_events
+        .iter()
+        .rev()
+        .take(64)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let message_events = all_events
+        .iter()
+        .filter(|event| {
+            event.get("message_id").and_then(Value::as_str) == Some(message_id)
+                || event
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|task_id| task_id == message_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let coordinator_pid = read_pid(&ws.coordinator_pid_file());
+    let coordinator_meta = read_json_file(&ws.path().join(".team/runtime/coordinator.json"));
+    let heartbeat = read_json_file(&ws.path().join(".team/runtime/coordinator_tick.json"));
+    let coordinator_boot_id = heartbeat
+        .get("boot_id")
+        .cloned()
+        .or_else(|| coordinator_meta.get("boot_id").cloned())
+        .unwrap_or(Value::Null);
+    let socket = state_value
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let session = state_value
+        .get("session_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let target = state_value
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let pane_id = target.get("pane_id").and_then(Value::as_str).unwrap_or("");
+    let pane_pid = target.get("pane_pid").cloned().unwrap_or(Value::Null);
+    let window = target
+        .get("window_name")
+        .and_then(Value::as_str)
+        .unwrap_or(recipient);
+    let physical = tmux_target_snapshot(socket, session, window, pane_id);
+    let resources = ws
+        .owned_tmux_sockets
+        .lock()
+        .ok()
+        .map(|sockets| {
+            sockets
+                .iter()
+                .map(|socket| socket.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "schema_version": "team-agent-e2e-delivery-timeout-v1",
+        "message_id": message_id,
+        "recipient": recipient,
+        "description": description,
+        "timeout_ms": timeout.as_millis(),
+        "row": row,
+        "coordinator": {
+            "pid": coordinator_pid,
+            "boot_id": coordinator_boot_id,
+            "heartbeat": heartbeat,
+            "tick": heartbeat.get("coordinator_tick_iteration_count").cloned().unwrap_or(Value::Null),
+            "health": coordinator_meta,
+        },
+        "events": events,
+        "message_events": message_events,
+        "target": {
+            "endpoint": socket,
+            "tmux_endpoint": socket,
+            "session": session,
+            "target_session": session,
+            "window": window,
+            "target_window": window,
+            "pane": pane_id,
+            "target_pane_id": pane_id,
+            "pane_pid": pane_pid,
+            "target_pane_pid": pane_pid,
+            "resolved_from": target.get("resolved_from").cloned().unwrap_or(Value::Null),
+            "agent_state": target,
+            "physical": physical,
+        },
+        "fixture": {
+            "workspace": ws.path(),
+            "coordinator_pid_file": ws.coordinator_pid_file(),
+            "owned_tmux_sockets": resources,
+            "post_delivery_obligations": {
+                "report_result": "not_created_before_delivery_wait_completed",
+                "collect": "not_created_before_delivery_wait_completed",
+            },
+        },
+    })
+}
+
+fn read_json_file(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null)
+}
+
+fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str) -> Value {
+    if socket.is_empty() {
+        return serde_json::json!({"liveness": "unknown", "capture": null});
+    }
+    let target = if pane_id.is_empty() {
+        format!("{session}:{window}")
+    } else {
+        pane_id.to_string()
+    };
+    let out = Command::new("tmux")
+        .args([
+            "-S",
+            socket,
+            "list-panes",
+            "-t",
+            &target,
+            "-F",
+            "#{pane_id}|#{pane_pid}|#{pane_current_path}",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let (liveness, tuple, stderr) = match out {
+        Ok(output) => (
+            if output.status.success() {
+                "live"
+            } else {
+                "missing"
+            },
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ),
+        Err(error) => ("unknown", String::new(), error.to_string()),
+    };
+    let capture = Command::new("tmux")
+        .args(["-S", socket, "capture-pane", "-t", &target, "-p"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    serde_json::json!({
+        "liveness": liveness,
+        "tuple": tuple,
+        "stderr": stderr,
+        "capture": capture,
+    })
+}
+
+fn write_delivery_timeout_snapshot(snapshot: &Value) -> PathBuf {
+    let root = std::env::var_os("TEAM_AGENT_E2E_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if Path::new("/private/tmp").is_dir() {
+                PathBuf::from("/private/tmp/team-agent-e2e-timeouts")
+            } else {
+                std::env::temp_dir().join("team-agent-e2e-timeouts")
+            }
+        });
+    std::fs::create_dir_all(&root).expect("create durable E2E evidence directory");
+    let message_id = snapshot["message_id"].as_str().unwrap_or("unknown");
+    let filename = format!(
+        "delivery-timeout-{}-{}-{}.json",
+        std::process::id(),
+        WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed),
+        message_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>()
+    );
+    let path = root.join(filename);
+    let encoded = serde_json::to_vec_pretty(snapshot).expect("serialize delivery timeout evidence");
+    std::fs::write(&path, encoded).expect("write durable E2E evidence");
+    path
 }
 
 // ----------------------------------------------------------------------------
