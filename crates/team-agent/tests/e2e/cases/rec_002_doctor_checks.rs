@@ -18,13 +18,49 @@ fn rec_002_doctor_checks() {
             "--json",
         ],
     );
-    assert!(out.is_success(), "doctor stderr={}", out.stderr);
+    assert!(
+        out.is_success(),
+        "unattached host doctor must remain healthy; stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", true);
+    assert_json_field(&j, "/error", &serde_json::Value::Null);
     assert_json_field_eq_str(&j, "/coordinator/status", "running");
     assert_json_field_eq_bool(&j, "/coordinator/schema_ok", true);
     assert_json_field_eq_bool(&j, "/tmux/installed", true);
     assert_json_field_eq_bool(&j, "/profile_smoke/ok", true);
+    assert_json_field_eq_bool(&j, "/grok_slot/readable", true);
+    assert_json_field_eq_bool(&j, "/grok_slot/consistent", true);
+    assert!(
+        j["issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue == "leader_not_attached")),
+        "unattached host doctor must retain leader_not_attached issue: {j}"
+    );
+    assert!(
+        j["suggested_repairs"].as_array().is_some_and(|repairs| repairs
+            .iter()
+            .any(|repair| repair["issue"] == "leader_not_attached")),
+        "unattached host doctor must retain the attachment repair: {j}"
+    );
+
+    let comms = run_ta(
+        &ws,
+        &[
+            "doctor",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--gate",
+            "comms",
+            "--json",
+        ],
+    );
+    assert!(!comms.is_success(), "unattached comms gate must fail: {comms:?}");
+    let comms_json = comms.json();
+    assert_json_field_eq_bool(&comms_json, "/ok", false);
+    assert_json_field_eq_str(&comms_json, "/checks/receiver_binding/status", "fail");
 
     let _ = run_ta(
         &ws,

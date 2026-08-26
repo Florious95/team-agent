@@ -394,7 +394,9 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     let Some(object) = report.as_object_mut() else {
         return;
     };
-    object.insert("ok".to_string(), Value::Bool(false));
+    // Host maintenance health is independent from leader transport
+    // attachment. Keep the actionable issue/repair visible, while the
+    // explicit `doctor --gate comms` path remains the hard attachment gate.
     let mut issues = object
         .get("issues")
         .and_then(Value::as_array)
