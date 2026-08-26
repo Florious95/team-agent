@@ -1,4 +1,21 @@
+//! ---
+//! purpose: hermetic claim-leader caller identity outcome contract
+//! contract:
+//!   provides:
+//!     - deterministic empty-caller and non-live-caller refusal assertions
+//!   depends:
+//!     - crate::leader::claim_leader
+//!     - rehomed_env::RehomedTestEnv
+//!     - shared serial(env) test lane
+//!   boundary:
+//!     - test-only; does not change lease production behavior
+//! maturity: wired
+//! ---
+
 use super::*;
+
+#[path = "rehomed_env.rs"]
+mod rehomed_env;
 
 // =====================================================================
 // 7. 五条 lease 路径签名 + 返回 LeaseResult 形态(unimplemented → RED)
@@ -70,17 +87,31 @@ fn attach_leader_binds_pane_advances_epoch_and_persists() {
 // claim_leader:无 ambiguous incident → 走 claim_lease_no_incident 直接 acquire/CAS。
 // 现 unimplemented → RED;锁住返回 LeaseResult。
 #[test]
+#[serial_test::serial(env)]
 fn claim_leader_returns_lease_result() {
-    let ws = std::env::temp_dir().join(format!("ta_rs_claim_{}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let env = rehomed_env::RehomedTestEnv::enter("claim-empty");
+    let ws = env.workspace("claim");
     let r = claim_leader(&ws, None, false).unwrap();
-    // 无 caller pane(测试进程无 TMUX_PANE)→ refused not_in_tmux_pane(__init__.py:616-618)。
-    if std::env::var_os("TMUX_PANE").is_none() {
-        assert!(!r.ok);
-        assert_eq!(r.status, LeaseStatus::Refused);
-        assert_eq!(r.reason, Some(LeaseReason::NotInTmuxPane));
-        assert!(r.action.is_some());
-    }
+    // RehomedTestEnv clears every caller identity source, so this remains
+    // NotInTmuxPane even when the test process itself runs inside tmux.
+    assert!(!r.ok);
+    assert_eq!(r.status, LeaseStatus::Refused);
+    assert_eq!(r.reason, Some(LeaseReason::NotInTmuxPane));
+    assert!(r.action.is_some());
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn claim_leader_returns_caller_not_live_for_non_live_pane() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let env = rehomed_env::RehomedTestEnv::enter("claim-nonlive");
+    let _caller = EnvGuard::apply(&[("TEAM_AGENT_LEADER_PANE_ID", Some("%nonlive"))]);
+    let ws = env.workspace("claim");
+    let r = claim_leader(&ws, None, false).unwrap();
+    assert!(!r.ok);
+    assert_eq!(r.status, LeaseStatus::Refused);
+    assert_eq!(r.reason, Some(LeaseReason::CallerPaneNotLive));
 }
 
 // write_lease_dual_state:同一锁内双写(C17,__init__.py:588-596);unimplemented → RED。
