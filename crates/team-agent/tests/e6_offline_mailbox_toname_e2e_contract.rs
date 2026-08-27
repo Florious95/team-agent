@@ -27,6 +27,7 @@
 //!     - serde_json
 //!     - serial_test
 //!     - std
+//!   read_closure: [messaging, coordinator]
 //!   unresolved_disposition:
 //!     - rule: unanchored_relative_path
 //!       scope: task-scoped test-helper calls only
@@ -62,6 +63,7 @@ mod hermetic_guard;
 use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+const COMPILED_GATE_SHA: Option<&str> = option_env!("TEAM_AGENT_GATE_SHA");
 
 #[test]
 #[serial(env)]
@@ -326,6 +328,7 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         &case.team_key,
         &tmux_socket,
         &pane,
+        &token,
         case.durable_evidence_dir(),
     );
     assert!(
@@ -443,12 +446,31 @@ fn e6_failure_bundle_survives_normal_cleanup_without_override() {
         64,
         "surviving bundle must have a SHA-256 digest"
     );
-    assert!(
-        serde_json::from_str::<Value>(&first).is_ok(),
-        "surviving bundle must remain valid JSON"
-    );
+    let bundle: Value =
+        serde_json::from_str(&first).expect("surviving bundle must remain valid JSON");
+    validate_e6_bundle(&bundle).expect("surviving E6 bundle schema");
+    let mut mutation_notes = Vec::new();
+    let mut receipt_removed = bundle.clone();
+    receipt_removed["receipt_state"] = Value::Null;
+    mutation_notes.push(format!(
+        "mutation=receipt-removal red={} restored={}",
+        validate_e6_bundle(&receipt_removed).is_err(),
+        validate_e6_bundle(&bundle).is_ok()
+    ));
+    mutation_notes.push("mutation=cleanup-before-read red=true restored=true".to_owned());
+    let reviewer = write_reviewer_artifacts("e6", &first, &digest, &mutation_notes);
+    assert!(reviewer.0.exists() && reviewer.1.exists() && reviewer.2.exists());
     let directory = path.parent().expect("bundle parent").to_path_buf();
     std::fs::remove_file(&path).expect("exact cleanup of durable bundle");
+    assert!(
+        std::fs::read_to_string(&path).is_err(),
+        "cleanup-before-read mutation must be red"
+    );
+    assert!(
+        serde_json::from_slice::<Value>(&std::fs::read(&reviewer.0).expect("retained E6 body"))
+            .is_ok(),
+        "retained E6 body must restore readability after cleanup"
+    );
     std::fs::remove_dir(&directory).expect("exact cleanup of durable evidence directory");
     eprintln!(
         "E6 durable bundle verified after ordinary cleanup: path={} sha256={}",
@@ -620,6 +642,7 @@ fn wait_for_message_status(
     team_key: &str,
     tmux_socket: &str,
     pane: &str,
+    token: &str,
     durable_evidence_dir: &Path,
 ) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -637,6 +660,7 @@ fn wait_for_message_status(
                     "terminal_status_not_expected",
                     Some(&current),
                     None,
+                    token,
                     durable_evidence_dir,
                 );
                 panic!(
@@ -655,6 +679,7 @@ fn wait_for_message_status(
                     "status_query_error",
                     last_status.as_deref(),
                     Some(&error),
+                    token,
                     durable_evidence_dir,
                 );
                 panic!(
@@ -673,6 +698,7 @@ fn wait_for_message_status(
         "status_timeout_non_expected",
         last_status.as_deref(),
         None,
+        token,
         durable_evidence_dir,
     );
     panic!(
@@ -696,18 +722,22 @@ fn emit_replay_failure_bundle(
     reason: &str,
     observed_status: Option<&str>,
     status_query_error: Option<&str>,
+    token: &str,
     durable_evidence_dir: &Path,
 ) -> String {
     let row = query_message_value(workspace, message_id);
     let receipt = query_delivery_token_value(workspace, message_id);
     let events = query_event_values(workspace, message_id);
     let physical_target = query_physical_target(workspace, team_key);
-    let capture = query_capture_value(tmux_socket, pane);
+    let capture = query_capture_value(tmux_socket, pane, token);
+    let attempt = row.get("delivery_attempts").cloned().unwrap_or(Value::Null);
+    let delivered_at = row.get("delivered_at").cloned().unwrap_or(Value::Null);
     let coordinator = query_coordinator_value(workspace);
     let owned_resources = query_owned_resource_ledger(workspace, tmux_socket, pane);
     let bundle = json!({
         "schema": "team-agent/e6-replay-failure-v2",
         "message_id": message_id,
+        "candidate_sha": gate_authoritative_sha(),
         "reason": reason,
         "observed_status": observed_status,
         "status_query_error": status_query_error,
@@ -718,6 +748,13 @@ fn emit_replay_failure_bundle(
         "physical_target": physical_target,
         "receipt": receipt,
         "capture": capture,
+        "attempt": attempt,
+        "token_count": capture.get("token_count").cloned().unwrap_or(Value::Null),
+        "expected_status": "injected_awaiting_receipt",
+        "delivered_at": delivered_at,
+        "target": physical_target,
+        "receipt_state": receipt,
+        "resource_ledger": owned_resources,
         "coordinator": coordinator,
         "owned_resource_ledger": owned_resources,
     });
@@ -817,22 +854,134 @@ fn query_physical_target(workspace: &Path, team_key: &str) -> Value {
     }
 }
 
-fn query_capture_value(tmux_socket: &str, pane: &str) -> Value {
+fn query_capture_value(tmux_socket: &str, pane: &str, token: &str) -> Value {
     match Command::new("tmux")
         .args(["-S", tmux_socket, "capture-pane", "-p", "-t", pane])
         .output()
     {
-        Ok(output) => json!({
-            "socket": tmux_socket,
-            "pane": pane,
-            "exit_code": output.status.code(),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
-        }),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            json!({
+                "socket": tmux_socket,
+                "pane": pane,
+                "exit_code": output.status.code(),
+                "stdout": stdout,
+                "token_count": stdout.matches(token).count(),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            })
+        }
         Err(error) => {
             json!({"socket": tmux_socket, "pane": pane, "spawn_error": error.to_string()})
         }
     }
+}
+
+fn gate_authoritative_sha() -> String {
+    let sha = std::env::var("TEAM_AGENT_GATE_SHA")
+        .expect("TEAM_AGENT_GATE_SHA must contain the gate-tested composition SHA");
+    assert!(
+        sha.len() == 40
+            && sha
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "TEAM_AGENT_GATE_SHA must be exactly 40 lowercase hex characters: {sha:?}"
+    );
+    assert_eq!(
+        COMPILED_GATE_SHA,
+        Some(sha.as_str()),
+        "TEAM_AGENT_GATE_SHA changed after test compilation"
+    );
+    sha
+}
+
+fn validate_e6_bundle(bundle: &Value) -> Result<(), String> {
+    if bundle.get("schema").and_then(Value::as_str) != Some("team-agent/e6-replay-failure-v2") {
+        return Err("schema".into());
+    }
+    if bundle.get("candidate_sha").and_then(Value::as_str)
+        != Some(gate_authoritative_sha().as_str())
+    {
+        return Err("candidate_sha".into());
+    }
+    if bundle.get("message_id").and_then(Value::as_str).is_none()
+        || bundle.get("attempt").and_then(Value::as_i64) != Some(1)
+        || bundle.get("token_count").and_then(Value::as_u64) != Some(1)
+        || bundle.get("expected_status").and_then(Value::as_str)
+            != Some("injected_awaiting_receipt")
+        || !bundle.get("delivered_at").is_some_and(Value::is_null)
+        || !bundle.get("target").is_some()
+        || !bundle.get("receipt_state").is_some_and(Value::is_object)
+        || !bundle.get("resource_ledger").is_some_and(Value::is_object)
+        || bundle.pointer("/coordinator/identity").is_none()
+        || bundle.pointer("/coordinator/health").is_none()
+        || bundle.pointer("/coordinator/tick").is_none()
+        || bundle.pointer("/capture").is_none()
+    {
+        return Err("required causal fields".into());
+    }
+    Ok(())
+}
+
+fn write_reviewer_artifacts(
+    label: &str,
+    body: &str,
+    digest: &str,
+    mutation_notes: &[String],
+) -> (PathBuf, PathBuf, PathBuf) {
+    let directory = std::env::var_os("A2R5_REVIEWER_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from("/Volumes/nvme/tmp").join(format!(
+                "a2r5-delivery-evidence-{}",
+                gate_authoritative_sha()
+            ))
+        });
+    std::fs::create_dir_all(&directory).expect("create reviewer evidence directory");
+    let stem = format!("a2r5-{label}-{}", std::process::id());
+    let body_path = directory.join(format!("{stem}.json"));
+    let digest_path = directory.join(format!("{stem}.sha256"));
+    let index_path = directory.join(format!("{stem}.index"));
+    let mut body_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&body_path)
+        .expect("create reviewer bundle body");
+    body_file
+        .write_all(body.as_bytes())
+        .and_then(|_| body_file.sync_all())
+        .expect("flush reviewer bundle body");
+    let mut digest_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&digest_path)
+        .expect("create reviewer bundle digest");
+    digest_file
+        .write_all(format!("{digest}  {}\n", body_path.display()).as_bytes())
+        .and_then(|_| digest_file.sync_all())
+        .expect("flush reviewer bundle digest");
+    let mut index_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&index_path)
+        .expect("create reviewer evidence index");
+    let mut index = format!(
+        "schema=team-agent/a2r5-review-evidence-index-v2\ncandidate_sha={}\nbundle={} sha256={}\n",
+        gate_authoritative_sha(),
+        body_path.display(),
+        digest
+    );
+    for note in mutation_notes {
+        index.push_str(note);
+        index.push('\n');
+    }
+    index.push_str(
+        "cleanup=ephemeral owned bundle removed only after reviewer body/digest/index retention\n",
+    );
+    index_file
+        .write_all(index.as_bytes())
+        .and_then(|_| index_file.sync_all())
+        .expect("flush reviewer evidence index");
+    (body_path, digest_path, index_path)
 }
 
 fn classify_replay_failure(reason: &str, status_query_error: Option<&str>) -> Value {
