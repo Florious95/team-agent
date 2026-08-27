@@ -706,9 +706,9 @@ fn existing_socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
 /// purpose: 把短 socket 名解析成文件路径
 /// params:
 ///   socket_name: 短名;空串、"default"、绝对路径三种输入都视为「无短名可解析」
-/// returns: 已存在则返回实际路径;否则 Unix 上给 /tmp/tmux-<uid>/<name> 预期路径,Windows 上 None
+/// returns: 已存在则返回当前 tmux root 下的实际路径;否则 Unix 上给当前 tmux root 下的预期路径,Windows 上 None
 /// cfg: unix 分支读 geteuid;not(unix) 分支恒 None
-/// boundary: 不创建目录、不创建 socket;返回 Some 不代表文件存在
+/// boundary: 不创建目录、不创建 socket;显式 TMUX_TMPDIR 设定时绝不回退到 ambient/其他 root;返回 Some 不代表文件存在
 /// ---
 pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     if socket_name.is_empty() || socket_name == "default" || Path::new(socket_name).is_absolute() {
@@ -717,16 +717,16 @@ pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     if let Some(existing) = existing_socket_path_for_name(socket_name) {
         return Some(existing);
     }
-    // Batch 1: tmux uses `/tmp/tmux-<uid>/` on Unix; on Windows this
-    // helper is dead code (Command::new "tmux" fails at spawn time
-    // before this path is dereferenced). N38 typed unsupported honored
-    // at the shellout boundary.
+    // Batch 1: tmux uses the first configured socket root on Unix; on
+    // Windows this helper is dead code (Command::new "tmux" fails at
+    // spawn time before this path is dereferenced). N38 typed unsupported
+    // honored at the shellout boundary.
     #[cfg(unix)]
     {
-        let uid = unsafe { libc::geteuid() };
-        let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
-        let default_root = default_root.canonicalize().unwrap_or(default_root);
-        Some(default_root.join(socket_name))
+        tmux_socket_roots()
+            .into_iter()
+            .next()
+            .map(|root| root.join(socket_name))
     }
     #[cfg(not(unix))]
     {
@@ -919,9 +919,9 @@ pub(crate) fn attach_commands_for_windows<'a>(
 
 /// ---
 /// purpose: 列出本机可能放 tmux socket 的根目录
-/// returns: Unix 上为 /tmp/tmux-<uid> 加 TMPDIR/tmux-<uid>(排序去重);Windows 上为空
-/// cfg: unix 读 geteuid 与 TMPDIR;not(unix) 返回空表示「本平台无此约定」
-/// boundary: 只列约定目录,不验证目录存在、不列举里面的 socket(那是 tmux_socket_endpoints)
+/// returns: Unix 上 TMUX_TMPDIR 设定时仅为 TMUX_TMPDIR/tmux-<uid>,否则为 /tmp/tmux-<uid> 加 TMPDIR/tmux-<uid>(排序去重);Windows 上为空
+/// cfg: unix 读 geteuid 与 TMUX_TMPDIR/TMPDIR;not(unix) 返回空表示「本平台无此约定」
+/// boundary: TMUX_TMPDIR 是 tmux 的显式 socket-root 选择;设定时不回退或扫描 ambient/其他 root;只列约定目录,不验证目录存在、不列举里面的 socket(那是 tmux_socket_endpoints)
 /// ---
 pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
     // Batch 1: `/tmp/tmux-<uid>` root enumeration is Unix-only tmux
@@ -931,8 +931,16 @@ pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
     #[cfg(unix)]
     {
         let uid = unsafe { libc::geteuid() };
+        if let Some(tmux_tmpdir) =
+            std::env::var_os("TMUX_TMPDIR").filter(|tmpdir| !tmpdir.is_empty())
+        {
+            // tmux treats TMUX_TMPDIR as an explicit root selector. Keep the
+            // resolver on that root only: consulting /tmp or TMPDIR here could
+            // adopt an unrelated same-named socket.
+            return vec![PathBuf::from(tmux_tmpdir).join(format!("tmux-{uid}"))];
+        }
         let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        if let Some(tmpdir) = std::env::var_os("TMPDIR").filter(|tmpdir| !tmpdir.is_empty()) {
             roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
         }
         roots.sort();
@@ -3681,5 +3689,89 @@ fn non_empty(raw: &str) -> Option<&str> {
 // runner + verifies Unix-specific socket-root derivation. Since the
 // tmux backend itself only functions on Unix (design § Route B —
 // tmux is a Unix concept), the test module stays Unix-only.
+#[cfg(all(test, unix))]
+mod canonical_endpoint_root_tests {
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(name, _)| (*name, std::env::var(name).ok()))
+                .collect();
+            for (name, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn fixture_root(label: &str) -> PathBuf {
+        let root = PathBuf::from("/tmp").join(format!("ta-tmux-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("fixture root");
+        root
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn tmux_tmpdir_is_the_only_short_endpoint_root() {
+        let selected = fixture_root("selected");
+        let ambient = fixture_root("ambient");
+        let socket_name = "ta-reused-name";
+        let ambient_root = ambient.join(format!("tmux-{}", unsafe { libc::geteuid() }));
+        std::fs::create_dir_all(&ambient_root).expect("ambient tmux root");
+        let ambient_socket = ambient_root.join(socket_name);
+        let _listener = UnixListener::bind(&ambient_socket).expect("ambient socket");
+        let _env = EnvGuard::set(&[
+            ("TMUX_TMPDIR", selected.to_str()),
+            ("TMPDIR", ambient.to_str()),
+        ]);
+
+        let selected_root = selected.join(format!("tmux-{}", unsafe { libc::geteuid() }));
+        assert_eq!(super::tmux_socket_roots(), vec![selected_root.clone()]);
+        assert_eq!(
+            super::socket_path_for_name(socket_name),
+            Some(selected_root.join(socket_name)),
+            "a same-named ambient socket must not be adopted"
+        );
+
+        drop(_listener);
+        let _ = std::fs::remove_dir_all(&selected);
+        let _ = std::fs::remove_dir_all(&ambient);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn empty_tmux_tmpdir_does_not_create_a_relative_socket_root() {
+        let _env = EnvGuard::set(&[("TMUX_TMPDIR", Some(""))]);
+        assert!(
+            super::tmux_socket_roots()
+                .iter()
+                .all(|root| root.is_absolute()),
+            "an empty override must preserve absolute default roots"
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests;
