@@ -3,15 +3,68 @@
 /// contract:
 ///   provides:
 ///     - name: update_state_path_contracts
-///       what: proves writable, canonical-remap, permission, two-outcome, and no-escape cases
+///       what: proves writable, canonical-remap, permission, two-outcome, no-escape, and fixture isolation cases
 ///   depends:
 ///     - name: mcp_state_fixture
 ///       what: fixture-owned root and provenance from tests.rs
 /// boundary:
 ///   - retain the raw {ok,state_file} result shape
 ///   - rejected writes preserve both runtime and rendered-state bytes
+///   - isolation control owns its unrelated messaging database and removes it after handles close
 /// maturity: wired
 /// ---
+use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static UNRELATED_WORKSPACE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn ambient_workspace(tag: &str) -> PathBuf {
+    loop {
+        let n = UNRELATED_WORKSPACE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ta-mcp-unrelated-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("create unrelated workspace {}: {error}", path.display()),
+        }
+    }
+}
+
+fn file_sha256(path: &std::path::Path) -> [u8; 32] {
+    Sha256::digest(std::fs::read(path).unwrap()).into()
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn held_fixture_does_not_redirect_or_remove_unrelated_messaging_db() {
+    let fixture = McpStateFixture::new("unrelated-db");
+    let fixture_root = fixture.root.clone();
+    let unrelated_workspace = ambient_workspace("concurrent");
+    let create = std::thread::spawn(move || {
+        let store = crate::message_store::MessageStore::open(&unrelated_workspace).unwrap();
+        let db_path = store.db_path().to_path_buf();
+        let connection = crate::db::schema::open_db(&db_path).unwrap();
+        let before = file_sha256(&db_path);
+        (unrelated_workspace, db_path, connection, store, before)
+    });
+    let (unrelated_workspace, db_path, connection, store, before) = create.join().unwrap();
+
+    assert!(!db_path.starts_with(&fixture_root), "unrelated DB entered fixture root");
+    assert!(db_path.exists());
+    assert_eq!(file_sha256(&db_path), before);
+    drop(fixture);
+
+    assert!(unrelated_workspace.exists(), "fixture Drop removed unrelated workspace");
+    assert!(db_path.exists(), "fixture Drop removed unrelated DB");
+    assert_eq!(file_sha256(&db_path), before, "unrelated DB changed across Drop");
+    drop(connection);
+    drop(store);
+    std::fs::remove_dir_all(unrelated_workspace).unwrap();
+}
+
     #[test]
     fn dispatch_send_message_worker_accepted_returned_verbatim() {
         // A-7: accepted requires a REAL stored message_id (no fabricated ids), so the
