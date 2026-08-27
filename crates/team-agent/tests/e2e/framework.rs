@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 // ----------------------------------------------------------------------------
 // 1. TestWorkspace — per-test temp dir with auto-cleanup (Drop)
@@ -77,6 +78,15 @@ pub struct TestWorkspace {
     /// BEFORE the workspace directory removal (verified by RED
     /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
     pub(crate) owned_tmux_sockets: Mutex<Vec<PathBuf>>,
+}
+
+/// Metadata that makes a forced delivery-failure receipt independently
+/// attributable to one command and one frozen case.
+#[derive(Debug, Clone)]
+pub struct DeliveryFailureContext {
+    pub command: String,
+    pub case_name: String,
+    pub failure_kind: String,
 }
 
 impl TestWorkspace {
@@ -937,18 +947,213 @@ pub fn wait_for_delivery_or_panic<F: FnMut() -> bool>(
     message_id: &str,
     recipient: &str,
     description: &str,
-    predicate: F,
+    mut predicate: F,
     timeout: Duration,
 ) {
-    if wait_for(predicate, timeout, Duration::from_millis(100)) {
+    let context = DeliveryFailureContext {
+        command: description.to_string(),
+        case_name: description.to_string(),
+        failure_kind: "unclassified_delivery_timeout".to_string(),
+    };
+    let started = Instant::now();
+    let mut assertion_count = 0_u64;
+    let ok = wait_for(
+        || {
+            assertion_count += 1;
+            predicate()
+        },
+        timeout,
+        Duration::from_millis(100),
+    );
+    if ok {
         return;
     }
-    let evidence = delivery_timeout_snapshot(ws, message_id, recipient, description, timeout);
+    let evidence = delivery_timeout_snapshot(
+        ws,
+        message_id,
+        recipient,
+        description,
+        timeout,
+        &context,
+        assertion_count,
+        started.elapsed(),
+        1,
+    );
     let path = write_delivery_timeout_snapshot(&evidence);
     panic!(
         "timed out after {:?} waiting for: {description}; durable delivery evidence={}",
         timeout,
         path.display()
+    );
+}
+
+/// ---
+/// purpose: Exercise the timeout renderer with one deterministic causal failure
+/// contract:
+///   provides:
+///     - name: force_delivery_failure_receipt
+///       what: Writes a complete bound receipt before the caller asserts its fields
+///   depends:
+///     - TestWorkspace-owned runtime files and tmux endpoint
+///     - sqlite messages/events store
+/// boundary:
+///   - Test-only failure apparatus; it never changes production delivery behavior
+/// maturity: wired
+/// ---
+pub fn force_delivery_failure_receipt<F: FnMut() -> bool>(
+    ws: &TestWorkspace,
+    context: &DeliveryFailureContext,
+    message_id: &str,
+    recipient: &str,
+    mut predicate: F,
+    timeout: Duration,
+) -> Value {
+    seed_forced_delivery_fixture(ws, context, message_id, recipient);
+    let started = Instant::now();
+    let mut assertion_count = 0_u64;
+    let ok = wait_for(
+        || {
+            assertion_count += 1;
+            predicate()
+        },
+        timeout,
+        Duration::from_millis(100),
+    );
+    if ok {
+        panic!(
+            "forced CR5 failure unexpectedly passed: case={} failure_kind={}",
+            context.case_name, context.failure_kind
+        );
+    }
+    let evidence = delivery_timeout_snapshot(
+        ws,
+        message_id,
+        recipient,
+        &context.failure_kind,
+        timeout,
+        context,
+        assertion_count,
+        started.elapsed(),
+        1,
+    );
+    let path = write_delivery_timeout_snapshot(&evidence);
+    let receipt = serde_json::from_slice::<Value>(
+        &std::fs::read(&path).expect("read forced CR5 receipt after renderer write"),
+    )
+    .expect("parse forced CR5 receipt after renderer write");
+    assert_eq!(
+        receipt.pointer("/receipt/sha256"),
+        evidence.pointer("/receipt/sha256"),
+        "forced CR5 receipt must preserve the renderer digest"
+    );
+    receipt
+}
+
+/// ---
+/// purpose: Verify the complete CR5 failure receipt contract
+/// contract:
+///   provides:
+///     - name: assert_cr5_receipt_complete
+///       what: Checks identity, causal facts, physical target, ledger, execution, and digest
+///   depends:
+///     - force_delivery_failure_receipt
+///   boundary:
+///     - Test-only receipt validation; no production delivery behavior
+/// maturity: wired
+/// ---
+pub fn assert_cr5_receipt_complete(
+    receipt: &Value,
+    context: &DeliveryFailureContext,
+    message_id: &str,
+) {
+    let head = receipt
+        .pointer("/head")
+        .and_then(Value::as_str)
+        .expect("CR5 receipt head");
+    assert_eq!(head.len(), 40, "CR5 receipt must bind a full git head");
+    assert_eq!(
+        receipt.pointer("/command").and_then(Value::as_str),
+        Some(context.command.as_str())
+    );
+    assert_eq!(
+        receipt.pointer("/case").and_then(Value::as_str),
+        Some(context.case_name.as_str())
+    );
+    assert_eq!(
+        receipt.pointer("/failure_kind").and_then(Value::as_str),
+        Some(context.failure_kind.as_str())
+    );
+    assert_eq!(
+        receipt.pointer("/message_id").and_then(Value::as_str),
+        Some(message_id)
+    );
+    for field in [
+        "/row/recipient",
+        "/row/status",
+        "/row/error",
+        "/row/delivery_attempts",
+        "/row/delivered_at",
+        "/coordinator/pid",
+        "/coordinator/boot_id",
+        "/coordinator/heartbeat",
+        "/coordinator/tick",
+        "/coordinator/health",
+        "/worker/pid",
+        "/worker/status",
+        "/worker/readiness",
+        "/events",
+        "/message_events",
+        "/target/endpoint",
+        "/target/session",
+        "/target/window",
+        "/target/pane",
+        "/target/pane_pid",
+        "/target/physical/liveness",
+        "/target/physical/capture",
+        "/fixture/resource_ledger/workspace",
+        "/fixture/resource_ledger/coordinator_pid_file",
+        "/fixture/resource_ledger/tmux_sockets",
+        "/fixture/resource_ledger/resource_count",
+        "/fixture/post_delivery_obligations/report_result",
+        "/fixture/post_delivery_obligations/collect",
+        "/fixture/post_delivery_obligations/report_result_created",
+        "/fixture/post_delivery_obligations/collect_created",
+        "/execution/assertion_count",
+        "/execution/duration_ms",
+        "/execution/exit_code",
+        "/execution/command_exit_code",
+        "/receipt/sha256",
+    ] {
+        assert!(
+            receipt.pointer(field).is_some(),
+            "CR5 receipt missing bound field {field}: {receipt}"
+        );
+    }
+    assert!(
+        receipt["execution"]["assertion_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "CR5 receipt must count predicate assertions"
+    );
+    assert_eq!(
+        receipt.pointer("/execution/exit_code"),
+        Some(&Value::from(1))
+    );
+    assert_eq!(
+        receipt.pointer("/execution/command_exit_code"),
+        Some(&Value::from(0))
+    );
+    let mut without_receipt = receipt.clone();
+    without_receipt
+        .as_object_mut()
+        .expect("CR5 receipt object")
+        .remove("receipt");
+    let digest_material =
+        serde_json::to_vec(&without_receipt).expect("serialize CR5 receipt digest material");
+    let digest = Sha256::digest(&digest_material);
+    assert_eq!(
+        receipt.pointer("/receipt/sha256").and_then(Value::as_str),
+        Some(format!("{digest:x}").as_str())
     );
 }
 
@@ -958,6 +1163,10 @@ fn delivery_timeout_snapshot(
     recipient: &str,
     description: &str,
     timeout: Duration,
+    context: &DeliveryFailureContext,
+    assertion_count: u64,
+    duration: Duration,
+    exit_code: i32,
 ) -> Value {
     let state = ws.state_json_path();
     let state_value = std::fs::read_to_string(&state)
@@ -1060,8 +1269,12 @@ fn delivery_timeout_snapshot(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    serde_json::json!({
-        "schema_version": "team-agent-e2e-delivery-timeout-v1",
+    let mut snapshot = serde_json::json!({
+        "schema_version": "team-agent-e2e-delivery-timeout-v2",
+        "head": repository_head_sha(),
+        "command": &context.command,
+        "case": &context.case_name,
+        "failure_kind": &context.failure_kind,
         "message_id": message_id,
         "recipient": recipient,
         "description": description,
@@ -1074,6 +1287,7 @@ fn delivery_timeout_snapshot(
             "tick": heartbeat.get("coordinator_tick_iteration_count").cloned().unwrap_or(Value::Null),
             "health": coordinator_meta,
         },
+        "worker": target.get("worker").cloned().unwrap_or(Value::Null),
         "events": events,
         "message_events": message_events,
         "target": {
@@ -1094,13 +1308,194 @@ fn delivery_timeout_snapshot(
         "fixture": {
             "workspace": ws.path(),
             "coordinator_pid_file": ws.coordinator_pid_file(),
-            "owned_tmux_sockets": resources,
+            "owned_tmux_sockets": &resources,
+            "resource_ledger": {
+                "workspace": ws.path(),
+                "coordinator_pid_file": ws.coordinator_pid_file(),
+                "tmux_sockets": &resources,
+                "resource_count": resources.len(),
+                "cleanup": "exact_registered_resources_before_workspace_removal",
+            },
             "post_delivery_obligations": {
                 "report_result": "not_created_before_delivery_wait_completed",
                 "collect": "not_created_before_delivery_wait_completed",
+                "report_result_created": false,
+                "collect_created": false,
             },
         },
-    })
+        "execution": {
+            "assertion_count": assertion_count,
+            "duration_ms": duration.as_millis(),
+            "exit_code": exit_code,
+            "command_exit_code": 0,
+        },
+    });
+    let digest_material = serde_json::to_vec(&snapshot).expect("serialize receipt digest material");
+    let digest = Sha256::digest(&digest_material);
+    snapshot["receipt"] = serde_json::json!({
+        "sha256": format!("{digest:x}"),
+        "bytes_before_digest": digest_material.len(),
+    });
+    snapshot
+}
+
+fn repository_head_sha() -> String {
+    let output = Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("resolve exact repository head for CR5 receipt");
+    assert!(
+        output.status.success(),
+        "git rev-parse HEAD failed for CR5 receipt: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn seed_forced_delivery_fixture(
+    ws: &TestWorkspace,
+    context: &DeliveryFailureContext,
+    message_id: &str,
+    recipient: &str,
+) {
+    let runtime = ws.path().join(".team/runtime");
+    std::fs::create_dir_all(&runtime).expect("create forced CR5 runtime directory");
+    let logs = ws.path().join(".team/logs");
+    std::fs::create_dir_all(&logs).expect("create forced CR5 log directory");
+    let socket = runtime.join("ta-cr5-failure.sock");
+    std::fs::write(&socket, b"owned test endpoint")
+        .expect("create forced CR5 endpoint ledger entry");
+    ws.register_owned_tmux_socket(&socket);
+
+    let pane_pid = 4242_i64;
+    let socket_text = socket.to_string_lossy().to_string();
+    let worker = match context.failure_kind.as_str() {
+        "fake_worker_exit" => serde_json::json!({
+            "pid": pane_pid,
+            "status": "exited",
+            "readiness": "never_ready",
+            "exit_code": 127
+        }),
+        "missing_or_foreign_physical_target" => serde_json::json!({
+            "pid": pane_pid,
+            "status": "foreign_target",
+            "readiness": "target_not_owned",
+            "exit_code": null
+        }),
+        _ => serde_json::json!({
+            "pid": pane_pid,
+            "status": "not_observed",
+            "readiness": "not_required",
+            "exit_code": null
+        }),
+    };
+    let state = serde_json::json!({
+        "tmux_socket": &socket_text,
+        "session_name": "team-cr5-failure",
+        "agents": {
+            recipient: {
+                "pane_id": "%42",
+                "pane_pid": pane_pid,
+                "window_name": recipient,
+                "resolved_from": "session_window_lookup",
+                "worker": worker
+            }
+        }
+    });
+    std::fs::write(
+        ws.state_json_path(),
+        serde_json::to_vec_pretty(&state).expect("serialize forced CR5 state"),
+    )
+    .expect("write forced CR5 state");
+    let pid = std::process::id();
+    std::fs::write(ws.coordinator_pid_file(), pid.to_string()).expect("write CR5 coordinator pid");
+    std::fs::write(
+        runtime.join("coordinator.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "pid": pid,
+            "boot_id": "cr5-boot-forced",
+            "status": &context.failure_kind,
+            "health": "stale"
+        }))
+        .expect("serialize CR5 coordinator identity"),
+    )
+    .expect("write CR5 coordinator identity");
+    std::fs::write(
+        runtime.join("coordinator_tick.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "pid": pid,
+            "boot_id": "cr5-boot-forced",
+            "coordinator_tick_iteration_count": 17,
+            "heartbeat_age_ms": 12_345,
+            "status": "stale"
+        }))
+        .expect("serialize CR5 heartbeat"),
+    )
+    .expect("write CR5 heartbeat");
+
+    let status = match context.failure_kind.as_str() {
+        "coordinator_stop_or_stale_heartbeat" | "fake_worker_exit" => "accepted",
+        "missing_or_foreign_physical_target" => "queued_pane_missing",
+        "row_event_mismatch_or_missing_metadata" | "post_delivery_obligation_separation" => {
+            "delivered"
+        }
+        other => panic!("unknown forced CR5 failure kind: {other}"),
+    };
+    let error = match context.failure_kind.as_str() {
+        "coordinator_stop_or_stale_heartbeat" => "coordinator_stopped",
+        "fake_worker_exit" => "fake_worker_exited",
+        "missing_or_foreign_physical_target" => "tmux_target_missing",
+        "row_event_mismatch_or_missing_metadata" => "message_event_metadata_missing",
+        "post_delivery_obligation_separation" => "post_delivery_obligation_not_created",
+        other => panic!("unknown forced CR5 failure kind: {other}"),
+    };
+    let delivered_at = (status == "delivered").then_some("2026-08-27T00:00:00Z");
+    let db = Connection::open(runtime.join("team.db")).expect("open forced CR5 database");
+    db.execute_batch(
+        "create table messages (message_id text primary key, recipient text not null, status text not null, error text, delivery_attempts integer not null, delivered_at text);",
+    )
+    .expect("create forced CR5 messages table");
+    db.execute(
+        "insert into messages (message_id, recipient, status, error, delivery_attempts, delivered_at) values (?1, ?2, ?3, ?4, 1, ?5)",
+        rusqlite::params![message_id, recipient, status, error, delivered_at],
+    )
+    .expect("insert forced CR5 message row");
+
+    let event = match context.failure_kind.as_str() {
+        "row_event_mismatch_or_missing_metadata" => serde_json::json!({
+            "event": "message.delivered",
+            "message_id": format!("{message_id}-mismatch"),
+            "target_window": recipient
+        }),
+        "post_delivery_obligation_separation" => serde_json::json!({
+            "event": "message.delivered",
+            "message_id": message_id,
+            "target_kind": "pane",
+            "tmux_endpoint": &socket_text,
+            "target_session": "team-cr5-failure",
+            "target_window": recipient,
+            "target_pane_id": "%42",
+            "target_pane_pid": pane_pid,
+            "resolved_from": "session_window_lookup"
+        }),
+        _ => serde_json::json!({
+            "event": "message.accepted",
+            "message_id": message_id,
+            "failure_kind": &context.failure_kind,
+            "coordinator_pid": pid
+        }),
+    };
+    std::fs::write(
+        ws.events_jsonl_path(),
+        format!(
+            "{}\n",
+            serde_json::to_string(&event).expect("serialize forced CR5 event")
+        ),
+    )
+    .expect("write forced CR5 events");
 }
 
 fn read_json_file(path: &Path) -> Value {

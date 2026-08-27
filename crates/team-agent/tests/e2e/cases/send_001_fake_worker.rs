@@ -33,6 +33,40 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[test]
+fn cr5_failure_renderer_fake_worker_exit() {
+    let case_name = "cr5_failure_renderer_fake_worker_exit";
+    let command = std::env::var("TEAM_AGENT_CR5_RECEIPT_COMMAND").unwrap_or_else(|_| {
+        "cargo test --locked --test e2e cases::send_001_fake_worker::cr5_failure_renderer_fake_worker_exit -- --test-threads=1".to_string()
+    });
+    let context = DeliveryFailureContext {
+        command,
+        case_name: case_name.to_string(),
+        failure_kind: "fake_worker_exit".to_string(),
+    };
+    let ws = TestWorkspace::new("cr5-worker-exit");
+    let message_id = format!("cr5-worker-exit-{}", std::process::id());
+    let receipt = force_delivery_failure_receipt(
+        &ws,
+        &context,
+        &message_id,
+        "a",
+        || false,
+        Duration::from_millis(120),
+    );
+    assert_cr5_receipt_complete(&receipt, &context, &message_id);
+    assert_eq!(
+        receipt.pointer("/row/error").and_then(Value::as_str),
+        Some("fake_worker_exited")
+    );
+    assert_eq!(
+        receipt
+            .pointer("/events/0/failure_kind")
+            .and_then(Value::as_str),
+        Some("fake_worker_exit")
+    );
+}
+
+#[test]
 fn send_001_delivers_to_fake_worker() {
     let team_id = "send001";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
