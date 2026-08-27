@@ -36,6 +36,85 @@ const RESOLVED_FROM_SESSION_WINDOW_LOOKUP: &str = "session_window_lookup";
 const TARGET_KIND_PANE: &str = "pane";
 
 #[test]
+fn cr5_failure_renderer_missing_or_foreign_physical_target() {
+    let case_name = "cr5_failure_renderer_missing_or_foreign_physical_target";
+    let command = std::env::var("TEAM_AGENT_CR5_RECEIPT_COMMAND").unwrap_or_else(|_| {
+        "cargo test --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::cr5_failure_renderer_missing_or_foreign_physical_target -- --test-threads=1".to_string()
+    });
+    let context = DeliveryFailureContext {
+        command,
+        case_name: case_name.to_string(),
+        failure_kind: "missing_or_foreign_physical_target".to_string(),
+    };
+    let ws = TestWorkspace::new("cr5-foreign-target");
+    let message_id = format!("cr5-foreign-target-{}", std::process::id());
+    let receipt = force_delivery_failure_receipt(
+        &ws,
+        &context,
+        &message_id,
+        "a",
+        || false,
+        Duration::from_millis(120),
+    );
+    assert_cr5_receipt_complete(&receipt, &context, &message_id);
+    assert_eq!(
+        receipt.pointer("/row/error").and_then(Value::as_str),
+        Some("tmux_target_missing")
+    );
+    assert_eq!(
+        receipt
+            .pointer("/target/physical/liveness")
+            .and_then(Value::as_str),
+        Some("missing")
+    );
+    assert_eq!(
+        receipt
+            .pointer("/target/resolved_from")
+            .and_then(Value::as_str),
+        Some(RESOLVED_FROM_SESSION_WINDOW_LOOKUP)
+    );
+}
+
+#[test]
+fn cr5_failure_renderer_row_event_mismatch_or_missing_metadata() {
+    let case_name = "cr5_failure_renderer_row_event_mismatch_or_missing_metadata";
+    let command = std::env::var("TEAM_AGENT_CR5_RECEIPT_COMMAND").unwrap_or_else(|_| {
+        "cargo test --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::cr5_failure_renderer_row_event_mismatch_or_missing_metadata -- --test-threads=1".to_string()
+    });
+    let context = DeliveryFailureContext {
+        command,
+        case_name: case_name.to_string(),
+        failure_kind: "row_event_mismatch_or_missing_metadata".to_string(),
+    };
+    let ws = TestWorkspace::new("cr5-event-mismatch");
+    let message_id = format!("cr5-event-mismatch-{}", std::process::id());
+    let receipt = force_delivery_failure_receipt(
+        &ws,
+        &context,
+        &message_id,
+        "a",
+        || false,
+        Duration::from_millis(120),
+    );
+    assert_cr5_receipt_complete(&receipt, &context, &message_id);
+    assert_eq!(
+        receipt.pointer("/row/error").and_then(Value::as_str),
+        Some("message_event_metadata_missing")
+    );
+    assert!(
+        receipt
+            .pointer("/message_events")
+            .and_then(Value::as_array)
+            .is_some_and(|events| events.is_empty()),
+        "mismatched message event must not be rebound to the requested id"
+    );
+    assert_eq!(
+        receipt.pointer("/events/0/event").and_then(Value::as_str),
+        Some("message.delivered")
+    );
+}
+
+#[test]
 fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
     let team_id = "wleak001";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
