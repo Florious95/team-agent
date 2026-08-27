@@ -554,7 +554,9 @@ fn shutdown_invocation_diagnostic(
             events.len()
         )
     });
-    let event_name = |event: &serde_json::Value| event["event"].as_str();
+    fn event_name(event: &serde_json::Value) -> Option<&str> {
+        event["event"].as_str()
+    }
     let starts = appended
         .iter()
         .enumerate()
