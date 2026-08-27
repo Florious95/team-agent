@@ -17,6 +17,8 @@
 //!     - tmux per-team endpoint
 //! boundary:
 //!   - Test-only fixture and evidence surface; no delivery product behavior
+//! arch:
+//!   allowed_dependencies: [rusqlite, serde_json, sha2, std, team_agent]
 //! maturity: wired
 //! ---
 //!
@@ -40,6 +42,7 @@ use sha2::{Digest, Sha256};
 // ----------------------------------------------------------------------------
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const COMPILED_GATE_SHA: Option<&str> = option_env!("TEAM_AGENT_GATE_SHA");
 
 const CALLER_IDENTITY_ENVS: &[&str] = &[
     "TMUX",
@@ -106,6 +109,7 @@ impl TestWorkspace {
         ));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create workspace dir");
+        std::fs::create_dir_all(path.join("tmux-tmp")).expect("create tmux temp root");
         let path = std::fs::canonicalize(&path).expect("canonicalize workspace dir");
         Self {
             path,
@@ -128,22 +132,11 @@ impl TestWorkspace {
             "refusing to register ambient TMUX endpoint as test-owned: {}",
             socket.display()
         );
-        let private_tmp_socket = socket.parent().is_some_and(|parent| {
-            let parent = normalize_existing_path(parent);
-            parent.parent() == Some(Path::new("/private/tmp"))
-                && parent
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("tmux-"))
-        }) && socket
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("ta-"));
         assert!(
             socket.is_absolute()
                 && socket.exists()
-                && (socket.starts_with(&self.path) || private_tmp_socket),
-            "tmux endpoint must already exist under its owning E2E workspace or private ta-* root: socket={} workspace={}",
+                && socket.starts_with(&self.path),
+            "tmux endpoint must already exist under its owning E2E workspace: socket={} workspace={}",
             socket.display(),
             self.path.display()
         );
@@ -154,6 +147,10 @@ impl TestWorkspace {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn tmux_tmpdir(&self) -> PathBuf {
+        self.path.join("tmux-tmp")
     }
 
     pub(crate) fn record_ta_binary(&self, path: &Path) {
@@ -389,11 +386,6 @@ impl TestWorkspace {
                 out.push(pid);
             }
         }
-        for (pid, command) in ps_table() {
-            if self.command_is_owned_coordinator(&command) {
-                out.push(pid);
-            }
-        }
         out.sort_unstable();
         out.dedup();
         out
@@ -526,33 +518,6 @@ fn ps_command(pid: u32) -> Option<String> {
     }
     let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!command.is_empty()).then_some(command)
-}
-
-fn ps_table() -> Vec<(u32, String)> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_ps_line)
-        .collect()
-}
-
-fn parse_ps_line(line: &str) -> Option<(u32, String)> {
-    let line = line.trim_start();
-    let split = line.find(char::is_whitespace).unwrap_or(line.len());
-    let pid = line.get(..split)?.parse::<u32>().ok()?;
-    let command = line.get(split..)?.trim();
-    (!command.is_empty()).then(|| (pid, command.to_string()))
 }
 
 fn workspace_match_candidates(path: &Path) -> Vec<String> {
@@ -708,6 +673,10 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     for key in CALLER_IDENTITY_ENVS {
         cmd.env_remove(key);
     }
+    cmd.env("TMUX_TMPDIR", ws.tmux_tmpdir());
+    // The product derives its persisted socket path from TMPDIR while tmux
+    // itself uses TMUX_TMPDIR. Keep both sides in this fixture-owned root.
+    cmd.env("TMPDIR", ws.tmux_tmpdir());
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -1111,7 +1080,9 @@ pub fn assert_cr5_receipt_complete(
         "/target/physical/liveness",
         "/target/physical/capture",
         "/fixture/resource_ledger/workspace",
+        "/fixture/resource_ledger/tmux_tmpdir",
         "/fixture/resource_ledger/coordinator_pid_file",
+        "/fixture/resource_ledger/coordinator_pid",
         "/fixture/resource_ledger/tmux_sockets",
         "/fixture/resource_ledger/resource_count",
         "/fixture/post_delivery_obligations/report_result",
@@ -1129,6 +1100,18 @@ pub fn assert_cr5_receipt_complete(
             "CR5 receipt missing bound field {field}: {receipt}"
         );
     }
+    let workspace = receipt
+        .pointer("/fixture/resource_ledger/workspace")
+        .and_then(Value::as_str)
+        .expect("CR5 receipt workspace");
+    let tmux_tmpdir = receipt
+        .pointer("/fixture/resource_ledger/tmux_tmpdir")
+        .and_then(Value::as_str)
+        .expect("CR5 receipt tmux temp root");
+    assert!(
+        Path::new(tmux_tmpdir).starts_with(workspace),
+        "CR5 receipt tmux temp root must be under the fixture workspace"
+    );
     assert!(
         receipt["execution"]["assertion_count"]
             .as_u64()
@@ -1307,11 +1290,15 @@ fn delivery_timeout_snapshot(
         },
         "fixture": {
             "workspace": ws.path(),
+            "tmux_tmpdir": ws.tmux_tmpdir(),
             "coordinator_pid_file": ws.coordinator_pid_file(),
+            "coordinator_pid": coordinator_pid,
             "owned_tmux_sockets": &resources,
             "resource_ledger": {
                 "workspace": ws.path(),
+                "tmux_tmpdir": ws.tmux_tmpdir(),
                 "coordinator_pid_file": ws.coordinator_pid_file(),
+                "coordinator_pid": coordinator_pid,
                 "tmux_sockets": &resources,
                 "resource_count": resources.len(),
                 "cleanup": "exact_registered_resources_before_workspace_removal",
@@ -1340,19 +1327,35 @@ fn delivery_timeout_snapshot(
 }
 
 fn repository_head_sha() -> String {
+    let gate_sha = std::env::var("TEAM_AGENT_GATE_SHA").unwrap_or_else(|_| {
+        panic!("E2E provenance unavailable: TEAM_AGENT_GATE_SHA must contain the gate-tested SHA")
+    });
+    assert!(
+        gate_sha.len() == 40
+            && gate_sha.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "E2E provenance invalid: TEAM_AGENT_GATE_SHA must be exactly 40 lowercase hex characters, got {gate_sha:?}"
+    );
+    assert_eq!(
+        COMPILED_GATE_SHA,
+        Some(gate_sha.as_str()),
+        "E2E provenance mismatch: runtime TEAM_AGENT_GATE_SHA differs from the SHA captured at test compilation"
+    );
     let output = Command::new("git")
         .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .expect("resolve exact repository head for CR5 receipt");
-    assert!(
-        output.status.success(),
-        "git rev-parse HEAD failed for CR5 receipt: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+        .output();
+    if let Ok(output) = output {
+        let git_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() {
+            assert_eq!(
+                git_sha, gate_sha,
+                "E2E provenance mismatch: git checkout HEAD differs from TEAM_AGENT_GATE_SHA"
+            );
+        }
+    }
+    gate_sha
 }
 
 fn seed_forced_delivery_fixture(

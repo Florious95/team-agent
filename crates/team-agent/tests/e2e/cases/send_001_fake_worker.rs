@@ -21,6 +21,8 @@
 //!     - messaging rows/events and fake-worker runtime
 //! boundary:
 //!   - Test-only E2E evidence; no delivery product edits
+//! arch:
+//!   allowed_dependencies: [rusqlite, serde_json, std, team_agent]
 //! maturity: wired
 //! ---
 
