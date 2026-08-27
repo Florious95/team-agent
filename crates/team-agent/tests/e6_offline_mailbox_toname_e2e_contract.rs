@@ -33,6 +33,12 @@
 //!       disposition: bounded_unknown_no_production_edge
 //!       rationale: required row/event/target/receipt probes remain test-local;
 //!         the base/head stable-symbol set is compared in CR6 evidence.
+//!   named_test_only_anchors:
+//!     - OpenOptions::new: immutable process-owned evidence writer
+//!     - serde_json::to_vec_pretty: deterministic failure-bundle encoding
+//!     - std::env::var_os: optional evidence-dir override; default is process-owned
+//!     - std::env::current_exe: child-process cleanup tooth launcher
+//!     - std::fs::remove_file/remove_dir: exact cleanup of the process-owned bundle
 //! maturity: wired
 //! ---
 
@@ -308,13 +314,19 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     // and physically inject, but a physical submit is not a provider receipt —
     // the SAME row parks as injected_awaiting_receipt, never jumps straight
     // to delivered on transport success alone.
+    let expected_status = if std::env::var_os("E6_FORCE_TERMINAL_STATUS").is_some() {
+        "__forced_unexpected_status__"
+    } else {
+        "injected_awaiting_receipt"
+    };
     let accepted = wait_for_message_status(
         case.target_workspace(),
         &message_id,
-        "injected_awaiting_receipt",
+        expected_status,
         &case.team_key,
         &tmux_socket,
         &pane,
+        case.durable_evidence_dir(),
     );
     assert!(
         accepted,
@@ -378,6 +390,78 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     );
 }
 
+#[test]
+fn e6_failure_bundle_survives_normal_cleanup_without_override() {
+    let executable = std::env::current_exe().expect("current e6 test executable");
+    let output = Command::new(executable)
+        .args([
+            "--exact",
+            "e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env_remove("E6_DURABLE_EVIDENCE_DIR")
+        .env_remove("TEAM_AGENT_KEEP_TEST_TMP")
+        .env_remove("TEAM_AGENT_KEEP_TEST_PROCESSES")
+        .env("E6_FORCE_TERMINAL_STATUS", "1")
+        .output()
+        .expect("run forced child e6 test");
+    assert!(
+        !output.status.success(),
+        "forced terminal child must fail so ordinary unwind cleanup runs; output={:?}",
+        output
+    );
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = transcript
+        .lines()
+        .find_map(|line| {
+            line.split_once("durable evidence=")
+                .map(|(_, path)| path.trim())
+        })
+        .map(PathBuf::from)
+        .expect("forced child must print durable bundle path");
+    assert!(
+        path.is_absolute() && path.exists(),
+        "bundle must survive ordinary child cleanup: {} transcript={transcript}",
+        path.display()
+    );
+    let first = std::fs::read_to_string(&path).expect("read surviving bundle");
+    let digest = sha256_file(&path);
+    let digest_again = sha256_file(&path);
+    let second = std::fs::read_to_string(&path).expect("read surviving bundle twice");
+    assert_eq!(first, second, "bundle bytes changed after child cleanup");
+    assert_eq!(
+        digest, digest_again,
+        "bundle digest changed after child cleanup"
+    );
+    assert_eq!(
+        digest.len(),
+        64,
+        "surviving bundle must have a SHA-256 digest"
+    );
+    assert!(
+        serde_json::from_str::<Value>(&first).is_ok(),
+        "surviving bundle must remain valid JSON"
+    );
+    let directory = path.parent().expect("bundle parent").to_path_buf();
+    std::fs::remove_file(&path).expect("exact cleanup of durable bundle");
+    std::fs::remove_dir(&directory).expect("exact cleanup of durable evidence directory");
+    eprintln!(
+        "E6 durable bundle verified after ordinary cleanup: path={} sha256={}",
+        path.display(),
+        digest
+    );
+    assert!(!path.exists(), "exact durable bundle cleanup must complete");
+    assert!(
+        !directory.exists(),
+        "exact durable directory cleanup must complete"
+    );
+}
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
 }
@@ -385,6 +469,24 @@ fn bin() -> &'static str {
 fn unique_token(prefix: &str) -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{}_{}", std::process::id(), n)
+}
+
+fn sha256_file(path: &Path) -> String {
+    let output = Command::new("shasum")
+        .args(["-a", "256", &path.to_string_lossy()])
+        .output()
+        .expect("shasum bundle");
+    assert!(
+        output.status.success(),
+        "digest probe must succeed for durable bundle; code={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn json_output(output: &Output, label: &str) -> Value {
@@ -518,6 +620,7 @@ fn wait_for_message_status(
     team_key: &str,
     tmux_socket: &str,
     pane: &str,
+    durable_evidence_dir: &Path,
 ) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_status = None;
@@ -534,6 +637,7 @@ fn wait_for_message_status(
                     "terminal_status_not_expected",
                     Some(&current),
                     None,
+                    durable_evidence_dir,
                 );
                 panic!(
                     "E6 replay terminal status {current:?} was not expected; durable evidence={evidence}"
@@ -551,6 +655,7 @@ fn wait_for_message_status(
                     "status_query_error",
                     last_status.as_deref(),
                     Some(&error),
+                    durable_evidence_dir,
                 );
                 panic!(
                     "E6 replay status query failed before assertion: {error}; durable evidence={evidence}"
@@ -568,6 +673,7 @@ fn wait_for_message_status(
         "status_timeout_non_expected",
         last_status.as_deref(),
         None,
+        durable_evidence_dir,
     );
     panic!(
         "E6 replay did not reach expected status {status:?}; last_status={last_status:?}; durable evidence={evidence}"
@@ -590,26 +696,32 @@ fn emit_replay_failure_bundle(
     reason: &str,
     observed_status: Option<&str>,
     status_query_error: Option<&str>,
+    durable_evidence_dir: &Path,
 ) -> String {
     let row = query_message_value(workspace, message_id);
     let receipt = query_delivery_token_value(workspace, message_id);
     let events = query_event_values(workspace, message_id);
     let physical_target = query_physical_target(workspace, team_key);
     let capture = query_capture_value(tmux_socket, pane);
+    let coordinator = query_coordinator_value(workspace);
+    let owned_resources = query_owned_resource_ledger(workspace, tmux_socket, pane);
     let bundle = json!({
         "schema": "team-agent/e6-replay-failure-v2",
         "message_id": message_id,
         "reason": reason,
         "observed_status": observed_status,
         "status_query_error": status_query_error,
+        "failure_classification": classify_replay_failure(reason, status_query_error),
         "row": row,
         "error": row.get("error").cloned().unwrap_or(Value::Null),
         "events": events,
         "physical_target": physical_target,
         "receipt": receipt,
         "capture": capture,
+        "coordinator": coordinator,
+        "owned_resource_ledger": owned_resources,
     });
-    write_immutable_bundle(workspace, message_id, &bundle)
+    write_immutable_bundle(durable_evidence_dir, message_id, &bundle)
         .unwrap_or_else(|error| panic!("E6 replay could not persist failure evidence: {error}"))
 }
 
@@ -723,14 +835,112 @@ fn query_capture_value(tmux_socket: &str, pane: &str) -> Value {
     }
 }
 
+fn classify_replay_failure(reason: &str, status_query_error: Option<&str>) -> Value {
+    let (kind, basis) = if status_query_error.is_some() {
+        ("apparatus", "status query could not read the fixture store")
+    } else if reason == "terminal_status_not_expected" {
+        (
+            "product",
+            "durable message status was terminal but not expected",
+        )
+    } else {
+        (
+            "unknown",
+            "timeout or missing row leaves apparatus/product unresolved",
+        )
+    };
+    json!({
+        "kind": kind,
+        "apparatus": kind == "apparatus",
+        "product": kind == "product",
+        "basis": basis,
+    })
+}
+
+fn query_coordinator_value(workspace: &Path) -> Value {
+    let runtime = workspace.join(".team/runtime");
+    let metadata_path = runtime.join("coordinator.json");
+    let heartbeat_path = runtime.join("coordinator_tick.json");
+    let pid_path = runtime.join("coordinator.pid");
+    let metadata = read_json_file(&metadata_path);
+    let heartbeat = read_json_file(&heartbeat_path);
+    let pid_text = std::fs::read_to_string(&pid_path).ok();
+    let pid = pid_text
+        .as_deref()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    let running = pid.is_some_and(|pid| {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    });
+    json!({
+        "identity": metadata,
+        "health": {
+            "pid_path": pid_path,
+            "pid": pid,
+            "pid_running": running,
+            "metadata_path": metadata_path,
+            "metadata_present": !metadata.is_null(),
+        },
+        "heartbeat": heartbeat,
+        "tick": heartbeat,
+    })
+}
+
+fn read_json_file(path: &Path) -> Value {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .unwrap_or_else(|error| json!({"path": path, "parse_error": error.to_string()})),
+        Err(error) => json!({"path": path, "read_error": error.to_string()}),
+    }
+}
+
+fn query_owned_resource_ledger(workspace: &Path, tmux_socket: &str, pane: &str) -> Value {
+    let runtime = workspace.join(".team/runtime");
+    let coordinator_pid_path = runtime.join("coordinator.pid");
+    let coordinator_pid = std::fs::read_to_string(&coordinator_pid_path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    let pane_pid = Command::new("tmux")
+        .args([
+            "-S",
+            tmux_socket,
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_pid}",
+        ])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    json!({
+        "owner": "E6Case/HermeticTestEnv",
+        "workspace": workspace,
+        "owned_paths": [
+            workspace.join(".team/runtime/team.db"),
+            workspace.join(".team/runtime/state.json"),
+            workspace.join(".team/runtime/coordinator.json"),
+            workspace.join(".team/runtime/coordinator_tick.json"),
+            workspace.join(".team/logs/events.jsonl")
+        ],
+        "owned_tmux_socket": tmux_socket,
+        "owned_pids": [coordinator_pid, pane_pid],
+        "leader_pane": pane,
+        "cleanup": "exact registered pids/socket plus hermetic root; durable sibling is retained for parent tooth",
+    })
+}
+
 fn write_immutable_bundle(
-    workspace: &Path,
+    default_directory: &Path,
     message_id: &str,
     bundle: &Value,
 ) -> Result<String, String> {
     let directory = std::env::var_os("E6_DURABLE_EVIDENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join(".team/logs"));
+        .unwrap_or_else(|| default_directory.to_path_buf());
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("create {}: {error}", directory.display()))?;
     let bytes =
@@ -803,6 +1013,7 @@ struct E6Case {
     team_dir: PathBuf,
     team_key: String,
     tmux_socket: PathBuf,
+    durable_evidence_dir: PathBuf,
 }
 
 impl E6Case {
@@ -820,6 +1031,16 @@ impl E6Case {
         for dir in [&home, &target_workspace, &sender_workspace, &team_dir] {
             std::fs::create_dir_all(dir).expect("create e6 test dir");
         }
+        let durable_evidence_dir = env
+            .root()
+            .parent()
+            .expect("system temp parent")
+            .join(format!(
+                "ta-e6-replay-evidence-{}-{}",
+                std::process::id(),
+                n
+            ));
+        std::fs::create_dir_all(&durable_evidence_dir).expect("create durable evidence dir");
         Self {
             home,
             target_workspace: std::fs::canonicalize(target_workspace)
@@ -834,6 +1055,7 @@ impl E6Case {
             team_key: format!("mail059-{}-{n}", std::process::id()),
             env,
             tmux_socket: short_tmux_socket(&format!("e6-{tag}")),
+            durable_evidence_dir,
         }
     }
 
@@ -855,6 +1077,10 @@ impl E6Case {
 
     fn team_dir_arg(&self) -> String {
         self.team_dir.to_string_lossy().to_string()
+    }
+
+    fn durable_evidence_dir(&self) -> &Path {
+        &self.durable_evidence_dir
     }
 
     fn write_fake_team(&self, spec_name: &str, agent_id: &str) {
@@ -1003,6 +1229,9 @@ impl Drop for E6Case {
                     .output();
             }
         }
+        // Preserve a non-empty durable bundle for the parent tooth. Empty
+        // process-owned directories are safe to remove after ordinary green runs.
+        let _ = std::fs::remove_dir(&self.durable_evidence_dir);
     }
 }
 
