@@ -3,6 +3,25 @@
 //! spare = state 锚 session(anchor_sessions) ∪ `team-agent-leader-` 命名前缀(并集,锚优先)。
 //! 独享 socket(无 spare)才允许整 server 拆;共享/leader 在 → 逐 session kill。
 //! 集成面由 tests/b5_leader_terminal_kill_red.rs 的真 tmux 契约覆盖,此处锁纯决策 + 4 反向 case。
+//!
+//! ---
+//! purpose: Test-only shutdown safety and typed outcome assertions.
+//! contract:
+//!   provides:
+//!     - name: e49_managed_leader_shutdown_spares_leader_session_and_kills_workers_per_pane
+//!       what: Proves worker-pane kills, leader/session sparing, and no kill-server.
+//!     - name: unit0_classify_outcome_no_residuals_returns_ok
+//!       what: Keeps the clean classifier positive control.
+//!     - name: unit0_classify_outcome_cleanup_truth_degraded_returns_partial_os_probe
+//!       what: Keeps degraded OS-probe status explicit.
+//!   depends:
+//!     - crate::cli::lifecycle_port
+//!     - crate::os_probe
+//!     - crate::transport
+//! boundary:
+//!   - Test-only declarations and assertions; no production classifier or cleanup behavior.
+//! maturity: wired
+//! ---
 
 use crate::cli::lifecycle_port::{sessions_to_kill, KillDecision};
 use crate::transport::{
@@ -692,6 +711,9 @@ impl Transport for CleanShutdownTransport {
     }
 
     fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        if let Some(probe) = self.probe_timeout_kind {
+            crate::os_probe::set_probe_timeout_for_test(probe, None, 900);
+        }
         self.killed_panes
             .lock()
             .unwrap()
@@ -1004,6 +1026,7 @@ fn e49_managed_leader_shutdown_spares_leader_session_and_kills_workers_per_pane(
                 leader_env: BTreeMap::new(),
             },
         ])
+        .with_probe_timeout("ps_table")
         .with_targets_persist_after_kill();
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
@@ -1057,25 +1080,20 @@ fn e49_managed_leader_shutdown_spares_leader_session_and_kills_workers_per_pane(
             .any(|v| v.as_str() == Some("team-current")),
         "E49: report's spared_sessions MUST contain the leader session. Got {out_spared:?}"
     );
-    // 0.4.0 refactor: when the target session is deliberately spared (E49
-    // managed-leader topology), shutdown reports
-    // `status="dirty_state", phase="target_session_spared", ok=false`. This
-    // is semantically the SUCCESS path for E49 — leader pane preserved — but
-    // the new refactor surfaces it as a non-clean exit so callers can detect
-    // residual sessions. The E49 invariant (leader spared, workers killed per
-    // pane) is already verified by the preceding `out_killed` / `out_spared`
-    // assertions; here we pin the new top-level shape.
+    // The E49 cleanup facts are already verified above. A degraded OS probe
+    // takes precedence over the spare-session classifier and must remain
+    // explicit in the top-level report.
     assert_eq!(
         out["status"],
-        json!("dirty_state"),
-        "0.4.0 refactor: managed-leader spare path surfaces dirty_state \
-         (target_session_spared) — leader was spared, not killed. Got out={out}"
+        json!("partial"),
+        "degraded OS probing must surface partial status. Got out={out}"
     );
     assert_eq!(
         out["phase"],
-        json!("target_session_spared"),
-        "0.4.0 refactor: phase must name the spare reason. Got out={out}"
+        json!("os_probe"),
+        "degraded OS probing must identify os_probe phase. Got out={out}"
     );
+    assert_eq!(out["verification_degraded"], json!(true));
     assert_eq!(out["session_killed"], json!(false));
 }
 
