@@ -473,7 +473,7 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
         .map(|idx| ws.join(format!("owned-loop-{idx}.sock")))
         .collect::<Vec<_>>();
     let starting = sockets.iter().filter(|path| path.exists()).count();
-    for socket in &sockets {
+    for (iteration, socket) in sockets.iter().enumerate() {
         std::fs::write(socket, b"socket").unwrap();
         crate::state::persist::save_runtime_state(
             &ws,
@@ -487,13 +487,30 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
             }),
         )
         .unwrap();
-        let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        let before_len = crate::event_log::EventLog::new(&ws)
+            .tail(0)
+            .expect("read shutdown event boundary")
+            .len();
+        let result = crate::cli::lifecycle_port::shutdown_with_transport(
             &ws,
             true,
             None,
             &CleanShutdownTransport::new(),
-        )
-        .expect("shutdown should complete");
+        );
+        let out = match &result {
+            Ok(out) if !shutdown_result_is_degraded(out) => out,
+            Ok(out) => {
+                let diagnostic =
+                    shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
+                assert!(!shutdown_result_is_degraded(out), "{diagnostic}");
+                out
+            }
+            Err(error) => {
+                let diagnostic =
+                    shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
+                panic!("shutdown invocation failed: {error}; {diagnostic}");
+            }
+        };
         assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
     }
     let ending = sockets.iter().filter(|path| path.exists()).count();
@@ -501,6 +518,193 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
         ending, starting,
         "owned socket files must not grow across loops"
     );
+}
+
+fn shutdown_result_is_degraded(out: &serde_json::Value) -> bool {
+    out["ok"] != json!(true)
+        || out["probe_degraded"] == json!(true)
+        || out["verification_degraded"] == json!(true)
+}
+
+fn shutdown_invocation_diagnostic(
+    ws: &Path,
+    before_len: usize,
+    iteration: usize,
+    socket: &Path,
+    result: &Result<serde_json::Value, crate::cli::CliError>,
+) -> String {
+    let result_summary = match result {
+        Ok(out) => format!("report={out}"),
+        Err(error) => format!("error={error}"),
+    };
+    let events = crate::event_log::EventLog::new(ws)
+        .tail(0)
+        .unwrap_or_else(|error| {
+            panic!(
+                "shutdown diagnostic event read failed: iteration={iteration} socket={} \
+                 {result_summary}; error={error}",
+                socket.display()
+            )
+        });
+    let appended = events.get(before_len..).unwrap_or_else(|| {
+        panic!(
+            "shutdown diagnostic boundary invalid: iteration={iteration} socket={} \
+             {result_summary}; before_len={before_len} event_len={}",
+            socket.display(),
+            events.len()
+        )
+    });
+    let event_name = |event: &serde_json::Value| event["event"].as_str();
+    let starts = appended
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event_name(event) == Some("lifecycle.shutdown.started"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let terminals = appended
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event_name(event) == Some("lifecycle.shutdown"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if starts.len() != 1 || terminals.len() != 1 || starts[0] >= terminals[0] {
+        panic!(
+            "shutdown diagnostic markers invalid: iteration={iteration} socket={} \
+             {result_summary}; appended={appended:?}",
+            socket.display()
+        );
+    }
+    let terminal = &appended[terminals[0]];
+    let expected_socket = socket.to_string_lossy();
+    if terminal["owned_endpoint"].as_str() != Some(expected_socket.as_ref()) {
+        panic!(
+            "shutdown diagnostic endpoint mismatch: iteration={iteration} socket={} \
+             {result_summary}; terminal={terminal}",
+            socket.display()
+        );
+    }
+    let bounded = &appended[starts[0]..=terminals[0]];
+    let probe_failures = bounded
+        .iter()
+        .filter(|event| event_name(event) == Some("shutdown.process_probe_failed"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if probe_failures.is_empty() {
+        panic!(
+            "shutdown diagnostic missing process-probe failure: iteration={iteration} \
+             socket={} {result_summary}; bounded={bounded:?}",
+            socket.display()
+        );
+    }
+    for event in &probe_failures {
+        let phase = event["phase"].as_str();
+        if event["probe"].as_str() != Some("ps_table")
+            || !matches!(phase, Some("entry" | "residual_round" | "post_verify"))
+            || !matches!(
+                event["error"].as_str(),
+                Some(error) if !error.trim().is_empty()
+            )
+        {
+            panic!(
+                "shutdown diagnostic probe failure invalid: iteration={iteration} \
+                 socket={} {result_summary}; event={event}",
+                socket.display()
+            );
+        }
+    }
+    format!(
+        "iteration={iteration} socket={} {result_summary}; probe_failures={probe_failures:?}",
+        socket.display()
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn rb07_probe_failure_diagnostic_is_iteration_bound() {
+    const CHILD: &str = "RB07_PROBE_FAILURE_DIAGNOSTIC_CHILD";
+    const TEST: &str =
+        "cli::tests::shutdown_kill_plan::rb07_probe_failure_diagnostic_is_iteration_bound";
+    if std::env::var_os(CHILD).is_none() {
+        let path = tmp_shutdown_workspace("rb07-empty-path").join("bin");
+        std::fs::create_dir_all(&path).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "directed child failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("running 1 test")
+                && stdout.contains(&format!("test {TEST} ..."))
+                && stdout.contains("RB07_CHILD_SUCCESS"),
+            "directed child omitted success marker: stdout={} stderr={}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let ws = tmp_shutdown_workspace("rb07-child");
+    let socket = ws.join("owned.sock");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-rb07-child",
+            "tmux_endpoint": socket.to_string_lossy(),
+            "tmux_socket": socket.to_string_lossy(),
+            "tmux_socket_source": "workspace",
+            "is_external_leader": false,
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let event_log = crate::event_log::EventLog::new(&ws);
+    event_log
+        .write(
+            "shutdown.process_probe_failed",
+            json!({
+                "phase": "entry",
+                "probe": "ps_table",
+                "error": "rb07-stale-decoy"
+            }),
+        )
+        .unwrap();
+    let before_len = event_log.tail(0).unwrap().len();
+    let result = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        None,
+        &CleanShutdownTransport::new(),
+    );
+    let diagnostic = shutdown_invocation_diagnostic(&ws, before_len, 0, &socket, &result);
+    let failures = match result {
+        Ok(out) => {
+            assert!(
+                shutdown_result_is_degraded(&out),
+                "child must force ps failure: {out}"
+            );
+            let text = diagnostic;
+            assert!(
+                !text.contains("rb07-stale-decoy"),
+                "stale event leaked: {text}"
+            );
+            text
+        }
+        Err(error) => panic!("child shutdown unexpectedly returned Err: {error}; {diagnostic}"),
+    };
+    assert!(
+        failures.contains("probe_failures=["),
+        "missing bounded failures: {failures}"
+    );
+    println!("RB07_CHILD_SUCCESS {failures}");
 }
 
 fn tmp_shutdown_workspace(tag: &str) -> PathBuf {
