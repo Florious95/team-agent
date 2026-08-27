@@ -84,7 +84,7 @@ fn probe_parent_denial(parent: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn probe_target_denial(target: &Path) -> bool {
+fn probe_target_denial(target: &Path) -> (bool, bool) {
     let before = std::fs::read(target).unwrap();
     let original_mode = metadata_mode(&std::fs::metadata(target).unwrap()) & 0o7777;
     let direct_denied = match std::fs::OpenOptions::new().write(true).open(target) {
@@ -117,7 +117,7 @@ fn probe_target_denial(target: &Path) -> bool {
         "[mcp-platform-capability] arm=target-0444 write_denied={direct_denied} replace_denied={replace_denied} original_mode={original_mode:o} final_mode={final_mode:o} facts={}",
         capability_facts(target)
     );
-    direct_denied && replace_denied
+    (direct_denied, replace_denied)
 }
 
 #[test]
@@ -283,7 +283,13 @@ fn held_fixture_does_not_redirect_or_remove_unrelated_messaging_db() {
         let mut fixture = McpStateFixture::new("target");
         let relative = "team_state.md";
         let expected = fixture.make_target_readonly(relative);
-        if !probe_target_denial(&expected) {
+        let (direct_denied, replace_denied) = probe_target_denial(&expected);
+        let applicable = direct_denied && replace_denied;
+        assert!(
+            !(direct_denied && !replace_denied && applicable),
+            "0444 applicability must require atomic-replace denial"
+        );
+        if !applicable {
             eprintln!("[mcp-platform-capability] arm=target-0444 applicability=N/A");
             return;
         }
