@@ -22,7 +22,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       TEAM_AGENT_GATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      TEAM_AGENT_E2E_EVIDENCE_DIR: ${{ runner.temp }}/team-agent-e2e-evidence
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +53,8 @@ jobs:
           tmux -V
 
       - name: Run Rust tests
+        env:
+          TEAM_AGENT_E2E_EVIDENCE_DIR: ${{ runner.temp }}/team-agent-e2e-evidence
         run: cargo test --workspace --all-targets --locked --no-fail-fast
 
       - name: Upload E2E failure evidence
