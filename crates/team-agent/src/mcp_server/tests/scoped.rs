@@ -86,6 +86,7 @@ fn probe_parent_denial(parent: &Path) -> bool {
 #[cfg(unix)]
 fn probe_target_denial(target: &Path) -> bool {
     let before = std::fs::read(target).unwrap();
+    let original_mode = metadata_mode(&std::fs::metadata(target).unwrap()) & 0o7777;
     let direct_denied = match std::fs::OpenOptions::new().write(true).open(target) {
         Ok(mut file) => {
             file.write_all(&before).unwrap();
@@ -100,7 +101,7 @@ fn probe_target_denial(target: &Path) -> bool {
         Ok(()) => match std::fs::rename(&replacement, target) {
             Ok(()) => {
                 std::fs::write(target, &before).unwrap();
-                set_mode(target, 0o444);
+                set_mode(target, original_mode);
                 false
             }
             Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
@@ -108,11 +109,15 @@ fn probe_target_denial(target: &Path) -> bool {
         Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
     };
     let _ = std::fs::remove_file(&replacement);
+    let after = std::fs::read(target).unwrap();
+    let final_mode = metadata_mode(&std::fs::metadata(target).unwrap()) & 0o7777;
+    assert_eq!(after, before, "target probe changed target bytes");
+    assert_eq!(final_mode, original_mode, "target probe changed target mode");
     eprintln!(
-        "[mcp-platform-capability] arm=target-0444 write_denied={direct_denied} replace_denied={replace_denied} facts={}",
+        "[mcp-platform-capability] arm=target-0444 write_denied={direct_denied} replace_denied={replace_denied} original_mode={original_mode:o} final_mode={final_mode:o} facts={}",
         capability_facts(target)
     );
-    direct_denied
+    direct_denied && replace_denied
 }
 
 #[test]
