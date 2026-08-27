@@ -126,6 +126,14 @@ pub(crate) fn prepare_leader_start(
     )
 }
 
+/// ---
+/// purpose: prepare a leader launch plan with one ambient authority observation
+/// params:
+///   workspace: workspace root used for optional state-derived launch decisions
+///   external_leader: explicit external-launch request
+/// returns: prepared launch plan and the verified ambient pane authority, when required
+/// boundary: explicit external launches preflight authority before any optional state read
+/// ---
 pub(crate) fn prepare_leader_start_with_nested_attach(
     provider: Provider,
     provider_args: &[String],
@@ -137,9 +145,13 @@ pub(crate) fn prepare_leader_start_with_nested_attach(
     allow_nested_attach: bool,
 ) -> Result<PreparedLeaderStart, PrepareLeaderStartError> {
     let explicit_external_path = external_leader || attach_existing || attach_session.is_some();
-    let state_external_path = workspace_state_uses_external_leader(workspace);
     let (ambient_authority, managed_client_attach_mode, managed_provider_reentry) =
-        if explicit_external_path || state_external_path {
+        if explicit_external_path {
+            // Explicit external launches must establish caller authority before
+            // consulting optional workspace state; the refusal path must remain
+            // free of canonical state/lock/store side effects.
+            (ambient_pane_authority_preflight(workspace)?, None, false)
+        } else if workspace_state_uses_external_leader(workspace) {
             (ambient_pane_authority_preflight(workspace)?, None, false)
         } else if workspace_state_is_managed_provider_reentry(workspace) {
             (ambient_pane_authority_preflight(workspace)?, None, true)
