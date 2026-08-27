@@ -20,6 +20,8 @@
 //!     - per-team tmux socket
 //! boundary:
 //!   - Test-only safety and metadata contracts; no production delivery edits
+//! arch:
+//!   allowed_dependencies: [rusqlite, serde_json, std, team_agent]
 //! maturity: wired
 //! ---
 
@@ -680,8 +682,8 @@ impl TmuxServerGuard {
     fn for_workspace(ws: &TestWorkspace) -> Self {
         let socket = state_socket(ws);
         assert!(
-            socket.contains("/ta-"),
-            "test must only guard a private team-agent tmux socket, got {socket:?}"
+            PathBuf::from(&socket).starts_with(ws.path()),
+            "test must only guard a tmux socket under its owning E2E workspace, got {socket:?}"
         );
         ws.register_owned_tmux_socket(PathBuf::from(&socket).as_path());
         Self { socket }

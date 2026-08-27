@@ -28,9 +28,12 @@
 //!       what: Exercises the public path and durable worker/result obligations
 //!   depends:
 //!     - crate::framework::wait_for_delivery_or_panic
+//!     - crate::support::source_walker
 //!     - messaging rows/events and fake-worker result store
 //! boundary:
 //!   - Test-only evidence and command coverage; no production delivery behavior
+//! arch:
+//!   allowed_dependencies: [rusqlite, serde_json, std, team_agent]
 //! maturity: wired
 //! ---
 

@@ -25,6 +25,11 @@
 //! ```text
 //! TEAM_AGENT_KEEP_TEST_TMP=1 cargo test --package team-agent --test e2e
 //! ```
+//!
+//! ---
+//! arch:
+//!   allowed_dependencies: [std, team_agent]
+//! ---
 
 #![allow(clippy::unwrap_used, clippy::expect_used)] // tests assert with unwrap/expect on purpose
 
