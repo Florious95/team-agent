@@ -3,14 +3,14 @@
 //! contract:
 //!   provides:
 //!     - name: mcp_state_fixture
-//!       what: binds HOME/TMPDIR/workspace and caller identity to one owned root before update_state
+//!       what: supplies explicit HOME/TMPDIR/workspace-shaped paths without mutating process-global environment
 //!     - name: mcp_state_path_provenance
 //!       what: records canonical remap, resolved state path, and filesystem ownership facts
 //!   depends:
 //!     - crate::mcp_server::lifecycle_tools::state_status
 //!     - crate::state::selector
 //! boundary:
-//!   - tests never write outside their fixture root
+//!   - normal tests never write outside their fixture root; isolation controls own and clean a sibling root
 //!   - permission failures remain observable; this suite does not alter persistence semantics
 //! maturity: wired
 //! ---
@@ -20,7 +20,6 @@
 use super::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -59,50 +58,20 @@ fn unique_ws(tag: &str) -> std::path::PathBuf {
     }
 }
 
-const CALLER_IDENTITY_ENVS: &[&str] = &[
-    "TMUX",
-    "TMUX_PANE",
-    "TEAM_AGENT_LEADER_PANE_ID",
-    "TEAM_AGENT_LEADER_SESSION_UUID",
-    "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
-    "TEAM_AGENT_LEADER_SESSION_NAME",
-    "TEAM_AGENT_LEADER_PROVIDER",
-    "TEAM_AGENT_MACHINE_FINGERPRINT",
-    "TEAM_AGENT_WORKSPACE",
-    "TEAM_AGENT_TEAM_ID",
-    "TEAM_AGENT_OWNER_TEAM_ID",
-    "TEAM_AGENT_ACTIVE_TEAM",
-    "TEAM_AGENT_ID",
-    "TEAM_AGENT_AGENT_ID",
-    "TEAM_AGENT_AUTH_MODE",
-    "TEAM_AGENT_LEADER_BYPASS",
-    "TEAM_AGENT_LEADER_BYPASS_SOURCE",
-    "TEAM_AGENT_LEADER_BYPASS_PROVIDER",
-    "TEAM_AGENT_LEADER_BYPASS_FLAG",
-    "TEAM_AGENT_MCP_AUTO_APPROVE",
-    "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE",
-];
-
-static MCP_FIXTURE_ENV_LOCK: Mutex<()> = Mutex::new(());
 static MCP_FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// One process-owned root for update_state tests. The guard serializes the
-/// process-global environment changes while a fixture is alive.
+/// One process-owned root for update_state tests. All paths are passed explicitly
+/// to the code under test; the fixture never changes process-global environment.
 struct McpStateFixture {
     root: PathBuf,
     workspace: PathBuf,
     home: PathBuf,
     tmpdir: PathBuf,
-    previous_env: Vec<(&'static str, Option<String>)>,
     readonly_paths: Vec<PathBuf>,
-    _env_lock: MutexGuard<'static, ()>,
 }
 
 impl McpStateFixture {
     fn new(_tag: &str) -> Self {
-        let env_lock = MCP_FIXTURE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seq = MCP_FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = if cfg!(target_os = "macos") {
             PathBuf::from("/private/tmp")
@@ -119,36 +88,12 @@ impl McpStateFixture {
         std::fs::create_dir(&tmpdir).unwrap();
         std::fs::create_dir(&workspace).unwrap();
 
-        let mut previous_env = Vec::new();
-        for key in std::iter::once("HOME")
-            .chain(std::iter::once("TMPDIR"))
-            .chain(std::iter::once("TEAM_AGENT_TEST_TMP"))
-            .chain(std::iter::once("TEAM_AGENT_TEST_TMPDIR"))
-            .chain(CALLER_IDENTITY_ENVS.iter().copied())
-        {
-            if !previous_env.iter().any(|(seen, _)| *seen == key) {
-                previous_env.push((key, std::env::var(key).ok()));
-            }
-        }
-        unsafe {
-            std::env::set_var("HOME", &home);
-            std::env::set_var("TMPDIR", &tmpdir);
-            std::env::set_var("TEAM_AGENT_TEST_TMP", &root);
-            std::env::set_var("TEAM_AGENT_TEST_TMPDIR", &tmpdir);
-            for key in CALLER_IDENTITY_ENVS {
-                std::env::remove_var(key);
-            }
-            std::env::set_var("TEAM_AGENT_WORKSPACE", &workspace);
-        }
-
         let fixture = Self {
             root,
             workspace,
             home,
             tmpdir,
-            previous_env,
             readonly_paths: Vec::new(),
-            _env_lock: env_lock,
         };
         fixture.seed_spec("team_state.md");
         crate::state::persist::save_runtime_state(
@@ -184,25 +129,6 @@ impl McpStateFixture {
         assert!(self.under_root(raw_workspace));
         assert!(self.under_root(&canonical_workspace));
         assert!(self.under_root(state_file));
-        assert_eq!(std::env::var_os("HOME").as_deref(), Some(self.home.as_os_str()));
-        assert_eq!(std::env::var_os("TMPDIR").as_deref(), Some(self.tmpdir.as_os_str()));
-        assert_eq!(
-            std::env::var_os("TEAM_AGENT_TEST_TMP").as_deref(),
-            Some(self.root.as_os_str())
-        );
-        assert_eq!(
-            std::env::var_os("TEAM_AGENT_TEST_TMPDIR").as_deref(),
-            Some(self.tmpdir.as_os_str())
-        );
-        assert_eq!(
-            std::env::var_os("TEAM_AGENT_WORKSPACE").as_deref(),
-            Some(self.workspace.as_os_str())
-        );
-        for key in CALLER_IDENTITY_ENVS {
-            if *key != "TEAM_AGENT_WORKSPACE" {
-                assert!(std::env::var_os(key).is_none(), "ambient identity env leaked: {key}");
-            }
-        }
         let team_dir = self.workspace.join(".team");
         let runtime_dir = team_dir.join("runtime");
         let paths = [
@@ -289,14 +215,6 @@ impl Drop for McpStateFixture {
                 set_mode(path, 0o755);
             } else if path.exists() {
                 set_mode(path, 0o644);
-            }
-        }
-        for (key, value) in self.previous_env.drain(..).rev() {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
             }
         }
         let _ = std::fs::remove_dir_all(&self.root);
