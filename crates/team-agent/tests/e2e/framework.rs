@@ -1301,9 +1301,9 @@ fn delivery_timeout_snapshot(
             "target_pane_id": pane_id,
             "pane_pid": pane_pid,
             "target_pane_pid": pane_pid,
+            "physical": physical,
             "resolved_from": target.get("resolved_from").cloned().unwrap_or(Value::Null),
             "agent_state": target,
-            "physical": physical,
         },
         "fixture": {
             "workspace": ws.path(),
