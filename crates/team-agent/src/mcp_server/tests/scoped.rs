@@ -3,17 +3,19 @@
 /// contract:
 ///   provides:
 ///     - name: update_state_path_contracts
-///       what: proves writable, canonical-remap, permission, two-outcome, no-escape, and fixture isolation cases
+///       what: proves writable, canonical-remap, capability-gated permission, two-outcome, no-escape, and fixture isolation cases
 ///   depends:
 ///     - name: mcp_state_fixture
 ///       what: fixture-owned root and provenance from tests.rs
 /// boundary:
 ///   - retain the raw {ok,state_file} result shape
 ///   - rejected writes preserve both runtime and rendered-state bytes
+///   - mode-bit arms run only after same-process write/replace capability probes; injected denial is platform-neutral
 ///   - isolation control owns its unrelated messaging database and removes it after handles close
 /// maturity: wired
 /// ---
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static UNRELATED_WORKSPACE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -35,6 +37,87 @@ fn ambient_workspace(tag: &str) -> PathBuf {
 
 fn file_sha256(path: &std::path::Path) -> [u8; 32] {
     Sha256::digest(std::fs::read(path).unwrap()).into()
+}
+
+#[cfg(unix)]
+fn capability_facts(path: &Path) -> serde_json::Value {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).unwrap();
+    let acl = std::process::Command::new("ls")
+        .args(["-lde", path.to_str().unwrap()])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let mount = std::process::Command::new("df")
+        .args(["-P", path.to_str().unwrap()])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    serde_json::json!({
+        "path": path,
+        "uid": metadata.uid(),
+        "gid": metadata.gid(),
+        "mode": metadata.mode() & 0o7777,
+        "device": metadata.dev(),
+        "acl": acl,
+        "mount": mount,
+    })
+}
+
+#[cfg(unix)]
+fn probe_parent_denial(parent: &Path) -> bool {
+    let probe = parent.join(format!(".a2r4-parent-probe-{}", std::process::id()));
+    let result = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe);
+    let denied =
+        matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied);
+    if result.is_ok() {
+        std::fs::remove_file(&probe).unwrap();
+    }
+    eprintln!(
+        "[mcp-platform-capability] arm=parent-0555 denied={denied} facts={}",
+        capability_facts(parent)
+    );
+    denied
+}
+
+#[cfg(unix)]
+fn probe_target_denial(target: &Path) -> (bool, bool) {
+    let before = std::fs::read(target).unwrap();
+    let original_mode = metadata_mode(&std::fs::metadata(target).unwrap()) & 0o7777;
+    let direct_denied = match std::fs::OpenOptions::new().write(true).open(target) {
+        Ok(mut file) => {
+            file.write_all(&before).unwrap();
+            file.flush().unwrap();
+            false
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+    };
+    let replacement =
+        target.with_file_name(format!(".a2r4-target-probe-{}", std::process::id()));
+    let replace_denied = match std::fs::write(&replacement, &before) {
+        Ok(()) => match std::fs::rename(&replacement, target) {
+            Ok(()) => {
+                std::fs::write(target, &before).unwrap();
+                set_mode(target, original_mode);
+                false
+            }
+            Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        },
+        Err(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+    };
+    let _ = std::fs::remove_file(&replacement);
+    let after = std::fs::read(target).unwrap();
+    let final_mode = metadata_mode(&std::fs::metadata(target).unwrap()) & 0o7777;
+    assert_eq!(after, before, "target probe changed target bytes");
+    assert_eq!(final_mode, original_mode, "target probe changed target mode");
+    eprintln!(
+        "[mcp-platform-capability] arm=target-0444 write_denied={direct_denied} replace_denied={replace_denied} original_mode={original_mode:o} final_mode={final_mode:o} facts={}",
+        capability_facts(target)
+    );
+    (direct_denied, replace_denied)
 }
 
 #[test]
@@ -170,6 +253,10 @@ fn held_fixture_does_not_redirect_or_remove_unrelated_messaging_db() {
         let relative = "s/team_state.md";
         fixture.seed_spec(relative);
         let parent = fixture.make_parent_readonly(relative);
+        if !probe_parent_denial(&parent) {
+            eprintln!("[mcp-platform-capability] arm=parent-0555 applicability=N/A");
+            return;
+        }
         let expected = fixture.state_file(relative);
         fixture.record_provenance(&fixture.workspace, &expected);
         let runtime_path = crate::state::persist::runtime_state_path(&fixture.workspace);
@@ -196,6 +283,16 @@ fn held_fixture_does_not_redirect_or_remove_unrelated_messaging_db() {
         let mut fixture = McpStateFixture::new("target");
         let relative = "team_state.md";
         let expected = fixture.make_target_readonly(relative);
+        let (direct_denied, replace_denied) = probe_target_denial(&expected);
+        let applicable = direct_denied && replace_denied;
+        assert!(
+            !(direct_denied && !replace_denied && applicable),
+            "0444 applicability must require atomic-replace denial"
+        );
+        if !applicable {
+            eprintln!("[mcp-platform-capability] arm=target-0444 applicability=N/A");
+            return;
+        }
         fixture.record_provenance(&fixture.workspace, &expected);
         let runtime_path = crate::state::persist::runtime_state_path(&fixture.workspace);
         let runtime_before = std::fs::read(&runtime_path).unwrap();
@@ -221,6 +318,7 @@ fn held_fixture_does_not_redirect_or_remove_unrelated_messaging_db() {
         fixture.record_provenance(&fixture.workspace, &expected);
         let runtime_path = crate::state::persist::runtime_state_path(&fixture.workspace);
         let runtime_before = std::fs::read(&runtime_path).unwrap();
+        let artifact_before = std::fs::read(&expected).ok();
         let tools = TeamOrchestratorTools::with_identity(
             &fixture.workspace,
             Some(AgentId::new("leader")),
@@ -233,7 +331,7 @@ fn held_fixture_does_not_redirect_or_remove_unrelated_messaging_db() {
         assert_error_names_paths(&error.message, &fixture.workspace, &fixture.workspace, &expected);
         assert!(error.message.contains("injected markdown denial after preparation"), "missing injected cause: {}", error.message);
         assert_eq!(std::fs::read(&runtime_path).unwrap(), runtime_before);
-        assert!(!expected.exists(), "rejected update must not create markdown");
+        assert_eq!(std::fs::read(&expected).ok(), artifact_before);
         assert_runtime_note_absent(&fixture.workspace, "injected failure");
     }
 

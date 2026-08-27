@@ -11,7 +11,7 @@
 //!     - OS cross-process file locking
 //! boundary:
 //!   - 通过同一 integration-test 可执行文件的子进程模拟 operator 的跨进程域
-//!   - holder acquired、waiter started 与 holder release 使用文件 barrier，不用固定 sleep 排竞态
+//!   - holder acquired、holder finished、waiter started 与 holder release 使用文件 barrier，不用固定 sleep 排竞态
 //!   - 不加自动重粘文本
 //! maturity: wired
 //! ---
@@ -38,6 +38,7 @@ const B: &str = "BBBBBBBB";
 struct ProcessPaneRunner {
     world: PathBuf,
     handshake: Option<PathBuf>,
+    finished: Option<PathBuf>,
     release: Option<PathBuf>,
     delay: Duration,
 }
@@ -73,6 +74,9 @@ impl ProcessPaneRunner {
             // Deliberately slow world model: this creates observable interleaving
             // if the production lock is removed; barriers still control ordering.
             thread::sleep(self.delay);
+        }
+        if let Some(finished) = &self.finished {
+            create_barrier(finished, "holder finished");
         }
         if let Some(release) = &self.release {
             wait_for_path(release, Duration::from_secs(5), "holder release");
@@ -150,9 +154,11 @@ fn spawn_lock_child(
     workspace: &std::path::Path,
     world: &std::path::Path,
     handshake: &std::path::Path,
+    finished: &std::path::Path,
     waiter_started: &std::path::Path,
     release: Option<&std::path::Path>,
     payload: &str,
+    delay_ms: u64,
 ) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("integration test executable"));
     command
@@ -164,8 +170,10 @@ fn spawn_lock_child(
         .env("PANE_LOCK_WORKSPACE", workspace)
         .env("PANE_LOCK_WORLD", world)
         .env("PANE_LOCK_HANDSHAKE", handshake)
+        .env("PANE_LOCK_FINISHED", finished)
         .env("PANE_LOCK_WAITER_STARTED", waiter_started)
         .env("PANE_LOCK_PAYLOAD", payload)
+        .env("PANE_LOCK_DELAY_MS", delay_ms.to_string())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     if let Some(release) = release {
@@ -187,16 +195,20 @@ fn run_process_scenario(tag: &str, holder_payload: &str, expect_timeout: bool) {
     let ws = temp_ws(tag);
     let world = ws.join("pane-world.txt");
     let handshake = ws.join("holder-acquired");
+    let finished = ws.join("holder-finished");
     let waiter_started = ws.join("waiter-started");
     let release = ws.join("release-holder");
+    let delay_ms = if expect_timeout { 8 } else { 1 };
     let mut holder = spawn_lock_child(
         "holder",
         &ws,
         &world,
         &handshake,
+        &finished,
         &waiter_started,
         Some(&release),
         holder_payload,
+        delay_ms,
     );
     let handshake_ms =
         wait_for_path(&handshake, Duration::from_secs(2), "holder acquired").as_millis();
@@ -206,9 +218,11 @@ fn run_process_scenario(tag: &str, holder_payload: &str, expect_timeout: bool) {
         &ws,
         &world,
         &handshake,
+        &finished,
         &waiter_started,
         None,
         waiter_payload,
+        delay_ms,
     );
     let waiter_started_ms =
         wait_for_path(&waiter_started, Duration::from_secs(2), "waiter started").as_millis();
@@ -216,14 +230,21 @@ fn run_process_scenario(tag: &str, holder_payload: &str, expect_timeout: bool) {
     let waiter_wait_started = Instant::now();
     let waiter_wait_ms;
     if expect_timeout {
+        let finished_ms =
+            wait_for_path(&finished, Duration::from_secs(2), "holder finished").as_millis();
         let waiter_status = wait_for_child(&mut waiter, Duration::from_secs(2), "timeout waiter");
         assert!(
             waiter_status.success(),
             "timeout waiter failed: {waiter_status}"
         );
         waiter_wait_ms = waiter_wait_started.elapsed().as_millis();
+        assert!(
+            finished_ms >= 200,
+            "timeout arm must prove holder exceeded 200ms: finished_ms={finished_ms}"
+        );
         create_barrier(&release, "holder release");
     } else {
+        wait_for_path(&finished, Duration::from_secs(2), "holder finished");
         create_barrier(&release, "holder release");
         let waiter_status = wait_for_child(&mut waiter, Duration::from_secs(2), "short waiter");
         assert!(
@@ -299,6 +320,7 @@ fn pane_input_lock_child_process() {
     let workspace = PathBuf::from(std::env::var_os("PANE_LOCK_WORKSPACE").expect("workspace"));
     let world = PathBuf::from(std::env::var_os("PANE_LOCK_WORLD").expect("world"));
     let handshake = PathBuf::from(std::env::var_os("PANE_LOCK_HANDSHAKE").expect("handshake"));
+    let finished = PathBuf::from(std::env::var_os("PANE_LOCK_FINISHED").expect("finished"));
     let waiter_started = PathBuf::from(
         std::env::var_os("PANE_LOCK_WAITER_STARTED").expect("waiter started barrier"),
     );
@@ -307,12 +329,17 @@ fn pane_input_lock_child_process() {
     }
     let release = std::env::var_os("PANE_LOCK_RELEASE").map(PathBuf::from);
     let payload = std::env::var("PANE_LOCK_PAYLOAD").expect("payload");
+    let delay_ms = std::env::var("PANE_LOCK_DELAY_MS")
+        .expect("delay")
+        .parse::<u64>()
+        .expect("delay milliseconds");
     let backend = TmuxBackend::with_runner_for_workspace(
         Box::new(ProcessPaneRunner {
             world,
             handshake: (mode == "holder").then_some(handshake),
+            finished: (mode == "holder").then_some(finished),
             release,
-            delay: Duration::from_millis(8),
+            delay: Duration::from_millis(delay_ms),
         }),
         &workspace,
     );
