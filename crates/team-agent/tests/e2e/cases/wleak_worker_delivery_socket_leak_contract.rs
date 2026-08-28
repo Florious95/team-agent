@@ -277,7 +277,10 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("generated message id");
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        mid,
+        "a",
         "message.delivered event",
         || delivered_event(&ws, mid).is_some(),
         Duration::from_secs(6),
