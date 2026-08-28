@@ -29,6 +29,15 @@
 //!     blocker; still exactly one row, no replacement row.
 //!  5. fanout independence: each comma-list recipient gets its own row; one
 //!     recipient's delivery blocker must not erase or block the other's.
+//!
+//! ---
+//! arch:
+//!   allowed_dependencies: [rusqlite, serde_json, serial_test, std, team_agent]
+//!   read_closure: [messaging, coordinator]
+//!   unresolved_disposition: inherited_incomplete_unknown
+//! boundary:
+//!   - test-only fanout evidence retention and correlation
+//! ---
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -39,6 +48,8 @@ use hermetic_guard::HermeticTestEnv;
 #[path = "support/mcp_sim_harness.rs"]
 mod mcp_sim_harness;
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Output;
 
@@ -46,11 +57,13 @@ use serde_json::{json, Value};
 use serial_test::serial;
 
 const TEAM: &str = "carc";
+const COMPILED_GATE_SHA: Option<&str> = option_env!("TEAM_AGENT_GATE_SHA");
 
 struct SendPathCase {
     env: HermeticTestEnv,
     workspace: PathBuf,
     socket: PathBuf,
+    durable_evidence_dir: PathBuf,
 }
 
 impl SendPathCase {
@@ -77,7 +90,21 @@ impl SendPathCase {
             env,
             workspace,
             socket: PathBuf::new(),
+            durable_evidence_dir: PathBuf::new(),
         };
+        case.durable_evidence_dir =
+            case.env
+                .root()
+                .parent()
+                .expect("system temp parent")
+                .join(format!(
+                    "ta-fanout-evidence-{}",
+                    case.env
+                        .root()
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .expect("hermetic root name")
+                ));
         let output = case.run_cli(&[
             "quick-start",
             "--workspace",
@@ -167,7 +194,7 @@ impl SendPathCase {
         let connection = rusqlite::Connection::open(&db).expect("open team.db");
         let mut statement = connection
             .prepare(
-                "SELECT message_id, sender, recipient, owner_team_id, status FROM messages \
+                "SELECT message_id, sender, recipient, owner_team_id, status, delivery_attempts, error, delivered_at FROM messages \
                  WHERE content LIKE ?1 ORDER BY rowid",
             )
             .expect("prepare message query");
@@ -179,6 +206,9 @@ impl SendPathCase {
                     recipient: row.get(2)?,
                     owner_team_id: row.get(3)?,
                     status: row.get(4)?,
+                    delivery_attempts: row.get(5)?,
+                    error: row.get(6)?,
+                    delivered_at: row.get(7)?,
                 })
             })
             .expect("query messages")
@@ -201,6 +231,147 @@ impl SendPathCase {
                 && event.get("message_id").and_then(Value::as_str) == Some(message_id)
         })
         .count()
+    }
+
+    fn event_values(&self, message_id: &str) -> Value {
+        let path = self.workspace.join(".team/logs/events.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let events = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event.get("message_id").and_then(Value::as_str) == Some(message_id))
+            .collect::<Vec<_>>();
+        json!({"path": path, "events": events})
+    }
+
+    fn capture_values(&self) -> Value {
+        let output = std::process::Command::new("tmux")
+            .args([
+                "-S",
+                self.socket.to_str().expect("socket utf8"),
+                "list-panes",
+                "-a",
+                "-F",
+                "#{window_name}__TA_FIELD__#{pane_id}",
+            ])
+            .output();
+        let lines = output
+            .as_ref()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            .unwrap_or_default();
+        let mut captures = serde_json::Map::new();
+        for recipient in ["w1", "w2"] {
+            let pane = lines.lines().find_map(|line| {
+                let mut fields = line.split("__TA_FIELD__");
+                (fields.next()? == recipient).then(|| fields.next().unwrap_or_default())
+            });
+            let capture = match pane {
+                Some(pane) => match std::process::Command::new("tmux")
+                    .args([
+                        "-S",
+                        self.socket.to_str().expect("socket utf8"),
+                        "capture-pane",
+                        "-p",
+                        "-t",
+                        pane,
+                    ])
+                    .output()
+                {
+                    Ok(output) => json!({
+                        "socket": self.socket,
+                        "pane": pane,
+                        "exit_code": output.status.code(),
+                        "stdout": String::from_utf8_lossy(&output.stdout),
+                        "stderr": String::from_utf8_lossy(&output.stderr),
+                    }),
+                    Err(error) => {
+                        json!({"socket": self.socket, "pane": pane, "spawn_error": error.to_string()})
+                    }
+                },
+                None => json!({"socket": self.socket, "pane": Value::Null, "missing": true}),
+            };
+            captures.insert(recipient.to_string(), capture);
+        }
+        Value::Object(captures)
+    }
+
+    fn coordinator_values(&self) -> Value {
+        let runtime = self.workspace.join(".team/runtime");
+        let read_json = |name: &str| {
+            let path = runtime.join(name);
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .unwrap_or_else(|| json!({"path": path, "missing_or_unreadable": true}))
+        };
+        let pid_path = runtime.join("coordinator.pid");
+        let pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok());
+        let running = pid.is_some_and(|pid| {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        });
+        json!({
+            "identity": read_json("coordinator.json"),
+            "health": {"pid": pid, "pid_path": pid_path, "pid_running": running},
+            "tick": read_json("coordinator_tick.json")
+        })
+    }
+
+    fn fanout_failure_bundle(&self, rows: &[DbRow]) -> String {
+        let row_values = rows
+            .iter()
+            .map(|row| {
+                let events = self.event_values(&row.message_id);
+                let first_boundary = events
+                    .pointer("/events/0/event")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                json!({
+                    "message_id": row.message_id,
+                    "recipient": row.recipient,
+                    "row": row,
+                    "attempt": row.delivery_attempts,
+                    "status": row.status,
+                    "error": row.error,
+                    "events": events,
+                    "first_canonical_boundary": first_boundary,
+                    "target_tuple": {"team": TEAM, "recipient": row.recipient, "legal": true}
+                })
+            })
+            .collect::<Vec<_>>();
+        let bundle = json!({
+            "schema": "team-agent/fanout-failure-v2",
+            "candidate_sha": gate_authoritative_sha(),
+            "classification": {"kind": "apparatus", "product": false, "basis": "forced expectation mismatch tooth"},
+            "message_ids": rows.iter().map(|row| row.message_id.clone()).collect::<Vec<_>>(),
+            "row_count": rows.len(),
+            "rows": row_values,
+            "coordinator": self.coordinator_values(),
+            "capture": self.capture_values(),
+            "cleanup": "durable sibling is read and hash-checked before exact parent cleanup"
+        });
+        std::fs::create_dir_all(&self.durable_evidence_dir)
+            .expect("create durable fanout evidence directory");
+        let path = self.durable_evidence_dir.join("fanout-failure.json");
+        let bytes = serde_json::to_vec_pretty(&bundle).expect("encode durable fanout evidence");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create durable fanout evidence");
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .expect("flush durable fanout evidence");
+        path.display().to_string()
+    }
+
+    fn remove_empty_evidence_dir(&self) {
+        let _ = std::fs::remove_dir(&self.durable_evidence_dir);
     }
 
     fn wait_status(&self, message_id: &str, wanted: &[&str], seconds: u64) -> String {
@@ -244,13 +415,16 @@ impl SendPathCase {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 struct DbRow {
     message_id: String,
     sender: String,
     recipient: String,
     owner_team_id: Option<String>,
     status: Option<String>,
+    delivery_attempts: i64,
+    error: Option<String>,
+    delivered_at: Option<String>,
 }
 
 fn json_stdout(output: &Output, context: &str) -> Value {
@@ -265,6 +439,82 @@ fn json_stdout(output: &Output, context: &str) -> Value {
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+fn gate_authoritative_sha() -> String {
+    let sha = std::env::var("TEAM_AGENT_GATE_SHA")
+        .expect("TEAM_AGENT_GATE_SHA must contain the gate-tested composition SHA");
+    assert!(
+        sha.len() == 40
+            && sha
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "TEAM_AGENT_GATE_SHA must be exactly 40 lowercase hex characters: {sha:?}"
+    );
+    assert_eq!(
+        COMPILED_GATE_SHA,
+        Some(sha.as_str()),
+        "TEAM_AGENT_GATE_SHA changed after test compilation"
+    );
+    sha
+}
+
+fn validate_fanout_bundle(bundle: &Value) -> Result<(), String> {
+    if bundle.get("schema").and_then(Value::as_str) != Some("team-agent/fanout-failure-v2") {
+        return Err("schema".into());
+    }
+    if bundle.get("candidate_sha").and_then(Value::as_str)
+        != Some(gate_authoritative_sha().as_str())
+    {
+        return Err("candidate_sha".into());
+    }
+    let ids = bundle
+        .get("message_ids")
+        .and_then(Value::as_array)
+        .ok_or("message_ids")?;
+    let rows = bundle.get("rows").and_then(Value::as_array).ok_or("rows")?;
+    if bundle.get("row_count").and_then(Value::as_u64) != Some(2)
+        || ids.len() != 2
+        || rows.len() != 2
+        || ids[0] == ids[1]
+        || bundle.pointer("/coordinator/identity").is_none()
+        || bundle.pointer("/coordinator/health").is_none()
+        || !bundle
+            .pointer("/coordinator/tick")
+            .is_some_and(Value::is_object)
+        || bundle.pointer("/capture").is_none()
+    {
+        return Err("bundle-level causal fields".into());
+    }
+    let row_ids = rows
+        .iter()
+        .map(|row| row.get("message_id").cloned().unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
+    if row_ids.len() != 2
+        || row_ids[0] == row_ids[1]
+        || row_ids
+            .iter()
+            .any(|row_id| !ids.iter().any(|id| id == row_id))
+    {
+        return Err("row-id correlation".into());
+    }
+    for row in rows {
+        if row.get("message_id").and_then(Value::as_str).is_none()
+            || !ids
+                .iter()
+                .any(|id| id == row.get("message_id").unwrap_or(&Value::Null))
+            || row.get("attempt").and_then(Value::as_i64).is_none()
+            || row.get("status").is_none()
+            || row.get("error").is_none()
+            || row.pointer("/events/events").is_none()
+            || row.pointer("/target_tuple/team").is_none()
+            || row.pointer("/target_tuple/recipient").is_none()
+            || row.pointer("/target_tuple/legal") != Some(&Value::Bool(true))
+        {
+            return Err("per-row correlation".into());
+        }
+    }
+    Ok(())
 }
 
 /// Invariant 1 — persist-before-recovery with the coordinator really dead:
@@ -590,19 +840,52 @@ fn c5_fanout_rows_are_independent_under_partial_blockers() {
         .iter()
         .find(|row| row.recipient == "w2")
         .expect("w2 row present");
-    let w2_status = case.wait_status(&w2_row.message_id, &["delivered"], 15);
-    assert_eq!(
-        w2_status, "delivered",
-        "C5: the live recipient must deliver despite the sibling blocker"
+    let forced = std::env::var_os("FANOUT_FORCE_FAILURE").is_some();
+    let w2_status = case.wait_status(
+        &w2_row.message_id,
+        if forced {
+            &["__forced_unexpected_status__"]
+        } else {
+            &["delivered"]
+        },
+        if forced { 3 } else { 15 },
     );
+    if !forced {
+        assert_eq!(
+            w2_status, "delivered",
+            "C5: the live recipient must deliver despite the sibling blocker"
+        );
+    }
     let w1_row = rows
         .iter()
         .find(|row| row.recipient == "w1")
         .expect("w1 row present");
-    let w1_status = case.wait_status(&w1_row.message_id, &["queued_pane_missing"], 15);
-    assert_eq!(
-        w1_status, "queued_pane_missing",
-        "C5: the blocked recipient parks as its own durable blocker, not erased"
+    let w1_status = case.wait_status(
+        &w1_row.message_id,
+        if forced {
+            &["__forced_unexpected_status__"]
+        } else {
+            &["queued_pane_missing"]
+        },
+        if forced { 3 } else { 15 },
     );
+    if forced {
+        let final_rows = case.db_rows("carc c5 fanout");
+        let evidence = case.fanout_failure_bundle(&final_rows);
+        let bundle = std::fs::read_to_string(&evidence)
+            .ok()
+            .and_then(|bytes| serde_json::from_str::<Value>(&bytes).ok())
+            .expect("fanout evidence must be readable JSON before cleanup");
+        validate_fanout_bundle(&bundle).expect("fanout evidence must validate before cleanup");
+        case.shutdown();
+        panic!("fanout forced failure; durable evidence={evidence}");
+    }
+    if !forced {
+        assert_eq!(
+            w1_status, "queued_pane_missing",
+            "C5: the blocked recipient parks as its own durable blocker, not erased"
+        );
+    }
     case.shutdown();
+    case.remove_empty_evidence_dir();
 }
