@@ -286,7 +286,7 @@ fn restart_readiness_timeout_keeps_three_truth_booleans_and_no_false_restarted()
 
 #[test]
 #[serial(env)]
-fn eight_worker_restart_records_overlap_without_elapsed_sla() {
+fn eight_worker_restart_with_100ms_spawn_delay_beats_serial_baseline() {
     let case = RestartLatencyCase::new("r4-timing-smoke", 8);
     let delay = Duration::from_millis(100);
     let transport = StartupLatencyTransport::new().with_spawn_delay(delay);
