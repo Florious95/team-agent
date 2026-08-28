@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
@@ -38,6 +39,162 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
+
+struct AgentReservation {
+    workspace: PathBuf,
+    team_key: String,
+    agent_id: AgentId,
+    owner: String,
+    active: bool,
+}
+
+impl AgentReservation {
+    fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for AgentReservation {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let request = LifecycleLockRequest {
+            workspace: &self.workspace,
+            operation: "agent-reservation-rollback",
+            team: Some(self.team_key.as_str()),
+            agent_id: Some(&self.agent_id),
+        };
+        let Ok(_lock) = acquire_agent_lifecycle_lock(request) else {
+            let _ = crate::event_log::EventLog::new(&self.workspace).write(
+                "lifecycle.clone_reservation_rollback_failed",
+                serde_json::json!({
+                    "agent_id": self.agent_id.as_str(),
+                    "reservation_owner": self.owner,
+                    "reason": "lifecycle lock unavailable",
+                }),
+            );
+            return;
+        };
+        let result =
+            release_agent_reservation(&self.workspace, &self.team_key, &self.agent_id, &self.owner);
+        let _ = crate::event_log::EventLog::new(&self.workspace).write(
+            if result.is_ok() {
+                "lifecycle.clone_reservation_rolled_back"
+            } else {
+                "lifecycle.clone_reservation_rollback_failed"
+            },
+            serde_json::json!({
+                "agent_id": self.agent_id.as_str(),
+                "reservation_owner": self.owner,
+                "result": result.as_ref().err().map(ToString::to_string),
+            }),
+        );
+    }
+}
+
+fn reserve_agent_slot(
+    workspace: &Path,
+    team: Option<&str>,
+    agent_id: &AgentId,
+) -> Result<AgentReservation, LifecycleError> {
+    let state = crate::state::projection::select_runtime_state(workspace, team)
+        .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
+    let team_key = team
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .or_else(|| explicit_active_team_key(&state))
+        .unwrap_or_else(|| crate::state::projection::team_state_key(&state));
+    let owner = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| LifecycleError::StatePersist(error.to_string()))?
+            .as_nanos()
+    );
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace,
+        operation: "agent-reservation",
+        team: Some(team_key.as_str()),
+        agent_id: Some(agent_id),
+    })?;
+    let mut latest = crate::state::projection::select_runtime_state(workspace, Some(&team_key))
+        .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
+    ensure_owner_allowed_for_state(&latest, Some(agent_id))?;
+    if runtime_agent_exists(&latest, agent_id) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "agent id already exists: {agent_id}"
+        )));
+    }
+    latest
+        .as_object_mut()
+        .ok_or_else(|| LifecycleError::StatePersist("runtime state root is not an object".into()))?
+        .entry("agents")
+        .or_insert_with(|| serde_json::json!({}));
+    let agents = latest
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("runtime state agents is not an object".into())
+        })?;
+    agents.insert(
+        agent_id.as_str().to_string(),
+        serde_json::json!({
+            "agent_id": agent_id.as_str(),
+            "status": "reserved",
+            "reservation_owner": owner,
+        }),
+    );
+    save_launched_team_state_for_key(
+        workspace,
+        &latest,
+        Some(team_key.as_str()),
+        Some(agent_id.as_str()),
+    )?;
+    let _ = crate::event_log::EventLog::new(workspace).write(
+        "lifecycle.clone_reservation_acquired",
+        serde_json::json!({
+            "agent_id": agent_id.as_str(),
+            "reservation_owner": owner,
+            "team": team_key,
+        }),
+    );
+    Ok(AgentReservation {
+        workspace: workspace.to_path_buf(),
+        team_key,
+        agent_id: agent_id.clone(),
+        owner,
+        active: true,
+    })
+}
+
+fn release_agent_reservation(
+    workspace: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    owner: &str,
+) -> Result<(), LifecycleError> {
+    let mut state = crate::state::projection::select_runtime_state(workspace, Some(team_key))
+        .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
+    let matches = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .and_then(|agent| agent.get("reservation_owner"))
+        .and_then(serde_json::Value::as_str)
+        == Some(owner);
+    if !matches {
+        return Ok(());
+    }
+    state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            LifecycleError::StatePersist("runtime state agents is not an object".into())
+        })?
+        .remove(agent_id.as_str());
+    save_launched_team_state_for_key(workspace, &state, Some(team_key), Some(agent_id.as_str()))
+}
 
 /// ---
 /// purpose: 加一席的默认入口，解析活跃 team、拿生命周期锁、路由到该 team 实际使用的 tmux socket
@@ -89,12 +246,11 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &selected.run_workspace,
-        operation: "add-agent",
-        team: Some(selected.team_key.as_str()),
-        agent_id: Some(agent_id),
-    })?;
+    let reservation = reserve_agent_slot(
+        &selected.run_workspace,
+        Some(selected.team_key.as_str()),
+        agent_id,
+    )?;
     // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
     let team_dir = selected.team_dir;
     // **0.3.24 add-agent socket drift fix**: route to the live team's persisted
@@ -108,7 +264,7 @@ pub fn add_agent(
         Some(selected.team_key.as_str()),
     )
     .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
-    add_agent_with_transport_at_paths(
+    add_agent_with_transport_at_paths_reserved(
         &selected.run_workspace,
         &team_dir,
         agent_id,
@@ -116,6 +272,7 @@ pub fn add_agent(
         open_display,
         Some(selected.team_key.as_str()),
         &transport,
+        Some(reservation),
     )
 }
 
@@ -188,13 +345,8 @@ pub(crate) fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &run_workspace,
-        operation: "add-agent",
-        team,
-        agent_id: Some(agent_id),
-    })?;
-    add_agent_with_transport_at_paths(
+    let reservation = reserve_agent_slot(&run_workspace, team, agent_id)?;
+    add_agent_with_transport_at_paths_reserved(
         &run_workspace,
         workspace,
         agent_id,
@@ -202,6 +354,7 @@ pub(crate) fn add_agent_with_transport(
         open_display,
         team,
         transport,
+        Some(reservation),
     )
 }
 
@@ -370,6 +523,29 @@ pub(super) fn add_agent_with_transport_at_paths(
     team: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<AddAgentReport, LifecycleError> {
+    add_agent_with_transport_at_paths_reserved(
+        run_workspace,
+        team_dir,
+        agent_id,
+        role_file_path,
+        open_display,
+        team,
+        transport,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_agent_with_transport_at_paths_reserved(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+    reservation: Option<AgentReservation>,
+) -> Result<AddAgentReport, LifecycleError> {
     let runtime_state = crate::state::persist::load_runtime_state(run_workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let canonical_team_key = team
@@ -387,7 +563,15 @@ pub(super) fn add_agent_with_transport_at_paths(
             role_file_path.display()
         )));
     }
-    if runtime_agent_exists(&owner_state, agent_id) {
+    let reservation_owned = reservation.as_ref().is_some_and(|reservation| {
+        owner_state
+            .get("agents")
+            .and_then(|agents| agents.get(agent_id.as_str()))
+            .and_then(|agent| agent.get("reservation_owner"))
+            .and_then(serde_json::Value::as_str)
+            == Some(reservation.owner.as_str())
+    });
+    if runtime_agent_exists(&owner_state, agent_id) && !reservation_owned {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent id already exists: {agent_id}"
         )));
@@ -414,20 +598,36 @@ pub(super) fn add_agent_with_transport_at_paths(
             compiled.id, agent_id
         )));
     }
-    inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
+    let compiled_agent = compiled.agent.clone();
+    inject_agent_into_spec(&mut spec, compiled_agent.clone(), &compiled.id)?;
     // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
     // E42 (0.3.24 P0): capture pre-write bytes for atomic rollback. If anything
     // downstream of write_spec_atomic + upsert_agent_state_from_role + spawn
     // fails, restore the prior bytes so the canonical spec / runtime state never
     // get a half-written row that disagrees with what remove-agent can see.
+    let reservation_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: run_workspace,
+        operation: "add-agent-spec-reservation",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     let pre_spec_text = match std::fs::read_to_string(&spec_path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(LifecycleError::StatePersist(format!("read spec: {e}"))),
     };
-    let pre_runtime_state = crate::state::persist::load_runtime_state(run_workspace).ok();
-    write_spec_atomic(&spec_path, &spec)?;
+    // Merge against the latest runtime spec while holding only the short
+    // filesystem critical section. Role compilation happened before this lock;
+    // peer reservations therefore remain visible instead of being overwritten
+    // by a stale base-spec snapshot.
+    let mut latest_spec = pre_spec_text
+        .as_deref()
+        .and_then(|text| crate::model::yaml::loads(text).ok())
+        .unwrap_or(spec);
+    inject_agent_into_spec(&mut latest_spec, compiled_agent, &compiled.id)?;
+    write_spec_atomic(&spec_path, &latest_spec)?;
+    drop(reservation_lock);
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     // upsert writes status="starting" (E42) — start_agent_at_paths::mark_agent_started
@@ -444,7 +644,7 @@ pub(super) fn add_agent_with_transport_at_paths(
             run_workspace,
             &spec_path,
             pre_spec_text.as_deref(),
-            pre_runtime_state.as_ref(),
+            None,
             agent_id,
             "state_upsert_failed",
         );
@@ -466,7 +666,7 @@ pub(super) fn add_agent_with_transport_at_paths(
                 run_workspace,
                 &spec_path,
                 pre_spec_text.as_deref(),
-                pre_runtime_state.as_ref(),
+                None,
                 agent_id,
                 "start_agent_failed",
             );
@@ -483,7 +683,7 @@ pub(super) fn add_agent_with_transport_at_paths(
                 run_workspace,
                 &spec_path,
                 pre_spec_text.as_deref(),
-                pre_runtime_state.as_ref(),
+                None,
                 agent_id,
                 "added_agent_paused",
             );
@@ -492,6 +692,9 @@ pub(super) fn add_agent_with_transport_at_paths(
             )));
         }
     };
+    if let Some(reservation) = reservation {
+        reservation.commit();
+    }
     Ok(AddAgentReport {
         env,
         start_mode,

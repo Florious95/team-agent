@@ -896,7 +896,11 @@ fn merge_agent_projection(
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
                     let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
-                        return Err(save_conflict(projection, agent_id, fields));
+                        if lifecycle_placeholder(existing.get()) {
+                            preserve_latest_topology(existing.get_mut(), latest_agent);
+                        } else {
+                            return Err(save_conflict(projection, agent_id, fields));
+                        }
                     }
                 }
                 if !skip_capture_backfill || !skip_capture_backfill_agent_ids.contains(agent_id) {
@@ -906,6 +910,47 @@ fn merge_agent_projection(
         }
     }
     Ok(())
+}
+
+fn lifecycle_placeholder(agent: &Value) -> bool {
+    matches!(
+        agent.get("status").and_then(Value::as_str),
+        Some("reserved" | "starting")
+    )
+}
+
+fn preserve_latest_topology(incoming: &mut Value, latest: &Value) {
+    let Some(incoming) = incoming.as_object_mut() else {
+        return;
+    };
+    // A stale add/clone writer can carry a placeholder row (`starting`) after
+    // a peer has completed its spawn. Preserve the completed lifecycle and
+    // capture tuple together with topology; otherwise a later peer save can
+    // regress the finalized row back to `starting` while returning success.
+    if latest.get("status").and_then(Value::as_str) == Some("running") {
+        for field in [
+            "status",
+            "agent_id",
+            "session_id",
+            "rollout_path",
+            "captured_at",
+            "captured_via",
+            "attribution_confidence",
+            "capture_state",
+            "_pending_session_id",
+            "spawn_cwd",
+            "owner_team_id",
+        ] {
+            if let Some(value) = latest.get(field).filter(|value| json_truthy(value)) {
+                incoming.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+    for field in LIVE_TOPOLOGY_FIELDS {
+        if let Some(value) = latest.get(field).filter(|value| json_truthy(value)) {
+            incoming.insert(field.to_string(), value.clone());
+        }
+    }
 }
 
 fn save_conflict(projection: &str, agent_id: &str, fields: Vec<&'static str>) -> StateError {
@@ -2003,13 +2048,8 @@ mod tests {
                 "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
             },
         });
-        save_runtime_state_with_lifecycle_topology_authority(
-            &ws,
-            &incoming,
-            "team-a",
-            &["target"],
-        )
-        .unwrap();
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
+            .unwrap();
         let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
         assert!(
             target.get("pane_id").is_none(),
