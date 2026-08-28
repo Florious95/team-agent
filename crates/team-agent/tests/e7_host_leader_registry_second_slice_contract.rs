@@ -503,10 +503,20 @@ fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
         Some(false),
         "E7 RED: mailbox queue is not physical delivery; delivered must be false; output={body}"
     );
+    let message_id = body
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|message_id| !message_id.is_empty())
+        .expect("E7 RED: mailbox response must include a durable message_id");
     assert_eq!(
         message_count(&target.workspace, &token),
         1,
         "E7 RED: mailbox path must write exactly one target team.db message row"
+    );
+    assert_eq!(
+        message_status(&target.workspace, message_id).as_deref(),
+        Some("queued_until_leader_attach"),
+        "E7 RED: mailbox row must remain queued until leader attach; message_id={message_id} body={body}"
     );
 }
 
@@ -967,6 +977,17 @@ fn message_count(workspace: &Path, token: &str) -> i64 {
         |row| row.get(0),
     )
     .unwrap_or(0)
+}
+
+fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
+    let db = workspace.join(".team/runtime/team.db");
+    let conn = Connection::open(db).ok()?;
+    conn.query_row(
+        "select status from messages where message_id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 fn channel_for_pane(case: &RuntimeCase, pane: &str) -> Value {
