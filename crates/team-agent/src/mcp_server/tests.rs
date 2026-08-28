@@ -19,6 +19,7 @@
 
 use super::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ static MCP_FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 struct McpStateFixture {
     root: PathBuf,
     workspace: PathBuf,
+    receipt: PathBuf,
 }
 
 impl McpStateFixture {
@@ -74,9 +76,17 @@ impl McpStateFixture {
         std::fs::create_dir(&raw_root).unwrap();
         let root = std::fs::canonicalize(raw_root).unwrap();
         let workspace = root.join("workspace");
+        let receipt = root
+            .parent()
+            .unwrap()
+            .join(format!("ta-mcp-receipt-{}-{seq}.json", std::process::id()));
         std::fs::create_dir(&workspace).unwrap();
 
-        let fixture = Self { root, workspace };
+        let fixture = Self {
+            root,
+            workspace,
+            receipt,
+        };
         fixture.seed_spec("team_state.md");
         crate::state::persist::save_runtime_state(
             &fixture.workspace,
@@ -105,7 +115,7 @@ impl McpStateFixture {
         self.workspace.join(relative)
     }
 
-    fn record_provenance(&self, raw_workspace: &Path, state_file: &Path) {
+    fn record_provenance(&self, raw_workspace: &Path, state_file: &Path) -> PathBuf {
         let canonical_workspace =
             crate::model::paths::canonical_run_workspace(raw_workspace).unwrap();
         assert!(self.under_root(raw_workspace));
@@ -113,6 +123,7 @@ impl McpStateFixture {
         assert!(self.under_root(state_file));
         let team_dir = self.workspace.join(".team");
         let runtime_dir = team_dir.join("runtime");
+        let runtime_state = crate::state::persist::runtime_state_path(&self.workspace);
         let paths = [
             ("root", self.root.as_path()),
             ("raw_workspace", raw_workspace),
@@ -120,6 +131,7 @@ impl McpStateFixture {
             ("team_dir", team_dir.as_path()),
             ("runtime_dir", runtime_dir.as_path()),
             ("state_parent", state_file.parent().unwrap()),
+            ("runtime_state", runtime_state.as_path()),
         ];
         let mut facts = paths
             .into_iter()
@@ -143,17 +155,30 @@ impl McpStateFixture {
                 "device": metadata_device(&metadata)
             }));
         }
-        let provenance = json!({
+        let payload = json!({
             "raw_workspace": raw_workspace.display().to_string(),
             "canonical_workspace": canonical_workspace.display().to_string(),
             "resolved_state_file": state_file.display().to_string(),
+            "runtime_state_path": runtime_state.display().to_string(),
             "facts": facts
         });
-        std::fs::write(
-            self.root.join("mcp-state-provenance.json"),
-            serde_json::to_vec_pretty(&provenance).unwrap(),
-        )
-        .unwrap();
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let payload_sha256 = format!("{:x}", Sha256::digest(&payload_bytes));
+        let receipt = json!({
+            "schema": "mcp-state-provenance-v1",
+            "payload": payload,
+            "payload_sha256": payload_sha256
+        });
+        let receipt_bytes = serde_json::to_vec_pretty(&receipt).unwrap();
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.receipt)
+            .unwrap();
+        file.write_all(&receipt_bytes).unwrap();
+        file.sync_all().unwrap();
+        self.receipt.clone()
     }
 
     fn under_root(&self, path: &Path) -> bool {
