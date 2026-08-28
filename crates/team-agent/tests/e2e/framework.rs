@@ -1147,10 +1147,10 @@ fn repository_head_sha() -> String {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("resolve exact repository head for CR5 receipt");
+        .expect("resolve exact repository head for delivery-timeout receipt");
     assert!(
         output.status.success(),
-        "git rev-parse HEAD failed for CR5 receipt: {}",
+        "git rev-parse HEAD failed for delivery-timeout receipt: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -1300,7 +1300,7 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
 /// returns the result for further inspection.
 pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
     let ws_str = ws.path().to_str().expect("workspace path utf8").to_string();
-    run_ta(
+    let result = run_ta(
         ws,
         &[
             "quick-start",
@@ -1313,7 +1313,8 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--no-display",
             "--json",
         ],
-    )
+    );
+    result
 }
 
 /// Sanitize team_id into the tmux session name as the runtime does:
