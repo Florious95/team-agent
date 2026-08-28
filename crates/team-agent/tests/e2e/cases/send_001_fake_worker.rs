@@ -42,6 +42,13 @@ fn send_001_delivers_to_fake_worker() {
         "quick-start did not launch: {}",
         qs.stdout
     );
+    let socket = ws
+        .read_state()
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .expect("quick-start must record its exact tmux socket");
+    ws.register_owned_tmux_socket(&socket);
 
     let canary = format!("send001-worker-canary-{}", std::process::id());
     let out = run_ta(
