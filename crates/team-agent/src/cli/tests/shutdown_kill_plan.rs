@@ -468,6 +468,46 @@ fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
 
 #[test]
 fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
+    #[cfg(unix)]
+    const CHILD: &str = "RB11_F01_NATURAL_PROBE_FAILURE_CHILD";
+    #[cfg(unix)]
+    const TEST: &str =
+        "cli::tests::shutdown_kill_plan::repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth";
+
+    #[cfg(unix)]
+    if std::env::var_os(CHILD).is_none() {
+        let path = tmp_shutdown_workspace("rb11-f01-empty-path").join("bin");
+        std::fs::create_dir_all(&path).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "directed child failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("running 1 test")
+                && stdout.contains(&format!("test {TEST} ..."))
+                && stdout.contains("RB11_F01_CHILD_SUCCESS"),
+            "directed child omitted success marker: stdout={} stderr={}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("RB11_F01_DIRECTED_CHILD_OUTPUT\n{stdout}");
+        return;
+    }
+
+    #[cfg(unix)]
+    let expected_probe_failure = std::env::var_os(CHILD).is_some();
+    #[cfg(not(unix))]
+    let expected_probe_failure = false;
     let ws = tmp_shutdown_workspace("owned-loop-no-growth");
     let sockets = (0..20)
         .map(|idx| ws.join(format!("owned-loop-{idx}.sock")))
@@ -499,11 +539,27 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
         );
         let out = match &result {
             Ok(out) if !shutdown_result_is_degraded(out) => out,
+            Ok(out) if expected_probe_failure => {
+                let diagnostic =
+                    shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
+                assert!(
+                    shutdown_result_is_degraded(out),
+                    "directed probe-failure child unexpectedly clean: {diagnostic}"
+                );
+                assert_eq!(
+                    out["ok"],
+                    json!(false),
+                    "probe failure must remain degraded: {out}"
+                );
+                if iteration == 0 {
+                    println!("RB11_F01_FIRST_FAILURE {diagnostic}");
+                }
+                out
+            }
             Ok(out) => {
                 let diagnostic =
                     shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
-                assert!(!shutdown_result_is_degraded(out), "{diagnostic}");
-                out
+                panic!("unexpected degraded shutdown: {diagnostic}");
             }
             Err(error) => {
                 let diagnostic =
@@ -511,13 +567,19 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
                 panic!("shutdown invocation failed: {error}; {diagnostic}");
             }
         };
-        assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
+        if !expected_probe_failure {
+            assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
+        }
     }
     let ending = sockets.iter().filter(|path| path.exists()).count();
     assert_eq!(
         ending, starting,
         "owned socket files must not grow across loops"
     );
+    #[cfg(unix)]
+    if expected_probe_failure {
+        println!("RB11_F01_CHILD_SUCCESS iterations={}", sockets.len());
+    }
 }
 
 fn shutdown_result_is_degraded(out: &serde_json::Value) -> bool {
@@ -604,7 +666,10 @@ fn shutdown_invocation_diagnostic(
             || !matches!(phase, Some("entry" | "residual_round" | "post_verify"))
             || !matches!(
                 event["error"].as_str(),
-                Some(error) if !error.trim().is_empty()
+                Some(error)
+                    if !error.trim().is_empty()
+                        && !error.contains("exited with status")
+                        && (error.contains("No such file") || error.contains("os error 2"))
             )
         {
             panic!(
