@@ -82,9 +82,24 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
             "health": health_facts(&coordinator_health(&fixture.workspace)),
         }),
     );
+    let health = coordinator_health(&fixture.workspace);
     assert!(
-        coordinator_health(&fixture.workspace).ok,
+        health.ok,
         "R1 RED: successful loud ensure must leave current coordinator healthy; body={body}"
+    );
+    assert_eq!(
+        health.pid.map(|pid| pid.get()),
+        Some(ensured_pid),
+        "R1 RED: readiness must still describe the coordinator started by this ensure; body={body}"
+    );
+    assert!(
+        health.process_running
+            && health.metadata_ok
+            && health.wire_metadata_ok
+            && health.binary_identity_ok
+            && health.service_available
+            && health.schema.ok,
+        "R1 RED: same-PID coordinator must satisfy every readiness component; health={health:?} body={body}"
     );
 }
 
