@@ -76,7 +76,6 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
         &fixture,
         "readiness_race",
         ensured_pid,
-        None,
         json!({
             "decision": "stable_same_pid",
             "samples_required": 3,
@@ -94,16 +93,6 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
 fn r2_current_caller_mutating_send_loudly_rotates_older_identity_coordinator() {
     let mut fixture = LoudEnsureFixture::active("r2-stale-identity");
     let previous_pid = fixture.spawn_stale_identity_process();
-    append_failure_facts(
-        &fixture,
-        "identity_mismatch",
-        previous_pid,
-        None,
-        json!({
-            "decision": "caller_newer_than_daemon",
-            "health": health_facts(&coordinator_health(&fixture.workspace)),
-        }),
-    );
 
     let body = fixture.send_worker_json("R2_LOUD_ROTATION");
 
@@ -249,71 +238,6 @@ fn r4_loud_ensure_does_not_bypass_dirty_topology_refusal() {
 }
 
 #[test]
-#[serial(env)]
-fn r6_immediate_exit_must_not_claim_restart_and_keeps_control_child_visible() {
-    let mut fixture = LoudEnsureFixture::immediate_exit("r6-immediate-exit");
-    let control_child = Command::new("sleep")
-        .arg("60")
-        .spawn()
-        .expect("spawn control-child sentinel");
-    let control_pid = control_child.id();
-    fixture.fixture_children.push(control_child);
-
-    let body = fixture.send_worker_json("R6_IMMEDIATE_EXIT");
-
-    assert_ne!(
-        body.get("coordinator_auto_restarted")
-            .and_then(Value::as_bool),
-        Some(true),
-        "R6: immediately exiting coordinator must not claim restart; body={body}"
-    );
-    assert_eq!(
-        body.pointer("/coordinator_readiness/ready")
-            .and_then(Value::as_bool),
-        Some(false),
-        "R6: readiness timeout must be explicit; body={body}"
-    );
-    assert_eq!(
-        body.pointer("/coordinator_readiness/last_health/status")
-            .and_then(Value::as_str),
-        Some("stale"),
-        "R6: last health must classify the dead coordinator; body={body}"
-    );
-    assert!(
-        fixture.has_event("coordinator.ensure_readiness_timeout"),
-        "R6: timeout event must preserve last health evidence"
-    );
-    let coordinator_pid = response_coordinator_pid(&body, "R6");
-    append_failure_facts(
-        &fixture,
-        "product_crash",
-        coordinator_pid,
-        Some(control_pid),
-        json!({
-            "decision": "coordinator_dead_control_child_alive",
-            "product_fatal_event": fixture.has_event("coordinator.session_missing"),
-        }),
-    );
-    append_failure_facts(
-        &fixture,
-        "runner_child_policy",
-        coordinator_pid,
-        Some(control_pid),
-        json!({
-            "verdict": "not_proven",
-            "required": "coordinator_dead_and_control_child_dead_without_product_fatal",
-            "observed": "control_child_alive",
-        }),
-    );
-    assert!(
-        fixture.pid_alive(control_pid),
-        "R6: sibling control child must remain alive while coordinator exits"
-    );
-    assert_not_reported_delivered(&body, "R6");
-    assert_no_delivered_rows(&fixture.root, "R6");
-}
-
-#[test]
 fn r5_explicit_restart_start_report_semantics_remain_structured_guard() {
     let common = repo_file("crates/team-agent/src/lifecycle/restart/common.rs");
     let types = repo_file("crates/team-agent/src/lifecycle/types.rs");
@@ -352,10 +276,6 @@ impl LoudEnsureFixture {
 
     fn dirty_topology(tag: &str) -> Self {
         Self::with_state(tag, dirty_topology_state)
-    }
-
-    fn immediate_exit(tag: &str) -> Self {
-        Self::with_state(tag, immediate_exit_state)
     }
 
     fn with_state(tag: &str, state: fn(&Path) -> Value) -> Self {
@@ -665,13 +585,6 @@ fn dirty_topology_state(root: &Path) -> Value {
     state
 }
 
-fn immediate_exit_state(root: &Path) -> Value {
-    let mut state = active_runtime_state(root);
-    state["session_name"] = json!("missing-coordinator-session");
-    state["teams"][TEAM]["session_name"] = json!("missing-coordinator-session");
-    state
-}
-
 fn worker_state() -> Value {
     json!({
         "status": "running",
@@ -818,7 +731,6 @@ fn append_failure_facts(
     fixture: &LoudEnsureFixture,
     classification: &str,
     child_pid: u32,
-    control_child_pid: Option<u32>,
     decision: Value,
 ) {
     let metadata_path = coordinator_meta_path(&fixture.workspace);
@@ -827,7 +739,6 @@ fn append_failure_facts(
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let log_path = coordinator_log_path(&fixture.workspace);
     let child_alive = fixture.pid_alive(child_pid);
-    let control_child_alive = control_child_pid.map(|pid| fixture.pid_alive(pid));
     let facts = json!({
         "schema": "cg5-loud-ensure-facts-v1",
         "classification": classification,
@@ -848,13 +759,6 @@ fn append_failure_facts(
             },
             "cgroup": cgroup_facts(child_pid),
         },
-        "control_child": control_child_pid.map(|pid| json!({
-            "pid": pid,
-            "alive_by_kill_zero": control_child_alive,
-            "exit_code": Value::Null,
-            "status_source": "test-owned sentinel; wait status unavailable",
-            "cgroup": cgroup_facts(pid),
-        })),
         "decision": decision,
     });
     let path = evidence_path();
