@@ -1300,7 +1300,7 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
 /// returns the result for further inspection.
 pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
     let ws_str = ws.path().to_str().expect("workspace path utf8").to_string();
-    run_ta(
+    let result = run_ta(
         ws,
         &[
             "quick-start",
@@ -1313,7 +1313,15 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--no-display",
             "--json",
         ],
-    )
+    );
+    let socket = ws
+        .read_state()
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .expect("quick-start must record its exact tmux socket");
+    ws.register_owned_tmux_socket(&socket);
+    result
 }
 
 /// Sanitize team_id into the tmux session name as the runtime does:
