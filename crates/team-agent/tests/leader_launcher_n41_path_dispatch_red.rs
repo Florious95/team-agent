@@ -24,7 +24,7 @@
 //!     - team-agent launcher route behavior
 //!     - hermetic tmux and provider shims
 //! boundary: Test-only route contracts; no launcher, runner, or product socket behavior is changed.
-//! maturity: experimental
+//! maturity: wired
 //! arch:
 //!   allowed_dependencies: [std, libc, serde_json, serial_test, team_agent]
 //! ---
