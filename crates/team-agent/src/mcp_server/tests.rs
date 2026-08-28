@@ -1,17 +1,17 @@
 //! ---
-//! purpose: MCP contract tests with fixture-owned workspace and path provenance
+//! purpose: MCP no-compaction contract test with fixture-owned workspace and path provenance
 //! contract:
 //!   provides:
 //!     - name: mcp_state_fixture
-//!       what: supplies explicit HOME/TMPDIR/workspace-shaped paths without mutating process-global environment
+//!       what: supplies explicit process-owned workspace and state-file paths without mutating process-global environment
 //!     - name: mcp_state_path_provenance
-//!       what: records canonical remap, resolved state path, and filesystem ownership facts
+//!       what: records raw/canonical workspace, resolved state path, and filesystem ownership facts
 //!   depends:
 //!     - crate::mcp_server::lifecycle_tools::state_status
 //!     - crate::state::selector
 //! boundary:
-//!   - normal tests never write outside their fixture root; isolation controls own and clean a sibling root
-//!   - permission failures remain observable; this suite does not alter persistence semantics
+//!   - the owned no-compaction test writes only within its fixture root
+//!   - this suite does not alter persistence semantics
 //! maturity: wired
 //! ---
 //! step 14a · mcp_server::tests — WAVE-2 RED contracts (Python v0.2.11 golden).
@@ -42,14 +42,9 @@ fn unique_ws(tag: &str) -> std::path::PathBuf {
     use std::io::ErrorKind;
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let base = if cfg!(target_os = "macos") {
-        PathBuf::from("/private/tmp")
-    } else {
-        PathBuf::from("/tmp")
-    };
     loop {
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = base.join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
         match std::fs::create_dir(&p) {
             Ok(()) => return p,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
@@ -65,9 +60,6 @@ static MCP_FIXTURE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 struct McpStateFixture {
     root: PathBuf,
     workspace: PathBuf,
-    home: PathBuf,
-    tmpdir: PathBuf,
-    readonly_paths: Vec<PathBuf>,
 }
 
 impl McpStateFixture {
@@ -81,20 +73,10 @@ impl McpStateFixture {
         let raw_root = base.join(format!("ta-mcp-{}-{seq}", std::process::id()));
         std::fs::create_dir(&raw_root).unwrap();
         let root = std::fs::canonicalize(raw_root).unwrap();
-        let home = root.join("home");
-        let tmpdir = root.join("tmp");
         let workspace = root.join("workspace");
-        std::fs::create_dir(&home).unwrap();
-        std::fs::create_dir(&tmpdir).unwrap();
         std::fs::create_dir(&workspace).unwrap();
 
-        let fixture = Self {
-            root,
-            workspace,
-            home,
-            tmpdir,
-            readonly_paths: Vec::new(),
-        };
+        let fixture = Self { root, workspace };
         fixture.seed_spec("team_state.md");
         crate::state::persist::save_runtime_state(
             &fixture.workspace,
@@ -165,8 +147,6 @@ impl McpStateFixture {
             "raw_workspace": raw_workspace.display().to_string(),
             "canonical_workspace": canonical_workspace.display().to_string(),
             "resolved_state_file": state_file.display().to_string(),
-            "home": self.home.display().to_string(),
-            "tmpdir": self.tmpdir.display().to_string(),
             "facts": facts
         });
         std::fs::write(
@@ -184,49 +164,12 @@ impl McpStateFixture {
         };
         candidate.starts_with(&self.root)
     }
-
-    #[cfg(unix)]
-    fn make_parent_readonly(&mut self, relative: &str) -> PathBuf {
-        let parent = self.state_file(relative).parent().unwrap().to_path_buf();
-        std::fs::create_dir_all(&parent).unwrap();
-        set_mode(&parent, 0o555);
-        self.readonly_paths.push(parent.clone());
-        parent
-    }
-
-    #[cfg(unix)]
-    fn make_target_readonly(&mut self, relative: &str) -> PathBuf {
-        let target = self.state_file(relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&target, "fixture baseline\n").unwrap();
-        set_mode(&target, 0o444);
-        self.readonly_paths.push(target.clone());
-        target
-    }
 }
 
 impl Drop for McpStateFixture {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        for path in &self.readonly_paths {
-            if path.is_dir() {
-                set_mode(path, 0o755);
-            } else if path.exists() {
-                set_mode(path, 0o644);
-            }
-        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
-}
-
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(mode);
-    std::fs::set_permissions(path, permissions).unwrap();
 }
 
 #[cfg(unix)]
