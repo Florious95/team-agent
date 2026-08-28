@@ -25,6 +25,8 @@
 //! when the SUT misbehaves.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,37 +111,25 @@ impl TestWorkspace {
     /// exact Drop cleanup. Never a host-wide scan — the ledger only
     /// contains sockets THIS fixture created.
     pub fn register_owned_tmux_socket(&self, socket: &Path) {
+        let socket = normalize_existing_path(socket);
         let ambient = std::env::var_os("TMUX").and_then(|value| {
             let socket = value.to_str()?.split(',').next()?;
-            (!socket.is_empty()).then(|| PathBuf::from(socket))
+            (!socket.is_empty()).then(|| normalize_existing_path(Path::new(socket)))
         });
         assert_ne!(
             ambient.as_deref(),
-            Some(socket),
+            Some(socket.as_path()),
             "refusing to register ambient TMUX endpoint as test-owned: {}",
             socket.display()
         );
-        let private_tmp_socket = socket.parent().is_some_and(|parent| {
-            let parent = normalize_existing_path(parent);
-            parent.parent() == Some(Path::new("/private/tmp"))
-                && parent
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("tmux-"))
-        }) && socket
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("ta-"));
         assert!(
-            socket.is_absolute()
-                && socket.exists()
-                && (socket.starts_with(&self.path) || private_tmp_socket),
-            "tmux endpoint must already exist under its owning E2E workspace or private ta-* root: socket={} workspace={}",
+            socket.is_absolute() && socket.exists() && is_owned_tmux_socket_path(&socket),
+            "tmux endpoint must already exist as an owned platform tmux socket: socket={} workspace={}",
             socket.display(),
             self.path.display()
         );
         if let Ok(mut sockets) = self.owned_tmux_sockets.lock() {
-            sockets.push(socket.to_path_buf());
+            sockets.push(socket);
         }
     }
 
@@ -577,6 +567,32 @@ fn workspace_arg_matches(tokens: &[&str], candidates: &[String]) -> bool {
 
 pub(crate) fn normalize_existing_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(unix)]
+fn is_owned_tmux_socket_path(socket: &Path) -> bool {
+    let Some(parent) = socket.parent() else {
+        return false;
+    };
+    let uid_root = format!("tmux-{}", unsafe { libc::geteuid() });
+    let parent = normalize_existing_path(parent);
+    let in_platform_tmux_root = test_tmp_roots()
+        .iter()
+        .any(|root| parent == root.join(&uid_root));
+    let fixture_socket_name = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ta-"));
+    in_platform_tmux_root
+        && fixture_socket_name
+        && socket
+            .metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
+#[cfg(not(unix))]
+fn is_owned_tmux_socket_path(_socket: &Path) -> bool {
+    false
 }
 
 fn test_tmp_roots() -> Vec<PathBuf> {
