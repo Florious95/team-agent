@@ -1132,6 +1132,8 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
         ])
         .with_targets_persist_after_kill();
 
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let event_start = event_log.tail(0).expect("events before shutdown").len();
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
 
@@ -1142,6 +1144,17 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
          the team session — leader pane lives elsewhere so this is safe. Got \
          transport killed_sessions={killed_sessions:?}"
     );
+    if out["ok"] != json!(true) {
+        let events = event_log.tail(0).expect("events after shutdown");
+        let invocation_events = events
+            .into_iter()
+            .skip(event_start)
+            .take(64)
+            .collect::<Vec<_>>();
+        panic!(
+            "E49 external-leader shutdown returned a non-clean outcome: workspace tag=e49-external-leader-still-kills, expected session=team-external, shutdown report={out}, killed_sessions={killed_sessions:?}, bounded invocation events={invocation_events:?}"
+        );
+    }
     assert_eq!(out["ok"], json!(true));
 }
 
