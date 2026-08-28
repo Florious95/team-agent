@@ -4137,11 +4137,13 @@ pub mod diagnose_port {
         let health = crate::coordinator::coordinator_health(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
         );
+        let coordinator_ok = health.ok;
+        let coordinator_error = health.metadata_mismatch_reason.clone();
         let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(Value::Null);
         let grok_slot = crate::cli::grok_slot_report(workspace, &state).to_json();
         let grok_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
             && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
-        let ok = ok && grok_slot_ok;
+        let ok = ok && grok_slot_ok && coordinator_ok;
         Ok(json!({
             "tmux": {
                 "installed": tmux_installed,
@@ -4168,6 +4170,10 @@ pub mod diagnose_port {
                     .unwrap_or_else(|| json!("grok_slot_mismatch"))
             } else if !profile_smoke_ok && !legacy_only_failure {
                 json!("profile_smoke_failed")
+            } else if !coordinator_ok {
+                coordinator_error
+                    .map(Value::String)
+                    .unwrap_or_else(|| json!("coordinator_unavailable"))
             } else if workspace_valid {
                 json!("workspace has no Team Agent spec or runtime context")
             } else {
