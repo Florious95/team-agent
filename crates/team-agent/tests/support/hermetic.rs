@@ -1,5 +1,17 @@
 #![allow(dead_code)]
 
+//! ---
+//! purpose: shared hermetic integration fixture and exact resource ledger
+//! contract:
+//!   provides:
+//!     - caller-environment scrubbing and fixture-owned process/socket cleanup
+//!   depends:
+//!     - std process/filesystem primitives
+//!   boundary:
+//!     - teardown touches only registered PIDs and tmux sockets
+//! maturity: wired
+//! ---
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -201,7 +213,9 @@ impl HermeticTestEnv {
     /// helper processes.
     pub fn register_owned_pid(&self, pid: u32) {
         if let Ok(mut owned) = self.owned.lock() {
-            owned.pids.push(pid);
+            if !owned.pids.contains(&pid) {
+                owned.pids.push(pid);
+            }
         }
     }
 
@@ -214,7 +228,9 @@ impl HermeticTestEnv {
     pub fn register_owned_tmux_socket(&self, socket: &Path) {
         assert_fixture_owned_tmux_socket(&self.root, socket);
         if let Ok(mut owned) = self.owned.lock() {
-            owned.tmux_sockets.push(socket.to_path_buf());
+            if !owned.tmux_sockets.iter().any(|entry| entry == socket) {
+                owned.tmux_sockets.push(socket.to_path_buf());
+            }
         }
     }
 
@@ -352,6 +368,7 @@ impl Drop for HermeticTestEnv {
         } else {
             for pid in owned.pids.drain(..) {
                 let _ = Command::new("kill").arg(pid.to_string()).output();
+                wait_for_pid_exit(pid);
             }
             for socket in owned.tmux_sockets.drain(..) {
                 if let Some(socket_str) = socket.to_str() {
@@ -379,6 +396,20 @@ impl Drop for HermeticTestEnv {
         } else {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+}
+
+fn wait_for_pid_exit(pid: u32) {
+    for _ in 0..20 {
+        let alive = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
