@@ -2,9 +2,11 @@ use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(900);
+static NEXT_TEMP_OUTPUT_ID: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static PROBE_TIMEOUT: RefCell<Option<ProbeTimeout>> = const { RefCell::new(None) };
@@ -114,9 +116,10 @@ fn temp_output_path(kind: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
+    let unique_id = NEXT_TEMP_OUTPUT_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "team-agent-os-probe-{}-{nanos}.{kind}",
-        std::process::id()
+        "team-agent-os-probe-{}-{nanos}-{unique_id}.{kind}",
+        std::process::id(),
     ))
 }
 
