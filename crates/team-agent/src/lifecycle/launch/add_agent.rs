@@ -113,12 +113,6 @@ fn reserve_agent_slot(
             .map_err(|error| LifecycleError::StatePersist(error.to_string()))?
             .as_nanos()
     );
-    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace,
-        operation: "agent-reservation",
-        team: Some(team_key.as_str()),
-        agent_id: Some(agent_id),
-    })?;
     let mut latest = crate::state::projection::select_runtime_state(workspace, Some(&team_key))
         .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
     ensure_owner_allowed_for_state(&latest, Some(agent_id))?;
@@ -246,11 +240,18 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
+    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &selected.run_workspace,
+        operation: "add-agent",
+        team: Some(selected.team_key.as_str()),
+        agent_id: Some(agent_id),
+    })?;
     let reservation = reserve_agent_slot(
         &selected.run_workspace,
         Some(selected.team_key.as_str()),
         agent_id,
     )?;
+    drop(lifecycle_lock);
     // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
     let team_dir = selected.team_dir;
     // **0.3.24 add-agent socket drift fix**: route to the live team's persisted
@@ -273,6 +274,7 @@ pub fn add_agent(
         Some(selected.team_key.as_str()),
         &transport,
         Some(reservation),
+        false,
     )
 }
 
@@ -345,7 +347,14 @@ pub(crate) fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &run_workspace,
+        operation: "add-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     let reservation = reserve_agent_slot(&run_workspace, team, agent_id)?;
+    drop(lifecycle_lock);
     add_agent_with_transport_at_paths_reserved(
         &run_workspace,
         workspace,
@@ -355,6 +364,7 @@ pub(crate) fn add_agent_with_transport(
         team,
         transport,
         Some(reservation),
+        false,
     )
 }
 
@@ -444,7 +454,7 @@ pub(super) fn force_recreate_with_transport_locked(
         let restore_errors = snapshot.restore(team, transport);
         return force_recreate_rollback_error(agent_id, error, restore_errors);
     }
-    let operation = add_agent_with_transport_at_paths(
+    let operation = add_agent_with_transport_at_paths_locked(
         run_workspace,
         team_dir,
         agent_id,
@@ -532,6 +542,30 @@ pub(super) fn add_agent_with_transport_at_paths(
         team,
         transport,
         None,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_agent_with_transport_at_paths_locked(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
+    add_agent_with_transport_at_paths_reserved(
+        run_workspace,
+        team_dir,
+        agent_id,
+        role_file_path,
+        open_display,
+        team,
+        transport,
+        None,
+        true,
     )
 }
 
@@ -545,6 +579,7 @@ fn add_agent_with_transport_at_paths_reserved(
     team: Option<&str>,
     transport: &dyn Transport,
     reservation: Option<AgentReservation>,
+    lifecycle_lock_held: bool,
 ) -> Result<AddAgentReport, LifecycleError> {
     let runtime_state = crate::state::persist::load_runtime_state(run_workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -606,12 +641,16 @@ fn add_agent_with_transport_at_paths_reserved(
     // downstream of write_spec_atomic + upsert_agent_state_from_role + spawn
     // fails, restore the prior bytes so the canonical spec / runtime state never
     // get a half-written row that disagrees with what remove-agent can see.
-    let reservation_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: run_workspace,
-        operation: "add-agent-spec-reservation",
-        team,
-        agent_id: Some(agent_id),
-    })?;
+    let reservation_lock = if lifecycle_lock_held {
+        None
+    } else {
+        Some(acquire_agent_lifecycle_lock(LifecycleLockRequest {
+            workspace: run_workspace,
+            operation: "add-agent",
+            team,
+            agent_id: Some(agent_id),
+        })?)
+    };
     let pre_spec_text = match std::fs::read_to_string(&spec_path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,

@@ -37,10 +37,6 @@ pub(crate) struct LifecycleLockRequest<'a> {
 
 pub(crate) struct LifecycleLockGuard {
     file: std::fs::File,
-    workspace: PathBuf,
-    operation: &'static str,
-    team: Option<String>,
-    agent_id: Option<String>,
 }
 
 /// ---
@@ -155,24 +151,7 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
         match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
             Ok(true) => {
                 write_lock_metadata(&mut file, &request, &lock_path)?;
-                let _ = crate::event_log::EventLog::new(request.workspace).write(
-                    "lifecycle.lock_acquired",
-                    serde_json::json!({
-                        "lock_name": AGENT_LIFECYCLE_LOCK_NAME,
-                        "lock_path": lock_path.display().to_string(),
-                        "workspace": request.workspace.display().to_string(),
-                        "operation": request.operation,
-                        "team": request.team,
-                        "agent_id": request.agent_id.map(AgentId::as_str),
-                    }),
-                );
-                return Ok(LifecycleLockGuard {
-                    file,
-                    workspace: request.workspace.to_path_buf(),
-                    operation: request.operation,
-                    team: request.team.map(str::to_string),
-                    agent_id: request.agent_id.map(|id| id.as_str().to_string()),
-                });
+                return Ok(LifecycleLockGuard { file });
             }
             Ok(false) => {}
             Err(e) => {
@@ -367,16 +346,5 @@ impl Drop for LifecycleLockGuard {
         // releases when the file handle closes anyway. Uniform on
         // both `flock(LOCK_UN)` (unix) and `UnlockFileEx` (windows).
         let _ = crate::platform::file_lock::unlock(&self.file);
-        let _ = crate::event_log::EventLog::new(&self.workspace).write(
-            "lifecycle.lock_released",
-            serde_json::json!({
-                "lock_name": AGENT_LIFECYCLE_LOCK_NAME,
-                "lock_path": agent_lifecycle_lock_path(&self.workspace).display().to_string(),
-                "workspace": self.workspace.display().to_string(),
-                "operation": self.operation,
-                "team": self.team,
-                "agent_id": self.agent_id,
-            }),
-        );
     }
 }

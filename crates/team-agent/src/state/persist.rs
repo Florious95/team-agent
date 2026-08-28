@@ -906,7 +906,14 @@ fn merge_agent_projection(
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
                     let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
-                        if lifecycle_placeholder(existing.get()) {
+                        if !topology_update_agent_ids.is_empty() {
+                            // A lifecycle writer may have loaded a complete
+                            // peer row before that peer finalized. Its own
+                            // topology authority is limited to the IDs it
+                            // explicitly reports; preserve the latest peer
+                            // row instead of surfacing a stale self-conflict.
+                            preserve_latest_topology(existing.get_mut(), latest_agent);
+                        } else if lifecycle_placeholder(existing.get()) {
                             preserve_latest_topology(existing.get_mut(), latest_agent);
                         } else {
                             return Err(save_conflict(projection, agent_id, fields));
@@ -2119,6 +2126,44 @@ mod tests {
             "session_name": "team-a",
             "active_team_key": "team-a",
             "agents": {"f2": f2.clone()}
+        });
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved["agents"]["f1"], latest["agents"]["f1"]);
+        assert_eq!(saved["agents"]["f2"], f2);
+
+        // Captured R4 f1/f2 shape: the writer includes a stale, already
+        // running f1 snapshot while finalizing f2. Lifecycle authority must
+        // preserve f1 byte-for-byte rather than report SaveConflict for its
+        // five topology fields.
+        let ws = temp_ws();
+        let latest = latest_state();
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "f1": {
+                    "agent_id": "f1",
+                    "provider": "codex",
+                    "status": "running",
+                    "session_id": "session-f1",
+                    "rollout_path": "/tmp/f1.jsonl",
+                    "captured_at": "2026-08-28T00:00:00Z",
+                    "captured_via": "contract-fixture",
+                    "attribution_confidence": "high",
+                    "capture_state": "complete",
+                    "spawn_cwd": "/tmp/f1",
+                    "owner_team_id": "team-a",
+                    "pane_id": "%stale",
+                    "pane_pid": 999,
+                    "window": "f1-stale",
+                    "spawned_at": "2026-08-27T23:59:59Z",
+                    "spawn_epoch": 0
+                },
+                "f2": f2.clone()
+            }
         });
         save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
             .unwrap();
