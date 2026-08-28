@@ -9,6 +9,20 @@
 //! - the message row records recipient `a`, status `delivered`, and delivered_at
 //! - the fake worker receives the message and reports a result
 //! - a real stdio MCP report_result is returned by CLI collect.
+//!
+//! ---
+//! purpose: Prove fake-worker delivery with a durable timeout evidence path
+//! contract:
+//!   provides:
+//!     - name: send_001_delivers_to_fake_worker
+//!       what: Binds message row, worker result, and collect output to one message id
+//!   depends:
+//!     - crate::framework::wait_for_delivery_or_panic
+//!     - messaging rows/events and fake-worker runtime
+//! boundary:
+//!   - Test-only E2E evidence; no delivery product edits
+//! maturity: wired
+//! ---
 
 use crate::framework::*;
 use rusqlite::Connection;
@@ -17,6 +31,40 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+#[test]
+fn cr5_failure_renderer_fake_worker_exit() {
+    let case_name = "cr5_failure_renderer_fake_worker_exit";
+    let command = std::env::var("TEAM_AGENT_CR5_RECEIPT_COMMAND").unwrap_or_else(|_| {
+        "cargo test --locked --test e2e cases::send_001_fake_worker::cr5_failure_renderer_fake_worker_exit -- --test-threads=1".to_string()
+    });
+    let context = DeliveryFailureContext {
+        command,
+        case_name: case_name.to_string(),
+        failure_kind: "fake_worker_exit".to_string(),
+    };
+    let ws = TestWorkspace::new("cr5-worker-exit");
+    let message_id = format!("cr5-worker-exit-{}", std::process::id());
+    let receipt = force_delivery_failure_receipt(
+        &ws,
+        &context,
+        &message_id,
+        "a",
+        || false,
+        Duration::from_millis(120),
+    );
+    assert_cr5_receipt_complete(&receipt, &context, &message_id);
+    assert_eq!(
+        receipt.pointer("/row/error").and_then(Value::as_str),
+        Some("fake_worker_exited")
+    );
+    assert_eq!(
+        receipt
+            .pointer("/events/0/failure_kind")
+            .and_then(Value::as_str),
+        Some("fake_worker_exit")
+    );
+}
 
 #[test]
 fn send_001_delivers_to_fake_worker() {
@@ -60,7 +108,10 @@ fn send_001_delivers_to_fake_worker() {
     assert_json_field_eq_str(&j, "/target", "a");
     assert_json_field_eq_str(&j, "/sender", "leader");
 
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        message_id,
+        "a",
         "message row delivered to worker a",
         || {
             message_truth(ws.path(), message_id).is_some_and(|truth| {
@@ -71,7 +122,10 @@ fn send_001_delivers_to_fake_worker() {
         },
         Duration::from_secs(10),
     );
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        message_id,
+        "a",
         "fake worker received message and reported result",
         || {
             result_truth_for_message(ws.path(), message_id).is_some_and(|truth| {
