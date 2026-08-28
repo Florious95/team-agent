@@ -16,6 +16,18 @@
 //! or tmux server is used: a hermetic PATH shim records the physical route,
 //! and all fixture sockets live below an explicit test root or Cargo's
 //! package-owned target tmpdir.
+//!
+//! ---
+//! purpose: Exercise the five N41 managed-launcher route contracts through hermetic tmux and provider recorders.
+//! contract:
+//!   depends:
+//!     - team-agent launcher route behavior
+//!     - hermetic tmux and provider shims
+//! boundary: Test-only route contracts; no launcher, runner, or product socket behavior is changed.
+//! maturity: experimental
+//! arch:
+//!   allowed_dependencies: [std, libc, serde_json, serial_test, team_agent]
+//! ---
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -40,6 +52,8 @@ use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::Transport;
 
 const AMBIENT_PANE: &str = "%ambient-n41";
+const SUN_LEN: usize = 104;
+const SOCKET_PATH_BUDGET: usize = 100;
 static SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,7 +287,7 @@ struct ShortSocketRoot(PathBuf);
 impl ShortSocketRoot {
     fn new(path: PathBuf) -> Self {
         assert!(
-            path.is_absolute() && path != Path::new("/") && path.components().count() > 3,
+            path.is_absolute() && path != Path::new("/") && path.components().count() >= 3,
             "refuse unsafe socket fixture root: {}",
             path.display()
         );
@@ -302,11 +316,15 @@ impl Case {
         write_executable(&fake_bin.join("tmux"), TMUX_SHIM);
         write_executable(&fake_bin.join("codex"), PROVIDER_SHIM);
 
-        let socket_base = std::env::var_os("TEAM_AGENT_TEST_TMP")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
-        let owned_socket_root = ShortSocketRoot::new(socket_base.join(format!(
-            "t70n41-{}-{}",
+        let short_root_base = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let owned_socket_root = ShortSocketRoot::new(short_root_base.join(format!(
+            "ta-n41-{}-{}",
             std::process::id(),
             SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed)
         )));
@@ -318,20 +336,26 @@ impl Case {
             .expect("workspace tmux endpoint name");
         let target_endpoint = tmux_socket_dir.join(&target_socket_name);
         let source_endpoint = tmux_socket_dir.join("foreign-source.sock");
+
+        assert!(
+            target_endpoint.starts_with(owned_socket_root.path())
+                && source_endpoint.starts_with(owned_socket_root.path()),
+            "fixture sockets must remain inside the process-owned short root"
+        );
+        assert!(
+            target_endpoint.as_os_str().as_encoded_bytes().len() < SOCKET_PATH_BUDGET
+                && source_endpoint.as_os_str().as_encoded_bytes().len() < SOCKET_PATH_BUDGET,
+            "fixture socket paths must stay below the portable Unix sun_path budget of {SUN_LEN}"
+        );
+        assert!(
+            target_endpoint.as_os_str().as_encoded_bytes().len() + 1 <= SUN_LEN
+                && source_endpoint.as_os_str().as_encoded_bytes().len() + 1 <= SUN_LEN,
+            "fixture socket paths including the terminating NUL must fit SUN_LEN={SUN_LEN}"
+        );
         let target_socket =
             UnixListener::bind(&target_endpoint).expect("bind target fixture socket");
         let source_socket =
             UnixListener::bind(&source_endpoint).expect("bind source fixture socket");
-
-        assert!(
-            target_endpoint.starts_with(&socket_base) && source_endpoint.starts_with(&socket_base),
-            "fixture sockets must remain inside TEAM_AGENT_TEST_TMP"
-        );
-        assert!(
-            target_endpoint.as_os_str().to_string_lossy().len() < 100
-                && source_endpoint.as_os_str().to_string_lossy().len() < 100,
-            "fixture socket paths must stay below the portable Unix sun_path budget"
-        );
 
         Self {
             _target_socket: target_socket,
