@@ -10,6 +10,15 @@ on:
         description: Exact 40-hex commit SHA to verify
         required: true
         type: string
+      test_profile:
+        description: Closed test profile to run
+        required: true
+        type: choice
+        options:
+          - full
+          - f04-r4
+          - f05-rec002
+        default: full
   workflow_call:
     inputs:
       target_sha:
@@ -17,6 +26,11 @@ on:
         required: false
         type: string
         default: ''
+      test_profile:
+        description: Closed test profile to run
+        required: false
+        type: string
+        default: full
 
 permissions:
   contents: read
@@ -81,4 +95,22 @@ jobs:
           tmux -V
 
       - name: Run Rust tests
-        run: cargo test --workspace --all-targets --locked --no-fail-fast
+        env:
+          TEST_PROFILE: ${{ inputs.test_profile || 'full' }}
+        run: |
+          set -euo pipefail
+          case "${TEST_PROFILE}" in
+            full)
+              cargo test --workspace --all-targets --locked --no-fail-fast
+              ;;
+            f04-r4)
+              cargo test -p team-agent --test clone_fork_parallel_lifecycle_red --locked r4_parallel_n_clones_have_pairwise_unique_new_sessions -- --exact --nocapture --test-threads=1
+              ;;
+            f05-rec002)
+              cargo test -p team-agent --test e2e --locked cases::rec_002_doctor_checks::rec_002_doctor_checks -- --exact --nocapture --test-threads=1
+              ;;
+            *)
+              echo "Invalid test profile: ${TEST_PROFILE}" >&2
+              exit 1
+              ;;
+          esac
