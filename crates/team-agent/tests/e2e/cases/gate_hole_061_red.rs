@@ -2111,7 +2111,8 @@ fn exact_live_help_roots(
             }
             if !handbook_commands.iter().any(|documented| {
                 documented == &root || documented.starts_with(&format!("{root} "))
-            }) {
+            })
+            {
                 return None;
             }
             Some(root)
