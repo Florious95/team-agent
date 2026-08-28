@@ -88,16 +88,17 @@ impl McpStateFixture {
             receipt,
         };
         fixture.seed_spec("team_state.md");
-        crate::state::persist::save_runtime_state(
-            &fixture.workspace,
-            &json!({
-                "session_name": "mcp-fixture",
-                "active_team_key": "current",
-                "agents": {},
-                "tasks": []
-            }),
-        )
-        .unwrap();
+        crate::state::repository::StateRepository::new(&fixture.workspace)
+            .save(
+                crate::state::repository::StateWriteIntent::FakeE2eSeed,
+                &json!({
+                    "session_name": "mcp-fixture",
+                    "active_team_key": "current",
+                    "agents": {},
+                    "tasks": []
+                }),
+            )
+            .unwrap();
         fixture
     }
 
