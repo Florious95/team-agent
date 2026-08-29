@@ -25,6 +25,8 @@
 //! when the SUT misbehaves.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,37 +111,25 @@ impl TestWorkspace {
     /// exact Drop cleanup. Never a host-wide scan — the ledger only
     /// contains sockets THIS fixture created.
     pub fn register_owned_tmux_socket(&self, socket: &Path) {
+        let socket = normalize_existing_path(socket);
         let ambient = std::env::var_os("TMUX").and_then(|value| {
             let socket = value.to_str()?.split(',').next()?;
-            (!socket.is_empty()).then(|| PathBuf::from(socket))
+            (!socket.is_empty()).then(|| normalize_existing_path(Path::new(socket)))
         });
         assert_ne!(
             ambient.as_deref(),
-            Some(socket),
+            Some(socket.as_path()),
             "refusing to register ambient TMUX endpoint as test-owned: {}",
             socket.display()
         );
-        let private_tmp_socket = socket.parent().is_some_and(|parent| {
-            let parent = normalize_existing_path(parent);
-            parent.parent() == Some(Path::new("/private/tmp"))
-                && parent
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("tmux-"))
-        }) && socket
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("ta-"));
         assert!(
-            socket.is_absolute()
-                && socket.exists()
-                && (socket.starts_with(&self.path) || private_tmp_socket),
-            "tmux endpoint must already exist under its owning E2E workspace or private ta-* root: socket={} workspace={}",
+            socket.is_absolute() && socket.exists() && is_owned_tmux_socket_path(&socket),
+            "tmux endpoint must already exist as an owned platform tmux socket: socket={} workspace={}",
             socket.display(),
             self.path.display()
         );
         if let Ok(mut sockets) = self.owned_tmux_sockets.lock() {
-            sockets.push(socket.to_path_buf());
+            sockets.push(socket);
         }
     }
 
@@ -577,6 +567,32 @@ fn workspace_arg_matches(tokens: &[&str], candidates: &[String]) -> bool {
 
 pub(crate) fn normalize_existing_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(unix)]
+fn is_owned_tmux_socket_path(socket: &Path) -> bool {
+    let Some(parent) = socket.parent() else {
+        return false;
+    };
+    let uid_root = format!("tmux-{}", unsafe { libc::geteuid() });
+    let parent = normalize_existing_path(parent);
+    let in_platform_tmux_root = test_tmp_roots()
+        .iter()
+        .any(|root| parent == root.join(&uid_root));
+    let fixture_socket_name = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ta-"));
+    in_platform_tmux_root
+        && fixture_socket_name
+        && socket
+            .metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+}
+
+#[cfg(not(unix))]
+fn is_owned_tmux_socket_path(_socket: &Path) -> bool {
+    false
 }
 
 fn test_tmp_roots() -> Vec<PathBuf> {
@@ -1412,4 +1428,193 @@ pub fn state_top_level_keys(state: &Value) -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+#[cfg(all(test, unix))]
+mod containment_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn socket(path: &Path) -> UnixListener {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create socket parent");
+        }
+        let _ = std::fs::remove_file(path);
+        UnixListener::bind(path).unwrap_or_else(|error| {
+            panic!(
+                "bind isolated F14 control socket {}: {error}",
+                path.display()
+            )
+        })
+    }
+
+    fn tmux_socket(path: &Path, session: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create tmux socket parent");
+        }
+        let _ = std::fs::remove_file(path);
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                path.to_str().unwrap(),
+                "new-session",
+                "-d",
+                "-s",
+                session,
+            ])
+            .output()
+            .expect("start isolated F14 tmux server");
+        assert!(
+            output.status.success(),
+            "start isolated F14 tmux server: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            path.exists(),
+            "tmux must create endpoint {}",
+            path.display()
+        );
+    }
+
+    fn ledger_len(ws: &TestWorkspace) -> usize {
+        ws.owned_tmux_sockets
+            .lock()
+            .expect("ownership ledger lock")
+            .len()
+    }
+
+    struct AmbientTmuxGuard(Option<std::ffi::OsString>);
+
+    impl Drop for AmbientTmuxGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("TMUX", value),
+                None => std::env::remove_var("TMUX"),
+            }
+        }
+    }
+
+    #[test]
+    fn f14_owned_socket_registration_is_exact_and_drop_spares_unregistered_socket() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let tmp_root = normalize_existing_path(&std::env::temp_dir());
+        let uid_root = tmp_root.join(format!("tmux-{}", unsafe { libc::geteuid() }));
+        let owned_path = uid_root.join(format!("ta-f14-owned-{nonce}"));
+        let outside_path = tmp_root.join(format!("ta-f14-outside-{nonce}"));
+        let unowned_path = uid_root.join(format!("foreign-f14-unowned-{nonce}"));
+        // Keep the ambient control endpoint valid for every non-ambient
+        // ownership predicate: only the ambient TMUX equality guard should
+        // reject it.  Outside-root and bad-basename controls remain
+        // independent below.
+        let ambient_path = uid_root.join(format!("ta-f14-ambient-{nonce}"));
+        let session = format!("f14-{nonce}");
+        tmux_socket(&owned_path, &session);
+        let outside_listener = socket(&outside_path);
+        let unowned_listener = socket(&unowned_path);
+        let ambient_listener = socket(&ambient_path);
+        assert!(
+            is_owned_tmux_socket_path(&ambient_path),
+            "ambient control must otherwise be a valid owned-shaped socket"
+        );
+
+        let workspace_path;
+        {
+            let ws = TestWorkspace::new("f14-containment");
+            workspace_path = ws.path().to_path_buf();
+            ws.register_owned_tmux_socket(&owned_path);
+            assert_eq!(
+                ledger_len(&ws),
+                1,
+                "exactly one owned endpoint is registered"
+            );
+            assert_eq!(
+                ws.owned_tmux_sockets.lock().unwrap()[0],
+                normalize_existing_path(&owned_path),
+                "ledger stores the exact canonical owned endpoint"
+            );
+
+            assert!(
+                catch_unwind(AssertUnwindSafe(
+                    || ws.register_owned_tmux_socket(&outside_path)
+                ))
+                .is_err(),
+                "outside socket must fail closed"
+            );
+            assert_eq!(ledger_len(&ws), 1, "outside socket was not appended");
+            assert!(
+                catch_unwind(AssertUnwindSafe(
+                    || ws.register_owned_tmux_socket(&unowned_path)
+                ))
+                .is_err(),
+                "unowned-shaped socket must fail closed"
+            );
+            assert_eq!(ledger_len(&ws), 1, "unowned socket was not appended");
+
+            let previous_tmux = std::env::var_os("TMUX");
+            let _ambient_guard = AmbientTmuxGuard(previous_tmux);
+            std::env::set_var(
+                "TMUX",
+                format!("{},f14-ambient-pane", ambient_path.display()),
+            );
+            assert_eq!(
+                std::env::var_os("TMUX")
+                    .and_then(|value| value.to_str()?.split(',').next().map(PathBuf::from))
+                    .map(|path| normalize_existing_path(&path)),
+                Some(normalize_existing_path(&ambient_path)),
+                "ambient TMUX must identify exactly the valid ambient control endpoint"
+            );
+            assert!(
+                catch_unwind(AssertUnwindSafe(
+                    || ws.register_owned_tmux_socket(&ambient_path)
+                ))
+                .is_err(),
+                "ambient TMUX endpoint must fail closed"
+            );
+            assert_eq!(ledger_len(&ws), 1, "ambient socket was not appended");
+        }
+
+        let owned_absent = !owned_path.exists();
+        let workspace_absent = !workspace_path.exists();
+        let outside_spared = outside_path.exists();
+        let unowned_spared = unowned_path.exists();
+        let ambient_spared = ambient_path.exists();
+        assert!(owned_absent, "Drop must remove the exact owned endpoint");
+        assert!(workspace_absent, "Drop must remove the fixture workspace");
+        assert!(outside_spared, "Drop must spare the outside endpoint");
+        assert!(unowned_spared, "Drop must spare the unowned endpoint");
+        assert!(ambient_spared, "Drop must spare the ambient endpoint");
+        println!(
+            "F14_CONTAINMENT_RECEIPT {}",
+            serde_json::json!({
+                "ledger_count_before_drop": 1,
+                "owned_endpoint": owned_path,
+                "owned_endpoint_absent_after_drop": owned_absent,
+                "workspace": workspace_path,
+                "workspace_absent_after_drop": workspace_absent,
+                "outside_endpoint_spared": outside_spared,
+                "unowned_endpoint_spared": unowned_spared,
+                "ambient_endpoint_spared": ambient_spared,
+                "ambient_endpoint_valid_owned_shape": is_owned_tmux_socket_path(&ambient_path),
+                "ambient_rejection_reason": "ambient_tmux_endpoint_matches_exact_endpoint",
+                "cleanup": "exact_registered_endpoint_only"
+            })
+        );
+
+        drop(outside_listener);
+        drop(unowned_listener);
+        drop(ambient_listener);
+        std::fs::remove_file(&outside_path).expect("cleanup outside control socket");
+        std::fs::remove_file(&unowned_path).expect("cleanup unowned control socket");
+        std::fs::remove_file(&ambient_path).expect("cleanup ambient control socket");
+        assert!(!outside_path.exists());
+        assert!(!unowned_path.exists());
+        assert!(!ambient_path.exists());
+        let _ = std::fs::remove_dir(&uid_root);
+    }
 }
