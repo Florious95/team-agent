@@ -323,6 +323,11 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
     let _guard = TmuxServerGuard::for_workspace(&ws);
     let session = worker_session_name(team_id);
     let pane_a = pane_for_window(&ws, &session, "a");
+    wait_for_fake_workers_ready(&ws, &[(&pane_a, "a")]);
+    stop_quick_start_coordinator(&ws);
+    let mut controlled_coordinator = start_controlled_background_coordinator(&ws, team_id);
+    let coordinator_before_delivery =
+        wait_for_coordinator_tick_finished(&ws, controlled_coordinator.id());
 
     let out = run_ta(
         &ws,
@@ -346,15 +351,31 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("generated message id");
-    wait_for_delivery_or_panic(
+    let drain = start_post_mutation_coordinator_tick(&ws, team_id);
+    let (drain_succeeded, drain_result) = wait_for_post_mutation_coordinator_tick(drain);
+    let event = delivered_event(&ws, mid);
+    let receipt = write_f17_delivery_receipt(
         &ws,
         mid,
-        "a",
-        "message.delivered event",
-        || delivered_event(&ws, mid).is_some(),
-        Duration::from_secs(6),
+        &coordinator_before_delivery,
+        drain_succeeded,
+        drain_result,
+        event.as_ref(),
+        &session,
+        &pane_a,
     );
-    let event = delivered_event(&ws, mid).expect("message.delivered event");
+    eprintln!("F17 durable delivery evidence={}", receipt.display());
+    assert!(
+        drain_succeeded,
+        "delivery coordinator --once failed; F17 receipt={}",
+        receipt.display()
+    );
+    let event = event.unwrap_or_else(|| {
+        panic!(
+            "message.delivered event missing after exact drain; F17 receipt={}",
+            receipt.display()
+        )
+    });
     let missing = [
         "target_kind",
         "tmux_endpoint",
@@ -372,6 +393,7 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
         "WLEAK RED: message.delivered must include physical target provenance; missing={missing:?}; event={event}"
     );
     assert_target_tuple(&event, &state_socket(&ws), &session, "a", &pane_a, "W1");
+    stop_controlled_background_coordinator(&ws, &mut controlled_coordinator);
 }
 
 #[test]
@@ -882,6 +904,68 @@ fn wait_for_post_mutation_coordinator_tick(mut child: Child) -> (bool, Value) {
             }),
         ),
     }
+}
+
+fn write_f17_delivery_receipt(
+    ws: &TestWorkspace,
+    message_id: &str,
+    coordinator_before_delivery: &Value,
+    drain_succeeded: bool,
+    drain_result: Value,
+    event: Option<&Value>,
+    session: &str,
+    pane: &PaneSnapshot,
+) -> PathBuf {
+    let row = message_row(ws, message_id)
+        .map(|row| {
+            json!({
+                "status": row.status,
+                "error": row.error,
+                "delivery_attempts": row.delivery_attempts,
+                "delivered_at": row.delivered_at,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let outcome = if !drain_succeeded {
+        "drain_failed"
+    } else if event.is_some() {
+        "delivered_event_observed"
+    } else {
+        "delivered_event_missing_after_drain"
+    };
+    let receipt = json!({
+        "schema_version": "team-agent-e2e-f17-delivery-v1",
+        "outcome": outcome,
+        "message_id": message_id,
+        "row": row,
+        "message_delivered": event,
+        "ordering_seam": {
+            "background_tick_interval_secs": CONTROLLED_COORDINATOR_TICK_INTERVAL_SECS,
+            "pre_delivery_tick": coordinator_before_delivery,
+            "delivery_once_result": drain_result,
+        },
+        "physical_target": {
+            "tmux_endpoint": state_socket(ws),
+            "target_session": session,
+            "target_window": "a",
+            "target_pane_id": pane.pane_id,
+            "target_pane_pid": pane.pane_pid,
+        },
+    });
+    let dir = std::env::var_os("TEAM_AGENT_E2E_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("team-agent-e2e-f17-receipts"));
+    std::fs::create_dir_all(&dir).expect("create F17 receipt directory");
+    let path = dir.join(format!(
+        "f17-{}-{message_id}-{outcome}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&receipt).expect("serialize F17 delivery receipt"),
+    )
+    .expect("write F17 delivery receipt");
+    path
 }
 
 fn agent_tuple_readback(ws: &TestWorkspace, agent_id: &str) -> Value {
