@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 // ----------------------------------------------------------------------------
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const LAST_COMMAND_OBSERVATION: &str = ".e2e-last-command-observation.json";
 
 const CALLER_IDENTITY_ENVS: &[&str] = &[
     "TMUX",
@@ -285,6 +286,9 @@ impl TestWorkspace {
 
 impl Drop for TestWorkspace {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            emit_fixture_panic_receipt(self);
+        }
         // 0.5.43 debt-sweep (§6.1) Drop order = stop exact coordinator
         // tree → kill exact owned tmux server(s) + delete socket file →
         // remove workspace dir. `TEAM_AGENT_KEEP_TEST_PROCESSES/TMP`
@@ -725,14 +729,16 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     } = cmd
         .output()
         .unwrap_or_else(|e| panic!("spawn {:?}: {e}", bin));
-    TaResult {
+    let result = TaResult {
         argv: std::iter::once("team-agent".to_string())
             .chain(args.iter().map(|s| (*s).to_string()))
             .collect(),
         exit_code: status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
-    }
+    };
+    record_last_command_observation(ws, &result, extra_env);
+    result
 }
 
 // ----------------------------------------------------------------------------
@@ -1192,6 +1198,188 @@ fn read_json_file(path: &Path) -> Value {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
+}
+
+fn record_last_command_observation(
+    ws: &TestWorkspace,
+    result: &TaResult,
+    extra_env: &[(&str, &str)],
+) {
+    let effective_home = extra_env
+        .iter()
+        .rev()
+        .find_map(|(key, value)| (*key == "HOME").then_some(PathBuf::from(*value)))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let command_json = serde_json::from_str::<Value>(&result.stdout).unwrap_or(Value::Null);
+    let message_id = command_json
+        .get("message_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let recipient = (result.argv.get(1).map(String::as_str) == Some("send"))
+        .then(|| result.argv.get(2).map(String::as_str))
+        .flatten()
+        .unwrap_or("");
+    let observation = serde_json::json!({
+        "schema_version": "team-agent-e2e-last-command-v1",
+        "command": {
+            "argv": &result.argv,
+            "exit_code": result.exit_code,
+            "stdout": &result.stdout,
+            "stderr": &result.stderr,
+            "effective_home": effective_home.as_deref(),
+            "message_id": message_id,
+            "recipient": recipient,
+        },
+    });
+    if let Ok(encoded) = serde_json::to_vec_pretty(&observation) {
+        let _ = std::fs::write(ws.path().join(LAST_COMMAND_OBSERVATION), encoded);
+    }
+}
+
+fn emit_fixture_panic_receipt(ws: &TestWorkspace) {
+    let last_command = read_json_file(&ws.path().join(LAST_COMMAND_OBSERVATION));
+    let effective_home = last_command
+        .pointer("/command/effective_home")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let message_id = last_command
+        .pointer("/command/message_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let recipient = last_command
+        .pointer("/command/recipient")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let receipt = serde_json::json!({
+        "schema_version": "team-agent-e2e-fixture-panic-v1",
+        "last_command": last_command,
+        "at_unwind": fixture_runtime_snapshot(
+            ws,
+            effective_home.as_deref(),
+            &message_id,
+            &recipient,
+        ),
+        "cleanup_order": "receipt_then_exact_coordinator_then_registered_tmux_then_workspace",
+    });
+    let encoded = serde_json::to_string_pretty(&receipt)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":{error:?}}}"));
+    eprintln!("F14_SHARED_FIXTURE_PANIC_RECEIPT {encoded}");
+}
+
+fn fixture_runtime_snapshot(
+    ws: &TestWorkspace,
+    effective_home: Option<&Path>,
+    message_id: &str,
+    recipient: &str,
+) -> Value {
+    let state = read_json_file(&ws.state_json_path());
+    let coordinator_pid = read_pid(&ws.coordinator_pid_file());
+    let events = std::fs::read_to_string(ws.events_jsonl_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rev()
+        .take(64)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let socket = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let session = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let target = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let pane_id = target.get("pane_id").and_then(Value::as_str).unwrap_or("");
+    let window = target
+        .get("window_name")
+        .and_then(Value::as_str)
+        .unwrap_or(recipient);
+    let owned_tmux_sockets = ws
+        .owned_tmux_sockets
+        .lock()
+        .ok()
+        .map(|sockets| sockets.clone())
+        .unwrap_or_default();
+    serde_json::json!({
+        "workspace": ws.path(),
+        "owned_tmux_sockets": owned_tmux_sockets,
+        "state": {
+            "active_team_key": state.get("active_team_key").cloned().unwrap_or(Value::Null),
+            "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
+            "tmux_socket": state.get("tmux_socket").cloned().unwrap_or(Value::Null),
+            "agents": state.get("agents").cloned().unwrap_or(Value::Null),
+        },
+        "coordinator": {
+            "pid": coordinator_pid,
+            "pid_live": coordinator_pid.map(pid_is_running),
+            "metadata": read_json_file(&ws.path().join(".team/runtime/coordinator.json")),
+            "heartbeat": read_json_file(&ws.path().join(".team/runtime/coordinator_tick.json")),
+            "log_tail": read_text_tail(&ws.path().join(".team/runtime/coordinator.log"), 64),
+        },
+        "message_rows": if message_id.is_empty() {
+            Vec::<Value>::new()
+        } else {
+            message_rows_snapshot(&ws.path().join(".team/runtime/team.db"), message_id)
+        },
+        "events_tail": events,
+        "tmux": if !recipient.is_empty() {
+            tmux_target_snapshot(socket, session, window, pane_id)
+        } else {
+            serde_json::json!({
+                "socket": if socket.is_empty() { Value::Null } else { Value::String(socket.to_string()) },
+                "socket_exists": !socket.is_empty() && Path::new(socket).exists(),
+                "liveness": "not_probed_without_recipient",
+            })
+        },
+        "leader_registry": scoped_leader_registry_snapshot(effective_home, ws.path(), &state),
+    })
+}
+
+fn read_text_tail(path: &Path, max_lines: usize) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(max_lines)
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn scoped_leader_registry_snapshot(
+    effective_home: Option<&Path>,
+    workspace: &Path,
+    state: &Value,
+) -> Value {
+    let Some(home) = effective_home else {
+        return serde_json::json!({"effective_home": null, "path": null, "entry": null});
+    };
+    let Some(team_key) = state.get("active_team_key").and_then(Value::as_str) else {
+        return serde_json::json!({"effective_home": home, "path": null, "entry": null});
+    };
+    let workspace_hash = team_agent::leader::registry::workspace_hash(workspace);
+    let path = home
+        .join(".team-agent/leaders")
+        .join(format!("{workspace_hash}__{team_key}.json"));
+    serde_json::json!({
+        "effective_home": home,
+        "path": path,
+        "entry": read_json_file(&path),
+    })
 }
 
 fn message_rows_snapshot(db_path: &Path, message_id: &str) -> Vec<Value> {
