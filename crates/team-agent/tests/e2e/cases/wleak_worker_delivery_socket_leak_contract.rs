@@ -34,6 +34,7 @@ use std::time::Duration;
 const STATUS_QUEUED_PANE_MISSING: &str = "queued_pane_missing";
 const RESOLVED_FROM_SESSION_WINDOW_LOOKUP: &str = "session_window_lookup";
 const TARGET_KIND_PANE: &str = "pane";
+const FAKE_READY_MARKER: &str = "TEAM_AGENT_FAKE_READY";
 
 #[test]
 fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
@@ -47,6 +48,7 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
     let session = worker_session_name(team_id);
     let pane_a = pane_for_window(&ws, &session, "a");
     let pane_b = pane_for_window(&ws, &session, "b");
+    wait_for_fake_workers_ready(&ws, &[(&pane_a, "a"), (&pane_b, "b")]);
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
     let token = "WLEAK_WRONG_WINDOW_TOKEN_001";
@@ -616,6 +618,20 @@ fn write_agent_pane_tuple(ws: &TestWorkspace, agent_id: &str, pane: &PaneSnapsho
         agent.insert("pane_id".to_string(), json!(pane.pane_id));
         agent.insert("pane_pid".to_string(), json!(pane.pane_pid));
     });
+}
+
+fn wait_for_fake_workers_ready(ws: &TestWorkspace, workers: &[(&PaneSnapshot, &str)]) {
+    wait_for_or_panic(
+        "fake workers expose TEAM_AGENT_FAKE_READY",
+        || {
+            workers.iter().all(|(pane, agent_id)| {
+                capture_pane(ws, &pane.pane_id)
+                    .lines()
+                    .any(|line| line.trim() == format!("{FAKE_READY_MARKER} agent={agent_id}"))
+            })
+        },
+        Duration::from_secs(3),
+    );
 }
 
 fn write_leader_receiver_tuple(ws: &TestWorkspace, team_key: &str, receiver: Value) {
