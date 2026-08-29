@@ -1,9 +1,0 @@
-{
-  "pid": 99025,
-  "protocol_version": 2,
-  "message_store_schema_version": 5,
-  "binary_path": "/private/tmp/ta-f16-r2-cargo-target-20260829/debug/team-agent",
-  "binary_version": "0.5.67",
-  "source": "boot",
-  "updated_at": "2026-08-29T04:39:26.398585+00:00"
-}
