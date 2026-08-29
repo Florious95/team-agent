@@ -19,6 +19,7 @@ on:
           - f04-r4
           - f05-rec002
           - f14-containment
+          - f14-a3-e2e-default
           - f16-wleak
           - f17-wleak-metadata
         default: full
@@ -115,6 +116,9 @@ jobs:
             f14-containment)
               cargo test -p team-agent --locked --test e2e framework::containment_tests::f14_owned_socket_registration_is_exact_and_drop_spares_unregistered_socket -- --exact --nocapture --test-threads=1
               cargo test -p team-agent --locked --test e2e cases::send_001_fake_worker::send_001_delivers_to_fake_worker -- --exact --nocapture --test-threads=1
+              ;;
+            f14-a3-e2e-default)
+              cargo test -p team-agent --locked --test e2e -- --nocapture
               ;;
             f16-wleak)
               cargo test -p team-agent --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_cached_pane_owned_by_other_window_never_receives_worker_message -- --exact --nocapture --test-threads=1
