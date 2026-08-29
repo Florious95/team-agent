@@ -1,2 +1,0 @@
-command=rustfmt --check --edition 2021 crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs
-exit_code=1

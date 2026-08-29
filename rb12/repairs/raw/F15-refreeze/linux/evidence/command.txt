@@ -1,3 +1,0 @@
-bash
--lc
-set -e; cargo test -p team-agent --locked --test e2e cases::gate_hole_061_red::tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim -- --exact --nocapture --test-threads=1; cargo test -p team-agent --locked --test e2e cases::gate_hole_061_red::tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect -- --exact --nocapture --test-threads=1

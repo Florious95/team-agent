@@ -1,3 +1,0 @@
-selector=cases::gate_hole_061_red::tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect
-command=cargo test --locked -p team-agent --test e2e cases::gate_hole_061_red::tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect -- --exact --nocapture --test-threads=1
-exit_code=0

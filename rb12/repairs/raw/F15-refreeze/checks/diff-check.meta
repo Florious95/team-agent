@@ -1,2 +1,0 @@
-command=git diff --check F14..F15
-exit_code=0

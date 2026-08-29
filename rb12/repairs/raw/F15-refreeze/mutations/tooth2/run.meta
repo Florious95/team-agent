@@ -1,3 +1,0 @@
-selector=cases::gate_hole_061_red::tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect
-exit_code=101
-intended_failure=same_message_result_correlation
