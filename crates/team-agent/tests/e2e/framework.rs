@@ -1657,8 +1657,92 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--json",
         ],
     );
+    if quick_start_launched(&result) {
+        disable_fake_worker_tty_echo(ws);
+    }
     result
 }
+
+#[cfg(unix)]
+fn disable_fake_worker_tty_echo(ws: &TestWorkspace) {
+    let state = ws.read_state();
+    let socket = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .expect("successful fake quick-start must record its exact tmux socket");
+    let agents = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .expect("successful fake quick-start must record its agents");
+
+    for (agent_id, agent) in agents {
+        let pane_id = agent
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!("successful fake quick-start must record pane_id for {agent_id}")
+            });
+        eprintln!(
+            "[e2e-fake-tty] query socket={socket} agent={agent_id} pane={pane_id} command=tmux -S <exact-socket> display-message -p -t <exact-pane> #{{pane_tty}}"
+        );
+        let tty_query = Command::new("tmux")
+            .args([
+                "-S",
+                socket,
+                "display-message",
+                "-p",
+                "-t",
+                pane_id,
+                "#{pane_tty}",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|error| panic!("query fake worker pane TTY for {agent_id}: {error}"));
+        assert!(
+            tty_query.status.success(),
+            "query fake worker pane TTY failed: socket={socket} agent={agent_id} pane={pane_id} status={} stderr={}",
+            tty_query.status,
+            String::from_utf8_lossy(&tty_query.stderr)
+        );
+        let tty = String::from_utf8_lossy(&tty_query.stdout)
+            .trim()
+            .to_string();
+        assert!(
+            !tty.is_empty(),
+            "query fake worker pane TTY returned empty path: socket={socket} agent={agent_id} pane={pane_id}"
+        );
+
+        #[cfg(target_os = "macos")]
+        let stty_flag = "-f";
+        #[cfg(not(target_os = "macos"))]
+        let stty_flag = "-F";
+        eprintln!(
+            "[e2e-fake-tty] disable-echo socket={socket} agent={agent_id} pane={pane_id} tty={tty} command=stty {stty_flag} <exact-tty> -echo"
+        );
+        let disable = Command::new("stty")
+            .args([stty_flag, &tty, "-echo"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|error| panic!("disable fake worker TTY echo for {agent_id}: {error}"));
+        eprintln!(
+            "[e2e-fake-tty] disable-echo-result socket={socket} agent={agent_id} pane={pane_id} tty={tty} status={}",
+            disable.status
+        );
+        assert!(
+            disable.status.success(),
+            "disable fake worker TTY echo failed: socket={socket} agent={agent_id} pane={pane_id} tty={tty} status={} stderr={}",
+            disable.status,
+            String::from_utf8_lossy(&disable.stderr)
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn disable_fake_worker_tty_echo(_ws: &TestWorkspace) {}
 
 /// Sanitize team_id into the tmux session name as the runtime does:
 /// session = `team-<team_id>` (lowercased, no transformation needed for our
