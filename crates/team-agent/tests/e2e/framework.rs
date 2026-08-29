@@ -738,7 +738,35 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     };
     record_last_command_observation(ws, &result, extra_env);
+    if args.first() == Some(&"quick-start")
+        && fake_delivery_fixture_needs_real_tui_noecho(ws)
+        && quick_start_spawned_workers(&result)
+    {
+        disable_fake_worker_tty_echo(ws);
+    }
     result
+}
+
+fn quick_start_spawned_workers(result: &TaResult) -> bool {
+    serde_json::from_str::<Value>(&result.stdout)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/readiness/all_workers_spawned")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or_else(|| result.stdout.contains("\"all_workers_spawned\": true"))
+}
+
+/// These delivery contracts assert persisted/result truth and need the fake
+/// pane to match a real TUI's no-echo input. Other contracts intentionally use
+/// terminal echo as a pane-routing oracle, so this cannot be a global fake
+/// provider setting.
+fn fake_delivery_fixture_needs_real_tui_noecho(ws: &TestWorkspace) -> bool {
+    let tag = ws.short_tag();
+    ["send001", "gate061-send", "gate061-doc"]
+        .iter()
+        .any(|fixture| tag.starts_with(&format!("ta-e2e-{fixture}-")))
 }
 
 // ----------------------------------------------------------------------------
@@ -1657,9 +1685,6 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--json",
         ],
     );
-    if quick_start_launched(&result) {
-        disable_fake_worker_tty_echo(ws);
-    }
     result
 }
 
