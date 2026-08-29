@@ -37,6 +37,8 @@
 //!   unresolved_disposition: inherited_incomplete_unknown
 //! boundary:
 //!   - test-only fanout row independence
+//!   - panic-safe exact-owned tmux/coordinator cleanup
+//!   - log-visible C5 failure packet
 //! ---
 
 #![cfg(unix)]
@@ -49,7 +51,7 @@ use hermetic_guard::HermeticTestEnv;
 mod mcp_sim_harness;
 
 use std::path::PathBuf;
-use std::process::Output;
+use std::process::{Command, Output};
 
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -60,6 +62,8 @@ struct SendPathCase {
     env: HermeticTestEnv,
     workspace: PathBuf,
     socket: PathBuf,
+    kill_pane: Value,
+    panes_after_kill: Value,
 }
 
 impl SendPathCase {
@@ -86,6 +90,8 @@ impl SendPathCase {
             env,
             workspace,
             socket: PathBuf::new(),
+            kill_pane: Value::Null,
+            panes_after_kill: Value::Null,
         };
         let output = case.run_cli(&[
             "quick-start",
@@ -97,6 +103,18 @@ impl SendPathCase {
             "--no-display",
             "--json",
         ]);
+        if let Ok(state_raw) = std::fs::read_to_string(
+            case.workspace
+                .join(".team")
+                .join("runtime")
+                .join("state.json"),
+        ) {
+            if let Ok(state) = serde_json::from_str::<Value>(&state_raw) {
+                if let Some(socket) = state.get("tmux_socket").and_then(Value::as_str) {
+                    case.socket = PathBuf::from(socket);
+                }
+            }
+        }
         let value = json_stdout(&output, "quick-start");
         assert!(
             value
@@ -107,19 +125,9 @@ impl SendPathCase {
             "fixture: quick-start must spawn workers; stdout={}",
             String::from_utf8_lossy(&output.stdout)
         );
-        let state_raw = std::fs::read_to_string(
-            case.workspace
-                .join(".team")
-                .join("runtime")
-                .join("state.json"),
-        )
-        .expect("read state.json");
-        let state: Value = serde_json::from_str(&state_raw).expect("parse state.json");
-        case.socket = PathBuf::from(
-            state
-                .get("tmux_socket")
-                .and_then(Value::as_str)
-                .expect("state tmux_socket"),
+        assert!(
+            !case.socket.as_os_str().is_empty(),
+            "fixture: state.json must expose tmux_socket after quick-start"
         );
         case
     }
@@ -142,20 +150,14 @@ impl SendPathCase {
     /// Canonical fault (MUST-15-listed trigger): really kill the coordinator
     /// process and wait for it to exit.
     fn kill_coordinator(&self) {
-        let pid_path = self
-            .workspace
-            .join(".team")
-            .join("runtime")
-            .join("coordinator.pid");
-        let pid = std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<i32>().ok())
+        let pid = self
+            .coordinator_pid()
             .expect("coordinator.pid present after quick-start");
-        let _ = std::process::Command::new("kill")
+        let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output();
         for _ in 0..50 {
-            let alive = std::process::Command::new("kill")
+            let alive = Command::new("kill")
                 .args(["-0", &pid.to_string()])
                 .output()
                 .map(|probe| probe.status.success())
@@ -176,7 +178,8 @@ impl SendPathCase {
         let connection = rusqlite::Connection::open(&db).expect("open team.db");
         let mut statement = connection
             .prepare(
-                "SELECT message_id, sender, recipient, owner_team_id, status FROM messages \
+                "SELECT message_id, sender, recipient, owner_team_id, status, \
+                        delivery_attempts, error, delivered_at FROM messages \
                  WHERE content LIKE ?1 ORDER BY rowid",
             )
             .expect("prepare message query");
@@ -188,6 +191,9 @@ impl SendPathCase {
                     recipient: row.get(2)?,
                     owner_team_id: row.get(3)?,
                     status: row.get(4)?,
+                    delivery_attempts: row.get(5)?,
+                    error: row.get(6)?,
+                    delivered_at: row.get(7)?,
                 })
             })
             .expect("query messages")
@@ -210,6 +216,171 @@ impl SendPathCase {
                 && event.get("message_id").and_then(Value::as_str) == Some(message_id)
         })
         .count()
+    }
+
+    fn coordinator_pid_path(&self) -> PathBuf {
+        self.workspace
+            .join(".team")
+            .join("runtime")
+            .join("coordinator.pid")
+    }
+
+    fn coordinator_pid(&self) -> Option<i32> {
+        std::fs::read_to_string(self.coordinator_pid_path())
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok())
+    }
+
+    fn pid_running(pid: i32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|probe| probe.status.success())
+            .unwrap_or(false)
+    }
+
+    fn command_snapshot(output: Result<Output, std::io::Error>) -> Value {
+        match output {
+            Ok(output) => json!({
+                "exit_code": output.status.code(),
+                "success": output.status.success(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            }),
+            Err(error) => json!({"spawn_error": error.to_string()}),
+        }
+    }
+
+    fn tmux(&self, args: &[&str]) -> Result<Output, std::io::Error> {
+        let socket = self.socket.to_str().unwrap_or("");
+        Command::new("tmux")
+            .args(["-S", socket])
+            .args(args)
+            .output()
+    }
+
+    fn pane_tuple_snapshot(&self) -> Value {
+        self.command_snapshot(self.tmux(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_id}__TA_FIELD__#{pane_pid}__TA_FIELD__#{pane_dead}",
+        ]))
+    }
+
+    fn read_runtime_json(&self, name: &str) -> Value {
+        let path = self.workspace.join(".team").join("runtime").join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| {
+                json!({"path": path, "unparsed": text})
+            }),
+            Err(_) => json!({"path": path, "missing_or_unreadable": true}),
+        }
+    }
+
+    fn events_for(&self, message_id: &str) -> Value {
+        let path = self
+            .workspace
+            .join(".team")
+            .join("logs")
+            .join("events.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let events = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| {
+                event.get("message_id").and_then(Value::as_str) == Some(message_id)
+            })
+            .collect::<Vec<_>>();
+        json!({"path": path, "events": events})
+    }
+
+    fn socket_is_exact_owned(&self) -> bool {
+        if self.socket.as_os_str().is_empty() || !self.socket.is_absolute() {
+            return false;
+        }
+        let Some(name) = self.socket.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if !name.starts_with("ta-") {
+            return false;
+        }
+        let ambient = std::env::var_os("TMUX").and_then(|value| {
+            let socket = value.to_str()?.split(',').next()?;
+            (!socket.is_empty()).then(|| PathBuf::from(socket))
+        });
+        ambient.as_deref() != Some(self.socket.as_path())
+    }
+
+    fn kill_exact_owned(&self) {
+        if let Some(pid) = self.coordinator_pid() {
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output();
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .output();
+        }
+        if self.socket_is_exact_owned() {
+            if let Some(socket) = self.socket.to_str() {
+                let _ = Command::new("tmux")
+                    .args(["-S", socket, "kill-server"])
+                    .output();
+            }
+        }
+    }
+
+    fn c5_failure_packet(&self, extra: Value) -> Value {
+        let rows = self.db_rows("carc c5 fanout");
+        let row_packets = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "message_id": row.message_id,
+                    "sender": row.sender,
+                    "recipient": row.recipient,
+                    "owner_team_id": row.owner_team_id,
+                    "status": row.status,
+                    "delivery_attempts": row.delivery_attempts,
+                    "error": row.error,
+                    "delivered_at": row.delivered_at,
+                    "events": self.events_for(&row.message_id),
+                })
+            })
+            .collect::<Vec<_>>();
+        let pid = self.coordinator_pid();
+        json!({
+            "schema": "team-agent/f07-c5-failure-v1",
+            "extra": extra,
+            "workspace": self.workspace.display().to_string(),
+            "home": self.env.home().display().to_string(),
+            "socket": self.socket.display().to_string(),
+            "socket_is_exact_owned": self.socket_is_exact_owned(),
+            "kill_pane": self.kill_pane,
+            "panes_after_kill": self.panes_after_kill,
+            "panes_at_failure": self.pane_tuple_snapshot(),
+            "rows": row_packets,
+            "coordinator": {
+                "pid": pid,
+                "pid_running": pid.is_some_and(Self::pid_running),
+                "meta": self.read_runtime_json("coordinator.json"),
+                "heartbeat": self.read_runtime_json("coordinator_tick.json"),
+                "drain": self.read_runtime_json("drain.json"),
+            },
+            "owned_child_exits": {
+                "coordinator_pid": pid,
+                "coordinator_alive": pid.is_some_and(Self::pid_running),
+            },
+        })
+    }
+
+    fn persist_c5_failure_packet(&self, extra: Value) -> String {
+        let packet = self.c5_failure_packet(extra);
+        let encoded = serde_json::to_string(&packet).unwrap_or_else(|_| {
+            "{\"schema\":\"team-agent/f07-c5-failure-v1\",\"encode_error\":true}".to_string()
+        });
+        eprintln!("F07_C5_DIAGNOSTIC {encoded}");
+        encoded
     }
 
     fn wait_status(&self, message_id: &str, wanted: &[&str], seconds: u64) -> String {
@@ -243,23 +414,26 @@ impl SendPathCase {
             "--yes",
             "--json",
         ]);
-        let _ = std::process::Command::new("tmux")
-            .args([
-                "-S",
-                self.socket.to_str().expect("socket utf8"),
-                "kill-server",
-            ])
-            .output();
+        self.kill_exact_owned();
     }
 }
 
-#[derive(Debug)]
+impl Drop for SendPathCase {
+    fn drop(&mut self) {
+        self.kill_exact_owned();
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
 struct DbRow {
     message_id: String,
     sender: String,
     recipient: String,
     owner_team_id: Option<String>,
     status: Option<String>,
+    delivery_attempts: Option<i64>,
+    error: Option<String>,
+    delivered_at: Option<String>,
 }
 
 fn json_stdout(output: &Output, context: &str) -> Value {
@@ -557,18 +731,15 @@ fn c4_coordinator_recovery_advances_same_row_without_replacement() {
 #[test]
 #[serial(env)]
 fn c5_fanout_rows_are_independent_under_partial_blockers() {
-    let case = SendPathCase::start("carc-c5");
+    let mut case = SendPathCase::start("carc-c5");
     // Canonical partial fault: kill w1's pane (w2 stays live, session intact).
-    let pane_list = std::process::Command::new("tmux")
-        .args([
-            "-S",
-            case.socket.to_str().expect("socket utf8"),
+    let pane_list = case
+        .tmux(&[
             "list-panes",
             "-a",
             "-F",
             "#{window_name}__TA_FIELD__#{pane_id}",
         ])
-        .output()
         .expect("tmux list-panes");
     let w1_pane = String::from_utf8_lossy(&pane_list.stdout)
         .lines()
@@ -577,15 +748,9 @@ fn c5_fanout_rows_are_independent_under_partial_blockers() {
             (cols.next()? == "w1").then(|| cols.next().map(ToString::to_string))?
         })
         .expect("w1 pane present");
-    let _ = std::process::Command::new("tmux")
-        .args([
-            "-S",
-            case.socket.to_str().expect("socket utf8"),
-            "kill-pane",
-            "-t",
-            w1_pane.as_str(),
-        ])
-        .output();
+    case.kill_pane =
+        SendPathCase::command_snapshot(case.tmux(&["kill-pane", "-t", w1_pane.as_str()]));
+    case.panes_after_kill = case.pane_tuple_snapshot();
 
     let value = case.send_json(&["w1,w2", "carc c5 fanout", "--team", TEAM]);
     assert_eq!(
@@ -602,7 +767,16 @@ fn c5_fanout_rows_are_independent_under_partial_blockers() {
     let w2_status = case.wait_status(&w2_row.message_id, &["delivered"], 15);
     assert_eq!(
         w2_status, "delivered",
-        "C5: the live recipient must deliver despite the sibling blocker"
+        "C5: the live recipient must deliver despite the sibling blocker; diagnostic={}",
+        case.persist_c5_failure_packet(json!({
+            "stage": "w2_delivered",
+            "observed_status": w2_status,
+            "wanted": "delivered",
+            "send": value,
+            "w1_pane": w1_pane,
+            "w2_message_id": w2_row.message_id,
+            "w1_message_id": rows.iter().find(|row| row.recipient == "w1").map(|row| row.message_id.clone()),
+        }))
     );
     let w1_row = rows
         .iter()
@@ -611,7 +785,16 @@ fn c5_fanout_rows_are_independent_under_partial_blockers() {
     let w1_status = case.wait_status(&w1_row.message_id, &["queued_pane_missing"], 15);
     assert_eq!(
         w1_status, "queued_pane_missing",
-        "C5: the blocked recipient parks as its own durable blocker, not erased"
+        "C5: the blocked recipient parks as its own durable blocker, not erased; diagnostic={}",
+        case.persist_c5_failure_packet(json!({
+            "stage": "w1_queued_pane_missing",
+            "observed_status": w1_status,
+            "wanted": "queued_pane_missing",
+            "send": value,
+            "w1_pane": w1_pane,
+            "w1_message_id": w1_row.message_id,
+            "w2_message_id": w2_row.message_id,
+        }))
     );
     case.shutdown();
 }
