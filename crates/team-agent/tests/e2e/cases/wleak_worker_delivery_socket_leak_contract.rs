@@ -84,22 +84,9 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         Duration::from_millis(100),
     );
     if !terminal {
-        let receipt = write_f16_routing_receipt(
-            &ws,
-            mid,
-            "terminal_timeout",
-            &coordinator_before_mutation,
-            &tuple_readback,
-            &pane_a,
-            &pane_b,
-            drain_started.elapsed(),
-            Value::Null,
-        );
-        panic!(
-            "timed out after {:?} waiting for: message reaches terminal status; durable F16 routing evidence={}",
-            Duration::from_secs(6),
-            receipt.display()
-        );
+        let _ = Command::new("kill")
+            .args(["-TERM", &drain.id().to_string()])
+            .output();
     }
     let drain_output = drain
         .wait_with_output()
@@ -109,6 +96,24 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         "stdout": String::from_utf8_lossy(&drain_output.stdout),
         "stderr": String::from_utf8_lossy(&drain_output.stderr),
     });
+    if !terminal {
+        let receipt = write_f16_routing_receipt(
+            &ws,
+            mid,
+            "terminal_timeout",
+            &coordinator_before_mutation,
+            &tuple_readback,
+            &pane_a,
+            &pane_b,
+            drain_started.elapsed(),
+            drain_result,
+        );
+        panic!(
+            "timed out after {:?} waiting for: message reaches terminal status; durable F16 routing evidence={}",
+            Duration::from_secs(6),
+            receipt.display()
+        );
+    }
     let receipt = write_f16_routing_receipt(
         &ws,
         mid,
@@ -196,7 +201,7 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         "WLEAK RED: stale cached pane should be bypassed and the event should record resolved_from=session_window_lookup; event={event}"
     );
     assert_target_tuple(&event, &state_socket(&ws), &session, "a", &pane_a, "W1/W2");
-    stop_controlled_background_coordinator(&mut controlled_coordinator);
+    stop_controlled_background_coordinator(&ws, &mut controlled_coordinator);
 }
 
 #[test]
@@ -738,10 +743,35 @@ fn stop_quick_start_coordinator(ws: &TestWorkspace) {
     );
 }
 
-fn start_controlled_background_coordinator(ws: &TestWorkspace, team_id: &str) -> Child {
+struct OwnedCoordinator {
+    child: Option<Child>,
+}
+
+impl OwnedCoordinator {
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("controlled coordinator still live")
+            .id()
+    }
+}
+
+impl Drop for OwnedCoordinator {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let pid = child.id();
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_controlled_background_coordinator(ws: &TestWorkspace, team_id: &str) -> OwnedCoordinator {
     let binary = ta_binary();
     ws.record_ta_binary(&binary);
-    Command::new(&binary)
+    let child = Command::new(&binary)
         .args([
             "coordinator",
             "--workspace",
@@ -756,11 +786,20 @@ fn start_controlled_background_coordinator(ws: &TestWorkspace, team_id: &str) ->
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap_or_else(|error| panic!("spawn controlled background coordinator: {error}"))
+        .unwrap_or_else(|error| panic!("spawn controlled background coordinator: {error}"));
+    OwnedCoordinator { child: Some(child) }
 }
 
-fn stop_controlled_background_coordinator(coordinator: &mut Child) {
-    let pid = coordinator.id();
+fn stop_controlled_background_coordinator(ws: &TestWorkspace, coordinator: &mut OwnedCoordinator) {
+    let mut child = coordinator
+        .child
+        .take()
+        .expect("controlled coordinator still live");
+    let pid = child.id();
+    assert!(
+        ws.pid_is_owned_coordinator(pid),
+        "refusing to stop non-owned controlled coordinator pid {pid}"
+    );
     let out = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .output()
@@ -770,10 +809,15 @@ fn stop_controlled_background_coordinator(coordinator: &mut Child) {
         "stop controlled coordinator pid {pid}; stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let status = coordinator
+    let status = child
         .wait()
         .expect("wait for controlled background coordinator");
     assert!(status.success(), "controlled coordinator exit={status}");
+    wait_for_or_panic(
+        "exact controlled background coordinator exits",
+        || !ws.pid_is_owned_coordinator(pid),
+        Duration::from_secs(3),
+    );
 }
 
 fn wait_for_coordinator_tick_finished(ws: &TestWorkspace, expected_pid: u32) -> Value {
