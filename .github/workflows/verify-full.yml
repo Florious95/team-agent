@@ -21,6 +21,7 @@ on:
           - f07-c5-diagnostic
           - f14-containment
           - f14-a3-e2e-default
+          - f14-a3-same-composition-full-diagnostic
           - f16-wleak
           - f17-wleak-metadata
         default: full
@@ -99,6 +100,92 @@ jobs:
           command -v tmux
           tmux -V
 
+      - name: Materialize F14 A3 same-composition diagnostic tree
+        if: ${{ (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
+        env:
+          TARGET_SHA: ${{ inputs.target_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
+          A3_TREE='eee65a25586c7c439221931742b44a590ef3affc'
+          OLD_F14_SHA='312d19a38330cf9389fa69f915709f6ec7477b1e'
+          CURRENT_F14_SHA='5673cdb041d8afe136d18f8c27cba2372d4cc507'
+          FRAMEWORK_PATH='crates/team-agent/tests/e2e/framework.rs'
+          OLD_FRAMEWORK_BLOB='a1501e1931cc705ddfef9b14154bba1a24388764'
+          CURRENT_FRAMEWORK_BLOB='9585f6ef27c426792f65cd4c81da6f91880749dd'
+          OLD_FRAMEWORK_SHA256='0fc9964f3f8c6ab2f90d0ff6f1498bcba00ecdb01d3d4ed580a3e46b98ffcffd'
+          CURRENT_FRAMEWORK_SHA256='62950ead9f3a647971c1cda358a5da6211de817cc4821c4e2b4ed776a87e88f0'
+          DIAGNOSTIC_TREE='b7a4a7030ddf146109bd8f99504378b7568c02a5'
+
+          target_sha="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          if [[ "${target_sha}" != "${A3_SHA}" || "${actual_sha}" != "${A3_SHA}" || "${actual_tree}" != "${A3_TREE}" ]]; then
+            echo "F14 A3 diagnostic requires exact target/head/tree ${A3_SHA}/${A3_TREE}; got ${target_sha}/${actual_sha}/${actual_tree}" >&2
+            exit 1
+          fi
+
+          refs_before="$(git for-each-ref --format='%(refname) %(objectname)')"
+          git fetch --no-tags --no-write-fetch-head origin "${OLD_F14_SHA}" "${CURRENT_F14_SHA}"
+          refs_after="$(git for-each-ref --format='%(refname) %(objectname)')"
+          if [[ "${refs_after}" != "${refs_before}" ]]; then
+            echo 'Exact-object fetch moved a ref' >&2
+            exit 1
+          fi
+          git cat-file -e "${OLD_F14_SHA}^{commit}"
+          git cat-file -e "${CURRENT_F14_SHA}^{commit}"
+
+          delta_names="$(git diff --name-only --no-renames "${OLD_F14_SHA}" "${CURRENT_F14_SHA}" --)"
+          delta_status="$(git diff --name-status --no-renames "${OLD_F14_SHA}" "${CURRENT_F14_SHA}" --)"
+          expected_status="$(printf 'M\t%s' "${FRAMEWORK_PATH}")"
+          if [[ "${delta_names}" != "${FRAMEWORK_PATH}" || "${delta_status}" != "${expected_status}" ]]; then
+            echo 'Old-to-current F14 delta is not the exact one-file framework modification' >&2
+            printf 'names=%s\nstatus=%s\n' "${delta_names}" "${delta_status}" >&2
+            exit 1
+          fi
+
+          old_blob="$(git rev-parse "${OLD_F14_SHA}:${FRAMEWORK_PATH}")"
+          current_blob="$(git rev-parse "${CURRENT_F14_SHA}:${FRAMEWORK_PATH}")"
+          a3_blob="$(git rev-parse "${A3_SHA}:${FRAMEWORK_PATH}")"
+          old_sha256="$(git show "${OLD_F14_SHA}:${FRAMEWORK_PATH}" | shasum -a 256 | cut -d' ' -f1)"
+          current_sha256="$(git show "${CURRENT_F14_SHA}:${FRAMEWORK_PATH}" | shasum -a 256 | cut -d' ' -f1)"
+          if [[ "${old_blob}" != "${OLD_FRAMEWORK_BLOB}" || "${a3_blob}" != "${OLD_FRAMEWORK_BLOB}" || "${current_blob}" != "${CURRENT_FRAMEWORK_BLOB}" || "${old_sha256}" != "${OLD_FRAMEWORK_SHA256}" || "${current_sha256}" != "${CURRENT_FRAMEWORK_SHA256}" ]]; then
+            echo 'Framework blob or byte digest mismatch' >&2
+            exit 1
+          fi
+
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo 'Checkout is not clean before diagnostic materialization' >&2
+            git status --porcelain=v1 --untracked-files=all >&2
+            exit 1
+          fi
+
+          git diff --binary --full-index --no-ext-diff --no-renames "${OLD_F14_SHA}" "${CURRENT_F14_SHA}" -- "${FRAMEWORK_PATH}" |
+            git apply --index --binary --check -
+          git diff --binary --full-index --no-ext-diff --no-renames "${OLD_F14_SHA}" "${CURRENT_F14_SHA}" -- "${FRAMEWORK_PATH}" |
+            git apply --index --binary -
+
+          applied_blob="$(git hash-object "${FRAMEWORK_PATH}")"
+          applied_sha256="$(shasum -a 256 "${FRAMEWORK_PATH}" | cut -d' ' -f1)"
+          synthetic_tree="$(git write-tree)"
+          synthetic_delta="$(git diff-tree --no-commit-id --name-status -r --no-renames "${A3_TREE}" "${synthetic_tree}")"
+          staged_names="$(git diff --cached --name-only --no-renames "${A3_SHA}" --)"
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          expected_worktree_status="$(printf 'M  %s' "${FRAMEWORK_PATH}")"
+          if [[ "${applied_blob}" != "${CURRENT_FRAMEWORK_BLOB}" || "${applied_sha256}" != "${CURRENT_FRAMEWORK_SHA256}" || "${synthetic_tree}" != "${DIAGNOSTIC_TREE}" || "${synthetic_delta}" != "${expected_status}" || "${staged_names}" != "${FRAMEWORK_PATH}" || "${status}" != "${expected_worktree_status}" ]]; then
+            echo 'Materialized diagnostic tree failed exact identity or containment checks' >&2
+            exit 1
+          fi
+          git diff --quiet
+          if [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+            echo 'Untracked source entered the diagnostic tree' >&2
+            exit 1
+          fi
+
+          printf 'F14_A3_DIAGNOSTIC_IDENTITY target=%s old_f14=%s current_f14=%s old_framework_blob=%s current_framework_blob=%s synthetic_tree=%s\n' \
+            "${A3_SHA}" "${OLD_F14_SHA}" "${CURRENT_F14_SHA}" "${OLD_FRAMEWORK_BLOB}" "${CURRENT_FRAMEWORK_BLOB}" "${synthetic_tree}"
+
       - name: Run Rust tests
         env:
           TEST_PROFILE: ${{ inputs.test_profile || 'full' }}
@@ -124,6 +211,9 @@ jobs:
             f14-a3-e2e-default)
               cargo test -p team-agent --locked --test e2e -- --nocapture
               ;;
+            f14-a3-same-composition-full-diagnostic)
+              cargo test --workspace --all-targets --locked --no-fail-fast
+              ;;
             f16-wleak)
               cargo test -p team-agent --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_cached_pane_owned_by_other_window_never_receives_worker_message -- --exact --nocapture --test-threads=1
               ;;
@@ -135,3 +225,24 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Restore F14 A3 diagnostic tree
+        if: ${{ always() && (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
+        run: |
+          set -euo pipefail
+          A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
+          A3_TREE='eee65a25586c7c439221931742b44a590ef3affc'
+          FRAMEWORK_PATH='crates/team-agent/tests/e2e/framework.rs'
+
+          git restore --source=HEAD --staged --worktree -- "${FRAMEWORK_PATH}"
+          actual_sha="$(git rev-parse HEAD)"
+          actual_tree="$(git rev-parse 'HEAD^{tree}')"
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [[ "${actual_sha}" != "${A3_SHA}" || "${actual_tree}" != "${A3_TREE}" || -n "${status}" ]]; then
+            echo 'Failed to restore exact clean A3 job worktree' >&2
+            printf 'head=%s\ntree=%s\nstatus=%s\n' "${actual_sha}" "${actual_tree}" "${status}" >&2
+            exit 1
+          fi
+          git diff --quiet "${A3_SHA}" --
+          git diff --cached --quiet "${A3_SHA}" --
+          echo "F14_A3_DIAGNOSTIC_RESTORED head=${actual_sha} tree=${actual_tree} status=clean"
