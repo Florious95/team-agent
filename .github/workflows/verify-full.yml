@@ -22,6 +22,7 @@ on:
           - f14-containment
           - f14-a3-e2e-default
           - f14-a3-same-composition-e2e-diagnostic
+          - f14-a3-same-composition-e2e-causal
           - f14-a3-same-composition-full-diagnostic
           - f16-wleak
           - f17-wleak-metadata
@@ -102,7 +103,7 @@ jobs:
           tmux -V
 
       - name: Materialize F14 A3 same-composition diagnostic tree
-        if: ${{ (inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-diagnostic' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
+        if: ${{ (inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-diagnostic' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-causal' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
         env:
           TARGET_SHA: ${{ inputs.target_sha || github.sha }}
         run: |
@@ -111,6 +112,7 @@ jobs:
           A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
           A3_TREE='eee65a25586c7c439221931742b44a590ef3affc'
           OLD_F14_SHA='312d19a38330cf9389fa69f915709f6ec7477b1e'
+          F14_FIX_BASE_SHA='221af22d4012c458cbaf589a48ebfc8ba0cc0545'
           CURRENT_F14_SHA='3a2417a1848a9b3944a98ac23ae02ecbee582fa6'
           FRAMEWORK_PATH='crates/team-agent/tests/e2e/framework.rs'
           OLD_FRAMEWORK_BLOB='a1501e1931cc705ddfef9b14154bba1a24388764'
@@ -128,13 +130,14 @@ jobs:
           fi
 
           refs_before="$(git for-each-ref --format='%(refname) %(objectname)')"
-          git fetch --no-tags --no-write-fetch-head origin "${OLD_F14_SHA}" "${CURRENT_F14_SHA}"
+          git fetch --no-tags --no-write-fetch-head origin "${OLD_F14_SHA}" "${F14_FIX_BASE_SHA}" "${CURRENT_F14_SHA}"
           refs_after="$(git for-each-ref --format='%(refname) %(objectname)')"
           if [[ "${refs_after}" != "${refs_before}" ]]; then
             echo 'Exact-object fetch moved a ref' >&2
             exit 1
           fi
           git cat-file -e "${OLD_F14_SHA}^{commit}"
+          git cat-file -e "${F14_FIX_BASE_SHA}^{commit}"
           git cat-file -e "${CURRENT_F14_SHA}^{commit}"
 
           delta_names="$(git diff --name-only --no-renames "${OLD_F14_SHA}" "${CURRENT_F14_SHA}" --)"
@@ -215,6 +218,71 @@ jobs:
             f14-a3-same-composition-e2e-diagnostic)
               cargo test -p team-agent --locked --test e2e -- --nocapture
               ;;
+            f14-a3-same-composition-e2e-causal)
+              F14_FIX_BASE_SHA='221af22d4012c458cbaf589a48ebfc8ba0cc0545'
+              CURRENT_F14_SHA='3a2417a1848a9b3944a98ac23ae02ecbee582fa6'
+              FRAMEWORK_PATH='crates/team-agent/tests/e2e/framework.rs'
+              FIX_BASE_FRAMEWORK_BLOB='003cc15da442bc39a1b01e9bfa128ec97de72e2c'
+              FIX_BASE_FRAMEWORK_SHA256='44eaf34a0b391247fe40550037878e6de07f1fa351241e4d0d80f2d84120ba6a'
+              FIX_BASE_SYNTHETIC_TREE='46e662eee9a5a5d96374ab1d7fd793af749dc00e'
+              CURRENT_FRAMEWORK_BLOB='53fe375ff607eb6164073f50658fd91aa0f1b766'
+              CURRENT_FRAMEWORK_SHA256='84eece0a37fc544c589c5917c65cc44db5e6c26aa79f19cb745ae3e2530d61b3'
+
+              git diff --binary --full-index --no-ext-diff --no-renames "${F14_FIX_BASE_SHA}" "${CURRENT_F14_SHA}" -- "${FRAMEWORK_PATH}" |
+                git apply --reverse --binary --check -
+              git diff --binary --full-index --no-ext-diff --no-renames "${F14_FIX_BASE_SHA}" "${CURRENT_F14_SHA}" -- "${FRAMEWORK_PATH}" |
+                git apply --reverse --binary -
+
+              causal_blob="$(git hash-object "${FRAMEWORK_PATH}")"
+              causal_sha256="$(shasum -a 256 "${FRAMEWORK_PATH}" | cut -d' ' -f1)"
+              causal_index="$(mktemp)"
+              rm "${causal_index}"
+              GIT_INDEX_FILE="${causal_index}" git read-tree HEAD
+              GIT_INDEX_FILE="${causal_index}" git update-index --add --cacheinfo "100644,${causal_blob},${FRAMEWORK_PATH}"
+              causal_tree="$(GIT_INDEX_FILE="${causal_index}" git write-tree)"
+              rm "${causal_index}"
+              if [[ "${causal_blob}" != "${FIX_BASE_FRAMEWORK_BLOB}" || "${causal_sha256}" != "${FIX_BASE_FRAMEWORK_SHA256}" || "${causal_tree}" != "${FIX_BASE_SYNTHETIC_TREE}" ]]; then
+                echo 'F14 causal reversal failed exact identity checks' >&2
+                exit 1
+              fi
+
+              set +e
+              cargo test -p team-agent --locked --test e2e -- --nocapture 2>&1 | tee f14-causal-red.log
+              causal_exit="${PIPESTATUS[0]}"
+              set -e
+              if [[ "${RUNNER_OS}" == 'macOS' ]]; then
+                if [[ "${causal_exit}" -eq 0 ]]; then
+                  echo 'F14 causal reversal unexpectedly stayed green on macOS' >&2
+                  exit 1
+                fi
+                for failed_name in \
+                  'cases::send_001_fake_worker::send_001_delivers_to_fake_worker' \
+                  'cases::gate_hole_061_red::tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim' \
+                  'cases::gate_hole_061_red::tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect'; do
+                  grep -F "${failed_name}" f14-causal-red.log | grep -F 'FAILED' >/dev/null || {
+                    echo "F14 causal reversal missed expected macOS red: ${failed_name}" >&2
+                    exit 1
+                  }
+                done
+              elif [[ "${causal_exit}" -ne 0 ]]; then
+                echo 'F14 causal reversal changed the historically green Ubuntu boundary' >&2
+                exit 1
+              fi
+              rm f14-causal-red.log
+              printf 'F14_CAUSAL_RED runner=%s exit=%s framework_blob=%s synthetic_tree=%s\n' \
+                "${RUNNER_OS}" "${causal_exit}" "${causal_blob}" "${causal_tree}"
+
+              git restore --worktree -- "${FRAMEWORK_PATH}"
+              restored_blob="$(git hash-object "${FRAMEWORK_PATH}")"
+              restored_sha256="$(shasum -a 256 "${FRAMEWORK_PATH}" | cut -d' ' -f1)"
+              if [[ "${restored_blob}" != "${CURRENT_FRAMEWORK_BLOB}" || "${restored_sha256}" != "${CURRENT_FRAMEWORK_SHA256}" ]]; then
+                echo 'F14 causal restore failed byte identity checks' >&2
+                exit 1
+              fi
+              git diff --quiet
+              echo "F14_CAUSAL_RESTORED framework_blob=${restored_blob} framework_sha256=${restored_sha256}"
+              cargo test -p team-agent --locked --test e2e -- --nocapture
+              ;;
             f14-a3-same-composition-full-diagnostic)
               cargo test --workspace --all-targets --locked --no-fail-fast
               ;;
@@ -231,7 +299,7 @@ jobs:
           esac
 
       - name: Restore F14 A3 diagnostic tree
-        if: ${{ always() && ((inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-diagnostic' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic') }}
+        if: ${{ always() && ((inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-diagnostic' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-causal' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic') }}
         run: |
           set -euo pipefail
           A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
