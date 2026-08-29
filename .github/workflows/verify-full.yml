@@ -24,6 +24,7 @@ on:
           - f14-a3-same-composition-e2e-diagnostic
           - f14-a3-same-composition-e2e-causal
           - f14-a3-same-composition-full-diagnostic
+          - f15-gate061
           - f16-wleak
           - f17-wleak-metadata
         default: full
@@ -285,6 +286,10 @@ jobs:
               ;;
             f14-a3-same-composition-full-diagnostic)
               cargo test --workspace --all-targets --locked --no-fail-fast
+              ;;
+            f15-gate061)
+              cargo test -p team-agent --locked --test e2e cases::gate_hole_061_red::tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim -- --exact --nocapture --test-threads=1
+              cargo test -p team-agent --locked --test e2e cases::gate_hole_061_red::tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect -- --exact --nocapture --test-threads=1
               ;;
             f16-wleak)
               cargo test -p team-agent --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_cached_pane_owned_by_other_window_never_receives_worker_message -- --exact --nocapture --test-threads=1
