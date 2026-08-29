@@ -260,7 +260,7 @@ impl SendPathCase {
     }
 
     fn pane_tuple_snapshot(&self) -> Value {
-        self.command_snapshot(self.tmux(&[
+        SendPathCase::command_snapshot(self.tmux(&[
             "list-panes",
             "-a",
             "-F",
