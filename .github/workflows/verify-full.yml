@@ -21,6 +21,7 @@ on:
           - f07-c5-diagnostic
           - f14-containment
           - f14-a3-e2e-default
+          - f14-a3-same-composition-e2e-diagnostic
           - f14-a3-same-composition-full-diagnostic
           - f16-wleak
           - f17-wleak-metadata
@@ -101,7 +102,7 @@ jobs:
           tmux -V
 
       - name: Materialize F14 A3 same-composition diagnostic tree
-        if: ${{ (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
+        if: ${{ (inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-diagnostic' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
         env:
           TARGET_SHA: ${{ inputs.target_sha || github.sha }}
         run: |
@@ -110,13 +111,13 @@ jobs:
           A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
           A3_TREE='eee65a25586c7c439221931742b44a590ef3affc'
           OLD_F14_SHA='312d19a38330cf9389fa69f915709f6ec7477b1e'
-          CURRENT_F14_SHA='221af22d4012c458cbaf589a48ebfc8ba0cc0545'
+          CURRENT_F14_SHA='3023366c03e738454e1b39d7b27a2a5e892e4981'
           FRAMEWORK_PATH='crates/team-agent/tests/e2e/framework.rs'
           OLD_FRAMEWORK_BLOB='a1501e1931cc705ddfef9b14154bba1a24388764'
-          CURRENT_FRAMEWORK_BLOB='003cc15da442bc39a1b01e9bfa128ec97de72e2c'
+          CURRENT_FRAMEWORK_BLOB='ee5f4eaebcf1e7da3962d6af38ba5af66b49a781'
           OLD_FRAMEWORK_SHA256='0fc9964f3f8c6ab2f90d0ff6f1498bcba00ecdb01d3d4ed580a3e46b98ffcffd'
-          CURRENT_FRAMEWORK_SHA256='44eaf34a0b391247fe40550037878e6de07f1fa351241e4d0d80f2d84120ba6a'
-          DIAGNOSTIC_TREE='46e662eee9a5a5d96374ab1d7fd793af749dc00e'
+          CURRENT_FRAMEWORK_SHA256='2065de64e0de934b45437563e63fc52dfbfa59e2cfbe7c4203cd96042416715d'
+          DIAGNOSTIC_TREE='e26b5ffae121da39954f976fd71c559436e5db9e'
 
           target_sha="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
           actual_sha="$(git rev-parse HEAD)"
@@ -211,6 +212,9 @@ jobs:
             f14-a3-e2e-default)
               cargo test -p team-agent --locked --test e2e -- --nocapture
               ;;
+            f14-a3-same-composition-e2e-diagnostic)
+              cargo test -p team-agent --locked --test e2e -- --nocapture
+              ;;
             f14-a3-same-composition-full-diagnostic)
               cargo test --workspace --all-targets --locked --no-fail-fast
               ;;
@@ -227,7 +231,7 @@ jobs:
           esac
 
       - name: Restore F14 A3 diagnostic tree
-        if: ${{ always() && (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic' }}
+        if: ${{ always() && ((inputs.test_profile || 'full') == 'f14-a3-same-composition-e2e-diagnostic' || (inputs.test_profile || 'full') == 'f14-a3-same-composition-full-diagnostic') }}
         run: |
           set -euo pipefail
           A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
