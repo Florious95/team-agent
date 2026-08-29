@@ -1508,12 +1508,20 @@ mod containment_tests {
         let owned_path = uid_root.join(format!("ta-f14-owned-{nonce}"));
         let outside_path = tmp_root.join(format!("ta-f14-outside-{nonce}"));
         let unowned_path = uid_root.join(format!("foreign-f14-unowned-{nonce}"));
-        let ambient_path = tmp_root.join(format!("ta-f14-ambient-{nonce}"));
+        // Keep the ambient control endpoint valid for every non-ambient
+        // ownership predicate: only the ambient TMUX equality guard should
+        // reject it.  Outside-root and bad-basename controls remain
+        // independent below.
+        let ambient_path = uid_root.join(format!("ta-f14-ambient-{nonce}"));
         let session = format!("f14-{nonce}");
         tmux_socket(&owned_path, &session);
         let outside_listener = socket(&outside_path);
         let unowned_listener = socket(&unowned_path);
         let ambient_listener = socket(&ambient_path);
+        assert!(
+            is_owned_tmux_socket_path(&ambient_path),
+            "ambient control must otherwise be a valid owned-shaped socket"
+        );
 
         let workspace_path;
         {
@@ -1554,6 +1562,13 @@ mod containment_tests {
                 "TMUX",
                 format!("{},f14-ambient-pane", ambient_path.display()),
             );
+            assert_eq!(
+                std::env::var_os("TMUX")
+                    .and_then(|value| value.to_str()?.split(',').next().map(PathBuf::from))
+                    .map(|path| normalize_existing_path(&path)),
+                Some(normalize_existing_path(&ambient_path)),
+                "ambient TMUX must identify exactly the valid ambient control endpoint"
+            );
             assert!(
                 catch_unwind(AssertUnwindSafe(
                     || ws.register_owned_tmux_socket(&ambient_path)
@@ -1585,6 +1600,8 @@ mod containment_tests {
                 "outside_endpoint_spared": outside_spared,
                 "unowned_endpoint_spared": unowned_spared,
                 "ambient_endpoint_spared": ambient_spared,
+                "ambient_endpoint_valid_owned_shape": is_owned_tmux_socket_path(&ambient_path),
+                "ambient_rejection_reason": "ambient_tmux_endpoint_matches_exact_endpoint",
                 "cleanup": "exact_registered_endpoint_only"
             })
         );
