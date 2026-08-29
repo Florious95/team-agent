@@ -1064,6 +1064,7 @@ fn delivery_timeout_snapshot(
             })
         })
         .collect::<Vec<_>>();
+    let coordinator_wait = coordinator_wait_snapshot(coordinator_pid);
     let socket = state_value
         .get("tmux_socket")
         .and_then(Value::as_str)
@@ -1127,6 +1128,7 @@ fn delivery_timeout_snapshot(
             "last_error": heartbeat.get("last_error").cloned().unwrap_or(Value::Null),
             "health": coordinator_meta,
             "pid_file_process": coordinator_pid_file_process,
+            "wait_snapshot": coordinator_wait,
         },
         "worker": {
             "state": target.get("worker").cloned().unwrap_or(Value::Null),
@@ -1198,6 +1200,93 @@ fn read_json_file(path: &Path) -> Value {
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Value::Null)
+}
+
+fn coordinator_wait_snapshot(pid: Option<u32>) -> Value {
+    let Some(pid) = pid else {
+        return serde_json::json!({"pid": null, "process": null, "children": [], "sample": null});
+    };
+    let pid_arg = pid.to_string();
+    let process = Command::new("ps")
+        .args(["-o", "pid=,ppid=,etime=,stat=,comm=", "-p", &pid_arg])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let child_ids = Command::new("pgrep")
+        .args(["-P", &pid_arg])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .filter_map(|raw| raw.parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let children = child_ids
+        .iter()
+        .filter_map(|child| {
+            let child_arg = child.to_string();
+            Command::new("ps")
+                .args(["-o", "pid=,ppid=,etime=,stat=,comm=", "-p", &child_arg])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .collect::<Vec<_>>();
+
+    #[cfg(target_os = "macos")]
+    let sample = Command::new("/usr/bin/sample")
+        .args([&pid_arg, "1", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()
+        .map(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let relevant = stdout
+                .lines()
+                .filter(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    [
+                        "team_agent", "tmux", "delivery", "inject", "capture", "process",
+                        "wait", "flock", "sqlite", "rusqlite", "psynch", "kevent", "poll",
+                    ]
+                    .iter()
+                    .any(|needle| lower.contains(needle))
+                })
+                .take(256)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "exit_code": output.status.code(),
+                "relevant_lines": relevant,
+                "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+            })
+        })
+        .unwrap_or(Value::Null);
+    #[cfg(not(target_os = "macos"))]
+    let sample = Value::Null;
+
+    serde_json::json!({
+        "pid": pid,
+        "process": process,
+        "children": children,
+        "sample": sample,
+    })
 }
 
 fn record_last_command_observation(
