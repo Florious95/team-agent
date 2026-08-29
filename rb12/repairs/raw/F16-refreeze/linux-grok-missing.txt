@@ -1,0 +1,7 @@
+unit=gb-26354c2f20cc-f16-wleak-a1
+tested_sha=26354c2f20ccb01981c4a21693bc9763a6f55998
+command=cargo test --package team-agent --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_cached_pane_owned_by_other_window_never_receives_worker_message --locked -- --exact --nocapture --test-threads=1
+preflight=pass; host=cursor; kernel=Linux 6.12.94+ x86_64 GNU/Linux; rustc=1.95.0; cargo=1.95.0; nproc=8
+sync=attempted; run=attempted; status_rc=4
+status=State=missing; LoadState=not-found; ActiveState=missing; Wiped=no; Process=
+classification=apparatus-unjudgeable; no retry-until-green; no authoritative ExecMainStatus or CommandExit

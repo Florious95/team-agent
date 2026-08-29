@@ -1,0 +1,9 @@
+tested_sha=26354c2f20ccb01981c4a21693bc9763a6f55998
+command=TEAM_AGENT_KEEP_TEST_TMP=1 TEAM_AGENT_KEEP_TEST_PROCESSES=1 TEAM_AGENT_E2E_EVIDENCE_DIR=<causal3> cargo test --locked --package team-agent --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_cached_pane_owned_by_other_window_never_receives_worker_message -- --exact --nocapture --test-threads=1
+mutation_exit=101; running=1; passed=0; failed=1; ignored=0; filtered=67
+failure=WLEAK RED: stale cached pane must be ignored when the intended session/window is live; expected token in worker a pane %0
+mutation_original_delivery_sha256=baff138b58dc832c28a08bc625382d0d850751904a0d433cf2083495651bbda6
+mutation_delivery_sha256=956e5d78f5c16e693435e52841997e50e2d812db856196c18c608eceaa877217
+mutation_diff_sha256=0a7f927999194ede084c2b5c31ba78a6f3a49b6ba70e4cc1d429bbea65ba574f
+evidence_json_sha256=76ca1216f584e98ebc1837d055577394b840bffbe3e131e96f9c6d0d4d6ee5f9
+physical_result=token absent from pane-a capture; token present in pane-b capture; message.delivered and turn_open.armed_after_delivery both target session team-wleak001, window b, pane %1, pid 90941, endpoint /private/tmp/tmux-501/ta-24ada15aa7d7

@@ -1,0 +1,256 @@
+# Rust code abstract tree
+
+- module: `/Volumes/nvme/tmp/team-agent-f16-wleak-terminal/crates/team-agent/src/messaging/delivery.rs`
+- direction: `C`
+- output_lines: 256
+- estimated_tokens: 3328
+- token_basis: `13 tokens/output line`
+- macro_policy: preserve definitions/invocations; do not expand generated AST
+
+## `messaging/delivery.rs`
+
+```rust
+//! ---
+//! purpose: 把已认领消息注入目标 pane 并记录投递阶段
+//! contract:
+//!   provides:
+//!     - name: deliver_stored_message
+//!       what: 单次物理注入；grok 队列默认再按回车顶出；cursor 打开单回车闸且不 flush send-now
+//! boundary:
+//!   - 不把物理 success 写成 delivered
+//!   - 不重粘文本
+//!   - error-bypass（target_resolved+error）只经 claim 原子闸，禁止旁路双投
+//!   - 物理 Enter 已出（pane/转录已有 token）后 observer/state 落盘失败不得返 Err 重投
+//!   - 提交前持久化失败仍返 Err，由 batch 记 item_blocked 隔离
+//!   - 同 message_id 的 token 已在 pane/转录则拒绝二次注入
+//! maturity: wired
+//! ---
+//!
+//! internal_delivery.py + delivery.py — coordinator/调度器侧 thin wrapper + 单条 tmux 注入投递
+//! + trust 有界重试 + turn-open arm (card §16/§65)。
+
+/// `deliver_stored_message` (`internal_delivery.py:16`):coordinator/调度器侧 team-scoped 单发
+/// (不重路由)。加 `_runtime_lock("send")`,直走 `_send_single_message_unlocked`。
+#[allow(clippy::too_many_arguments)]
+pub fn deliver_stored_message(
+    workspace: &Path,
+    target: Option<&str>,
+    content: &str,
+    task_id: Option<&crate::model::ids::TaskId>,
+    sender: &str,
+    requires_ack: bool,
+    wait_visible: bool,
+    timeout: f64,
+    team: Option<&TeamKey>,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+pub fn deliver_persisted_message(
+    workspace: &Path,
+    transport: &dyn Transport,
+    message_id: &str,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+/// `_tmux_pane_width` (`delivery.py:20`):查询 pane 列宽。**fail-safe** (bug-064/082):失败
+/// 返回 [`PaneWidthQuery::Failed`],**绝不**给默认宽度。借 step 9 transport 的 query。
+pub(crate) fn tmux_pane_width(transport: &dyn Transport, target: &Target) -> PaneWidthQuery {
+}
+
+pub(crate) fn worker_target_missing_due_to_stale_binding(
+    state: &serde_json::Value,
+    recipient: &str,
+    transport: &dyn Transport,
+) -> bool {
+}
+
+/// `_deliver_pending_message` (`delivery.py:63`):对一条消息做 tmux 注入投递 (含 trust 提示
+/// 自动应答 + turn-open arm + first_send_at 戳)。daemon-path → Result。
+pub fn deliver_pending_message(
+    workspace: &Path,
+    store: &MessageStore,
+    transport: &dyn Transport,
+    message_id: &str,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+pub(crate) fn mark_worker_target_missing(
+    store: &MessageStore,
+    event_log: &EventLog,
+    message_id: &str,
+    recipient: &str,
+    verification: Option<String>,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+pub fn requeue_worker_target_missing_messages(
+    workspace: &Path,
+    store: &MessageStore,
+    event_log: &EventLog,
+    recipient: &str,
+    owner_team_id: Option<&str>,
+) -> Result<Vec<String>, MessagingError> {
+}
+
+/// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
+pub(crate) fn inject_submit_verified(report: &InjectReport) -> bool {
+}
+
+/// U1 #7 step-2: pane-readback gate. `CaptureMissingToken` is negative readback
+/// evidence, but 0.3.30 submit evidence can supersede it: consumption or
+/// post-submit token observation proves the message reached the pane.
+/// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
+pub(crate) fn pane_readback_verified(report: &InjectReport) -> bool {
+}
+
+/// Render a message into the worker-facing protocol block (port of `rust_core.py:render_message`,
+/// golden-verified): `Team Agent message from {sender}[ for {task_id}]:\n\n{content}\n\n
+/// [team-agent-token:{message_id}]`. The worker (fake or real provider) only builds a result_envelope
+/// when it sees this block + extracts the token — the bare content gives WORKING but never a report
+/// (rt-host-a loop #4). token == message_id (exactly-once correlation).
+/// F1 (0.3.26): promoted to `pub` for direct pane send in cli/send.rs.
+pub fn render_message(
+    sender: &str,
+    task_id: Option<&str>,
+    content: &str,
+    message_id: &str,
+) -> String {
+}
+
+/// `_deliver_pending_messages` (`delivery.py:484`):扫 pending 队列逐条投递;busy 收件人写
+/// `send.deferred_busy` 跳过 (**不丢**,card §131)。返回投递的 message_id 列表。
+pub fn deliver_pending_messages(
+    workspace: &Path,
+    state: &serde_json::Value,
+    transport: &dyn Transport,
+    event_log: &EventLog,
+) -> Result<Vec<String>, MessagingError> {
+}
+
+/// ---
+/// purpose: paste→Enter 地板按收件人 provider 选择
+/// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
+/// boundary: 不改 cursor 单回车闸；不把地板套到 claude/codex
+/// ---
+pub(crate) fn paste_to_submit_floor_for_recipient(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Duration {
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeaderReceiptObservation {
+    SourceUnavailable,
+    TokenAbsent,
+    TokenObserved,
+}
+
+pub(crate) fn observe_leader_receipt(
+    state: &serde_json::Value,
+    message_id: &str,
+) -> LeaderReceiptObservation {
+}
+
+pub(crate) fn leader_transcript_has_token(state: &serde_json::Value, message_id: &str) -> bool {
+}
+
+pub(crate) fn leader_receipt_source_unavailable_outcome(message_id: &str) -> DeliveryOutcome {
+}
+
+/// `_handle_trust_retry_needed` (`delivery.py:221`):trust 应答失败时调度有界退避重试
+/// (`attempt < MAX` → schedule;`>= MAX` → 终态 mark failed + `trust_auto_answer_exhausted`)。
+pub fn handle_trust_retry_needed(
+    store: &MessageStore,
+    payload: &TrustRetryPayload,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+/// `_execute_trust_retry` (`delivery.py:330`):trust_retry scheduled event 的消费者 ——
+/// 把行重置回 `accepted`,attempt 穿透,重跑 `_deliver_pending_message`。
+pub fn execute_trust_retry(
+    workspace: &Path,
+    store: &MessageStore,
+    transport: &dyn Transport,
+    payload: &TrustRetryPayload,
+    event_log: &EventLog,
+    owner_team_id: Option<&TeamKey>,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+/// `_record_turn_open_if_leader_to_worker` (`delivery.py:430`):**take-over arm 来自真实投递**
+/// (card §121) —— 仅 leader→worker 注入/投递成功后才 arm,绝不凭空 arm。
+pub(crate) fn record_turn_open_if_leader_to_worker(
+    workspace: &Path,
+    state: &serde_json::Value,
+    sender: &str,
+    recipient: &str,
+    delivered: &DeliveryOutcome,
+    event_log: &EventLog,
+) -> Result<(), MessagingError> {
+}
+
+impl SubmitObserver for CurrentTurnSubmitObserver<'_> {
+fn after_physical_submit(&self) {
+    }
+}
+
+/// `_stamp_first_send_at_if_leader_to_worker` (`delivery.py:380`):首次 leader→worker 投递戳
+/// `first_send_at` (step 13 restart Route B atomicity 决策读它)。
+pub(crate) fn stamp_first_send_at_if_leader_to_worker(
+    workspace: &Path,
+    state: &serde_json::Value,
+    sender: &str,
+    recipient: &str,
+) -> Result<(), MessagingError> {
+}
+
+pub(crate) fn normalize_owner_team_id_rows(
+    workspace: &Path,
+    requested: &str,
+    canonical: &str,
+    message_id: Option<&str>,
+    event_log: Option<&EventLog>,
+) -> Result<(), MessagingError> {
+}
+
+/// `retry_injection_after_trust_auto_answer` (`trust_auto_answer.py`):leader 路径 trust 应答
+/// 后重注入 (查 pane_width fail-safe + attempt_trust_auto_answer + 等 dismissal + 重 inject)。
+pub fn retry_injection_after_trust_auto_answer(
+    workspace: &Path,
+    state: &serde_json::Value,
+    transport: &dyn Transport,
+    target: &Target,
+    text: &str,
+    provider: Provider,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
+}
+
+/// ---
+/// purpose: 同 message_id 已在 pane 或转录出现则视为已注入
+/// contract:
+///   provides:
+///     - name: token_already_visible
+///       what: capture Tail(80) 或 recipient rollout_path 尾含 `[team-agent-token:{id}]` 则为 true
+/// boundary:
+///   - capture 失败不当已见（倒向允许注入，避免丢信）
+///   - 不请求 Full（wave-2：滚出屏的 trust 残渣不当成已见/可行动）
+///   - 不把 JSON 字段里的 message_id 当 pane token
+/// ---
+pub(crate) fn token_already_visible(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+    target: &Target,
+    message_id: &str,
+) -> bool {
+}
+
+#[cfg(test)]
+mod paste_floor_tests {}
+```
