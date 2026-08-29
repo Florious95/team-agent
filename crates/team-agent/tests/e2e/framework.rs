@@ -980,8 +980,10 @@ pub fn wait_for_delivery_or_panic<F: FnMut() -> bool>(
         started.elapsed(),
     );
     let path = write_delivery_timeout_snapshot(&evidence);
+    let evidence_json = serde_json::to_string_pretty(&evidence)
+        .expect("serialize delivery timeout evidence for log");
     panic!(
-        "timed out after {:?} waiting for: {description}; durable delivery evidence={}",
+        "timed out after {:?} waiting for: {description}; durable delivery evidence={}\nF14_DELIVERY_TIMEOUT_RECEIPT {evidence_json}",
         timeout,
         path.display()
     );
@@ -1002,36 +1004,17 @@ fn delivery_timeout_snapshot(
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .unwrap_or(Value::Null);
     let db_path = ws.path().join(".team/runtime/team.db");
-    let row = Connection::open(&db_path)
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "select recipient, status, error, delivery_attempts, delivered_at \
-                 from messages where message_id = ?1",
-                [message_id],
-                |row| {
-                    Ok(serde_json::json!({
-                        "message_id": message_id,
-                        "recipient": row.get::<_, String>(0)?,
-                        "status": row.get::<_, String>(1)?,
-                        "error": row.get::<_, Option<String>>(2)?,
-                        "delivery_attempts": row.get::<_, i64>(3)?,
-                        "delivered_at": row.get::<_, Option<String>>(4)?,
-                    }))
-                },
-            )
-            .ok()
+    let same_message_rows = message_rows_snapshot(&db_path, message_id);
+    let row = same_message_rows.first().cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "message_id": message_id,
+            "recipient": null,
+            "status": null,
+            "error": null,
+            "delivery_attempts": null,
+            "delivered_at": null,
         })
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "message_id": message_id,
-                "recipient": null,
-                "status": null,
-                "error": null,
-                "delivery_attempts": null,
-                "delivered_at": null,
-            })
-        });
+    });
     let all_events = std::fs::read_to_string(ws.events_jsonl_path())
         .unwrap_or_default()
         .lines()
@@ -1065,6 +1048,16 @@ fn delivery_timeout_snapshot(
         .cloned()
         .or_else(|| coordinator_meta.get("boot_id").cloned())
         .unwrap_or(Value::Null);
+    let coordinator_pid_file_process = coordinator_pid
+        .into_iter()
+        .map(|pid| {
+            serde_json::json!({
+                "pid": pid,
+                "live": pid_is_running(pid),
+                "source": "exact_workspace_pid_file",
+            })
+        })
+        .collect::<Vec<_>>();
     let socket = state_value
         .get("tmux_socket")
         .and_then(Value::as_str)
@@ -1086,6 +1079,18 @@ fn delivery_timeout_snapshot(
         .and_then(Value::as_str)
         .unwrap_or(recipient);
     let physical = tmux_target_snapshot(socket, session, window, pane_id);
+    let fake_ready_marker = physical
+        .get("capture")
+        .and_then(Value::as_str)
+        .is_some_and(|capture| {
+            capture.contains(&format!("TEAM_AGENT_FAKE_READY agent={recipient}"))
+        });
+    let submit_verification =
+        read_json_file(&ws.path().join(".team/runtime/submit-verification.json"));
+    let submit_verification_matches_message = submit_verification
+        .get("message_id")
+        .and_then(Value::as_str)
+        == Some(message_id);
     let resources = ws
         .owned_tmux_sockets
         .lock()
@@ -1098,21 +1103,31 @@ fn delivery_timeout_snapshot(
         })
         .unwrap_or_default();
     let mut snapshot = serde_json::json!({
-        "schema_version": "team-agent-e2e-delivery-timeout-v2",
+        "schema_version": "team-agent-e2e-delivery-timeout-v3",
         "head": repository_head_sha(),
         "message_id": message_id,
         "recipient": recipient,
         "description": description,
         "timeout_ms": timeout.as_millis(),
         "row": row,
+        "same_message_rows": same_message_rows,
         "coordinator": {
             "pid": coordinator_pid,
             "boot_id": coordinator_boot_id,
             "heartbeat": heartbeat,
             "tick": heartbeat.get("coordinator_tick_iteration_count").cloned().unwrap_or(Value::Null),
+            "last_phase": heartbeat.get("last_phase").cloned().unwrap_or(Value::Null),
+            "last_tick_status": heartbeat.get("last_tick_status").cloned().unwrap_or(Value::Null),
+            "last_error": heartbeat.get("last_error").cloned().unwrap_or(Value::Null),
             "health": coordinator_meta,
+            "pid_file_process": coordinator_pid_file_process,
         },
-        "worker": target.get("worker").cloned().unwrap_or(Value::Null),
+        "worker": {
+            "state": target.get("worker").cloned().unwrap_or(Value::Null),
+            "fake_ready_marker": fake_ready_marker,
+            "submit_verification": submit_verification,
+            "submit_verification_matches_message": submit_verification_matches_message,
+        },
         "events": events,
         "message_events": message_events,
         "target": {
@@ -1179,6 +1194,31 @@ fn read_json_file(path: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn message_rows_snapshot(db_path: &Path, message_id: &str) -> Vec<Value> {
+    let Ok(conn) = Connection::open(db_path) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "select recipient, status, error, delivery_attempts, delivered_at \
+         from messages where message_id = ?1 order by recipient",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([message_id], |row| {
+        Ok(serde_json::json!({
+            "message_id": message_id,
+            "recipient": row.get::<_, String>(0)?,
+            "status": row.get::<_, String>(1)?,
+            "error": row.get::<_, Option<String>>(2)?,
+            "delivery_attempts": row.get::<_, i64>(3)?,
+            "delivered_at": row.get::<_, Option<String>>(4)?,
+        }))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
 fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str) -> Value {
     if socket.is_empty() {
         return serde_json::json!({"liveness": "unknown", "capture": null});
@@ -1196,13 +1236,13 @@ fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str
             "-t",
             &target,
             "-F",
-            "#{pane_id}|#{pane_pid}|#{pane_current_path}",
+            "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{pane_id}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_current_command}|#{pane_start_command}|#{pane_current_path}",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
-    let (liveness, tuple, stderr) = match out {
+    let (liveness, tuple, list_panes_exit, stderr) = match out {
         Ok(output) => (
             if output.status.success() {
                 "live"
@@ -1210,22 +1250,32 @@ fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str
                 "missing"
             },
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            output.status.code(),
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ),
-        Err(error) => ("unknown", String::new(), error.to_string()),
+        Err(error) => ("unknown", String::new(), None, error.to_string()),
     };
-    let capture = Command::new("tmux")
+    let capture_output = Command::new("tmux")
         .args(["-S", socket, "capture-pane", "-t", &target, "-p"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .ok()
+        .ok();
+    let capture_exit = capture_output
+        .as_ref()
+        .and_then(|output| output.status.code());
+    let capture = capture_output
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
     serde_json::json!({
+        "socket": socket,
+        "requested_target": target,
         "liveness": liveness,
         "tuple": tuple,
+        "tuple_fields": "session_id|session_name|window_id|window_name|pane_id|pane_pid|pane_dead|pane_dead_status|pane_current_command|pane_start_command|pane_current_path",
+        "list_panes_exit": list_panes_exit,
         "stderr": stderr,
+        "capture_exit": capture_exit,
         "capture": capture,
     })
 }
