@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 // ----------------------------------------------------------------------------
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const LAST_COMMAND_OBSERVATION: &str = ".e2e-last-command-observation.json";
 
 const CALLER_IDENTITY_ENVS: &[&str] = &[
     "TMUX",
@@ -285,6 +286,9 @@ impl TestWorkspace {
 
 impl Drop for TestWorkspace {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            emit_fixture_panic_receipt(self);
+        }
         // 0.5.43 debt-sweep (§6.1) Drop order = stop exact coordinator
         // tree → kill exact owned tmux server(s) + delete socket file →
         // remove workspace dir. `TEAM_AGENT_KEEP_TEST_PROCESSES/TMP`
@@ -725,14 +729,44 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     } = cmd
         .output()
         .unwrap_or_else(|e| panic!("spawn {:?}: {e}", bin));
-    TaResult {
+    let result = TaResult {
         argv: std::iter::once("team-agent".to_string())
             .chain(args.iter().map(|s| (*s).to_string()))
             .collect(),
         exit_code: status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    };
+    record_last_command_observation(ws, &result, extra_env);
+    if args.first() == Some(&"quick-start")
+        && fake_delivery_fixture_needs_real_tui_noecho(ws)
+        && quick_start_spawned_workers(&result)
+    {
+        disable_fake_worker_tty_echo(ws);
     }
+    result
+}
+
+fn quick_start_spawned_workers(result: &TaResult) -> bool {
+    serde_json::from_str::<Value>(&result.stdout)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/readiness/all_workers_spawned")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or_else(|| result.stdout.contains("\"all_workers_spawned\": true"))
+}
+
+/// These delivery contracts assert persisted/result truth and need the fake
+/// pane to match a real TUI's no-echo input. Other contracts intentionally use
+/// terminal echo as a pane-routing oracle, so this cannot be a global fake
+/// provider setting.
+fn fake_delivery_fixture_needs_real_tui_noecho(ws: &TestWorkspace) -> bool {
+    let tag = ws.short_tag();
+    ["send001", "gate061-send", "gate061-doc"]
+        .iter()
+        .any(|fixture| tag.starts_with(&format!("ta-e2e-{fixture}-")))
 }
 
 // ----------------------------------------------------------------------------
@@ -980,8 +1014,10 @@ pub fn wait_for_delivery_or_panic<F: FnMut() -> bool>(
         started.elapsed(),
     );
     let path = write_delivery_timeout_snapshot(&evidence);
+    let evidence_json = serde_json::to_string_pretty(&evidence)
+        .expect("serialize delivery timeout evidence for log");
     panic!(
-        "timed out after {:?} waiting for: {description}; durable delivery evidence={}",
+        "timed out after {:?} waiting for: {description}; durable delivery evidence={}\nF14_DELIVERY_TIMEOUT_RECEIPT {evidence_json}",
         timeout,
         path.display()
     );
@@ -1002,36 +1038,17 @@ fn delivery_timeout_snapshot(
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .unwrap_or(Value::Null);
     let db_path = ws.path().join(".team/runtime/team.db");
-    let row = Connection::open(&db_path)
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "select recipient, status, error, delivery_attempts, delivered_at \
-                 from messages where message_id = ?1",
-                [message_id],
-                |row| {
-                    Ok(serde_json::json!({
-                        "message_id": message_id,
-                        "recipient": row.get::<_, String>(0)?,
-                        "status": row.get::<_, String>(1)?,
-                        "error": row.get::<_, Option<String>>(2)?,
-                        "delivery_attempts": row.get::<_, i64>(3)?,
-                        "delivered_at": row.get::<_, Option<String>>(4)?,
-                    }))
-                },
-            )
-            .ok()
+    let same_message_rows = message_rows_snapshot(&db_path, message_id);
+    let row = same_message_rows.first().cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "message_id": message_id,
+            "recipient": null,
+            "status": null,
+            "error": null,
+            "delivery_attempts": null,
+            "delivered_at": null,
         })
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "message_id": message_id,
-                "recipient": null,
-                "status": null,
-                "error": null,
-                "delivery_attempts": null,
-                "delivered_at": null,
-            })
-        });
+    });
     let all_events = std::fs::read_to_string(ws.events_jsonl_path())
         .unwrap_or_default()
         .lines()
@@ -1065,6 +1082,17 @@ fn delivery_timeout_snapshot(
         .cloned()
         .or_else(|| coordinator_meta.get("boot_id").cloned())
         .unwrap_or(Value::Null);
+    let coordinator_pid_file_process = coordinator_pid
+        .into_iter()
+        .map(|pid| {
+            serde_json::json!({
+                "pid": pid,
+                "live": pid_is_running(pid),
+                "source": "exact_workspace_pid_file",
+            })
+        })
+        .collect::<Vec<_>>();
+    let coordinator_wait = coordinator_wait_snapshot(coordinator_pid);
     let socket = state_value
         .get("tmux_socket")
         .and_then(Value::as_str)
@@ -1086,6 +1114,18 @@ fn delivery_timeout_snapshot(
         .and_then(Value::as_str)
         .unwrap_or(recipient);
     let physical = tmux_target_snapshot(socket, session, window, pane_id);
+    let fake_ready_marker = physical
+        .get("capture")
+        .and_then(Value::as_str)
+        .is_some_and(|capture| {
+            capture.contains(&format!("TEAM_AGENT_FAKE_READY agent={recipient}"))
+        });
+    let submit_verification =
+        read_json_file(&ws.path().join(".team/runtime/submit-verification.json"));
+    let submit_verification_matches_message = submit_verification
+        .get("message_id")
+        .and_then(Value::as_str)
+        == Some(message_id);
     let resources = ws
         .owned_tmux_sockets
         .lock()
@@ -1098,21 +1138,32 @@ fn delivery_timeout_snapshot(
         })
         .unwrap_or_default();
     let mut snapshot = serde_json::json!({
-        "schema_version": "team-agent-e2e-delivery-timeout-v2",
+        "schema_version": "team-agent-e2e-delivery-timeout-v3",
         "head": repository_head_sha(),
         "message_id": message_id,
         "recipient": recipient,
         "description": description,
         "timeout_ms": timeout.as_millis(),
         "row": row,
+        "same_message_rows": same_message_rows,
         "coordinator": {
             "pid": coordinator_pid,
             "boot_id": coordinator_boot_id,
             "heartbeat": heartbeat,
             "tick": heartbeat.get("coordinator_tick_iteration_count").cloned().unwrap_or(Value::Null),
+            "last_phase": heartbeat.get("last_phase").cloned().unwrap_or(Value::Null),
+            "last_tick_status": heartbeat.get("last_tick_status").cloned().unwrap_or(Value::Null),
+            "last_error": heartbeat.get("last_error").cloned().unwrap_or(Value::Null),
             "health": coordinator_meta,
+            "pid_file_process": coordinator_pid_file_process,
+            "wait_snapshot": coordinator_wait,
         },
-        "worker": target.get("worker").cloned().unwrap_or(Value::Null),
+        "worker": {
+            "state": target.get("worker").cloned().unwrap_or(Value::Null),
+            "fake_ready_marker": fake_ready_marker,
+            "submit_verification": submit_verification,
+            "submit_verification_matches_message": submit_verification_matches_message,
+        },
         "events": events,
         "message_events": message_events,
         "target": {
@@ -1179,6 +1230,300 @@ fn read_json_file(path: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn coordinator_wait_snapshot(pid: Option<u32>) -> Value {
+    let Some(pid) = pid else {
+        return serde_json::json!({"pid": null, "process": null, "children": [], "sample": null});
+    };
+    let pid_arg = pid.to_string();
+    let process = Command::new("ps")
+        .args(["-o", "pid=,ppid=,etime=,stat=,comm=", "-p", &pid_arg])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let child_ids = Command::new("pgrep")
+        .args(["-P", &pid_arg])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .filter_map(|raw| raw.parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let children = child_ids
+        .iter()
+        .filter_map(|child| {
+            let child_arg = child.to_string();
+            Command::new("ps")
+                .args(["-o", "pid=,ppid=,etime=,stat=,comm=", "-p", &child_arg])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .collect::<Vec<_>>();
+
+    #[cfg(target_os = "macos")]
+    let sample = Command::new("/usr/bin/sample")
+        .args([&pid_arg, "1", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()
+        .map(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let relevant = stdout
+                .lines()
+                .filter(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    [
+                        "team_agent", "tmux", "delivery", "inject", "capture", "process",
+                        "wait", "flock", "sqlite", "rusqlite", "psynch", "kevent", "poll",
+                    ]
+                    .iter()
+                    .any(|needle| lower.contains(needle))
+                })
+                .take(256)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "exit_code": output.status.code(),
+                "relevant_lines": relevant,
+                "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+            })
+        })
+        .unwrap_or(Value::Null);
+    #[cfg(not(target_os = "macos"))]
+    let sample = Value::Null;
+
+    serde_json::json!({
+        "pid": pid,
+        "process": process,
+        "children": children,
+        "sample": sample,
+    })
+}
+
+fn record_last_command_observation(
+    ws: &TestWorkspace,
+    result: &TaResult,
+    extra_env: &[(&str, &str)],
+) {
+    let effective_home = extra_env
+        .iter()
+        .rev()
+        .find_map(|(key, value)| (*key == "HOME").then_some(PathBuf::from(*value)))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let command_json = serde_json::from_str::<Value>(&result.stdout).unwrap_or(Value::Null);
+    let message_id = command_json
+        .get("message_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let recipient = (result.argv.get(1).map(String::as_str) == Some("send"))
+        .then(|| result.argv.get(2).map(String::as_str))
+        .flatten()
+        .unwrap_or("");
+    let observation = serde_json::json!({
+        "schema_version": "team-agent-e2e-last-command-v1",
+        "command": {
+            "argv": &result.argv,
+            "exit_code": result.exit_code,
+            "stdout": &result.stdout,
+            "stderr": &result.stderr,
+            "effective_home": effective_home.as_deref(),
+            "message_id": message_id,
+            "recipient": recipient,
+        },
+    });
+    if let Ok(encoded) = serde_json::to_vec_pretty(&observation) {
+        let _ = std::fs::write(ws.path().join(LAST_COMMAND_OBSERVATION), encoded);
+    }
+}
+
+fn emit_fixture_panic_receipt(ws: &TestWorkspace) {
+    let last_command = read_json_file(&ws.path().join(LAST_COMMAND_OBSERVATION));
+    let effective_home = last_command
+        .pointer("/command/effective_home")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let message_id = last_command
+        .pointer("/command/message_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let recipient = last_command
+        .pointer("/command/recipient")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let receipt = serde_json::json!({
+        "schema_version": "team-agent-e2e-fixture-panic-v1",
+        "last_command": last_command,
+        "at_unwind": fixture_runtime_snapshot(
+            ws,
+            effective_home.as_deref(),
+            &message_id,
+            &recipient,
+        ),
+        "cleanup_order": "receipt_then_exact_coordinator_then_registered_tmux_then_workspace",
+    });
+    let encoded = serde_json::to_string_pretty(&receipt)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":{error:?}}}"));
+    eprintln!("F14_SHARED_FIXTURE_PANIC_RECEIPT {encoded}");
+}
+
+fn fixture_runtime_snapshot(
+    ws: &TestWorkspace,
+    effective_home: Option<&Path>,
+    message_id: &str,
+    recipient: &str,
+) -> Value {
+    let state = read_json_file(&ws.state_json_path());
+    let coordinator_pid = read_pid(&ws.coordinator_pid_file());
+    let events = std::fs::read_to_string(ws.events_jsonl_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rev()
+        .take(64)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let socket = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let session = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let target = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let pane_id = target.get("pane_id").and_then(Value::as_str).unwrap_or("");
+    let window = target
+        .get("window_name")
+        .and_then(Value::as_str)
+        .unwrap_or(recipient);
+    let owned_tmux_sockets = ws
+        .owned_tmux_sockets
+        .lock()
+        .ok()
+        .map(|sockets| sockets.clone())
+        .unwrap_or_default();
+    serde_json::json!({
+        "workspace": ws.path(),
+        "owned_tmux_sockets": owned_tmux_sockets,
+        "state": {
+            "active_team_key": state.get("active_team_key").cloned().unwrap_or(Value::Null),
+            "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
+            "tmux_socket": state.get("tmux_socket").cloned().unwrap_or(Value::Null),
+            "agents": state.get("agents").cloned().unwrap_or(Value::Null),
+        },
+        "coordinator": {
+            "pid": coordinator_pid,
+            "pid_live": coordinator_pid.map(pid_is_running),
+            "metadata": read_json_file(&ws.path().join(".team/runtime/coordinator.json")),
+            "heartbeat": read_json_file(&ws.path().join(".team/runtime/coordinator_tick.json")),
+            "log_tail": read_text_tail(&ws.path().join(".team/runtime/coordinator.log"), 64),
+        },
+        "message_rows": if message_id.is_empty() {
+            Vec::<Value>::new()
+        } else {
+            message_rows_snapshot(&ws.path().join(".team/runtime/team.db"), message_id)
+        },
+        "events_tail": events,
+        "tmux": if !recipient.is_empty() {
+            tmux_target_snapshot(socket, session, window, pane_id)
+        } else {
+            serde_json::json!({
+                "socket": if socket.is_empty() { Value::Null } else { Value::String(socket.to_string()) },
+                "socket_exists": !socket.is_empty() && Path::new(socket).exists(),
+                "liveness": "not_probed_without_recipient",
+            })
+        },
+        "leader_registry": scoped_leader_registry_snapshot(effective_home, ws.path(), &state),
+    })
+}
+
+fn read_text_tail(path: &Path, max_lines: usize) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(max_lines)
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn scoped_leader_registry_snapshot(
+    effective_home: Option<&Path>,
+    workspace: &Path,
+    state: &Value,
+) -> Value {
+    let Some(home) = effective_home else {
+        return serde_json::json!({"effective_home": null, "path": null, "entry": null});
+    };
+    let Some(team_key) = state.get("active_team_key").and_then(Value::as_str) else {
+        return serde_json::json!({"effective_home": home, "path": null, "entry": null});
+    };
+    let workspace_hash = team_agent::leader::registry::workspace_hash(workspace);
+    let path = home
+        .join(".team-agent/leaders")
+        .join(format!("{workspace_hash}__{team_key}.json"));
+    serde_json::json!({
+        "effective_home": home,
+        "path": path,
+        "entry": read_json_file(&path),
+    })
+}
+
+fn message_rows_snapshot(db_path: &Path, message_id: &str) -> Vec<Value> {
+    let Ok(conn) = Connection::open(db_path) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "select recipient, status, error, delivery_attempts, delivered_at \
+         from messages where message_id = ?1 order by recipient",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([message_id], |row| {
+        Ok(serde_json::json!({
+            "message_id": message_id,
+            "recipient": row.get::<_, String>(0)?,
+            "status": row.get::<_, String>(1)?,
+            "error": row.get::<_, Option<String>>(2)?,
+            "delivery_attempts": row.get::<_, i64>(3)?,
+            "delivered_at": row.get::<_, Option<String>>(4)?,
+        }))
+    }) else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
 fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str) -> Value {
     if socket.is_empty() {
         return serde_json::json!({"liveness": "unknown", "capture": null});
@@ -1196,13 +1541,13 @@ fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str
             "-t",
             &target,
             "-F",
-            "#{pane_id}|#{pane_pid}|#{pane_current_path}",
+            "#{session_id}|#{session_name}|#{window_id}|#{window_name}|#{pane_id}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_current_command}|#{pane_start_command}|#{pane_current_path}",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
-    let (liveness, tuple, stderr) = match out {
+    let (liveness, tuple, list_panes_exit, stderr) = match out {
         Ok(output) => (
             if output.status.success() {
                 "live"
@@ -1210,22 +1555,32 @@ fn tmux_target_snapshot(socket: &str, session: &str, window: &str, pane_id: &str
                 "missing"
             },
             String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            output.status.code(),
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ),
-        Err(error) => ("unknown", String::new(), error.to_string()),
+        Err(error) => ("unknown", String::new(), None, error.to_string()),
     };
-    let capture = Command::new("tmux")
+    let capture_output = Command::new("tmux")
         .args(["-S", socket, "capture-pane", "-t", &target, "-p"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
-        .ok()
+        .ok();
+    let capture_exit = capture_output
+        .as_ref()
+        .and_then(|output| output.status.code());
+    let capture = capture_output
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
     serde_json::json!({
+        "socket": socket,
+        "requested_target": target,
         "liveness": liveness,
         "tuple": tuple,
+        "tuple_fields": "session_id|session_name|window_id|window_name|pane_id|pane_pid|pane_dead|pane_dead_status|pane_current_command|pane_start_command|pane_current_path",
+        "list_panes_exit": list_panes_exit,
         "stderr": stderr,
+        "capture_exit": capture_exit,
         "capture": capture,
     })
 }
@@ -1332,6 +1687,87 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
     );
     result
 }
+
+#[cfg(unix)]
+fn disable_fake_worker_tty_echo(ws: &TestWorkspace) {
+    let state = ws.read_state();
+    let socket = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .expect("successful fake quick-start must record its exact tmux socket");
+    let agents = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .expect("successful fake quick-start must record its agents");
+
+    for (agent_id, agent) in agents {
+        let pane_id = agent
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!("successful fake quick-start must record pane_id for {agent_id}")
+            });
+        eprintln!(
+            "[e2e-fake-tty] query socket={socket} agent={agent_id} pane={pane_id} command=tmux -S <exact-socket> display-message -p -t <exact-pane> #{{pane_tty}}"
+        );
+        let tty_query = Command::new("tmux")
+            .args([
+                "-S",
+                socket,
+                "display-message",
+                "-p",
+                "-t",
+                pane_id,
+                "#{pane_tty}",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|error| panic!("query fake worker pane TTY for {agent_id}: {error}"));
+        assert!(
+            tty_query.status.success(),
+            "query fake worker pane TTY failed: socket={socket} agent={agent_id} pane={pane_id} status={} stderr={}",
+            tty_query.status,
+            String::from_utf8_lossy(&tty_query.stderr)
+        );
+        let tty = String::from_utf8_lossy(&tty_query.stdout)
+            .trim()
+            .to_string();
+        assert!(
+            !tty.is_empty(),
+            "query fake worker pane TTY returned empty path: socket={socket} agent={agent_id} pane={pane_id}"
+        );
+
+        #[cfg(target_os = "macos")]
+        let stty_flag = "-f";
+        #[cfg(not(target_os = "macos"))]
+        let stty_flag = "-F";
+        eprintln!(
+            "[e2e-fake-tty] disable-echo socket={socket} agent={agent_id} pane={pane_id} tty={tty} command=stty {stty_flag} <exact-tty> -echo"
+        );
+        let disable = Command::new("stty")
+            .args([stty_flag, &tty, "-echo"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|error| panic!("disable fake worker TTY echo for {agent_id}: {error}"));
+        eprintln!(
+            "[e2e-fake-tty] disable-echo-result socket={socket} agent={agent_id} pane={pane_id} tty={tty} status={}",
+            disable.status
+        );
+        assert!(
+            disable.status.success(),
+            "disable fake worker TTY echo failed: socket={socket} agent={agent_id} pane={pane_id} tty={tty} status={} stderr={}",
+            disable.status,
+            String::from_utf8_lossy(&disable.stderr)
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn disable_fake_worker_tty_echo(_ws: &TestWorkspace) {}
 
 /// Sanitize team_id into the tmux session name as the runtime does:
 /// session = `team-<team_id>` (lowercased, no transformation needed for our
