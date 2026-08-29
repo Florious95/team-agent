@@ -906,7 +906,9 @@ fn merge_agent_projection(
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
                     let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
-                        if !topology_update_agent_ids.is_empty() {
+                        if !topology_update_agent_ids.is_empty()
+                            && lifecycle_peer_snapshot_is_stale(existing.get(), latest_agent)
+                        {
                             // A lifecycle writer may have loaded a complete
                             // peer row before that peer finalized. Its own
                             // topology authority is limited to the IDs it
@@ -934,6 +936,29 @@ fn lifecycle_placeholder(agent: &Value) -> bool {
         agent.get("status").and_then(Value::as_str),
         Some("reserved" | "starting")
     )
+}
+
+fn lifecycle_peer_snapshot_is_stale(incoming: &Value, latest: &Value) -> bool {
+    // A concurrent clone/restart can have promoted its peer to `running`
+    // while its capture tuple is still pending.  That row is still a
+    // lifecycle snapshot, not a completed topology observation; preserving
+    // the latest peer avoids making the concurrent writer lose on a pane
+    // binding it never owned.  A completed row remains epoch-ordered below,
+    // so a newer/equal completed topology still conflicts.
+    if incoming
+        .get("_pending_session_id")
+        .and_then(Value::as_str)
+        .is_some_and(|session| !session.is_empty())
+    {
+        return true;
+    }
+    let Some(incoming_epoch) = incoming.get("spawn_epoch").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(latest_epoch) = latest.get("spawn_epoch").and_then(Value::as_u64) else {
+        return false;
+    };
+    incoming_epoch < latest_epoch
 }
 
 fn preserve_latest_topology(incoming: &mut Value, latest: &Value) {
