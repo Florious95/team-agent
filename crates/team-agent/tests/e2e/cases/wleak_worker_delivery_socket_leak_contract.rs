@@ -903,7 +903,6 @@ fn write_f16_routing_receipt(
     let receipt = json!({
         "schema_version": "team-agent-e2e-f16-routing-v1",
         "outcome": outcome,
-        "head": repository_head(),
         "message_id": message_id,
         "row": row,
         "ordering_seam": {
@@ -950,15 +949,6 @@ fn write_f16_routing_receipt(
     )
     .expect("write F16 routing receipt");
     path
-}
-
-fn repository_head() -> String {
-    let output = Command::new("git")
-        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
-        .output()
-        .expect("resolve repository head");
-    assert!(output.status.success(), "git rev-parse HEAD failed");
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn read_json(path: &std::path::Path) -> Value {
