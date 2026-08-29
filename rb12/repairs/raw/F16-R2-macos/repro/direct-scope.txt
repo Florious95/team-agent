@@ -1,0 +1,12 @@
+M	crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
+A	rb12/repairs/F16-refreeze.md
+A	rb12/repairs/raw/F16-refreeze/arch-current.json
+A	rb12/repairs/raw/F16-refreeze/arch-f14.json
+A	rb12/repairs/raw/F16-refreeze/causal-routing-evidence.json
+A	rb12/repairs/raw/F16-refreeze/causal-tooth-result.txt
+A	rb12/repairs/raw/F16-refreeze/causal-tooth.diff
+A	rb12/repairs/raw/F16-refreeze/linux-grok-missing.txt
+A	rb12/repairs/raw/F16-refreeze/tree-current-C.normalized.txt
+A	rb12/repairs/raw/F16-refreeze/tree-current-C.txt
+A	rb12/repairs/raw/F16-refreeze/tree-f14-C.normalized.txt
+A	rb12/repairs/raw/F16-refreeze/tree-f14-C.txt

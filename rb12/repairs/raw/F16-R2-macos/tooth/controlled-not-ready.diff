@@ -1,0 +1,44 @@
+diff --git a/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs b/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
+index d28d4c63..9f315660 100644
+--- a/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
++++ b/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
+@@ -47,6 +47,39 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
+     let session = worker_session_name(team_id);
+     let pane_a = pane_for_window(&ws, &session, "a");
+     let pane_b = pane_for_window(&ws, &session, "b");
++    let process_group = format!("-{}", pane_a.pane_pid);
++    let stop = Command::new("kill")
++        .args(["-STOP", &process_group])
++        .status()
++        .expect("stop intended worker process group for not-ready tooth");
++    assert!(
++        stop.success(),
++        "stop intended worker process group failed: {stop}"
++    );
++    let clear = Command::new("tmux")
++        .args([
++            "-S",
++            &state_socket(&ws),
++            "clear-history",
++            "-t",
++            &pane_a.pane_id,
++        ])
++        .status()
++        .expect("clear intended worker pane history for not-ready tooth");
++    assert!(
++        clear.success(),
++        "clear intended worker pane history failed: {clear}"
++    );
++    assert!(
++        !capture_pane(&ws, &pane_a.pane_id).contains("TEAM_AGENT_FAKE_READY agent=a"),
++        "controlled not-ready tooth setup raced past the worker READY marker"
++    );
++    std::thread::spawn(move || {
++        std::thread::sleep(Duration::from_millis(5900));
++        let _ = Command::new("kill")
++            .args(["-CONT", &process_group])
++            .status();
++    });
+     write_agent_pane_tuple(&ws, "a", &pane_b);
+
+     let token = "WLEAK_WRONG_WINDOW_TOKEN_001";

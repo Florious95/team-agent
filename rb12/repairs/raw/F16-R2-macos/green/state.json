@@ -1,0 +1,304 @@
+{
+  "spec_path": "/private/tmp/ta-e2e-wleak001-98042-0/.team/runtime/wleak001/team.spec.yaml",
+  "workspace": "/private/tmp/ta-e2e-wleak001-98042-0",
+  "team_dir": "/private/tmp/ta-e2e-wleak001-98042-0",
+  "team_key": "wleak001",
+  "session_name": "team-wleak001",
+  "leader": {
+    "id": "leader",
+    "role": "leader",
+    "provider": "fake",
+    "model": null,
+    "tools": [
+      "fs_read",
+      "fs_list",
+      "mcp_team"
+    ],
+    "context_policy": {
+      "keep_user_thread": true,
+      "receive_worker_outputs": "business_messages_and_short_summaries",
+      "max_worker_result_tokens": 2000
+    }
+  },
+  "agents": {
+    "a": {
+      "status": "running",
+      "provider": "fake",
+      "agent_id": "a",
+      "model": "fake",
+      "auth_mode": "subscription",
+      "profile": null,
+      "window": "a",
+      "mcp_config": "/private/tmp/ta-e2e-wleak001-98042-0/.team/runtime/mcp/a.json",
+      "permissions": {
+        "agent_id": "a",
+        "provider": "fake",
+        "tools": [
+          "mcp_team"
+        ],
+        "resolved_tools": [
+          {
+            "tool": "mcp_team",
+            "enforcement": "hard"
+          }
+        ],
+        "has_prompt_only": false
+      },
+      "effective_approval_policy": {
+        "enabled": false,
+        "source": "disabled",
+        "inherited": false,
+        "explicit_yes_confirmed": false,
+        "provider": null,
+        "flag": null,
+        "worker_capability_above_leader": false
+      },
+      "as_launched_dangerously_skip_permissions": false,
+      "session_id": null,
+      "rollout_path": null,
+      "captured_at": null,
+      "captured_via": null,
+      "attribution_confidence": null,
+      "capture_state": "pending_first_turn",
+      "spawn_cwd": "/private/tmp/ta-e2e-wleak001-98042-0",
+      "spawned_at": "2026-08-29T04:39:26.129565+00:00",
+      "pane_id": "%1",
+      "pane_pid": 98955,
+      "current_turn_message_id": "msg_afd1eb1bf410",
+      "first_send_at": "2026-08-29T04:39:32.165025+00:00"
+    },
+    "b": {
+      "status": "running",
+      "provider": "fake",
+      "agent_id": "b",
+      "model": "fake",
+      "auth_mode": "subscription",
+      "profile": null,
+      "window": "b",
+      "mcp_config": "/private/tmp/ta-e2e-wleak001-98042-0/.team/runtime/mcp/b.json",
+      "permissions": {
+        "agent_id": "b",
+        "provider": "fake",
+        "tools": [
+          "mcp_team"
+        ],
+        "resolved_tools": [
+          {
+            "tool": "mcp_team",
+            "enforcement": "hard"
+          }
+        ],
+        "has_prompt_only": false
+      },
+      "effective_approval_policy": {
+        "enabled": false,
+        "source": "disabled",
+        "inherited": false,
+        "explicit_yes_confirmed": false,
+        "provider": null,
+        "flag": null,
+        "worker_capability_above_leader": false
+      },
+      "as_launched_dangerously_skip_permissions": false,
+      "session_id": null,
+      "rollout_path": null,
+      "captured_at": null,
+      "captured_via": null,
+      "attribution_confidence": null,
+      "capture_state": "pending_first_turn",
+      "spawn_cwd": "/private/tmp/ta-e2e-wleak001-98042-0",
+      "spawned_at": "2026-08-29T04:39:26.227863+00:00",
+      "pane_id": "%1",
+      "pane_pid": 98955
+    }
+  },
+  "tasks": [
+    {
+      "id": "task_initial",
+      "title": "Initial document-driven team task",
+      "type": "implementation",
+      "assignee": "a",
+      "deps": [],
+      "acceptance": [
+        "Worker reports valid result_envelope_v1"
+      ],
+      "status": "pending",
+      "requires_tools": [
+        "mcp_team"
+      ],
+      "files": [],
+      "risk": "low"
+    }
+  ],
+  "display_backend": "none",
+  "is_external_leader": false,
+  "transport": {
+    "kind": "tmux",
+    "source": "unknown"
+  },
+  "tmux_endpoint": "/private/tmp/tmux-501/ta-24ca346abad7",
+  "tmux_socket": "/private/tmp/tmux-501/ta-24ca346abad7",
+  "tmux_socket_source": "workspace",
+  "active_team_key": "wleak001",
+  "team_depth": 1,
+  "coordinator": {
+    "turn_open": {
+      "armed": true,
+      "node_id": "a",
+      "turn_id": "msg_afd1eb1bf410"
+    }
+  },
+  "teams": {
+    "wleak001": {
+      "spec_path": "/private/tmp/ta-e2e-wleak001-98042-0/.team/runtime/wleak001/team.spec.yaml",
+      "workspace": "/private/tmp/ta-e2e-wleak001-98042-0",
+      "team_dir": "/private/tmp/ta-e2e-wleak001-98042-0",
+      "team_key": "wleak001",
+      "session_name": "team-wleak001",
+      "leader": {
+        "id": "leader",
+        "role": "leader",
+        "provider": "fake",
+        "model": null,
+        "tools": [
+          "fs_read",
+          "fs_list",
+          "mcp_team"
+        ],
+        "context_policy": {
+          "keep_user_thread": true,
+          "receive_worker_outputs": "business_messages_and_short_summaries",
+          "max_worker_result_tokens": 2000
+        }
+      },
+      "agents": {
+        "a": {
+          "status": "running",
+          "provider": "fake",
+          "agent_id": "a",
+          "model": "fake",
+          "auth_mode": "subscription",
+          "profile": null,
+          "window": "a",
+          "mcp_config": "/private/tmp/ta-e2e-wleak001-98042-0/.team/runtime/mcp/a.json",
+          "permissions": {
+            "agent_id": "a",
+            "provider": "fake",
+            "tools": [
+              "mcp_team"
+            ],
+            "resolved_tools": [
+              {
+                "tool": "mcp_team",
+                "enforcement": "hard"
+              }
+            ],
+            "has_prompt_only": false
+          },
+          "effective_approval_policy": {
+            "enabled": false,
+            "source": "disabled",
+            "inherited": false,
+            "explicit_yes_confirmed": false,
+            "provider": null,
+            "flag": null,
+            "worker_capability_above_leader": false
+          },
+          "as_launched_dangerously_skip_permissions": false,
+          "session_id": null,
+          "rollout_path": null,
+          "captured_at": null,
+          "captured_via": null,
+          "attribution_confidence": null,
+          "capture_state": "pending_first_turn",
+          "spawn_cwd": "/private/tmp/ta-e2e-wleak001-98042-0",
+          "spawned_at": "2026-08-29T04:39:26.129565+00:00",
+          "pane_id": "%1",
+          "pane_pid": 98955,
+          "current_turn_message_id": "msg_afd1eb1bf410",
+          "first_send_at": "2026-08-29T04:39:32.165025+00:00"
+        },
+        "b": {
+          "status": "running",
+          "provider": "fake",
+          "agent_id": "b",
+          "model": "fake",
+          "auth_mode": "subscription",
+          "profile": null,
+          "window": "b",
+          "mcp_config": "/private/tmp/ta-e2e-wleak001-98042-0/.team/runtime/mcp/b.json",
+          "permissions": {
+            "agent_id": "b",
+            "provider": "fake",
+            "tools": [
+              "mcp_team"
+            ],
+            "resolved_tools": [
+              {
+                "tool": "mcp_team",
+                "enforcement": "hard"
+              }
+            ],
+            "has_prompt_only": false
+          },
+          "effective_approval_policy": {
+            "enabled": false,
+            "source": "disabled",
+            "inherited": false,
+            "explicit_yes_confirmed": false,
+            "provider": null,
+            "flag": null,
+            "worker_capability_above_leader": false
+          },
+          "as_launched_dangerously_skip_permissions": false,
+          "session_id": null,
+          "rollout_path": null,
+          "captured_at": null,
+          "captured_via": null,
+          "attribution_confidence": null,
+          "capture_state": "pending_first_turn",
+          "spawn_cwd": "/private/tmp/ta-e2e-wleak001-98042-0",
+          "spawned_at": "2026-08-29T04:39:26.227863+00:00",
+          "pane_id": "%1",
+          "pane_pid": 98955
+        }
+      },
+      "tasks": [
+        {
+          "id": "task_initial",
+          "title": "Initial document-driven team task",
+          "type": "implementation",
+          "assignee": "a",
+          "deps": [],
+          "acceptance": [
+            "Worker reports valid result_envelope_v1"
+          ],
+          "status": "pending",
+          "requires_tools": [
+            "mcp_team"
+          ],
+          "files": [],
+          "risk": "low"
+        }
+      ],
+      "display_backend": "none",
+      "is_external_leader": false,
+      "transport": {
+        "kind": "tmux",
+        "source": "unknown"
+      },
+      "tmux_endpoint": "/private/tmp/tmux-501/ta-24ca346abad7",
+      "tmux_socket": "/private/tmp/tmux-501/ta-24ca346abad7",
+      "tmux_socket_source": "workspace",
+      "active_team_key": "wleak001",
+      "team_depth": 1,
+      "coordinator": {
+        "turn_open": {
+          "armed": true,
+          "node_id": "a",
+          "turn_id": "msg_afd1eb1bf410"
+        }
+      }
+    }
+  }
+}

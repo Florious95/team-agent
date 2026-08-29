@@ -1,0 +1,126 @@
+{
+  "head": "86b3aec1065a1e48ce6d647d60e2a10f21be9182",
+  "message_id": "msg_52b0f5ed0008",
+  "timeout_ms": 6000,
+  "row": {
+    "message_id": "msg_52b0f5ed0008",
+    "recipient": "a",
+    "status": "target_resolved",
+    "error": null,
+    "delivery_attempts": 1,
+    "delivered_at": null
+  },
+  "coordinator": {
+    "pid": 32217,
+    "boot_id": "coord_20260829T043643Z_32217",
+    "heartbeat": {
+      "coordinator_tick_iteration_count": 1,
+      "pid": 32217,
+      "boot_id": "coord_20260829T043643Z_32217",
+      "host_boot_id": "macos-{ sec = 1787225980, usec = 934509 } Thu Aug 20 19:39:40 2026",
+      "host_boot_time": "2026-08-29T04:36:43.394431+00:00",
+      "binary_path": "/private/tmp/ta-f16-r2-cargo-target-20260829/debug/team-agent",
+      "binary_version": "0.5.67",
+      "last_phase": "tick_running",
+      "last_tick_status": "running",
+      "last_error": null,
+      "updated_at": "2026-08-29T04:36:43.394431+00:00",
+      "last_tick_started_at": "2026-08-29T04:36:43.394431+00:00",
+      "last_tick_finished_at": "2026-08-29T04:36:43.384694+00:00"
+    },
+    "tick": 1,
+    "health": {
+      "pid": 32217,
+      "protocol_version": 2,
+      "message_store_schema_version": 5,
+      "binary_path": "/private/tmp/ta-f16-r2-cargo-target-20260829/debug/team-agent",
+      "binary_version": "0.5.67",
+      "source": "boot",
+      "updated_at": "2026-08-29T04:36:43.381081+00:00"
+    }
+  },
+  "worker": null,
+  "target": {
+    "endpoint": "/private/tmp/tmux-501/ta-78815cc0134a",
+    "tmux_endpoint": "/private/tmp/tmux-501/ta-78815cc0134a",
+    "session": "team-wleak001",
+    "target_session": "team-wleak001",
+    "window": "a",
+    "target_window": "a",
+    "pane": "%1",
+    "target_pane_id": "%1",
+    "pane_pid": 32182,
+    "target_pane_pid": 32182,
+    "physical": {
+      "liveness": "live",
+      "tuple": "%1|32182|/private/tmp/ta-e2e-wleak001-31624-0",
+      "stderr": "",
+      "capture": "TEAM_AGENT_FAKE_READY agent=b\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+    },
+    "resolved_from": null,
+    "agent_state": {
+      "status": "running",
+      "provider": "fake",
+      "agent_id": "a",
+      "model": "fake",
+      "auth_mode": "subscription",
+      "profile": null,
+      "window": "a",
+      "mcp_config": "/private/tmp/ta-e2e-wleak001-31624-0/.team/runtime/mcp/a.json",
+      "permissions": {
+        "agent_id": "a",
+        "provider": "fake",
+        "tools": [
+          "mcp_team"
+        ],
+        "resolved_tools": [
+          {
+            "tool": "mcp_team",
+            "enforcement": "hard"
+          }
+        ],
+        "has_prompt_only": false
+      },
+      "effective_approval_policy": {
+        "enabled": false,
+        "source": "disabled",
+        "inherited": false,
+        "explicit_yes_confirmed": false,
+        "provider": null,
+        "flag": null,
+        "worker_capability_above_leader": false
+      },
+      "as_launched_dangerously_skip_permissions": false,
+      "session_id": null,
+      "rollout_path": null,
+      "captured_at": null,
+      "captured_via": null,
+      "attribution_confidence": null,
+      "capture_state": "pending_first_turn",
+      "spawn_cwd": "/private/tmp/ta-e2e-wleak001-31624-0",
+      "spawned_at": "2026-08-29T04:36:43.073166+00:00",
+      "pane_id": "%1",
+      "pane_pid": 32182,
+      "current_turn_message_id": "msg_52b0f5ed0008"
+    }
+  },
+  "execution": {
+    "assertion_count": 55,
+    "duration_ms": 6060
+  },
+  "message_events": [
+    {
+      "agent_id": "a",
+      "event": "turn_open.armed_after_inject",
+      "message_id": "msg_52b0f5ed0008",
+      "resolved_from": "session_window_lookup",
+      "target_kind": "pane",
+      "target_pane_id": "%0",
+      "target_pane_pid": 32154,
+      "target_session": "team-wleak001",
+      "target_window": "a",
+      "tmux_endpoint": "/private/tmp/tmux-501/ta-78815cc0134a",
+      "ts": "2026-08-29T04:36:44.152574+00:00"
+    }
+  ]
+}

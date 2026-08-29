@@ -1,0 +1,19 @@
+diff --git a/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs b/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
+index d28d4c63..a2366a44 100644
+--- a/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
++++ b/crates/team-agent/tests/e2e/cases/wleak_worker_delivery_socket_leak_contract.rs
+@@ -47,6 +47,14 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
+     let session = worker_session_name(team_id);
+     let pane_a = pane_for_window(&ws, &session, "a");
+     let pane_b = pane_for_window(&ws, &session, "b");
++    wait_for_or_panic(
++        "fake workers reach their explicit READY marker",
++        || {
++            capture_pane(&ws, &pane_a.pane_id).contains("TEAM_AGENT_FAKE_READY agent=a")
++                && capture_pane(&ws, &pane_b.pane_id).contains("TEAM_AGENT_FAKE_READY agent=b")
++        },
++        Duration::from_secs(3),
++    );
+     write_agent_pane_tuple(&ws, "a", &pane_b);
+
+     let token = "WLEAK_WRONG_WINDOW_TOKEN_001";
