@@ -20,6 +20,7 @@ on:
           - f05-rec002
           - f14-containment
           - f16-wleak
+          - f17-wleak-metadata
         default: full
   workflow_call:
     inputs:
@@ -117,6 +118,9 @@ jobs:
               ;;
             f16-wleak)
               cargo test -p team-agent --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_cached_pane_owned_by_other_window_never_receives_worker_message -- --exact --nocapture --test-threads=1
+              ;;
+            f17-wleak-metadata)
+              cargo test -p team-agent --locked --test e2e cases::wleak_worker_delivery_socket_leak_contract::wleak_message_delivered_event_records_physical_target_metadata -- --exact --nocapture --test-threads=1
               ;;
             *)
               echo "Invalid test profile: ${TEST_PROFILE}" >&2
