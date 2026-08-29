@@ -18,6 +18,7 @@ on:
           - full
           - f04-r4
           - f05-rec002
+          - f07-c5-diagnostic
           - f14-containment
           - f14-a3-e2e-default
           - f16-wleak
@@ -112,6 +113,9 @@ jobs:
               ;;
             f05-rec002)
               cargo test -p team-agent --test e2e --locked cases::rec_002_doctor_checks::rec_002_doctor_checks -- --exact --nocapture --test-threads=1
+              ;;
+            f07-c5-diagnostic)
+              cargo test -p team-agent --locked --test msg_sendpath_persist_first_contract c5_fanout_rows_are_independent_under_partial_blockers -- --exact --nocapture
               ;;
             f14-containment)
               cargo test -p team-agent --locked --test e2e framework::containment_tests::f14_owned_socket_registration_is_exact_and_drop_spares_unregistered_socket -- --exact --nocapture --test-threads=1
