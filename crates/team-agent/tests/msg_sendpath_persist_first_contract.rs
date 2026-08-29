@@ -383,23 +383,70 @@ impl SendPathCase {
         encoded
     }
 
+    fn message_status(&self, message_id: &str) -> String {
+        let db = self.workspace.join(".team").join("runtime").join("team.db");
+        rusqlite::Connection::open(&db)
+            .ok()
+            .and_then(|connection| {
+                connection
+                    .query_row(
+                        "SELECT status FROM messages WHERE message_id = ?1",
+                        [message_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+            })
+            .unwrap_or_else(|| "<norow>".to_string())
+    }
+
     fn wait_status(&self, message_id: &str, wanted: &[&str], seconds: u64) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
         loop {
-            let db = self.workspace.join(".team").join("runtime").join("team.db");
-            let status = rusqlite::Connection::open(&db)
-                .ok()
-                .and_then(|connection| {
-                    connection
-                        .query_row(
-                            "SELECT status FROM messages WHERE message_id = ?1",
-                            [message_id],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok()
-                })
-                .unwrap_or_else(|| "<norow>".to_string());
+            let status = self.message_status(message_id);
             if wanted.contains(&status.as_str()) || std::time::Instant::now() >= deadline {
+                return status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    fn wait_delivery_attempt(&self, message_id: &str, seconds: u64) -> String {
+        let status = self.wait_status(
+            message_id,
+            &["target_resolved", "delivered", "submitted_unverified", "failed"],
+            seconds,
+        );
+        if status != "target_resolved" {
+            return status;
+        }
+        let claim_tick = self
+            .read_runtime_json("coordinator_tick.json")
+            .get("coordinator_tick_iteration_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+
+        // The row is in-flight after claim. Observe that claiming tick through
+        // completion before judging its final state. Removing worker finalization
+        // leaves target_resolved after tick_finished, which is the C5 causal tooth.
+        let finalize_deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        loop {
+            let status = self.message_status(message_id);
+            if status != "target_resolved" {
+                return status;
+            }
+            let heartbeat = self.read_runtime_json("coordinator_tick.json");
+            let iteration = heartbeat
+                .get("coordinator_tick_iteration_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let phase = heartbeat.get("last_phase").and_then(Value::as_str);
+            if iteration > claim_tick
+                || (iteration == claim_tick && phase == Some("tick_finished"))
+            {
+                return status;
+            }
+            if std::time::Instant::now() >= finalize_deadline {
                 return status;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -764,20 +811,6 @@ fn c5_fanout_rows_are_independent_under_partial_blockers() {
         .iter()
         .find(|row| row.recipient == "w2")
         .expect("w2 row present");
-    let w2_status = case.wait_status(&w2_row.message_id, &["delivered"], 15);
-    assert_eq!(
-        w2_status, "delivered",
-        "C5: the live recipient must deliver despite the sibling blocker; diagnostic={}",
-        case.persist_c5_failure_packet(json!({
-            "stage": "w2_delivered",
-            "observed_status": w2_status,
-            "wanted": "delivered",
-            "send": value,
-            "w1_pane": w1_pane,
-            "w2_message_id": w2_row.message_id,
-            "w1_message_id": rows.iter().find(|row| row.recipient == "w1").map(|row| row.message_id.clone()),
-        }))
-    );
     let w1_row = rows
         .iter()
         .find(|row| row.recipient == "w1")
@@ -794,6 +827,20 @@ fn c5_fanout_rows_are_independent_under_partial_blockers() {
             "w1_pane": w1_pane,
             "w1_message_id": w1_row.message_id,
             "w2_message_id": w2_row.message_id,
+        }))
+    );
+    let w2_status = case.wait_delivery_attempt(&w2_row.message_id, 15);
+    assert_eq!(
+        w2_status, "delivered",
+        "C5: the live recipient must deliver despite the sibling blocker; diagnostic={}",
+        case.persist_c5_failure_packet(json!({
+            "stage": "w2_delivered",
+            "observed_status": w2_status,
+            "wanted": "delivered",
+            "send": value,
+            "w1_pane": w1_pane,
+            "w2_message_id": w2_row.message_id,
+            "w1_message_id": w1_row.message_id,
         }))
     );
     case.shutdown();
