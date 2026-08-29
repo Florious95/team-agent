@@ -36,6 +36,8 @@ const RESOLVED_FROM_SESSION_WINDOW_LOOKUP: &str = "session_window_lookup";
 const TARGET_KIND_PANE: &str = "pane";
 const FAKE_READY_MARKER: &str = "TEAM_AGENT_FAKE_READY";
 const CONTROLLED_COORDINATOR_TICK_INTERVAL_SECS: &str = "30";
+// Bound the exact child at the product shutdown's global deadline; this is not delivery polling.
+const POST_MUTATION_COORDINATOR_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[test]
 fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
@@ -73,51 +75,19 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         .expect("generated message id");
     let drain_started = Instant::now();
     let drain = start_post_mutation_coordinator_tick(&ws, team_id);
-    let terminal = wait_for(
-        || {
-            matches!(
-                message_status(&ws, mid).as_deref(),
-                Some("delivered" | "queued_pane_missing")
-            )
-        },
-        Duration::from_secs(6),
-        Duration::from_millis(100),
-    );
-    if !terminal {
-        let _ = Command::new("kill")
-            .args(["-TERM", &drain.id().to_string()])
-            .output();
-    }
-    let drain_output = drain
-        .wait_with_output()
-        .expect("wait for post-mutation coordinator --once");
-    let drain_result = json!({
-        "exit_code": drain_output.status.code(),
-        "stdout": String::from_utf8_lossy(&drain_output.stdout),
-        "stderr": String::from_utf8_lossy(&drain_output.stderr),
-    });
-    if !terminal {
-        let receipt = write_f16_routing_receipt(
-            &ws,
-            mid,
-            "terminal_timeout",
-            &coordinator_before_mutation,
-            &tuple_readback,
-            &pane_a,
-            &pane_b,
-            drain_started.elapsed(),
-            drain_result,
-        );
-        panic!(
-            "timed out after {:?} waiting for: message reaches terminal status; durable F16 routing evidence={}",
-            Duration::from_secs(6),
-            receipt.display()
-        );
-    }
+    let (drain_succeeded, drain_result) = wait_for_post_mutation_coordinator_tick(drain);
+    let row = message_row(&ws, mid);
+    let outcome = if drain_succeeded && row.as_ref().is_some_and(|row| row.status == "delivered") {
+        "terminal_observed"
+    } else if drain_succeeded {
+        "terminal_missing_after_drain"
+    } else {
+        "drain_failed"
+    };
     let receipt = write_f16_routing_receipt(
         &ws,
         mid,
-        "terminal_observed",
+        outcome,
         &coordinator_before_mutation,
         &tuple_readback,
         &pane_a,
@@ -127,12 +97,12 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
     );
     eprintln!("F16 durable routing evidence={}", receipt.display());
     assert!(
-        drain_output.status.success(),
+        drain_succeeded,
         "post-mutation coordinator --once failed; evidence={}",
         receipt.display()
     );
 
-    let row = message_row(&ws, mid).expect("terminal message row");
+    let row = row.expect("post-mutation drain must leave the same message row");
     assert_eq!(row.status, "delivered", "F16 receipt={}", receipt.display());
     assert_eq!(row.error, None, "F16 receipt={}", receipt.display());
     assert_eq!(
@@ -857,6 +827,58 @@ fn start_post_mutation_coordinator_tick(ws: &TestWorkspace, team_id: &str) -> Ch
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|error| panic!("spawn post-mutation coordinator --once: {error}"))
+}
+
+fn wait_for_post_mutation_coordinator_tick(mut child: Child) -> (bool, Value) {
+    let started = Instant::now();
+    let (timed_out, wait_error, terminate_error) = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break (false, None, None),
+            Ok(None) if started.elapsed() < POST_MUTATION_COORDINATOR_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let terminate_error = child.kill().err().map(|error| error.to_string());
+                break (true, None, terminate_error);
+            }
+            Err(error) => {
+                let terminate_error = child.kill().err().map(|error| error.to_string());
+                break (false, Some(error.to_string()), terminate_error);
+            }
+        }
+    };
+    let elapsed = started.elapsed();
+    match child.wait_with_output() {
+        Ok(output) => {
+            let succeeded = !timed_out && wait_error.is_none() && output.status.success();
+            (
+                succeeded,
+                json!({
+                    "exit_code": output.status.code(),
+                    "stdout": String::from_utf8_lossy(&output.stdout),
+                    "stderr": String::from_utf8_lossy(&output.stderr),
+                    "timed_out": timed_out,
+                    "timeout_ms": POST_MUTATION_COORDINATOR_TIMEOUT.as_millis(),
+                    "wait_error": wait_error,
+                    "terminate_error": terminate_error,
+                    "elapsed_ms": elapsed.as_millis(),
+                }),
+            )
+        }
+        Err(error) => (
+            false,
+            json!({
+                "exit_code": Value::Null,
+                "stdout": Value::Null,
+                "stderr": Value::Null,
+                "timed_out": timed_out,
+                "timeout_ms": POST_MUTATION_COORDINATOR_TIMEOUT.as_millis(),
+                "wait_error": wait_error.unwrap_or_else(|| error.to_string()),
+                "terminate_error": terminate_error,
+                "elapsed_ms": elapsed.as_millis(),
+            }),
+        ),
+    }
 }
 
 fn agent_tuple_readback(ws: &TestWorkspace, agent_id: &str) -> Value {
