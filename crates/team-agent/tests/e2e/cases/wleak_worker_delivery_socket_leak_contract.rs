@@ -28,13 +28,14 @@ use crate::support::source_walker::source_tree;
 use crate::support::topology_issue_ids::WORKER_PANE_BINDING_STALE;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 const STATUS_QUEUED_PANE_MISSING: &str = "queued_pane_missing";
 const RESOLVED_FROM_SESSION_WINDOW_LOOKUP: &str = "session_window_lookup";
 const TARGET_KIND_PANE: &str = "pane";
 const FAKE_READY_MARKER: &str = "TEAM_AGENT_FAKE_READY";
+const CONTROLLED_COORDINATOR_TICK_INTERVAL_SECS: &str = "30";
 
 #[test]
 fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
@@ -49,7 +50,13 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
     let pane_a = pane_for_window(&ws, &session, "a");
     let pane_b = pane_for_window(&ws, &session, "b");
     wait_for_fake_workers_ready(&ws, &[(&pane_a, "a"), (&pane_b, "b")]);
+    stop_quick_start_coordinator(&ws);
+    let mut controlled_coordinator = start_controlled_background_coordinator(&ws, team_id);
+    let coordinator_before_mutation =
+        wait_for_coordinator_tick_finished(&ws, controlled_coordinator.id());
     write_agent_pane_tuple(&ws, "a", &pane_b);
+    let tuple_readback = agent_tuple_readback(&ws, "a");
+    assert_stale_tuple_readback(&tuple_readback, &pane_b);
 
     let token = "WLEAK_WRONG_WINDOW_TOKEN_001";
     let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
@@ -64,11 +71,9 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("generated message id");
-    wait_for_delivery_or_panic(
-        &ws,
-        mid,
-        "a",
-        "message reaches terminal status",
+    let drain_started = Instant::now();
+    let drain = start_post_mutation_coordinator_tick(&ws, team_id);
+    let terminal = wait_for(
         || {
             matches!(
                 message_status(&ws, mid).as_deref(),
@@ -76,6 +81,92 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
             )
         },
         Duration::from_secs(6),
+        Duration::from_millis(100),
+    );
+    if !terminal {
+        let receipt = write_f16_routing_receipt(
+            &ws,
+            mid,
+            "terminal_timeout",
+            &coordinator_before_mutation,
+            &tuple_readback,
+            &pane_a,
+            &pane_b,
+            drain_started.elapsed(),
+            Value::Null,
+        );
+        panic!(
+            "timed out after {:?} waiting for: message reaches terminal status; durable F16 routing evidence={}",
+            Duration::from_secs(6),
+            receipt.display()
+        );
+    }
+    let drain_output = drain
+        .wait_with_output()
+        .expect("wait for post-mutation coordinator --once");
+    let drain_result = json!({
+        "exit_code": drain_output.status.code(),
+        "stdout": String::from_utf8_lossy(&drain_output.stdout),
+        "stderr": String::from_utf8_lossy(&drain_output.stderr),
+    });
+    let receipt = write_f16_routing_receipt(
+        &ws,
+        mid,
+        "terminal_observed",
+        &coordinator_before_mutation,
+        &tuple_readback,
+        &pane_a,
+        &pane_b,
+        drain_started.elapsed(),
+        drain_result,
+    );
+    eprintln!("F16 durable routing evidence={}", receipt.display());
+    assert!(
+        drain_output.status.success(),
+        "post-mutation coordinator --once failed; evidence={}",
+        receipt.display()
+    );
+
+    let row = message_row(&ws, mid).expect("terminal message row");
+    assert_eq!(row.status, "delivered", "F16 receipt={}", receipt.display());
+    assert_eq!(row.error, None, "F16 receipt={}", receipt.display());
+    assert_eq!(
+        row.delivery_attempts,
+        1,
+        "the post-mutation drain must claim this message exactly once; F16 receipt={}",
+        receipt.display()
+    );
+    assert!(
+        row.delivered_at.is_some(),
+        "delivered row must persist delivered_at; F16 receipt={}",
+        receipt.display()
+    );
+
+    let stale_events = message_events(&ws, mid, WORKER_PANE_BINDING_STALE);
+    assert_eq!(
+        stale_events.len(),
+        1,
+        "the same message must emit one stale-binding event; events={stale_events:?}; F16 receipt={}",
+        receipt.display()
+    );
+    let stale = &stale_events[0];
+    assert_eq!(
+        stale.get("cached_pane_id").and_then(Value::as_str),
+        Some(pane_b.pane_id.as_str()),
+        "stale event must name b's cached pane; event={stale}; F16 receipt={}",
+        receipt.display()
+    );
+    assert_eq!(
+        stale.get("expected_session").and_then(Value::as_str),
+        Some(session.as_str()),
+        "stale event must name the intended session; event={stale}; F16 receipt={}",
+        receipt.display()
+    );
+    assert_eq!(
+        stale.get("expected_window").and_then(Value::as_str),
+        Some("a"),
+        "stale event must name worker a's intended window; event={stale}; F16 receipt={}",
+        receipt.display()
     );
 
     let a_capture = capture_pane(&ws, pane_a.pane_id.as_str());
@@ -105,6 +196,7 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
         "WLEAK RED: stale cached pane should be bypassed and the event should record resolved_from=session_window_lookup; event={event}"
     );
     assert_target_tuple(&event, &state_socket(&ws), &session, "a", &pane_a, "W1/W2");
+    stop_controlled_background_coordinator(&mut controlled_coordinator);
 }
 
 #[test]
@@ -620,6 +712,262 @@ fn write_agent_pane_tuple(ws: &TestWorkspace, agent_id: &str, pane: &PaneSnapsho
     });
 }
 
+fn stop_quick_start_coordinator(ws: &TestWorkspace) {
+    let pid = std::fs::read_to_string(ws.coordinator_pid_file())
+        .expect("read quick-start coordinator pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse quick-start coordinator pid");
+    assert!(
+        ws.pid_is_owned_coordinator(pid),
+        "refusing to stop non-owned coordinator pid {pid}"
+    );
+    let out = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .expect("stop exact quick-start coordinator");
+    assert!(
+        out.status.success(),
+        "stop exact coordinator pid {pid}; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    wait_for_or_panic(
+        "exact quick-start coordinator exits",
+        || !ws.pid_is_owned_coordinator(pid),
+        Duration::from_secs(3),
+    );
+}
+
+fn start_controlled_background_coordinator(ws: &TestWorkspace, team_id: &str) -> Child {
+    let binary = ta_binary();
+    ws.record_ta_binary(&binary);
+    Command::new(&binary)
+        .args([
+            "coordinator",
+            "--workspace",
+            ws.path().to_str().expect("workspace utf8"),
+            "--team",
+            team_id,
+            "--tick-interval",
+            CONTROLLED_COORDINATOR_TICK_INTERVAL_SECS,
+        ])
+        .current_dir(ws.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn controlled background coordinator: {error}"))
+}
+
+fn stop_controlled_background_coordinator(coordinator: &mut Child) {
+    let pid = coordinator.id();
+    let out = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .expect("stop controlled background coordinator");
+    assert!(
+        out.status.success(),
+        "stop controlled coordinator pid {pid}; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = coordinator
+        .wait()
+        .expect("wait for controlled background coordinator");
+    assert!(status.success(), "controlled coordinator exit={status}");
+}
+
+fn wait_for_coordinator_tick_finished(ws: &TestWorkspace, expected_pid: u32) -> Value {
+    let path = ws.path().join(".team/runtime/coordinator_tick.json");
+    wait_for_or_panic(
+        "background coordinator completes its pre-mutation tick",
+        || {
+            let heartbeat = read_json(&path);
+            heartbeat.get("pid").and_then(Value::as_u64) == Some(u64::from(expected_pid))
+                && heartbeat.get("last_phase").and_then(Value::as_str) == Some("tick_finished")
+                && heartbeat.get("last_tick_status").and_then(Value::as_str) == Some("ok")
+                && heartbeat
+                    .get("last_tick_finished_at")
+                    .and_then(Value::as_str)
+                    .is_some()
+        },
+        Duration::from_secs(6),
+    );
+    read_json(&path)
+}
+
+fn start_post_mutation_coordinator_tick(ws: &TestWorkspace, team_id: &str) -> Child {
+    let binary = ta_binary();
+    ws.record_ta_binary(&binary);
+    Command::new(&binary)
+        .args([
+            "coordinator",
+            "--workspace",
+            ws.path().to_str().expect("workspace utf8"),
+            "--team",
+            team_id,
+            "--once",
+        ])
+        .current_dir(ws.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn post-mutation coordinator --once: {error}"))
+}
+
+fn agent_tuple_readback(ws: &TestWorkspace, agent_id: &str) -> Value {
+    let state = ws.read_state();
+    let top_level = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| agents.get(agent_id))
+        .map(pane_tuple)
+        .unwrap_or(Value::Null);
+    let active_team_key = state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let nested = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(active_team_key))
+        .and_then(|team| team.get("agents"))
+        .and_then(Value::as_object)
+        .and_then(|agents| agents.get(agent_id))
+        .map(pane_tuple)
+        .unwrap_or(Value::Null);
+    json!({
+        "active_team_key": active_team_key,
+        "top_level": top_level,
+        "nested": nested,
+    })
+}
+
+fn pane_tuple(agent: &Value) -> Value {
+    json!({
+        "pane_id": agent.get("pane_id").cloned().unwrap_or(Value::Null),
+        "pane_pid": agent.get("pane_pid").cloned().unwrap_or(Value::Null),
+        "window": agent.get("window").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn assert_stale_tuple_readback(readback: &Value, pane_b: &PaneSnapshot) {
+    for projection in ["top_level", "nested"] {
+        assert_eq!(
+            readback
+                .get(projection)
+                .and_then(|tuple| tuple.get("pane_id"))
+                .and_then(Value::as_str),
+            Some(pane_b.pane_id.as_str()),
+            "{projection} projection must read back b's stale pane; readback={readback}"
+        );
+        assert_eq!(
+            readback
+                .get(projection)
+                .and_then(|tuple| tuple.get("pane_pid"))
+                .and_then(Value::as_i64),
+            Some(pane_b.pane_pid),
+            "{projection} projection must read back b's stale pid; readback={readback}"
+        );
+    }
+}
+
+fn write_f16_routing_receipt(
+    ws: &TestWorkspace,
+    message_id: &str,
+    outcome: &str,
+    coordinator_before_mutation: &Value,
+    post_mutation_tuple_readback: &Value,
+    pane_a: &PaneSnapshot,
+    pane_b: &PaneSnapshot,
+    drain_elapsed: Duration,
+    drain_result: Value,
+) -> PathBuf {
+    let row = message_row(ws, message_id)
+        .map(|row| {
+            json!({
+                "status": row.status,
+                "error": row.error,
+                "delivery_attempts": row.delivery_attempts,
+                "delivered_at": row.delivered_at,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let events = read_events(ws)
+        .into_iter()
+        .filter(|entry| entry.get("message_id").and_then(Value::as_str) == Some(message_id))
+        .collect::<Vec<_>>();
+    let heartbeat_path = ws.path().join(".team/runtime/coordinator_tick.json");
+    let coordinator_meta_path = ws.path().join(".team/runtime/coordinator.json");
+    let submit_verification_path = ws.path().join(".team/runtime/submit-verification.json");
+    let receipt = json!({
+        "schema_version": "team-agent-e2e-f16-routing-v1",
+        "outcome": outcome,
+        "head": repository_head(),
+        "message_id": message_id,
+        "row": row,
+        "ordering_seam": {
+            "background_tick_interval_secs": CONTROLLED_COORDINATOR_TICK_INTERVAL_SECS,
+            "pre_mutation_tick": coordinator_before_mutation,
+            "post_mutation_tuple_readback": post_mutation_tuple_readback,
+            "post_mutation_once_result": drain_result,
+            "post_mutation_once_elapsed_ms": drain_elapsed.as_millis(),
+        },
+        "coordinator": {
+            "after_drain": read_json(&heartbeat_path),
+            "health": read_json(&coordinator_meta_path),
+        },
+        "state_tuple_at_receipt": agent_tuple_readback(ws, "a"),
+        "message_events": events,
+        "panes": {
+            "a": {
+                "pane_id": pane_a.pane_id,
+                "pane_pid": pane_a.pane_pid,
+                "capture": capture_pane(ws, &pane_a.pane_id),
+            },
+            "b": {
+                "pane_id": pane_b.pane_id,
+                "pane_pid": pane_b.pane_pid,
+                "capture": capture_pane(ws, &pane_b.pane_id),
+            },
+        },
+        "submit_verification": {
+            "record": read_json(&submit_verification_path),
+            "observed_elapsed_ms": drain_elapsed.as_millis(),
+        },
+    });
+    let dir = std::env::var_os("TEAM_AGENT_E2E_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("team-agent-e2e-f16-receipts"));
+    std::fs::create_dir_all(&dir).expect("create F16 receipt directory");
+    let path = dir.join(format!(
+        "f16-{}-{message_id}-{outcome}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&receipt).expect("serialize F16 routing receipt"),
+    )
+    .expect("write F16 routing receipt");
+    path
+}
+
+fn repository_head() -> String {
+    let output = Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+        .expect("resolve repository head");
+    assert!(output.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn read_json(path: &std::path::Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(Value::Null)
+}
+
 fn wait_for_fake_workers_ready(ws: &TestWorkspace, workers: &[(&PaneSnapshot, &str)]) {
     wait_for_or_panic(
         "fake workers expose TEAM_AGENT_FAKE_READY",
@@ -884,6 +1232,7 @@ struct MessageRow {
     status: String,
     error: Option<String>,
     delivery_attempts: i64,
+    delivered_at: Option<String>,
 }
 
 fn message_status(ws: &TestWorkspace, message_id: &str) -> Option<String> {
@@ -894,13 +1243,14 @@ fn message_row(ws: &TestWorkspace, message_id: &str) -> Option<MessageRow> {
     let db = ws.path().join(".team/runtime/team.db");
     let conn = rusqlite::Connection::open(db).ok()?;
     conn.query_row(
-        "select status, error, delivery_attempts from messages where message_id = ?1",
+        "select status, error, delivery_attempts, delivered_at from messages where message_id = ?1",
         [message_id],
         |row| {
             Ok(MessageRow {
                 status: row.get(0)?,
                 error: row.get(1)?,
                 delivery_attempts: row.get(2)?,
+                delivered_at: row.get(3)?,
             })
         },
     )
@@ -926,6 +1276,16 @@ fn event_count(ws: &TestWorkspace, event: &str, message_id: &str) -> usize {
                 && entry.get("message_id").and_then(Value::as_str) == Some(message_id)
         })
         .count()
+}
+
+fn message_events(ws: &TestWorkspace, message_id: &str, event: &str) -> Vec<Value> {
+    read_events(ws)
+        .into_iter()
+        .filter(|entry| {
+            entry.get("event").and_then(Value::as_str) == Some(event)
+                && entry.get("message_id").and_then(Value::as_str) == Some(message_id)
+        })
+        .collect()
 }
 
 fn named_leader_stale_or_mailbox_outcome(ws: &TestWorkspace, body: &Value) -> bool {
