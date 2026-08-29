@@ -1,0 +1,372 @@
+warning: unused imports: `ContextBackingSnapshot`, `ContextForkOutcome`, `PendingContextFork`, `context_fork_convergence_deadline`, and `observe_context_fork`
+  --> crates/team-agent/src/provider/session/mod.rs:32:5
+   |
+32 |     context_fork_convergence_deadline, materialize_codex_fork, observe_context_fork,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                          ^^^^^^^^^^^^^^^^^^^^
+33 |     transition_pending_context_fork, ContextBackingSnapshot, ContextForkOutcome,
+   |                                      ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+34 |     PendingContextFork,
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary parentheses around type
+    --> crates/team-agent/src/lifecycle/restart/rebuild.rs:2631:17
+     |
+2631 |     transport: &(dyn crate::transport::Transport),
+     |                 ^                               ^
+     |
+     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+     |
+2631 -     transport: &(dyn crate::transport::Transport),
+2631 +     transport: &dyn crate::transport::Transport,
+     |
+
+warning: unnecessary parentheses around type
+    --> crates/team-agent/src/lifecycle/restart/rebuild.rs:2836:17
+     |
+2836 |     transport: &(dyn crate::transport::Transport),
+     |                 ^                               ^
+     |
+help: remove these parentheses
+     |
+2836 -     transport: &(dyn crate::transport::Transport),
+2836 +     transport: &dyn crate::transport::Transport,
+     |
+
+warning: type `ShutdownProtection` is more private than the item `extend_protection_with_leader_panes`
+    --> crates/team-agent/src/cli/mod.rs:2267:5
+     |
+2267 | /     pub(crate) fn extend_protection_with_leader_panes(
+2268 | |         protected: &mut ShutdownProtection,
+2269 | |         transport: &dyn crate::transport::Transport,
+2270 | |         state: &Value,
+2271 | |         table: &[ProcessInfo],
+2272 | |     ) {
+     | |_____^ function `extend_protection_with_leader_panes` is reachable at visibility `pub(crate)`
+     |
+note: but type `ShutdownProtection` is only usable at visibility `pub(self)`
+    --> crates/team-agent/src/cli/mod.rs:2008:5
+     |
+2008 |     struct ShutdownProtection {
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `cli::lifecycle_port::ProcessInfo` is more private than the item `extend_protection_with_leader_panes`
+    --> crates/team-agent/src/cli/mod.rs:2267:5
+     |
+2267 | /     pub(crate) fn extend_protection_with_leader_panes(
+2268 | |         protected: &mut ShutdownProtection,
+2269 | |         transport: &dyn crate::transport::Transport,
+2270 | |         state: &Value,
+2271 | |         table: &[ProcessInfo],
+2272 | |     ) {
+     | |_____^ function `extend_protection_with_leader_panes` is reachable at visibility `pub(crate)`
+     |
+note: but type `cli::lifecycle_port::ProcessInfo` is only usable at visibility `pub(self)`
+    --> crates/team-agent/src/cli/mod.rs:1999:5
+     |
+1999 |     struct ProcessInfo {
+     |     ^^^^^^^^^^^^^^^^^^
+
+warning: type `WorkerSessionError` is more private than the item `WorkerSession::new`
+  --> crates/team-agent/src/layout/runtime_sessions.rs:57:5
+   |
+57 |     pub fn new(name: impl Into<String>) -> Result<Self, WorkerSessionError> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `WorkerSession::new` is reachable at visibility `pub`
+   |
+note: but type `WorkerSessionError` is only usable at visibility `pub(self)`
+  --> crates/team-agent/src/layout/runtime_sessions.rs:39:1
+   |
+39 | enum WorkerSessionError {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `LeaderLauncherSessionError` is more private than the item `LeaderLauncherSession::new`
+  --> crates/team-agent/src/layout/runtime_sessions.rs:82:5
+   |
+82 |     pub fn new(name: impl Into<String>) -> Result<Self, LeaderLauncherSessionError> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `LeaderLauncherSession::new` is reachable at visibility `pub`
+   |
+note: but type `LeaderLauncherSessionError` is only usable at visibility `pub(self)`
+  --> crates/team-agent/src/layout/runtime_sessions.rs:49:1
+   |
+49 | enum LeaderLauncherSessionError {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `best_name` is never used
+   --> crates/team-agent/src/model/name_similarity.rs:118:8
+    |
+118 | pub fn best_name<'a, S: AsRef<str>>(request: &str, candidates: &'a [S]) -> Option<&'a str> {
+    |        ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `expected` is never read
+   --> crates/team-agent/src/db/migration.rs:148:9
+    |
+146 | struct Diff {
+    |        ---- field in this struct
+147 |     pub table: &'static str,
+148 |     pub expected: Vec<&'static str>,
+    |         ^^^^^^^^
+    |
+    = note: `Diff` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `populate_team_owner_from_env` is never used
+   --> crates/team-agent/src/state/identity.rs:295:4
+    |
+295 | fn populate_team_owner_from_env(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `CanonicalPerTeamState` is never constructed
+  --> crates/team-agent/src/state/ownership.rs:48:5
+   |
+45 | enum OwnershipSource {
+   |      --------------- variant in this enum
+...
+48 |     CanonicalPerTeamState,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `OwnershipSource` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `source` is never read
+  --> crates/team-agent/src/state/ownership.rs:63:9
+   |
+61 | struct OwnershipRead<'a> {
+   |        ------------- field in this struct
+62 |     pub value: &'a Value,
+63 |     pub source: OwnershipSource,
+   |         ^^^^^^
+   |
+   = note: `OwnershipRead` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `ClaudeForkMaterialization` is never constructed
+ --> crates/team-agent/src/provider/adapters/claude_fork.rs:7:19
+  |
+7 | pub(crate) struct ClaudeForkMaterialization {
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `path` and `keep` are never used
+  --> crates/team-agent/src/provider/adapters/claude_fork.rs:13:19
+   |
+12 | impl ClaudeForkMaterialization {
+   | ------------------------------ methods in this implementation
+13 |     pub(crate) fn path(&self) -> &Path {
+   |                   ^^^^
+...
+17 |     pub(crate) fn keep(&mut self) {
+   |                   ^^^^
+
+warning: function `materialize_claude_fork` is never used
+  --> crates/team-agent/src/provider/adapters/claude_fork.rs:30:15
+   |
+30 | pub(crate) fn materialize_claude_fork(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_jsonl` is never used
+  --> crates/team-agent/src/provider/adapters/claude_fork.rs:77:4
+   |
+77 | fn validate_jsonl(text: &str) -> Result<(), ProviderError> {
+   |    ^^^^^^^^^^^^^^
+
+warning: constant `SESSION_TABLES` is never used
+ --> crates/team-agent/src/provider/adapters/copilot_fork.rs:8:7
+  |
+8 | const SESSION_TABLES: [&str; 6] = [
+  |       ^^^^^^^^^^^^^^
+
+warning: struct `CopilotForkMaterialization` is never constructed
+  --> crates/team-agent/src/provider/adapters/copilot_fork.rs:18:19
+   |
+18 | pub(crate) struct CopilotForkMaterialization {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `session_id`, `home`, and `keep` are never used
+  --> crates/team-agent/src/provider/adapters/copilot_fork.rs:25:19
+   |
+24 | impl CopilotForkMaterialization {
+   | ------------------------------- methods in this implementation
+25 |     pub(crate) fn session_id(&self) -> &SessionId {
+   |                   ^^^^^^^^^^
+...
+29 |     pub(crate) fn home(&self) -> &Path {
+   |                   ^^^^
+...
+33 |     pub(crate) fn keep(&mut self) {
+   |                   ^^^^
+
+warning: function `materialize_copilot_fork` is never used
+  --> crates/team-agent/src/provider/adapters/copilot_fork.rs:56:15
+   |
+56 | pub(crate) fn materialize_copilot_fork(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `copy_tree` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:124:4
+    |
+124 | fn copy_tree(source: &Path, target: &Path) -> Result<(), ProviderError> {
+    |    ^^^^^^^^^
+
+warning: function `rewrite_text_tree` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:140:4
+    |
+140 | fn rewrite_text_tree(root: &Path, source: &str, target: &str) -> Result<(), ProviderError> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `clone_and_rekey_store` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:162:4
+    |
+162 | fn clone_and_rekey_store(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `require_session_column` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:201:4
+    |
+201 | fn require_session_column(conn: &Connection, table: &str) -> Result<(), ProviderError> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `verify_rekeyed_store` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:217:4
+    |
+217 | fn verify_rekeyed_store(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `rewrite_per_session_db` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:258:4
+    |
+258 | fn rewrite_per_session_db(path: &Path, source: &str, target: &str) -> Result<(), ProviderError> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sql_error` is never used
+   --> crates/team-agent/src/provider/adapters/copilot_fork.rs:305:4
+    |
+305 | fn sql_error(error: rusqlite::Error) -> ProviderError {
+    |    ^^^^^^^^^
+
+warning: function `cursor_agent_launch_command` is never used
+  --> crates/team-agent/src/provider/adapters/cursor_agent.rs:29:15
+   |
+29 | pub(crate) fn cursor_agent_launch_command(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `ContextForkTermination` is never used
+  --> crates/team-agent/src/provider/session/context_fork.rs:35:17
+   |
+35 | pub(crate) enum ContextForkTermination {
+   |                 ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `context_fork_convergence_deadline` is never used
+  --> crates/team-agent/src/provider/session/context_fork.rs:67:15
+   |
+67 | pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ContextBackingSnapshot` is never constructed
+  --> crates/team-agent/src/provider/session/context_fork.rs:89:19
+   |
+89 | pub(crate) struct ContextBackingSnapshot {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `FileStamp` is never constructed
+  --> crates/team-agent/src/provider/session/context_fork.rs:94:8
+   |
+94 | struct FileStamp {
+   |        ^^^^^^^^^
+
+warning: associated function `capture` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:114:19
+    |
+ 99 | impl ContextBackingSnapshot {
+    | --------------------------- associated function in this implementation
+...
+114 |     pub(crate) fn capture(provider: Provider, plan: &CommandPlan) -> Self {
+    |                   ^^^^^^^
+
+warning: function `verify_context_fork` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:143:15
+    |
+143 | pub(crate) fn verify_context_fork(
+    |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `verify_copilot_fork` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:187:4
+    |
+187 | fn verify_copilot_fork(
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `provider_backing_root` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:244:4
+    |
+244 | fn provider_backing_root(provider: Provider, plan: &CommandPlan) -> PathBuf {
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `jsonl_files` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:259:4
+    |
+259 | fn jsonl_files(root: &Path) -> BTreeMap<PathBuf, FileStamp> {
+    |    ^^^^^^^^^^^
+
+warning: function `file_stamp` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:280:4
+    |
+280 | fn file_stamp(path: &Path) -> Option<FileStamp> {
+    |    ^^^^^^^^^^
+
+warning: function `readable_jsonl` is never used
+   --> crates/team-agent/src/provider/session/context_fork.rs:288:4
+    |
+288 | fn readable_jsonl(path: &Path) -> bool {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `verify_claude_fork` is never used
+  --> crates/team-agent/src/provider/session/context_fork/claude.rs:41:15
+   |
+41 | pub(super) fn verify_claude_fork(
+   |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `verify_codex_fork` is never used
+   --> crates/team-agent/src/provider/session/context_fork/codex.rs:357:15
+    |
+357 | pub(super) fn verify_codex_fork(
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: function `verify_legacy_codex_fork` is never used
+   --> crates/team-agent/src/provider/session/context_fork/codex.rs:441:4
+    |
+441 | fn verify_legacy_codex_fork(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `PendingContextFork` is never constructed
+  --> crates/team-agent/src/provider/session/context_fork/outcome.rs:25:19
+   |
+25 | pub(crate) struct PendingContextFork {
+   |                   ^^^^^^^^^^^^^^^^^^
+
+warning: enum `ContextForkOutcome` is never used
+  --> crates/team-agent/src/provider/session/context_fork/outcome.rs:33:17
+   |
+33 | pub(crate) enum ContextForkOutcome {
+   |                 ^^^^^^^^^^^^^^^^^^
+
+warning: function `observe_context_fork` is never used
+  --> crates/team-agent/src/provider/session/context_fork/outcome.rs:87:15
+   |
+87 | pub(crate) fn observe_context_fork(
+   |               ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `name_is_leader_launcher` is never used
+   --> crates/team-agent/src/layout/runtime_sessions.rs:224:4
+    |
+224 | fn name_is_leader_launcher(name: &str) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_worker_session` is never used
+  --> crates/team-agent/src/layout/sessions.rs:62:4
+   |
+62 | fn is_worker_session(name: &SessionName, spec: &YamlValue) -> bool {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: `team-agent` (lib) generated 47 warnings (run `cargo fix --lib -p team-agent` to apply 3 suggestions)
+    Checking team-agent v0.5.67 (/Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.24s

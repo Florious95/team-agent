@@ -1,0 +1,2 @@
+command=cargo check --locked -p team-agent --test e2e
+exit_code=0

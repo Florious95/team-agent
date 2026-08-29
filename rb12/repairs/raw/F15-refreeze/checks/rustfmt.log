@@ -1,0 +1,2570 @@
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/grok_slot.rs:70:
+             }
+             Ok(text) => {
+                 let disk = parse_disk_slot(&text);
+-                return classify(disk, live_ids, pre_first_turn, expected_owner, expected_auth);
++                return classify(
++                    disk,
++                    live_ids,
++                    pre_first_turn,
++                    expected_owner,
++                    expected_auth,
++                );
+             }
+         }
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/grok_slot.rs:168:
+         mismatches.push(format!("per-seat key TEAM_AGENT_ID={disk_id}"));
+     }
+     if let Some(disk_owner) = disk.owner_team_id.as_deref() {
+-        mismatches.push(format!("per-seat key TEAM_AGENT_OWNER_TEAM_ID={disk_owner}"));
++        mismatches.push(format!(
++            "per-seat key TEAM_AGENT_OWNER_TEAM_ID={disk_owner}"
++        ));
+     }
+     if let Some(disk_auth) = disk.auth_mode.as_deref() {
+         mismatches.push(format!("per-seat key TEAM_AGENT_AUTH_MODE={disk_auth}"));
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/grok_slot.rs:295:
+     }
+     found
+ }
+-
+-
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/leader.rs:110:
+     let as_json = leader_launcher_json(provider_args);
+     let launcher_args = without_leader_json(provider_args);
+     let attach = leader_launcher_args(&launcher_args)?;
+-    let provider = leader_passthrough_provider(command).ok_or_else(|| {
+-        CliError::Usage(format!(
+-            "unknown leader passthrough command: {command}"
+-        ))
+-    })?;
++    let provider = leader_passthrough_provider(command)
++        .ok_or_else(|| CliError::Usage(format!("unknown leader passthrough command: {command}")))?;
+     let value = lifecycle_port::start_leader(provider, &attach.provider_args, cwd, &attach)?;
+     Ok(CmdResult::from_json(value, as_json))
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/leader.rs:121:
+ 
+ /// Closed-set verb → Provider. `None` = not a passthrough verb (must not become ClaudeCode).
+-pub(crate) fn leader_passthrough_provider(
+-    command: &str,
+-) -> Option<crate::model::enums::Provider> {
++pub(crate) fn leader_passthrough_provider(command: &str) -> Option<crate::model::enums::Provider> {
+     use crate::model::enums::Provider;
+     match command {
+         "codex" => Some(Provider::Codex),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/mod.rs:4380:
+     ///
+     /// `orphan_gate(fix, confirm)`(`--gate orphans`)。CI gate。
+     #[cfg(test)]
+-    pub(super) fn orphan_gate(workspace: &Path, fix: bool, confirm: bool) -> Result<Value, CliError> {
++    pub(super) fn orphan_gate(
++        workspace: &Path,
++        fix: bool,
++        confirm: bool,
++    ) -> Result<Value, CliError> {
+         crate::diagnose::orphans::orphan_gate_json(workspace, fix, confirm)
+     }
+     ///
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/named_address.rs:188:
+                 })
+             })
+             .collect();
+-        let best = ranked
+-            .first()
+-            .map(|agent_id| format!("{team}/{agent_id}"));
++        let best = ranked.first().map(|agent_id| format!("{team}/{agent_id}"));
+         self.with_scoped_suggestions(requested_display, candidate_values, best)
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/named_address.rs:216:
+         // returned candidate (RED-4). Falls back to a status-JSON
+         // hint when no candidate cleared the threshold.
+         if let Some(best) = best_copyable {
+-            self.action = format!(
+-                "Did you mean `{best}`? Rerun with `--to-name {best}`."
+-            );
++            self.action = format!("Did you mean `{best}`? Rerun with `--to-name {best}`.");
+         } else {
+             self.action = format!(
+                 "No close matches for `{requested}`. \
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/named_address.rs:487:
+     match parsed.target {
+         ParsedTarget::TeamEntity { team, entity } if entity == "leader" => {
+             let state = load_state_checked(&target_workspace)?;
+-            let canonical = canonical_named_team_key(&target_workspace, &state, &team)
+-                .unwrap_or(team);
++            let canonical =
++                canonical_named_team_key(&target_workspace, &state, &team).unwrap_or(team);
+             Ok(Some((target_workspace, canonical)))
+         }
+         _ => Ok(None),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/named_address.rs:962:
+     let socket = string_field(receiver, "tmux_socket")
+         .map(str::to_string)
+         .or_else(|| transport.tmux_endpoint());
+-    match crate::messaging::resolve_live_leader_channel(
+-        target_workspace,
+-        receiver,
+-        transport,
+-    ) {
++    match crate::messaging::resolve_live_leader_channel(target_workspace, receiver, transport) {
+         crate::messaging::LeaderChannelResolution::Live(
+             crate::messaging::LiveLeaderChannel::DirectTmux(channel),
+         ) => Ok(ResolvedNamedAddress {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/named_address.rs:1180:
+     parsed: &ParsedNamedAddress,
+ ) -> Box<dyn Transport> {
+     if let ParsedTarget::TeamEntity { team, entity } = &parsed.target {
+-        let canonical = canonical_named_team_key(target_workspace, state, team)
+-            .unwrap_or_else(|| team.clone());
++        let canonical =
++            canonical_named_team_key(target_workspace, state, team).unwrap_or_else(|| team.clone());
+         if entity == "leader" {
+             let team_scoped_socket = team_entry(state, &canonical)
+                 .and_then(|entry| entry.get("leader_receiver"))
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/named_address.rs:1288:
+     if team_entry(state, requested).is_some() || is_legacy_single_team_active(state, requested) {
+         return Some(requested.to_string());
+     }
+-    let selected = crate::state::projection::select_runtime_state(
+-        target_workspace,
+-        Some(requested),
+-    )
+-    .ok()?;
++    let selected =
++        crate::state::projection::select_runtime_state(target_workspace, Some(requested)).ok()?;
+     let canonical = selected
+         .get("active_team_key")
+         .and_then(Value::as_str)
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/send/presentation.rs:189:
+         send_human_field(value, "message_id"),
+         format!("target: {}", send_human_target(value)),
+     ];
+-    for key in ["verification", "stage", "reason", "channel", "turn_verification"] {
++    for key in [
++        "verification",
++        "stage",
++        "reason",
++        "channel",
++        "turn_verification",
++    ] {
+         if !value.get(key).is_none_or(Value::is_null) {
+             parts.push(send_human_field(value, key));
+         }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/tests/named_address.rs:243:
+             "teamdir": worker_team("team-displayname", "qa", "%1", "qa")
+         })),
+     );
+-    let transport = OfflineTransport::new().with_targets(vec![pane(
+-        "team-displayname",
+-        "qa",
+-        "%1",
+-    )]);
++    let transport =
++        OfflineTransport::new().with_targets(vec![pane("team-displayname", "qa", "%1")]);
+ 
+     let resolved = resolve_name_with_transport(&ws, "displayname/qa", &transport)
+         .expect("qualified legacy alias must resolve through the canonical selector");
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/cli/tests/verb_profile.rs:144:
+         "compatible_api profile init must route and exit 0"
+     );
+ 
+-    let expected =
+-        "AUTH_MODE=compatible_api\nPROFILE_NAME=compat\nBASE_URL=\nAPI_KEY=\nMODEL=\n";
++    let expected = "AUTH_MODE=compatible_api\nPROFILE_NAME=compat\nBASE_URL=\nAPI_KEY=\nMODEL=\n";
+     let dir = profiles_dir(&ws);
+     assert_eq!(
+         std::fs::read_to_string(dir.join("compat.env")).unwrap(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/compiler.rs:611:
+ 
+ /// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。
+ /// 缺 = 编译失败(消息含硬串);非 bool = 同 fail-loud。
+-fn required_dangerously_skip_permissions(
+-    meta: &Value,
+-    path: &Path,
+-) -> Result<bool, ModelError> {
++fn required_dangerously_skip_permissions(meta: &Value, path: &Path) -> Result<bool, ModelError> {
+     match meta.get("dangerously_skip_permissions") {
+         Some(Value::Bool(value)) => Ok(*value),
+         Some(_) => Err(ModelError::Validation(format!(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/diagnose/comms.rs:1:
+-
+ use std::path::Path;
+ 
+ use serde_json::{json, Value};
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/diagnose/orphans.rs:1:
+-
+ use std::collections::{BTreeMap, BTreeSet};
+ use std::path::{Path, PathBuf};
+ use std::process::Command;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/leader/provider_attribution.rs:109:
+ fn cursor_agent_command_text(lower: &str) -> bool {
+     let tokens: Vec<&str> = lower.split_whitespace().collect();
+     if tokens.iter().any(|tok| {
+-        *tok == "team-agent"
+-            || tok.ends_with("/team-agent")
+-            || tok.ends_with("\\team-agent")
++        *tok == "team-agent" || tok.ends_with("/team-agent") || tok.ends_with("\\team-agent")
+     }) {
+         return false;
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/leader/provider_attribution.rs:123:
+             || tok.ends_with("\\cursor-agent")
+             || tok.ends_with("\\agent")
+     });
+-    let has_cursor_flag = tokens.iter().any(|tok| *tok == "--sandbox" || *tok == "--trust");
++    let has_cursor_flag = tokens
++        .iter()
++        .any(|tok| *tok == "--sandbox" || *tok == "--trust");
+     is_cursor_bin && has_cursor_flag
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/agent_state.rs:293:
+     agent: &Value,
+     provider: Provider,
+ ) {
+-    let enabled = matches!(agent.get("dangerously_skip_permissions"), Some(Value::Bool(true)));
++    let enabled = matches!(
++        agent.get("dangerously_skip_permissions"),
++        Some(Value::Bool(true))
++    );
+     let policy = if !enabled {
+         serde_json::json!({
+             "enabled": false,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/agent_state.rs:336:
+     #[test]
+     fn test_audit_log_written_on_true_spawn() {
+         let mut state = serde_json::Map::new();
+-        persist_effective_approval_policy_from_yaml_agent(&mut state, &yaml_agent(true), Provider::Codex);
++        persist_effective_approval_policy_from_yaml_agent(
++            &mut state,
++            &yaml_agent(true),
++            Provider::Codex,
++        );
+         let policy = state.get("effective_approval_policy").unwrap();
+         assert_eq!(policy["enabled"], serde_json::json!(true));
+         assert_eq!(policy["source"], serde_json::json!("runtime_config"));
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/agent_state.rs:353:
+                 Some(Value::Bool(true))
+             )),
+         );
+-        assert_eq!(run_state["as_launched_dangerously_skip_permissions"], serde_json::json!(true));
++        assert_eq!(
++            run_state["as_launched_dangerously_skip_permissions"],
++            serde_json::json!(true)
++        );
+     }
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/cursor_create_chat.rs:92:
+     thread::spawn(move || {
+         let mut reader = BufReader::new(stdout);
+         let mut line = String::new();
+-        let result = reader.read_line(&mut line).ok().and_then(|_| parse_chat_id_line(&line));
++        let result = reader
++            .read_line(&mut line)
++            .ok()
++            .and_then(|_| parse_chat_id_line(&line));
+         let _ = tx.send(result);
+     });
+     let parsed = match rx.recv_timeout(FIRST_LINE_TIMEOUT) {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/cursor_create_chat.rs:192:
+             "#!/bin/sh\necho '681c8837-d564-44fa-98bf-4ff5a66592e2'\nkill -STOP $$\n",
+         );
+         let got = create_cursor_chat_id_with_command(bin.to_str().unwrap(), &ws);
+-        assert_eq!(
+-            got.as_deref(),
+-            Some("681c8837-d564-44fa-98bf-4ff5a66592e2")
+-        );
++        assert_eq!(got.as_deref(), Some("681c8837-d564-44fa-98bf-4ff5a66592e2"));
+         let _ = std::fs::remove_dir_all(&base);
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/cursor_create_chat.rs:213:
+     #[test]
+     fn apply_is_noop_when_resume_already_present() {
+         let mut plan = CommandPlan {
+-            argv: vec![
+-                "agent".into(),
+-                "--resume".into(),
+-                "already-bound".into(),
+-            ],
++            argv: vec!["agent".into(), "--resume".into(), "already-bound".into()],
+             expected_session_id: None,
+             provider_projects_root: None,
+             managed_mcp_config: false,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/role_source.rs:15:
+ use crate::model::ids::AgentId;
+ use crate::model::yaml::{self, Value};
+ 
+-fn set_yaml_map_value(
+-    value: &mut Value,
+-    key: &str,
+-    next: Value,
+-) -> Result<(), LifecycleError> {
++fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), LifecycleError> {
+     let Value::Map(pairs) = value else {
+         return Err(LifecycleError::Compile(
+             "agent entry is not a map".to_string(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/role_source.rs:39:
+ }
+ 
+ impl MaterializedRole {
+-/// ---
+-/// purpose: 取物化出来的角色文件路径
+-/// returns: 落盘路径
+-/// ---
++    /// ---
++    /// purpose: 取物化出来的角色文件路径
++    /// returns: 落盘路径
++    /// ---
+     pub(super) fn path(&self) -> &Path {
+         &self.path
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/role_source.rs:49:
+ 
+-/// ---
+-/// purpose: 标记该文件由调用方接管，Drop 时不再删除
+-/// ---
++    /// ---
++    /// purpose: 标记该文件由调用方接管，Drop 时不再删除
++    /// ---
+     pub(super) fn keep(&mut self) {
+         self.keep = true;
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/spawn.rs:116:
+         // has both the role instruction AND the callable Team Agent MCP capability.
+         // probe5 RED proved that `build_command(.., None, None, ..)` left the worker
+         // without `report_result`; placeholders are substituted at spawn time.
+-        let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
+-            agent,
+-            Some(agent_id_raw),
+-            provider,
+-        )?;
++        let command_agent =
++            crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
++                agent,
++                Some(agent_id_raw),
++                provider,
++            )?;
+         let system_prompt =
+             crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
+         let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/launch/spawn.rs:474:
+         });
+     team_dir
+         .map(|dir| dir.join("agents").join(format!("{agent_id}.md")))
+-        .unwrap_or_else(|| workspace.join(".team/current/agents").join(format!("{agent_id}.md")))
++        .unwrap_or_else(|| {
++            workspace
++                .join(".team/current/agents")
++                .join(format!("{agent_id}.md"))
++        })
+         .display()
+         .to_string()
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/pane_input_lock.rs:109:
+ fn pane_input_lock_path(workspace: &Path, target_key: &str) -> PathBuf {
+     let safe: String = target_key
+         .chars()
+-        .map(|c| {
+-            if c.is_ascii_alphanumeric() {
+-                c
+-            } else {
+-                '_'
+-            }
+-        })
++        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+         .collect();
+     runtime_dir(workspace)
+         .join(PANE_INPUT_LOCK_NAME)
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/profile_smoke.rs:237:
+             | Provider::Grok
+             | Provider::CursorAgent
+             | Provider::GeminiCli
+-            | Provider::Fake => {
+-                Err("unsupported_provider_smoke_skipped")
+-            }
++            | Provider::Fake => Err("unsupported_provider_smoke_skipped"),
+         }
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/agent.rs:339:
+     };
+     let into_existing_session =
+         session_live_or_default(transport, &session_name, session_name_present(&state));
+-    let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
+-        &agent,
+-        provider,
+-    )?;
++    let safety =
++        crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(&agent, provider)?;
+     let layout_placement = if adaptive_layout {
+         crate::lifecycle::launch::adaptive_existing_placement_for_agent(
+             &state,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/agent.rs:410:
+     )?;
+     // 0.5.66 bypass 单源 §2.7:启动即带 bypass → 审计留痕。
+     if safety.enabled {
+-        let state_agent = state
+-            .get("agents")
+-            .and_then(|v| v.get(agent_id.as_str()));
++        let state_agent = state.get("agents").and_then(|v| v.get(agent_id.as_str()));
+         let _ = crate::event_log::EventLog::new(workspace).write(
+             "worker.spawn_dangerously_skip_permissions",
+             serde_json::json!({
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/agent.rs:1146:
+     let team_key = restart_projection_team_key(&state, team);
+     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a
+     // multi-team workspace keeps the other teams' persisted runtime state instead of being clobbered.
+-    crate::state::repository::StateRepository::new(workspace).save(
+-        crate::state::repository::StateWriteIntent::StopAgent {
+-            team_key: &team_key,
+-            agent_id: agent_id.as_str(),
+-        },
+-        &state,
+-    )
+-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
++    crate::state::repository::StateRepository::new(workspace)
++        .save(
++            crate::state::repository::StateWriteIntent::StopAgent {
++                team_key: &team_key,
++                agent_id: agent_id.as_str(),
++            },
++            &state,
++        )
++        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+     // golden operations.py:96-99: snapshot (side-effect), then state_file = write_team_state path.
+     // Foundation-0 F0-2: legacy per-session snapshot dual-write retired
+     // (`.team/artifacts/foundation-0-slice-design.md` §§4-5). Root state
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/agent.rs:1631:
+     sync_restart_team_projections(&mut state, &team_key);
+     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
+     // preservation as stop, not a raw save_runtime_state.
+-    crate::state::repository::StateRepository::new(workspace).save(
+-        crate::state::repository::StateWriteIntent::ResetAgent {
+-            team_key: &team_key,
+-            agent_id: agent_id.as_str(),
+-            discard_session,
+-        },
+-        &state,
+-    )
+-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
++    crate::state::repository::StateRepository::new(workspace)
++        .save(
++            crate::state::repository::StateWriteIntent::ResetAgent {
++                team_key: &team_key,
++                agent_id: agent_id.as_str(),
++                discard_session,
++            },
++            &state,
++        )
++        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+     // golden operations.py:125: write_team_state after the discard-save (the intermediate stopped snapshot).
+     write_team_state(spec_workspace, &spec, &state)?;
+     write_reset_tombstone_event(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/agent.rs:2021:
+ }
+ 
+ #[cfg(test)]
+-
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/common.rs:61:
+ }
+ 
+ impl SameRoleCohortTarget {
+-/// ---
+-/// purpose: 构造一个同角色同批目标
+-/// params:
+-///   window: 该席位的窗口名
+-/// returns: 未带期望 pane 的目标
+-/// ---
++    /// ---
++    /// purpose: 构造一个同角色同批目标
++    /// params:
++    ///   window: 该席位的窗口名
++    /// returns: 未带期望 pane 的目标
++    /// ---
+     pub(super) fn new(agent_id: &AgentId, window: &str) -> Self {
+         Self {
+             agent_id: agent_id.as_str().to_string(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/common.rs:75:
+         }
+     }
+ 
+-/// ---
+-/// purpose: 给目标补上期望的旧 pane
+-/// returns: 带期望 pane 的目标
+-/// ---
++    /// ---
++    /// purpose: 给目标补上期望的旧 pane
++    /// returns: 带期望 pane 的目标
++    /// ---
+     pub(super) fn with_expected_pane_id(mut self, pane_id: Option<&str>) -> Self {
+         self.expected_pane_id = pane_id.map(ToString::to_string);
+         self
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/common.rs:1332:
+                 .map(PathBuf::from)
+                 .unwrap_or_else(|| workspace.to_path_buf());
+             let rollout_ok = rollout_path.is_some_and(|path| {
+-                crate::provider::session_scan::cursor::cursor_session_archive_present(path.as_path())
++                crate::provider::session_scan::cursor::cursor_session_archive_present(
++                    path.as_path(),
++                )
+             });
+             let discovered = crate::provider::session_scan::cursor::cursor_session_dir_for_cwd(
+                 session_id.as_str(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/preflight.rs:42:
+ }
+ 
+ impl SessionPreflight {
+-/// ---
+-/// purpose: 判断守卫是否放行
+-/// returns: 结论为 Ok 时为 true
+-/// ---
++    /// ---
++    /// purpose: 判断守卫是否放行
++    /// returns: 结论为 Ok 时为 true
++    /// ---
+     /// True when the preflight passed and the caller may proceed.
+     pub fn is_ok(&self) -> bool {
+         matches!(self, SessionPreflight::Ok)
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:47:
+ }
+ 
+ impl RestartPhaseTimer {
+-/// ---
+-/// purpose: 起一个阶段计时器
+-/// returns: 以当前单调时钟为起点的计时器
+-/// ---
++    /// ---
++    /// purpose: 起一个阶段计时器
++    /// returns: 以当前单调时钟为起点的计时器
++    /// ---
+     pub(crate) fn start() -> Self {
+         Self {
+             started_at: std::time::Instant::now(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:57:
+         }
+     }
+ 
+-/// ---
+-/// purpose: 取从起点到现在的毫秒数
+-/// returns: 毫秒数，溢出时取上限值
+-/// ---
++    /// ---
++    /// purpose: 取从起点到现在的毫秒数
++    /// returns: 毫秒数，溢出时取上限值
++    /// ---
+     pub(crate) fn elapsed_ms(&self) -> u64 {
+         u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:67:
+ 
+-/// ---
+-/// purpose: 写一条带阶段名与已用毫秒数的事件
+-/// params:
+-///   kind: 事件名，restart.phase 或 launch.phase
+-///   phase: 阶段名
+-/// returns: 写事件失败被吞掉，不影响主流程
+-/// ---
++    /// ---
++    /// purpose: 写一条带阶段名与已用毫秒数的事件
++    /// params:
++    ///   kind: 事件名，restart.phase 或 launch.phase
++    ///   phase: 阶段名
++    /// returns: 写事件失败被吞掉，不影响主流程
++    /// ---
+     pub(crate) fn emit(&self, workspace: &Path, kind: &'static str, phase: &'static str) {
+         let event_log = crate::event_log::EventLog::new(workspace);
+         let _ = event_log.write(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:1332:
+     // restoring the worker→leader delivery path. Failure is non-fatal — the
+     // user can still run `team-agent attach-leader` manually.
+     try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+-    if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
++    if let Ok(probe) =
++        crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
+     {
+         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
+             &selected.run_workspace,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:1966:
+         .map(String::as_str)
+         .collect::<Vec<_>>();
+     sync_restart_team_projections(state, team_key);
+-    crate::state::repository::StateRepository::new(workspace).save(
+-        crate::state::repository::StateWriteIntent::RestartTeam {
+-            team_key,
+-            topology_authority_agent_ids: &topology_agent_ids,
+-            skip_capture_backfill_agent_ids: &skip_capture_backfill_agent_ids,
+-        },
+-        state,
+-    )
+-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
++    crate::state::repository::StateRepository::new(workspace)
++        .save(
++            crate::state::repository::StateWriteIntent::RestartTeam {
++                team_key,
++                topology_authority_agent_ids: &topology_agent_ids,
++                skip_capture_backfill_agent_ids: &skip_capture_backfill_agent_ids,
++            },
++            state,
++        )
++        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+ }
+ 
+ fn save_restart_session_repairs(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:3213:
+ /// ---
+ /// `restart_candidates(workspace)`(`restart/selection.py:12`)。从 snapshot + active
+ /// state 收集可重启 team。
+-pub(crate) fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidate>, LifecycleError> {
++pub(crate) fn restart_candidates(
++    workspace: &Path,
++) -> Result<Vec<RestartCandidate>, LifecycleError> {
+     let state = crate::state::persist::load_runtime_state(workspace)
+         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+     let alive = crate::state::projection::team_state_candidates(&state);
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:3650:
+             .get("agents")
+             .and_then(YamlValue::as_list)
+             .expect("agents");
+-        assert!(agents.iter().all(|agent| {
+-            agent.get("id").and_then(YamlValue::as_str) != Some("gone")
+-        }));
++        assert!(agents
++            .iter()
++            .all(|agent| { agent.get("id").and_then(YamlValue::as_str) != Some("gone") }));
+         let startup_order = spec
+             .get("runtime")
+             .and_then(|runtime| runtime.get("startup_order"))
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:3663:
+             .all(|agent_id| agent_id.as_str() != Some("gone")));
+         let routing = spec.get("routing").expect("routing");
+         assert_ne!(
+-            routing
+-                .get("default_assignee")
+-                .and_then(YamlValue::as_str),
++            routing.get("default_assignee").and_then(YamlValue::as_str),
+             Some("gone"),
+             "spec_default_assignee must not return a retired agent"
+         );
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:3673:
+             .get("rules")
+             .and_then(YamlValue::as_list)
+             .expect("routing rules");
+-        assert!(rules.iter().all(|rule| {
+-            rule.get("assign_to").and_then(YamlValue::as_str) != Some("gone")
+-        }));
++        assert!(rules
++            .iter()
++            .all(|rule| { rule.get("assign_to").and_then(YamlValue::as_str) != Some("gone") }));
+         let tasks = spec
+             .get("tasks")
+             .and_then(YamlValue::as_list)
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/rebuild.rs:3682:
+             .expect("tasks");
+-        assert!(tasks.iter().all(|task| {
+-            task.get("assignee").and_then(YamlValue::as_str) != Some("gone")
+-        }));
++        assert!(tasks
++            .iter()
++            .all(|task| { task.get("assignee").and_then(YamlValue::as_str) != Some("gone") }));
+     }
+ 
+     #[test]
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/remove.rs:143:
+ }
+ 
+ impl ForceRecreateSnapshot {
+-/// ---
+-/// purpose: 为强制重建拍一份可回滚的快照
+-/// returns: 含逻辑回滚数据与摘除前物理 pane 身份的快照
+-/// errors: 选不到 team 或席位解析失败时返回 LifecycleError
+-/// ---
++    /// ---
++    /// purpose: 为强制重建拍一份可回滚的快照
++    /// returns: 含逻辑回滚数据与摘除前物理 pane 身份的快照
++    /// errors: 选不到 team 或席位解析失败时返回 LifecycleError
++    /// ---
+     pub(crate) fn capture(
+         workspace: &Path,
+         agent_id: &AgentId,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/remove.rs:181:
+         })
+     }
+ 
+-/// ---
+-/// purpose: 按快照恢复席位的逻辑状态
+-/// returns: 恢复过程中的错误描述列表，空表示恢复干净
+-/// ---
++    /// ---
++    /// purpose: 按快照恢复席位的逻辑状态
++    /// returns: 恢复过程中的错误描述列表，空表示恢复干净
++    /// ---
+     pub(crate) fn restore(
+         &self,
+         team: Option<&str>,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/remove.rs:194:
+             .restore(&self.run_workspace, &self.spec_workspace, team, transport)
+     }
+ 
+-/// ---
+-/// purpose: 旧 pane 已被消费后的恢复，先杀掉本次事务新起的 pane 再恢复逻辑快照
+-/// returns: 错误描述列表；恢复干净时还会校验物理身份是否回到摘除前的 session 与窗口
+-/// ---
++    /// ---
++    /// purpose: 旧 pane 已被消费后的恢复，先杀掉本次事务新起的 pane 再恢复逻辑快照
++    /// returns: 错误描述列表；恢复干净时还会校验物理身份是否回到摘除前的 session 与窗口
++    /// ---
+     /// The old pane has already been consumed. Any exact pane now resolved for
+     /// this seat belongs to this force-recreate transaction and must be removed
+     /// before the logical snapshot is restored, otherwise rollback can leave a
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart/remove.rs:256:
+         errors
+     }
+ 
+-/// ---
+-/// purpose: 强制重建之后要求席位处于一致态
+-/// returns: 一致时返回空值
+-/// errors: 解析失败透传；解析出的一致性态不是 Coherent 时返回 StatePersist
+-/// ---
++    /// ---
++    /// purpose: 强制重建之后要求席位处于一致态
++    /// returns: 一致时返回空值
++    /// errors: 解析失败透传；解析出的一致性态不是 Coherent 时返回 StatePersist
++    /// ---
+     pub(crate) fn require_coherent(
+         &self,
+         agent_id: &AgentId,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/restart.rs:99:
+     restart_candidates, restart_with_transport, restart_with_transport_with_readiness_deadline,
+     select_restart_state,
+ };
+-pub use remove::{remove_agent, remove_agent_flag_requirements};
+ pub(crate) use remove::remove_agent_with_transport;
+-pub(crate) use selection::{classify_first_send_at, classify_restart_plan, python_type_name};
++pub use remove::{remove_agent, remove_agent_flag_requirements};
+ pub use selection::decide_start_mode;
++pub(crate) use selection::{classify_first_send_at, classify_restart_plan, python_type_name};
+ // Layer 2 (leader follow-up 2026-06-22): test-visible workspace-aware
+ // classification so lifecycle/tests/restart.rs can exercise the
+ // SessionBackingStoreMissing + checked_paths + RecoveryHint path
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/agent_ops.rs:69:
+         .with_windows(vec![crate::transport::WindowName::new("alpha")])
+         .with_pane_presence("%dead", false)
+         .with_liveness("%dead", crate::transport::PaneLiveness::Dead);
+-    let _ = start_agent_with_transport(
+-        &ws,
+-        &aid("alpha"),
+-        false,
+-        false,
+-        false,
+-        None,
+-        &transport,
+-    );
++    let _ = start_agent_with_transport(&ws, &aid("alpha"), false, false, false, None, &transport);
+ 
+     assert!(
+         !transport.spawn_records().is_empty(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/agent_ops.rs:114:
+         .with_targets(vec![foreign])
+         .with_pane_presence("%foreign", true)
+         .with_liveness("%foreign", crate::transport::PaneLiveness::Live);
+-    let _ = start_agent_with_transport(
+-        &ws,
+-        &aid("alpha"),
+-        false,
+-        false,
+-        false,
+-        None,
+-        &transport,
+-    );
++    let _ = start_agent_with_transport(&ws, &aid("alpha"), false, false, false, None, &transport);
+ 
+     assert!(
+         !transport.spawn_records().is_empty(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/agent_ops.rs:148:
+         .with_pane_presence("%transport-error", true)
+         .with_liveness("%transport-error", crate::transport::PaneLiveness::Live)
+         .with_list_targets_error("simulated tmux snapshot failure");
+-    let _ = start_agent_with_transport(
+-        &ws,
+-        &aid("alpha"),
+-        false,
+-        false,
+-        false,
+-        None,
+-        &transport,
+-    );
++    let _ = start_agent_with_transport(&ws, &aid("alpha"), false, false, false, None, &transport);
+ 
+     assert!(
+         transport.spawn_records().is_empty(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/agent_ops.rs:179:
+     let transport = OfflineTransport::new()
+         .with_session_present(true)
+         .with_windows(vec![crate::transport::WindowName::new("alpha")]);
+-    let _ = start_agent_with_transport(
+-        &ws,
+-        &aid("alpha"),
+-        false,
+-        false,
+-        false,
+-        None,
+-        &transport,
+-    );
++    let _ = start_agent_with_transport(&ws, &aid("alpha"), false, false, false, None, &transport);
+ 
+     assert!(
+         !transport.spawn_records().is_empty(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/clone_fork_copilot_perms_red.rs:351:
+         .join("copilot-fixture")
+         .join(&source_session_id)
+         .join("unused.db");
+-    std::fs::create_dir_all(rollout.parent().expect("parent")).expect("create per-test copilot dir");
++    std::fs::create_dir_all(rollout.parent().expect("parent"))
++        .expect("create per-test copilot dir");
+     std::fs::write(&rollout, b"").expect("touch unused db placeholder");
+     let tuple = json!({
+         "status": "running",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/copilot_provider_red.rs:1414:
+     let team = ws.join(name);
+     std::fs::create_dir_all(team.join("agents")).unwrap();
+     // 0.5.66 bypass 单源:bypass 由角色字段驱动,不再是 TEAM.md dangerous_auto_approve。
+-    let role_bypass = if dangerous {
+-        "true"
+-    } else {
+-        "false"
+-    };
++    let role_bypass = if dangerous { "true" } else { "false" };
+     std::fs::write(
+         team.join("TEAM.md"),
+         format!(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/cursor_restart_resume_red.rs:26:
+ 
+ use crate::lifecycle::restart::classify_restart_plan_with_resume_validation;
+ use crate::lifecycle::types::ResumeDecision;
+-use crate::provider::session_scan::cursor::{
+-    cursor_session_archive_present, cursor_session_dir,
+-};
++use crate::model::ids::AgentId;
++use crate::provider::session_scan::cursor::{cursor_session_archive_present, cursor_session_dir};
+ use crate::state::persist::{load_runtime_state, save_runtime_state};
+ use serial_test::serial;
+-use crate::model::ids::AgentId;
+ use team_agent::lifecycle::{
+     fork_agent_with_transport, quick_start_with_transport_in_workspace, restart_with_transport,
+ };
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/grok_require_explicit_model_red.rs:29:
+     let home = tmp_dir("grok-no-model-home");
+     seed_grok_home(&home, Some(&ws));
+     let _guard = HomeGuard::set(&home);
+-    let team = write_role_team(
+-        &ws,
+-        "grokteam",
+-        "grok_writer",
+-        "grok",
+-        None,
+-        "Grok Writer",
+-    );
++    let team = write_role_team(&ws, "grokteam", "grok_writer", "grok", None, "Grok Writer");
+     let transport = OfflineTransport::new();
+ 
+     let result = quick_start_with_transport_in_workspace(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/grok_require_explicit_model_red.rs:105:
+     );
+     let transport = OfflineTransport::new();
+ 
+-    quick_start_with_transport_in_workspace(
+-        &ws,
+-        &team,
+-        None,
+-        true,
+-        Some("grokteam"),
+-        &transport,
+-    )
+-    .expect("grok role with explicit model must start");
++    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("grokteam"), &transport)
++        .expect("grok role with explicit model must start");
+ 
+     let argv = first_spawn_argv(&transport);
+     assert!(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:34:
+ use team_agent::state::persist::{load_runtime_state, save_runtime_state};
+ use team_agent::transport::{
+     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
+-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
+-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+-    TurnVerification, WindowName,
++    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
++    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
++    WindowName,
+ };
+ 
+ const TEAM: &str = "current";
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:70:
+     let env = hermetic_guard::HermeticTestEnv::enter("p0-caller-env-sentinel");
+     let shim_dir = env.root().join("bin");
+     fs::create_dir_all(&shim_dir).unwrap();
+-    let recorder = hermetic_guard::short_tmux_socket("p0-caller-env-recorder")
+-        .with_extension("log");
++    let recorder =
++        hermetic_guard::short_tmux_socket("p0-caller-env-recorder").with_extension("log");
+     let _ = fs::remove_file(&recorder);
+     let sentinel = env.root().join("foreign-sentinel.sock");
+     let polluted_tmux = format!("{},4242,0", sentinel.display());
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:135:
+         .filter(|line| line.contains("\tkill-session") || line.contains("\tkill-server"))
+         .filter(|line| {
+             let explicit_endpoint = line.contains("\t-S\t") || line.contains("\t-L\t");
+-            let targets_sentinel = line.split('\t').any(|arg| arg == sentinel.to_str().unwrap());
++            let targets_sentinel = line
++                .split('\t')
++                .any(|arg| arg == sentinel.to_str().unwrap());
+             let inherits_sentinel = line.starts_with(&format!("TMUX={polluted_tmux}\t"));
+             targets_sentinel || (inherits_sentinel && !explicit_endpoint)
+         })
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:153:
+ #[serial(env, pid_probe)]
+ fn restart_allow_fresh_does_not_leave_same_role_host_cotenants() {
+     let mut failures = Vec::new();
+-    let (env, workspace) = team_case("p0-restart", &["developer", "test-engineer", "arch-reviewer"]);
++    let (env, workspace) = team_case(
++        "p0-restart",
++        &["developer", "test-engineer", "arch-reviewer"],
++    );
+     let shim_dir = env.root().join("bin");
+     fs::create_dir_all(&shim_dir).unwrap();
+     let recorder = env.root().join("ps-recorder.log");
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:199:
+         env.with_env("TEAM_AGENT_TEST_REAL_PS", real_ps.to_str().unwrap()),
+         env.with_env("TEAM_AGENT_TEST_SELF_PID", &self_pid),
+     ];
+-    let transport = CohortTransport::with_old_panes(&["developer", "test-engineer", "arch-reviewer"]);
++    let transport =
++        CohortTransport::with_old_panes(&["developer", "test-engineer", "arch-reviewer"]);
+     let before = load_runtime_state(&workspace).unwrap();
+     let restart = restart_with_transport_with_readiness_deadline(
+         &workspace,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:219:
+         restart.map(|_| ()),
+         &transport,
+     );
+-    let restart_coordinator_pid = fs::read_to_string(coordinator_pid_path(&WorkspacePath::new(
+-        workspace.clone(),
+-    )))
+-    .unwrap_or_default();
++    let restart_coordinator_pid =
++        fs::read_to_string(coordinator_pid_path(&WorkspacePath::new(workspace.clone())))
++            .unwrap_or_default();
+     if restart_coordinator_pid.trim() != self_pid {
+         failures.push(format!(
+             "restart --allow-fresh: seeded coordinator pid must remain the integration-test self pid; expected={self_pid}; actual={restart_coordinator_pid:?}"
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:261:
+                 "restart --allow-fresh: {worker} state must not remain bound to retired pane {prior_pane:?}"
+             ));
+         }
+-        let prior_epoch = prior.get("spawn_epoch").and_then(Value::as_u64).unwrap_or(0);
+-        let saved_epoch = saved.get("spawn_epoch").and_then(Value::as_u64).unwrap_or(0);
++        let prior_epoch = prior
++            .get("spawn_epoch")
++            .and_then(Value::as_u64)
++            .unwrap_or(0);
++        let saved_epoch = saved
++            .get("spawn_epoch")
++            .and_then(Value::as_u64)
++            .unwrap_or(0);
+         if saved_epoch <= prior_epoch {
+             failures.push(format!(
+                 "restart --allow-fresh: {worker} spawn_epoch must increase monotonically; before={prior_epoch}; after={saved_epoch}"
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:277:
+     collect_lifecycle_cohort_result(
+         &mut failures,
+         "start-agent --force",
+-        start_agent_with_transport(&workspace2, &AgentId::new("developer"), true, false, true, Some(TEAM), &transport2).map(|_| ()),
++        start_agent_with_transport(
++            &workspace2,
++            &AgentId::new("developer"),
++            true,
++            false,
++            true,
++            Some(TEAM),
++            &transport2,
++        )
++        .map(|_| ()),
+         &transport2,
+     );
+     let force_spawned = transport2
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:351:
+     let after = load_runtime_state(&workspace).unwrap();
+     let saved = &after["agents"]["developer"];
+     let saved_pane = saved.get("pane_id").and_then(Value::as_str);
+-    let saved_epoch = saved.get("spawn_epoch").and_then(Value::as_u64).unwrap_or(0);
++    let saved_epoch = saved
++        .get("spawn_epoch")
++        .and_then(Value::as_u64)
++        .unwrap_or(0);
+     let old_live = transport
+         .has_pane(&PaneId::new(old_pane.as_str()))
+         .unwrap()
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:362:
+         .filter(|pane| pane.pane_id.as_str().starts_with("%new-"))
+         .map(|pane| pane.pane_id.as_str().to_string())
+         .collect::<Vec<_>>();
+-    let stale_third_state = !old_live && saved_pane == Some(old_pane.as_str()) && !new_live.is_empty();
++    let stale_third_state =
++        !old_live && saved_pane == Some(old_pane.as_str()) && !new_live.is_empty();
+     let old_redeclared_as_new = saved_pane == Some(old_pane.as_str()) && saved_epoch > old_epoch;
+ 
+     assert!(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:521:
+     let (_env, workspace) = team_case("p0-reset", &["developer"]);
+     let transport = CohortTransport::with_old_panes(&["developer"]);
+ 
+-    let result = reset_agent_with_transport(&workspace, &AgentId::new("developer"), true, false, Some(TEAM), &transport);
+-    let error_text = result.as_ref().err().map(ToString::to_string).unwrap_or_default();
++    let result = reset_agent_with_transport(
++        &workspace,
++        &AgentId::new("developer"),
++        true,
++        false,
++        Some(TEAM),
++        &transport,
++    );
++    let error_text = result
++        .as_ref()
++        .err()
++        .map(ToString::to_string)
++        .unwrap_or_default();
+     assert!(
+         error_text.contains("stop_not_proven")
+             || error_text.contains("residue")
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:540:
+     ));
+     let reset = source_section(src, "pub(crate) fn reset_agent", "pub(crate) fn fork_agent");
+     let json_object = reset_success_json_object(reset);
+-    let missing = ["\"capture_state\":", "\"reset_proof\":", "\"transcript_missing\"", "\"attribution_ambiguous\"", "\"weak\""]
+-        .into_iter().filter(|needle| !json_object.contains(needle)).collect::<Vec<_>>();
++    let missing = [
++        "\"capture_state\":",
++        "\"reset_proof\":",
++        "\"transcript_missing\"",
++        "\"attribution_ambiguous\"",
++        "\"weak\"",
++    ]
++    .into_iter()
++    .filter(|needle| !json_object.contains(needle))
++    .collect::<Vec<_>>();
+     assert!(
+         missing.is_empty(),
+         "P0 MCP reset: ok=true/status=reset must expose additive capture_state and reset_proof=weak inside the ResetAgentOutcome::Reset serde_json::json! object; missing={missing:?}; reset_json={json_object}"
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:554:
+     let env = hermetic_guard::HermeticTestEnv::enter("p0-abnormal");
+     let workspace = env.workspace("abnormal");
+     let rollout = workspace.join("architect-rollout.jsonl");
+-    fs::write(&rollout, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess-arch\",\"cwd\":\"/tmp\"}}\n").unwrap();
++    fs::write(
++        &rollout,
++        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess-arch\",\"cwd\":\"/tmp\"}}\n",
++    )
++    .unwrap();
+     seed_healthy_coordinator(&workspace);
+     save_runtime_state(
+         &workspace,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:603:
+         "/src/coordinator/steps/abnormal.rs"
+     ));
+     let mut failures = Vec::new();
+-    if let Err(error) = tick { failures.push(format!("coordinator tick failed before abnormal fixture could be evaluated: {error}")); }
+-    if watch.is_null() { failures.push("coordinator tick did not write abnormal_exit_watch for the live shell fixture".to_string()); }
++    if let Err(error) = tick {
++        failures.push(format!(
++            "coordinator tick failed before abnormal fixture could be evaluated: {error}"
++        ));
++    }
++    if watch.is_null() {
++        failures.push(
++            "coordinator tick did not write abnormal_exit_watch for the live shell fixture"
++                .to_string(),
++        );
++    }
+     if watch.pointer("/last_liveness").and_then(Value::as_str) == Some("dead")
+         || watch
+             .pointer("/last_liveness_detail")
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:654:
+ }
+ 
+ fn team_case(tag: &str, workers: &[&str]) -> (hermetic_guard::HermeticTestEnv, PathBuf) {
+-    let pairs = workers.iter().map(|worker| (*worker, "gpt-5")).collect::<Vec<_>>();
++    let pairs = workers
++        .iter()
++        .map(|worker| (*worker, "gpt-5"))
++        .collect::<Vec<_>>();
+     team_case_with_model(tag, &pairs)
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:675:
+ 
+ fn write_team_docs(workspace: &Path, workers: &[(&str, &str)]) {
+     fs::create_dir_all(workspace.join("agents")).unwrap();
+-    fs::write(workspace.join("TEAM.md"), "---\nname: current\nobjective: P0 host co-tenant contract.\nprovider: codex\n---\n").unwrap();
++    fs::write(
++        workspace.join("TEAM.md"),
++        "---\nname: current\nobjective: P0 host co-tenant contract.\nprovider: codex\n---\n",
++    )
++    .unwrap();
+     for (worker, model) in workers {
+         let role = format!("---\nname: {worker}\nrole: {worker}\nprovider: codex\nmodel: {model}\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{worker}.\n");
+         fs::write(workspace.join("agents").join(format!("{worker}.md")), role).unwrap();
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:694:
+ fn seed_state(workspace: &Path, workers: &[(&str, &str)]) {
+     let agents = workers
+         .iter()
+-        .map(|(worker, model)| ((*worker).to_string(), json!({
+-            "status": "running", "provider": "codex", "agent_id": worker, "role": worker,
+-            "model": model, "auth_mode": "subscription", "tools": ["mcp_team"],
+-            "window": worker, "pane_id": format!("%old-{worker}"), "pane_pid": 10_000,
+-            "owner_team_id": TEAM,
+-            "session_id": format!("sess-{worker}"),
+-            "rollout_path": workspace.join(format!("{worker}.jsonl")).to_string_lossy(),
+-            "spawn_epoch": 1, "spawn_cwd": workspace.to_string_lossy()
+-        })))
++        .map(|(worker, model)| {
++            (
++                (*worker).to_string(),
++                json!({
++                    "status": "running", "provider": "codex", "agent_id": worker, "role": worker,
++                    "model": model, "auth_mode": "subscription", "tools": ["mcp_team"],
++                    "window": worker, "pane_id": format!("%old-{worker}"), "pane_pid": 10_000,
++                    "owner_team_id": TEAM,
++                    "session_id": format!("sess-{worker}"),
++                    "rollout_path": workspace.join(format!("{worker}.jsonl")).to_string_lossy(),
++                    "spawn_epoch": 1, "spawn_cwd": workspace.to_string_lossy()
++                }),
++            )
++        })
+         .collect::<serde_json::Map<_, _>>();
+     for (worker, _) in workers {
+         fs::write(workspace.join(format!("{worker}.jsonl")), "{}\n").unwrap();
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:709:
+     }
+-    save_runtime_state(workspace, &json!({
+-        "active_team_key": TEAM, "team_dir": workspace.to_string_lossy(),
+-        "spec_path": workspace.join("team.spec.yaml").to_string_lossy(),
+-        "session_name": SESSION, "agents": agents
+-    })).unwrap();
++    save_runtime_state(
++        workspace,
++        &json!({
++            "active_team_key": TEAM, "team_dir": workspace.to_string_lossy(),
++            "spec_path": workspace.join("team.spec.yaml").to_string_lossy(),
++            "session_name": SESSION, "agents": agents
++        }),
++    )
++    .unwrap();
+ }
+ 
+ fn seed_healthy_coordinator(workspace: &Path) {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:732:
+         "id": "old-session-before-spawn", "cwd": spawn_cwd.to_string_lossy(),
+         "created_at": "2026-01-01T00:00:00+00:00"
+     }});
+-    fs::write(&rollout, format!("{meta}\n{}\n", json!({"type": "event", "payload": {"message": "old rollout"}}))).unwrap();
++    fs::write(
++        &rollout,
++        format!(
++            "{meta}\n{}\n",
++            json!({"type": "event", "payload": {"message": "old rollout"}})
++        ),
++    )
++    .unwrap();
+     rollout
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:753:
+ 
+ impl CohortTransport {
+     fn with_old_panes(workers: &[&str]) -> Self {
+-        let panes = workers.iter().map(|w| pane_info(w, &format!("%old-{w}"), "team-agent-worker")).collect();
++        let panes = workers
++            .iter()
++            .map(|w| pane_info(w, &format!("%old-{w}"), "team-agent-worker"))
++            .collect();
+         Self {
+-            state: Arc::new(Mutex::new(TransportState { panes, killed: BTreeSet::new(), next: 1, current_command: "team-agent-worker".to_string() })),
++            state: Arc::new(Mutex::new(TransportState {
++                panes,
++                killed: BTreeSet::new(),
++                next: 1,
++                current_command: "team-agent-worker".to_string(),
++            })),
+             bad_spawn_identity: false,
+             hide_new_from_list_targets: false,
+             fail_list_targets: false,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:780:
+     fn with_current_command(self, command: &str) -> Self {
+         let mut state = self.state.lock().unwrap();
+         state.current_command = command.to_string();
+-        for pane in &mut state.panes { pane.current_command = Some(command.to_string()); }
++        for pane in &mut state.panes {
++            pane.current_command = Some(command.to_string());
++        }
+         drop(state);
+         self
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:787:
+ 
+     fn spawn(&self, session: &SessionName, window: &WindowName) -> SpawnResult {
+         let mut state = self.state.lock().unwrap();
+-        let old_identity = state.panes.iter().find(|pane| {
+-            pane.window_name.as_ref().is_some_and(|name| name == window)
+-                && pane.pane_id.as_str().starts_with("%old-")
+-                && !state.killed.contains(pane.pane_id.as_str())
+-        }).map(|pane| (pane.pane_id.clone(), pane.pane_pid));
++        let old_identity = state
++            .panes
++            .iter()
++            .find(|pane| {
++                pane.window_name.as_ref().is_some_and(|name| name == window)
++                    && pane.pane_id.as_str().starts_with("%old-")
++                    && !state.killed.contains(pane.pane_id.as_str())
++            })
++            .map(|pane| (pane.pane_id.clone(), pane.pane_pid));
+         let pane_id = PaneId::new(format!("%new-{}-{}", window.as_str(), state.next));
+         let pane_pid = 20_000 + u32::try_from(state.next).unwrap();
+         state.next += 1;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:804:
+         ));
+         if self.bad_spawn_identity {
+             let (old_pane, old_pid) = old_identity.expect("bad identity fixture needs old pane");
+-            SpawnResult { pane_id: old_pane, session: session.clone(), window: window.clone(), child_pid: old_pid }
++            SpawnResult {
++                pane_id: old_pane,
++                session: session.clone(),
++                window: window.clone(),
++                child_pid: old_pid,
++            }
+         } else {
+-            SpawnResult { pane_id, session: session.clone(), window: window.clone(), child_pid: Some(pane_pid) }
++            SpawnResult {
++                pane_id,
++                session: session.clone(),
++                window: window.clone(),
++                child_pid: Some(pane_pid),
++            }
+         }
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:813:
+     fn pane_summary(&self) -> Vec<String> {
+-        self.state.lock().unwrap().panes.iter().map(|p| {
+-            format!("{}:{}", p.window_name.as_ref().map(WindowName::as_str).unwrap_or("-"), p.pane_id.as_str())
+-        }).collect()
++        self.state
++            .lock()
++            .unwrap()
++            .panes
++            .iter()
++            .map(|p| {
++                format!(
++                    "{}:{}",
++                    p.window_name
++                        .as_ref()
++                        .map(WindowName::as_str)
++                        .unwrap_or("-"),
++                    p.pane_id.as_str()
++                )
++            })
++            .collect()
+     }
+ 
+     fn window_counts(&self) -> BTreeMap<String, usize> {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:820:
+         let mut counts = BTreeMap::new();
+         let state = self.state.lock().unwrap();
+-        for pane in state.panes.iter().filter(|pane| !state.killed.contains(pane.pane_id.as_str())) {
+-            if let Some(window) = pane.window_name.as_ref() { *counts.entry(window.as_str().to_string()).or_insert(0) += 1; }
++        for pane in state
++            .panes
++            .iter()
++            .filter(|pane| !state.killed.contains(pane.pane_id.as_str()))
++        {
++            if let Some(window) = pane.window_name.as_ref() {
++                *counts.entry(window.as_str().to_string()).or_insert(0) += 1;
++            }
+         }
+         counts
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:827:
+ 
+     fn live_panes_for_window(&self, window: &str) -> Vec<PaneInfo> {
+         let state = self.state.lock().unwrap();
+-        state.panes.iter().filter(|pane| {
+-            !state.killed.contains(pane.pane_id.as_str())
+-                && pane.window_name.as_ref().is_some_and(|name| name.as_str() == window)
+-        }).cloned().collect()
++        state
++            .panes
++            .iter()
++            .filter(|pane| {
++                !state.killed.contains(pane.pane_id.as_str())
++                    && pane
++                        .window_name
++                        .as_ref()
++                        .is_some_and(|name| name.as_str() == window)
++            })
++            .cloned()
++            .collect()
+     }
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:840:
+     result: Result<(), LifecycleError>,
+     transport: &CohortTransport,
+ ) {
+-    let spawned = transport.pane_summary().into_iter().filter(|pane| pane.contains(":%new-")).collect::<Vec<_>>();
++    let spawned = transport
++        .pane_summary()
++        .into_iter()
++        .filter(|pane| pane.contains(":%new-"))
++        .collect::<Vec<_>>();
+     if let Err(error) = result {
+         let text = error.to_string();
+         if spawned.is_empty()
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:855:
+         });
+         return;
+     }
+-    let duplicates = transport.window_counts().into_iter().filter(|(_, count)| *count != 1).map(|(window, count)| format!("{window}={count}")).collect::<Vec<_>>();
++    let duplicates = transport
++        .window_counts()
++        .into_iter()
++        .filter(|(_, count)| *count != 1)
++        .map(|(window, count)| format!("{window}={count}"))
++        .collect::<Vec<_>>();
+     if !duplicates.is_empty() {
+         failures.push(format!(
+             "{label}: duplicate live tuple(s) {duplicates:?}; panes={:?}",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:865:
+ }
+ 
+ impl Transport for CohortTransport {
+-    fn kind(&self) -> BackendKind { BackendKind::Tmux }
++    fn kind(&self) -> BackendKind {
++        BackendKind::Tmux
++    }
+ 
+-    fn tmux_endpoint(&self) -> Option<String> { Some(TMUX_ENDPOINT.to_string()) }
++    fn tmux_endpoint(&self) -> Option<String> {
++        Some(TMUX_ENDPOINT.to_string())
++    }
+ 
+     fn spawn_first(
+         &self,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:880:
+         Ok(self.spawn(session, window))
+     }
+ 
+-    fn spawn_into(&self, session: &SessionName, window: &WindowName, argv: &[String], cwd: &Path, env: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
++    fn spawn_into(
++        &self,
++        session: &SessionName,
++        window: &WindowName,
++        argv: &[String],
++        cwd: &Path,
++        env: &BTreeMap<String, String>,
++    ) -> Result<SpawnResult, TransportError> {
+         self.spawn_first(session, window, argv, cwd, env)
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:887:
+-    fn inject(&self, _target: &Target, _payload: &InjectPayload, _submit: Key, _bracketed: bool) -> Result<InjectReport, TransportError> {
+-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotRequired, attempts: 1, submit_diagnostics: None })
++    fn inject(
++        &self,
++        _target: &Target,
++        _payload: &InjectPayload,
++        _submit: Key,
++        _bracketed: bool,
++    ) -> Result<InjectReport, TransportError> {
++        Ok(InjectReport {
++            stage_reached: InjectStage::Submit,
++            inject_verification: InjectVerification::CaptureContainsToken,
++            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
++            turn_verification: TurnVerification::NotRequired,
++            attempts: 1,
++            submit_diagnostics: None,
++        })
+     }
+ 
+-    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> { Ok(()) }
++    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
++        Ok(())
++    }
+ 
+-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+-        Ok(CapturedText { text: "wrapper shell prompt without team-agent provider exit marker".to_string(), range })
++    fn capture(
++        &self,
++        _target: &Target,
++        range: CaptureRange,
++    ) -> Result<CapturedText, TransportError> {
++        Ok(CapturedText {
++            text: "wrapper shell prompt without team-agent provider exit marker".to_string(),
++            range,
++        })
+     }
+ 
+     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:898:
+         Ok(match field {
+             PaneField::PaneId => Some("%query".to_string()),
+             PaneField::SessionName => Some(SESSION.to_string()),
+-            PaneField::PaneCurrentCommand => Some(self.state.lock().unwrap().current_command.clone()),
++            PaneField::PaneCurrentCommand => {
++                Some(self.state.lock().unwrap().current_command.clone())
++            }
+             _ => None,
+         })
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:905:
+ 
+     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+-        Ok(if self.has_pane(pane)? == Some(true) { PaneLiveness::Live } else { PaneLiveness::Dead })
++        Ok(if self.has_pane(pane)? == Some(true) {
++            PaneLiveness::Live
++        } else {
++            PaneLiveness::Dead
++        })
+     }
+ 
+     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:911:
+         let state = self.state.lock().unwrap();
+-        Ok(Some(!state.killed.contains(pane.as_str()) && state.panes.iter().any(|item| item.pane_id == *pane)))
++        Ok(Some(
++            !state.killed.contains(pane.as_str())
++                && state.panes.iter().any(|item| item.pane_id == *pane),
++        ))
+     }
+ 
+     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:920:
+             });
+         }
+         let state = self.state.lock().unwrap();
+-        Ok(state.panes.iter().filter(|pane| {
+-            !self.hide_new_from_list_targets || !pane.pane_id.as_str().starts_with("%new-")
+-        }).cloned().collect())
++        Ok(state
++            .panes
++            .iter()
++            .filter(|pane| {
++                !self.hide_new_from_list_targets || !pane.pane_id.as_str().starts_with("%new-")
++            })
++            .cloned()
++            .collect())
+     }
+ 
+-    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> { Ok(true) }
++    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
++        Ok(true)
++    }
+ 
+     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+-        Ok(self.state.lock().unwrap().panes.iter().filter_map(|pane| pane.window_name.clone()).collect::<BTreeSet<_>>().into_iter().collect())
++        Ok(self
++            .state
++            .lock()
++            .unwrap()
++            .panes
++            .iter()
++            .filter_map(|pane| pane.window_name.clone())
++            .collect::<BTreeSet<_>>()
++            .into_iter()
++            .collect())
+     }
+ 
+-    fn set_session_env(&self, _session: &SessionName, _key: &str, _value: &str) -> Result<SetEnvOutcome, TransportError> { Ok(SetEnvOutcome::Applied) }
++    fn set_session_env(
++        &self,
++        _session: &SessionName,
++        _key: &str,
++        _value: &str,
++    ) -> Result<SetEnvOutcome, TransportError> {
++        Ok(SetEnvOutcome::Applied)
++    }
+ 
+-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> { Ok(()) }
++    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
++        Ok(())
++    }
+ 
+     fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+-        if let Target::Pane(pane) = target { self.kill_pane(pane)?; }
++        if let Target::Pane(pane) = target {
++            self.kill_pane(pane)?;
++        }
+         Ok(())
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:943:
+     fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+-        self.state.lock().unwrap().killed.insert(pane.as_str().to_string());
++        self.state
++            .lock()
++            .unwrap()
++            .killed
++            .insert(pane.as_str().to_string());
+         Ok(())
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:948:
+-    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
++    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
++        Ok(AttachOutcome::Attached)
++    }
+ }
+ 
+ fn pane_info(window: &str, pane: &str, current_command: &str) -> PaneInfo {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:958:
+         session: SessionName::new(SESSION),
+         window_name: Some(WindowName::new(window)),
+         window_index: None,
+-        pane_index: None, tty: None,
++        pane_index: None,
++        tty: None,
+         current_command: Some(current_command.to_string()),
+-        current_path: None, active: true, pane_pid: Some(pane_pid),
++        current_path: None,
++        active: true,
++        pane_pid: Some(pane_pid),
+         leader_env: BTreeMap::new(),
+     }
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/host_cotenant_death_p0_contract.rs:973:
+     }
+ }
+ 
+-fn source_section<'a>(src: &'a str, start: &str, end: &str) -> &'a str { let start = src.find(start).unwrap_or(0); let rest = &src[start..]; &rest[..rest.find(end).unwrap_or(rest.len())] }
++fn source_section<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
++    let start = src.find(start).unwrap_or(0);
++    let rest = &src[start..];
++    &rest[..rest.find(end).unwrap_or(rest.len())]
++}
+ 
+ fn reset_success_json_object(reset_src: &str) -> &str {
+-    let success = source_section(reset_src, "ResetAgentOutcome::Reset", "ResetAgentOutcome::Refused");
+-    let macro_start = success.find("serde_json::json!({").expect("reset success json object"); let object_start = macro_start + success[macro_start..].find('{').unwrap(); let mut depth = 0_i32;
++    let success = source_section(
++        reset_src,
++        "ResetAgentOutcome::Reset",
++        "ResetAgentOutcome::Refused",
++    );
++    let macro_start = success
++        .find("serde_json::json!({")
++        .expect("reset success json object");
++    let object_start = macro_start + success[macro_start..].find('{').unwrap();
++    let mut depth = 0_i32;
+     for (offset, ch) in success[object_start..].char_indices() {
+-        if ch == '{' { depth += 1; } if ch == '}' { depth -= 1; }
+-        if depth == 0 { return &success[object_start..object_start + offset + 1]; }
++        if ch == '{' {
++            depth += 1;
++        }
++        if ch == '}' {
++            depth -= 1;
++        }
++        if depth == 0 {
++            return &success[object_start..object_start + offset + 1];
++        }
+     }
+     panic!("unterminated reset success json object")
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/lifecycle_rollback_red.rs:109:
+         "refused in-window fork must not mutate team.spec.yaml; result={result:?}"
+     );
+     assert!(
+-        state_after
+-            .pointer("/agents/newfork")
+-            .is_none(),
++        state_after.pointer("/agents/newfork").is_none(),
+         "refused in-window fork must not create a newfork row; state={state_after}"
+     );
+     assert!(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/startup_latency_contract.rs:176:
+     observed_spawn_windows.sort();
+     expected_spawn_windows.sort();
+     assert_eq!(
+-        observed_spawn_windows,
+-        expected_spawn_windows,
++        observed_spawn_windows, expected_spawn_windows,
+         "R2: failure aggregation must attempt the full plan; no early return after w3"
+     );
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/status_credential_redaction_contract.rs:277:
+         "fn write_session_convergence_progress_event(",
+         "pub(crate) fn restart_required_missing_session_agent_ids(",
+     );
+-    let resume_end = ["pub(crate) fn restart_candidates(", "pub fn restart_candidates("]
+-        .into_iter()
+-        .find(|marker| rebuild.contains(marker))
+-        .expect("restart_candidates source section end");
++    let resume_end = [
++        "pub(crate) fn restart_candidates(",
++        "pub fn restart_candidates(",
++    ]
++    .into_iter()
++    .find(|marker| rebuild.contains(marker))
++    .expect("restart_candidates source section end");
+     let resume_writer = source_section(
+         &rebuild,
+         "fn write_restart_resume_decision_event(",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/tests/test_isolation_escape_contract.rs:87:
+     let verify = read_repo_file(
+         "crates/team-agent/src/lifecycle/tests/verify_rs031_window_consistency_red.rs",
+     );
+-    let quick = read_repo_file(
+-        "crates/team-agent/src/lifecycle/tests/quick_start_worker_readiness_red.rs",
+-    );
++    let quick =
++        read_repo_file("crates/team-agent/src/lifecycle/tests/quick_start_worker_readiness_red.rs");
+     let combined = format!("{verify}\n{quick}");
+     assert_contains_all(
+         "R3",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/types.rs:81:
+ pub struct PlanId(String);
+ 
+ impl PlanId {
+-/// ---
+-/// purpose: 校验并构造 PlanId
+-/// params:
+-///   raw: 原始 plan 名，首字符须字母数字，其余只许字母数字与下划线点横线，长度不超过 64
+-/// returns: 通过校验的 PlanId
+-/// errors: 不满足上述形状时返回 InvalidPlanId
+-/// contract_id: lifecycle.types.plan_id_parse
+-/// ---
++    /// ---
++    /// purpose: 校验并构造 PlanId
++    /// params:
++    ///   raw: 原始 plan 名，首字符须字母数字，其余只许字母数字与下划线点横线，长度不超过 64
++    /// returns: 通过校验的 PlanId
++    /// errors: 不满足上述形状时返回 InvalidPlanId
++    /// contract_id: lifecycle.types.plan_id_parse
++    /// ---
+     /// `sanitize_plan_id`(`orchestrator/state.py:18`):正则校验,失败 → `Err`。
+     pub fn parse(raw: &str) -> Result<Self, LifecycleError> {
+         let mut chars = raw.chars();
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/types.rs:105:
+             )))
+         }
+     }
+-/// ---
+-/// purpose: 取 PlanId 的原始字符串
+-/// returns: 构造时保存的原文
+-/// ---
++    /// ---
++    /// purpose: 取 PlanId 的原始字符串
++    /// returns: 构造时保存的原文
++    /// ---
+     pub fn as_str(&self) -> &str {
+         &self.0
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/types.rs:131:
+ }
+ 
+ impl CoordinatorStartSummary {
+-/// ---
+-/// purpose: 把 coordinator 的 StartReport 投影成 lifecycle 报告用的摘要
+-/// params:
+-///   report: coordinator 启动返回的原始报告
+-/// returns: 摘要，status 已转成稳定 wire 字符串，binary_identity_relation 原样带出
+-/// ---
++    /// ---
++    /// purpose: 把 coordinator 的 StartReport 投影成 lifecycle 报告用的摘要
++    /// params:
++    ///   report: coordinator 启动返回的原始报告
++    /// returns: 摘要，status 已转成稳定 wire 字符串，binary_identity_relation 原样带出
++    /// ---
+     pub fn from_start_report(report: &crate::coordinator::StartReport) -> Self {
+         Self {
+             ok: report.ok,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/types.rs:191:
+ pub struct DisplaySessionName(pub String);
+ 
+ impl DisplaySessionName {
+-/// ---
+-/// purpose: 取 ghostty 派生 display session 名的原始字符串
+-/// returns: 内部保存的名字
+-/// ---
++    /// ---
++    /// purpose: 取 ghostty 派生 display session 名的原始字符串
++    /// returns: 内部保存的名字
++    /// ---
+     pub fn as_str(&self) -> &str {
+         &self.0
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/types.rs:406:
+ }
+ 
+ impl PlanCondition {
+-/// ---
+-/// purpose: 解析 plan 推进条件的封闭文法
+-/// params:
+-///   expr: any，或 report_result.<字段> == <值>，值须带单引号或双引号
+-/// returns: Any 或 FieldEq
+-/// errors: 前缀不对、缺等号、字段名非法或值未带引号时返回 InvalidPlan
+-/// contract_id: lifecycle.types.plan_condition_parse
+-/// ---
++    /// ---
++    /// purpose: 解析 plan 推进条件的封闭文法
++    /// params:
++    ///   expr: any，或 report_result.<字段> == <值>，值须带单引号或双引号
++    /// returns: Any 或 FieldEq
++    /// errors: 前缀不对、缺等号、字段名非法或值未带引号时返回 InvalidPlan
++    /// contract_id: lifecycle.types.plan_condition_parse
++    /// ---
+     /// 解析封闭条件文法。越界 raise `InvalidPlan`(`orchestrator/plan.py:_is_supported_condition`)。
+     pub fn parse(expr: &str) -> Result<Self, LifecycleError> {
+         let trimmed = expr.trim();
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/worker_command_context.rs:67:
+ }
+ 
+ impl WorkerCommandAgent {
+-/// ---
+-/// purpose: 从 spec 的 YAML agent 节点读出命令上下文
+-/// params:
+-///   agent: 单个 agent 的 YAML 节点
+-///   fallback_id: agent 节点没写 id 时的兜底 id
+-///   provider: 已解析的 provider
+-/// returns: 填好的 WorkerCommandAgent
+-/// errors: communication_mode 取值非法时返回 LifecycleError
+-/// contract_id: lifecycle.worker_command_agent.from_source
+-/// ---
++    /// ---
++    /// purpose: 从 spec 的 YAML agent 节点读出命令上下文
++    /// params:
++    ///   agent: 单个 agent 的 YAML 节点
++    ///   fallback_id: agent 节点没写 id 时的兜底 id
++    ///   provider: 已解析的 provider
++    /// returns: 填好的 WorkerCommandAgent
++    /// errors: communication_mode 取值非法时返回 LifecycleError
++    /// contract_id: lifecycle.worker_command_agent.from_source
++    /// ---
+     pub(crate) fn from_yaml(
+         agent: &crate::model::yaml::Value,
+         fallback_id: Option<&str>,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/worker_command_context.rs:131:
+         })
+     }
+ 
+-/// ---
+-/// purpose: 从 runtime state 的 JSON agent 节点读出命令上下文
+-/// params:
+-///   agent: 单个 agent 的 JSON 节点
+-///   fallback_id: agent 节点没写 id 时的兜底 id
+-///   provider: 已解析的 provider
+-/// returns: 填好的 WorkerCommandAgent
+-/// errors: communication_mode 取值非法时返回 LifecycleError
+-/// contract_id: lifecycle.worker_command_agent.from_source
+-/// ---
++    /// ---
++    /// purpose: 从 runtime state 的 JSON agent 节点读出命令上下文
++    /// params:
++    ///   agent: 单个 agent 的 JSON 节点
++    ///   fallback_id: agent 节点没写 id 时的兜底 id
++    ///   provider: 已解析的 provider
++    /// returns: 填好的 WorkerCommandAgent
++    /// errors: communication_mode 取值非法时返回 LifecycleError
++    /// contract_id: lifecycle.worker_command_agent.from_source
++    /// ---
+     pub(crate) fn from_json(
+         agent: &serde_json::Value,
+         fallback_id: Option<&str>,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/worker_command_context.rs:405:
+             communication_mode: CommunicationMode::default(),
+             dangerously_skip_permissions: false,
+         };
+-        let tools =
+-            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
++        let tools = resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
+         assert_eq!(
+             tools,
+             [
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/lifecycle/worker_command_context.rs:424:
+             declared_tools: Some(vec!["fs_*".to_string(), "@team-orchestrator".to_string()]),
+             ..agent
+         };
+-        let tools =
+-            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
++        let tools = resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
+         assert_eq!(tools, ["fs_list", "fs_read", "fs_write", "mcp_team"]);
+     }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/mcp_server/lifecycle_tools/state_status.rs:27:
+     let mut state = selected.state;
+     ensure_object(&mut state);
+     append_note(&mut state, note);
+-    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
+-        crate::state::repository::StateWriteIntent::McpUpdateStateNote {
+-            team_key: Some(&selected.team_key),
+-        },
+-        &state,
+-        |latest| {
+-            ensure_object(latest);
+-            append_note(latest, note);
+-        },
+-    )
+-    .map_err(tool_runtime_error)?;
++    crate::state::repository::StateRepository::new(&selected.run_workspace)
++        .save_reapplying(
++            crate::state::repository::StateWriteIntent::McpUpdateStateNote {
++                team_key: Some(&selected.team_key),
++            },
++            &state,
++            |latest| {
++                ensure_object(latest);
++                append_note(latest, note);
++            },
++        )
++        .map_err(tool_runtime_error)?;
+     let spec_path = selected
+         .spec_path
+         .ok_or_else(|| tool_runtime_error("active team spec not found for update_state"))?;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/mcp_server/lifecycle_tools/state_status.rs:69:
+     ensure_object(&mut state);
+     seed_legacy_team_key(&mut state, &selected.run_workspace, &selected.team_key);
+     append_note(&mut state, note);
+-    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
+-        crate::state::repository::StateWriteIntent::McpUpdateStateNote {
+-            team_key: Some(&selected.team_key),
+-        },
+-        &state,
+-        |latest| {
+-            ensure_object(latest);
+-            seed_legacy_team_key(latest, &selected.run_workspace, &selected.team_key);
+-            append_note(latest, note);
+-        },
+-    )
+-    .map_err(tool_runtime_error)?;
++    crate::state::repository::StateRepository::new(&selected.run_workspace)
++        .save_reapplying(
++            crate::state::repository::StateWriteIntent::McpUpdateStateNote {
++                team_key: Some(&selected.team_key),
++            },
++            &state,
++            |latest| {
++                ensure_object(latest);
++                seed_legacy_team_key(latest, &selected.run_workspace, &selected.team_key);
++                append_note(latest, note);
++            },
++        )
++        .map_err(tool_runtime_error)?;
+     let path = crate::lifecycle::restart::write_team_state(
+         &selected.run_workspace,
+         &crate::model::yaml::Value::Null,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/mcp_server/tests.rs:27:
+     static N: AtomicU64 = AtomicU64::new(0);
+     loop {
+         let n = N.fetch_add(1, Ordering::Relaxed);
+-        let p =
+-            std::env::temp_dir().join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
++        let p = std::env::temp_dir().join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
+         match std::fs::create_dir(&p) {
+             Ok(()) => return p,
+             Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/delivery.rs:3185:
+     #[test]
+     fn grok_paste_to_submit_floor_matches_cursor() {
+         let grok = paste_to_submit_floor_for_recipient(&state_with_provider("grok"), "w1");
+-        let cursor = paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
++        let cursor =
++            paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
+         assert_eq!(grok, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
+         assert_eq!(cursor, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
+         assert_eq!(grok, cursor);
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/mod.rs:98:
+ };
+ pub use peers::allow_peer_talk;
+ pub use persist::{
+-    persist_resolved_send, DeliveryBlocker, InitialDisposition, InternalSendKind,
+-    LogicalRecipient, PersistResolution, PersistedSend, ResolvedSendIntent, SendOrigin,
++    persist_resolved_send, DeliveryBlocker, InitialDisposition, InternalSendKind, LogicalRecipient,
++    PersistResolution, PersistedSend, ResolvedSendIntent, SendOrigin,
+ };
+ pub use results::{
+     collect, collect_for_team, collect_results_and_notify_watchers, report_result,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/mod.rs:114:
+ pub use types::{
+     ActivityStatus, AgentActivity, AlertType, CheckEvidence, CheckKind, CheckStatus,
+     ContractSuiteCheck, DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus,
+-    IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery,
+-    ProviderSdkCalls, ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload,
++    IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery, ProviderSdkCalls,
++    ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload,
+     TrustRetryPayload, WatcherNotice, WorkerRuntimeState, RESULT_DELIVERY_MAX_ATTEMPTS,
+     SEND_RETRY_MAX_ATTEMPTS, TRUST_RETRY_BACKOFF_SECONDS, TRUST_RETRY_MAX_ATTEMPTS,
+ };
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/presentation.rs:257:
+     })
+ }
+ 
+-pub(crate) fn normalize_presentation(value: Option<&Value>) -> (PresentationRequest, Option<String>) {
++pub(crate) fn normalize_presentation(
++    value: Option<&Value>,
++) -> (PresentationRequest, Option<String>) {
+     let Some(value) = value else {
+         return (PresentationRequest::default(), None);
+     };
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/tests/mod.rs:1:
+ #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+-use super::*;
+ use super::delivery::tmux_pane_width;
+ use super::helpers::fail_leader_delivery;
+ use super::selftest::evaluate_idle_behavior;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/tests/mod.rs:6:
+ use super::send::session_drift_refusal;
+ use super::watchers::{delivered_result_message, notify_result_watchers};
++use super::*;
+ use std::collections::BTreeMap;
+ use std::path::{Path, PathBuf};
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/tests/runtime.rs:3304:
+     };
+     assert_eq!(
+         row(&leader_message),
+-        (
+-            "submitted_pending_acceptance".to_string(),
+-            None,
+-            None
+-        )
++        ("submitted_pending_acceptance".to_string(), None, None)
+     );
+     assert_eq!(
+         row(&worker_message),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/messaging/tests/runtime.rs:3315:
+-        (
+-            "submitted_pending_acceptance".to_string(),
+-            None,
+-            None
+-        )
++        ("submitted_pending_acceptance".to_string(), None, None)
+     );
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/model/name_similarity.rs:258:
+     fn statu_still_maps_to_status() {
+         // Byte-lock the existing emit.rs behavior: `statu` → `status`
+         // with the shared helper.
+-        let out = rank(
+-            "statu",
+-            &[c("status"), c("send"), c("start"), c("restart")],
+-        );
++        let out = rank("statu", &[c("status"), c("send"), c("start"), c("restart")]);
+         assert_eq!(out[0], "status");
+     }
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/model/spec.rs:1066:
+             .iter()
+             .filter(|m| m.starts_with("/agents/dangerously_skip_permissions: missing"))
+             .collect();
+-        assert_eq!(missing.len(), 1, "exactly one missing-field error, got: {errors:#?}");
++        assert_eq!(
++            missing.len(),
++            1,
++            "exactly one missing-field error, got: {errors:#?}"
++        );
+         assert!(
+             missing[0].contains("`codex_implementer`"),
+             "must name the role id, got: {}",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/model/spec.rs:1083:
+     #[test]
+     fn test_invalid_dangerously_type_rejected() {
+         let text = include_str!("testdata/team.spec.yaml");
+-        let bad = text.replacen("    dangerously_skip_permissions: false\n", "    dangerously_skip_permissions: \"yes\"\n", 1);
++        let bad = text.replacen(
++            "    dangerously_skip_permissions: false\n",
++            "    dangerously_skip_permissions: \"yes\"\n",
++            1,
++        );
+         assert_ne!(text, bad, "fixture must contain the field");
+         let spec = yaml::loads(&bad).unwrap();
+         let errors = all_spec_errors(&spec);
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/model/spec.rs:1091:
+             .iter()
+             .filter(|m| m.starts_with("/agents/dangerously_skip_permissions: must be a boolean"))
+             .collect();
+-        assert_eq!(type_errs.len(), 1, "exactly one type error, got: {errors:#?}");
++        assert_eq!(
++            type_errs.len(),
++            1,
++            "exactly one type error, got: {errors:#?}"
++        );
+         assert!(
+             type_errs[0].contains("`codex_implementer`"),
+             "must name the role id, got: {}",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/model/spec.rs:1148:
+         //   fork-agent(fork_agent.rs:96 validate_spec)
+         //   start-agent / reset-agent(操作已编译 spec,团队创建时经 compile_team 校验)
+         // 验证 compile_team 对缺字段的角色文档 fail-loud。
+-        let team = std::env::temp_dir().join(format!(
+-            "ta-spec-7trigger-{}",
+-            std::process::id()
+-        ));
++        let team = std::env::temp_dir().join(format!("ta-spec-7trigger-{}", std::process::id()));
+         let _ = std::fs::remove_dir_all(&team);
+         std::fs::create_dir_all(team.join("agents")).unwrap();
+         std::fs::write(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/model/spec.rs:1165:
+             "---\nname: w\nrole: Worker\nprovider: codex\ntools:\n  - mcp_team\n---\n\nw.\n",
+         )
+         .unwrap();
+-        let err = crate::compiler::compile_team(&team).unwrap_err().to_string();
++        let err = crate::compiler::compile_team(&team)
++            .unwrap_err()
++            .to_string();
+         assert!(
+             err.contains("missing front matter field dangerously_skip_permissions")
+                 && err.contains("This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed."),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/platform/mod.rs:1:
+-
+ pub mod argv;
+ pub mod errors;
+ pub mod file_lock;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/adapter.rs:943:
+             Provider::CursorAgent => {
+                 let Some(session_id) = session_id else {
+                     return Err(ProviderError::ResumeUnavailable(
+-                        "cursor_agent resume requires chatId; empty --resume is forbidden (picker)".to_string(),
++                        "cursor_agent resume requires chatId; empty --resume is forbidden (picker)"
++                            .to_string(),
+                     ));
+                 };
+                 let raw = session_id.as_str();
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/adapters/cursor_agent.rs:75:
+     // launch 写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`。
+     // mcp_config 也不入 argv（无 --mcp-config）。launch 写 `.cursor/mcp.json`
+     // 并 `agent mcp enable team_orchestrator`。这里收下以免静默丢弃。
+-    let _ = (adapter, auth_mode, mcp_config, managed_mcp_config, system_prompt);
++    let _ = (
++        adapter,
++        auth_mode,
++        mcp_config,
++        managed_mcp_config,
++        system_prompt,
++    );
+     argv.push("--workspace".to_string());
+     argv.push("{workspace}".to_string());
+     Ok(argv)
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/adapters/mod.rs:27:
+ pub(crate) mod codex;
+ pub(crate) mod copilot;
+ pub(crate) mod copilot_fork;
++pub(crate) mod cursor_agent;
+ pub(crate) mod fake;
+ pub(crate) mod grok;
+-pub(crate) mod cursor_agent;
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/bypass_flags.rs:43:
+ /// TODO(0.6.0): remove
+ pub(crate) fn detect_bypass_flag_in_argv(argv_tokens: &[String]) -> Option<&'static str> {
+     for token in argv_tokens {
+-        if token == "--dangerously-skip-permissions"
+-            || token == "--dangerously-skip-permission"
+-        {
++        if token == "--dangerously-skip-permissions" || token == "--dangerously-skip-permission" {
+             return Some("--dangerously-skip-permissions");
+         }
+         if token == "--dangerously-bypass-approvals-and-sandbox" {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/bypass_flags.rs:98:
+             provider_bypass_flag(Provider::Grok),
+             Some("--always-approve")
+         );
+-        assert_eq!(
+-            provider_bypass_flag(Provider::CursorAgent),
+-            Some("--force")
+-        );
++        assert_eq!(provider_bypass_flag(Provider::CursorAgent), Some("--force"));
+     }
+ 
+     #[test]
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/classify.rs:215:
+         Provider::Claude | Provider::ClaudeCode => claude_latest_explicit_error_fact(record),
+         // C-3-5 cr verdict: copilot N35 通知不依赖 turn-state 分类;一期 Unknown,
+         // 与 GeminiCli/Fake 同精神。二期接 sqlite turns 表后再回填。
+-        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
++        Provider::Copilot
++        | Provider::Grok
++        | Provider::CursorAgent
++        | Provider::GeminiCli
+         | Provider::Fake => None,
+     }
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/classify.rs:379:
+             Provider::Codex => codex_lifecycle_fact(record),
+             // C-3-1 cr verdict: copilot lifecycle facts 一期不导出(classify→None,
+             // Unknown);二期读 sqlite turns 表(turn_index/assistant_response)。
+-            Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
++            Provider::Copilot
++            | Provider::Grok
++            | Provider::CursorAgent
++            | Provider::GeminiCli
+             | Provider::Fake => None,
+         })
+         .collect()
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/faults.rs:46:
+     match provider {
+         Provider::Claude | Provider::ClaudeCode => claude_fault_fact(record),
+         Provider::Codex => codex_fault_fact(record),
+-        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
++        Provider::Copilot
++        | Provider::Grok
++        | Provider::CursorAgent
++        | Provider::GeminiCli
+         | Provider::Fake => None,
+     }
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/mod.rs:42:
+ // 复用 model::enums 的 Provider/AuthMode,并 re-export(下游惯于 `provider::Provider` 取用)。
+ pub use crate::model::enums::{AuthMode, Provider};
+ 
+-/// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
+-pub(crate) mod bypass_flags;
+ pub mod adapter;
+ /// 0.4.x decoupling step 2: per-provider command builders + permission/auth
+ /// helpers split out of `adapter.rs`. Pure extraction — behavior unchanged.
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/mod.rs:50:
+ pub(crate) mod adapters;
+ pub mod approvals;
++/// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
++pub(crate) mod bypass_flags;
+ pub mod classify;
+ pub mod faults;
+ pub mod session;
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/session/context_fork.rs:69:
+     match provider {
+         Provider::Claude | Provider::ClaudeCode => Duration::from_secs(45),
+         Provider::Codex => Duration::from_secs(10),
+-        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
++        Provider::Copilot
++        | Provider::Grok
++        | Provider::CursorAgent
++        | Provider::GeminiCli
+         | Provider::Fake => Duration::from_secs(5),
+     }
+ }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/provider/session_scan/cursor.rs:56:
+ }
+ 
+ fn first_present_dir(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+-    candidates.into_iter().find(|dir| cursor_session_archive_present(dir))
++    candidates
++        .into_iter()
++        .find(|dir| cursor_session_archive_present(dir))
+ }
+ 
+ /// ---
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/persist.rs:2003:
+                 "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
+             },
+         });
+-        save_runtime_state_with_lifecycle_topology_authority(
+-            &ws,
+-            &incoming,
+-            "team-a",
+-            &["target"],
+-        )
+-        .unwrap();
++        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
++            .unwrap();
+         let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
+         assert!(
+             target.get("pane_id").is_none(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/projection.rs:1255:
+         let resolved = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
+         assert_eq!(resolved.canonical_team_key, "alpha");
+         assert_eq!(
+-            resolved.state.get("active_team_key").and_then(Value::as_str),
++            resolved
++                .state
++                .get("active_team_key")
++                .and_then(Value::as_str),
+             Some("alpha")
+         );
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository/intent.rs:1:
+-
+ use super::StateWriteIntent;
+ 
+ impl<'a> StateWriteIntent<'a> {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository/tests.rs:1:
+-
+ use super::{reapply_scope, ReapplyScope, StateWriteIntent};
+ 
+ #[test]
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository.rs:41:
+ // `save_team_scoped_state(` tokens that the governance scanner counts.
+ #[allow(unused_imports)]
+ use super::persist::{
+-    load_runtime_state as helper_load_workspace,
+-    runtime_state_path as helper_workspace_path, save_runtime_state as helper_write_root,
++    load_runtime_state as helper_load_workspace, runtime_state_path as helper_workspace_path,
++    save_runtime_state as helper_write_root,
+     save_runtime_state_reapplying_after_conflict as helper_write_root_reapply,
+     save_runtime_state_with_deleted_agents as helper_write_root_with_deleted_agents,
+     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository.rs:90:
+     /// Load the canonical workspace document without running read-time
+     /// migrations. `None` preserves the legacy raw-reader distinction between
+     /// a missing file and a present empty/default document.
+-    pub fn load_workspace_if_exists_without_migrations(
+-        &self,
+-    ) -> Result<Option<Value>, StateError> {
++    pub fn load_workspace_if_exists_without_migrations(&self) -> Result<Option<Value>, StateError> {
+         if !helper_workspace_path(self.workspace).exists() {
+             return Ok(None);
+         }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository.rs:99:
+         let text = std::fs::read_to_string(helper_workspace_path(self.workspace))?;
+-        serde_json::from_str(&text).map(Some).map_err(StateError::from)
++        serde_json::from_str(&text)
++            .map(Some)
++            .map_err(StateError::from)
+     }
+ 
+     ///
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository.rs:308:
+         // StartAgent - the launch add-agent tail lands via
+         // `save_team_scoped_state_with_lifecycle_topology_authority` today.
+         StateWriteIntent::StartAgent { team_key, .. } => {
+-            helper_write_team_scoped_with_lifecycle_topology_authority(workspace, state, team_key, &[])
++            helper_write_team_scoped_with_lifecycle_topology_authority(
++                workspace,
++                state,
++                team_key,
++                &[],
++            )
+         }
+         // StopAgent uses the legacy helper family
+         // `save_team_scoped_state_with_lifecycle_topology_authority`,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/state/repository.rs:464:
+                 owner_team_id: Some(_),
+             }
+             | StateWriteIntent::CoordinatorTick { .. }
+-            | StateWriteIntent::McpUpdateStateNote {
+-                team_key: Some(_),
+-            }
++            | StateWriteIntent::McpUpdateStateNote { team_key: Some(_) }
+     ) {
+         ReapplyScope::Team
+     } else {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/src/transport/test_support.rs:570:
+     ) -> Result<(), TransportError> {
+         self.with_state(|state| {
+             state.calls.push("set_window_option");
+-            state.window_options.push((option.to_string(), value.to_string()));
++            state
++                .window_options
++                .push((option.to_string(), value.to_string()));
+         });
+         Ok(())
+     }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/clone_agent_preserves_source_tools.rs:288:
+ 
+     let source_role = case.workspace.join("agents").join(format!("{SOURCE}.md"));
+     let source_tools = role_tools(&source_role);
+-    assert_eq!(source_tools.len(), SOURCE_TOOLS.len(), "fixture source tools");
++    assert_eq!(
++        source_tools.len(),
++        SOURCE_TOOLS.len(),
++        "fixture source tools"
++    );
+ 
+     let out = case.run(&[
+         "clone-agent",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/debt_sweep_0544_contract.rs:672:
+             child,
+         }
+     }
+-
+ }
+ 
+ impl Drop for ProcessTree {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs:2111:
+             }
+             if !handbook_commands.iter().any(|documented| {
+                 documented == &root || documented.starts_with(&format!("{root} "))
+-            })
+-            {
++            }) {
+                 return None;
+             }
+             Some(root)
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e/cases/lnch_001_quick_start_basic.rs:39:
+             1,
+         );
+     }
+-    assert!(twin_observation.observe(
+-        out.stdout.contains("status: leader_receiver_unbound")
+-            && out.stdout.contains("\"all_workers_spawned\": true")),
++    assert!(
++        twin_observation.observe(
++            out.stdout.contains("status: leader_receiver_unbound")
++                && out.stdout.contains("\"all_workers_spawned\": true")
++        ),
+         "quick-start did not launch the team. exit={} stdout={} stderr={}",
+         out.exit_code,
+         out.stdout,
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e/cases/lnch_001_quick_start_basic.rs:67:
+             .stdout
+             .replacen("session_name: ", "negative_twin_removed", 1);
+     }
+-    assert!(twin_observation.observe(
+-        out.stdout
+-            .contains(&format!("session_name: {}", worker_session_name(team_id)))),
++    assert!(
++        twin_observation.observe(
++            out.stdout
++                .contains(&format!("session_name: {}", worker_session_name(team_id)))
++        ),
+         "public output must expose the canonical session name: {}",
+         out.stdout
+     );
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e/cases/lnch_003_missing_profile.rs:49:
+         !ws.state_json_path().exists(),
+         "state.json must not be created when validation fails"
+     );
+-
+ }
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:52:
+ fn require_codex_binary() -> bool {
+     let found = std::env::var_os("PATH")
+         .map(|p| {
+-            std::env::split_paths(&p).any(|dir| {
+-                dir.join("codex").exists() || dir.join("codex-cli").exists()
+-            })
++            std::env::split_paths(&p)
++                .any(|dir| dir.join("codex").exists() || dir.join("codex-cli").exists())
+         })
+         .unwrap_or(false);
+     if !found {
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:79:
+     let ws = mini_team_ws("bypass-e2e-mini");
+     let out = run_ta(
+         &ws,
+-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
++        &[
++            "quick-start",
++            ".team/current",
++            "--yes",
++            "--no-display",
++            "--json",
++        ],
+     );
+     // quick-start 在无 leader receiver 时 ok=false(launch readiness 要求 attach),
+     // 但 state 已落盘——断言 state 写入即可,不 assert 退出码。
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:117:
+     let ws = mini_team_ws("bypass-e2e-drift");
+     let out = run_ta(
+         &ws,
+-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
++        &[
++            "quick-start",
++            ".team/current",
++            "--yes",
++            "--no-display",
++            "--json",
++        ],
+     );
+     let _ = out;
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:124:
+     // 把 worker_true 的 dangerously_skip_permissions 从 true 改成 false(声明面)。
+-    let role_path = ws
+-        .path()
+-        .join(".team/current/agents/worker_true.md");
++    let role_path = ws.path().join(".team/current/agents/worker_true.md");
+     let body = std::fs::read_to_string(&role_path).unwrap();
+     let body = body.replace(
+         "dangerously_skip_permissions: true",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:167:
+     let ws = mini_team_ws("bypass-e2e-force");
+     let out = run_ta(
+         &ws,
+-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
++        &[
++            "quick-start",
++            ".team/current",
++            "--yes",
++            "--no-display",
++            "--json",
++        ],
+     );
+     let _ = out;
+ 
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:174:
+     // worker_false:false → true。
+-    let role_path = ws
+-        .path()
+-        .join(".team/current/agents/worker_false.md");
++    let role_path = ws.path().join(".team/current/agents/worker_false.md");
+     let body = std::fs::read_to_string(&role_path).unwrap();
+     let body = body.replace(
+         "dangerously_skip_permissions: false",
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e_bypass_single_source.rs:210:
+     let ws = mini_team_ws("bypass-e2e-flag");
+     let out = run_ta(
+         &ws,
+-        &["quick-start", ".team/current", "--yes", "--no-display", "--json"],
++        &[
++            "quick-start",
++            ".team/current",
++            "--yes",
++            "--no-display",
++            "--json",
++        ],
+     );
+     let _ = out;
+     let state = ws.read_state();
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_agent_five_shapes_red.rs:455:
+     );
+     // A `//` inside a string literal must not cost us the rest of the line:
+     // ignoring whitespace is allowed, dropping code is not.
+-    let url_line = "let d = \"https://internal.example/agents\"; let agent = selected.state.get(\"agents\")";
++    let url_line =
++        "let d = \"https://internal.example/agents\"; let agent = selected.state.get(\"agents\")";
+     assert!(
+         code_no_ws(url_line).contains("state.get(\"agents\")"),
+         "a `//` inside a string literal must not hide the state-authority shape"
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_capability_behavior.rs:62:
+     )
+     .unwrap();
+     let spec = team_agent::compiler::compile_team(&ws).expect("compile");
+-    std::fs::write(ws.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
++    std::fs::write(
++        ws.join("team.spec.yaml"),
++        team_agent::model::yaml::dumps(&spec),
++    )
++    .unwrap();
+     team_agent::state::persist::save_runtime_state(
+         &ws,
+         &json!({
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_capability_behavior.rs:129:
+ fn grok_subscription_injects_slash_fork_and_accepts_forked_from() {
+     let ws = seat_ws("grok-sub", "grok", "subscription");
+     let (result, injected) = fork_on(&ws, "Session new (forked from old-id)\n");
+-    assert!(result.is_ok(), "grok subscription must take in-window path: {result:?}");
++    assert!(
++        result.is_ok(),
++        "grok subscription must take in-window path: {result:?}"
++    );
+     assert!(
+         injected.iter().any(|t| t == "/fork"),
+         "must inject official /fork via set-buffer, got {injected:?}"
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_contracts_after_rebuild.rs:62:
+     )
+     .unwrap();
+     let spec = team_agent::compiler::compile_team(&ws).expect("compile");
+-    std::fs::write(ws.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
++    std::fs::write(
++        ws.join("team.spec.yaml"),
++        team_agent::model::yaml::dumps(&spec),
++    )
++    .unwrap();
+     team_agent::state::persist::save_runtime_state(
+         &ws,
+         &json!({
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_contracts_after_rebuild.rs:114:
+             );
+             let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
+             assert!(
+-                state
+-                    .get("agents")
+-                    .and_then(|a| a.get("seer2"))
+-                    .is_some(),
++                state.get("agents").and_then(|a| a.get("seer2")).is_some(),
+                 "if --as is accepted, seer2 must be an addressable agent row"
+             );
+         }
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_contracts_after_rebuild.rs:149:
+         None,
+         &tx,
+     );
+-    assert!(result.is_ok(), "same-name in-place fork must succeed: {result:?}");
++    assert!(
++        result.is_ok(),
++        "same-name in-place fork must succeed: {result:?}"
++    );
+     let events = ws.join(".team").join("logs").join("events.jsonl");
+     let text = std::fs::read_to_string(&events).unwrap_or_default();
+     assert!(
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_contracts_after_rebuild.rs:167:
+ /// After the fix the token must be gone from fork_agent.rs.
+ #[test]
+ fn pending_context_fork_dead_arm_is_gone() {
+-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+-        .join("src/lifecycle/launch/fork_agent.rs");
++    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/launch/fork_agent.rs");
+     let src = std::fs::read_to_string(&path).expect("read fork_agent.rs (positive control)");
+     assert!(
+         src.contains("forked from"),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/fork_pending_verified_boundaries_red.rs:368:
+         .find("fn apply_captured_session")
+         .expect("apply_captured_session not found after positive control");
+     let apply_tail = &capture[apply_start..];
+-    let apply_end = apply_tail
+-        .find("\nfn ")
+-        .unwrap_or(apply_tail.len());
++    let apply_end = apply_tail.find("\nfn ").unwrap_or(apply_tail.len());
+     let apply_body = &apply_tail[..apply_end];
+     assert!(
+         !apply_body.contains("pending_context_fork"),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/inject_exits_copy_mode_before_submit.rs:148:
+     // scroll-up 让 copy-mode 确定进入(probe 同款)。
+     let _ = tmux(
+         &fixture.socket,
+-        &["send-keys", "-X", "-N", "1", "-t", &fixture.pane, "scroll-up"],
++        &[
++            "send-keys",
++            "-X",
++            "-N",
++            "1",
++            "-t",
++            &fixture.pane,
++            "scroll-up",
++        ],
+     );
+     std::thread::sleep(std::time::Duration::from_millis(300));
+     // 确认 copy-mode 已进入(前置条件)。
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/inject_exits_copy_mode_before_submit.rs:155:
+     let in_mode = tmux(
+         &fixture.socket,
+-        &["display-message", "-p", "-t", &fixture.pane, "#{pane_in_mode}"],
++        &[
++            "display-message",
++            "-p",
++            "-t",
++            &fixture.pane,
++            "#{pane_in_mode}",
++        ],
+     );
+     assert_eq!(
+         String::from_utf8_lossy(&in_mode.stdout).trim(),
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/perf_tick_red.rs:52:
+ use std::sync::Arc;
+ 
+ use serde_json::{json, Value};
+-use team_agent::coordinator::{
+-    observe_runtime, Coordinator, ProviderRegistry, WorkspacePath,
+-};
++use team_agent::coordinator::{observe_runtime, Coordinator, ProviderRegistry, WorkspacePath};
+ use team_agent::model::enums::Provider;
+ use team_agent::model::ids::AgentId;
+ use team_agent::provider::{get_adapter, CaptureSessionContext, ProviderAdapter};

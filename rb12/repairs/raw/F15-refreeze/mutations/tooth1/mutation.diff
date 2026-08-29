@@ -1,0 +1,13 @@
+diff --git a/crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs b/crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs
+index 317c3785..6021d72a 100644
+--- a/crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs
++++ b/crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs
+@@ -64,7 +64,7 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
+     );
+     let compact = launch.split_whitespace().collect::<String>();
+     assert!(
+-        compact.contains(r#"["quick-start",".team/current"]"#),
++        compact.contains(r#"["quick-start",".team/not-current"]"#),
+         "TOOTH-1 RED: `{LNCH_CASE}` never executes the SKILL.md argv verbatim: \
+          `team-agent quick-start .team/current` (no --workspace/--team-id)."
+     );

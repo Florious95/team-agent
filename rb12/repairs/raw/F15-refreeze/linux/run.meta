@@ -1,0 +1,2 @@
+command=cargo test -p team-agent --locked --test e2e <tooth1> -- --exact --nocapture --test-threads=1; then <tooth2> same
+run_exit_code=0

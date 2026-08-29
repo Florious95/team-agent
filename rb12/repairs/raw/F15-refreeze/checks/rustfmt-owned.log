@@ -1,0 +1,10 @@
+Diff in /Volumes/nvme/tmp/team-agent-f15-gate061/crates/team-agent/tests/e2e/cases/gate_hole_061_red.rs:2111:
+             }
+             if !handbook_commands.iter().any(|documented| {
+                 documented == &root || documented.starts_with(&format!("{root} "))
+-            })
+-            {
++            }) {
+                 return None;
+             }
+             Some(root)
