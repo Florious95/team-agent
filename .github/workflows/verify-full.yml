@@ -110,13 +110,13 @@ jobs:
           A3_SHA='a1bd011defa7ae4beec784a663c6bfa28350973f'
           A3_TREE='eee65a25586c7c439221931742b44a590ef3affc'
           OLD_F14_SHA='312d19a38330cf9389fa69f915709f6ec7477b1e'
-          CURRENT_F14_SHA='5673cdb041d8afe136d18f8c27cba2372d4cc507'
+          CURRENT_F14_SHA='221af22d4012c458cbaf589a48ebfc8ba0cc0545'
           FRAMEWORK_PATH='crates/team-agent/tests/e2e/framework.rs'
           OLD_FRAMEWORK_BLOB='a1501e1931cc705ddfef9b14154bba1a24388764'
-          CURRENT_FRAMEWORK_BLOB='9585f6ef27c426792f65cd4c81da6f91880749dd'
+          CURRENT_FRAMEWORK_BLOB='003cc15da442bc39a1b01e9bfa128ec97de72e2c'
           OLD_FRAMEWORK_SHA256='0fc9964f3f8c6ab2f90d0ff6f1498bcba00ecdb01d3d4ed580a3e46b98ffcffd'
-          CURRENT_FRAMEWORK_SHA256='62950ead9f3a647971c1cda358a5da6211de817cc4821c4e2b4ed776a87e88f0'
-          DIAGNOSTIC_TREE='b7a4a7030ddf146109bd8f99504378b7568c02a5'
+          CURRENT_FRAMEWORK_SHA256='44eaf34a0b391247fe40550037878e6de07f1fa351241e4d0d80f2d84120ba6a'
+          DIAGNOSTIC_TREE='46e662eee9a5a5d96374ab1d7fd793af749dc00e'
 
           target_sha="$(printf '%s' "${TARGET_SHA}" | tr '[:upper:]' '[:lower:]')"
           actual_sha="$(git rev-parse HEAD)"
