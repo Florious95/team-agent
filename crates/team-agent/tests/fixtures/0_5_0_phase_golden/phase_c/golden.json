@@ -257,7 +257,7 @@
         "-c",
         "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
         "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"\"",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
         "-c",
         "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
         "-c",
