@@ -1,3 +1,18 @@
+//! ---
+//! purpose: loud coordinator ensure contract with an isolated stable-readiness fixture
+//! contract:
+//!   provides:
+//!     - missing/stale identity loud ensure and honest pending delivery assertions
+//!     - read-only coordinator health and dirty-topology refusal assertions
+//!   depends:
+//!     - tests::support::hermetic::HermeticTestEnv
+//!     - coordinator canonical health/start APIs
+//! boundary:
+//!   - fixture owns its tmux socket and never touches ambient tmux resources
+//!   - no delivered claim is inferred from queue persistence
+//! maturity: wired
+//! ---
+//!
 //! 0.5.22 loud coordinator ensure RED contracts (te-owned).
 //!
 //! References:
@@ -18,14 +33,16 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::coordinator::{
-    coordinator_health, coordinator_meta_path, coordinator_pid_path, stop_coordinator, Pid,
-    WorkspacePath, PROTOCOL_VERSION,
+    coordinator_health, coordinator_log_path, coordinator_meta_path, coordinator_pid_path,
+    stop_coordinator, Pid, WorkspacePath, PROTOCOL_VERSION,
 };
 use team_agent::db::schema::open_db;
 use team_agent::event_log::EventLog;
@@ -55,9 +72,34 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
     assert_no_delivered_rows(&fixture.root, "R1 RED");
     let ensured_pid = response_coordinator_pid(&body, "R1 RED");
     assert_ensure_event(&fixture.root, "missing", None, Some(ensured_pid), "R1 RED");
+    append_failure_facts(
+        &fixture,
+        "readiness_race",
+        ensured_pid,
+        json!({
+            "decision": "stable_same_pid",
+            "samples_required": 3,
+            "health": health_facts(&coordinator_health(&fixture.workspace)),
+        }),
+    );
+    let health = coordinator_health(&fixture.workspace);
     assert!(
-        coordinator_health(&fixture.workspace).ok,
+        health.ok,
         "R1 RED: successful loud ensure must leave current coordinator healthy; body={body}"
+    );
+    assert_eq!(
+        health.pid.map(|pid| pid.get()),
+        Some(ensured_pid),
+        "R1 RED: readiness must still describe the coordinator started by this ensure; body={body}"
+    );
+    assert!(
+        health.process_running
+            && health.metadata_ok
+            && health.wire_metadata_ok
+            && health.binary_identity_ok
+            && health.service_available
+            && health.schema.ok,
+        "R1 RED: same-PID coordinator must satisfy every readiness component; health={health:?} body={body}"
     );
 }
 
@@ -259,8 +301,49 @@ impl LoudEnsureFixture {
         let root = env.workspace(tag);
         std::fs::create_dir_all(team_agent::model::paths::runtime_dir(&root))
             .expect("create runtime dir");
+        let socket_root = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let socket = socket_root.join(format!(
+            "ta43-loud-{}-{}.sock",
+            std::process::id(),
+            root.file_name()
+                .expect("fixture root name")
+                .to_string_lossy()
+        ));
+        let socket_text = socket.to_str().expect("fixture socket utf8");
+        let tmux = Command::new("tmux")
+            .args([
+                "-S",
+                socket_text,
+                "new-session",
+                "-d",
+                "-s",
+                "loud-ensure-session",
+            ])
+            .output()
+            .expect("spawn isolated fixture tmux server");
+        assert!(
+            tmux.status.success(),
+            "isolated fixture tmux server must start: {}",
+            String::from_utf8_lossy(&tmux.stderr)
+        );
+        env.register_owned_tmux_socket(&socket);
         let _ = MessageStore::open(&root).expect("create message store");
-        save_runtime_state(&root, &state(&root)).expect("save runtime state");
+        let mut runtime_state = state(&root);
+        if runtime_state
+            .get("tmux_endpoint")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            runtime_state["tmux_endpoint"] = json!(socket_text);
+            runtime_state["tmux_socket"] = json!(socket_text);
+        }
+        save_runtime_state(&root, &runtime_state).expect("save runtime state");
         Self {
             _env: env,
             _binary_match_env: binary_match_env,
@@ -657,6 +740,99 @@ fn events(root: &Path) -> Vec<Value> {
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect()
+}
+
+fn append_failure_facts(
+    fixture: &LoudEnsureFixture,
+    classification: &str,
+    child_pid: u32,
+    decision: Value,
+) {
+    let metadata_path = coordinator_meta_path(&fixture.workspace);
+    let metadata = std::fs::read_to_string(&metadata_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let log_path = coordinator_log_path(&fixture.workspace);
+    let child_alive = fixture.pid_alive(child_pid);
+    let facts = json!({
+        "schema": "cg5-loud-ensure-facts-v1",
+        "classification": classification,
+        "workspace": fixture.root,
+        "child": {
+            "pid": child_pid,
+            "alive_by_kill_zero": child_alive,
+            "meta_path": metadata_path,
+            "meta": metadata,
+            "event_path": fixture.root.join(".team/logs/events.jsonl"),
+            "events": events(&fixture.root),
+            "stderr_path": log_path,
+            "stderr_capture": std::fs::read_to_string(&log_path).ok(),
+            "exit": {
+                "observed_dead": !child_alive,
+                "exit_code": Value::Null,
+                "status_source": "detached_child_kill_zero; wait status unavailable"
+            },
+            "cgroup": cgroup_facts(child_pid),
+        },
+        "decision": decision,
+    });
+    let path = evidence_path();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("open CG5 evidence {}: {error}", path.display()));
+    writeln!(file, "{facts}")
+        .unwrap_or_else(|error| panic!("write CG5 evidence {}: {error}", path.display()));
+}
+
+fn evidence_path() -> PathBuf {
+    std::env::var_os("TEAM_AGENT_CG5_EVIDENCE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let root = if cfg!(target_os = "macos") {
+                PathBuf::from("/private/tmp")
+            } else {
+                std::env::temp_dir()
+            };
+            root.join("cg5-loud-ensure-failure-facts.jsonl")
+        })
+}
+
+fn health_facts(health: &team_agent::coordinator::HealthReport) -> Value {
+    json!({
+        "ready": health.ok,
+        "status": format!("{:?}", health.status).to_ascii_lowercase(),
+        "pid": health.pid.map(|pid| pid.get()),
+        "process_running": health.process_running,
+        "metadata_ok": health.metadata_ok,
+        "wire_metadata_ok": health.wire_metadata_ok,
+        "binary_identity_ok": health.binary_identity_ok,
+        "binary_identity_relation": health.binary_identity_relation.as_str(),
+        "service_available": health.service_available,
+        "metadata_mismatch_reason": health.metadata_mismatch_reason,
+        "schema_ok": health.schema.ok,
+    })
+}
+
+fn cgroup_facts(pid: u32) -> Value {
+    #[cfg(target_os = "linux")]
+    {
+        let path = format!("/proc/{pid}/cgroup");
+        return json!({
+            "available": true,
+            "path": path,
+            "contents": std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok(),
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        json!({
+            "available": false,
+            "reason": "cgroup facts are not exposed on this platform",
+        })
+    }
 }
 
 fn parse_json_stdout(label: &str, output: Output) -> Value {
