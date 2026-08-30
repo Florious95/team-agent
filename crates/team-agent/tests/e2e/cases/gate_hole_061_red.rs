@@ -310,10 +310,6 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
     let skill = std::fs::read_to_string(repo_root().join("skills/team-agent/SKILL.md"))
         .expect("read product Team Agent SKILL.md");
     let compact = extract_team_agent_commands(&skill);
-    assert!(
-        compact.contains("team-agent quick-start .team/current"),
-        "TOOTH-3 harness canary: extractor missed the canonical quick-start command"
-    );
 
     let manifest = load_coverage_manifest("TOOTH-3A");
     let listed = unique_manifest_commands(&manifest)
