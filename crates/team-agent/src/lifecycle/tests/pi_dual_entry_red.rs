@@ -424,6 +424,17 @@ fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
                             "session_name": live_session,
                             "tmux_socket": live_socket
                         }
+                    },
+                    "sibling": {
+                        "status": "alive",
+                        "team_dir": live.join("sibling"),
+                        "session_name": null,
+                        "agents": {},
+                        "leader_receiver": {
+                            "status": "attached",
+                            "session_name": "team-agent-leader-pi-sibling",
+                            "tmux_socket": "/private/tmp/tmux-501/ta-live-sibling"
+                        }
                     }
                 }
             }),
@@ -513,6 +524,106 @@ esac
         assert!(
             !tmux_argv.contains(&parent_socket),
             "public add must not derive transport from the scratch parent: {tmux_argv}"
+        );
+
+        let added_state = crate::state::persist::load_runtime_state(&live)
+            .expect("load public add state for send/status");
+        assert_eq!(
+            added_state
+                .pointer("/teams/current/session_name")
+                .and_then(serde_json::Value::as_str),
+            Some(live_session),
+            "dynamic add must persist the selected receiver session for shared send/status routing"
+        );
+        assert!(
+            added_state
+                .pointer("/teams/sibling/session_name")
+                .is_some_and(serde_json::Value::is_null),
+            "selected-team routing must not borrow or rewrite a sibling session: {added_state}"
+        );
+        assert_eq!(
+            added_state
+                .pointer("/teams/sibling/leader_receiver/session_name")
+                .and_then(serde_json::Value::as_str),
+            Some("team-agent-leader-pi-sibling")
+        );
+
+        let mut old_state = added_state.clone();
+        old_state["teams"]["current"]["session_name"] = serde_json::Value::Null;
+        crate::state::persist::save_runtime_state(&live, &old_state)
+            .expect("seed controlled old null-session view");
+        let blocked = tools
+            .send_message(
+                &crate::messaging::MessageTarget::Single("mate".to_string()),
+                "controlled old session routing probe",
+                None,
+                None,
+                None,
+            )
+            .expect("old public send must return a structured refusal")
+            .to_value();
+        assert_eq!(blocked.get("ok"), Some(&json!(false)), "{blocked}");
+        assert_eq!(
+            blocked.get("reason"),
+            Some(&json!("tmux_target_missing")),
+            "the old null-session view must fail at real send target resolution: {blocked}"
+        );
+        let old_status = tools
+            .get_team_status()
+            .expect("old public status must return an honest dead view");
+        assert_eq!(
+            old_status
+                .fields
+                .get("agents")
+                .and_then(|agents| agents.get("mate"))
+                .and_then(|mate| mate.get("stale_reason"))
+                .and_then(serde_json::Value::as_str),
+            Some("pane_dead"),
+            "the old null-session view must fail at real status liveness resolution: {:?}",
+            old_status.fields
+        );
+        crate::state::persist::save_runtime_state(&live, &added_state)
+            .expect("restore corrected selected-team session");
+
+        let sent = tools
+            .send_message(
+                &crate::messaging::MessageTarget::Single("mate".to_string()),
+                "session routing probe",
+                None,
+                None,
+                None,
+            )
+            .expect("public send must resolve the added mate")
+            .to_value();
+        assert_eq!(sent.get("status"), Some(&json!("accepted")), "{sent}");
+        assert!(
+            sent.get("message_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message_id| message_id.starts_with("msg_")),
+            "blocked target resolution must not be reported as a successful send: {sent}"
+        );
+
+        let status = tools
+            .get_team_status()
+            .expect("public status must resolve the selected owner session");
+        assert_eq!(
+            status
+                .fields
+                .get("session_name")
+                .and_then(serde_json::Value::as_str),
+            Some(live_session),
+            "status must report the selected receiver session"
+        );
+        assert_ne!(
+            status
+                .fields
+                .get("agents")
+                .and_then(|agents| agents.get("mate"))
+                .and_then(|mate| mate.get("stale_reason"))
+                .and_then(serde_json::Value::as_str),
+            Some("pane_dead"),
+            "the live owner-session mate must not be reported pane_dead: {:?}",
+            status.fields
         );
     }
 

@@ -167,6 +167,24 @@ pub(super) fn upsert_agent_state_from_role(
             "runtime state root is not an object".to_string(),
         ));
     };
+    if !root
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|session| !session.is_empty())
+    {
+        if let Some(owner_session) = root
+            .get("leader_receiver")
+            .and_then(|receiver| receiver.get("session_name"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|session| !session.is_empty())
+            .map(str::to_string)
+        {
+            root.insert(
+                "session_name".to_string(),
+                serde_json::Value::String(owner_session),
+            );
+        }
+    }
     let agents = root
         .entry("agents".to_string())
         .or_insert_with(|| serde_json::json!({}));
