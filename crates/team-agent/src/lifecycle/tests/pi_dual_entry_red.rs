@@ -372,8 +372,6 @@ fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-
         let live = dynamic_root.join("live-public-add");
         std::fs::create_dir_all(live.join("agents")).expect("create live agents dir");
         std::fs::create_dir_all(live.join("roles")).expect("create live roles dir");
@@ -450,37 +448,76 @@ fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
         let shim_root = live.join("tmux-shim");
         std::fs::create_dir_all(&shim_root).expect("create tmux shim dir");
         let shim_log = shim_root.join("argv.log");
+        let shim_source = shim_root.join("tmux.c");
         let shim = shim_root.join("tmux");
         std::fs::write(
-            &shim,
-            r#"#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$TEAM_AGENT_PI_TMUX_LOG"
-case "$*" in
-  *"-S $TEAM_AGENT_PI_OWNING_SOCKET"*) ;;
-  *) exit 91 ;;
-esac
-case "$*" in
-  *"new-window "*) printf '%%9101\n' ;;
-  *"list-panes -a -F "*)
-    printf '%%9101__TA_FIELD__%s__TA_FIELD__0__TA_FIELD__mate__TA_FIELD__0__TA_FIELD__/dev/ttys099__TA_FIELD__sh__TA_FIELD__1__TA_FIELD__%s__TA_FIELD__1__TA_FIELD__0__TA_FIELD__9101__TA_FIELD__\n' "$TEAM_AGENT_PI_OWNING_SESSION" "$TEAM_AGENT_PI_RUN_WORKSPACE"
-    ;;
-  *"display-message -p -t %9101 #{pane_id}"*) printf '%%9101\n' ;;
-  *) ;;
-esac
+            &shim_source,
+            r#"#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int has_arg(int argc, char **argv, const char *needle) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], needle) == 0) return 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *log_path = getenv("TEAM_AGENT_PI_TMUX_LOG");
+    const char *socket = getenv("TEAM_AGENT_PI_OWNING_SOCKET");
+    const char *session = getenv("TEAM_AGENT_PI_OWNING_SESSION");
+    const char *workspace = getenv("TEAM_AGENT_PI_RUN_WORKSPACE");
+    FILE *log = log_path == NULL ? NULL : fopen(log_path, "a");
+    if (log == NULL || socket == NULL || session == NULL || workspace == NULL) return 92;
+    for (int i = 1; i < argc; i++) fprintf(log, "%s%s", i == 1 ? "" : " ", argv[i]);
+    fputc('\n', log);
+    fclose(log);
+
+    int owns_socket = 0;
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "-S") == 0 && strcmp(argv[i + 1], socket) == 0) owns_socket = 1;
+    }
+    if (!owns_socket) return 91;
+    if (has_arg(argc, argv, "new-window") || has_arg(argc, argv, "display-message")) {
+        puts("%9101");
+    } else if (has_arg(argc, argv, "list-panes")) {
+        printf("%%9101__TA_FIELD__%s__TA_FIELD__0__TA_FIELD__mate__TA_FIELD__0__TA_FIELD__/dev/ttys099__TA_FIELD__sh__TA_FIELD__1__TA_FIELD__%s__TA_FIELD__1__TA_FIELD__0__TA_FIELD__9101__TA_FIELD__\n", session, workspace);
+    }
+    return 0;
+}
 "#,
         )
-        .expect("write tmux shim");
-        let mut permissions = std::fs::metadata(&shim)
-            .expect("stat tmux shim")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim, permissions).expect("chmod tmux shim");
+        .expect("write native tmux shim source");
+        let compile = std::process::Command::new("cc")
+            .args(["-O0", "-o"])
+            .arg(&shim)
+            .arg(&shim_source)
+            .output()
+            .expect("compile native tmux shim");
+        assert!(
+            compile.status.success(),
+            "native tmux shim compile failed: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let preflight = std::process::Command::new(&shim)
+            .args(["-S", live_socket, "has-session"])
+            .env("TEAM_AGENT_PI_TMUX_LOG", shim_root.join("preflight.log"))
+            .env("TEAM_AGENT_PI_OWNING_SOCKET", live_socket)
+            .env("TEAM_AGENT_PI_OWNING_SESSION", live_session)
+            .env("TEAM_AGENT_PI_RUN_WORKSPACE", &live)
+            .output()
+            .expect("execute native tmux shim preflight");
+        assert!(
+            preflight.status.success(),
+            "native tmux shim preflight failed: {}",
+            String::from_utf8_lossy(&preflight.stderr)
+        );
         let previous_path = std::env::var_os("PATH").unwrap_or_default();
         let joined_path = std::env::join_paths(
             std::iter::once(shim_root.clone()).chain(std::env::split_paths(&previous_path)),
         )
-        .expect("join shim PATH");
+        .expect("join native shim PATH");
         let _path = EnvVarGuard::set("PATH", joined_path);
         let _log = EnvVarGuard::set("TEAM_AGENT_PI_TMUX_LOG", &shim_log);
         let _socket = EnvVarGuard::set("TEAM_AGENT_PI_OWNING_SOCKET", live_socket);
