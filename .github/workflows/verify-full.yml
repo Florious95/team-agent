@@ -17,6 +17,7 @@ on:
         options:
           - full
           - a6-message-funnel
+          - a6-message-funnel-causal
           - f04-r4
           - f05-rec002
           - f07-c5-diagnostic
@@ -206,6 +207,68 @@ jobs:
               ;;
             a6-message-funnel)
               cargo test -p team-agent --locked --test mcp_simulated_worker_source_red -- --nocapture
+              ;;
+            a6-message-funnel-causal)
+              PRE_FIX_SHA='0a324586e287aa07e622399ff72bbb052daf86db'
+              FIXED_SHA='2fade9698ffa50a11359fc2ba832bf4d316990f6'
+              FIXED_TREE='3def0d0feb813261296e8bcd0d115a893960a9b5'
+              DELIVERY_PATH='crates/team-agent/src/messaging/delivery.rs'
+              PRE_FIX_BLOB='bc8cee047cf5b1498d9f097d444c90a58f9ef94e'
+              FIXED_BLOB='d32e915fcf1712a0c060a155adabe897ff55f2e9'
+              PRE_FIX_SHA256='0ba9c47b630246c69f2b3534145ad686f3c1ecf3bf71793b641277ae858aa30b'
+              FIXED_SHA256='854bcc274ab2ad2c57df4d43f28dbad945234a72b2e10b9ad1b4011cb04683e4'
+              GUARD='messaging::tests::leader_inject_acceptance::claimed_leader_delivery_revalidates_a_stale_unattached_snapshot'
+
+              if [[ "$(git rev-parse HEAD)" != "${FIXED_SHA}" || "$(git rev-parse 'HEAD^{tree}')" != "${FIXED_TREE}" ]]; then
+                echo 'A6 causal profile requires the exact fixed F11 head and tree' >&2
+                exit 1
+              fi
+              git diff --binary --full-index --no-ext-diff --no-renames "${PRE_FIX_SHA}" "${FIXED_SHA}" -- "${DELIVERY_PATH}" |
+                git apply --reverse --binary --check -
+              git diff --binary --full-index --no-ext-diff --no-renames "${PRE_FIX_SHA}" "${FIXED_SHA}" -- "${DELIVERY_PATH}" |
+                git apply --reverse --binary -
+
+              causal_blob="$(git hash-object "${DELIVERY_PATH}")"
+              causal_sha256="$(shasum -a 256 "${DELIVERY_PATH}" | cut -d' ' -f1)"
+              causal_status="$(git status --porcelain=v1 --untracked-files=all)"
+              expected_status=" M ${DELIVERY_PATH}"
+              if [[ "${causal_blob}" != "${PRE_FIX_BLOB}" || "${causal_sha256}" != "${PRE_FIX_SHA256}" || "${causal_status}" != "${expected_status}" ]]; then
+                echo 'A6 causal reversal failed exact byte or scope checks' >&2
+                exit 1
+              fi
+
+              set +e
+              cargo test -p team-agent --locked --lib "${GUARD}" -- --exact --nocapture 2>&1 | tee a6-causal-red.log
+              causal_exit="${PIPESTATUS[0]}"
+              set -e
+              if [[ "${causal_exit}" -eq 0 ]]; then
+                echo 'A6 causal reversal unexpectedly stayed green' >&2
+                exit 1
+              fi
+              grep -F "test ${GUARD} ... FAILED" a6-causal-red.log >/dev/null || {
+                echo 'A6 causal guard did not run non-zero at the selected invariant' >&2
+                exit 1
+              }
+              grep -F 'leader_not_attached' a6-causal-red.log >/dev/null || {
+                echo 'A6 causal guard did not recreate the lost leader binding' >&2
+                exit 1
+              }
+              rm a6-causal-red.log
+              printf 'A6_MESSAGE_FUNNEL_CAUSAL_RED runner=%s exit=%s delivery_blob=%s delivery_sha256=%s\n' \
+                "${RUNNER_OS}" "${causal_exit}" "${causal_blob}" "${causal_sha256}"
+
+              git restore --source=HEAD --worktree -- "${DELIVERY_PATH}"
+              restored_blob="$(git hash-object "${DELIVERY_PATH}")"
+              restored_sha256="$(shasum -a 256 "${DELIVERY_PATH}" | cut -d' ' -f1)"
+              if [[ "${restored_blob}" != "${FIXED_BLOB}" || "${restored_sha256}" != "${FIXED_SHA256}" || -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+                echo 'A6 causal restore failed exact byte or clean-checkout checks' >&2
+                exit 1
+              fi
+              echo "A6_MESSAGE_FUNNEL_RESTORED head=${FIXED_SHA} tree=${FIXED_TREE} delivery_blob=${restored_blob} delivery_sha256=${restored_sha256} status=clean"
+
+              cargo test -p team-agent --locked --lib "${GUARD}" -- --exact --nocapture
+              cargo test -p team-agent --locked --test mcp_simulated_worker_source_red -- --nocapture
+              cargo test -p team-agent --locked --test e6_offline_mailbox_toname_e2e_contract e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once -- --exact --nocapture
               ;;
             f04-r4)
               cargo test -p team-agent --test clone_fork_parallel_lifecycle_red --locked r4_parallel_n_clones_have_pairwise_unique_new_sessions -- --exact --nocapture --test-threads=1
