@@ -9,10 +9,57 @@ use crate::lifecycle::launch::pi_mcp::{
 };
 use crate::provider::McpConfig;
 
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic_guard;
+use hermetic_guard::HermeticTestEnv;
+
 const PACKAGE_DIGEST: &str = "ce8b8b6154e83e9732c58bd993e7ed69390617616f4f0e7330274d5ee9e2f620";
 const INDEX_DIGEST: &str = "16d260ac25b66346baab6ecef76680324336953bafc7be8cf95b3df5c611b89e";
 const CATALOG_DIGEST: &str = "726cedb6c3f6fe80a0d7b98918d8ed5063695e01f510a48f46c4bad5daab49fe";
 static NEXT_ROOT: AtomicU32 = AtomicU32::new(0);
+const PI_WRAPPER_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_CHILD";
+const PI_WRAPPER_NEGATIVE_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_NEGATIVE_CHILD";
+const PI_WRAPPER_PARENT_PID: &str = "TEAM_AGENT_TEST_PI_WRAPPER_PARENT_PID";
+const PI_WRAPPER_TEST: &str = concat!(
+    "lifecycle::tests::pi_executable_mcp_red::",
+    "pi_wrapper_is_atomic_per_seat_and_embeds_exact_candidate"
+);
+const PI_WRAPPER_NEGATIVE_TEST: &str = concat!(
+    "lifecycle::tests::pi_executable_mcp_red::",
+    "pi_wrapper_import_failure_has_no_ambient_merge_fallback"
+);
+
+fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
+    if std::env::var_os(marker).is_some() {
+        body();
+        return;
+    }
+
+    let output =
+        std::process::Command::new(std::env::current_exe().expect("current lib-test executable"))
+            .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+            .env(marker, "1")
+            .env(PI_WRAPPER_PARENT_PID, std::process::id().to_string())
+            .output()
+            .expect("run Pi wrapper send_message fixture in isolated child test process");
+    assert!(
+        output.status.success(),
+        "isolated Pi wrapper child failed: test={test_name} status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn assert_isolated_child() {
+    let parent_pid = std::env::var(PI_WRAPPER_PARENT_PID)
+        .expect("isolated child receives the parent test process id");
+    assert_ne!(
+        std::process::id().to_string(),
+        parent_pid,
+        "Pi wrapper send_message fixture must not run in the parent lib-test process"
+    );
+}
 
 fn temp_root(label: &str) -> PathBuf {
     let seq = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
@@ -148,7 +195,15 @@ fn pi_adapter_detector_requires_exact_2_30_0_entry_and_digest() {
 
 #[test]
 fn pi_wrapper_is_atomic_per_seat_and_embeds_exact_candidate() {
-    let root = temp_root("wrapper");
+    run_process_isolated(PI_WRAPPER_CHILD, PI_WRAPPER_TEST, || {
+        let hermetic = HermeticTestEnv::enter("pi-wrapper-send");
+        assert_isolated_child();
+        pi_wrapper_is_atomic_body(&hermetic);
+    });
+}
+
+fn pi_wrapper_is_atomic_body(hermetic: &HermeticTestEnv) {
+    let root = hermetic.workspace("wrapper");
     let workspace = root.join("workspace");
     let candidate = root.join("candidate/team-agent");
     std::fs::create_dir_all(candidate.parent().expect("candidate parent"))
@@ -205,7 +260,15 @@ fn pi_wrapper_is_atomic_per_seat_and_embeds_exact_candidate() {
 
 #[test]
 fn pi_wrapper_import_failure_has_no_ambient_merge_fallback() {
-    let root = temp_root("wrapper-negative");
+    run_process_isolated(PI_WRAPPER_NEGATIVE_CHILD, PI_WRAPPER_NEGATIVE_TEST, || {
+        let hermetic = HermeticTestEnv::enter("pi-wrapper-negative-send");
+        assert_isolated_child();
+        pi_wrapper_import_failure_body(&hermetic);
+    });
+}
+
+fn pi_wrapper_import_failure_body(hermetic: &HermeticTestEnv) {
+    let root = hermetic.workspace("wrapper-negative");
     let workspace = root.join("workspace");
     let candidate = root.join("candidate/team-agent");
     std::fs::create_dir_all(candidate.parent().expect("candidate parent"))
