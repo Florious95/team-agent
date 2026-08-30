@@ -309,6 +309,9 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         case.target_workspace(),
         &message_id,
         "injected_awaiting_receipt",
+        &case.team_key,
+        &tmux_socket,
+        &pane,
     );
     assert!(
         accepted,
@@ -505,7 +508,14 @@ fn query_message_status(workspace: &Path, message_id: &str) -> Result<Option<Str
     .map_err(|error| format!("query status for {message_id}: {error}"))
 }
 
-fn wait_for_message_status(workspace: &Path, message_id: &str, status: &str) -> bool {
+fn wait_for_message_status(
+    workspace: &Path,
+    message_id: &str,
+    status: &str,
+    team_key: &str,
+    tmux_socket: &str,
+    pane: &str,
+) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         match query_message_status(workspace, message_id) {
@@ -517,7 +527,112 @@ fn wait_for_message_status(workspace: &Path, message_id: &str, status: &str) -> 
         }
         thread::sleep(Duration::from_millis(250));
     }
+    emit_replay_timeout_receipt(workspace, message_id, team_key, tmux_socket, pane);
     panic!("E6 replay did not reach expected status {status:?}");
+}
+
+fn emit_replay_timeout_receipt(
+    workspace: &Path,
+    message_id: &str,
+    team_key: &str,
+    tmux_socket: &str,
+    pane: &str,
+) {
+    let row = message_rows_by_id(workspace, message_id);
+    let token = delivery_token(workspace, message_id).map(|token| {
+        json!({
+            "unique_token": token.unique_token,
+            "injected_at": token.injected_at,
+            "consumed_at": token.consumed_at,
+            "failed_at": token.failed_at,
+            "failure_reason": token.failure_reason,
+        })
+    });
+    let runtime = workspace.join(".team/runtime");
+    let events = std::fs::read_to_string(workspace.join(".team/logs/events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("message_id").and_then(Value::as_str) == Some(message_id))
+        .collect::<Vec<_>>();
+
+    eprintln!(
+        "E6_DIAGNOSTIC_TMUX_CALL socket={tmux_socket} pane={pane} format=session,window,pane,pid,tty,dead,command"
+    );
+    let tmux = Command::new("tmux")
+        .args([
+            "-S",
+            tmux_socket,
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_dead}\t#{pane_current_command}",
+        ])
+        .output()
+        .map(|output| {
+            json!({
+                "status": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            })
+        })
+        .unwrap_or_else(|error| json!({"spawn_error": error.to_string()}));
+
+    eprintln!(
+        "E6_REPLAY_TIMEOUT_RECEIPT {}",
+        json!({
+            "workspace": workspace,
+            "team_key": team_key,
+            "message_id": message_id,
+            "message_row": row,
+            "delivery_token": token,
+            "leader_receiver": runtime_state(workspace)
+                .pointer(&format!("/teams/{team_key}/leader_receiver"))
+                .cloned(),
+            "coordinator": read_json_or_error(&runtime.join("coordinator.json")),
+            "coordinator_tick": read_json_or_error(&runtime.join("coordinator_tick.json")),
+            "coordinator_pid": std::fs::read_to_string(runtime.join("coordinator.pid"))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default(),
+            "message_events": events,
+            "tmux": tmux,
+        })
+    );
+}
+
+fn message_rows_by_id(workspace: &Path, message_id: &str) -> Value {
+    let db = workspace.join(".team/runtime/team.db");
+    let conn = match Connection::open(&db) {
+        Ok(conn) => conn,
+        Err(error) => return json!({"open_error": error.to_string(), "path": db}),
+    };
+    conn.query_row(
+        "select message_id, owner_team_id, recipient, status, delivery_attempts, delivered_at, error \
+         from messages where message_id = ?1",
+        [message_id],
+        |row| {
+            Ok(json!({
+                "message_id": row.get::<_, String>(0)?,
+                "owner_team_id": row.get::<_, Option<String>>(1)?,
+                "recipient": row.get::<_, Option<String>>(2)?,
+                "status": row.get::<_, Option<String>>(3)?,
+                "delivery_attempts": row.get::<_, i64>(4)?,
+                "delivered_at": row.get::<_, Option<String>>(5)?,
+                "error": row.get::<_, Option<String>>(6)?,
+            }))
+        },
+    )
+    .optional()
+    .map(|value| json!({"row": value}))
+    .unwrap_or_else(|error| json!({"query_error": error.to_string()}))
+}
+
+fn read_json_or_error(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .map_err(|error| error.to_string())
+        .and_then(|text| serde_json::from_str(&text).map_err(|error| error.to_string()))
+        .unwrap_or_else(|error| json!({"path": path, "read_error": error}))
 }
 
 fn wait_for_pane_token(tmux_socket: &str, pane: &str, token: &str) -> String {
