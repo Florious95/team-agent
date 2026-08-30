@@ -60,27 +60,8 @@ pub struct McpSimHarness {
 
 impl McpSimHarness {
     pub fn new() -> Self {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let run_tag = format!(
-            "{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system clock after unix epoch")
-                .as_nanos()
-        );
-        let workspace = std::env::temp_dir().join(format!(
-            "ta-rs-mcp-sim-{run_tag}-{}",
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&workspace);
-        std::fs::create_dir_all(&workspace).unwrap();
-        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let (workspace, session) = fresh_mcp_workspace();
         let backend = TmuxBackend::for_workspace(&workspace);
-        let session = SessionName::new(format!(
-            "team-mcp-sim-{run_tag}-{}",
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
         let mut harness = Self {
             workspace,
             backend,
@@ -93,6 +74,23 @@ impl McpSimHarness {
         harness.spawn_pane("worker_c", false);
         harness.spawn_pane("team_b_leader", false);
         harness.seed_state();
+        let _ = MessageStore::open(&harness.workspace).unwrap();
+        harness
+    }
+
+    /// Build an MCP-only fixture for contracts whose assertion does not exercise
+    /// pane delivery. This keeps the stdio ingress test runnable on hosts without
+    /// a tmux binary (for example, the Grok full-test image).
+    pub fn new_without_tmux() -> Self {
+        let (workspace, session) = fresh_mcp_workspace();
+        let backend = TmuxBackend::for_workspace(&workspace);
+        let harness = Self {
+            workspace,
+            backend,
+            session,
+            panes: BTreeMap::new(),
+        };
+        harness.seed_mcp_report_state();
         let _ = MessageStore::open(&harness.workspace).unwrap();
         harness
     }
@@ -316,7 +314,7 @@ impl McpSimHarness {
                             "worker_c": {"status": "running"}
                         },
                         "tasks": [
-                            {"id": "task_mcp", "assignee": "worker_a", "status": "pending"}
+                            {"id": "task_mcp", "assignee": "worker_a", "status": "pending", "result_route": "pipeline"}
                         ]
                     },
                     "teamB": {
@@ -332,6 +330,47 @@ impl McpSimHarness {
         )
         .unwrap();
     }
+
+    fn seed_mcp_report_state(&self) {
+        team_agent::state::persist::save_runtime_state(
+            &self.workspace,
+            &json!({
+                "active_team_key": "teamA",
+                "teams": {
+                    "teamA": {
+                        "tasks": [
+                            {"id": "task_mcp", "assignee": "worker_a", "status": "pending"}
+                        ]
+                    }
+                }
+            }),
+        )
+        .unwrap();
+    }
+}
+
+fn fresh_mcp_workspace() -> (PathBuf, SessionName) {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let run_tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos()
+    );
+    let workspace = std::env::temp_dir().join(format!(
+        "ta-rs-mcp-sim-{run_tag}-{}",
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&workspace);
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace = std::fs::canonicalize(workspace).unwrap();
+    let session = SessionName::new(format!(
+        "team-mcp-sim-{run_tag}-{}",
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    (workspace, session)
 }
 
 impl Drop for McpSimHarness {
