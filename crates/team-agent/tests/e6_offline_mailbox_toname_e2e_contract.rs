@@ -516,10 +516,22 @@ fn wait_for_message_status(
     tmux_socket: &str,
     pane: &str,
 ) -> bool {
+    let started = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         match query_message_status(workspace, message_id) {
-            Ok(Some(current)) if current == status => return true,
+            Ok(Some(current)) if current == status => {
+                emit_replay_status_receipt(
+                    workspace,
+                    message_id,
+                    team_key,
+                    tmux_socket,
+                    pane,
+                    "observed",
+                    started.elapsed().as_millis(),
+                );
+                return true;
+            }
             Ok(Some(_)) | Ok(None) => {}
             Err(error) => {
                 panic!("E6 replay status query failed before assertion: {error}");
@@ -527,16 +539,26 @@ fn wait_for_message_status(
         }
         thread::sleep(Duration::from_millis(250));
     }
-    emit_replay_timeout_receipt(workspace, message_id, team_key, tmux_socket, pane);
+    emit_replay_status_receipt(
+        workspace,
+        message_id,
+        team_key,
+        tmux_socket,
+        pane,
+        "timeout",
+        started.elapsed().as_millis(),
+    );
     panic!("E6 replay did not reach expected status {status:?}");
 }
 
-fn emit_replay_timeout_receipt(
+fn emit_replay_status_receipt(
     workspace: &Path,
     message_id: &str,
     team_key: &str,
     tmux_socket: &str,
     pane: &str,
+    outcome: &str,
+    wait_elapsed_ms: u128,
 ) {
     let row = message_rows_by_id(workspace, message_id);
     let token = delivery_token(workspace, message_id).map(|token| {
@@ -580,8 +602,10 @@ fn emit_replay_timeout_receipt(
         .unwrap_or_else(|error| json!({"spawn_error": error.to_string()}));
 
     eprintln!(
-        "E6_REPLAY_TIMEOUT_RECEIPT {}",
+        "E6_REPLAY_STATUS_RECEIPT {}",
         json!({
+            "outcome": outcome,
+            "wait_elapsed_ms": wait_elapsed_ms,
             "workspace": workspace,
             "team_key": team_key,
             "message_id": message_id,
