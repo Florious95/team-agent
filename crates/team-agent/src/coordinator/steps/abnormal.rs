@@ -1,3 +1,31 @@
+//! ---
+//! purpose: tick 的异常退出检测步骤——按 agent 读有界 rollout 尾，判「最新一条显式 provider 错误是否属于当前 worker 世代」，据此决定通知还是只留审计
+//! contract:
+//!   provides:
+//!     - name: detect_abnormal_exits
+//!       what: 遍历受监视 agent，产出 worker.abnormal_exit 通知或 dead_only 审计事件，并把本轮观测写回 state 的 abnormal_exit_watch
+//!     - name: explicit_process_liveness
+//!       what: 从 agent JSON 的显式存活字段解析进程存活态，不做任何探测
+//!     - name: read_tail_text
+//!       what: 有界读文件尾部文本，超长时从尾部 max_bytes 处起读
+//!     - name: metadata_mtime_ns
+//!       what: 把文件 metadata 的 mtime 归一成纳秒整数，供跨 tick 变化比较
+//!   depends:
+//!     - super::super::health
+//!     - super::super::tick
+//!     - super::super::types
+//!     - crate::event_log
+//!     - crate::messaging
+//!     - crate::provider
+//!     - crate::transport
+//!     - crate::state::projection
+//! boundary:
+//!   - 不重启、不清理、不做物理注入：写事件与 state 观测记录之外，异常通知会经 crate::messaging 的 leader funnel 入库为 accepted 消息（物理注入由后续 deliver_pending 完成）
+//!   - 进程已死但没有显式错误时不通知，只落 dead_only 审计
+//!   - 通知事件里的 queued 只表示消息入库，不表示已送达
+//!   - rollout 尾读是有界的（首行可能被截断，消费方只解析最后一条完整 JSONL 记录）
+//! maturity: wired
+//! ---
 //!
 //! unit-11 (Stage 4) — coordinator tick `abnormal` step group.
 //!
@@ -23,6 +51,17 @@ use super::super::types::Pid;
 /// provider error that is fresh for the current worker cohort. A dead process
 /// without an explicit error remains a suppressed `dead_only` audit event; process
 /// liveness is otherwise diagnostic data for this path.
+/// ---
+/// purpose: 跑一轮异常退出检测，把结论落成事件与 state 里的 abnormal_exit_watch 记录
+/// params:
+///   workspace: workspace 根，用于解析 rollout 相对路径
+///   transport: pane 存活探测通道；只读探测，不注入
+///   state: 可变运行时状态；本轮观测（size/mtime/世代/去重键）写回 coordinator.abnormal_exit_watch
+///   event_log: 事件出口
+///   targets: 本 tick 已采到的 pane 快照，避免每 agent 重新列一遍
+/// returns: 检测跑完即 Ok；「有没有异常」不由返回值表达，只体现在事件与 state 里
+/// errors: 事件写入等不可恢复失败时返回 TickError；单个 agent 的 rollout metadata 读不到不算错误，记为 unverifiable 继续
+/// ---
 pub(crate) fn detect_abnormal_exits(
     workspace: &Path,
     transport: &dyn crate::transport::Transport,
@@ -476,6 +515,12 @@ fn agent_pid(agent: &Value) -> Option<Pid> {
         .find_map(|key| json_u32(agent.get(key)).map(Pid::new))
 }
 
+/// ---
+/// purpose: 只从 agent JSON 里已写明的存活字段读出进程存活态，不做任何主动探测
+/// params:
+///   agent: agent 状态对象；先下钻 provider_process / process 子对象，再看本层的 *_liveness 串字段
+/// returns: 命中显式字段时给出 Alive/Dead/Unverifiable；没有任何显式字段时为 None，交调用方走探测路径
+/// ---
 pub(crate) fn explicit_process_liveness(agent: &Value) -> Option<ProcessLiveness> {
     if let Some(process) = agent
         .get("provider_process")
@@ -836,6 +881,12 @@ fn process_liveness_wire(state: ProcessLiveness) -> &'static str {
     }
 }
 
+/// ---
+/// purpose: 把文件修改时间归一成自 UNIX 纪元起的纳秒整数，供跨 tick 比较「rollout 有没有变过」
+/// params:
+///   metadata: 目标文件的 metadata
+/// returns: 纳秒时间戳；取不到 mtime 或早于纪元时为 None。乘加均为 saturating，不会回绕
+/// ---
 pub(crate) fn metadata_mtime_ns(metadata: &std::fs::Metadata) -> Option<u64> {
     let duration = metadata
         .modified()
@@ -977,6 +1028,14 @@ const ABNORMAL_TAIL_BYTES: u64 = 131_072;
 ///
 /// P1: bounded tail read; a partial first line is harmless (the consumer only parses
 /// the latest complete JSONL record) and lossy UTF-8 keeps a mid-codepoint seek safe.
+/// ---
+/// purpose: 有界读取文件尾部文本，避免整份 rollout 进内存
+/// params:
+///   path: 目标文件
+///   max_bytes: 最多回读的字节数；文件更短时整份读出
+/// returns: 尾部文本。按字节 seek，首行可能被截断，且用有损 UTF-8 解码，切在码点中间也安全
+/// errors: 打开、取长度或读取失败时返回底层 io::Error
+/// ---
 pub(crate) fn read_tail_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;

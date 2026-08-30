@@ -9,6 +9,20 @@
 //! - the message row records recipient `a`, status `delivered`, and delivered_at
 //! - the fake worker receives the message and reports a result
 //! - a real stdio MCP report_result is returned by CLI collect.
+//!
+//! ---
+//! purpose: Prove fake-worker delivery with a durable timeout evidence path
+//! contract:
+//!   provides:
+//!     - name: send_001_delivers_to_fake_worker
+//!       what: Binds message row, worker result, and collect output to one message id
+//!   depends:
+//!     - crate::framework::wait_for_delivery_or_panic
+//!     - messaging rows/events and fake-worker runtime
+//! boundary:
+//!   - Test-only E2E evidence; no delivery product edits
+//! maturity: wired
+//! ---
 
 use crate::framework::*;
 use rusqlite::Connection;
@@ -28,6 +42,13 @@ fn send_001_delivers_to_fake_worker() {
         "quick-start did not launch: {}",
         qs.stdout
     );
+    let socket = ws
+        .read_state()
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .expect("quick-start must record its exact tmux socket");
+    ws.register_owned_tmux_socket(&socket);
 
     let canary = format!("send001-worker-canary-{}", std::process::id());
     let out = run_ta(
@@ -60,7 +81,10 @@ fn send_001_delivers_to_fake_worker() {
     assert_json_field_eq_str(&j, "/target", "a");
     assert_json_field_eq_str(&j, "/sender", "leader");
 
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        message_id,
+        "a",
         "message row delivered to worker a",
         || {
             message_truth(ws.path(), message_id).is_some_and(|truth| {
@@ -71,7 +95,10 @@ fn send_001_delivers_to_fake_worker() {
         },
         Duration::from_secs(10),
     );
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        message_id,
+        "a",
         "fake worker received message and reported result",
         || {
             result_truth_for_message(ws.path(), message_id).is_some_and(|truth| {

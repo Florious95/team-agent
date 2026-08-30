@@ -1,10 +1,31 @@
+//! ---
+//! purpose: 为运行时提供有界的进程输出读取与前台进程组探测
+//! contract:
+//!   provides:
+//!     - name: bounded_command_output_with_probe
+//!       what: 在固定超时内执行命令并读取 stdout，超时后终止子进程
+//!     - name: pane_foreground_and_root_pgrp
+//!       what: 读取 pane PID 的前台与根进程组 ID，无法判定时返回 None
+//!   depends:
+//!     - std
+//! boundary:
+//!   - 只负责有界探测、临时 stdout 文件的独占创建与清理
+//!   - 不决定 shutdown 状态，不重试探测，不修改调用方行为
+//! arch:
+//!   allowed_dependencies:
+//!     - std
+//! maturity: wired
+//! ---
+
 use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(900);
+static NEXT_TEMP_OUTPUT_ID: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static PROBE_TIMEOUT: RefCell<Option<ProbeTimeout>> = const { RefCell::new(None) };
@@ -23,19 +44,31 @@ pub(crate) struct BoundedCommandOutput {
     pub(crate) stdout: Vec<u8>,
 }
 
+/// ---
+/// purpose: 清除当前线程记录的探测超时
+/// ---
 pub(crate) fn clear_probe_timeout() {
     PROBE_TIMEOUT.with(|timeout| *timeout.borrow_mut() = None);
 }
 
+/// ---
+/// purpose: 判断当前线程是否记录了探测超时
+/// ---
 pub(crate) fn probe_timed_out() -> bool {
     PROBE_TIMEOUT.with(|timeout| timeout.borrow().is_some())
 }
 
+/// ---
+/// purpose: 获取当前线程记录的探测超时详情
+/// ---
 pub(crate) fn probe_timeout() -> Option<ProbeTimeout> {
     PROBE_TIMEOUT.with(|timeout| timeout.borrow().clone())
 }
 
 #[cfg(test)]
+/// ---
+/// purpose: 为单元测试设置探测超时详情
+/// ---
 pub(crate) fn set_probe_timeout_for_test(probe: &'static str, pid: Option<u32>, timeout_ms: u64) {
     PROBE_TIMEOUT.with(|current| {
         *current.borrow_mut() = Some(ProbeTimeout {
@@ -46,6 +79,9 @@ pub(crate) fn set_probe_timeout_for_test(probe: &'static str, pid: Option<u32>, 
     });
 }
 
+/// ---
+/// purpose: 执行一个带默认超时与探测标识的命令并读取 stdout
+/// ---
 pub(crate) fn bounded_command_output_with_probe(
     command: &mut Command,
     probe: &'static str,
@@ -114,9 +150,14 @@ fn temp_output_path(kind: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
+    temp_output_path_with_nanos(kind, nanos)
+}
+
+fn temp_output_path_with_nanos(kind: &str, nanos: u128) -> std::path::PathBuf {
+    let unique_id = NEXT_TEMP_OUTPUT_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "team-agent-os-probe-{}-{nanos}.{kind}",
-        std::process::id()
+        "team-agent-os-probe-{}-{nanos}-{unique_id}.{kind}",
+        std::process::id(),
     ))
 }
 
@@ -146,6 +187,9 @@ fn read_and_remove(path: &std::path::Path) -> Vec<u8> {
 ///
 /// Bounded via [`run_bounded_command`] so a wedged ps cannot stall the
 /// coordinator tick.
+/// ---
+/// purpose: 读取 pane PID 的前台与根进程组 ID，无法判定时返回 None
+/// ---
 pub(crate) fn pane_foreground_and_root_pgrp(pane_pid: u32) -> io::Result<Option<(u32, u32)>> {
     let mut command = Command::new("ps");
     command.args(["-o", "tpgid=,pgid=", "-p", &pane_pid.to_string()]);
@@ -205,5 +249,32 @@ mod fg_pgrp_tests {
         let result =
             pane_foreground_and_root_pgrp(0xFFFF_FFFE).expect("must not error on missing pid");
         assert!(result.is_none(), "missing pid → None");
+    }
+
+    #[test]
+    fn temp_output_create_new_requires_atomic_discriminator() {
+        let fixed_nanos = 0x5eed_u128;
+        let first_path = temp_output_path_with_nanos("stdout", fixed_nanos);
+        let second_path = temp_output_path_with_nanos("stdout", fixed_nanos);
+        let _ = std::fs::remove_file(&first_path);
+        let _ = std::fs::remove_file(&second_path);
+
+        let first = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&first_path)
+            .expect("first atomic path create");
+        let second = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&second_path)
+            .expect("second atomic path create");
+        assert_ne!(first_path, second_path, "atomic discriminator must advance");
+        drop(first);
+        drop(second);
+        let _ = std::fs::remove_file(first_path);
+        let _ = std::fs::remove_file(second_path);
     }
 }

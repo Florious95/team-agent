@@ -1,3 +1,24 @@
+//! ---
+//! purpose: 对 compatible_api 席位做发车前的 profile 连通性冒烟
+//! contract:
+//!   provides:
+//!     - name: profile_smoke_checks_for_agents_with_profile_dir
+//!       what: 对一组 agent 逐个冒烟，可指定优先查找的 profile 目录
+//!     - name: profile_smoke_checks_for_agents
+//!       what: 对一组 agent 逐个冒烟，返回逐个结果
+//!     - name: smoke_check_agent_profile
+//!       what: 单 agent 冒烟，非 compatible_api 直接判 not_required
+//!     - name: format_profile_smoke_failures
+//!       what: 把失败结果排成一行可读文本
+//!   depends:
+//!     - crate::lifecycle::profile_launch
+//!     - crate::provider::wire
+//! boundary:
+//!   - 只读 profile 并发探测请求，不改 profile、不写 runtime state
+//!   - 不做重试与退避，超时即判失败
+//!   - 结果里不带密钥值
+//! maturity: wired
+//! ---
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
@@ -13,6 +34,13 @@ use crate::provider::wire::provider_wire;
 
 pub(crate) const DEFAULT_PROFILE_SMOKE_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// ---
+/// purpose: 用默认 profile 目录对一组 agent 逐个冒烟
+/// params:
+///   agents: spec 里的 agent 节点列表
+///   timeout: 单次探测的超时
+/// returns: 与入参同序的逐 agent 结果 JSON
+/// ---
 pub(crate) fn profile_smoke_checks_for_agents(
     workspace: &Path,
     agents: &[YamlValue],
@@ -21,6 +49,12 @@ pub(crate) fn profile_smoke_checks_for_agents(
     profile_smoke_checks_for_agents_with_profile_dir(workspace, agents, None, timeout)
 }
 
+/// ---
+/// purpose: 用指定 profile 目录对一组 agent 逐个冒烟
+/// params:
+///   profile_dir: 优先查找的 profile 目录，None 表示只用默认查找顺序
+/// returns: 与入参同序的逐 agent 结果 JSON
+/// ---
 pub(crate) fn profile_smoke_checks_for_agents_with_profile_dir(
     workspace: &Path,
     agents: &[YamlValue],
@@ -33,6 +67,13 @@ pub(crate) fn profile_smoke_checks_for_agents_with_profile_dir(
         .collect()
 }
 
+/// ---
+/// purpose: 单个 agent 的 profile 冒烟
+/// params:
+///   agent: 单个 agent 节点，缺 provider 按 codex、缺 auth_mode 按 subscription
+///   timeout: 单次 HTTP 探测的超时
+/// returns: 结果 JSON。非 compatible_api 记 not_required，profile 里关掉冒烟记 skipped_by_profile，其余走真实请求
+/// ---
 pub(crate) fn smoke_check_agent_profile(
     workspace: &Path,
     agent: &YamlValue,
@@ -108,6 +149,10 @@ pub(crate) fn smoke_check_agent_profile(
     result
 }
 
+/// ---
+/// purpose: 把失败结果拼成一行人类可读的摘要
+/// returns: 以分号分隔的 agent 与原因，缺字段时退化成 agent 与 failed
+/// ---
 pub(crate) fn format_profile_smoke_failures(failures: &[Value]) -> String {
     failures
         .iter()

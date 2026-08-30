@@ -61,10 +61,7 @@ args = ["stale"]
 enabled = true
 
 [mcp_servers.team-agent.env]
-TEAM_AGENT_ID = "stale-id"
 TEAM_AGENT_WORKSPACE = "/stale-ws"
-TEAM_AGENT_OWNER_TEAM_ID = "stale-team"
-TEAM_AGENT_AUTH_MODE = "subscription"
 "#,
     )
     .unwrap();
@@ -82,9 +79,11 @@ TEAM_AGENT_AUTH_MODE = "subscription"
         "migrated file must declare the canonical server; text={text}"
     );
     assert!(
-        text.contains("TEAM_AGENT_ID = \"migrated-seat\"")
+        !text.contains("TEAM_AGENT_ID")
+            && !text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            && !text.contains("TEAM_AGENT_AUTH_MODE")
             && text.contains("TEAM_AGENT_WORKSPACE = \"/ws-migrated\""),
-        "identity env must land on the new table, not vanish during rename; text={text}"
+        "per-seat keys must not land on the shared toml; workspace env must survive rename; text={text}"
     );
     assert!(
         text.contains("[mcp_servers.keep-me]"),
@@ -93,6 +92,72 @@ TEAM_AGENT_AUTH_MODE = "subscription"
     assert!(
         !text.contains("stale-id") && !text.contains("/old/team-agent"),
         "stale identity/command from the old table must not remain; text={text}"
+    );
+}
+
+#[test]
+fn grok_overlay_clears_existing_per_seat_keys_instead_of_writing_them() {
+    // 已废除的行为：旧实现把每席键迁进共享 toml（目录作用域 ⇒ 所有 grok 席互相继承），此断言证明它确实没了。
+    let ws = tmp_dir("grok-mcp-clear-per-seat");
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        r#"[mcp_servers.team-agent]
+command = "/old/team-agent"
+
+[mcp_servers.team-agent.env]
+TEAM_AGENT_ID = "stale-id"
+TEAM_AGENT_OWNER_TEAM_ID = "stale-team"
+TEAM_AGENT_AUTH_MODE = "subscription"
+"#,
+    )
+    .unwrap();
+
+    apply_grok_mcp_overlay(&ws, &sample_mcp_config("migrated-seat", "/ws-migrated"))
+        .expect("leftover per-seat keys must be cleared, not refuse the overlay");
+    let text = std::fs::read_to_string(grok.join("config.toml")).unwrap();
+    assert!(
+        !text.contains("TEAM_AGENT_ID")
+            && !text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            && !text.contains("TEAM_AGENT_AUTH_MODE")
+            && !text.contains("stale-id")
+            && text.contains("TEAM_AGENT_WORKSPACE = \"/ws-migrated\""),
+        "overlay must strip leftover per-seat keys and not write incoming ones; text={text}"
+    );
+    let events = team_agent::event_log::EventLog::new(&ws)
+        .tail(0)
+        .expect("events");
+    let cleared = events.iter().find(|event| {
+        event.get("event").and_then(serde_json::Value::as_str)
+            == Some("lifecycle.grok_toml.per_seat_keys_cleared")
+    });
+    let cleared =
+        cleared.unwrap_or_else(|| panic!("cleanup must leave an audit event; events={events:?}"));
+    let keys = cleared
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        keys.iter().any(|key| key.as_str() == Some("TEAM_AGENT_ID"))
+            && keys
+                .iter()
+                .any(|key| key.as_str() == Some("TEAM_AGENT_OWNER_TEAM_ID"))
+            && keys
+                .iter()
+                .any(|key| key.as_str() == Some("TEAM_AGENT_AUTH_MODE")),
+        "audit must name the cleared keys; event={cleared}"
+    );
+    let serialized = cleared.to_string();
+    assert!(
+        !serialized.contains("stale-id") && !serialized.contains("stale-team"),
+        "audit must not carry key values; event={cleared}"
+    );
+    assert_eq!(
+        cleared.get("path").and_then(serde_json::Value::as_str),
+        Some(grok.join("config.toml").to_string_lossy().as_ref()),
+        "audit must name the file; event={cleared}"
     );
 }
 
@@ -114,45 +179,103 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
 }
 
 #[test]
-fn two_grok_seats_sharing_cwd_must_refuse_to_start() {
-    let ws = tmp_dir("grok-cwd-collision");
+#[serial(env)]
+fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
+    let ws = tmp_dir("grok-cwd-coexist");
+    let home = tmp_dir("grok-cwd-coexist-home");
+    seed_grok_home(&home, Some(&ws));
+    let _guard = HomeGuard::set(&home);
     let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
 
-    let result = quick_start_with_transport_in_workspace(
+    quick_start_with_transport_in_workspace(
         &ws,
         &team,
         None,
         true,
         Some("grokteam"),
         &OfflineTransport::new(),
-    );
+    )
+    .expect("two grok seats must start when the shared toml has no per-seat keys");
 
-    let err = match result {
-        Ok(report) => panic!(
-            "two grok seats sharing cwd must refuse to start; silent overlay overwrite \
-             would make both seats use the last TEAM_AGENT_ID; report={report:?}"
-        ),
-        Err(error) => error.to_string(),
-    };
+    let text = std::fs::read_to_string(ws.join(".grok/config.toml")).unwrap_or_default();
     assert!(
-        err.contains("only one grok seat per workspace"),
-        "error must state the real limit, not a fake worktree remedy; err={err}"
+        !text.contains("TEAM_AGENT_ID")
+            && !text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+            && !text.contains("TEAM_AGENT_AUTH_MODE"),
+        "overlay must not write per-seat keys; text={text}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn leftover_per_seat_key_is_cleared_before_start() {
+    let ws = tmp_dir("grok-cwd-per-seat");
+    let home = tmp_dir("grok-cwd-per-seat-home");
+    seed_grok_home(&home, Some(&ws));
+    let _guard = HomeGuard::set(&home);
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        "[mcp_servers.keep-me.env]\nTEAM_AGENT_FUTURE_SEAT_KEY = \"leaked\"\nGROK_FOLDER_TRUST = \"1\"\n",
+    )
+    .unwrap();
+    let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
+
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        Some("grokteam"),
+        &OfflineTransport::new(),
+    )
+    .expect("leftover per-seat keys must be cleared, not refuse start");
+
+    let text = std::fs::read_to_string(ws.join(".grok/config.toml")).unwrap_or_default();
+    assert!(
+        !text.contains("TEAM_AGENT_FUTURE_SEAT_KEY") && !text.contains("leaked"),
+        "upgrade migration must drop the leftover per-seat key; text={text}"
     );
     assert!(
-        err.contains(".grok/config.toml") && err.to_ascii_lowercase().contains("directory-scoped"),
-        "error must name the directory-scoped MCP cause; err={err}"
+        text.contains("GROK_FOLDER_TRUST"),
+        "non-framework keys must stay; text={text}"
+    );
+}
+
+#[test]
+fn overlay_preserves_unknown_env_keys_on_the_shared_table() {
+    let ws = tmp_dir("grok-mcp-keep-unknown");
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        r#"[mcp_servers.team_orchestrator]
+command = "/old/team-agent"
+
+[mcp_servers.team_orchestrator.env]
+TEAM_AGENT_ID = "stale-id"
+GROK_FOLDER_TRUST = "1"
+USER_EXTRA = "keep-me"
+TEAM_AGENT_WORKSPACE = "/stale-ws"
+"#,
+    )
+    .unwrap();
+
+    apply_grok_mcp_overlay(&ws, &sample_mcp_config("keep-seat", "/ws-keep"))
+        .expect("overlay must keep unknown keys while dropping per-seat ones");
+    let text = std::fs::read_to_string(grok.join("config.toml")).unwrap();
+    assert!(
+        !text.contains("TEAM_AGENT_ID") && !text.contains("stale-id"),
+        "per-seat keys must leave; text={text}"
     );
     assert!(
-        err.contains("g1") && err.contains("g2"),
-        "error must name both colliding grok seats; err={err}"
+        text.contains("GROK_FOLDER_TRUST = \"1\"") && text.contains("USER_EXTRA = \"keep-me\""),
+        "unknown env keys must survive the stanza rewrite with the same value; text={text}"
     );
     assert!(
-        !err.contains("worktree") && !err.contains("then retry"),
-        "must not promise a remedy this version cannot honor; err={err}"
-    );
-    assert!(
-        !ws.join(".grok").join("config.toml").exists(),
-        "must refuse before writing overlay; a leftover .grok/config.toml is a half-written identity"
+        text.contains("TEAM_AGENT_WORKSPACE = \"/ws-keep\""),
+        "incoming workspace must win over the stale disk value; text={text}"
     );
 }
 
@@ -280,9 +403,8 @@ fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
         "spawned overlay must not leave the misnamed team-agent table; text={text}"
     );
     assert!(
-        text.contains("TEAM_AGENT_ID = \"grok_writer\"")
-            || text.contains("TEAM_AGENT_ID = 'grok_writer'"),
-        "TEAM_AGENT_ID must be this grok seat, not a leftover placeholder; text={text}"
+        !text.contains("TEAM_AGENT_ID"),
+        "shared grok toml must not carry TEAM_AGENT_ID (pane env is the carrier); text={text}"
     );
     assert!(
         text.contains(&format!("TEAM_AGENT_WORKSPACE = \"{workspace}\""))
@@ -290,14 +412,8 @@ fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
         "TEAM_AGENT_WORKSPACE must match spawn cwd; workspace={workspace} text={text}"
     );
     assert!(
-        text.contains("TEAM_AGENT_OWNER_TEAM_ID = \"grokteam\"")
-            || text.contains("TEAM_AGENT_OWNER_TEAM_ID = 'grokteam'"),
-        "TEAM_AGENT_OWNER_TEAM_ID must be the runtime team key; text={text}"
-    );
-    assert!(
-        text.contains("TEAM_AGENT_AUTH_MODE = \"subscription\"")
-            || text.contains("TEAM_AGENT_AUTH_MODE = 'subscription'"),
-        "TEAM_AGENT_AUTH_MODE must come from the resolved MCP config; text={text}"
+        !text.contains("TEAM_AGENT_OWNER_TEAM_ID") && !text.contains("TEAM_AGENT_AUTH_MODE"),
+        "shared grok toml must not carry per-seat OWNER/AUTH; text={text}"
     );
 }
 

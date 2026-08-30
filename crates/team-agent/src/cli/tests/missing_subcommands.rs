@@ -37,6 +37,75 @@ impl Drop for WorkspaceCleanup {
     }
 }
 
+struct IsolatedHome {
+    prev: Option<String>,
+    dir: std::path::PathBuf,
+}
+
+impl IsolatedHome {
+    fn enter(tag: &str) -> Self {
+        let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!(
+            "ta-cli-home-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".team-agent").join("leaders")).unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+        Self { prev, dir }
+    }
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn seed_self_signed_attached_leader(ws: &std::path::Path) {
+    std::fs::write(
+        ws.join(".team").join("runtime").join("state.json"),
+        serde_json::to_vec(&json!({
+            "team_key": "current",
+            "leader": {"id": "leader"},
+            "leader_receiver": {
+                "mode": "direct_tmux",
+                "status": "attached",
+                "pane_id": "%1",
+                "provider": "codex"
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn seed_leader_registry_entry(ws: &std::path::Path) {
+    let entry = crate::leader::registry::build_entry(
+        ws,
+        "current",
+        "direct_tmux",
+        json!({"status": "attached", "pane_id": "%1"}),
+        1,
+        "diagnose-healthy-fixture",
+        "2026-08-18T00:00:00Z".to_string(),
+    );
+    assert!(
+        crate::leader::registry::write_entry_best_effort(&entry).is_some(),
+        "hermetic HOME must accept a leaders/ registry write"
+    );
+}
+
 // =========================================================================
 // WAVE-2 NON-SUB CHECKPOINT — missing CLI subcommands (ABSENT from cli/emit.rs dispatch).
 // emit.rs `dispatch` has NO arm for sessions, peek, collect, e2e, diagnose,
@@ -255,33 +324,74 @@ fn dispatch_routes_collect_with_spec() {
         );
 }
 
-// ── diagnose ── golden parser.py:298 `cmd_diagnose` -> runtime.diagnose(ws) (diagnose/health.py:19).
-// ok:true only when there are zero issues. Seed leader_receiver=attached + NO session_name + NO
-// agents -> issues=[] -> EXIT 0, golden top keys (sort): event_log,issues,ok,runtime,suggested_repairs.
-// RED: unrouted -> Error.
+// ── diagnose ── attached is host-registry authority, not state.json self-sign.
+// Seed leader_receiver=attached + a ~/.team-agent/leaders/ row for this workspace
+// + NO session_name + NO agents -> issues=[] -> EXIT 0.
 #[test]
+#[serial(env)]
 fn dispatch_routes_diagnose_healthy_leader() {
+    let _env = EnvUnsetGuard::unset(&[
+        "TMUX",
+        "TMUX_PANE",
+        "TEAM_AGENT_WORKSPACE",
+        "TEAM_AGENT_TEAM_ID",
+        "TEAM_AGENT_OWNER_TEAM_ID",
+        "TEAM_AGENT_ACTIVE_TEAM",
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_LEADER_PANE_ID",
+        "TEAM_AGENT_LEADER_SESSION_UUID",
+        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+        "TEAM_AGENT_LEADER_PROVIDER",
+    ]);
+    let _home = IsolatedHome::enter("diagnose-healthy");
     let ws = tmp_workspace();
-    std::fs::write(
-            ws.join(".team").join("runtime").join("state.json"),
-            serde_json::to_vec(&json!({
-                "leader": {"id": "leader"},
-                "leader_receiver": {"mode": "direct_tmux", "status": "attached", "pane_id": "%1", "provider": "codex"},
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+    seed_self_signed_attached_leader(&ws);
+    seed_leader_registry_entry(&ws);
     let code = run(
         &cli_argv(&["diagnose", "--workspace", &ws.to_string_lossy(), "--json"]),
         &ws,
     );
     assert_eq!(
-            code,
-            ExitCode::Ok,
-            "`diagnose` must ROUTE to cmd_diagnose (parser.py:298); a healthy (attached, no-session, \
-             no-agent) state yields zero issues -> exit 0 {{event_log,issues,ok,runtime,suggested_repairs}}; \
-             today -> unknown-subcommand Error"
-        );
+        code,
+        ExitCode::Ok,
+        "`diagnose` must be Ok when state.json looks attached AND ~/.team-agent/leaders/ \
+         has a matching attached row; got {code:?}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+#[serial(env)]
+fn dispatch_routes_diagnose_self_signed_attached_without_registry_is_not_ok() {
+    // 已废除的行为：旧实现只信 `state.json` 的自签 attached（F2 谎话本体），此断言证明它确实没了。
+    // 夹具只种 leader_receiver.status=attached，注册表无该 workspace 条目。
+    // 旧 diagnose 会因此报 Ok；新 diagnose 必须以注册表为可投递权威，判非 Ok。
+    let _env = EnvUnsetGuard::unset(&[
+        "TMUX",
+        "TMUX_PANE",
+        "TEAM_AGENT_WORKSPACE",
+        "TEAM_AGENT_TEAM_ID",
+        "TEAM_AGENT_OWNER_TEAM_ID",
+        "TEAM_AGENT_ACTIVE_TEAM",
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_LEADER_PANE_ID",
+        "TEAM_AGENT_LEADER_SESSION_UUID",
+        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+        "TEAM_AGENT_LEADER_PROVIDER",
+    ]);
+    let _home = IsolatedHome::enter("diagnose-f2-tombstone");
+    let ws = tmp_workspace();
+    seed_self_signed_attached_leader(&ws);
+    let code = run(
+        &cli_argv(&["diagnose", "--workspace", &ws.to_string_lossy(), "--json"]),
+        &ws,
+    );
+    assert_ne!(
+        code,
+        ExitCode::Ok,
+        "self-signed state.json attached with no leaders/ row must not diagnose Ok (F2 lie is dead); \
+         got {code:?}"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

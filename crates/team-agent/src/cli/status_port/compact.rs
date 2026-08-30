@@ -4,6 +4,9 @@ use super::*;
 pub(super) fn compact_status(full: Value) -> Value {
     let not_ready = compact_not_ready(&full);
     let ready = compact_ready(&full, &not_ready);
+    let grok_slot = full.get("grok_slot").cloned().unwrap_or(Value::Null);
+    let grok_identity_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
+        && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
     json!({
         "ok": true,
         "team": full.get("team").cloned().unwrap_or(Value::Null),
@@ -11,6 +14,8 @@ pub(super) fn compact_status(full: Value) -> Value {
         "leader_attach_command": full.get("leader_attach_command").cloned().unwrap_or(Value::Null),
         "ready": ready,
         "not_ready": not_ready,
+        "grok_slot": grok_slot,
+        "grok_identity_slot_ok": grok_identity_slot_ok,
         "agents": compact_agents(full.get("agents")),
     })
 }
@@ -55,11 +60,20 @@ pub(super) fn compact_not_ready(full: &Value) -> Value {
         })
         .unwrap_or_default();
     let mut obj = Map::new();
+    let channel_unbound = reasons
+        .iter()
+        .any(|reason| reason == "leader_receiver_unbound");
     obj.insert(
         "reasons".to_string(),
         Value::Array(reasons.into_iter().map(Value::String).collect()),
     );
     obj.insert("agents".to_string(), Value::Array(agents));
+    if channel_unbound {
+        obj.insert(
+            "next_action".to_string(),
+            Value::String("claim-leader".to_string()),
+        );
+    }
     Value::Object(obj)
 }
 
@@ -111,6 +125,20 @@ pub(super) fn not_ready_reasons(full: &Value) -> Vec<String> {
         == Some(true)
     {
         reasons.push("awaiting_trust_prompt".to_string());
+    }
+    let grok_slot = full.get("grok_slot");
+    let grok_readable = grok_slot
+        .and_then(|slot| slot.get("readable"))
+        .and_then(Value::as_bool);
+    let grok_consistent = grok_slot
+        .and_then(|slot| slot.get("consistent"))
+        .and_then(Value::as_bool);
+    if grok_readable != Some(true) || grok_consistent != Some(true) {
+        if grok_readable == Some(false) || grok_slot.is_none() || grok_slot == Some(&Value::Null) {
+            reasons.push("grok_slot_unjudgeable".to_string());
+        } else {
+            reasons.push("grok_slot_mismatch".to_string());
+        }
     }
     reasons
 }

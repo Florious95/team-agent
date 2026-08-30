@@ -475,8 +475,8 @@ fn copilot_fork_is_supported_but_missing_backing_never_falls_back_fresh() {
         "fixture has no Copilot store backing: {result:?}"
     );
     assert!(
-        !text.contains("capability") && !text.contains("does not support native session fork"),
-        "Copilot must not be rejected by the retired blanket capability gate: {result:?}"
+        text.contains("unverified") || text.contains("未验证"),
+        "Copilot in-window fork is unverified (not a store-fork capability gate): {result:?}"
     );
     assert!(
         fork_transport.spawns.lock().unwrap().is_empty(),

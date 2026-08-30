@@ -114,7 +114,8 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
         ("NODE_EXTRA_CA_CERTS", "/canary/ca.pem"),
     ]);
 
-    let launch_team = compiled_team_dir("cross-launch", &[("worker_a", "Launch Worker")]);
+    let launch_team =
+        compiled_team_dir_for_provider("cross-launch", &[("worker_a", "Launch Worker")], "claude");
     let launch_transport = RecordingTransport::new().with_session_present(false);
     launch_with_transport(
         &launch_team.join("team.spec.yaml"),
@@ -125,16 +126,25 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
     )
     .expect("launch fixture should spawn worker");
 
-    let restart_team = compiled_team_dir("cross-restart", &[("worker_a", "Restart Worker")]);
-    seed_restart_state(&restart_team, "worker_a");
+    let restart_team = compiled_team_dir_for_provider(
+        "cross-restart",
+        &[("worker_a", "Restart Worker")],
+        "claude",
+    );
+    seed_restart_state_as(&restart_team, "worker_a", "claude");
     let restart_transport = RecordingTransport::new().with_session_present(false);
     restart_with_transport(&restart_team, true, None, &restart_transport)
         .expect("restart fixture should spawn worker");
 
-    let add_team = compiled_team_dir("cross-add", &[("worker_a", "Existing Worker")]);
-    seed_running_add_agent_state(&add_team, "worker_a");
+    let add_team =
+        compiled_team_dir_for_provider("cross-add", &[("worker_a", "Existing Worker")], "claude");
+    seed_running_add_agent_state_as(&add_team, "worker_a", "claude");
     let role_file = add_team.parent().unwrap().join("worker_b.md");
-    std::fs::write(&role_file, role_doc("worker_b", "Added Worker")).unwrap();
+    std::fs::write(
+        &role_file,
+        role_doc_for_provider("worker_b", "Added Worker", "claude"),
+    )
+    .unwrap();
     let add_transport = RecordingTransport::new().with_session_present(true);
     add_agent_with_transport(
         &add_team,
@@ -146,25 +156,10 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
     )
     .expect("add-agent fixture should spawn worker");
 
-    let fork_team = compiled_team_dir("cross-fork", &[("worker_a", "Fork Source")]);
-    seed_forkable_source_state(&fork_team, "worker_a");
-    let fork_transport = RecordingTransport::new().with_session_present(true);
-    fork_agent_with_transport(
-        &fork_team,
-        &AgentId::new("worker_a"),
-        &AgentId::new("worker_fork"),
-        None,
-        false,
-        None,
-        &fork_transport,
-    )
-    .expect("fork-agent fixture should spawn worker");
-
     let failures = [
         ("quick-start launch", launch_transport.single_spawn()),
         ("restart", restart_transport.single_spawn()),
         ("add-agent", add_transport.single_spawn()),
-        ("fork-agent", fork_transport.single_spawn()),
     ]
     .into_iter()
     .flat_map(|(surface, spawn)| cross_provider_identity_failures(surface, &spawn))
@@ -174,6 +169,36 @@ fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
         failures.is_empty(),
         "cross-provider worker env isolation contract failed:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+#[serial(env)]
+fn worker_spawn_codex_in_window_fork_reports_unverified_not_unsupported() {
+    // 已废除的行为：旧实现把 codex in-window fork 当成已验证能力（或报「不支持」），此断言证明它确实没了。
+    // 本轮裁定：codex 走这条路必须明确报「未验证」，不是「不支持」。
+    let _home = hermetic_guard::HermeticTestEnv::enter("codex-fork-unverified");
+    let team = compiled_team_dir("codex-fork-tombstone", &[("worker_a", "Fork Source")]);
+    seed_forkable_source_state(&team, "worker_a");
+    let transport = RecordingTransport::new().with_session_present(true);
+    let err = fork_agent_with_transport(
+        &team,
+        &AgentId::new("worker_a"),
+        &AgentId::new("worker_a"),
+        None,
+        false,
+        None,
+        &transport,
+    )
+    .expect_err("codex in-window fork must refuse as unverified");
+    let text = err.to_string();
+    assert!(
+        text.contains("未验证") && text.contains("unverified"),
+        "codex in-window fork must report 未验证; err={text}"
+    );
+    assert!(
+        !text.contains("不支持") && !text.contains("does not support"),
+        "the ruling is unverified, not unsupported; err={text}"
     );
 }
 
@@ -304,17 +329,23 @@ fn cross_provider_identity_failures(surface: &str, spawn: &RecordedSpawn) -> Vec
 }
 
 fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
+    compiled_team_dir_for_provider(label, agents, "codex")
+}
+
+fn compiled_team_dir_for_provider(label: &str, agents: &[(&str, &str)], provider: &str) -> PathBuf {
     let team = tmp_dir(label).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(
         team.join("TEAM.md"),
-        "---\nname: envteam\nobjective: Worker spawn env contract.\nprovider: codex\n---\n\nTeam.\n",
+        format!(
+            "---\nname: envteam\nobjective: Worker spawn env contract.\nprovider: {provider}\n---\n\nTeam.\n"
+        ),
     )
     .unwrap();
     for (name, role) in agents {
         std::fs::write(
             team.join("agents").join(format!("{name}.md")),
-            role_doc(name, role),
+            role_doc_for_provider(name, role, provider),
         )
         .unwrap();
     }
@@ -328,12 +359,20 @@ fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
 }
 
 fn role_doc(name: &str, role: &str) -> String {
+    role_doc_for_provider(name, role, "codex")
+}
+
+fn role_doc_for_provider(name: &str, role: &str, provider: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: {role}\nprovider: codex\nmodel: codex-test-model\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
+        "---\nname: {name}\nrole: {role}\nprovider: {provider}\nmodel: {provider}-test-model\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\n{role}.\n"
     )
 }
 
 fn seed_restart_state(team: &Path, agent_id: &str) {
+    seed_restart_state_as(team, agent_id, "codex");
+}
+
+fn seed_restart_state_as(team: &Path, agent_id: &str, provider: &str) {
     team_agent::state::persist::save_runtime_state(
         team,
         &json!({
@@ -344,7 +383,7 @@ fn seed_restart_state(team: &Path, agent_id: &str) {
             "agents": {
                 agent_id: {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": provider,
                     "role": "Restart Worker",
                     "tools": ["mcp_team"],
                     "window": agent_id,
@@ -360,6 +399,10 @@ fn seed_restart_state(team: &Path, agent_id: &str) {
 }
 
 fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
+    seed_running_add_agent_state_as(team, agent_id, "codex");
+}
+
+fn seed_running_add_agent_state_as(team: &Path, agent_id: &str, provider: &str) {
     let workspace = team_agent::model::paths::team_workspace(team).unwrap();
     team_agent::state::persist::save_runtime_state(
         &workspace,
@@ -371,7 +414,7 @@ fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
             "agents": {
                 agent_id: {
                     "status": "running",
-                    "provider": "codex",
+                    "provider": provider,
                     "role": "Existing Worker",
                     "tools": ["mcp_team"],
                     "window": agent_id,

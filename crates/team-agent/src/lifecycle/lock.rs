@@ -1,3 +1,22 @@
+//! ---
+//! purpose: workspace 级 agent-lifecycle 互斥锁，让同一 workspace 的席位增删起停串行
+//! contract:
+//!   provides:
+//!     - name: acquire_agent_lifecycle_lock
+//!       what: 轮询抢锁，成功返回持有到 Drop 的 guard，超时返回 LifecycleLockTimeout
+//!     - name: agent_lifecycle_lock_path
+//!       what: 给出该 workspace 的锁文件路径
+//!   depends:
+//!     - crate::platform::file_lock
+//!     - crate::event_log::EventLog
+//!     - crate::model::paths
+//! boundary:
+//!   - 不锁 pane 输入通道，那是 pane_input_lock
+//!   - 不做跨 workspace 互斥，锁作用域就是一个 workspace
+//!   - 拿不到锁只超时报错，不强抢也不清理他人锁文件
+//!   - 锁文件内容只作观测用，不作为持有权判据
+//! maturity: wired
+//! ---
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -17,10 +36,16 @@ pub(crate) struct LifecycleLockRequest<'a> {
 }
 
 pub(crate) struct LifecycleLockGuard {
-    #[allow(dead_code)]
     file: std::fs::File,
 }
 
+/// ---
+/// purpose: 抢 workspace 级 agent-lifecycle 锁，默认 30 秒超时、5 秒起写 lock_held_long 事件
+/// params:
+///   request: 携带 workspace、操作名与可选 team/agent，仅用于锁元数据与事件
+/// returns: 持有锁的 guard，Drop 时解锁
+/// errors: 建目录或打开锁文件失败返回 StatePersist，等待超时返回 LifecycleLockTimeout
+/// ---
 pub(crate) fn acquire_agent_lifecycle_lock(
     request: LifecycleLockRequest<'_>,
 ) -> Result<LifecycleLockGuard, LifecycleError> {
@@ -35,6 +60,14 @@ pub(crate) fn acquire_agent_lifecycle_lock(
     )
 }
 
+/// ---
+/// purpose: 以显式超时与告警阈值抢同一把锁，仅测试构建可见
+/// params:
+///   timeout: 放弃等待的上限
+///   held_long: 超过它写一次 lock_held_long 事件
+/// returns: 持有锁的 guard
+/// errors: 同 acquire_agent_lifecycle_lock
+/// ---
 #[cfg(test)]
 pub(crate) fn acquire_agent_lifecycle_lock_for_test(
     request: LifecycleLockRequest<'_>,
@@ -55,6 +88,10 @@ pub(crate) struct LifecycleLockDeadlineOverrideGuard {
     previous: Option<(Duration, Duration)>,
 }
 
+/// ---
+/// purpose: 线程内改写默认锁超时与告警阈值，仅测试构建可见
+/// returns: guard，Drop 时恢复上一次的取值
+/// ---
 #[cfg(test)]
 pub(crate) fn override_agent_lifecycle_lock_deadlines_for_test(
     timeout: Duration,
@@ -145,6 +182,10 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     }
 }
 
+/// ---
+/// purpose: 给出该 workspace 的 agent-lifecycle 锁文件路径
+/// returns: runtime 目录下的 agent-lifecycle.lock
+/// ---
 pub(crate) fn agent_lifecycle_lock_path(workspace: &Path) -> PathBuf {
     crate::model::paths::runtime_dir(workspace).join(format!("{AGENT_LIFECYCLE_LOCK_NAME}.lock"))
 }

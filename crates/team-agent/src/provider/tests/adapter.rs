@@ -348,8 +348,20 @@ fn test_cursor_agent_build_command_includes_workspace_flag() {
         "cursor argv must carry `--workspace {{workspace}}`: {argv:?}"
     );
     assert!(
+        argv_contains_adjacent(&argv, &["--trust"]),
+        "cursor argv must carry documented --trust: {argv:?}"
+    );
+    assert!(
+        argv_contains_adjacent(&argv, &["--sandbox", "disabled"]),
+        "cursor argv must carry documented --sandbox disabled: {argv:?}"
+    );
+    assert!(
         !argv.iter().any(|a| a == "--rules" || a == "--append-system-prompt"),
         "cursor append-system-prompt must NOT go on argv (workspace rules file): {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|a| a == "--system-prompt" || a == "--allowed-tools"),
+        "undocumented flags must stay off the main path: {argv:?}"
     );
 }
 
@@ -379,7 +391,7 @@ fn test_cursor_agent_build_command_bypass_flag_when_dangerous() {
 }
 
 #[test]
-fn test_cursor_agent_refuses_mcp_config_loudly() {
+fn test_cursor_agent_accepts_mcp_config_without_putting_it_on_argv() {
     let adapter = get_adapter(Provider::CursorAgent);
     let cfg = McpConfig {
         raw: serde_json::json!({
@@ -389,17 +401,151 @@ fn test_cursor_agent_refuses_mcp_config_loudly() {
             }
         }),
     };
-    let err = adapter
+    let argv = adapter
         .build_command(AuthMode::Subscription, Some(&cfg), None, None)
-        .expect_err("cursor must not silently drop mcp_config");
-    let text = err.to_string();
+        .expect("cursor MCP is launch overlay, not an argv capability hole");
     assert!(
-        text.to_ascii_lowercase().contains("mcp") && text.contains("not implemented"),
-        "cursor MCP hole must be a loud capability error; got {text}"
+        !argv.iter().any(|a| a == "--mcp-config" || a.contains("mcp")),
+        "cursor has no --mcp-config flag; overlay writes .cursor/mcp.json: {argv:?}"
     );
     assert!(
-        text.contains("action:"),
-        "cursor MCP error must give a next step; got {text}"
+        argv_contains_adjacent(&argv, &["--workspace", "{workspace}"]),
+        "workspace flag must survive an mcp_config argument: {argv:?}"
+    );
+}
+
+#[test]
+fn test_cursor_agent_refuses_mcp_config_loudly() {
+    // 已废除的行为：旧实现收到 mcp_config 就返回 CapabilityUnsupported
+    // （「MCP is not implemented」），此断言证明它确实没了。
+    let adapter = get_adapter(Provider::CursorAgent);
+    let cfg = McpConfig {
+        raw: serde_json::json!({
+            "team_orchestrator": {
+                "command": "/bin/team-agent",
+                "args": ["mcp-server"]
+            }
+        }),
+    };
+    let result = adapter.build_command(AuthMode::Subscription, Some(&cfg), None, None);
+    assert!(
+        !matches!(result, Err(ProviderError::CapabilityUnsupported(_))),
+        "feeding mcp_config must not return CapabilityUnsupported; got {result:?}"
+    );
+}
+
+#[test]
+fn test_grok_build_command_plan_binds_expected_session_id_to_argv() {
+    let adapter = get_adapter(Provider::Grok);
+    let plan = adapter
+        .build_command_plan(ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: None,
+            model: Some("grok-4.6"),
+            tools: &[],
+            profile_launch: None,
+            agent_id_hint: Some("w1"),
+            effort: None,
+        })
+        .expect("grok plan");
+    let sid = plan
+        .expected_session_id
+        .as_ref()
+        .map(|s| s.as_str())
+        .expect("grok fresh plan must carry expected_session_id");
+    assert!(
+        !sid.is_empty(),
+        "expected_session_id must be a non-empty uuid"
+    );
+    assert!(
+        argv_contains_adjacent(&plan.argv, &["--session-id", sid]),
+        "argv --session-id must match expected_session_id; argv={:?}",
+        plan.argv
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--resume"),
+        "fresh grok plan must not include --resume; argv={:?}",
+        plan.argv
+    );
+}
+
+#[test]
+fn test_cursor_auth_hint_subscription_is_unknown_not_present() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let hint = adapter.auth_hint(AuthMode::Subscription);
+    assert_ne!(
+        hint,
+        crate::provider::types::AuthHintStatus::Present,
+        "U-17 前不得把未观测写成 Present"
+    );
+    assert_ne!(hint, crate::provider::types::AuthHintStatus::PresentWeak);
+    assert_eq!(hint, crate::provider::types::AuthHintStatus::Unknown);
+}
+
+#[test]
+fn test_cursor_fresh_plan_has_no_session_id_and_no_resume() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let plan = adapter
+        .build_command_plan(ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: None,
+            model: Some("sonnet-4-thinking"),
+            tools: &[],
+            profile_launch: None,
+            agent_id_hint: Some("w1"),
+            effort: None,
+        })
+        .expect("cursor plan");
+    assert!(
+        plan.expected_session_id.is_none(),
+        "U-01 未过不得造假 pending; got {:?}",
+        plan.expected_session_id
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--session-id" || a == "--resume" || a == "--continue"),
+        "fresh cursor argv must not invent session flags; argv={:?}",
+        plan.argv
+    );
+    assert!(
+        argv_contains_adjacent(&plan.argv, &["--trust"]),
+        "fresh cursor must keep --trust; argv={:?}",
+        plan.argv
+    );
+}
+
+#[test]
+fn test_cursor_resume_plan_requires_chat_id_and_never_emits_empty_resume() {
+    let adapter = get_adapter(Provider::CursorAgent);
+    let ctx = ProviderCommandContext {
+        auth_mode: AuthMode::Subscription,
+        mcp_config: None,
+        system_prompt: None,
+        model: Some("sonnet-4-thinking"),
+        tools: &[],
+        profile_launch: None,
+        agent_id_hint: Some("w1"),
+        effort: None,
+    };
+    let missing = adapter.build_resume_command_plan(None, ctx);
+    assert!(
+        matches!(missing, Err(ProviderError::ResumeUnavailable(_))),
+        "no chatId must not emit empty --resume; got {missing:?}"
+    );
+    let sid = SessionId::new("502896a1-72ba-4c53-9a86-b2da28780806");
+    let plan = adapter
+        .build_resume_command_plan(Some(&sid), ctx)
+        .expect("resume plan");
+    assert!(
+        argv_contains_adjacent(&plan.argv, &["--resume", sid.as_str()]),
+        "resume plan must hit CursorAgent --resume arm; argv={:?}",
+        plan.argv
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--session-id" || a == "--continue"),
+        "resume must not mint --session-id/--continue; argv={:?}",
+        plan.argv
     );
 }
 

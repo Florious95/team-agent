@@ -295,6 +295,7 @@ pub(crate) fn fail_leader_delivery(
             reason: Some(reason),
             channel: Some("fallback_log".to_string()),
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
     store.mark(&message_id, "failed", error)?;
@@ -312,6 +313,7 @@ pub(crate) fn fail_leader_delivery(
         reason: Some(reason),
         channel: Some("fallback_inbox".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 

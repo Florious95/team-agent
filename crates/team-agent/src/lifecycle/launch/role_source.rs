@@ -1,10 +1,37 @@
+//! ---
+//! purpose: 把源席最新角色文件物化到 dynamic-role-files
+//! contract:
+//!   provides:
+//!     - name: materialize_latest_role
+//!       what: clone/add 用的角色落盘，以磁盘最新文件为准
+//! boundary:
+//!   - 不负责 fork 窗口注入
+//!   - 不读 provider session 落盘
+//! maturity: wired
+//! ---
 use std::path::{Path, PathBuf};
 
 use crate::lifecycle::LifecycleError;
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 
-use super::set_yaml_map_value;
+fn set_yaml_map_value(
+    value: &mut Value,
+    key: &str,
+    next: Value,
+) -> Result<(), LifecycleError> {
+    let Value::Map(pairs) = value else {
+        return Err(LifecycleError::Compile(
+            "agent entry is not a map".to_string(),
+        ));
+    };
+    if let Some((_, existing)) = pairs.iter_mut().find(|(k, _)| k == key) {
+        *existing = next;
+    } else {
+        pairs.push((key.to_string(), next));
+    }
+    Ok(())
+}
 
 pub(super) struct MaterializedRole {
     path: PathBuf,
@@ -12,10 +39,17 @@ pub(super) struct MaterializedRole {
 }
 
 impl MaterializedRole {
+/// ---
+/// purpose: 取物化出来的角色文件路径
+/// returns: 落盘路径
+/// ---
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
 
+/// ---
+/// purpose: 标记该文件由调用方接管，Drop 时不再删除
+/// ---
     pub(super) fn keep(&mut self) {
         self.keep = true;
     }
@@ -29,6 +63,15 @@ impl Drop for MaterializedRole {
     }
 }
 
+/// ---
+/// purpose: 读源席最新角色文件，改名后物化到托管目录
+/// params:
+///   state: 用于找源席的 dynamic_role_file，找不到时退到 team 目录下的同名 md
+///   as_agent_id: 新席位名，写进 front matter 的 name
+///   label: 非空时覆盖 front matter 的 role
+/// returns: 物化结果，未调用 keep 时 Drop 会删掉该文件
+/// errors: 源文件缺失、未声明 name 或声明与源席不符时返回 Compile；目标已存在返回 RequirementUnmet；建目录或写盘失败返回 StatePersist
+/// ---
 pub(super) fn materialize_latest_role(
     run_workspace: &Path,
     team_dir: &Path,
@@ -84,49 +127,6 @@ pub(super) fn materialize_latest_role(
         return Err(LifecycleError::StatePersist(error.to_string()));
     }
     Ok(MaterializedRole { path, keep: false })
-}
-
-pub(super) fn clamp_materialized_role_to_leader(
-    materialized: &Path,
-    spec: &Value,
-) -> Result<(), LifecycleError> {
-    let leader_tools = spec
-        .get("leader")
-        .and_then(|leader| leader.get("tools"))
-        .and_then(Value::as_list)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let (mut meta, body) = crate::compiler::read_front_matter(materialized)
-        .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-    let requested = meta
-        .get("tools")
-        .and_then(Value::as_list)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let ceiling = crate::model::permissions::expand_tool_strings(&leader_tools)
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    let effective = crate::model::permissions::expand_tool_strings(&requested)
-        .into_iter()
-        .filter(|tool| ceiling.contains(tool))
-        .map(Value::Str)
-        .collect::<Vec<_>>();
-    set_yaml_map_value(&mut meta, "tools", Value::List(effective))?;
-    let rendered = format!("---\n{}---\n\n{}", yaml::dumps(&meta), body);
-    std::fs::write(materialized, rendered.as_bytes())
-        .map_err(|error| LifecycleError::StatePersist(error.to_string()))
 }
 
 fn resolve_role_source(

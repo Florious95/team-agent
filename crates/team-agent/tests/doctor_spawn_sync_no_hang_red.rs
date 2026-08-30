@@ -88,10 +88,15 @@ process.stdout.write(JSON.stringify({{
          spawnSync stdout capture in a clean cwd. Current doctor recursively scans cwd and blocks \
          opening FIFO-like files, so install.mjs can wait forever. spawnSync report: {report}"
     );
-    assert!(
-        report.contains(r#""status":0"#) && report.contains(r#""stdout_len":"#),
-        "doctor should exit 0 and emit JSON for installer to parse; spawnSync report: {report}"
-    );
+    // 🔴 2026-08-23 RETIRED: `report.contains(r#""status":0"#) && ..."stdout_len":"` —
+    // "doctor should exit 0 and emit JSON for installer to parse".
+    // It assumed the installer needs a PROVIDER-AVAILABILITY REPORT to parse.
+    // 落盘需求 (`.team/artifacts/test-asset-liabilities.md:101-102`, 用户原话):
+    // 装机 = 更新 provider 位置 + skill 位置 + 装 CLI，**不需要告诉他缺什么** —— and it
+    // names this very assertion as 多余需求. ⇒ deleted, not weakened.
+    // ⚠️ 仍然保留的是上面那条「不得挂死」: it is anchored by the SAME requirement's
+    // third item ——「装好 CLI」—— because a doctor that never returns makes
+    // `npx @team-agent/installer install` never finish.
 }
 
 fn make_fifo(path: &Path) {

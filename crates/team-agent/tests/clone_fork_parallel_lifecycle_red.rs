@@ -48,6 +48,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -63,6 +64,13 @@ struct Case {
     workspace: PathBuf,
     shim_path: String,
     socket: Option<PathBuf>,
+}
+
+struct CloneAttempt {
+    name: String,
+    report: Value,
+    elapsed_ms: u128,
+    completed: bool,
 }
 
 impl Case {
@@ -174,6 +182,39 @@ impl Case {
         );
     }
 
+    /// 2026-08-23 rehome (R4 only): the identity/backing-uniqueness axis is a
+    /// `clone` concern — `fork` never produces a NEW named seat and reports
+    /// `session_id: None` by design (`wiki/C1/分身与克隆.md`). r5/r6 keep using
+    /// `fork()` below; only R4 moved.
+    fn clone_seat(&self, as_name: &str) -> CloneAttempt {
+        let started = Instant::now();
+        let out = self.run(&[
+            "clone-agent",
+            SOURCE,
+            "--as",
+            as_name,
+            "--workspace",
+            self.ws(),
+            "--team",
+            TEAM_NAME,
+            "--no-display",
+            "--json",
+        ]);
+        let report = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            json!({
+                "ok": out.status.success(),
+                "_exit": out.status.code(),
+                "_stderr": String::from_utf8_lossy(&out.stderr),
+            })
+        });
+        CloneAttempt {
+            name: as_name.to_string(),
+            report,
+            elapsed_ms: started.elapsed().as_millis(),
+            completed: true,
+        }
+    }
+
     fn fork(&self, as_name: &str) -> Value {
         let out = self.run(&[
             "fork-agent",
@@ -214,6 +255,84 @@ impl Case {
             }
         }
         serde_json::Map::new()
+    }
+
+    fn event_line_count(&self) -> usize {
+        std::fs::read_to_string(self.workspace.join(".team/logs/events.jsonl"))
+            .map(|raw| raw.lines().count())
+            .unwrap_or(0)
+    }
+
+    fn r4_diagnostics(
+        &self,
+        attempts: &[CloneAttempt],
+        event_boundary: usize,
+        names: &[&str],
+    ) -> String {
+        let rows = self.team_agent_rows();
+        let state_rows = names
+            .iter()
+            .copied()
+            .chain(std::iter::once(SOURCE))
+            .map(|name| {
+                (
+                    name.to_string(),
+                    rows.get(name).cloned().unwrap_or(Value::Null),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+
+        let event_path = self.workspace.join(".team/logs/events.jsonl");
+        let invocation_events = match std::fs::read_to_string(&event_path) {
+            Ok(raw) => raw
+                .lines()
+                .skip(event_boundary)
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|event| {
+                    let name = event
+                        .get("event")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    ["lifecycle", "lock", "reservation", "rollback"]
+                        .iter()
+                        .any(|marker| name.contains(marker))
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => vec![json!({
+                "unavailable": format!("EventLog unavailable within invocation boundary: {error}"),
+                "path": event_path,
+            })],
+        };
+        let non_ok_clones = attempts
+            .iter()
+            .filter(|attempt| attempt.report.get("ok").and_then(Value::as_bool) != Some(true))
+            .map(|attempt| attempt.name.as_str())
+            .collect::<Vec<_>>();
+
+        serde_json::to_string_pretty(&json!({
+            "case": "r4_parallel_n_clones_have_pairwise_unique_new_sessions",
+            "workspace": self.ws(),
+            "team": TEAM_NAME,
+            "clone_names": names,
+            "non_ok_clones": non_ok_clones,
+            "event_boundary_line_count": event_boundary,
+            "clone_attempts": attempts.iter().map(|attempt| json!({
+                "name": attempt.name,
+                "report": attempt.report,
+                "elapsed_ms": attempt.elapsed_ms,
+                "completed": attempt.completed,
+            })).collect::<Vec<_>>(),
+            "state_rows": state_rows,
+            "invocation_lifecycle_events": invocation_events,
+            "unavailable_fields": {
+                "reservation_owner": "unavailable: B0 exposes no authoritative clone-reservation owner field",
+                "lock_acquire_release_timeline": "unavailable: B0 EventLog exposes no clone lock acquire/release timeline",
+                "state_conflict": "unavailable: B0 exposes no authoritative state-conflict event field",
+                "rollback": "available only when B0 emits a matching invocation EventLog event"
+            }
+        }))
+        .unwrap_or_else(|error| format!("diagnostic context serialization unavailable: {error}"))
     }
 }
 
@@ -368,20 +487,31 @@ fn backing_of(row: &Value) -> Option<String> {
 /// The shim now emits a distinct NEW backing per fork (keyed to the predetermined
 /// --session-id) and every fork MUST report ok.
 ///
-/// RED cause unchanged @baseline: each fork reports ok:true (baseline never checks
-/// backing) with session_id=null, so the uniqueness assertions fire.
+/// 🔴 2026-08-23 REHOME to `clone-agent`: this axis was written on `fork`, but
+/// per `wiki/C1/分身与克隆.md` a fork produces a provider-opened, UNNAMED window
+/// whose session id the provider assigns and the framework never sees
+/// (`fork_agent.rs` reports `session_id: None`, `new_agent_id == source`).
+/// "N concurrent creations must yield pairwise-distinct NEW session ids" has no
+/// landing point there. `clone` is the verb whose session id is framework
+/// predetermined/captured, so the requirement lives here. The window/pane
+/// uniqueness assertions below remain a POSITIVE CONTROL (29bf8e6c) and move
+/// WITH the axis they guard — they are not left behind on fork as an ownerless
+/// scaffold.
+/// ⛔ Rewritten to clone semantics, not the fork fixture carried across:
+/// `clone_seat()` is a separate helper; r5/r6 keep the fork helper.
 #[test]
-fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
+fn r4_parallel_n_clones_have_pairwise_unique_new_sessions() {
     let case = Case::start("cf-r4");
     case.seed_source_tuple(&case.rollout_path());
     std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").expect("write rollout");
 
     let names = ["f1", "f2", "f3"];
+    let event_boundary = case.event_line_count();
     // REAL concurrency: a barrier releases all N fork subprocesses simultaneously
     // so workspace-lock contention / reservation mutual-exclusion is actually
     // exercised (a sequential loop would not). Scoped threads borrow `&case`.
     let barrier = std::sync::Barrier::new(names.len());
-    let forks: Vec<(&str, Value)> = std::thread::scope(|scope| {
+    let forks: Vec<CloneAttempt> = std::thread::scope(|scope| {
         let handles: Vec<_> = names
             .iter()
             .map(|&n| {
@@ -389,21 +519,25 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
                 let case = &case;
                 scope.spawn(move || {
                     barrier.wait();
-                    (n, case.fork(n))
+                    case.clone_seat(n)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let diagnostics = case.r4_diagnostics(&forks, event_boundary, &names);
 
     // Every fork MUST report ok — no early-return escape that would leave the
     // uniqueness assertions unreachable (vacuous green, type 8).
-    for (n, fork) in &forks {
+    for attempt in &forks {
+        let n = &attempt.name;
+        let fork = &attempt.report;
         assert_eq!(
             fork.get("ok").and_then(Value::as_bool),
             Some(true),
-            "fork {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
-             green). A refusal of a legitimate concurrent fork is itself the failure. fork={fork}"
+            "clone {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
+             green). A refusal of a legitimate concurrent clone is itself the failure. clone={fork}; \
+             diagnostic_context={diagnostics}"
         );
     }
 
@@ -422,10 +556,10 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     // reject-everything impl passing the session assertion for the wrong reason).
     let mut windows: Vec<String> = Vec::new();
     let mut panes: Vec<String> = Vec::new();
-    for n in names {
+    for n in &names {
         let row = rows
-            .get(n)
-            .unwrap_or_else(|| panic!("fork {n} row present"));
+            .get(*n)
+            .unwrap_or_else(|| panic!("fork {n} row present; diagnostic_context={diagnostics}"));
         if let Some(w) = window_of(row) {
             windows.push(w);
         }
@@ -435,33 +569,40 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     }
     assert!(
         windows.len() == names.len() && uniq(&windows),
-        "positive control: N forks must have pairwise-distinct windows; windows={windows:?}"
+        "positive control: N forks must have pairwise-distinct windows; windows={windows:?}; \
+         diagnostic_context={diagnostics}"
     );
     assert!(
         panes.len() == names.len() && uniq(&panes),
-        "positive control: N forks must have pairwise-distinct panes; panes={panes:?}"
+        "positive control: N forks must have pairwise-distinct panes; panes={panes:?}; \
+         diagnostic_context={diagnostics}"
     );
 
     // R4 red: NEW session ids must be present, pairwise distinct, and != source.
     let mut new_sessions: Vec<String> = Vec::new();
-    for n in names {
-        let row = rows.get(n).unwrap();
+    for n in &names {
+        let row = rows.get(*n).unwrap_or_else(|| {
+            panic!("fork {n} row present for session assertion; diagnostic_context={diagnostics}")
+        });
         let sess = new_session_of(row).unwrap_or_else(|| {
             panic!(
                 "fork {n} reported ok but carries no NEW session id (session_id=null): N concurrent \
-                 forks are indistinguishable as forked contexts (locate §3/§4.4; batch2 R2). row={row}"
+                 forks are indistinguishable as forked contexts (locate §3/§4.4; batch2 R2). row={row}; \
+                 diagnostic_context={diagnostics}"
             )
         });
         assert_ne!(
             Some(&sess),
             source_session.as_ref(),
-            "fork {n} NEW session id must differ from the source; got {sess}"
+            "fork {n} NEW session id must differ from the source; got {sess}; \
+             diagnostic_context={diagnostics}"
         );
         new_sessions.push(sess);
     }
     assert!(
         uniq(&new_sessions),
-        "N concurrent forks must have PAIRWISE-DISTINCT new session ids; got {new_sessions:?}"
+        "N concurrent forks must have PAIRWISE-DISTINCT new session ids; got {new_sessions:?}; \
+         diagnostic_context={diagnostics}"
     );
 
     // R4 backing uniqueness (leader ruling msg_432066100c50 §2, locate §5.6): each
@@ -471,26 +612,29 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     // source's, and non-empty.
     let source_backing = rows.get(SOURCE).and_then(backing_of);
     let mut backings: Vec<String> = Vec::new();
-    for n in names {
-        let row = rows.get(n).unwrap();
+    for n in &names {
+        let row = rows.get(*n).unwrap_or_else(|| {
+            panic!("fork {n} row present for backing assertion; diagnostic_context={diagnostics}")
+        });
         let backing = backing_of(row).unwrap_or_else(|| {
             panic!(
                 "fork {n} reported ok but carries no NEW backing (rollout_path/backing_path empty): a \
                  forked context must own an independent backing, not just a distinct id (locate §5.6). \
-                 row={row}"
+                 row={row}; diagnostic_context={diagnostics}"
             )
         });
         assert_ne!(
             Some(&backing),
             source_backing.as_ref(),
-            "fork {n} backing must differ from the source's backing; got {backing}"
+            "fork {n} backing must differ from the source's backing; got {backing}; \
+             diagnostic_context={diagnostics}"
         );
         backings.push(backing);
     }
     assert!(
         uniq(&backings),
         "N concurrent forks must own PAIRWISE-DISTINCT backings (independent context, not shared \
-         rollout); got {backings:?}"
+         rollout); got {backings:?}; diagnostic_context={diagnostics}"
     );
 }
 

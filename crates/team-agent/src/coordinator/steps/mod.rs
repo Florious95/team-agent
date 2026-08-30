@@ -1,3 +1,17 @@
+//! ---
+//! purpose: tick 步骤组的命名空间与规范顺序——给每个步骤组一个稳定标签与固定次序，供编排器与事件日志共用
+//! contract:
+//!   provides:
+//!     - name: ordered
+//!       what: 步骤组的规范顺序（穷尽枚举），编排器必须按此序调用
+//!     - name: as_str
+//!       what: 步骤组的稳定标签（tick.<group>），进事件与指标字段
+//!   depends: []
+//! boundary:
+//!   - 不含任何步骤的实现，只定义分组身份与顺序
+//!   - persist 必须排最后、session_gate 必须排最前，这是顺序本身承载的约束
+//! maturity: wired
+//! ---
 //!
 //! unit-11 (Stage 4) — coordinator tick steps namespace.
 //!
@@ -37,6 +51,10 @@ pub enum TickStepGroup {
 
 impl TickStepGroup {
     /// Stable label used in event-log and metric fields.
+    /// ---
+    /// purpose: 给步骤组一个稳定标签，供事件日志与指标字段使用
+    /// returns: 形如 tick.<group> 的稳定串；已发布的取值不可改写，只可新增
+    /// ---
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SessionGate => "tick.session_gate",
@@ -50,6 +68,10 @@ impl TickStepGroup {
 
     ///
     /// Canonical ordering as a const slice — exhaustive over the enum.
+    /// ---
+    /// purpose: 给出步骤组的规范调用顺序
+    /// returns: 穷尽覆盖本 enum 全部变体的静态切片，session_gate 在首、persist 在尾；编排器按此序调用，持久化才能反映之前每一步的结果
+    /// ---
     pub fn ordered() -> &'static [TickStepGroup] {
         &[
             TickStepGroup::SessionGate,

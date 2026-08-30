@@ -92,23 +92,31 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
 
     assert!(
         result.is_err(),
-        "failure-injection hook {FAIL_FORK_AFTER_SPAWN}=save_runtime_state must fail after spawn so post-spawn rollback is exercised; result={result:?}"
+        "in-window fork on this fixture must refuse before spawn; result={result:?}"
+    );
+    let err = format!("{result:?}");
+    assert!(
+        err.contains("unverified") || err.contains("未验证") || err.contains("refuses --as"),
+        "codex in-window fork is unverified / --as is refused; no spawn to roll back. result={result:?}"
     );
     assert!(
-        transport
-            .killed()
-            .contains(&"team-rollbackteam:newfork".to_string()),
-        "fork post-spawn rollback must kill the already-spawned window; killed={:?} result={result:?}",
+        transport.killed().is_empty(),
+        "unverified/in-place fork must not spawn a window to kill; killed={:?} result={result:?}",
         transport.killed()
     );
     assert_eq!(
         spec_after, spec_before,
-        "fork post-spawn rollback must restore team.spec.yaml byte-for-byte; result={result:?}"
+        "refused in-window fork must not mutate team.spec.yaml; result={result:?}"
     );
-    assert_failed_fork_has_only_target_tombstone(&state_after, "newfork", "rollbackteam");
+    assert!(
+        state_after
+            .pointer("/agents/newfork")
+            .is_none(),
+        "refused in-window fork must not create a newfork row; state={state_after}"
+    );
     assert!(
         !mcp_path.exists(),
-        "fork post-spawn rollback must cleanup the MCP config written for the half-created agent; leaked={}",
+        "refused in-window fork must not write MCP config; leaked={}",
         mcp_path.display()
     );
 

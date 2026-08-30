@@ -1,3 +1,13 @@
+//! ---
+//! purpose: 冷启、add/clone/fork 入口拼装
+//! contract:
+//!   provides:
+//!     - name: fork_agent
+//!       what: 成员分身入口，grok 走窗口内命令
+//! boundary:
+//!   - 不读 provider 会话落盘
+//! maturity: wired
+//! ---
 //!
 //! lifecycle::launch —— 冷启 / quick-start / 危险审批探测 + add/fork / plan 起步与推进。
 
@@ -18,6 +28,16 @@ use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
 
+/// ---
+/// purpose: 冷启全队的默认入口，按 spec 所在目录绑定 per-team tmux socket 后转 launch_with_transport
+/// params:
+///   spec_path: 已编译 spec 的路径，其父目录即 team 目录
+///   dry_run: 只出路由与权限，不 spawn 也不落盘
+///   auto_approve: 当前为 no-op
+///   skip_profile_smoke: 当前为 no-op
+/// returns: LaunchReport
+/// errors: 透传 launch_with_transport 的错误
+/// ---
 ///
 /// `launch(spec_path, dry_run, auto_approve, skip_profile_smoke)`(`launch/core.py:29`)。
 /// 冷启全队:路由 tasks、resolve 权限/危险审批门、session 冲突检查(冲突 →
@@ -42,6 +62,13 @@ pub fn launch(
     )
 }
 
+/// ---
+/// purpose: 由 spec 路径推出 workspace，再转 launch_with_transport_in_workspace
+/// params:
+///   transport: 已绑定 team socket 的 transport
+/// returns: LaunchReport
+/// errors: 透传 launch_with_transport_in_workspace 的错误
+/// ---
 pub(crate) fn launch_with_transport(
     spec_path: &Path,
     dry_run: bool,
@@ -61,6 +88,17 @@ pub(crate) fn launch_with_transport(
     )
 }
 
+/// ---
+/// purpose: 冷启全队的实体实现，编译 spec、检查 session 冲突、按序 spawn、落 state、出报告
+/// params:
+///   workspace: run workspace 根，事件与 state 都落在这里
+///   spec_path: 已编译 spec 的路径
+///   dry_run: 为真时不 spawn 不落盘，started 为空
+///   auto_approve: 未使用
+///   skip_profile_smoke: 未使用
+/// returns: LaunchReport，其中 leader_receiver_attached 恒 false、session_capture_incomplete_agents 恒空
+/// errors: spec 不存在或解析失败返回 Compile，tmux session 已存在返回 SessionConflict，spawn 与落 state 的错误透传
+/// ---
 pub fn launch_with_transport_in_workspace(
     workspace: &Path,
     spec_path: &Path,
@@ -71,8 +109,8 @@ pub fn launch_with_transport_in_workspace(
 ) -> Result<LaunchReport, LifecycleError> {
     let _ = skip_profile_smoke;
     let _ = auto_approve; // 0.5.66: bypass 单源后无 runtime.dangerous_auto_approve,`--yes` 为 no-op。
-    // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): launch.phase
-    // timer with monotonic `elapsed_ms` for latency triage.
+                          // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): launch.phase
+                          // timer with monotonic `elapsed_ms` for latency triage.
     let phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     if !spec_path.exists() {
         return Err(LifecycleError::Compile(format!(
@@ -83,8 +121,6 @@ pub fn launch_with_transport_in_workspace(
     let text = std::fs::read_to_string(spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    // Grok cwd 冲突在写 events / spawn overlay 之前拒绝，避免回滚半截配置。
-    ensure_exclusive_grok_cwd(&spec, workspace)?;
     // 0.5.66 §3.2 跨 workspace 兼容警示:leader argv 带 bypass flag 但当前团队
     // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
     // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。
@@ -109,13 +145,7 @@ pub fn launch_with_transport_in_workspace(
         Vec::new()
     } else {
         phase_timer.emit(workspace, "launch.phase", "spawn_all");
-        let started = spawn_agents(
-            workspace,
-            spec_path,
-            &spec,
-            &session_name,
-            transport,
-        )?;
+        let started = spawn_agents(workspace, spec_path, &spec, &session_name, transport)?;
         persist_spawn_agent_state(
             workspace,
             spec_path,
@@ -226,8 +256,8 @@ mod plan;
 pub(crate) use plan::{handle_report_result, start_plan};
 
 pub mod spawn;
-pub(super) use spawn::*;
 pub(crate) use spawn::agent_id_spec_source_path;
+pub(super) use spawn::*;
 
 mod layout;
 pub(super) use layout::*;
@@ -262,22 +292,38 @@ pub(crate) use agent_state::{
     persist_effective_approval_policy_from_agent,
 };
 
+mod grok_per_seat;
+pub(crate) use grok_per_seat::{
+    is_per_seat_env_key, non_per_seat_env_in_tables, per_seat_keys_in_toml,
+    strip_per_seat_keys_from_toml,
+};
+
 mod mcp_config;
+pub use mcp_config::apply_grok_mcp_overlay;
 pub(super) use mcp_config::*;
 pub(crate) use mcp_config::{
-    apply_grok_mcp_overlay, ensure_exclusive_grok_cwd, ensure_grok_login_and_folder_trust,
-    grok_shared_cwd_error,
-    point_native_mcp_config_at_file, resolve_mcp_config, write_worker_mcp_config,
+    ensure_grok_login_and_folder_trust, grok_shared_cwd_error, point_native_mcp_config_at_file,
+    reconcile_grok_toml_per_seat_keys, resolve_mcp_config, write_worker_mcp_config,
     write_worker_mcp_config_for_provider,
 };
+
+mod cursor_mcp;
+pub use cursor_mcp::{
+    apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,
+    enable_cursor_workspace_mcp, physical_workspace_path, refuse_second_cursor_occupant,
+};
+
+mod cursor_create_chat;
 
 mod worker_env;
 pub(super) use worker_env::*;
 pub(crate) use worker_env::{
-    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay, apply_mcp_auto_approval_env,
-    apply_profile_launch_env, fill_spawn_placeholders, fill_spawn_placeholders_full,
-    inherited_env_with_team_overrides, persist_command_plan_state, spawn_timestamp,
+    apply_copilot_instructions_overlay, apply_cursor_agent_rules_overlay,
+    apply_mcp_auto_approval_env, apply_profile_launch_env, auth_mode_env_value,
+    fill_spawn_placeholders, fill_spawn_placeholders_full, inherited_env_with_team_overrides,
+    persist_command_plan_state, spawn_timestamp,
 };
+pub use worker_env::{apply_cursor_subscription_proxy_env, CursorProxyPresence};
 
 mod identity;
 pub(super) use identity::*;
@@ -304,7 +350,7 @@ pub(crate) use quick_start_transport::{
 };
 
 pub mod readiness;
-pub(crate) use readiness::launched_team_receiver_is_attached;
+pub use readiness::launched_team_receiver_is_attached;
 pub(super) use readiness::*;
 
 mod add_agent;
@@ -317,18 +363,11 @@ pub(crate) use add_agent_state::inject_agent_into_spec;
 pub(super) use add_agent_state::*;
 
 mod fork_agent;
-pub use fork_agent::fork_agent_with_transport;
 pub(super) use fork_agent::*;
+pub use fork_agent::{fork_agent_with_transport, in_window_fork, in_window_fork_command};
 
 mod fork_entry;
 pub use fork_entry::fork_agent;
-
-mod fork_state;
-pub(super) use fork_state::*;
-
-mod fork_finalize;
-pub(super) use fork_finalize::*;
-pub(crate) use fork_finalize::{finalize_pending_fork_capture, ContextForkFinalized};
 
 mod role_source;
 pub(super) use role_source::*;
@@ -341,9 +380,7 @@ pub(super) use ownership::*;
 pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};
 
 pub mod spec_state;
-pub(crate) use spec_state::{
-    override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
-};
+pub use spec_state::worker_session_name_pub;
 pub(crate) use spec_state::{
     effective_runtime_config_for_worker_spawn, effective_runtime_config_for_worker_spawn_json,
 };
@@ -354,7 +391,9 @@ use spec_state::{
     spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
     spec_tasks_json, team_workspace, yaml_value_to_json,
 };
-pub use spec_state::worker_session_name_pub;
+pub(crate) use spec_state::{
+    override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
+};
 
 #[cfg(test)]
 mod tests {
@@ -365,10 +404,8 @@ mod tests {
     // leader argv 带 bypass flag + 无角色声明 true → 写 warning 事件。
     #[test]
     fn test_leader_flag_present_but_no_role_true_writes_warning_event() {
-        let ws = std::env::temp_dir().join(format!(
-            "ta-bypass-warning-test-{}",
-            std::process::id()
-        ));
+        let ws =
+            std::env::temp_dir().join(format!("ta-bypass-warning-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
         let spec = yaml::loads(
@@ -422,10 +459,8 @@ mod tests {
 
     #[test]
     fn team_agent_force_flag_does_not_look_like_bypass() {
-        let ws = std::env::temp_dir().join(format!(
-            "ta-bypass-force-not-bypass-{}",
-            std::process::id()
-        ));
+        let ws =
+            std::env::temp_dir().join(format!("ta-bypass-force-not-bypass-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&ws);
         std::fs::create_dir_all(&ws).unwrap();
         let spec = yaml::loads(

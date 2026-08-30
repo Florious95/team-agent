@@ -1,4 +1,29 @@
-//!
+//! ---
+//! purpose: context-fork 的验证总闸——按 provider 分派「新会话 backing 确实生成了」的证明，拿不到证明就超时或拒绝，绝不假绿
+//! contract:
+//!   provides:
+//!     - name: ContextBackingSnapshot
+//!       what: spawn 前对 provider backing 根下 .jsonl 的 (len, mtime) 基线快照，用于判「变过」
+//!     - name: verify_context_fork
+//!       what: 按 provider 路由到 copilot/codex/claude 三条验证路径，成功给 ContextForkProof
+//!     - name: context_fork_convergence_deadline
+//!       what: 每个 provider 各自的收敛预算(claude 45s / codex 10s / 其余 5s)
+//!     - name: ContextForkProof
+//!       what: 已验证的 fork 证明:新旧 session id、backing 路径、captured_via、归属置信度
+//!     - name: ContextForkTermination
+//!       what: 两种失败:Timeout(未在预算内看到新 backing) 与 Rejected(provider 侧错误)
+//!   requires:
+//!     - name: crate::provider::session_scan
+//!       what: codex 分支复用一次性候选扫描来认领新 rollout
+//!     - name: crate::provider::CommandPlan
+//!       what: expected_session_id 与 provider_projects_root 两个关键输入都来自 plan
+//! boundary:
+//!   - 只回答「fork 有没有产生一个可读的、不等于源会话的新 backing」，不回答会话内容对不对
+//!   - 不创建/改写 backing(codex 的物化改写在 context_fork/codex.rs，不在本文件)
+//!   - 未证明即 Timeout/Rejected，绝不退化成「假定成功」
+//!   - grok / cursor / gemini / fake 没有可验证 backing，一律直接 Rejected
+//! maturity: wired
+//! ---
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -27,6 +52,18 @@ pub(crate) use outcome::{
     observe_context_fork, transition_pending_context_fork, ContextForkOutcome, PendingContextFork,
 };
 
+/// ---
+/// purpose: 给出该 provider 等待 fork backing 落盘的收敛预算
+/// params:
+///   provider: 目标 provider;全枚举穷举，无兜底臂
+/// returns: Claude/ClaudeCode 45s、Codex 10s、其余(Copilot/Grok/CursorAgent/GeminiCli/Fake) 5s
+/// contract:
+///   provides:
+///     - name: context_fork_convergence_deadline
+///       what: 纯查表，不读时钟、不读磁盘
+/// boundary:
+///   - 只给预算数值，不负责在预算内轮询;超时语义由 ContextForkOutcome::Pending 承接
+/// ---
 pub(crate) fn context_fork_convergence_deadline(provider: Provider) -> Duration {
     // Expiration is consumed by ContextForkOutcome::Pending(PendingContextFork).
     match provider {
@@ -60,6 +97,20 @@ struct FileStamp {
 }
 
 impl ContextBackingSnapshot {
+    /// ---
+    /// purpose: 在 fork spawn 之前对 provider backing 根做一次 .jsonl 基线快照，事后据此判断哪些文件「变过」
+    /// params:
+    ///   provider: 决定 backing 根的默认位置(plan 未给 provider_projects_root 时按 HOME 推导)
+    ///   plan: 优先取 plan.provider_projects_root;隔离根存在时不碰用户全局目录
+    /// returns: 根下递归到底的 path → (len, modified) 映射;根不可读时是空映射，不报错
+    /// contract:
+    ///   provides:
+    ///     - name: capture
+    ///       what: 只读元数据(len+mtime)，不打开文件正文
+    /// boundary:
+    ///   - 只收 .jsonl 后缀;copilot 的 session-store.db 不在快照内，其证明走 sqlite 查询另算
+    ///   - 目录读失败静默跳过——快照是「变没变」的参照物，不是完整性断言
+    /// ---
     pub(crate) fn capture(provider: Provider, plan: &CommandPlan) -> Self {
         let root = provider_backing_root(provider, plan);
         let files = jsonl_files(&root);
@@ -67,6 +118,28 @@ impl ContextBackingSnapshot {
     }
 }
 
+/// ---
+/// purpose: fork 后按 provider 分派验证，只有拿到「新会话 backing 可读且不等于源会话」的实证才返回证明
+/// params:
+///   provider: 决定走 copilot(sqlite 行存在) / codex(候选扫描认领) / claude(轮询双路径) 三条路之一
+///   source_session_id: 被 fork 的源会话 id;新会话等于它即判失败
+///   plan: 提供 expected_session_id 与隔离 backing 根
+///   before: spawn 前的 ContextBackingSnapshot 基线，用于判「文件变过」
+///   expected_backing_path: 精确快照路径。claude 必需，缺失即拒绝;codex 仅在 plan 带 expected id 时必需(无 expected id 走 legacy「唯一变过的新 rollout」认领，可为 None);两者都不做同目录猜测
+///   spawn_cwd: codex 分支据此构造扫描上下文;claude 分支据此推导 provider 侧 projects 目录
+///   spawned_at: codex 候选扫描的时间边界
+///   deadline: 轮询预算，来自 context_fork_convergence_deadline
+/// returns: ContextForkProof——新旧 session id、backing 路径、captured_via、attribution_confidence
+/// errors: Timeout 表示预算内没看到可验证的新 backing;Rejected 包装 ProviderError(缺 expected id、路径不匹配、无可验证 backing 的 provider)
+/// contract:
+///   provides:
+///     - name: verify_context_fork
+///       what: 分派 + 兜底拒绝;本函数自身不轮询，轮询在各 provider 分支内
+/// boundary:
+///   - 不修改 backing、不写 state、不发事件
+///   - _source_agent_id 当前不参与任何判定(仅 codex 用 agent_id 做 embedded 身份比对)
+///   - 未列入三条路径的 provider 一律 CaptureFailed，绝不返回「无法验证但放行」
+/// ---
 pub(crate) fn verify_context_fork(
     provider: Provider,
     source_session_id: &SessionId,

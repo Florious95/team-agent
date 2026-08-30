@@ -1,3 +1,22 @@
+//! ---
+//! purpose: 三个只读运行时探测——上下文压缩、Codex session 漂移、leader 端 API 错误——全部值变才发事件
+//! contract:
+//!   provides:
+//!     - name: observe_runtime
+//!       what: 对本 tick 的每条捕获事实跑三个探测，收集结果并写变化驱动的事件
+//!   depends:
+//!     - super::runtime_observation
+//!     - super::types
+//!     - crate::event_log
+//!     - crate::state::projection
+//!     - crate::state::ownership
+//!     - crate::model::enums
+//! boundary:
+//!   - 只分类不动作：不重启 agent、不清 session、不投递任何消息，只给 recommendation 文案
+//!   - 事件是 change-driven：计数/指纹不变的那一 tick 不重发，去重键存在 state 里
+//!   - 只读 scrollback 尾与已存 session id，不与 provider 进程交互
+//! maturity: wired
+//! ---
 //!
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,6 +34,15 @@ use super::types::{CompactionResult, LeaderApiError, SessionDriftResult};
 
 const COMPACTION_RESET_THRESHOLD_DEFAULT: i64 = 3;
 
+/// ---
+/// purpose: 对本 tick 的全部捕获事实依次跑 compaction / session-drift / leader-api-error 三个探测
+/// params:
+///   workspace: workspace 根，用于打开事件日志
+///   state: 可变运行时状态；探测在其中读写压缩计数、漂移标记与 api-error 指纹这些跨 tick 去重键
+///   captures_by_agent: 本 tick 的 per-agent 捕获事实，按 agent_id 有序
+///   leader_capture: leader 侧捕获；为 None 时 api-error 结果为空，且不清除既有指纹
+/// returns: 捕获事实原样带回，附三组探测结果；未命中的探测对应空 Vec
+/// ---
 pub fn observe_runtime(
     workspace: &Path,
     state: &mut Value,

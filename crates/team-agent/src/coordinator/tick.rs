@@ -1,3 +1,37 @@
+//! ---
+//! purpose: coordinator 的核心——Coordinator 本体与单次 tick 的固定顺序编排，外加心跳 sidecar 与 worker 运行态解析
+//! contract:
+//!   provides:
+//!     - name: tick
+//!       what: 跑一轮固定顺序的编排：会话门 → 捕获缺失 session → 启动/审批提示 → 健康对账 → 投递与到期事件 → 只读探测 → 原子持久化 → 回收结果
+//!     - name: write_coordinator_heartbeat
+//!       what: 写 runtime/coordinator_tick.json 心跳 sidecar（阶段、状态、boot id、迭代计数）
+//!     - name: read_coordinator_heartbeat
+//!       what: 只读取出最近一次心跳，供 status/diagnose 消费
+//!     - name: resolve_worker_runtime_state_with_fg_pgrp
+//!       what: 由 agent JSON 与活动分类结果解析 worker 运行态，缺信号时判 Unknown 而非 Idle
+//!   depends:
+//!     - super::health
+//!     - super::types
+//!     - super::steps
+//!     - super::steps::abnormal
+//!     - super::runtime_observation
+//!     - crate::state
+//!     - crate::message_store
+//!     - crate::messaging
+//!     - crate::leader
+//!     - crate::provider
+//!     - crate::transport
+//!     - crate::event_log
+//!     - crate::os_probe
+//! boundary:
+//!   - 不实现投递、到期事件与结果回收的本体，那些在 crate::messaging，本模块只按序调用
+//!   - 无 pending obligation 时不注入任何探索性 prompt；无既定义务时唯一会投递的是 should_ping 成立时的一条中性提示。例外：屏上出现审批提示且策略允许时，runtime_approval 会经 transport.send_keys 注入应答按键（不是 prompt，是对已观测提示的应答）
+//!   - 监测步骤失败降级并继续，TickReport.ok=true 不代表每一步都成功——各步失败只在事件里
+//!   - 持久化失败走 degraded 报告而不是 panic，也不是 Err
+//!   - 不直接依赖 provider client crate，provider 一律经注入的 ProviderAdapter
+//! maturity: wired
+//! ---
 //!
 //! Coordinator core:daemon lifecycle 宿主 + 单次 tick 编排(19 步固定顺序)+ health/start/stop。
 
@@ -166,6 +200,14 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// 构造(注入 provider registry + transport)。spawn 出的 daemon 在 `run` 前装配它。
+    /// ---
+    /// purpose: 装配一个 Coordinator——注入 provider registry 与 transport，两者都是 trait object 以便替换与 mock
+    /// params:
+    ///   workspace: 本实例服务的 workspace 根
+    ///   provider_registry: provider adapter 解析器；provider 一律经它取，绝不直连 provider client crate
+    ///   transport: 会话/pane 控制面，用于存活探测与注入
+    /// returns: 未绑定 team_key、无 save 钩子、无顺序探针的实例
+    /// ---
     pub fn new(
         workspace: WorkspacePath,
         provider_registry: Box<dyn ProviderRegistry>,
@@ -181,6 +223,12 @@ impl Coordinator {
         }
     }
 
+    /// ---
+    /// purpose: 绑定 daemon 侧选定的 team_key，让 tick 的状态投影用它而不是可能过期的根 active_team_key
+    /// params:
+    ///   team_key: 目标 team；None 或空串都视为未绑定，tick 会回落到 state 推导
+    /// returns: 绑定后的自身
+    /// ---
     pub(crate) fn with_team_key(mut self, team_key: Option<String>) -> Self {
         self.daemon_team_key = team_key.filter(|key| !key.is_empty());
         self
@@ -190,6 +238,17 @@ impl Coordinator {
     /// transport + mock provider registry + 可选 save 注入钩 + ORDER 探针。**纯 test-support
     /// 脚手架**(真实 impl,非 `unimplemented!()`):它只装配字段,不执行任何 daemon 逻辑;
     /// tick/health/start/stop 仍是 `unimplemented!()` 生产体,因此调它们的契约仍 RED。
+    /// ---
+    /// purpose: 测试装配口——直接构出实例并注入 save 钩子与步骤顺序探针
+    /// params:
+    ///   workspace: workspace 根
+    ///   provider_registry: 可 mock 的 provider adapter 解析器
+    ///   transport: 可 mock 的传输控制面
+    ///   save_hook: 替换真实持久化，用于制造持久化失败
+    ///   order_recorder: 记录 tick 内各步骤名，用于断言固定顺序
+    /// returns: 只装配字段的实例，本函数自身不执行任何 daemon 逻辑
+    /// cfg: test
+    /// ---
     #[cfg(test)]
     pub(crate) fn for_test(
         workspace: WorkspacePath,
@@ -226,6 +285,11 @@ impl Coordinator {
     /// `state::save_runtime_state`,bug-084 测试注入失败);在每个 step8-11 原子调用点
     /// `if let Some(rec) = &self.order_recorder { rec.lock()...push(STEP_NAME) }`(tick
     /// 副作用 ORDER 测试断言固定序列)。生产两者均 `None`,零开销。
+    /// ---
+    /// purpose: 跑一轮 tick——按固定顺序把各步骤串起来，只投递既定义务，绝不凭空注入
+    /// returns: TickReport。传输会话不在了 → stop=true 且 reason=TmuxSessionMissing，主循环据此退出；持久化失败 → ok=false、reason=PersistenceDegraded、persisted=Some(false)，但仍是 Ok；正常 → ok=true 并带本轮投递、到期事件、回收结果等清单。注意 ok=true 只说明主干走完，监测类步骤失败已被降级吞掉，真相只在事件日志里
+    /// errors: 加载状态、打开 message store、传输探测或事件写入这些主干操作失败时返回 TickError，由主循环 catch 后退避
+    /// ---
     pub fn tick(&self) -> Result<TickReport, TickError> {
         self.record_step(TickStepGroup::SessionGate, "load_state");
         let raw_state = crate::state::persist::load_runtime_state(self.workspace.as_path())?;
@@ -271,17 +335,12 @@ impl Coordinator {
         }
 
         self.record_step(TickStepGroup::SessionGate, "capture_missing");
-        let pending_context_fork_audits =
-            match self.capture_missing_sessions(&mut state, &event_log) {
-                Ok(audits) => audits,
-                Err(error) => {
-                    let _ = event_log.write(
-                        "coordinator.tick.capture_missing_failed",
-                        serde_json::json!({"error": error.to_string()}),
-                    );
-                    Vec::new()
-                }
-            };
+        if let Err(error) = self.capture_missing_sessions(&mut state, &event_log) {
+            let _ = event_log.write(
+                "coordinator.tick.capture_missing_failed",
+                serde_json::json!({"error": error.to_string()}),
+            );
+        }
 
         // Slice 1 energy gate: one pane snapshot per tick feeds probe eligibility,
         // health sync, and abnormal-exit detection. Missing panes are filtered
@@ -461,15 +520,6 @@ impl Coordinator {
                 collections,
             ));
         }
-        for context_fork in &pending_context_fork_audits {
-            context_fork.write_audit(&event_log).map_err(|error| {
-                eprintln!(
-                    "[coordinator] context_fork audit publish failed after state commit: {error}"
-                );
-                TickError::EventLog(error)
-            })?;
-        }
-
         self.record_step(TickStepGroup::Delivery, "collect_results");
         collections.results =
             collect_results(crate::messaging::collect_results_and_notify_watchers(
@@ -489,7 +539,7 @@ impl Coordinator {
         &self,
         state: &mut Value,
         event_log: &EventLog,
-    ) -> Result<Vec<crate::lifecycle::launch::ContextForkFinalized>, TickError> {
+    ) -> Result<(), TickError> {
         let report = crate::session_capture::capture_missing_provider_sessions_once(
             state,
             &mut |provider| self.provider_registry.adapter_for(provider),
@@ -653,7 +703,7 @@ impl Coordinator {
                 }),
             )?;
         }
-        Ok(report.context_forks)
+        Ok(())
     }
 
     fn sync_agent_health(
@@ -1371,6 +1421,11 @@ impl Coordinator {
 
     /// `coordinator_health`(`lifecycle.py:26`)。pid + meta + schema 三合一健康。
     /// doctor / start 前置调它。`ok = running ∧ metadata_ok ∧ schema_ok`。
+    /// ---
+    /// purpose: 取本 workspace 的 coordinator 健康报告
+    /// returns: 与 health::coordinator_health 完全一致的报告
+    /// errors: 当前实现恒为 Ok；返回类型保留 Result 以便未来健康判定引入可失败路径
+    /// ---
     pub fn health(&self) -> Result<HealthReport, TickError> {
         Ok(super::health::coordinator_health(&self.workspace))
     }
@@ -1379,11 +1434,23 @@ impl Coordinator {
     /// schema 不兼容拒启给 hint;否则 spawn 自身二进制子命令(`team-agent coordinator --workspace ..`,
     /// Python 是 `python -m team_agent.coordinator`,`lifecycle.py:108`)。
     /// **schema 兼容门**:三元任一不匹配 → restart_incompatible,**不可静默继续**(card §89)。
+    /// ---
+    /// purpose: 幂等启动本 workspace 的 daemon 子进程
+    /// returns: 与 health::start_coordinator 完全一致的报告；「拒启」体现为 ok=false 而非 Err
+    /// errors: 建目录、开日志、spawn 或写 pid/metadata 失败时返回 StartError
+    /// ---
     pub fn start(&self) -> Result<StartReport, StartError> {
         super::health::start_coordinator(&self.workspace)
     }
 
     /// `stop_coordinator`(`lifecycle.py:229`)。SIGTERM + 清 pid/meta。pid 非整数 → 清文件返回。
+    /// ---
+    /// purpose: 清掉本 workspace 的 coordinator pid/meta 文件
+    /// returns: pid 文件不存在 → Missing；文件在且内容可解析 → Stopped 并带该 pid；文件在但内容非法 → InvalidPidRemoved
+    /// errors: 删文件失败时返回 StopError
+    /// ---
+    /// 注意：本方法只删文件，**不向 daemon 发任何信号**——与 health::stop_coordinator
+    /// 的「真终止进程」语义不同。调它之后 daemon 仍会继续 tick，而健康探测会报 Missing。
     pub fn stop(&self) -> Result<StopReport, StopError> {
         let pid_path = coordinator_pid_path(&self.workspace);
         if !pid_path.exists() {
@@ -1412,6 +1479,10 @@ impl Coordinator {
 
     /// `message_store_schema_health`(`lifecycle.py:197`)。DB 列兼容门:区分 pre-init 必需列缺失
     /// (拒启)vs migratable 列缺失(可迁移)。`doctor --fix-schema` 用其 action hint。
+    /// ---
+    /// purpose: 查本队 message store 的 schema 兼容门
+    /// returns: 与 health::message_store_schema_health 一致；打不开库时 ok=false 并带原文与修复 hint
+    /// ---
     pub fn schema_health(&self) -> SchemaHealth {
         // A-8: the gate must inspect the REAL team.db (Python lifecycle.py:197+
         // message_store_schema_health); a hardcoded ok:true left the card §89
@@ -1525,6 +1596,21 @@ fn increment_coordinator_tick_iteration_count(workspace: &WorkspacePath) {
     );
 }
 
+/// ---
+/// purpose: 写心跳 sidecar runtime/coordinator_tick.json，让外部不必进程内也能看到 daemon 走到哪一步
+/// params:
+///   workspace: workspace 根
+///   pid: 当前 daemon pid
+///   boot_id: daemon 世代 id；None 时沿用文件里已有值，都没有则用 coord_unknown_<pid>
+///   last_phase: 本次写入代表的阶段名；值为 tick_running 时刷新 last_tick_started_at，否则刷新 last_tick_finished_at
+///   last_tick_status: 上一轮 tick 的状态串
+///   last_error: 上一轮的错误串
+///   increment_count: 是否把迭代计数加一
+/// returns: 写成功返回 ()；先写临时文件再 rename，读方不会看到半份
+/// errors: 建目录、写临时文件或 rename 失败时返回 io::Error
+/// ---
+/// ⚠ 字段 `host_boot_time` 写的是**本次写入时刻的墙钟**，不是主机启动时间——
+/// 每次心跳都会变。主机启动身份在 `host_boot_id`，按名消费 host_boot_time 会拿到假事实。
 pub(crate) fn write_coordinator_heartbeat(
     workspace: &WorkspacePath,
     pid: Pid,
@@ -1597,6 +1683,10 @@ fn coordinator_heartbeat_path(workspace: &WorkspacePath) -> PathBuf {
 /// falls back to a formatted timestamp. Returns None when the platform
 /// signal cannot be read — the caller MUST NOT guess; downstream
 /// treats a missing/mismatched host boot separately from a matched one.
+/// ---
+/// purpose: 探测当前主机的启动身份，用来识别「所有 pane/pid/会话绑定都早于本次开机」
+/// returns: Linux 读 boot_id 得 linux-<uuid>；macOS 读 kern.boottime 得 macos-<...>；测试可用 TEAM_AGENT_TEST_HOST_BOOT_ID 覆盖。平台信号读不到时为 None——调用方必须把「读不到」与「不匹配」分开处理，不许猜
+/// ---
 pub(crate) fn probe_host_boot_id() -> Option<String> {
     if let Ok(override_id) = std::env::var("TEAM_AGENT_TEST_HOST_BOOT_ID") {
         if !override_id.is_empty() {
@@ -1634,6 +1724,12 @@ pub(crate) fn probe_host_boot_id() -> Option<String> {
 /// error (missing file, malformed JSON) returns None — callers treat
 /// that as "unknown, fall back to existing facts" per locate §8 risk
 /// note, they must never guess a stale/fresh verdict from absence.
+/// ---
+/// purpose: 只读取出最近一次写入的心跳 sidecar
+/// params:
+///   workspace: workspace 根
+/// returns: 解析成功才有值；文件缺失或 JSON 损坏一律 None。调用方须把 None 当作「未知」回落到既有事实，不得据此断定新鲜或陈旧
+/// ---
 pub fn read_coordinator_heartbeat(workspace: &WorkspacePath) -> Option<Value> {
     let path = coordinator_heartbeat_path(workspace);
     let text = std::fs::read_to_string(path).ok()?;
@@ -2529,6 +2625,13 @@ fn write_activity(
 ///                     conflict (or probe unavailable + activity idle).
 ///   5. Unknown      — missing pane_pid, probe error, or no decisive
 ///                     signal. Iron law: never silently Idle.
+/// ---
+/// purpose: 由 agent 状态与活动分类结果解析出 worker 的运行态
+/// params:
+///   agent: agent 状态对象；读 pane_pid、awaiting_human_confirm 与审批/信任标志
+///   activity: JSONL 活动分类结果；None 表示本轮没有分类信号
+/// returns: 按优先级判定——先 Blocked（等人确认/等信任提示），再用前台进程组探测判 Busy，再由活动分类给 Busy/ProbablyIdle；任何一步缺信号都落到 Unknown。铁律是绝不在信息不足时静默判 Idle
+/// ---
 pub(crate) fn resolve_worker_runtime_state_with_fg_pgrp(
     agent: &Value,
     activity: Option<&crate::messaging::AgentActivity>,
@@ -2612,6 +2715,14 @@ fn agent_health_status_wire(status: crate::messaging::ActivityStatus) -> &'stati
 /// 0.4.x Phase 1: read the worker_state wire string that `write_activity`
 /// persisted alongside the legacy activity. Returns None when no worker_state
 /// has been written yet (older state row pre-upgrade).
+/// ---
+/// purpose: 读回 write_activity 与活动一起持久化的 worker_state 线字符串
+/// params:
+///   agent: agent 状态对象
+/// returns: 已写过 worker_state 时解析出运行态；升级前的旧状态行没有该字段，返回 None
+/// ---
+/// 现状：本仓内没有任何调用点（仅定义），与其他 pub(crate) 项不同——按机器事实记录，
+/// 不据此推断它「已接线」。
 pub(crate) fn agent_worker_state(agent: &Value) -> Option<crate::messaging::WorkerRuntimeState> {
     agent
         .get("worker_state")

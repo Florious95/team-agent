@@ -2638,10 +2638,11 @@ fn fork_refuses_source_with_partial_tuple() {
     );
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("source session backing is missing")
+        err.contains("unverified")
+            || err.contains("未验证")
             || err.contains("backing")
             || err.contains("incomplete"),
-        "0.4.6: fork refusal must name backing/incomplete cause; got error={err}"
+        "0.4.6/in-window: unverified providers refuse before backing check; got error={err}"
     );
 }
 

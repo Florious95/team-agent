@@ -1,3 +1,27 @@
+//! ---
+//! purpose: team 显示面的能力探测、后端解析、开关与 rebind 后重建
+//! contract:
+//!   provides:
+//!     - name: resolve_display_backend
+//!       what: 按 requested 优先于 recorded 优先于 adaptive 选后端，并标出是否偏离默认
+//!     - name: probe_display_capabilities
+//!       what: 探测当前进程能否开 adaptive 显示，给出被挡原因
+//!     - name: open_worker_displays
+//!       what: 按后端为各 worker 打开显示，返回 agent 到 WorkerDisplay 的映射
+//!     - name: close_team_display_backends
+//!       what: 关闭本 team 的显示后端
+//!     - name: rebuild_adaptive_display_after_rebind
+//!       what: leader rebind 之后重建 adaptive 窗口
+//!   depends:
+//!     - crate::transport
+//!     - crate::state::persist
+//! boundary:
+//!   - 不 spawn 也不 kill worker 进程，只管显示面
+//!   - 显示失败不阻塞 team readiness
+//!   - tmux 操作一律走 workspace 作用域的 TmuxBackend，不用继承 $TMUX 的 ambient 调用
+//!   - ambient leader-pane 探测不属于本文件
+//! maturity: wired
+//! ---
 //!
 //! lifecycle::display —— 能力门 / 后端解析 / 开关 / rebind 后重建。
 //!
@@ -20,6 +44,13 @@ use super::*;
 
 // ── lifecycle::display —— 能力门 / 后端解析 / 开关 / rebind 后重建 ────────────
 
+/// ---
+/// purpose: 定出本次使用的显示后端
+/// params:
+///   requested: 本次命令显式请求的后端，None 表示未指定
+///   recorded: state 里记录的上次后端
+/// returns: 选中的后端，附带它是否偏离默认 adaptive
+/// ---
 ///
 /// `resolve_display_backend(requested, recorded, source)`(`display/backend.py`)。默认
 /// adaptive;显式 none 是逃生口。
@@ -34,6 +65,13 @@ pub fn resolve_display_backend(
     }
 }
 
+/// ---
+/// purpose: 探测当前环境是否具备 adaptive 显示能力
+/// params:
+///   _workspace: 未参与判定，仅保留签名
+/// returns: 平台名、leader 所在 tmux session 与 pane、能力位、状态与被挡原因
+/// errors: 当前实现不产生 Err
+/// ---
 ///
 /// `probe_display_capabilities(...)`(`display/adaptive.py:31`,C13)。能力探测,分支只看
 /// 结果不看 `cfg!(target_os)`;Windows/WSL → `NotImplementedThisPlatform`。
@@ -71,6 +109,14 @@ pub fn probe_display_capabilities(_workspace: &Path) -> Result<DisplayProbe, Lif
     })
 }
 
+/// ---
+/// purpose: 按已解析的后端为各 worker 打开显示
+/// params:
+///   backend: 已解析的显示后端；不带 worker 视图的后端得到空映射
+///   probe: 能力探测结果，adaptive 分支据此决定开还是记 blocked
+/// returns: 后端与 agent_id 到 WorkerDisplay 的映射
+/// errors: adaptive 开窗或读取显示目标失败时返回 LifecycleError
+/// ---
 ///
 /// `open_worker_displays(workspace, session_name, jobs, backend, capability_probe)`
 /// (`display/worker_window.py`)。按后端分派 adaptive / ghostty_workspace / ghostty_window;
@@ -95,6 +141,11 @@ pub(crate) fn open_worker_displays(
     Ok(OpenDisplaysReport { backend, displays })
 }
 
+/// ---
+/// purpose: 关闭本 team 的显示，当前实现只处理 adaptive
+/// returns: 关闭报告
+/// errors: 底层 tmux 操作失败时返回 LifecycleError
+/// ---
 ///
 /// `close_team_display_backends(state, event_log)`(`display/close.py`,C9)。按 state
 /// 记录的后端关显示;adaptive 只删带 team tag 的窗口(C2 leader pane 安全)+ orphan 清理。
@@ -105,6 +156,11 @@ pub fn close_team_display_backends(
     close_adaptive_displays(workspace, session_name)
 }
 
+/// ---
+/// purpose: leader rebind 完成之后重建 adaptive worker 窗口
+/// returns: 重新打开的显示映射
+/// errors: 同 open_worker_displays
+/// ---
 ///
 /// `rebuild_adaptive_display_after_rebind(...)`(`display/rebuild.py`,C12)。restart 在
 /// leader rebind **之后**重建 adaptive 窗口(读 `leader_receiver.rebind_applied` 事件)。

@@ -1,4 +1,33 @@
-//!
+//! ---
+//! purpose: claude 家族的会话归属过滤——按 expected id 直达 ~/.claude/projects/<编码 cwd>/<sid>.jsonl 读头验身份，并为通用扫描提供 leader-transcript 与 cwd 字段两道排除判据
+//! contract:
+//!   provides:
+//!     - name: projects_dir_for_cwd
+//!       what: 由 HOME + spawn_cwd 推出 claude 的 projects 目录(非字母数字字符一律替成 '-')
+//!     - name: encode_projects_dir
+//!       what: claude 的目录名编码规则本身
+//!     - name: scan_expected_session
+//!       what: 有 pending id 时的直达捕获:读头 64KB，验 sessionId 一致 + 有 user/assistant 记录 + 无 leader marker + 有 cwd 字段，四条全过才出候选
+//!     - name: rollout_path_has_leader_marker
+//!       what: 判某条 transcript 是不是 leader 的(customTitle/agentName == "claude leader")
+//!     - name: records_have_leader_marker
+//!       what: 上一条的记录级判据
+//!     - name: has_cwd_field
+//!       what: 记录里有没有 cwd 字段——claude transcript 的最低可信度门槛
+//!     - name: apply_expected_session_filter
+//!       what: 通用扫描结果的收窄:expected 命中则独取，未命中则只留身份/路径阳性的
+//!   requires:
+//!     - name: super::common
+//!       what: 读头、解析记录、embedded 身份、时间窗过滤都复用 common
+//!     - name: crate::provider::helpers::find_session_id
+//!       what: 从记录里取 sessionId 的统一入口
+//! boundary:
+//!   - 只服务 Provider::Claude / ClaudeCode;rollout_path_has_leader_marker 对其它 provider 恒 false
+//!   - 不写盘、不改 state、不发事件
+//!   - 直达路径不做同 cwd「最新文件」回落——有 pending id 就只认那一个文件名
+//!   - leader transcript 一律排除，防止 worker 席位绑上 leader 的会话
+//! maturity: wired
+//! ---
 use std::path::{Path, PathBuf};
 
 use crate::provider::helpers::find_session_id;
@@ -7,6 +36,20 @@ use crate::provider::Provider;
 
 use super::{CaptureSessionContext, CapturedSessionCandidate};
 
+/// ---
+/// purpose: 由 HOME 与席位 cwd 推出 claude 存放该工作目录 transcript 的 projects 子目录
+/// params:
+///   home: HOME 根;调用方决定是真实 HOME 还是隔离根
+///   spawn_cwd: 席位工作目录;先 canonicalize，失败则原样使用
+/// returns: <home>/.claude/projects/<编码后的 cwd>;编码结果为空串时 None
+/// contract:
+///   provides:
+///     - name: projects_dir_for_cwd
+///       what: 只拼路径，不创建目录、不判存在性
+/// boundary:
+///   - 不枚举目录内容、不读任何文件
+///   - canonicalize 失败不报错,退回原路径——编码结果因此可能与 claude 实际用的目录不同
+/// ---
 pub(crate) fn projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(spawn_cwd).unwrap_or_else(|_| spawn_cwd.to_path_buf());
     let encoded = encode_projects_dir(&canonical.to_string_lossy());
@@ -16,6 +59,19 @@ pub(crate) fn projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<Path
     Some(home.join(".claude").join("projects").join(encoded))
 }
 
+/// ---
+/// purpose: 复刻 claude 的 projects 目录名编码:非 ASCII 字母数字的字符一律替成单个 '-'
+/// params:
+///   path: 待编码的路径文本
+/// returns: 等长的编码串;输入为空则空串
+/// contract:
+///   provides:
+///     - name: encode_projects_dir
+///       what: 纯字符映射，逐字符一对一，不折叠连续分隔符
+/// boundary:
+///   - 有损且不可逆:不同路径可以编出同一个目录名
+///   - 不做长度截断、不做大小写归一
+/// ---
 pub(super) fn encode_projects_dir(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
@@ -28,6 +84,21 @@ pub(super) fn encode_projects_dir(path: &str) -> String {
     out
 }
 
+/// ---
+/// purpose: 有 pending id 时直达那一个 transcript 文件，读头验明身份后给出唯一候选
+/// params:
+///   context: 需要 expected_session_id;projects 根优先取 provider_projects_root，否则退到 HOME/.claude/projects;spawn_cwd 决定编码后的子目录
+/// returns: 四道校验全过则一条 FsWatch/High 候选(带 embedded 身份与是否与本席位一致);任一条不过则空向量
+/// contract:
+///   provides:
+///     - name: scan_expected_session
+///       what: 只读该文件头 64KB;不遍历目录、不比较 mtime
+/// boundary:
+///   - 无 expected_session_id / 无法确定 projects 根 / 编码为空 / 文件读不出来 → 空向量
+///   - 四道校验:sessionId 与 expected 相等、存在 user 或 assistant 记录、不含 leader marker、至少一条记录有 cwd 字段
+///   - embedded 身份与本席位不符时仍返回候选(positive_agent_id_match=false)，是否拒绝交给上游分配器判定
+///   - agent_path_match 恒 false:直达路径下文件名就是 uuid，不含席位名
+/// ---
 pub(super) fn scan_expected_session(
     context: &CaptureSessionContext,
 ) -> Vec<CapturedSessionCandidate> {
@@ -87,6 +158,20 @@ pub(super) fn scan_expected_session(
     }]
 }
 
+/// ---
+/// purpose: 判断一条 transcript 是不是 leader 的会话，供捕获与 event-log 修复两条通道共用排除
+/// params:
+///   provider: 非 Claude/ClaudeCode 一律直接判否
+///   rollout_path: 待判定的 transcript 路径
+/// returns: 读得到头且头部记录里出现 leader marker 才为 true
+/// contract:
+///   provides:
+///     - name: rollout_path_has_leader_marker
+///       what: 只读头 64KB
+/// boundary:
+///   - 文件打不开、解析不出记录一律返回 false —— 判据是 fail-open 的:读不到不等于不是 leader
+///   - marker 只在头窗口内查;超出 64KB 之后才出现的 marker 看不见
+/// ---
 pub(crate) fn rollout_path_has_leader_marker(provider: Provider, rollout_path: &Path) -> bool {
     if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         return false;
@@ -99,6 +184,18 @@ pub(crate) fn rollout_path_has_leader_marker(provider: Provider, rollout_path: &
     records_have_leader_marker(&records)
 }
 
+/// ---
+/// purpose: 在已解析的记录里找 leader 身份 marker
+/// params:
+///   records: 已解析的 transcript 记录切片
+/// returns: 任一记录的 customTitle 或 agentName 小写后等于 "claude leader" 即 true
+/// contract:
+///   provides:
+///     - name: records_have_leader_marker
+///       what: 纯内存判定，无 I/O
+/// boundary:
+///   - 判据是精确串相等(仅大小写不敏感)，不做包含匹配、不认其它别名
+/// ---
 pub(super) fn records_have_leader_marker(records: &[serde_json::Value]) -> bool {
     records.iter().any(|record| {
         let custom_title = record
@@ -114,10 +211,37 @@ pub(super) fn records_have_leader_marker(records: &[serde_json::Value]) -> bool 
     })
 }
 
+/// ---
+/// purpose: 判断一条 claude 记录是否带 cwd 字段——用作 transcript 是否够格当候选的最低门槛
+/// params:
+///   record: 单条已解析记录
+/// returns: common::record_cwd 能取到值即 true
+/// contract:
+///   provides:
+///     - name: has_cwd_field
+///       what: 只判字段有无，不比较 cwd 是否等于席位 cwd
+/// boundary:
+///   - 不做路径等价判定;是否同 cwd 由调用方另行判断
+/// ---
 pub(super) fn has_cwd_field(record: &serde_json::Value) -> bool {
     super::common::record_cwd(record).is_some()
 }
 
+/// ---
+/// purpose: 用 pending id 收窄通用扫描的结果，把「可能是它」压成「就是它」或「至少身份阳性」
+/// params:
+///   context: 有 expected_session_id 才做收窄;否则退到时间窗过滤
+///   out: 待收窄的候选列表，按值传入
+/// returns: expected 命中则只留那一条;未命中则只留 positive_agent_id_match 或 agent_path_match 为真的;无 expected 则原表经唯一时间窗过滤后返回
+/// errors: 当前实现不产生 Err;返回 Result 是为与其它 provider 过滤器同形
+/// contract:
+///   provides:
+///     - name: apply_expected_session_filter
+///       what: 纯过滤，不读盘(时间窗分支会取候选文件 mtime)
+/// boundary:
+///   - 未命中 expected 时不返回空而是返回身份阳性子集——弱于「必须命中」，允许分配器再判
+///   - 不排序;expected 优先排序由 common::sort_expected_first_if_needed 另做
+/// ---
 pub(super) fn apply_expected_session_filter(
     context: &CaptureSessionContext,
     mut out: Vec<CapturedSessionCandidate>,

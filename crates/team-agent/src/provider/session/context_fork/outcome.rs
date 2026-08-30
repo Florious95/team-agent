@@ -1,4 +1,24 @@
-//!
+//! ---
+//! purpose: 把 verify_context_fork 的 Result 翻译成三态结局(Verified/Pending/Rejected)，并给 pending 态一条推进到失败的判据
+//! contract:
+//!   provides:
+//!     - name: ContextForkOutcome
+//!       what: fork 三态:Verified(带证明) / Pending(带可交回捕获通道的扫描上下文) / Rejected(provider 错误)
+//!     - name: PendingContextFork
+//!       what: 超时未验证时保留的续查材料:源会话 id、目标席位、spawned_at、CaptureSessionContext
+//!     - name: observe_context_fork
+//!       what: 调 verify_context_fork 并把 Timeout 折成 Pending 而不是错误
+//!     - name: transition_pending_context_fork
+//!       what: 纯判据——pending_context_fork 是否该被推进成 transcript_missing
+//!   requires:
+//!     - name: crate::provider::session_scan::CaptureSessionContext
+//!       what: Pending 携带的续查上下文类型
+//! boundary:
+//!   - 不轮询、不读磁盘;所有 I/O 都在被调用的 verify_context_fork 里
+//!   - 不写 state、不发事件——只产出结局值，落盘由捕获通道做
+//!   - Pending 不是成功也不是失败，绝不折进另外两态
+//! maturity: wired
+//! ---
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -21,6 +41,20 @@ pub(crate) enum ContextForkPendingFailure {
     TranscriptMissing,
 }
 
+/// ---
+/// purpose: 判定一个停在 pending_context_fork 的席位是否该被改判为 transcript_missing
+/// params:
+///   triggered: 该席位是否已出现过触发事件(有过交互/结果/pane 输出)
+///   grace_expired: 宽限窗口是否已过
+/// returns: 两者同时为真才给 Some(TranscriptMissing);否则 None = 继续 pending
+/// contract:
+///   provides:
+///     - name: transition_pending_context_fork
+///       what: 纯布尔判据，无 I/O、无时钟
+/// boundary:
+///   - 不自己计算 triggered / grace_expired——两个事实由调用方(capture.rs)从 agent 行算好后传入
+///   - 只表达「该改判」，不负责写 capture_state
+/// ---
 pub(crate) fn transition_pending_context_fork(
     triggered: bool,
     grace_expired: bool,
@@ -28,6 +62,28 @@ pub(crate) fn transition_pending_context_fork(
     (triggered && grace_expired).then_some(ContextForkPendingFailure::TranscriptMissing)
 }
 
+/// ---
+/// purpose: 跑一次 fork 验证并把结果收敛成三态，超时不当错误而是留成可续查的 Pending
+/// params:
+///   provider: 转交 verify_context_fork 分派
+///   source_session_id: 源会话 id，同时写进 Pending 供后续比对
+///   plan: expected_session_id 与 provider_projects_root 会被复制进 Pending 的扫描上下文
+///   before: spawn 前 backing 基线
+///   expected_backing_path: 精确快照路径，透传
+///   source_agent_id: 透传给 verify_context_fork(当前该参数不参与判定)
+///   agent_id: 目标席位 id;既用于 codex 身份比对，也写进 Pending.target_agent
+///   spawn_cwd: 目标席位工作目录，透传并写进 Pending 的扫描上下文
+///   spawned_at: 时间边界，透传并写进 Pending
+///   deadline: 轮询预算
+/// returns: Verified(proof) / Pending(续查材料) / Rejected(ProviderError)
+/// contract:
+///   provides:
+///     - name: observe_context_fork
+///       what: 只做结果翻译与 Pending 材料装配，不新增任何判定
+/// boundary:
+///   - Pending 里的 CaptureSessionContext 一律 pane_id=None、pane_pid=None——本函数不掌握 pane 事实
+///   - 不重试、不写状态;是否再验由捕获通道决定
+/// ---
 pub(crate) fn observe_context_fork(
     provider: Provider,
     source_session_id: &SessionId,

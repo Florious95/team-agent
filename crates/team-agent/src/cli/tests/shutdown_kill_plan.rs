@@ -468,12 +468,52 @@ fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
 
 #[test]
 fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
+    #[cfg(unix)]
+    const CHILD: &str = "RB11_F01_NATURAL_PROBE_FAILURE_CHILD";
+    #[cfg(unix)]
+    const TEST: &str =
+        "cli::tests::shutdown_kill_plan::repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth";
+
+    #[cfg(unix)]
+    if std::env::var_os(CHILD).is_none() {
+        let path = tmp_shutdown_workspace("rb11-f01-empty-path").join("bin");
+        std::fs::create_dir_all(&path).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "directed child failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("running 1 test")
+                && stdout.contains(&format!("test {TEST} ..."))
+                && stdout.contains("RB11_F01_CHILD_SUCCESS"),
+            "directed child omitted success marker: stdout={} stderr={}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("RB11_F01_DIRECTED_CHILD_OUTPUT\n{stdout}");
+        return;
+    }
+
+    #[cfg(unix)]
+    let expected_probe_failure = std::env::var_os(CHILD).is_some();
+    #[cfg(not(unix))]
+    let expected_probe_failure = false;
     let ws = tmp_shutdown_workspace("owned-loop-no-growth");
     let sockets = (0..20)
         .map(|idx| ws.join(format!("owned-loop-{idx}.sock")))
         .collect::<Vec<_>>();
     let starting = sockets.iter().filter(|path| path.exists()).count();
-    for socket in &sockets {
+    for (iteration, socket) in sockets.iter().enumerate() {
         std::fs::write(socket, b"socket").unwrap();
         crate::state::persist::save_runtime_state(
             &ws,
@@ -487,20 +527,251 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
             }),
         )
         .unwrap();
-        let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        let before_len = crate::event_log::EventLog::new(&ws)
+            .tail(0)
+            .expect("read shutdown event boundary")
+            .len();
+        let result = crate::cli::lifecycle_port::shutdown_with_transport(
             &ws,
             true,
             None,
             &CleanShutdownTransport::new(),
-        )
-        .expect("shutdown should complete");
-        assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
+        );
+        let out = match &result {
+            Ok(out) if !shutdown_result_is_degraded(out) => out,
+            Ok(out) if expected_probe_failure => {
+                let diagnostic =
+                    shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
+                assert!(
+                    shutdown_result_is_degraded(out),
+                    "directed probe-failure child unexpectedly clean: {diagnostic}"
+                );
+                assert_eq!(
+                    out["ok"],
+                    json!(false),
+                    "probe failure must remain degraded: {out}"
+                );
+                if iteration == 0 {
+                    println!("RB11_F01_FIRST_FAILURE {diagnostic}");
+                }
+                out
+            }
+            Ok(out) => {
+                let diagnostic =
+                    shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
+                panic!("unexpected degraded shutdown: {diagnostic}");
+            }
+            Err(error) => {
+                let diagnostic =
+                    shutdown_invocation_diagnostic(&ws, before_len, iteration, socket, &result);
+                panic!("shutdown invocation failed: {error}; {diagnostic}");
+            }
+        };
+        if !expected_probe_failure {
+            assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
+        }
     }
     let ending = sockets.iter().filter(|path| path.exists()).count();
     assert_eq!(
         ending, starting,
         "owned socket files must not grow across loops"
     );
+    #[cfg(unix)]
+    if expected_probe_failure {
+        println!("RB11_F01_CHILD_SUCCESS iterations={}", sockets.len());
+    }
+}
+
+fn shutdown_result_is_degraded(out: &serde_json::Value) -> bool {
+    out["ok"] != json!(true)
+        || out["probe_degraded"] == json!(true)
+        || out["verification_degraded"] == json!(true)
+}
+
+fn shutdown_invocation_diagnostic(
+    ws: &Path,
+    before_len: usize,
+    iteration: usize,
+    socket: &Path,
+    result: &Result<serde_json::Value, crate::cli::CliError>,
+) -> String {
+    let result_summary = match result {
+        Ok(out) => format!("report={out}"),
+        Err(error) => format!("error={error}"),
+    };
+    let events = crate::event_log::EventLog::new(ws)
+        .tail(0)
+        .unwrap_or_else(|error| {
+            panic!(
+                "shutdown diagnostic event read failed: iteration={iteration} socket={} \
+                 {result_summary}; error={error}",
+                socket.display()
+            )
+        });
+    let appended = events.get(before_len..).unwrap_or_else(|| {
+        panic!(
+            "shutdown diagnostic boundary invalid: iteration={iteration} socket={} \
+             {result_summary}; before_len={before_len} event_len={}",
+            socket.display(),
+            events.len()
+        )
+    });
+    fn event_name(event: &serde_json::Value) -> Option<&str> {
+        event["event"].as_str()
+    }
+    let starts = appended
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event_name(event) == Some("lifecycle.shutdown.started"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let terminals = appended
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event_name(event) == Some("lifecycle.shutdown"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if starts.len() != 1 || terminals.len() != 1 || starts[0] >= terminals[0] {
+        panic!(
+            "shutdown diagnostic markers invalid: iteration={iteration} socket={} \
+             {result_summary}; appended={appended:?}",
+            socket.display()
+        );
+    }
+    let terminal = &appended[terminals[0]];
+    let expected_socket = socket.to_string_lossy();
+    if terminal["owned_endpoint"].as_str() != Some(expected_socket.as_ref()) {
+        panic!(
+            "shutdown diagnostic endpoint mismatch: iteration={iteration} socket={} \
+             {result_summary}; terminal={terminal}",
+            socket.display()
+        );
+    }
+    let bounded = &appended[starts[0]..=terminals[0]];
+    let probe_failures = bounded
+        .iter()
+        .filter(|event| event_name(event) == Some("shutdown.process_probe_failed"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if probe_failures.is_empty() {
+        panic!(
+            "shutdown diagnostic missing process-probe failure: iteration={iteration} \
+             socket={} {result_summary}; bounded={bounded:?}",
+            socket.display()
+        );
+    }
+    for event in &probe_failures {
+        let phase = event["phase"].as_str();
+        if event["probe"].as_str() != Some("ps_table")
+            || !matches!(phase, Some("entry" | "residual_round" | "post_verify"))
+            || !matches!(
+                event["error"].as_str(),
+                Some(error)
+                    if !error.trim().is_empty()
+                        && !error.contains("exited with status")
+                        && (error.contains("No such file") || error.contains("os error 2"))
+            )
+        {
+            panic!(
+                "shutdown diagnostic probe failure invalid: iteration={iteration} \
+                 socket={} {result_summary}; event={event}",
+                socket.display()
+            );
+        }
+    }
+    format!(
+        "iteration={iteration} socket={} {result_summary}; probe_failures={probe_failures:?}",
+        socket.display()
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn rb07_probe_failure_diagnostic_is_iteration_bound() {
+    const CHILD: &str = "RB07_PROBE_FAILURE_DIAGNOSTIC_CHILD";
+    const TEST: &str =
+        "cli::tests::shutdown_kill_plan::rb07_probe_failure_diagnostic_is_iteration_bound";
+    if std::env::var_os(CHILD).is_none() {
+        let path = tmp_shutdown_workspace("rb07-empty-path").join("bin");
+        std::fs::create_dir_all(&path).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "directed child failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("running 1 test")
+                && stdout.contains(&format!("test {TEST} ..."))
+                && stdout.contains("RB07_CHILD_SUCCESS"),
+            "directed child omitted success marker: stdout={} stderr={}",
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let ws = tmp_shutdown_workspace("rb07-child");
+    let socket = ws.join("owned.sock");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-rb07-child",
+            "tmux_endpoint": socket.to_string_lossy(),
+            "tmux_socket": socket.to_string_lossy(),
+            "tmux_socket_source": "workspace",
+            "is_external_leader": false,
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let event_log = crate::event_log::EventLog::new(&ws);
+    event_log
+        .write(
+            "shutdown.process_probe_failed",
+            json!({
+                "phase": "entry",
+                "probe": "ps_table",
+                "error": "rb07-stale-decoy"
+            }),
+        )
+        .unwrap();
+    let before_len = event_log.tail(0).unwrap().len();
+    let result = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        None,
+        &CleanShutdownTransport::new(),
+    );
+    let diagnostic = shutdown_invocation_diagnostic(&ws, before_len, 0, &socket, &result);
+    let failures = match result {
+        Ok(out) => {
+            assert!(
+                shutdown_result_is_degraded(&out),
+                "child must force ps failure: {out}"
+            );
+            let text = diagnostic;
+            assert!(
+                !text.contains("rb07-stale-decoy"),
+                "stale event leaked: {text}"
+            );
+            text
+        }
+        Err(error) => panic!("child shutdown unexpectedly returned Err: {error}; {diagnostic}"),
+    };
+    assert!(
+        failures.contains("probe_failures=["),
+        "missing bounded failures: {failures}"
+    );
+    println!("RB07_CHILD_SUCCESS {failures}");
 }
 
 fn tmp_shutdown_workspace(tag: &str) -> PathBuf {
@@ -521,6 +792,7 @@ struct CleanShutdownTransport {
     kill_server_called: Mutex<bool>,
     probe_timeout_kind: Option<&'static str>,
     targets_persist_after_kill: bool,
+    kill_session_error: Option<String>,
     // E49 (0.3.24 P0, shutdown kills leader CLI): record per-pane / per-window /
     // per-session kill targets so RED contracts can assert (a) the leader pane is
     // never killed and (b) worker panes ARE killed via the new per-pane path.
@@ -537,6 +809,7 @@ impl CleanShutdownTransport {
             kill_server_called: Mutex::new(false),
             probe_timeout_kind: None,
             targets_persist_after_kill: false,
+            kill_session_error: None,
             killed_panes: Mutex::new(Vec::new()),
             killed_window_targets: Mutex::new(Vec::new()),
             killed_sessions: Mutex::new(Vec::new()),
@@ -559,6 +832,11 @@ impl CleanShutdownTransport {
 
     fn with_targets_persist_after_kill(mut self) -> Self {
         self.targets_persist_after_kill = true;
+        self
+    }
+
+    fn with_kill_session_error(mut self, detail: impl Into<String>) -> Self {
+        self.kill_session_error = Some(detail.into());
         self
     }
 
@@ -675,7 +953,19 @@ impl Transport for CleanShutdownTransport {
             .unwrap()
             .push(session.as_str().to_string());
         *self.session_present.lock().unwrap() = false;
-        Ok(())
+        match self.kill_session_error.as_deref() {
+            Some(detail) => Err(TransportError::Subprocess {
+                argv: vec![
+                    "tmux".to_string(),
+                    "kill-session".to_string(),
+                    "-t".to_string(),
+                    session.as_str().to_string(),
+                ],
+                code: Some(1),
+                stderr: detail.to_string(),
+            }),
+            None => Ok(()),
+        }
     }
 
     fn kill_server(&self) -> Result<(), TransportError> {
@@ -1132,6 +1422,8 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
         ])
         .with_targets_persist_after_kill();
 
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let event_start = event_log.tail(0).expect("events before shutdown").len();
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
 
@@ -1142,7 +1434,96 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
          the team session — leader pane lives elsewhere so this is safe. Got \
          transport killed_sessions={killed_sessions:?}"
     );
+    if out["ok"] != json!(true) {
+        let events = event_log.tail(0).expect("events after shutdown");
+        let invocation_events = events
+            .into_iter()
+            .skip(event_start)
+            .take(64)
+            .collect::<Vec<_>>();
+        panic!(
+            "E49 external-leader shutdown returned a non-clean outcome: workspace tag=e49-external-leader-still-kills, expected session=team-external, shutdown report={out}, killed_sessions={killed_sessions:?}, bounded invocation events={invocation_events:?}"
+        );
+    }
     assert_eq!(out["ok"], json!(true));
+}
+
+#[test]
+fn e49_external_leader_non_clean_diagnostic_is_bounded_and_still_kills() {
+    let ws = tmp_shutdown_workspace("e49-external-leader-non-clean");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-external",
+            "is_external_leader": true,
+            "leader_receiver": {"pane_id": "%leaderelsewhere"},
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "w1", "pane_id": "%w1"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%w1"),
+            session: SessionName::new("team-external"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("w1")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_kill_session_error("deterministic E49 kill-session failure");
+
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let event_start = event_log.tail(0).expect("events before shutdown").len();
+    let diagnostic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+            .expect("shutdown should complete");
+        let killed_sessions = transport.killed_sessions_observed();
+        assert!(
+            killed_sessions.iter().any(|s| s == "team-external"),
+            concat!(
+                "E49 non-clean path must still attempt kill_session(team-external); ",
+                "got killed_sessions={:?}"
+            ),
+            killed_sessions
+        );
+        if out["ok"] != json!(true) {
+            let events = event_log.tail(0).expect("events after shutdown");
+            let invocation_events = events
+                .into_iter()
+                .skip(event_start)
+                .take(64)
+                .collect::<Vec<_>>();
+            panic!(
+                "E49 external-leader shutdown returned a non-clean outcome: workspace tag=e49-external-leader-non-clean, expected session=team-external, shutdown report={out}, killed_sessions={killed_sessions:?}, bounded invocation events={invocation_events:?}"
+            );
+        }
+    }))
+    .expect_err("deterministic kill-session error must exercise the diagnostic path");
+    let diagnostic = diagnostic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| diagnostic.downcast_ref::<&str>().map(ToString::to_string))
+        .expect("diagnostic panic should carry text");
+    let bounded_events = diagnostic
+        .split("bounded invocation events=")
+        .nth(1)
+        .expect("diagnostic should include bounded invocation events");
+    let event_count = bounded_events.matches("\"event\":").count();
+    assert!(
+        event_count > 0,
+        "diagnostic should include invocation events"
+    );
+    assert!(
+        event_count <= 64,
+        "diagnostic must be bounded to 64 invocation events, got {event_count}"
+    );
 }
 
 /// E49 regression guard: managed topology where the leader anchor pane is NOT

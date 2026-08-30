@@ -1,3 +1,43 @@
+//! ---
+//! purpose: 终端控制面的 Transport trait、typed 载荷,以及 tmux argv 的纯构造函数
+//! contract:
+//!   provides:
+//!     - name: Transport
+//!       what: 后端无关的 spawn / inject / capture / query / liveness / lifecycle 接口;daemon 可达方法一律返回 Result<_, TransportError>
+//!     - name: SetEnvOutcome
+//!       what: set-env 的能力性拒绝走 typed 变体,不走 Err、不 panic
+//!     - name: AttachOutcome
+//!       what: attach 的能力性拒绝走 typed 变体,不走 Err、不 panic
+//!     - name: tmux_spawn_argv
+//!       what: spawn argv 的唯一构造点(first→new-session / 否则 new-window),纯函数可 golden 锁
+//!     - name: tmux_inject_text_argv
+//!       what: 文本注入三步 argv(装 buffer→paste→删 buffer)的唯一构造点
+//!     - name: tmux_send_submit_argv
+//!       what: 提交键 argv 的唯一构造点,Enter 锁定为 C-m
+//!     - name: tmux_capture_argv
+//!       what: capture-pane argv 的唯一构造点
+//!     - name: tmux_query_argv
+//!       what: display-message 单字段查询 argv 的唯一构造点
+//!     - name: tmux_cancel_mode_argv
+//!       what: 按 pane mode 分派退出键的 argv 构造点
+//!     - name: InjectReport
+//!       what: 阶段化注入报告(stage_reached / inject_verification / submit_verification / turn_verification / attempts / submit_diagnostics)
+//!     - name: submit_verification_wire
+//!       what: SubmitVerification 落 JSON 的唯一拼写来源
+//!     - name: turn_verification_wire
+//!       what: TurnVerification 落 JSON 的唯一拼写来源
+//!   depends:
+//!     - crate::model::enums::PaneLiveness
+//!     - serde
+//!     - thiserror
+//! boundary:
+//!   - 不做投递语义(发给谁 / 为何发 / 可见性启发式)——那在 transport 之上的 delivery 层
+//!   - 本文件不执行 I/O;真正跑 argv 的是 tmux_backend
+//!   - turn_verification 不是投递闸门(Gap42),not_yet_observed 也算成功
+//!   - 不透传后端字面键名:抽象 Key 由各后端自行翻译
+//!   - submit_diagnostics 不上 typed wire,只在进程内传递
+//! maturity: wired
+//! ---
 //!
 //! step 9 · transport — 控制面 trait + typed payload(ROUND-0 SKELETON).
 //!
@@ -46,9 +86,21 @@ pub use crate::model::enums::PaneLiveness;
 pub struct PaneId(pub String);
 
 impl PaneId {
+    /// ---
+    /// purpose: 把已知的 pane 标识字符串包成 PaneId newtype
+    /// params:
+    ///   s: 后端给出的 pane 标识原文;不做校验、不归一化
+    /// returns: 与入参字节相同的 PaneId(serde transparent)
+    /// boundary: 不校验格式、不区分 tmux/wezterm/conpty 方言;混入 window/session 名由类型系统在调用点挡
+    /// ---
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
+    /// ---
+    /// purpose: 借出 pane 标识的原始字符串,供 argv 拼装
+    /// returns: 内部字符串的借用,与构造时字节一致
+    /// boundary: 不做转义、不加引号;shell 引用由调用方负责
+    /// ---
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -72,9 +124,21 @@ impl From<&str> for PaneId {
 pub struct SessionName(pub String);
 
 impl SessionName {
+    /// ---
+    /// purpose: 把 tmux session 名包成 SessionName newtype
+    /// params:
+    ///   s: session 名原文;不做校验、不归一化
+    /// returns: 与入参字节相同的 SessionName(serde transparent)
+    /// boundary: 不校验 session 是否存在(那是 Transport::has_session)
+    /// ---
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
+    /// ---
+    /// purpose: 借出 session 名原文,供 argv 拼装
+    /// returns: 内部字符串的借用,与构造时字节一致
+    /// boundary: 不做转义、不加引号
+    /// ---
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -98,9 +162,21 @@ impl From<&str> for SessionName {
 pub struct WindowName(pub String);
 
 impl WindowName {
+    /// ---
+    /// purpose: 把 tmux window 名包成 WindowName newtype
+    /// params:
+    ///   s: window 名原文;不做校验、不归一化
+    /// returns: 与入参字节相同的 WindowName(serde transparent)
+    /// boundary: 不校验 window 是否存在(那是 Transport::list_windows)
+    /// ---
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
+    /// ---
+    /// purpose: 借出 window 名原文,供 argv 拼装
+    /// returns: 内部字符串的借用,与构造时字节一致
+    /// boundary: 不做转义、不加引号
+    /// ---
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -147,6 +223,11 @@ pub enum InjectPayload {
 }
 
 impl InjectPayload {
+    /// ---
+    /// purpose: 取出载荷正文,把「有正文」与「空载荷」在类型上分开
+    /// returns: Text / TextSkipConsumptionPoll 返回 Some(正文);Empty 返回 None
+    /// boundary: 不区分两种带正文的变体(要区分用 skip_consumption_poll);不裁剪、不脱敏
+    /// ---
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(text) | Self::TextSkipConsumptionPoll(text) => Some(text),
@@ -154,6 +235,11 @@ impl InjectPayload {
         }
     }
 
+    /// ---
+    /// purpose: 标出「收件 pane 不消费 provider 回合」的载荷,后端据此跳过 post-Enter 消费轮询
+    /// returns: 仅 TextSkipConsumptionPoll 为 true
+    /// boundary: 只表达「不轮询消费」这一件事,不表达投递成功;调用方不得据此直接判 delivered
+    /// ---
     pub fn skip_consumption_poll(&self) -> bool {
         matches!(self, Self::TextSkipConsumptionPoll(_))
     }
@@ -832,6 +918,14 @@ pub enum PaneMode {
 /// 把抽象 `Key` 翻译成 tmux send-keys 字面键名(各后端翻译,不透传字面量;§gap-5)。
 /// tmux:Enter/Up/Down/Left/Right/数字字符/C-c;CancelMode 不是单键(走 cancel_mode_argv)。
 /// 真相源:codex.py:266 `send-keys -t %7 Down Enter`、tmux send-keys 键名约定。
+/// 菜单/方向键序列继续用这里的 `Enter`。投递提交键走 [`tmux_submit_key_name`]。
+/// ---
+/// purpose: 抽象 Key 到 tmux send-keys 字面键名的翻译表
+/// params:
+///   key: 抽象按键;CancelMode 与非数字 Char 无单键拼写
+/// returns: tmux 键名;CancelMode 与未覆盖的 Char 返回空串,由调用方过滤掉
+/// boundary: 不构 argv、不发键;CancelMode 的真正出口是 tmux_cancel_mode_argv;提交键拼写不在这里(见 tmux_submit_key_name)
+/// ---
 pub fn tmux_key_name(key: Key) -> &'static str {
     match key {
         Key::Enter => "Enter",
@@ -860,6 +954,14 @@ pub fn tmux_key_name(key: Key) -> &'static str {
 
 /// `send-keys -t <target> <k1> <k2> ...`(键名经 `tmux_key_name` 翻译)。
 /// golden:`[Down, Enter]` → `["tmux","send-keys","-t","%7","Down","Enter"]`(codex.py:266)。
+/// ---
+/// purpose: 构造按键序列的 send-keys argv(菜单/方向键路径)
+/// params:
+///   pane: 目标 pane 标识,直接进 -t
+///   keys: 按顺序翻译成键名;翻译为空串的键被丢弃,不占位
+/// returns: 完整 argv;keys 全为空串时退化成只有前缀的 send-keys(不会报错)
+/// boundary: 纯构造,不执行;不加 socket 参数(-L/-S 由 tmux_backend 的 run chokepoint 补);此处的 Enter 是菜单键名,不是提交拼写
+/// ---
 pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
     let mut argv = vec![
         "tmux".to_string(),
@@ -877,8 +979,74 @@ pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
     argv
 }
 
+/// 投递提交键的 tmux 拼写。
+///
+/// ledger.p0enter 锁定对：`C-j`/LF 5/5 不成回合，`C-m`/CR 5/5 成回合。
+/// `send-keys Enter` 在 raw PTY 上也是 `0d`，但提交路径只发锁定阳性名
+/// `C-m`，避免落到 LF 族。菜单 `send_keys([Down, Enter])` 不走这里。
+/// ---
+/// purpose: 投递提交键的 tmux 拼写:Enter 锁定为 C-m(CR),其余键回落通用翻译
+/// params:
+///   key: 提交键;只有 Enter 有专门拼写
+/// returns: 提交用键名;非 Enter 与 tmux_key_name 同值(含空串情形)
+/// boundary: 只管拼写,不管何时提交、提交是否成功;不发送、不验证
+/// ---
+pub fn tmux_submit_key_name(key: Key) -> &'static str {
+    match key {
+        Key::Enter => "C-m",
+        other => tmux_key_name(other),
+    }
+}
+
+/// 投递提交：`send-keys -t <pane> <submit-spelling>`。
+/// ---
+/// purpose: 构造投递提交键的 send-keys argv
+/// params:
+///   pane: 目标 pane 标识
+///   submit: 提交键;经 tmux_submit_key_name 取拼写
+/// returns: 单条 argv,末位为提交键拼写
+/// boundary: 纯构造,不执行;tmux 对该 argv 返回 rc=0 不等于回合已提交(copy-mode 会吞键),真伪判定在 tmux_backend 的消费验证
+/// ---
+pub fn tmux_send_submit_argv(pane: &PaneId, submit: Key) -> Vec<String> {
+    vec![
+        "tmux".to_string(),
+        "send-keys".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        tmux_submit_key_name(submit).to_string(),
+    ]
+}
+
+/// 闭合未完成的 bracketed paste：字面 CSI `ESC [ 201 ~`。
+/// 不是 `Escape` 键（E55：重试只重按回车，绝不送 Escape/C-c）。
+/// ---
+/// purpose: 构造「字面写入 CSI 201~」的 argv,闭合 composer 里未收尾的 bracketed paste
+/// params:
+///   pane: 目标 pane 标识
+/// returns: 带 -l 的 send-keys argv,写入的是字面转义序列而非键名
+/// boundary: 绝不用 Escape / Ctrl-C 代替(E55 红线);纯构造,不执行;不判断 pane 当前是否真处于 paste 中
+/// ---
+pub fn tmux_close_bracketed_paste_argv(pane: &PaneId) -> Vec<String> {
+    vec![
+        "tmux".to_string(),
+        "send-keys".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        "-l".to_string(),
+        "\u{1b}[201~".to_string(),
+    ]
+}
+
 /// CancelMode 在 tmux 上按 pane mode 分派退出键(tmux_io.py:419-426)。
 /// golden:Copy→`-X cancel`,Tree/View→`q`,Client→`d`,Unknown→`-X cancel`(+warn)。
+/// ---
+/// purpose: 按 pane 当前 mode 分派退出键,构造离开特殊 mode 的 argv
+/// params:
+///   pane: 目标 pane 标识
+///   mode: 已探到的 pane mode;Unknown 保守走 -X cancel
+/// returns: 单条 send-keys argv,尾部按 mode 取 -X cancel / q / d
+/// boundary: 纯构造,不执行、不探测 mode(探测在 tmux_backend);不保证 mode 真的退出了,调用方需复查
+/// ---
 pub fn tmux_cancel_mode_argv(pane: &PaneId, mode: PaneMode) -> Vec<String> {
     let mut argv = vec![
         "tmux".to_string(),
@@ -900,6 +1068,14 @@ pub fn tmux_cancel_mode_argv(pane: &PaneId, mode: PaneMode) -> Vec<String> {
 /// CaptureRange → `capture-pane -p -S <spec> -t <target>`。
 /// golden:`Tail(40)` → `-S -40`(tmux_prompt.py:149/tmux_io.py:410);
 ///         `Full` → `-S -`(runtime.py:519)。
+/// ---
+/// purpose: 把 CaptureRange 翻成 capture-pane 的起止参数
+/// params:
+///   pane: 目标 pane 标识
+///   range: Tail(n) 取倒数 n 行 -S -n;Head(n) 取 -S 0 并追加 -E n-1;Full 取 -S -
+/// returns: 完整 capture-pane argv;Head(0) 时 -E 饱和到 0(不会下溢)
+/// boundary: 纯构造,不执行、不解析输出;抓回来的文本要经 normalize_capture 才交给识别层
+/// ---
 pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
     let spec = match range {
         CaptureRange::Tail(lines) => format!("-{lines}"),
@@ -924,6 +1100,14 @@ pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
 /// PaneField → `display-message -p -t <target> [-F] <fmt>`。
 /// golden:PaneWidth → `-F '#{pane_width}'`(delivery.py:34);
 ///         PaneMode → `'#{pane_mode}'`(tmux_io.py:403);PaneId → `'#{pane_id}'`(state.py:346)。
+/// ---
+/// purpose: 把 PaneField 翻成 display-message 的单字段查询 argv
+/// params:
+///   pane: 目标 pane 标识
+///   field: 待查字段;PaneMode 走不带 -F 的形式,其余字段加 -F
+/// returns: 完整 display-message argv,末位是 tmux 格式串
+/// boundary: 纯构造,不执行、不解析;查询失败与「字段不适用」的区分在 Transport::query 的 Option 返回值上
+/// ---
 pub fn tmux_query_argv(pane: &PaneId, field: PaneField) -> Vec<String> {
     let fmt = match field {
         PaneField::PaneId => "#{pane_id}",
@@ -953,6 +1137,16 @@ pub fn tmux_query_argv(pane: &PaneId, field: PaneField) -> Vec<String> {
 ///   first → `new-session -d -P -F #{pane_id} -s <s> -n <w> sh -lc <cmd>`
 ///   into  → `new-window -d -P -F #{pane_id} -t <s> -n <w> sh -lc <cmd>`
 /// `argv` 被组装成单条 `sh -lc` 命令字符串(provider 启动行)。
+/// ---
+/// purpose: 构造 spawn argv:首个席位用 new-session,后续席位用 new-window
+/// params:
+///   session: 目标 session 名
+///   window: 新窗口名
+///   command: 已拼好的单条 shell 命令行,原样进 sh -lc(本函数不做引用/转义)
+///   first: true 走 new-session,false 走 new-window
+/// returns: 完整 argv;两支都带 -d(后台创建,不抢客户端焦点)与 -P -F 使 tmux 回打 pane_id
+/// boundary: 纯构造,不执行、不校验 session 是否已存在;command 的 shell 引用由调用方(tmux_backend 的 shell wrapper)负责
+/// ---
 pub fn tmux_spawn_argv(
     session: &SessionName,
     window: &WindowName,
@@ -1007,6 +1201,16 @@ pub fn tmux_spawn_argv(
 ///   set-buffer  → `set-buffer -b <buf> <text>`
 ///   paste-buffer→ `paste-buffer -t <target> -b <buf> -p`(-p = bracketed)
 ///   delete-buffer→`delete-buffer -b <buf>`
+/// ---
+/// purpose: 构造文本注入的三步 argv 序列:装 buffer → 粘到 pane → 删 buffer
+/// params:
+///   pane: 目标 pane 标识
+///   buffer_name: 本次注入独占的 tmux buffer 名,三步共用同一个名字
+///   text: 待注入正文;长度 >= 16 KiB 改走 load-buffer - (由 stdin 喂),否则 set-buffer 直传
+///   bracketed: true 时 paste-buffer 加 -p(bracketed paste)
+/// returns: 有序的三条 argv:[load 或 set, paste, delete];调用方必须按序执行
+/// boundary: 纯构造,不执行、不发提交键;空文本禁走这条路径(见 tmux_empty_inject_argv);不保证 buffer 名唯一,去重由调用方负责
+/// ---
 pub fn tmux_inject_text_argv(
     pane: &PaneId,
     buffer_name: &str,
@@ -1056,13 +1260,29 @@ pub fn tmux_inject_text_argv(
 
 /// 空文本 inject:纯 `send-keys -t <target> <submit_key>`,**禁** buffer 路径
 /// (tmux 拒空 buffer 会卡 trust prompt;tmux_io.py:42)。
+/// `Key::Enter` 在此译成锁定阳性 `C-m`，不是菜单用的 `Enter`。
+/// ---
+/// purpose: 空载荷注入(唤醒/ping)的 argv:只发提交键,不碰 buffer
+/// params:
+///   pane: 目标 pane 标识
+///   submit: 提交键;转发给 tmux_send_submit_argv 取拼写
+/// returns: 与 tmux_send_submit_argv 完全相同的单条 argv
+/// boundary: 禁走 buffer 路径(tmux 拒空 buffer 会卡 trust prompt);纯构造,不执行、不做任何提交验证
+/// ---
 pub fn tmux_empty_inject_argv(pane: &PaneId, submit: Key) -> Vec<String> {
-    tmux_send_keys_argv(pane, &[submit])
+    tmux_send_submit_argv(pane, submit)
 }
 
 /// capture 出口规范化(§4b,design line 399-400):逐行 rstrip 行尾空白 +
 /// `\xa0`(NBSP)→`\x20`,保留 box-drawing。recognizer 不为后端开分支。
 /// golden:`"line one  \nbusy\xa0marker   \n  \n"` → `"line one\nbusy marker\n\n"`。
+/// ---
+/// purpose: capture 出口的统一规范化,让识别层不必为后端开分支
+/// params:
+///   raw: 后端抓回的原始屏幕文本
+/// returns: 逐行去掉行尾空白、NBSP 归一为普通空格的文本;换行位置与行数不变
+/// boundary: 只做这两件事——不剥 ANSI 转义、不裁剪行数、不脱敏、不改 box-drawing 字符
+/// ---
 pub fn normalize_capture(raw: &str) -> String {
     raw.replace('\u{a0}', " ")
         .split_inclusive('\n')
@@ -1083,6 +1303,16 @@ pub fn normalize_capture(raw: &str) -> String {
 /// 真相源:`enter_sent_without_placeholder_check` /
 ///        `pasted_content_prompt_absent_after_submit` / `send_keys_failed` /
 ///        `Enter_sent_after_visible_token`(submit_key 字面)。
+/// ---
+/// purpose: SubmitVerification 判定值落 JSON / 事件的唯一拼写来源
+/// params:
+///   v: 后端给出的提交验证判定
+/// returns: 稳定 wire 字符串;KeySentAfterVisibleToken 由 tmux_key_name 拼成 <键名>_sent_after_visible_token
+/// boundary:
+///   - 只翻译不判定:不把 SubmitConsumptionUnverified 折成成功值,也不合并任何两个变体
+///   - 名与语义已知脱节:enter_sent_without_placeholder_check 实际含义是「消费已确认或跳过消费轮询」,读日志时不可按字面理解成未验证
+///   - 是否算 delivered 不在这里裁定,由 delivery 层的判定表决定
+/// ---
 pub fn submit_verification_wire(v: SubmitVerification) -> String {
     match v {
         SubmitVerification::EnterSentWithoutPlaceholderCheck => {
@@ -1101,6 +1331,23 @@ pub fn submit_verification_wire(v: SubmitVerification) -> String {
         SubmitVerification::SubmitConsumptionUnverified => {
             "submit_consumption_unverified".to_string()
         }
+    }
+}
+
+/// ---
+/// purpose: TurnVerification 的 send JSON / persist 用词
+/// params:
+///   v: 回合观测判定
+/// returns: 与 serde snake_case 一致的固定拼写
+/// contract: 与 serde snake_case 一致；未知必须是 not_yet_observed，不得写成 verified
+/// boundary: 不是投递闸门（Gap42）；只翻译不判定
+/// ---
+pub fn turn_verification_wire(v: TurnVerification) -> &'static str {
+    match v {
+        TurnVerification::LeaderNewTurnBoundaryVerified => "leader_new_turn_boundary_verified",
+        TurnVerification::LeaderNewTurnBoundaryMissing => "leader_new_turn_boundary_missing",
+        TurnVerification::NotYetObserved => "not_yet_observed",
+        TurnVerification::NotRequired => "not_required",
     }
 }
 

@@ -1,3 +1,13 @@
+//! ---
+//! purpose: provider 命令构造与会话观察入口
+//! contract:
+//!   provides:
+//!     - name: adapter
+//!       what: 按 Provider 分发 launch/capability
+//! boundary:
+//!   - 不把 observation 写成 ownership
+//! maturity: wired
+//! ---
 //!
 //! step 8 · provider — type + trait SKELETON (ROUND-0).
 //!
@@ -44,6 +54,7 @@ pub mod faults;
 pub mod session;
 pub mod session_scan;
 pub mod startup_prompt;
+pub mod submit_now;
 pub mod types;
 /// 0.4.x: provider wire-format helpers — single source of truth for
 /// `Provider` ↔ string conversions (replaces 7 hand-rolled match copies).

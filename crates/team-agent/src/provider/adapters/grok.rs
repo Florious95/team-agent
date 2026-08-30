@@ -22,7 +22,8 @@
 //!   session → `-s, --session-id <SESSION_ID>` (fresh spawn)
 //!   resume  → `-r, --resume [<ID_OR_TITLE>]` / `-c, --continue`
 //!   fork    → `--fork-session` (with --resume)
-//!   effort  → `--reasoning-effort <EFFORT>` (alias `--effort`)
+//!   effort  → `--effort <level>` (alias of `--reasoning-effort`)
+//!             grok accepts low|medium|high|xhigh; CLI rejects `max`
 //!   deny    → `--disallowed-tools` (compat alias `--disallowedTools`)
 //!   cwd     → `--cwd <CWD>` / `-w, --worktree [<WORKTREE>]`
 //!

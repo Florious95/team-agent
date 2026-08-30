@@ -1,3 +1,18 @@
+//! ---
+//! purpose: restart spawn overlap and identity contracts
+//! contract:
+//!   provides:
+//!     - name: restart_spawn_overlap_identity
+//!       what: controlled transport facts prove overlapping worker spawns and stable persisted identities
+//!   depends:
+//!     - crate::lifecycle::restart
+//!     - hermetic fake transport with spawn trace
+//!   boundary:
+//!     - overlap/max-in-flight facts replace scheduler-sensitive total-time thresholds
+//!     - no production scheduler, pool, or state-machine changes
+//! maturity: wired
+//! ---
+//!
 //! 0.5.38 RED contract: startup latency instrumentation and bounded worker spawn.
 //!
 //! References:
@@ -83,6 +98,10 @@ fn restart_records_parallel_spawn_overlap_and_deterministic_state() {
             "expected at least two new-window spawns to overlap after the initial session creator; calls={calls:?}"
         ));
     }
+    assert!(
+        transport.max_in_flight() >= 2,
+        "expected at least two concurrent spawn calls; calls={calls:?}"
+    );
     let agent_keys = state
         .pointer("/agents")
         .and_then(Value::as_object)
@@ -272,7 +291,6 @@ fn eight_worker_restart_with_100ms_spawn_delay_beats_serial_baseline() {
     let delay = Duration::from_millis(100);
     let transport = StartupLatencyTransport::new().with_spawn_delay(delay);
 
-    let started = Instant::now();
     let report = restart_with_transport_with_readiness_deadline(
         &case.workspace,
         true,
@@ -281,7 +299,6 @@ fn eight_worker_restart_with_100ms_spawn_delay_beats_serial_baseline() {
         Some(2_000),
     )
     .expect("R4 setup: restart should complete against delayed transport");
-    let elapsed = started.elapsed();
     assert!(
         matches!(report, RestartReport::Restarted { .. }),
         "R4 setup: restart must reach Restarted; report={report:?}"
@@ -293,14 +310,18 @@ fn eight_worker_restart_with_100ms_spawn_delay_beats_serial_baseline() {
         8,
         "R4 setup: timing smoke must exercise all 8 workers; calls={calls:?}"
     );
-    let serial_baseline = delay * calls.len() as u32;
     assert!(
-        serial_baseline >= Duration::from_millis(800),
-        "R4 setup: serial baseline must represent 8 workers * 100ms; baseline={serial_baseline:?}"
+        has_overlap(
+            &calls
+                .iter()
+                .filter(|call| call.kind == "spawn_into")
+                .collect::<Vec<_>>(),
+        ),
+        "R4: bounded-concurrency restart must overlap spawn calls; calls={calls:?}"
     );
     assert!(
-        elapsed < serial_baseline - Duration::from_millis(150),
-        "R4: bounded-concurrency restart should complete below the serial spawn sum; elapsed={elapsed:?} serial_baseline={serial_baseline:?} calls={calls:?}"
+        transport.max_in_flight() >= 2,
+        "R4: max in-flight spawn count must prove overlap; calls={calls:?}"
     );
     assert_phase_events(&case.events(), "restart.phase", &["spawn_all", "completed"]);
 }
@@ -583,6 +604,8 @@ struct TransportState {
     calls: Vec<SpawnCall>,
     panes: BTreeMap<String, PaneInfo>,
     next_pane: usize,
+    in_flight: usize,
+    max_in_flight: usize,
 }
 
 #[derive(Clone)]
@@ -625,6 +648,10 @@ impl StartupLatencyTransport {
         self.state.lock().unwrap().calls.clone()
     }
 
+    fn max_in_flight(&self) -> usize {
+        self.state.lock().unwrap().max_in_flight
+    }
+
     fn pane_snapshot(&self) -> Vec<Value> {
         self.state
             .lock()
@@ -648,11 +675,17 @@ impl StartupLatencyTransport {
         window: &WindowName,
     ) -> Result<SpawnResult, TransportError> {
         let start = Instant::now();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.in_flight += 1;
+            state.max_in_flight = state.max_in_flight.max(state.in_flight);
+        }
         if !self.spawn_delay.is_zero() {
             std::thread::sleep(self.spawn_delay);
         }
         let end = Instant::now();
         let mut state = self.state.lock().unwrap();
+        state.in_flight -= 1;
         let pane_id = PaneId::new(format!("%{}", state.next_pane));
         state.next_pane += 1;
         state.calls.push(SpawnCall {

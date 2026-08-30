@@ -1,11 +1,49 @@
+//! ---
+//! purpose: 摘掉一席，含双确认门、六态一致性判定、原子摘除与字节级回滚快照
+//! contract:
+//!   provides:
+//!     - name: remove_agent
+//!       what: 从 spec、state、team_state 与 role 文件原子摘除一席
+//!     - name: remove_agent_flag_requirements
+//!       what: 只做前置判定，告诉调用方这次需要哪些确认标志
+//!     - name: ForceRecreateSnapshot
+//!       what: 强制重建用的快照，可在失败后恢复席位并清掉本事务新起的 pane
+//!     - name: resolve_seat
+//!       what: 由期望、持久与物理三源定出席位的唯一身份与一致性态
+//!     - name: spec_without_agent
+//!       what: 生成摘掉该席位后的 spec，并清掉指向它的路由与启动项
+//!   depends:
+//!     - crate::lifecycle::lock
+//!     - crate::lifecycle::restart::agent
+//!     - crate::lifecycle::restart::team_state
+//!     - crate::state::projection
+//!     - crate::transport::Transport
+//! boundary:
+//!   - 未给 from_spec 确认或运行中未给 force 时拒绝，不擅自摘除
+//!   - 物理身份必须收敛到唯一的 session 加 window 加 pane，全局同名窗口不算身份
+//!   - 只删托管目录下的角色副本，用户自带的 role 文件不删
+//! maturity: wired
+//! ---
 use super::agent::{resolve_team_scoped_state_or_refuse, start_agent_at_paths};
 use super::common::*;
 use super::team_state::write_team_state;
 use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
+/// ---
+/// purpose: 摘掉一席的对外入口，取生命周期锁后走实体实现
+/// params:
+///   from_spec: 确认同时从 spec 里摘掉
+///   force: 席位仍在运行时必须给出
+/// returns: 摘除结果
+/// errors: 选不到 team 返回 TeamSelect；确认标志不足或一致性态不允许时返回 RequirementUnmet；写盘失败返回 StatePersist
+/// contract_id: lifecycle.remove_agent.entry
+/// ---
 /// `remove_agent(workspace, agent_id, from_spec, force, team)`(`lifecycle/agents.py:22`)。
-/// 从 spec/state/team_state/agent_health 原子摘除；role markdown 是用户资产，始终保留。
+/// 从 spec/state/team_state/agent_health 原子摘除。
+/// 托管目录 `.team/dynamic-role-files/` 下的物化副本随席位清掉；托管目录之外的
+/// `--role-file` 仍是用户资产，不删。A-28 对托管文件「默认保留」的承诺已由
+/// `ledger.seat-supply-prereq` 推翻。
 /// `_RemoveRollback` 字节级快照回滚全部运行时变更。未传 from_spec 确认 / 运行中未传 force → 拒绝。
 pub fn remove_agent(
     workspace: &Path,
@@ -35,6 +73,12 @@ pub fn remove_agent(
     )
 }
 
+/// ---
+/// purpose: 带注入 transport 的摘席入口，自行取锁
+/// returns: 摘除结果
+/// errors: 同 remove_agent
+/// contract_id: lifecycle.remove_agent.entry
+/// ---
 pub(crate) fn remove_agent_with_transport(
     workspace: &Path,
     agent_id: &AgentId,
@@ -63,6 +107,12 @@ pub(crate) fn remove_agent_with_transport(
     )
 }
 
+/// ---
+/// purpose: 调用方已持有生命周期锁时的摘席入口，本函数不再取锁
+/// returns: 摘除结果
+/// errors: 同 remove_agent
+/// contract_id: lifecycle.remove_agent.entry
+/// ---
 pub(crate) fn remove_agent_with_transport_locked(
     workspace: &Path,
     agent_id: &AgentId,
@@ -93,6 +143,11 @@ pub(crate) struct ForceRecreateSnapshot {
 }
 
 impl ForceRecreateSnapshot {
+/// ---
+/// purpose: 为强制重建拍一份可回滚的快照
+/// returns: 含逻辑回滚数据与摘除前物理 pane 身份的快照
+/// errors: 选不到 team 或席位解析失败时返回 LifecycleError
+/// ---
     pub(crate) fn capture(
         workspace: &Path,
         agent_id: &AgentId,
@@ -126,6 +181,10 @@ impl ForceRecreateSnapshot {
         })
     }
 
+/// ---
+/// purpose: 按快照恢复席位的逻辑状态
+/// returns: 恢复过程中的错误描述列表，空表示恢复干净
+/// ---
     pub(crate) fn restore(
         &self,
         team: Option<&str>,
@@ -135,6 +194,10 @@ impl ForceRecreateSnapshot {
             .restore(&self.run_workspace, &self.spec_workspace, team, transport)
     }
 
+/// ---
+/// purpose: 旧 pane 已被消费后的恢复，先杀掉本次事务新起的 pane 再恢复逻辑快照
+/// returns: 错误描述列表；恢复干净时还会校验物理身份是否回到摘除前的 session 与窗口
+/// ---
     /// The old pane has already been consumed. Any exact pane now resolved for
     /// this seat belongs to this force-recreate transaction and must be removed
     /// before the logical snapshot is restored, otherwise rollback can leave a
@@ -193,6 +256,11 @@ impl ForceRecreateSnapshot {
         errors
     }
 
+/// ---
+/// purpose: 强制重建之后要求席位处于一致态
+/// returns: 一致时返回空值
+/// errors: 解析失败透传；解析出的一致性态不是 Coherent 时返回 StatePersist
+/// ---
     pub(crate) fn require_coherent(
         &self,
         agent_id: &AgentId,
@@ -217,6 +285,11 @@ impl ForceRecreateSnapshot {
     }
 }
 
+/// ---
+/// purpose: 只做前置判定，给出这次摘席需要哪些确认标志
+/// returns: 标志要求；不做任何摘除动作
+/// errors: 选不到 team 或席位解析失败时返回 LifecycleError
+/// ---
 pub fn remove_agent_flag_requirements(
     workspace: &Path,
     agent_id: &AgentId,
@@ -263,6 +336,13 @@ pub(super) struct ResolvedSeat {
     pub(super) consistency: SeatConsistency,
 }
 
+/// ---
+/// purpose: 由 spec、runtime state 与物理 pane 三源定出席位身份与一致性态
+/// params:
+///   transport: 已绑定该 team endpoint 的 transport
+/// returns: 席位解析结果，含所在 session、窗口、物理 pane 与六态之一的一致性判定
+/// errors: 团队作用域 state 取不到或 owner 门不过时返回 LifecycleError
+/// ---
 /// Resolve one seat from the selected team's desired, persisted and physical
 /// sources. The transport is already bound to the selected team's endpoint;
 /// physical identity is then narrowed to exactly one `(session, window, pane)`
@@ -552,6 +632,7 @@ fn remove_agent_inner(
     // after the stop (stop_agent persisted it); otherwise the originally-resolved projection drives the
     // removal. Either way we operate on the PROJECTION, never a raw load_runtime_state.
     let working_state = state;
+    let recorded_role_file = recorded_dynamic_role_file(&working_state, agent_id);
     let mut stopped = false;
     let mut cleared_locations = Vec::new();
     if force {
@@ -620,10 +701,16 @@ fn remove_agent_inner(
         "team.spec.yaml",
         None,
     )?;
-    // Role markdown is user-owned input, including files under the registered
-    // dynamic-role path. Removing a seat only unregisters runtime state/spec;
-    // cleanup is intentionally not part of the default operation.
-    let role_file_removed = false;
+    // Managed copies under `.team/dynamic-role-files/` are framework residue
+    // and must not block the next same-id clone. External --role-file paths
+    // stay user-owned. Classify by the path's directory (do not follow a
+    // last-component symlink); unlink with remove_file so only the link dies.
+    let role_file_removed = clear_managed_role_residue(
+        paths.run_workspace,
+        agent_id,
+        recorded_role_file.as_deref(),
+        &mut cleared_locations,
+    )?;
     let agent_health_deleted = delete_agent_health(paths.run_workspace, team_key, agent_id)?;
     cleared_locations.push(serde_json::json!("agent_health"));
     write_remove_step_event(
@@ -661,6 +748,94 @@ struct RemoveSuccess {
     stopped: bool,
     role_file_removed: bool,
     cleared_locations: Vec<serde_json::Value>,
+}
+
+fn recorded_dynamic_role_file(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+) -> Option<std::path::PathBuf> {
+    state
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("dynamic_role_file"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+fn resolve_role_path(workspace: &Path, role_file: &Path) -> std::path::PathBuf {
+    if role_file.is_absolute() {
+        role_file.to_path_buf()
+    } else {
+        workspace.join(role_file)
+    }
+}
+
+fn default_managed_role_file(workspace: &Path, agent_id: &AgentId) -> std::path::PathBuf {
+    workspace
+        .join(".team")
+        .join("dynamic-role-files")
+        .join(format!("{}.md", agent_id.as_str()))
+}
+
+/// Same prefix rule as `role_source_ownership`, but canonicalize the parent
+/// only. Following the last component would classify a managed symlink whose
+/// target lives outside the managed dir as external, and leave residue.
+fn role_path_is_managed(workspace: &Path, role_file: &Path) -> bool {
+    let managed_root = workspace.join(".team").join("dynamic-role-files");
+    let Ok(root) = std::fs::canonicalize(&managed_root) else {
+        return false;
+    };
+    let abs = resolve_role_path(workspace, role_file);
+    let Some(parent) = abs.parent() else {
+        return false;
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(parent_canon) => parent_canon.starts_with(&root),
+        Err(_) => false,
+    }
+}
+
+fn unlink_role_path(path: &Path) -> Result<bool, LifecycleError> {
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(LifecycleError::StatePersist(format!(
+            "inspect managed role file {}: {err}",
+            path.display()
+        ))),
+        Ok(_) => std::fs::remove_file(path).map(|_| true).map_err(|err| {
+            LifecycleError::StatePersist(format!(
+                "remove managed role file {}: {err}",
+                path.display()
+            ))
+        }),
+    }
+}
+
+fn clear_managed_role_residue(
+    workspace: &Path,
+    agent_id: &AgentId,
+    recorded: Option<&Path>,
+    cleared_locations: &mut Vec<serde_json::Value>,
+) -> Result<bool, LifecycleError> {
+    let target = match recorded {
+        Some(recorded) => {
+            let abs = resolve_role_path(workspace, recorded);
+            if !role_path_is_managed(workspace, &abs) {
+                return Ok(false);
+            }
+            abs
+        }
+        None => default_managed_role_file(workspace, agent_id),
+    };
+    if !unlink_role_path(&target)? {
+        return Ok(false);
+    }
+    let resource = target.to_string_lossy().into_owned();
+    write_remove_step_event(workspace, agent_id, "role_file", &resource, None)?;
+    cleared_locations.push(serde_json::json!(resource));
+    Ok(true)
 }
 
 fn write_remove_step_event(
@@ -780,6 +955,13 @@ fn remove_agent_from_state(
     }
 }
 
+/// ---
+/// purpose: 在 state 里给该席位打上退役标记
+/// params:
+///   state: 就地写 agent_lifecycle 下该席位的状态、时间与原因
+/// returns: 已是退役态时幂等返回
+/// errors: state 根、agent_lifecycle 或该条目不是对象时返回 StatePersist
+/// ---
 pub(crate) fn mark_agent_retired_in_state(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
@@ -814,6 +996,11 @@ pub(crate) fn mark_agent_retired_in_state(
     Ok(())
 }
 
+/// ---
+/// purpose: 清掉该席位的退役标记
+/// params:
+///   state: 就地删除；只有当前确为退役态才删
+/// ---
 pub(crate) fn clear_agent_retirement_in_state(state: &mut serde_json::Value, agent_id: &AgentId) {
     let Some(lifecycle) = state
         .get_mut("agent_lifecycle")
@@ -831,6 +1018,10 @@ pub(crate) fn clear_agent_retirement_in_state(state: &mut serde_json::Value, age
     }
 }
 
+/// ---
+/// purpose: 生成摘掉该席位后的 spec
+/// returns: 去掉该 agent、去掉它的启动项、并清掉指向它的路由引用后的 spec；spec 不是 map 时原样返回
+/// ---
 /// Build the persisted spec after removing one worker. Besides deleting the worker and startup entry,
 /// prune routing references that would otherwise point at the removed worker.
 pub(crate) fn spec_without_agent(spec: &YamlValue, agent_id: &AgentId) -> YamlValue {

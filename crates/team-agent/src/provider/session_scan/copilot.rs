@@ -1,10 +1,42 @@
-//!
+//! ---
+//! purpose: 只按 pending session id 到 copilot 的 session-store.db 里查一行，查得到才算捕获
+//! contract:
+//!   provides:
+//!     - name: scan_session_store
+//!       what: 有 expected_session_id 且 sessions 表里存在该 id 时返回唯一候选，否则空
+//!   requires:
+//!     - name: crate::provider::adapters::copilot_fork::copilot_home
+//!       what: session-store.db 的位置由 copilot adapter 决定，本文件不自行推导 HOME
+//!     - name: rusqlite
+//!       what: 只读打开 sqlite，不建表、不写入
+//! boundary:
+//!   - 只服务 Provider::Copilot
+//!   - 无 pending id 一律返回空——绝不按 cwd/时间挑「最近那个会话」
+//!   - 候选的 rollout_path 是共享的 session-store.db 本身，不是每席位一份的文件
+//!   - embedded_agent_id 恒 None:copilot 存档里没有 team-agent 身份 marker 可读
+//!   - 打不开 HOME / 库不存在 / SQL 失败一律退成空向量，不上抛错误
+//! maturity: wired
+//! ---
 use std::path::Path;
 
 use crate::provider::types::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
 
 use super::{CaptureSessionContext, CapturedSessionCandidate};
 
+/// ---
+/// purpose: 按 pending id 在 copilot session-store.db 的 sessions 表里做一次存在性查询
+/// params:
+///   context: 只用到 expected_session_id 与 spawn_cwd(后者仅原样写进候选)
+/// returns: 命中给一条 FsWatch/High 候选，rollout_path 指向 session-store.db;未命中或无 pending id 给空向量
+/// contract:
+///   provides:
+///     - name: scan_session_store
+///       what: 只读 sqlite 一行 id，不读会话正文、不按 cwd 过滤
+/// boundary:
+///   - 无 expected_session_id 直接返回空，不做任何回落挑选
+///   - 不校验该会话的 cwd 是否等于 spawn_cwd——库里 cwd 列存在但本函数不用
+///   - 所有失败路径都退成空向量,调用方无法区分「库不存在」与「查无此行」
+/// ---
 pub(super) fn scan_session_store(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
     let Ok(home) = crate::provider::adapters::copilot_fork::copilot_home() else {
         return Vec::new();

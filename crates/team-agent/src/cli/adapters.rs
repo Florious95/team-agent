@@ -1536,6 +1536,11 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
             args.team.as_deref(),
             &mut value,
         );
+        crate::cli::diagnose::append_registry_channel_unbound_to_report(
+            &args.workspace,
+            args.team.as_deref(),
+            &mut value,
+        );
         value
     };
     Ok(CmdResult::from_json(value, args.json))

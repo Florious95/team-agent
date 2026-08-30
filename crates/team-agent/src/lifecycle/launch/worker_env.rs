@@ -1,3 +1,28 @@
+//! ---
+//! purpose: worker 进程的环境变量与 argv 占位符处理，以及各 provider 的角色注入落盘
+//! contract:
+//!   provides:
+//!     - name: inherited_env_with_team_overrides
+//!       what: 由当前进程环境按白名单派生 worker spawn 环境，并叠加 team 身份
+//!     - name: apply_mcp_auto_approval_env
+//!       what: 按 bypass 结论写或清 MCP 自动放行相关变量
+//!     - name: apply_copilot_instructions_overlay
+//!       what: 把角色提示词写成 per-agent 的 AGENTS.md 并指向它
+//!     - name: apply_cursor_agent_rules_overlay
+//!       what: 把角色提示词写成 workspace 内 per-agent 的 cursor rules 文件
+//!     - name: fill_spawn_placeholders_full
+//!       what: 替换 argv 里的 workspace、agent_id 与 team_id 占位符
+//!   depends:
+//!     - crate::layout::worker_env
+//!     - crate::event_log::EventLog
+//!     - crate::provider
+//!     - std::fs
+//! boundary:
+//!   - 不写用户全局配置，角色注入一律落在 workspace 或 runtime 目录下的 per-agent 路径
+//!   - 环境里的代理与凭据值只允许记存在与长度，不落值
+//!   - 不 spawn 进程，只准备环境与 argv
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,10 +39,18 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 判断 spec 里的该 agent 是否被标为 paused
+/// returns: paused 字段确为真时 true
+/// ---
 pub(super) fn agent_is_paused(agent: &Value) -> bool {
     matches!(agent.get("paused"), Some(Value::Bool(true)))
 }
 
+/// ---
+/// purpose: 给出 spawn 时间戳
+/// returns: 测试固定时间戳环境变量优先，否则取当前 UTC 时间的微秒精度串
+/// ---
 pub(crate) fn spawn_timestamp() -> String {
     match std::env::var("TEAM_AGENT_TEST_FIXED_SPAWNED_AT") {
         Ok(value) => value,
@@ -27,6 +60,12 @@ pub(crate) fn spawn_timestamp() -> String {
     }
 }
 
+/// ---
+/// purpose: 给出带偏移的 spawn 时间戳，用于同批席位间保持先后次序
+/// params:
+///   offset_micros: 相对基准时间的微秒偏移，为 0 时等同 spawn_timestamp
+/// returns: 固定时间戳可解析时加上偏移，否则原样返回固定值；无固定值时取当前时间
+/// ---
 pub(super) fn spawn_timestamp_for_agent(offset_micros: u32) -> String {
     if offset_micros == 0 {
         return spawn_timestamp();
@@ -44,10 +83,17 @@ pub(super) fn spawn_timestamp_for_agent(offset_micros: u32) -> String {
     }
 }
 
+/// ---
+/// purpose: 替换 argv 里的 workspace 与 agent_id 占位符，不带 team_id
+/// ---
 pub(crate) fn fill_spawn_placeholders(argv: &mut [String], workspace: &Path, agent_id: &str) {
     fill_spawn_placeholders_full(argv, workspace, agent_id, None);
 }
 
+/// ---
+/// purpose: 给出 auth_mode 写进环境变量时的稳定字符串
+/// returns: subscription、official_api 或 compatible_api
+/// ---
 /// #229 B-layer worker env contract (`worker_spawn_inherits_parent_process_env_for_proxy_and_ca`):
 /// every worker `transport.spawn_first/into` MUST receive an env map that is the **complete**
 /// `team-agent` process environ (so the child sees the user's PATH ordering, HTTP_PROXY /
@@ -59,10 +105,26 @@ pub(crate) fn fill_spawn_placeholders(argv: &mut [String], workspace: &Path, age
 ///
 /// `TMUX` / `TMUX_PANE` are stripped because they bind the inherited shell to the **launching**
 /// tmux pane; leaving them in would point worker-side tmux integrations at the wrong pane.
+pub(crate) fn auth_mode_env_value(mode: AuthMode) -> &'static str {
+    match mode {
+        AuthMode::Subscription => "subscription",
+        AuthMode::OfficialApi => "official_api",
+        AuthMode::CompatibleApi => "compatible_api",
+    }
+}
+
+/// ---
+/// purpose: 由当前进程环境派生 worker 的 spawn 环境
+/// params:
+///   team_id: 作为 owner team id 重新注入给 worker
+///   auth_mode: 写进环境的 auth_mode 字符串
+/// returns: 白名单过滤后的环境，leader 身份类变量与 TMUX 绑定变量已被剥离
+/// ---
 pub(crate) fn inherited_env_with_team_overrides(
     workspace: &Path,
     agent_id: &str,
     team_id: Option<&str>,
+    auth_mode: Option<&str>,
 ) -> BTreeMap<String, String> {
     // 0.3.28 Step 3: delegate to `layout::worker_env::worker_spawn_env` which
     // implements Python's whitelist semantics (`providers.py:130-145`). The
@@ -77,9 +139,22 @@ pub(crate) fn inherited_env_with_team_overrides(
     //   * Strips `COPILOT_DISABLE_TERMINAL_TITLE` (re-injected per-agent by
     //     `apply_copilot_instructions_overlay` based on the WORKER's provider).
     //   * Strips `TMUX` / `TMUX_PANE` (would attach worker to leader's pane).
-    crate::layout::worker_env::worker_spawn_env(std::env::vars(), workspace, agent_id, team_id)
+    crate::layout::worker_env::worker_spawn_env(
+        std::env::vars(),
+        workspace,
+        agent_id,
+        team_id,
+        auth_mode,
+    )
 }
 
+/// ---
+/// purpose: 按 bypass 结论设置或清除 MCP 自动放行相关环境变量
+/// params:
+///   env: 就地改写的环境表，六个相关键先被无条件清掉
+///   safety: 只有来源为 leader 进程且确为继承而来时才写入放行变量
+/// returns: 不满足条件时只写一个关闭标记
+/// ---
 pub(crate) fn apply_mcp_auto_approval_env(
     env: &mut BTreeMap<String, String>,
     safety: &DangerousApproval,
@@ -128,6 +203,14 @@ pub(crate) fn apply_mcp_auto_approval_env(
     }
 }
 
+/// ---
+/// purpose: 把角色提示词写进 per-agent 的 copilot 指令目录并指向它
+/// params:
+///   system_prompt: 写入 AGENTS.md 的正文
+///   env: 就地写入指令目录与禁用终端标题的变量
+/// returns: 成功返回空值
+/// errors: 建目录或写文件失败时返回 StatePersist，不静默吞
+/// ---
 /// BUG / B2 灵魂件 + C-1-2 + C-6-1 cr verdict — Copilot per-worker AGENTS.md
 /// 写入 + `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` 注入。
 ///
@@ -172,6 +255,13 @@ pub(crate) fn apply_copilot_instructions_overlay(
     Ok(())
 }
 
+/// ---
+/// purpose: 把角色提示词写成 workspace 内 per-agent 的 cursor rules 文件
+/// params:
+///   system_prompt: 写入 rules 正文，文件头声明 alwaysApply
+/// returns: 成功返回空值
+/// errors: 建目录或写文件失败时返回 StatePersist
+/// ---
 /// 0.5.67 Cursor append-system-prompt 方案 1 变体（冒烟 PASS, see
 /// .team/artifacts/0.5.67-cursor-rules-smoke.md）— Cursor `agent` CLI 无
 /// append/rule CLI flag, 只从 workspace 静态 rules 文件读:
@@ -201,6 +291,14 @@ pub(crate) fn apply_cursor_agent_rules_overlay(
     Ok(())
 }
 
+/// ---
+/// purpose: 扫出 copilot 侧残留的 MCP server，对非本框架的逐个追加禁用参数
+/// params:
+///   argv: 就地追加禁用参数
+///   log_dir: 残留清单落盘目录
+/// returns: 成功返回空值；copilot 命令不可用或退出码非零时只记录不阻断
+/// errors: 写残留清单文件失败时返回 StatePersist
+/// ---
 /// C-3-2/C-3-3 cr verdict v2 — Copilot spawn 前调 `copilot mcp list` 扫用户全局
 /// `~/.copilot/mcp-config.json` 与 workspace `.mcp.json` 的 MCP 残留;对每个非
 /// `team_orchestrator` server 追加 `--disable-mcp-server <name>`(main-help:72-73)
@@ -275,6 +373,12 @@ pub(super) fn apply_copilot_mcp_residual_disables(
     Ok(())
 }
 
+/// ---
+/// purpose: 从 copilot mcp list 输出里解析 server 名集合
+/// params:
+///   text: 命令原始输出
+/// returns: server 名列表；遇到无配置的提示行立即返回空；只在 servers 段内取缩进行首 token
+/// ---
 /// 解析 `copilot mcp list` 输出取 server 名集合(te 真机实证 v2,1.0.59 形态):
 /// ```text
 /// User servers:
@@ -347,6 +451,65 @@ pub(super) fn parse_copilot_mcp_list_server_names(text: &str) -> Vec<String> {
     out
 }
 
+/// Subscription seats inherit parent env, but that is implicit. Cursor cloud
+/// on this host is blocked without a proxy; `profile_launch` copies these
+/// keys only on the compatible-api path. Copy them explicitly here so a
+/// subscription cursor seat sees the same keys. Values may contain
+/// credentials — callers must only log presence/length, never the value.
+const CURSOR_PROXY_KEYS: &[&str] = &[
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorProxyPresence {
+    pub https_proxy: bool,
+    pub no_proxy: bool,
+}
+
+/// ---
+/// purpose: 给订阅制 cursor 席位显式补上父进程里的代理变量
+/// params:
+///   env: 就地补键，已有同名键不覆盖
+/// returns: 记录是否存在 https 代理与 no_proxy，只记存在与否不记值
+/// ---
+pub fn apply_cursor_subscription_proxy_env(
+    env: &mut BTreeMap<String, String>,
+) -> CursorProxyPresence {
+    let mut https_proxy = false;
+    let mut no_proxy = false;
+    for key in CURSOR_PROXY_KEYS {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        if key.eq_ignore_ascii_case("HTTPS_PROXY") {
+            https_proxy = true;
+        }
+        if key.eq_ignore_ascii_case("NO_PROXY") {
+            no_proxy = true;
+        }
+        env.entry((*key).to_string()).or_insert(value);
+    }
+    CursorProxyPresence {
+        https_proxy,
+        no_proxy,
+    }
+}
+
+/// ---
+/// purpose: 把 profile 推出的环境清除与覆盖套用到 spawn 环境上
+/// params:
+///   env: 先按 env_unset 删键，再并入 env_overlay
+/// ---
 pub(crate) fn apply_profile_launch_env(
     env: &mut BTreeMap<String, String>,
     profile_launch: &crate::provider::ProviderProfileLaunch,
@@ -357,6 +520,11 @@ pub(crate) fn apply_profile_launch_env(
     env.extend(profile_launch.env_overlay.clone());
 }
 
+/// ---
+/// purpose: 把已 spawn 席位的 profile 相关信息写进该席位的 state 节点
+/// params:
+///   state: 就地写入待定 session id、projects 根与 profile_launch 摘要
+/// ---
 pub(super) fn persist_started_agent_plan_state(
     state: &mut serde_json::Map<String, serde_json::Value>,
     started_agent: &StartedAgent,
@@ -391,6 +559,12 @@ pub(super) fn persist_started_agent_plan_state(
     }
 }
 
+/// ---
+/// purpose: 把命令计划与 profile 推出的信息写进该席位的 state 节点
+/// params:
+///   plan: 命令计划，其 projects 根优先于 profile 给出的
+///   profile_launch: profile 推出的启动参数
+/// ---
 pub(crate) fn persist_command_plan_state(
     state: &mut serde_json::Map<String, serde_json::Value>,
     plan: &crate::provider::CommandPlan,
@@ -428,6 +602,10 @@ pub(crate) fn persist_command_plan_state(
     }
 }
 
+/// ---
+/// purpose: 判断名字是否是合法的 POSIX shell 标识符
+/// returns: 首字符为字母或下划线且其余为字母数字下划线时为 true
+/// ---
 pub(super) fn is_posix_shell_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -437,6 +615,12 @@ pub(super) fn is_posix_shell_identifier(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// ---
+/// purpose: 替换 argv 里的 workspace、agent_id 与 team_id 占位符
+/// params:
+///   argv: 就地改写；整串等于占位符时整体替换，否则按子串替换
+///   team_id: None 时按空串替换
+/// ---
 /// Same as [`fill_spawn_placeholders`] plus `{team_id}` substitution everywhere it
 /// appears as a SUBSTRING (the MCP config encodes it as `mcp_servers.team_orchestrator
 /// .env.TEAM_AGENT_OWNER_TEAM_ID="{team_id}"`, embedded inside `-c key=value` strings,

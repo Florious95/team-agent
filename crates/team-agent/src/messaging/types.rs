@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::enums::Provider;
 use crate::model::ids::{LeaderSessionUuid, OwnerEpoch, TaskId, TeamKey};
-use crate::transport::PaneId;
+use crate::transport::{PaneId, TurnVerification};
 
 use super::helpers::MessageStatusShadow;
 
@@ -308,6 +308,9 @@ pub struct DeliveryOutcome {
     pub reason: Option<DeliveryRefusal>,
     /// fallback / broadcast / fanout 等通道标注 (`channel` 字段)。
     pub channel: Option<String>,
+    /// 入箱 vs 开跑。None = 本路径没观测（JSON 必须落成 not_yet_observed，不得报开跑）。
+    /// Gap42：只是 metadata，不是投递闸门。
+    pub turn_verification: Option<TurnVerification>,
 }
 
 /// trust retry payload (card §45;`delivery.py:273` scheduled_events.payload_json 的 typed 视图)。

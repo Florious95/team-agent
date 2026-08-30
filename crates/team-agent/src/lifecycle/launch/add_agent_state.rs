@@ -1,3 +1,26 @@
+//! ---
+//! purpose: 加席过程中的 state 写入、spec 注入与失败回滚
+//! contract:
+//!   provides:
+//!     - name: rollback_add_agent_atomic
+//!       what: 尽力恢复 spec 字节与 runtime state，并写一条回滚事件
+//!     - name: upsert_agent_state_from_role
+//!       what: 由角色文档 front matter 写出该席位的 state 行
+//!     - name: inject_agent_into_spec
+//!       what: 把编译出的 agent 注入 spec 的 agents 与 routing 规则
+//!     - name: runtime_agent_exists
+//!       what: 判断 state 里是否已有同 id 席位
+//!   depends:
+//!     - crate::state::repository
+//!     - crate::state::persist
+//!     - crate::lifecycle::restart::remove
+//!     - crate::event_log::EventLog
+//! boundary:
+//!   - 回滚是尽力而为，回滚自身的错误被吞掉，只在事件里如实记录成败
+//!   - 注入 spec 不落盘，落盘由调用方原子写
+//!   - 已存在同 id 的条目不重复注入
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +37,14 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 加席失败后恢复 spec 与 runtime state，并给新席立墓碑防止被合并回来
+/// params:
+///   pre_spec_text: 写之前的 spec 字节；None 表示原本没有该文件，回滚即删除
+///   pre_runtime_state: 写之前的 runtime state；None 时改为从当前 state 里摘掉该席位
+///   reason: 写进回滚事件的原因串
+/// returns: 无返回值；回滚成败如实写进 add_agent.rollback 事件
+/// ---
 /// E42 (0.3.24 P0, double-spec deadlock): best-effort atomic rollback for a
 /// failed add-agent. Restores the canonical spec to its pre-write bytes (or
 /// removes the file if it didn't exist), and restores runtime state to its
@@ -110,6 +141,14 @@ pub(super) fn rollback_add_agent_atomic(
     );
 }
 
+/// ---
+/// purpose: 由角色文档的 front matter 写出该席位的 state 行并落盘
+/// params:
+///   meta: 角色文档 front matter
+///   dynamic_role_file: 角色文件路径，记进 state 供 restart 重建 spec 用
+/// returns: 成功返回空值，席位状态记为 starting
+/// errors: 读或写 runtime state 失败时返回 StatePersist
+/// ---
 pub(super) fn upsert_agent_state_from_role(
     workspace: &Path,
     canonical_team_key: &str,
@@ -212,6 +251,10 @@ pub(super) fn upsert_agent_state_from_role(
     )
 }
 
+/// ---
+/// purpose: 判断角色文件是框架托管的还是外部的
+/// returns: 路径落在托管目录下为 managed，否则为 external
+/// ---
 pub(super) fn role_source_ownership(workspace: &Path, role_file: &Path) -> &'static str {
     let managed_root = workspace.join(".team").join("dynamic-role-files");
     match (
@@ -223,6 +266,13 @@ pub(super) fn role_source_ownership(workspace: &Path, role_file: &Path) -> &'sta
     }
 }
 
+/// ---
+/// purpose: 把编译出的 agent 注入 spec 的 agents 列表并补一条同形路由规则
+/// params:
+///   spec: 就地改写；已有同 id 的 agent 或同目标的路由规则时不重复追加
+/// returns: 成功返回空值，不落盘
+/// errors: spec 不是 map 或 agents 缺失时返回 Compile
+/// ---
 /// E5 Bug1:把 add-agent 就地编译出的 agent 条目注入 base team spec(`agents` 列表 +
 /// `routing.rules` 加 `route-<id>`),复刻 [`compile_team`] 的路由规则形态。不落任何文件。
 ///
@@ -279,6 +329,10 @@ pub(crate) fn inject_agent_into_spec(
     Ok(())
 }
 
+/// ---
+/// purpose: 判断 state 的 agents 表里是否已有该 id
+/// returns: 存在则 true
+/// ---
 pub(super) fn runtime_agent_exists(state: &serde_json::Value, agent_id: &AgentId) -> bool {
     state
         .get("agents")
@@ -286,6 +340,10 @@ pub(super) fn runtime_agent_exists(state: &serde_json::Value, agent_id: &AgentId
         .is_some_and(|agents| agents.contains_key(agent_id.as_str()))
 }
 
+/// ---
+/// purpose: 取 YAML agent 节点的 id
+/// returns: id 是字符串时返回它，否则 None
+/// ---
 pub(super) fn yaml_agent_id(agent: &Value) -> Option<&str> {
     let Value::Map(pairs) = agent else {
         return None;
@@ -299,6 +357,10 @@ pub(super) fn yaml_agent_id(agent: &Value) -> Option<&str> {
         })
 }
 
+/// ---
+/// purpose: 取 YAML 路由规则的 assign_to
+/// returns: 该字段是字符串时返回它，否则 None
+/// ---
 pub(super) fn yaml_route_assigns_to(rule: &Value) -> Option<&str> {
     let Value::Map(pairs) = rule else {
         return None;

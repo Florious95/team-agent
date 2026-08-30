@@ -353,8 +353,10 @@ pub struct ProviderCommandContext<'a> {
     /// framework passes no effort flag (provider default).
     ///   - Claude / ClaudeCode: low|medium|high|xhigh|max → `--effort <level>`
     ///   - Codex: low|medium|high|xhigh → `-c model_reasoning_effort=<level>`
-    ///   - Copilot / Gemini / Fake: ignored, warning event emitted at the
-    ///     caller (lifecycle/launch.rs / lifecycle/restart) before construct.
+    ///   - Grok: low|medium|high|xhigh (NOT max) → `--effort <level>`
+    ///   - Copilot / Gemini / CursorAgent / Fake: ignored, warning event
+    ///     emitted at the caller (lifecycle/launch.rs / lifecycle/restart)
+    ///     before construct.
     pub effort: Option<crate::model::enums::ProviderEffort>,
 }
 

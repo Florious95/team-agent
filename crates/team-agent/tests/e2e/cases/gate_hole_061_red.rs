@@ -19,6 +19,20 @@
 //!   checks observable twin-discrimination cells; nested diagnostic/control subtrees do not become
 //!   behavior evidence merely by containing the binding tokens. Provider launchers retain their
 //!   additional hermetic PATH shim and exact argv-log obligations.
+//!
+//! ---
+//! purpose: Keep documented launch/send smoke failures causally attributable
+//! contract:
+//!   provides:
+//!     - name: gate-hole launch and delivery teeth
+//!       what: Exercises the public path and durable worker/result obligations
+//!   depends:
+//!     - crate::framework::wait_for_delivery_or_panic
+//!     - messaging rows/events and fake-worker result store
+//! boundary:
+//!   - Test-only evidence and command coverage; no production delivery behavior
+//! maturity: wired
+//! ---
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -133,7 +147,10 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         .as_str()
         .expect("TOOTH-1: send must return message_id")
         .to_string();
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        &message_id,
+        "coder",
         "documented-path message delivered to coder",
         || {
             message_truth(ws.path(), &message_id)
@@ -212,7 +229,10 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         .to_string();
     let fake_worker_summary = format!("Fake worker handled message {message_id}");
 
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        &message_id,
+        "a",
         "message row recipient=a with delivered truth",
         || {
             message_truth(ws.path(), &message_id)
@@ -220,7 +240,10 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         },
         Duration::from_secs(10),
     );
-    wait_for_or_panic(
+    wait_for_delivery_or_panic(
+        &ws,
+        &message_id,
+        "a",
         "fake worker received message token and reported a result",
         || {
             result_truth_for_message(ws.path(), &message_id).is_some_and(|truth| {
@@ -286,22 +309,80 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
 
     let skill = std::fs::read_to_string(repo_root().join("skills/team-agent/SKILL.md"))
         .expect("read product Team Agent SKILL.md");
-    let documented = extract_team_agent_commands(&skill);
+    let compact = extract_team_agent_commands(&skill);
     assert!(
-        documented.contains("team-agent quick-start .team/current"),
+        compact.contains("team-agent quick-start .team/current"),
         "TOOTH-3 harness canary: extractor missed the canonical quick-start command"
     );
 
     let manifest = load_coverage_manifest("TOOTH-3A");
     let listed = unique_manifest_commands(&manifest)
         .unwrap_or_else(|failure| panic!("TOOTH-3A EXACTLY-ONE-BUCKET RED: {failure}"));
-    if let Some(drift) = command_set_drift(&documented, &listed) {
-        panic!(
-            "TOOTH-3A UNASSIGNED-COMMAND RED: SKILL.md executable commands and the \
-             three-bucket coverage manifest drifted; commands must be recorded byte-for-byte \
-             after whitespace normalization, including a legal final argv token `.`; {drift}"
-        );
-    }
+    let authority = manifest
+        .authority
+        .as_ref()
+        .expect("TOOTH-3A AUTHORITY-METADATA RED: manifest authority metadata is required");
+    assert_eq!(
+        authority.kind, "normative_handbook_plus_live_help",
+        "TOOTH-3A AUTHORITY-METADATA RED: unsupported command authority kind"
+    );
+    assert_eq!(
+        authority.handbook.path, "docs/reference/team-agent-operator.md",
+        "TOOTH-3A AUTHORITY-METADATA RED: handbook path must be repository canonical"
+    );
+    assert_eq!(
+        authority.compact_skill_smoke.path, "skills/team-agent/SKILL.md",
+        "TOOTH-3A AUTHORITY-METADATA RED: compact skill path must be repository canonical"
+    );
+    assert_eq!(
+        authority.compact_skill_smoke.policy, "quick_start_and_send_are_subset_only",
+        "TOOTH-3A AUTHORITY-METADATA RED: compact skill must be subset-only"
+    );
+    let handbook = std::fs::read_to_string(repo_root().join(&authority.handbook.path))
+        .expect("read normative command handbook");
+    let normative = extract_normative_handbook_commands(
+        &handbook,
+        &authority.handbook.start_marker,
+        &authority.handbook.end_marker,
+    )
+    .unwrap_or_else(|failure| panic!("TOOTH-3A NORMATIVE-HANDBOOK RED: {failure}"));
+    let handbook_commands = extract_team_agent_commands(&handbook);
+    let live_help = exact_live_help_roots(&authority.live_help, &normative, &handbook_commands);
+    let stale_allowed = normative
+        .iter()
+        .chain(live_help.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let compact_smoke = compact
+        .into_iter()
+        .filter(|command| {
+            command.starts_with("team-agent quick-start") || command.starts_with("team-agent send")
+        })
+        .collect::<BTreeSet<_>>();
+    let compact_missing = compact_smoke
+        .difference(&listed)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        compact_missing.is_empty(),
+        "TOOTH-3A COMPACT-SMOKE RED: quick-start/send promises from the compact skill \
+         must remain a subset of the manifest; missing={compact_missing:?}"
+    );
+    let missing = normative.difference(&listed).cloned().collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "TOOTH-3A COMMAND-AUTHORITY RED: normative handbook commands are missing from the \
+         three-bucket coverage manifest; missing={missing:?}"
+    );
+    let stale = listed
+        .difference(&stale_allowed)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "TOOTH-3A STALE-MANIFEST RED: manifest commands are absent from marked handbook \
+         sections and exact live public roots: stale={stale:?}"
+    );
 }
 
 #[ignore = "red-by-design: pending contract, tracked in private backlog"]
@@ -326,7 +407,7 @@ fn evaluate_tooth_3b() -> Result<TwinDiscriminationOutcome, String> {
     let manifest = load_coverage_manifest("TOOTH-3B");
     let e2e_tests = source_tree(&["tests/e2e/main.rs", "tests/e2e/cases"]);
     validate_bucket_fields(&manifest)
-        .and_then(|_| validate_expected_bucket_totals(&manifest, 2, 44, 0))
+        .and_then(|_| validate_expected_bucket_totals(&manifest, 2, 46, 0))
         .and_then(|_| validate_covered_case_registration(&manifest))
         .and_then(|_| validate_covered_evidence(&manifest, &e2e_tests))
         .and_then(|outcome| {
@@ -384,7 +465,41 @@ impl MessageTruth {
 #[serde(deny_unknown_fields)]
 struct CoverageManifest {
     schema_version: String,
+    #[serde(default)]
+    authority: Option<CoverageAuthority>,
     commands: Vec<CoverageEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageAuthority {
+    kind: String,
+    handbook: HandbookAuthority,
+    live_help: LiveHelpAuthority,
+    compact_skill_smoke: CompactSkillSmokeAuthority,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandbookAuthority {
+    path: String,
+    start_marker: String,
+    end_marker: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveHelpAuthority {
+    argv: Vec<String>,
+    source: String,
+    root_command_policy: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactSkillSmokeAuthority {
+    path: String,
+    policy: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -923,6 +1038,7 @@ fn assert_three_bucket_validator_canary() {
     let honest_evidence = canary_evidence("assert", "condition", "stdout", 7);
     let honest = CoverageManifest {
         schema_version: "team-agent-skill-command-coverage-v3".to_string(),
+        authority: None,
         commands: vec![
             CoverageEntry::Covered {
                 command: "team-agent status --json".to_string(),
@@ -998,6 +1114,7 @@ fn assert_three_bucket_validator_canary() {
 
     let missing_owner = CoverageManifest {
         schema_version: honest.schema_version.clone(),
+        authority: None,
         commands: vec![CoverageEntry::DeclaredGap {
             command: "team-agent doctor".to_string(),
             covered: Some(false),
@@ -1009,6 +1126,7 @@ fn assert_three_bucket_validator_canary() {
 
     let invalid_exemption = CoverageManifest {
         schema_version: honest.schema_version.clone(),
+        authority: None,
         commands: vec![CoverageEntry::Exempt {
             command: "team-agent verifier-exempt".to_string(),
             category: "convenience_skip".to_string(),
@@ -1347,6 +1465,7 @@ fn assert_global_evidence_identity_canary() {
     let first = canary_evidence("assert", "condition", "stdout", 7);
     let duplicate_pair = CoverageManifest {
         schema_version: "team-agent-skill-command-coverage-v3".to_string(),
+        authority: None,
         commands: vec![
             covered_canary_entry("team-agent status --json", first.clone()),
             covered_canary_entry("team-agent status", first.clone()),
@@ -1367,6 +1486,7 @@ fn assert_global_evidence_identity_canary() {
     distinct_pair.negative_twin.env_value = "verifier-status-distinct".to_string();
     let restored = CoverageManifest {
         schema_version: duplicate_pair.schema_version.clone(),
+        authority: None,
         commands: vec![
             covered_canary_entry(
                 "team-agent status --json",
@@ -1907,6 +2027,97 @@ fn command_set_drift(documented: &BTreeSet<String>, listed: &BTreeSet<String>) -
     let missing = documented.difference(listed).cloned().collect::<Vec<_>>();
     let stale = listed.difference(documented).cloned().collect::<Vec<_>>();
     Some(format!("missing={missing:?} stale={stale:?}"))
+}
+
+fn extract_normative_handbook_commands(
+    markdown: &str,
+    start_marker: &str,
+    end_marker: &str,
+) -> Result<BTreeSet<String>, String> {
+    let starts = markdown.match_indices(start_marker).collect::<Vec<_>>();
+    let ends = markdown.match_indices(end_marker).collect::<Vec<_>>();
+    if starts.len() != 1 || ends.len() != 1 {
+        return Err(format!(
+            "normative markers must occur exactly once (start={}, end={})",
+            starts.len(),
+            ends.len()
+        ));
+    }
+    let start = starts[0].0 + start_marker.len();
+    let end = ends[0].0;
+    if start >= end {
+        return Err("normative end marker precedes start marker".to_string());
+    }
+    let commands = markdown[start..end]
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("team-agent ")
+                .and_then(|_| normalize_team_agent_command(trimmed))
+        })
+        .collect::<BTreeSet<_>>();
+    if commands.is_empty() {
+        return Err("normative section contains no canonical command lines".to_string());
+    }
+    Ok(commands)
+}
+
+fn exact_live_help_roots(
+    authority: &LiveHelpAuthority,
+    normative: &BTreeSet<String>,
+    handbook_commands: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    assert_eq!(
+        authority.argv,
+        vec!["team-agent".to_string(), "--help".to_string()],
+        "TOOTH-3A LIVE-HELP-AUTHORITY RED: live help argv must be exact root help"
+    );
+    assert_eq!(
+        authority.source, "exact_test_binary",
+        "TOOTH-3A LIVE-HELP-AUTHORITY RED: live help must come from the test binary"
+    );
+    assert_eq!(
+        authority.root_command_policy, "canonical_handbook_commands_may_use_compatibility_forms",
+        "TOOTH-3A LIVE-HELP-AUTHORITY RED: unsupported live help policy"
+    );
+    let ws = TestWorkspace::new("gate061-live-help");
+    let out = run_ta(&ws, &["--help"]);
+    assert_eq!(
+        out.exit_code, 0,
+        "TOOTH-3A LIVE-HELP RED: exact CLI root help failed: stdout={} stderr={}",
+        out.stdout, out.stderr
+    );
+    out.stdout
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let command = if let Some(rest) = trimmed.strip_prefix("team-agent ") {
+                rest.split_whitespace().next()?
+            } else if line.starts_with("  ") {
+                trimmed.split_whitespace().next()?
+            } else {
+                return None;
+            };
+            if command.is_empty() || command.contains('|') || command.contains('<') {
+                return None;
+            }
+            let root = format!("team-agent {command}");
+            if normative
+                .iter()
+                .any(|canonical| canonical == &root || canonical.starts_with(&format!("{root} ")))
+            {
+                return None;
+            }
+            if !handbook_commands.iter().any(|documented| {
+                documented == &root || documented.starts_with(&format!("{root} "))
+            })
+            {
+                return None;
+            }
+            Some(root)
+        })
+        .collect()
 }
 
 fn extract_team_agent_commands(markdown: &str) -> BTreeSet<String> {
@@ -2938,6 +3149,7 @@ fn assert_twin_discrimination_canary() {
     let second = evidence_for("NEGATIVE-TWIN-MATRIX-SECOND-CANARY", "matrix-second");
     let honest = CoverageManifest {
         schema_version: "team-agent-skill-command-coverage-v3".to_string(),
+        authority: None,
         commands: vec![
             covered_canary_entry("team-agent matrix-first", first.clone()),
             covered_canary_entry("team-agent matrix-second", second),
@@ -2975,6 +3187,7 @@ fn assert_twin_discrimination_canary() {
 
     let collision = CoverageManifest {
         schema_version: honest.schema_version.clone(),
+        authority: None,
         commands: vec![
             covered_canary_entry("team-agent matrix-first", first.clone()),
             covered_canary_entry("team-agent matrix-collision", first),

@@ -1,10 +1,61 @@
-//!
+//! ---
+//! purpose: codex rollout 的时间与归属过滤——用「创建时间」而非 mtime 判新旧，用 rollout 头里的 cwd 判是不是本席位的
+//! contract:
+//!   provides:
+//!     - name: parse_spawned_at
+//!       what: RFC3339 文本 → SystemTime，解析不了给 None(调用方据此 fail-closed 清空候选)
+//!     - name: truncate_to_uuid_precision
+//!       what: 把时间截到毫秒，与 uuid-v7 里能表达的精度对齐，避免亚毫秒误差把自己的会话判成"太旧"
+//!     - name: rollout_created_at
+//!       what: 三级取创建时间:uuid-v7 时间戳 → 头记录 created_at → 文件名里的时间戳
+//!     - name: apply_expected_session_filter
+//!       what: 有 pending id 时只留 session id 精确相等的候选
+//!     - name: retain_spawn_cwd
+//!       what: 只留 rollout 头记录里 cwd 与席位 spawn_cwd 等价的候选
+//!   requires:
+//!     - name: super::common
+//!       what: 读头、解析记录、record_cwd、paths_equivalent 均复用 common
+//!     - name: chrono
+//!       what: RFC3339 解析
+//! boundary:
+//!   - 只服务 Provider::Codex
+//!   - 一律只读:不写盘、不改 plan、不改 state
+//!   - 创建时间刻意不取文件 mtime——邻席活动会抬升 mtime，把别人的会话冒充成新的
+//!   - 头窗口之外的记录读不到;三级取值全失败时 rollout_created_at 给 None，调用方按"不通过"处理
+//! maturity: wired
+//! ---
+/// ---
+/// purpose: 把持久化在 state 上的 spawned_at 文本解析成时间点
+/// params:
+///   raw: RFC3339 时间串
+/// returns: 解析成功给 UTC SystemTime;失败给 None
+/// contract:
+///   provides:
+///     - name: parse_spawned_at
+///       what: 纯解析，无 I/O、不读系统时钟
+/// boundary:
+///   - 只认 RFC3339;不接受 epoch 秒、不做宽松格式回落
+///   - 返回 None 的处置由调用方定:common::apply_spawned_at_filter 选择清空候选(fail-closed)
+/// ---
 pub(super) fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| std::time::SystemTime::from(dt.with_timezone(&chrono::Utc)))
 }
 
+/// ---
+/// purpose: 把时间点截到毫秒，与 uuid-v7 能表达的精度对齐
+/// params:
+///   timestamp: 待截断的时间点
+/// returns: 同一毫秒的起点;早于 UNIX 纪元或毫秒数溢出 u64 时 None
+/// contract:
+///   provides:
+///     - name: truncate_to_uuid_precision
+///       what: 纯算术，无 I/O
+/// boundary:
+///   - 只向下截断，绝不向上取整——否则会把自己刚开的会话判成"早于 spawn"
+///   - 只在「Codex 且有 expected id」的比较里使用，不是通用时间归一
+/// ---
 pub(super) fn truncate_to_uuid_precision(
     timestamp: std::time::SystemTime,
 ) -> Option<std::time::SystemTime> {
@@ -16,12 +67,40 @@ pub(super) fn truncate_to_uuid_precision(
     ))
 }
 
+/// ---
+/// purpose: 取 codex rollout 的创建时间，作为「这条存档是不是本次 spawn 之后产生的」的判据
+/// params:
+///   path: rollout 文件路径
+/// returns: 三级依次尝试:文件名尾部 uuid-v7 的时间戳 → 头记录里的 created_at → 文件名中的时间戳;全失败给 None
+/// contract:
+///   provides:
+///     - name: rollout_created_at
+///       what: 只读文件名与头 64KB
+/// boundary:
+///   - 刻意不取文件 mtime:mtime 会被后续追加与邻席活动抬升，不是创建时间
+///   - uuid 分支要求版本位为 '7';非 v7 的 uuid 直接落到下一级
+///   - 返回 None 时调用方按"不满足时间窗"处理，不做放行
+/// ---
 pub(super) fn rollout_created_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
     created_at_from_rollout_uuid(path)
         .or_else(|| created_at_from_rollout_head(path))
         .or_else(|| created_at_from_rollout_filename(path))
 }
 
+/// ---
+/// purpose: 有 pending id 时把候选收窄到 session id 精确相等的那些
+/// params:
+///   context: 无 expected_session_id 时原样返回，不做任何过滤
+///   out: 候选列表，按值传入并就地 retain
+/// returns: 过滤后的候选;无一条命中则空向量
+/// contract:
+///   provides:
+///     - name: apply_expected_session_filter
+///       what: 纯内存过滤，无 I/O
+/// boundary:
+///   - 判据是 session id 全等;session_id 为 None 的候选一律剔除
+///   - 与 claude 同名函数语义不同:此处未命中即空，不退到"身份阳性子集"
+/// ---
 pub(super) fn apply_expected_session_filter(
     context: &super::CaptureSessionContext,
     mut out: Vec<super::CapturedSessionCandidate>,
@@ -39,6 +118,20 @@ pub(super) fn apply_expected_session_filter(
     out
 }
 
+/// ---
+/// purpose: 只保留 rollout 头里记着的 cwd 与本席位 spawn_cwd 等价的候选，挡掉其它工作目录的会话
+/// params:
+///   context: 提供 spawn_cwd 基准
+///   out: 就地过滤的候选列表
+/// contract:
+///   provides:
+///     - name: retain_spawn_cwd
+///       what: 逐个候选读头 64KB 后比对 cwd
+/// boundary:
+///   - 无 rollout_path、读不出头、头里一条 cwd 都没有 → 剔除(fail-closed)
+///   - 等价判定走 common::paths_equivalent，它把「记录 cwd 的父目录等于 spawn_cwd」也算等价
+///   - 只看头窗口内的记录;窗口之外的 cwd 记录看不见
+/// ---
 pub(super) fn retain_spawn_cwd(
     context: &super::CaptureSessionContext,
     out: &mut Vec<super::CapturedSessionCandidate>,

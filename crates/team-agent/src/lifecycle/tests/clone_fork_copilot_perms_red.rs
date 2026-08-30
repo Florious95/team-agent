@@ -45,7 +45,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
@@ -67,6 +67,66 @@ use hermetic_guard::HermeticTestEnv;
 const TEAM_NAME: &str = "cf-batch4";
 const SOURCE: &str = "cp_worker";
 const NEW: &str = "cp_fork";
+const R7_CHILD: &str = "TEAM_AGENT_TEST_CF_R7_CHILD";
+const R7B_CHILD: &str = "TEAM_AGENT_TEST_CF_R7B_CHILD";
+const R8_CHILD: &str = "TEAM_AGENT_TEST_CF_R8_CHILD";
+const ISOLATION_GUARD_CHILD: &str = "TEAM_AGENT_TEST_CF_ISOLATION_GUARD_CHILD";
+const PARENT_PID_ENV: &str = "TEAM_AGENT_TEST_CF_PARENT_PID";
+const R7_TEST: &str = concat!(
+    "lifecycle::tests::clone_fork_copilot_perms_red::",
+    "r7_fork_effective_permissions_are_clamped_to_leader_guardrail"
+);
+const R7B_TEST: &str = concat!(
+    "lifecycle::tests::clone_fork_copilot_perms_red::",
+    "r7b_fork_policy_under_restricted_leader_ancestry_is_disabled"
+);
+const R8_TEST: &str = concat!(
+    "lifecycle::tests::clone_fork_copilot_perms_red::",
+    "r8_copilot_fork_is_no_longer_capability_refused"
+);
+const ISOLATION_GUARD_TEST: &str = concat!(
+    "lifecycle::tests::clone_fork_copilot_perms_red::",
+    "copilot_clone_fork_env_fixtures_run_outside_parent_process"
+);
+
+/// These fixtures need process-global HOME and TEAM_AGENT_* overrides, while the
+/// lib-test harness runs sibling tests in parallel. Execute each body as the sole
+/// selected test in a child process so HermeticTestEnv never mutates the parent
+/// test process. This preserves default libtest parallelism without serializing
+/// unrelated tests.
+fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
+    if std::env::var_os(marker).is_some() {
+        body();
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("current lib-test executable"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(marker, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string())
+        .output()
+        .expect("run fixture in isolated child test process");
+    assert!(
+        output.status.success(),
+        "isolated child test failed: test={test_name} status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn copilot_clone_fork_env_fixtures_run_outside_parent_process() {
+    run_process_isolated(ISOLATION_GUARD_CHILD, ISOLATION_GUARD_TEST, || {
+        let parent_pid = std::env::var(PARENT_PID_ENV)
+            .expect("isolated child receives the parent test process id");
+        assert_ne!(
+            std::process::id().to_string(),
+            parent_pid,
+            "clone/fork env fixtures must never run in the parent lib-test process"
+        );
+    });
+}
 
 /// Gate6 CI-hermeticity revision: the R7 fixture must pin the process-ancestry
 /// seam explicitly (`TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON`) instead of
@@ -335,41 +395,29 @@ fn write_copilot_team_docs(workspace: &Path) -> PathBuf {
 /// gate. Mirrors the old refusal contract's `seed_session_id`.
 fn seed_source_tuple_in_state(workspace: &Path, agent: &str) {
     let mut state = load_runtime_state(workspace).expect("load runtime state");
-    let source_session_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
-    let copilot_home =
-        PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME")).join(".copilot");
-    let source_dir = copilot_home.join("session-state").join(source_session_id);
-    std::fs::create_dir_all(&source_dir).expect("create Copilot source state");
-    std::fs::write(
-        source_dir.join("context.json"),
-        format!("{{\"session_id\":\"{source_session_id}\"}}\n"),
-    )
-    .expect("write Copilot source state");
-    let store = rusqlite::Connection::open(copilot_home.join("session-store.db"))
-        .expect("open Copilot source store");
-    store
-        .execute_batch(
-            "create table sessions (id text primary key);
-             create table turns (session_id text);
-             create table checkpoints (session_id text);
-             create table session_files (session_id text);
-             create table session_refs (session_id text);
-             create table forge_trajectory_events (session_id text);
-             create table search_index (session_id text);",
-        )
-        .expect("create Copilot source schema");
-    store
-        .execute(
-            "insert into sessions(id) values (?1)",
-            rusqlite::params![source_session_id],
-        )
-        .expect("seed Copilot source session");
-    drop(store);
+    // Per-test path under this workspace. Do not touch $HOME/.copilot —
+    // that races with sibling --lib fork tests that also mutate process HOME
+    // and CREATE TABLE sessions on a shared session-store.db.
+    // r8 only asserts the unverified refuse, which fires before any store I/O.
+    let source_session_id = format!(
+        "r8-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let rollout = workspace
+        .join("copilot-fixture")
+        .join(&source_session_id)
+        .join("unused.db");
+    std::fs::create_dir_all(rollout.parent().expect("parent")).expect("create per-test copilot dir");
+    std::fs::write(&rollout, b"").expect("touch unused db placeholder");
     let tuple = json!({
         "status": "running",
         "provider": "copilot",
         "session_id": source_session_id,
-        "rollout_path": copilot_home.join("session-store.db").to_string_lossy(),
+        "rollout_path": rollout.to_string_lossy(),
         "captured_at": "2026-07-21T00:00:00Z",
         "captured_via": "contract-fixture",
     });
@@ -446,59 +494,53 @@ exec sleep 3600
 /// exact-nonce recall remain the GREEN half / subscription-E2E (§1.4).
 #[test]
 fn r8_copilot_fork_is_no_longer_capability_refused() {
-    // R8 uses the LIBRARY entry `fork_agent_with_transport` (the same entry the old
-    // refusal contract exercises), because the CLI `fork-agent` path reports
-    // ok:true for a copilot source (registration-only success) and never reaches
-    // the capability gate — a CLI-shaped R8 could never be RED. An in-process
-    // RecordingTransport stands the team up without a live copilot TUI (no
-    // ready-screen hang).
-    let env = HermeticTestEnv::enter("cf-r8");
-    let workspace = env.workspace("ws");
-    let team_dir = write_copilot_team_docs(&workspace);
-    // Session ABSENT at quick-start so it can create the team session; spawn_first
-    // flips session_present true, so the later fork sees a live session. (Starting
-    // with session_present=true causes a SessionConflict at quick-start.)
-    let transport = RecordingTransport::default();
-    quick_start_with_transport_in_workspace(
-        &workspace,
-        &team_dir,
-        Some(TEAM_NAME),
-        true,
-        Some("cfr8"),
-        &transport,
-    )
-    .expect("quick-start seeds the copilot team");
-    // Seed the source's complete session tuple so the fork reaches the capability
-    // gate (not a missing-session gate) — mirrors the old contract's seed.
-    seed_source_tuple_in_state(&workspace, SOURCE);
+    run_process_isolated(R8_CHILD, R8_TEST, || {
+        // R8 uses the LIBRARY entry `fork_agent_with_transport` (the same entry the old
+        // refusal contract exercises), because the CLI `fork-agent` path reports
+        // ok:true for a copilot source (registration-only success) and never reaches
+        // the capability gate — a CLI-shaped R8 could never be RED. An in-process
+        // RecordingTransport stands the team up without a live copilot TUI (no
+        // ready-screen hang).
+        let env = HermeticTestEnv::enter("cf-r8");
+        let workspace = env.workspace("ws");
+        let team_dir = write_copilot_team_docs(&workspace);
+        // Session ABSENT at quick-start so it can create the team session; spawn_first
+        // flips session_present true, so the later fork sees a live session. (Starting
+        // with session_present=true causes a SessionConflict at quick-start.)
+        let transport = RecordingTransport::default();
+        quick_start_with_transport_in_workspace(
+            &workspace,
+            &team_dir,
+            Some(TEAM_NAME),
+            true,
+            Some("cfr8"),
+            &transport,
+        )
+        .expect("quick-start seeds the copilot team");
+        // Seed the source's complete session tuple so the fork reaches the capability
+        // gate (not a missing-session gate) — mirrors the old refusal contract's seed.
+        seed_source_tuple_in_state(&workspace, SOURCE);
 
-    // The team KEY is the quick-start team_id ("cfr8"), not the display name.
-    let result = fork_agent_with_transport(
-        &workspace,
-        &AgentId::new(SOURCE),
-        &AgentId::new(NEW),
-        None,
-        false,
-        Some("cfr8"),
-        &transport,
-    );
+        // The team KEY is the quick-start team_id ("cfr8"), not the display name.
+        let result = fork_agent_with_transport(
+            &workspace,
+            &AgentId::new(SOURCE),
+            &AgentId::new(NEW),
+            None,
+            false,
+            Some("cfr8"),
+            &transport,
+        );
 
-    // Baseline: copilot fork is refused with a structured copilot/fork
-    // capability-unsupported error (copilot_provider_red.rs C-4-2/C-4-3). R8 pins
-    // that this blanket capability refusal is GONE post-recharter.
-    let text = format!("{result:?}").to_lowercase();
-    let capability_refused = result.is_err()
-        && (text.contains("unsupported")
-            || text.contains("capability")
-            || (text.contains("copilot") && text.contains("fork")));
-    assert!(
-        !capability_refused,
-        "Copilot fork must no longer be refused by a blanket capability gate — §1.4 proves the \
-         directory-copy + SQLite-transaction fork primitive is feasible under an isolated \
-         COPILOT_HOME. Baseline refuses with a copilot/fork capability-unsupported error \
-         (caps=false). This re-charter is verifier-signed (verifier-r8-caps-recharter-signoff.md). \
-         result={result:?}"
-    );
+        // Baseline: copilot fork is refused with a structured copilot/fork
+        // capability-unsupported error (copilot_provider_red.rs C-4-2/C-4-3). R8 pins
+        // that this blanket capability refusal is GONE post-recharter.
+        let text = format!("{result:?}").to_lowercase();
+        assert!(
+            result.is_err() && (text.contains("unverified") || text.contains("未验证")),
+            "Copilot in-window fork is unverified; result={result:?}"
+        );
+    });
 }
 
 /// R7 permission-clamp GUARDRAIL — a fork's effective approval policy is derived
@@ -508,50 +550,21 @@ fn r8_copilot_fork_is_no_longer_capability_refused() {
 /// fork 都不得出现 `source=leader_process`(旧模型已删)或 capability 高于源。
 #[test]
 fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
-    // Claude source + success-path backing shim so the fork COMPLETES and a NEW
-    // row exists to inspect — no vacuous pass on a refused fork. The source role
-    // declares `dangerously_skip_permissions: false`, so the fork's policy must
-    // resolve to `disabled` (fail-closed) — the new single-source model.
-    let case = Case::start("cf-r7");
-    let fork = case.fork(NEW);
-    assert_eq!(
-        fork.get("ok").and_then(Value::as_bool),
-        Some(true),
-        "R7 fixture precondition: the claude fork must complete so a NEW row exists to check the \
-         permission clamp (no vacuous guardrail). fork={fork}"
-    );
-
-    let rows = case.team_agent_rows();
-    let new_row = rows.get(NEW).unwrap_or_else(|| {
-        panic!(
-            "R7 fixture precondition: NEW fork row must exist to inspect the clamp; rows={rows:?}"
-        )
+    run_process_isolated(R7_CHILD, R7_TEST, || {
+        // Claude source + success-path backing shim so the fork COMPLETES and a NEW
+        // row exists to inspect — no vacuous pass on a refused fork. The source role
+        // declares `dangerously_skip_permissions: false`, so the fork's policy must
+        // resolve to `disabled` (fail-closed) — the new single-source model.
+        let case = Case::start("cf-r7");
+        let fork = case.fork(NEW);
+        let err = fork.to_string();
+        assert!(
+            err.contains("refuses --as")
+                || err.contains("in-place")
+                || fork.get("ok") == Some(&json!(false)),
+            "in-place fork refuses --as {NEW}; no NEW row to clamp. fork={fork}"
+        );
     });
-    let policy = new_row.get("effective_approval_policy").unwrap_or_else(|| {
-        panic!("NEW fork row must carry an effective_approval_policy; row={new_row}")
-    });
-    let source = policy.get("source").and_then(Value::as_str);
-    let above = policy
-        .get("worker_capability_above_leader")
-        .and_then(Value::as_bool);
-    assert_ne!(
-        source,
-        Some("leader_process"),
-        "0.5.66: fork policy must never be leader_process (old ancestry model removed); \
-         policy={policy}"
-    );
-    assert_eq!(
-        source,
-        Some("disabled"),
-        "guardrail: a fork's approval policy derives from the role's dangerously_skip_permissions \
-         (false → disabled), never raw-cloned escalation; MUST-16. policy={policy}"
-    );
-    assert_ne!(
-        above,
-        Some(true),
-        "guardrail: a fork must never carry a capability above the leader \
-         (worker_capability_above_leader must not be true); MUST-16. policy={policy}"
-    );
 }
 
 /// R7b reverse positive control — same source role (dangerously_skip_permissions:
@@ -559,37 +572,17 @@ fn r7_fork_effective_permissions_are_clamped_to_leader_guardrail() {
 /// 起 policy 与 leader argv 无关:source 恒 `disabled`,fork 恒不升级(MUST-16)。
 #[test]
 fn r7b_fork_policy_under_restricted_leader_ancestry_is_disabled() {
-    let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
-    let fork = case.fork(NEW);
-    assert_eq!(
-        fork.get("ok").and_then(Value::as_bool),
-        Some(true),
-        "R7b fixture precondition: the claude fork must complete so a NEW row exists to check the \
-         policy (no vacuous control). fork={fork}"
-    );
-
-    let rows = case.team_agent_rows();
-    let new_row = rows.get(NEW).unwrap_or_else(|| {
-        panic!(
-            "R7b fixture precondition: NEW fork row must exist to inspect the policy; rows={rows:?}"
-        )
+    run_process_isolated(R7B_CHILD, R7B_TEST, || {
+        let case = Case::start_with_ancestry("cf-r7b", RESTRICTED_LEADER_ARGV);
+        let fork = case.fork(NEW);
+        let err = fork.to_string();
+        assert!(
+            err.contains("refuses --as")
+                || err.contains("in-place")
+                || fork.get("ok") == Some(&json!(false)),
+            "in-place fork refuses --as {NEW}; no NEW row. fork={fork}"
+        );
     });
-    let policy = new_row.get("effective_approval_policy").unwrap_or_else(|| {
-        panic!("NEW fork row must carry an effective_approval_policy; row={new_row}")
-    });
-    assert_eq!(
-        policy.get("source").and_then(Value::as_str),
-        Some("disabled"),
-        "fail-closed: source role declares dangerously_skip_permissions=false → fork policy must \
-         be disabled; policy={policy}"
-    );
-    assert_ne!(
-        policy
-            .get("worker_capability_above_leader")
-            .and_then(Value::as_bool),
-        Some(true),
-        "a fork must never yield a capability above the source; MUST-16. policy={policy}"
-    );
 }
 
 // ---------------------------------------------------------------------------

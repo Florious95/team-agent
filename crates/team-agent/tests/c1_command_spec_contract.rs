@@ -490,7 +490,7 @@ fn visible_default_commands(help: &str) -> BTreeSet<String> {
             }
         }
     }
-    for provider in ["codex", "claude", "copilot"] {
+    for provider in ["codex", "claude", "copilot", "grok", "cursor"] {
         names.remove(provider);
     }
     names

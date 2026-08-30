@@ -56,22 +56,24 @@ test("unparseable or killed doctor self-check is advisory without blocker wordin
   }
 });
 
-test("install bin resolver chooses writable on-path dir and skips node version dirs", () => {
+test("install bin resolver ignores writable third-party PATH dirs and uses declared ~/.local/bin", () => {
   const root = tempRoot("path-choice");
   const versionBin = path.join(root, ".nvm", "versions", "node", "v22.0.0", "bin");
   const npxBin = path.join(root, ".npm", "_npx", "abc123", "node_modules", ".bin");
   const pathBin = path.join(root, "homebrew", "bin");
+  const declared = path.join(root, ".local", "bin");
   fs.mkdirSync(versionBin, { recursive: true });
   fs.mkdirSync(npxBin, { recursive: true });
   fs.mkdirSync(pathBin, { recursive: true });
+  fs.mkdirSync(declared, { recursive: true });
 
   const resolved = resolveInstallBinDir({
-    env: { PATH: [npxBin, versionBin, pathBin].join(path.delimiter), SHELL: "/bin/zsh" },
+    env: { PATH: [npxBin, versionBin, pathBin, declared].join(path.delimiter), SHELL: "/bin/zsh" },
     home: root,
   });
 
-  assert.equal(resolved.binDir, pathBin);
-  assert.equal(resolved.kind, "path");
+  assert.equal(resolved.binDir, declared);
+  assert.equal(resolved.kind, "declared");
   assert.equal(resolved.readyNow, true);
   assert.equal(fs.existsSync(path.join(root, ".zshrc")), false);
 });
@@ -96,20 +98,21 @@ test("install bin resolver falls back to shell rc idempotently", () => {
   assert.equal((zshrc.match(/# team-agent PATH \(E48\)/g) || []).length, 1);
 });
 
-test("install bin resolver skips writable path dir with foreign wrapper", () => {
+test("install bin resolver does not adopt a writable PATH dir that already has a foreign wrapper", () => {
   const root = tempRoot("foreign-wrapper");
   const foreignBin = path.join(root, "foreign", "bin");
-  const pathBin = path.join(root, "stable", "bin");
+  const declared = path.join(root, ".local", "bin");
   fs.mkdirSync(foreignBin, { recursive: true });
-  fs.mkdirSync(pathBin, { recursive: true });
+  fs.mkdirSync(declared, { recursive: true });
   fs.writeFileSync(path.join(foreignBin, "team-agent"), "#!/bin/sh\necho foreign\n", { mode: 0o755 });
 
   const resolved = resolveInstallBinDir({
-    env: { PATH: [foreignBin, pathBin].join(path.delimiter), SHELL: "/bin/zsh" },
+    env: { PATH: [foreignBin, declared].join(path.delimiter), SHELL: "/bin/zsh" },
     home: root,
   });
 
-  assert.equal(resolved.binDir, pathBin);
+  assert.equal(resolved.binDir, declared);
+  assert.equal(resolved.kind, "declared");
   assert.equal(resolved.readyNow, true);
 });
 
@@ -122,8 +125,8 @@ test("post-install repair updates higher-priority stale local team-agent binary"
   fs.mkdirSync(installBin, { recursive: true });
   fs.mkdirSync(path.dirname(runtimeBinary), { recursive: true });
   fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(localBin, "team-agent"), "#!/bin/sh\necho old team-agent\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
+  writeManagedWrapper(path.join(localBin, "team-agent"), path.join(root, "runtime", "old", "bin", "team-agent"));
+  writeManagedWrapper(path.join(installBin, "team-agent"), runtimeBinary);
   const logs = [];
 
   const repairs = repairPathShadowingTeamAgentCommands({
@@ -152,8 +155,8 @@ test("post-install repair probes home local bin even when npm PATH misses it", (
   fs.mkdirSync(installBin, { recursive: true });
   fs.mkdirSync(path.dirname(runtimeBinary), { recursive: true });
   fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(localBin, "team-agent"), "#!/bin/sh\necho old team-agent\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
+  writeManagedWrapper(path.join(localBin, "team-agent"), path.join(root, "runtime", "old", "bin", "team-agent"));
+  writeManagedWrapper(path.join(installBin, "team-agent"), runtimeBinary);
   const logs = [];
 
   const repairs = repairPathShadowingTeamAgentCommands({
@@ -171,17 +174,18 @@ test("post-install repair probes home local bin even when npm PATH misses it", (
   assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
 });
 
-test("post-install repair leaves lower-priority team-agent binary untouched", () => {
+test("post-install repair rewrites lower-priority installer-managed wrappers onto the new runtime", () => {
   const root = tempRoot("path-shadow-after");
-  const installBin = path.join(root, ".hermes", "bin");
+  const installBin = path.join(root, ".local", "bin");
   const laterBin = path.join(root, "later", "bin");
   const runtimeBinary = path.join(root, "runtime", "0.3.test", "bin", "team-agent");
+  const oldRuntime = path.join(root, "runtime", "old", "bin", "team-agent");
   fs.mkdirSync(installBin, { recursive: true });
   fs.mkdirSync(laterBin, { recursive: true });
   fs.mkdirSync(path.dirname(runtimeBinary), { recursive: true });
   fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
-  fs.writeFileSync(path.join(laterBin, "team-agent"), "#!/bin/sh\necho later old\n", { mode: 0o755 });
+  writeManagedWrapper(path.join(installBin, "team-agent"), runtimeBinary);
+  writeManagedWrapper(path.join(laterBin, "team-agent"), oldRuntime);
 
   const repairs = repairPathShadowingTeamAgentCommands({
     env: { PATH: [installBin, laterBin].join(path.delimiter) },
@@ -190,8 +194,9 @@ test("post-install repair leaves lower-priority team-agent binary untouched", ()
     runtimeBinary,
   });
 
-  assert.deepEqual(repairs, []);
-  assert.equal(fs.readFileSync(path.join(laterBin, "team-agent"), "utf8"), "#!/bin/sh\necho later old\n");
+  assert.deepEqual(repairs.map((repair) => repair.file), [path.join(laterBin, "team-agent")]);
+  const repaired = fs.readFileSync(path.join(laterBin, "team-agent"), "utf8");
+  assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
 });
 
 test("post-install version check verifies the actual team-agent resolved on PATH", () => {
@@ -284,6 +289,18 @@ test("installer stages under temp dir and codesigns before atomic rename", () =>
     "Darwin signer must invoke /usr/bin/codesign --force --sign - (ad-hoc)",
   );
 });
+
+function writeManagedWrapper(file, runtimeBinary) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    `#!/usr/bin/env sh
+# team-agent installer wrapper
+exec '${runtimeBinary}' "$@"
+`,
+    { mode: 0o755 },
+  );
+}
 
 function tempRoot(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `team-agent-install-${label}-`));

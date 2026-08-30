@@ -1,4 +1,10 @@
-//! A-22 RED: managed leader startup must recover a stale registered session.
+//! A-22: managed leader startup — attach-failure diagnostics and existing-session safety.
+//!
+//! 🔴 2026-08-23: this file used to be titled "must recover a stale registered
+//! session". That title stated a SELF-HEAL requirement the product does not have
+//! (`.team/artifacts/test-asset-liabilities.md:103-104`); the assertion carrying it
+//! was deleted from the first test. See that test's inline RETIRED note.
+//! ⚠️ 作用域：本次处置只重锚第二个测试的失败合同；不改产品自愈逻辑。
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -21,7 +27,7 @@ use hermetic_guard::HermeticTestEnv;
 
 #[test]
 #[serial(env)]
-fn a22_managed_start_recovers_stale_registered_leader_session() {
+fn a22_managed_start_attach_failure_persists_diagnostics_and_preserves_existing_session() {
     let env = HermeticTestEnv::enter("a22-stale-leader");
     let workspace = env.workspace("workspace");
     let backend = TmuxBackend::for_workspace(&workspace);
@@ -155,21 +161,28 @@ fn a22_managed_start_recovers_stale_registered_leader_session() {
         "A-22 attach-or-create failure must persist both child streams and startup stage; diagnostics={diagnostics:?}"
     );
 
-    let state = load_runtime_state(&workspace).expect("load refreshed state");
-    assert_eq!(
-        state["teams"]["current"]["leader_receiver"]["session_name"],
-        json!(existing.as_str()),
-        "A-22: stale registration must be refreshed to an existing leader session matched by prefix; state={state}"
-    );
+    // 🔴 2026-08-23 RETIRED:
+    //   assert_eq!(state[..]["leader_receiver"]["session_name"], json!(existing.as_str()),
+    //       "A-22: stale registration must be refreshed to an existing leader session
+    //        matched by prefix")
+    // It assumed a SELF-HEAL mechanism: 发现注册陈旧 ⇒ 探测哪个 session 还活着 ⇒ 覆盖注册.
+    // 落盘需求 (`.team/artifacts/test-asset-liabilities.md:103-104`, 用户原话):
+    // **从来没有设计过自愈，claim 就够了** ——「判活 → 决定覆盖」产品里不存在.
+    // 架构页同向 (`wiki/C3/所有权与租约.md:9/:17/:21`): 只有用户明确触发的绑定命令能改
+    // leader receiver；即使发现旧 pane 已死也无权进入写路径；输出要么完整绑定、要么明确
+    // 拒绝，**没有半成功**. 而本用例上面刚断言 attach 必须失败 ⇒ 它要的正是那个"半成功".
+    // ⇒ deleted, not weakened.
+    // ⚠️ ⛔ 未替换成反向断言（「失败后注册必须保持原样」/「必须清空」）——两者哪个正确
+    // **没有落盘**，判为「待向人确认」，⛔ 不由本格代裁。
     assert!(
         backend.has_session(&existing).unwrap_or(false),
-        "A-22: the matched existing leader session must survive attach failure"
+        "A-22: the pre-existing leader session must survive attach failure"
     );
 }
 
 #[test]
 #[serial(env)]
-fn a22b_managed_attach_failure_rediscovers_after_selected_session_disappears() {
+fn a22b_managed_attach_failure_preserves_binding_after_selected_session_disappears() {
     let env = HermeticTestEnv::enter("a22b-attach-recovery");
     let workspace = env.workspace("workspace");
     let backend = TmuxBackend::for_workspace(&workspace);
@@ -286,7 +299,11 @@ exec \"$real\" -L \"$socket\" \"$@\"
     let _attach_log = env.with_env("TA_A22_ATTACH_LOG", &attach_log.to_string_lossy());
     let _attach_count = env.with_env("TA_A22_ATTACH_COUNT", &attach_count.to_string_lossy());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
+    // The window nonce is `<pid_hex>-<epoch_nanos_hex>` minted inside this very
+    // launcher process (leader/start.rs:961-966), so capture the child pid and
+    // the wall-clock window around the launch: both are asserted below.
+    let launch_started_nanos = epoch_nanos_now();
+    let child = Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .args(["claude", "--json", "--", "--version"])
         .current_dir(&workspace)
         .env("HOME", env.home())
@@ -297,8 +314,13 @@ exec \"$real\" -L \"$socket\" \"$@\"
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
+        .expect("spawn A-22b managed launcher");
+    let launcher_pid = child.id();
+    let output = child
+        .wait_with_output()
         .expect("run A-22b managed launcher");
+    let launch_finished_nanos = epoch_nanos_now();
     assert!(
         !output.status.success(),
         "both injected attach attempts must fail; stdout={} stderr={}",
@@ -317,29 +339,80 @@ exec \"$real\" -L \"$socket\" \"$@\"
         2,
         "A-22b must retry exactly once after the selected session disappears; targets={targets:?}"
     );
+    // 0.5.x multi-leader window contract (leader/start.rs:3-7 and :916-918):
+    // the first managed leader keeps the bare `claude_code` window, a later
+    // leader joining a session where that name is already taken MUST get a
+    // unique `claude_code-<nonce>` window, otherwise tmux answers
+    // `attach-session -t SESSION:claude_code` with `can't find window`.
+    // This test creates the selected session with `-n claude_code` above, so
+    // the base name is occupied and the suffix is REQUIRED, not optional.
+    // The intent of this assertion is unchanged: the first attach must go to
+    // the selected existing candidate. Only the window literal — which pinned
+    // an implementation shape that the contract above replaced — is relaxed,
+    // and it is replaced by stricter checks on the nonce itself.
+    let (first_session, first_window) = split_attach_target(&targets[0]);
     assert_eq!(
-        targets[0],
-        format!("{}:claude_code", existing.as_str()),
-        "first attach must use the selected existing candidate"
+        first_session,
+        existing.as_str(),
+        "first attach must use the selected existing candidate; target={}",
+        targets[0]
     );
-    let retry_session = targets[1]
-        .strip_suffix(":claude_code")
-        .expect("retry target must contain provider window");
+    let (first_pid_hex, first_nanos_hex) = parse_provider_window(&first_window, "first")
+        .unwrap_or_else(|| {
+            panic!(
+                "the selected session already owns a `claude_code` window, so the first attach \
+                 must target a nonce-suffixed window (leader/start.rs:919-940); window={first_window}"
+            )
+        });
+    // `nonce` = `<pid_hex>-<epoch_nanos_hex>` (leader/start.rs:857-859, minted
+    // for the window at :961-966). Pin it to THIS launch so a constant or
+    // hardcoded nonce cannot satisfy the shape check above.
+    assert_eq!(
+        u32::from_str_radix(&first_pid_hex, 16).expect("nonce pid segment must parse as hex"),
+        launcher_pid,
+        "window nonce pid segment must be this launcher's pid; nonce_pid_hex={first_pid_hex} \
+         launcher_pid={launcher_pid} window={first_window}"
+    );
+    let first_nonce_nanos =
+        u128::from_str_radix(&first_nanos_hex, 16).expect("nonce epoch segment must parse as hex");
+    assert!(
+        (launch_started_nanos..=launch_finished_nanos).contains(&first_nonce_nanos),
+        "window nonce epoch segment must be minted during this launch; \
+         nonce_nanos={first_nonce_nanos} window=[{launch_started_nanos},{launch_finished_nanos}]"
+    );
+
+    let (retry_session, retry_window) = split_attach_target(&targets[1]);
+    // The retry may land in a session where `claude_code` is free, so the bare
+    // base name is legal here; what is NOT legal is a malformed window.
+    let _ = parse_provider_window(&retry_window, "retry");
     assert_ne!(
         retry_session,
         existing.as_str(),
         "retry must not reuse the selected session after it disappears"
     );
-    assert!(
-        retry_session.starts_with("team-agent-leader-claude_code-"),
-        "retry must use a discovered leader candidate or nonce: {retry_session}"
-    );
 
     let state = load_runtime_state(&workspace).expect("load refreshed A-22b state");
     assert_eq!(
         state["teams"]["current"]["leader_receiver"]["session_name"],
-        json!(retry_session),
-        "A-22b retry must refresh the binding before the second attach; state={state}"
+        json!("team-agent-leader-claude_code-stale-registration"),
+        "failed retry must not overwrite the original scalar binding; state={state}"
+    );
+    assert_eq!(
+        state["teams"]["current"]["leader_receiver"]["pane_id"],
+        json!("%stale"),
+        "failed retry must preserve the original scalar pane binding; state={state}"
+    );
+    assert!(
+        !state.to_string().contains(&retry_session),
+        "failed retry candidate must not remain in active binding state; candidate={retry_session} state={state}"
+    );
+    assert!(
+        !Command::new(&real_tmux)
+            .args(["-L", &endpoint, "has-session", "-t", &retry_session])
+            .status()
+            .expect("probe failed retry session")
+            .success(),
+        "failed retry resources must be cleaned up; session={retry_session}"
     );
     let combined = format!(
         "{}\n{}",
@@ -366,6 +439,50 @@ impl Drop for TmuxCleanup {
             .args(["-L", &self.endpoint, "kill-server"])
             .output();
     }
+}
+
+fn epoch_nanos_now() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_nanos()
+}
+
+/// Split a tmux attach target `SESSION:WINDOW` recorded by the shim.
+fn split_attach_target(target: &str) -> (String, String) {
+    let (session, window) = target
+        .split_once(':')
+        .unwrap_or_else(|| panic!("attach target must be SESSION:WINDOW; target={target}"));
+    (session.to_string(), window.to_string())
+}
+
+/// Validate a managed-leader provider window and return its nonce segments.
+///
+/// Contract (leader/start.rs:3-7, :916-918, :919-940): the window is either the
+/// bare provider wire name when it is free, or `claude_code-<pid_hex>-<epoch_nanos_hex>`
+/// when that name is already taken (nonce format documented at :857-859, minted
+/// for the window at :961-966). Anything else is a contract violation.
+fn parse_provider_window(window: &str, whose: &str) -> Option<(String, String)> {
+    if window == "claude_code" {
+        return None;
+    }
+    let nonce = window.strip_prefix("claude_code-").unwrap_or_else(|| {
+        panic!(
+            "{whose} attach window must be `claude_code` or `claude_code-<nonce>`; window={window}"
+        )
+    });
+    let (pid_hex, nanos_hex) = nonce.split_once('-').unwrap_or_else(|| {
+        panic!("{whose} window nonce must be `<pid_hex>-<epoch_nanos_hex>`; nonce={nonce}")
+    });
+    assert!(
+        !pid_hex.is_empty() && pid_hex.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "{whose} window nonce pid segment must be non-empty hex; nonce={nonce}"
+    );
+    assert!(
+        !nanos_hex.is_empty() && nanos_hex.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "{whose} window nonce epoch segment must be non-empty hex; nonce={nonce}"
+    );
+    Some((pid_hex.to_string(), nanos_hex.to_string()))
 }
 
 fn write_executable(path: &Path, body: &str) {

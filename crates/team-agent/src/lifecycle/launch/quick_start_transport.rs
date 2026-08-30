@@ -1,3 +1,26 @@
+//! ---
+//! purpose: 起队路径上的 transport 选择、runtime state 里的 transport 标注与 attach 命令拼装
+//! contract:
+//!   provides:
+//!     - name: quick_start_tmux_backend
+//!       what: 优先复用调用方所在 tmux socket，否则按 workspace 派生
+//!     - name: annotate_runtime_transport
+//!       what: 把 transport 种类与来源写进 state，tmux 时再写 endpoint 三字段
+//!     - name: attach_commands_for_runtime_windows
+//!       what: 拼出用户可直接粘贴的 attach 命令
+//!     - name: attach_window_names_for_state_agents
+//!       what: 由 state 推出这些席位对应的窗口名
+//!   depends:
+//!     - crate::tmux_backend
+//!     - crate::transport::Transport
+//!     - crate::state::projection
+//!     - crate::event_log::EventLog
+//! boundary:
+//!   - 只做选择与标注，不 spawn 也不 kill
+//!   - tmux 专有字段不写进非 tmux 后端的 state
+//!   - pane 标题设置失败只告警不阻断
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +37,10 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 定出 quick-start 使用的 tmux 后端
+/// returns: 调用方环境里有 socket 就复用它，否则按 workspace 派生一个
+/// ---
 pub(crate) fn quick_start_tmux_backend(workspace: &Path) -> crate::tmux_backend::TmuxBackend {
     if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
         crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint)
@@ -22,6 +49,10 @@ pub(crate) fn quick_start_tmux_backend(workspace: &Path) -> crate::tmux_backend:
     }
 }
 
+/// ---
+/// purpose: 说明当前 transport 的 socket 是从哪来的
+/// returns: leader_env 或 workspace；无 endpoint 或两者都不匹配时为 None
+/// ---
 pub(crate) fn selected_tmux_socket_source(
     transport: &dyn Transport,
     workspace: &Path,
@@ -36,6 +67,10 @@ pub(crate) fn selected_tmux_socket_source(
     }
 }
 
+/// ---
+/// purpose: 给 adaptive 布局的 pane 设置标题
+/// returns: 失败只打印告警并写一条事件，不向调用方报错
+/// ---
 pub(crate) fn configure_adaptive_pane_title(
     workspace: &Path,
     transport: &dyn Transport,
@@ -66,6 +101,10 @@ pub(crate) fn configure_adaptive_pane_title(
     }
 }
 
+/// ---
+/// purpose: 把用户给的 workspace 归一成绝对路径
+/// returns: 能 canonicalize 就用它；否则绝对路径原样返回，相对路径接到当前目录后
+/// ---
 pub(super) fn explicit_quick_start_workspace(workspace: &Path) -> PathBuf {
     std::fs::canonicalize(workspace).unwrap_or_else(|_| {
         if workspace.is_absolute() {
@@ -78,6 +117,13 @@ pub(super) fn explicit_quick_start_workspace(workspace: &Path) -> PathBuf {
     })
 }
 
+/// ---
+/// purpose: 把 transport 的种类与来源写进 runtime state
+/// params:
+///   state: 就地写入 transport 段
+///   source: 来源说明，None 时记 unknown
+/// returns: tmux 后端会再调 annotate_runtime_tmux_endpoint，非 tmux 不写 tmux 专有字段
+/// ---
 /// `quick_start` with an injected transport — tests inject a recording mock so the REAL spawn path
 /// (launch dry_run=false → spawn_agents) is asserted without a live tmux; prod uses the real TmuxBackend.
 /// Annotate `state.tmux_endpoint` / `state.tmux_socket` (and `tmux_socket_source`)
@@ -126,6 +172,12 @@ pub fn annotate_runtime_transport(
     }
 }
 
+/// ---
+/// purpose: 把 tmux endpoint、socket 与 socket 来源写进 state
+/// params:
+///   state: 就地写入
+/// returns: transport 没有 endpoint 时不写；socket 名能解析成路径时写路径
+/// ---
 pub(crate) fn annotate_runtime_tmux_endpoint(
     state: &mut serde_json::Value,
     transport: &dyn Transport,
@@ -162,6 +214,12 @@ pub(crate) fn annotate_runtime_tmux_endpoint(
     }
 }
 
+/// ---
+/// purpose: 拼出这些窗口的 tmux attach 命令
+/// params:
+///   endpoint: 已知 endpoint；是绝对路径时直接拼 -S 形式，否则交给 tmux_backend 按 workspace 拼
+/// returns: 与窗口一一对应的命令行
+/// ---
 pub(super) fn attach_commands_for_runtime_windows<'a>(
     endpoint: Option<&str>,
     workspace: &Path,
@@ -199,6 +257,10 @@ pub(super) fn attach_commands_for_runtime_windows<'a>(
     attach
 }
 
+/// ---
+/// purpose: 由本次起的席位推出窗口名
+/// returns: 排序去重后的窗口名，席位没有布局窗口时用 agent id
+/// ---
 pub(super) fn started_attach_window_names(started: &[StartedAgent]) -> Vec<String> {
     let mut windows = started
         .iter()
@@ -215,6 +277,10 @@ pub(super) fn started_attach_window_names(started: &[StartedAgent]) -> Vec<Strin
     windows
 }
 
+/// ---
+/// purpose: 由 state 推出指定席位的窗口名
+/// returns: 每个席位取 layout_window 再取 window，都没有时用 agent id；托管 leader 时追加 leader 窗口
+/// ---
 pub(crate) fn attach_window_names_for_state_agents<'a>(
     state: &serde_json::Value,
     agent_ids: impl IntoIterator<Item = &'a str>,
@@ -240,6 +306,10 @@ pub(crate) fn attach_window_names_for_state_agents<'a>(
     attach_window_names_with_managed_leader(state, windows)
 }
 
+/// ---
+/// purpose: 由 state 里的全部席位推出窗口名
+/// returns: 排序去重后的窗口名，托管 leader 时含 leader 窗口
+/// ---
 pub(super) fn quick_start_attach_window_names(state: &serde_json::Value) -> Vec<String> {
     let windows = state
         .get("agents")
@@ -261,6 +331,10 @@ pub(super) fn quick_start_attach_window_names(state: &serde_json::Value) -> Vec<
     attach_window_names_with_managed_leader(state, windows)
 }
 
+/// ---
+/// purpose: 托管 leader 时补上 leader 窗口并排序去重
+/// returns: 处理后的窗口名列表
+/// ---
 pub(super) fn attach_window_names_with_managed_leader(
     state: &serde_json::Value,
     mut windows: Vec<String>,
@@ -273,6 +347,10 @@ pub(super) fn attach_window_names_with_managed_leader(
     windows
 }
 
+/// ---
+/// purpose: 判断该 state 是否走托管 leader
+/// returns: 由 state::projection 给出的判定
+/// ---
 pub(super) fn state_uses_managed_leader(state: &serde_json::Value) -> bool {
     crate::state::projection::state_is_managed_leader(state)
 }

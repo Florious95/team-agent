@@ -4081,6 +4081,9 @@ pub mod lifecycle_port {
 /// `run_comms_selftest`、`diagnose/orphan_cleanup.py` `orphan_gate`/`cleanup_orphan_coordinators`、
 /// `message_store/schema_migration.py` `schema_diagnosis`/`fix_schema_layout`)。
 /// `cmd_doctor` 的所有分支委派点。返回 `Value`(稳定 JSON 形状由 diagnose lane 拥有)。
+pub mod grok_slot;
+pub(crate) use grok_slot::grok_slot_report;
+
 pub mod diagnose_port {
     use super::*;
 
@@ -4134,6 +4137,13 @@ pub mod diagnose_port {
         let health = crate::coordinator::coordinator_health(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
         );
+        let coordinator_ok = health.ok;
+        let coordinator_error = health.metadata_mismatch_reason.clone();
+        let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(Value::Null);
+        let grok_slot = crate::cli::grok_slot_report(workspace, &state).to_json();
+        let grok_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
+            && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
+        let ok = ok && grok_slot_ok && coordinator_ok;
         Ok(json!({
             "tmux": {
                 "installed": tmux_installed,
@@ -4149,11 +4159,21 @@ pub mod diagnose_port {
             "secret_scan": secret_scan(workspace),
             "profile_smoke": profile_smoke_value,
             "coordinator": coordinator_health_value(health),
+            "grok_slot": grok_slot,
             "ok": ok,
             "error": if ok {
                 Value::Null
+            } else if !grok_slot_ok {
+                grok_slot
+                    .get("reason")
+                    .cloned()
+                    .unwrap_or_else(|| json!("grok_slot_mismatch"))
             } else if !profile_smoke_ok && !legacy_only_failure {
                 json!("profile_smoke_failed")
+            } else if !coordinator_ok {
+                coordinator_error
+                    .map(Value::String)
+                    .unwrap_or_else(|| json!("coordinator_unavailable"))
             } else if workspace_valid {
                 json!("workspace has no Team Agent spec or runtime context")
             } else {

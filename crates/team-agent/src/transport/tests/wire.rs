@@ -94,6 +94,27 @@ fn turn_verification_serde_snake_case_byte_locked() {
 }
 
 #[test]
+fn turn_verification_wire_never_defaults_started() {
+    use crate::transport::turn_verification_wire;
+    assert_eq!(
+        turn_verification_wire(TurnVerification::NotYetObserved),
+        "not_yet_observed"
+    );
+    assert_eq!(
+        turn_verification_wire(TurnVerification::LeaderNewTurnBoundaryMissing),
+        "leader_new_turn_boundary_missing"
+    );
+    assert_eq!(
+        turn_verification_wire(TurnVerification::LeaderNewTurnBoundaryVerified),
+        "leader_new_turn_boundary_verified"
+    );
+    assert_ne!(
+        turn_verification_wire(TurnVerification::NotYetObserved),
+        "leader_new_turn_boundary_verified"
+    );
+}
+
+#[test]
 fn submit_verification_wire_strings_byte_locked() {
     // 09-transport.md 表 §39 + tmux_io.py:64/215-221 + tmux_prompt.py:304/313。
     // SubmitVerification 携 Key 模板,Python 是散字符串 → 这里钉死 to-wire 映射。
@@ -349,11 +370,12 @@ fn inject_empty_payload_reports_empty_text_send_keys_and_turn_not_required() {
 fn empty_inject_is_single_direct_send_keys_never_buffer() {
     // 命令构造 golden(STEP-9):空文本禁走 buffer,只发一条 send-keys 提交键
     // (tmux_io.py:42 —— tmux 拒空 buffer 会卡 trust prompt)。
-    // golden empty_inject_calls 仅 1 条:send-keys -t %7 Enter。RED via stub。
+    // golden empty_inject_calls 仅 1 条:send-keys -t %7 C-m（锁定阳性 CR）。
     assert_eq!(
         tmux_empty_inject_argv(&PaneId::new("%7"), Key::Enter),
-        vec!["tmux", "send-keys", "-t", "%7", "Enter"]
+        vec!["tmux", "send-keys", "-t", "%7", "C-m"]
     );
+    assert_eq!(crate::transport::tmux_submit_key_name(Key::Enter), "C-m");
 }
 
 #[test]
@@ -518,6 +540,10 @@ fn cancel_mode_is_noop_on_non_tmux_backends() {
     assert_eq!(
         tmux_cancel_mode_argv(&PaneId::new("%7"), PaneMode::Unknown),
         vec!["tmux", "send-keys", "-t", "%7", "-X", "cancel"]
+    );
+    assert_eq!(
+        tmux_close_bracketed_paste_argv(&PaneId::new("%7")),
+        vec!["tmux", "send-keys", "-t", "%7", "-l", "\u{1b}[201~"]
     );
 }
 

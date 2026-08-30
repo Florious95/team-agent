@@ -1,3 +1,41 @@
+//! ---
+//! purpose: restart 与 start 共用的底座，含 spawn 执行、transport 解析、state 标记与各类读取判定
+//! contract:
+//!   provides:
+//!     - name: spawn_agent_window
+//!       what: 为一个席位拼命令并在目标 session 里开窗或分格起进程
+//!     - name: lifecycle_worker_tmux_backend_for_selected_state
+//!       what: 按团队已持久化的 endpoint 解析 tmux 后端，非 tmux 状态直接拒绝
+//!     - name: save_restart_projected_state
+//!       what: 同步团队投影后经 repository 带写意图落盘
+//!     - name: resume_backing_probe_for_agent
+//!       what: 探测该席位的 resume 依据是否在盘上，并记下所有查过的路径
+//!     - name: converge_missing_provider_sessions
+//!       what: 有界等待会话捕获收敛，并逐轮写进度事件
+//!     - name: mark_agent_stopped
+//!       what: 把席位标记为已停并清掉 window 与 pane_id 字段
+//!   depends:
+//!     - crate::transport::Transport
+//!     - crate::tmux_backend
+//!     - crate::transport_factory
+//!     - crate::provider
+//!     - crate::session_capture
+//!     - crate::state::projection
+//!     - crate::state::repository
+//!     - crate::state::persist
+//!     - crate::coordinator::health
+//!     - crate::event_log::EventLog
+//!     - crate::lifecycle::launch
+//!     - crate::lifecycle::profile_launch
+//!     - crate::lifecycle::worker_command_context
+//!     - crate::lifecycle::restart::selection
+//! boundary:
+//!   - 状态是 conpty 时 tmux 专用解析器直接报错，不静默降级到 tmux
+//!   - 探测类判定失败一律倒向保守值，不把不确定当成存活
+//!   - 清活动观测只删观测字段，不动生命周期与拓扑字段
+//!   - 收敛与排空都是有界等待，不无限阻塞
+//! maturity: wired
+//! ---
 use super::*;
 
 pub(super) struct SpawnedAgentWindow {
@@ -23,6 +61,12 @@ pub(super) struct SameRoleCohortTarget {
 }
 
 impl SameRoleCohortTarget {
+/// ---
+/// purpose: 构造一个同角色同批目标
+/// params:
+///   window: 该席位的窗口名
+/// returns: 未带期望 pane 的目标
+/// ---
     pub(super) fn new(agent_id: &AgentId, window: &str) -> Self {
         Self {
             agent_id: agent_id.as_str().to_string(),
@@ -31,16 +75,28 @@ impl SameRoleCohortTarget {
         }
     }
 
+/// ---
+/// purpose: 给目标补上期望的旧 pane
+/// returns: 带期望 pane 的目标
+/// ---
     pub(super) fn with_expected_pane_id(mut self, pane_id: Option<&str>) -> Self {
         self.expected_pane_id = pane_id.map(ToString::to_string);
         self
     }
 }
 
+/// ---
+/// purpose: 判断该窗口是不是按席位命名的独立窗口
+/// returns: 窗口名等于席位名且不是规范布局窗口时为 true
+/// ---
 pub(super) fn is_per_agent_cohort_window(window: &str, agent_id: &AgentId) -> bool {
     window == agent_id.as_str() && !crate::lifecycle::launch::is_adaptive_layout_window_pub(window)
 }
 
+/// ---
+/// purpose: spawn 之前检查同角色同批是否已有残留
+/// returns: 期望基数为 0；不满足时给出可读的拒绝说明，满足则 None
+/// ---
 pub(super) fn same_role_cohort_pre_spawn_error(
     transport: &dyn crate::transport::Transport,
     session_name: &SessionName,
@@ -50,6 +106,10 @@ pub(super) fn same_role_cohort_pre_spawn_error(
     same_role_cohort_error(transport, session_name, operation, targets, 0, true)
 }
 
+/// ---
+/// purpose: spawn 之后检查同角色同批是否恰好只剩一个
+/// returns: 期望基数为 1；不满足时给出可读的拒绝说明，满足则 None
+/// ---
 pub(super) fn same_role_cohort_exactly_one_error(
     transport: &dyn crate::transport::Transport,
     session_name: &SessionName,
@@ -59,6 +119,11 @@ pub(super) fn same_role_cohort_exactly_one_error(
     same_role_cohort_error(transport, session_name, operation, targets, 1, false)
 }
 
+/// ---
+/// purpose: 杀掉这些目标记录的旧 pane
+/// returns: 全部处理完返回空值；目标没有期望 pane 或该 pane 明确不存在时跳过
+/// errors: 杀 pane 失败时返回带席位、窗口与 pane 的错误串
+/// ---
 pub(super) fn retire_expected_same_role_cohorts(
     transport: &dyn crate::transport::Transport,
     operation: &str,
@@ -175,6 +240,17 @@ fn same_role_cohort_error(
     None
 }
 
+/// ---
+/// purpose: 为一个席位拼出命令并在目标 session 里起进程
+/// params:
+///   resume_session_id: 给出且该 provider 支持 resume 时按 resume 起，否则丢弃它全新起
+///   into_existing_session: 目标 session 已存在时开新窗口，否则新建 session
+///   layout_placement: 有布局位置时按布局开窗或分格
+///   spawn_cwd_override: 覆盖工作目录
+///   owner_team_id_override: 显式指定写进 worker 环境的 owner team，缺省时退回席位行与顶层活跃键
+/// returns: spawn 结果、时间戳、命令计划、profile 启动参数、布局位置与实际使用的 owner team
+/// errors: 命令拼装、profile 准备或 transport spawn 失败时返回 LifecycleError
+/// ---
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_agent_window(
     workspace: &Path,
@@ -214,8 +290,7 @@ pub(super) fn spawn_agent_window(
         safety
     } else {
         detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
-            agent,
-            provider,
+            agent, provider,
         )?;
         &detected_safety
     };
@@ -327,6 +402,7 @@ pub(super) fn spawn_agent_window(
         workspace,
         agent_id.as_str(),
         team_id.as_deref(),
+        Some(crate::lifecycle::launch::auth_mode_env_value(auth_mode)),
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
@@ -340,11 +416,20 @@ pub(super) fn spawn_agent_window(
     }
     // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
     if provider == crate::provider::Provider::CursorAgent {
+        crate::lifecycle::launch::refuse_second_cursor_occupant(
+            workspace,
+            agent_id.as_str(),
+            None,
+        )?;
         crate::lifecycle::launch::apply_cursor_agent_rules_overlay(
             workspace,
             agent_id.as_str(),
             &system_prompt,
         )?;
+        crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace)?;
+        crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+        crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
     }
     if provider == crate::provider::Provider::Grok {
         crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
@@ -572,6 +657,10 @@ fn is_structural_startup_prompt_error(error: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// ---
+/// purpose: 用 spec 里的同名 agent 补回 state 席位行缺的命令上下文字段
+/// returns: 合并后的席位行；spec 读不到或找不到该 agent 时原样返回
+/// ---
 pub(super) fn rehydrate_agent_command_context_from_spec(
     spec_workspace: &Path,
     agent_id: &AgentId,
@@ -664,6 +753,13 @@ fn window_present_in_live(
     false
 }
 
+/// ---
+/// purpose: 起该 workspace 的 coordinator
+/// params:
+///   team_key: 传给 coordinator 的团队键
+/// returns: 启动摘要
+/// errors: 启动失败时返回 StatePersist
+/// ---
 pub(super) fn start_coordinator_for_workspace(
     workspace: &Path,
     team_key: Option<&str>,
@@ -674,6 +770,13 @@ pub(super) fn start_coordinator_for_workspace(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
+/// ---
+/// purpose: 按团队持久化的 tmux endpoint 解析出后端，让 restart、add 与 fork 落在同一 socket
+/// params:
+///   team: 目标团队，None 时按唯一性选
+/// returns: 绑定到该 endpoint 的 tmux 后端；冷 workspace 无持久 endpoint 时退到按 workspace 派生
+/// errors: 团队目标歧义或未解析返回 TeamSelect；state 声明后端是 conpty 时也返回 TeamSelect 拒绝，不降级
+/// ---
 /// State-aware tmux backend resolver. Reads the team's persisted
 /// `tmux_endpoint` (set at `team-agent launch` time and shared across
 /// restart/add-agent/fork-agent) and constructs a TmuxBackend on THAT socket,
@@ -748,6 +851,11 @@ pub(crate) fn lifecycle_worker_tmux_backend_for_selected_state(
         .unwrap_or_else(|| crate::tmux_backend::TmuxBackend::for_workspace(run_workspace)))
 }
 
+/// ---
+/// purpose: 与上面同样的团队选择语义，但返回工厂解析出的通用 transport
+/// returns: 已解析的 transport，含后端种类、来源与提示
+/// errors: 团队选择失败或工厂拒绝时返回 TeamSelect，读 state 失败返回 StatePersist
+/// ---
 /// 0.5.x Phase 1d Batch 1: new generic-typed lifecycle resolver.
 ///
 /// Same team-selection semantics as the legacy tmux-typed variant, but
@@ -786,6 +894,11 @@ pub(crate) fn lifecycle_worker_transport_for_selected_state(
         .map_err(|e| LifecycleError::TeamSelect(e.to_string()))
 }
 
+/// ---
+/// purpose: 由已取到的 state 解析 tmux 后端与它的来源
+/// returns: 后端与 endpoint 来源
+/// errors: state 声明后端是 conpty 时返回 TeamSelect
+/// ---
 pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
     run_workspace: &Path,
     state: &serde_json::Value,
@@ -807,6 +920,10 @@ pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
     )
 }
 
+/// ---
+/// purpose: 由已取到的 state 直接给出 tmux 后端
+/// returns: 绑定到该 state endpoint 的后端，缺失时按 workspace 派生
+/// ---
 pub(super) fn lifecycle_worker_tmux_backend_for_state(
     run_workspace: &Path,
     state: &serde_json::Value,
@@ -815,6 +932,14 @@ pub(super) fn lifecycle_worker_tmux_backend_for_state(
         .backend
 }
 
+/// ---
+/// purpose: 同步团队投影后落盘 restart 结果
+/// params:
+///   topology_authority_agent_ids: 本次以内存值为拓扑权威的席位
+/// returns: 成功返回空值
+/// errors: 落盘失败时返回 StatePersist
+/// contract_id: lifecycle.common.save_restart_projected_state
+/// ---
 pub(super) fn save_restart_projected_state(
     workspace: &Path,
     state: &mut serde_json::Value,
@@ -830,6 +955,14 @@ pub(super) fn save_restart_projected_state(
     )
 }
 
+/// ---
+/// purpose: 同上，并可指定哪些席位跳过会话捕获回填
+/// params:
+///   skip_capture_backfill_agent_ids: 跳过回填的席位
+/// returns: 成功返回空值
+/// errors: 落盘失败时返回 StatePersist
+/// contract_id: lifecycle.common.save_restart_projected_state
+/// ---
 pub(super) fn save_restart_projected_state_with_capture_backfill_skip(
     workspace: &Path,
     state: &mut serde_json::Value,
@@ -838,17 +971,22 @@ pub(super) fn save_restart_projected_state_with_capture_backfill_skip(
     topology_authority_agent_ids: &[&str],
 ) -> Result<(), LifecycleError> {
     sync_restart_team_projections(state, team_key);
-    crate::state::repository::StateRepository::new(workspace).save(
-        crate::state::repository::StateWriteIntent::RestartTeam {
-            team_key,
-            topology_authority_agent_ids,
-            skip_capture_backfill_agent_ids,
-        },
-        state,
-    )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::RestartTeam {
+                team_key,
+                topology_authority_agent_ids,
+                skip_capture_backfill_agent_ids,
+            },
+            state,
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
+/// ---
+/// purpose: 定出本次投影使用的团队键
+/// returns: 显式 team 优先，其次 state 里的活跃键，最后由 state 推算
+/// ---
 pub(super) fn restart_projection_team_key(state: &serde_json::Value, team: Option<&str>) -> String {
     team.filter(|key| !key.is_empty())
         .map(str::to_string)
@@ -862,6 +1000,12 @@ pub(super) fn restart_projection_team_key(state: &serde_json::Value, team: Optio
         .unwrap_or_else(|| crate::state::projection::team_state_key(state))
 }
 
+/// ---
+/// purpose: 把当前顶层状态压实后写回 teams 表
+/// params:
+///   state: 就地改写；显式团队键允许覆盖或新建，别名键只在盘上已有且身份不冲突时才写
+/// returns: teams 表缺失或为空时不动
+/// ---
 pub(super) fn sync_restart_team_projections(state: &mut serde_json::Value, team_key: &str) {
     let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) else {
         return;
@@ -942,6 +1086,10 @@ fn json_team_identity_matches(existing: &serde_json::Value, compact: &serde_json
     true
 }
 
+/// ---
+/// purpose: 取 state 里的 session 名
+/// returns: 非空的 session_name，缺失时退到默认名
+/// ---
 pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
     state
         .get("session_name")
@@ -951,6 +1099,10 @@ pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
         .unwrap_or_else(|| SessionName::new("team-agent"))
 }
 
+/// ---
+/// purpose: 判断 state 里是否记了非空 session 名
+/// returns: 记了则 true
+/// ---
 pub(super) fn session_name_present(state: &serde_json::Value) -> bool {
     state
         .get("session_name")
@@ -959,6 +1111,12 @@ pub(super) fn session_name_present(state: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// ---
+/// purpose: 探测 session 是否存活
+/// params:
+///   default: 探测本身 panic 时采用的兜底判定
+/// returns: transport 明确回答时用它；返回错误时判为不存活；探测 panic 时用兜底值
+/// ---
 pub(super) fn session_live_or_default(
     transport: &dyn crate::transport::Transport,
     session_name: &SessionName,
@@ -973,6 +1131,10 @@ pub(super) fn session_live_or_default(
     }
 }
 
+/// ---
+/// purpose: 取席位行的 provider
+/// returns: 解析成功用它，缺失或不认识时退到 codex
+/// ---
 pub(super) fn agent_provider(agent: &serde_json::Value) -> Provider {
     agent
         .get("provider")
@@ -981,6 +1143,10 @@ pub(super) fn agent_provider(agent: &serde_json::Value) -> Provider {
         .unwrap_or(Provider::Codex)
 }
 
+/// ---
+/// purpose: 取席位行的 auth_mode
+/// returns: 解析成功用它，缺失或不认识时退到 subscription
+/// ---
 pub(super) fn agent_auth_mode(agent: &serde_json::Value) -> AuthMode {
     agent
         .get("auth_mode")
@@ -989,6 +1155,10 @@ pub(super) fn agent_auth_mode(agent: &serde_json::Value) -> AuthMode {
         .unwrap_or(AuthMode::Subscription)
 }
 
+/// ---
+/// purpose: 取席位行记录的会话 id
+/// returns: 非空时返回，否则 None
+/// ---
 pub(super) fn agent_session_id(agent: &serde_json::Value) -> Option<SessionId> {
     agent
         .get("session_id")
@@ -997,6 +1167,10 @@ pub(super) fn agent_session_id(agent: &serde_json::Value) -> Option<SessionId> {
         .map(SessionId::new)
 }
 
+/// ---
+/// purpose: 取席位行记录的 rollout 路径
+/// returns: 非空时返回，否则 None
+/// ---
 pub(super) fn agent_rollout_path(agent: &serde_json::Value) -> Option<RolloutPath> {
     agent
         .get("rollout_path")
@@ -1005,6 +1179,10 @@ pub(super) fn agent_rollout_path(agent: &serde_json::Value) -> Option<RolloutPat
         .map(RolloutPath::new)
 }
 
+/// ---
+/// purpose: 判断该席位的 resume 依据是否存在
+/// returns: 探测结果里的存在位
+/// ---
 pub(super) fn resume_backing_exists_for_agent(
     workspace: &Path,
     agent_id: &AgentId,
@@ -1044,6 +1222,13 @@ pub(crate) struct SessionIdentityProbeResult {
     pub rollout_path: Option<PathBuf>,
 }
 
+/// ---
+/// purpose: 探测 rollout 文件里嵌的席位身份是否与本席位一致
+/// params:
+///   _provider: 未参与判定
+///   rollout_path: 没有路径时三项都返回未知
+/// returns: 一致性判定、读到的嵌入席位名与实际探测路径；读不出嵌入身份时一致性为未知
+/// ---
 pub(crate) fn session_identity_probe_for_agent(
     agent_id: &AgentId,
     _provider: Provider,
@@ -1068,6 +1253,10 @@ pub(crate) fn session_identity_probe_for_agent(
     }
 }
 
+/// ---
+/// purpose: 按 provider 分支探测 resume 依据，并记录所有查过的路径
+/// returns: 存在位与查过的路径列表；持久化的 rollout 路径即使不存在也记进列表
+/// ---
 pub(super) fn resume_backing_probe_for_agent(
     workspace: &Path,
     agent_id: &AgentId,
@@ -1119,7 +1308,48 @@ pub(super) fn resume_backing_probe_for_agent(
             }
             copilot_session_store_has_session(session_id.as_str())
         }
-        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
+        Provider::Grok => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            match crate::provider::session_scan::grok::grok_session_dir(
+                &spawn_cwd,
+                session_id.as_str(),
+            ) {
+                Some(dir) => {
+                    checked_paths.push(dir.clone());
+                    crate::provider::session_scan::grok::grok_session_archive_present(&dir)
+                }
+                None => false,
+            }
+        }
+        Provider::CursorAgent => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            let rollout_ok = rollout_path.is_some_and(|path| {
+                crate::provider::session_scan::cursor::cursor_session_archive_present(path.as_path())
+            });
+            let discovered = crate::provider::session_scan::cursor::cursor_session_dir_for_cwd(
+                session_id.as_str(),
+                &spawn_cwd,
+            );
+            if let Some(dir) = discovered.as_ref() {
+                checked_paths.push(dir.clone());
+            }
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                checked_paths.push(home.join(".cursor").join("chats"));
+            }
+            rollout_ok
+                || discovered.as_ref().is_some_and(|dir| {
+                    crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
+                })
+        }
+        Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic
@@ -1133,10 +1363,20 @@ pub(super) fn resume_backing_probe_for_agent(
     }
 }
 
+/// ---
+/// purpose: 判断该 provider 是否支持 resume
+/// returns: 由 provider 适配器的能力位给出
+/// contract_id: lifecycle.common.provider_supports_resume
+/// ---
 pub(super) fn provider_supports_resume(provider: Provider) -> bool {
     crate::provider::get_adapter(provider).caps().resume
 }
 
+/// ---
+/// purpose: 由 provider wire 名判断是否支持 resume
+/// returns: 名字不认识时为 false
+/// contract_id: lifecycle.common.provider_supports_resume
+/// ---
 pub(super) fn provider_wire_supports_resume(provider: &str) -> bool {
     parse_provider(provider)
         .map(provider_supports_resume)
@@ -1312,6 +1552,13 @@ fn copilot_session_store_has_session(session_id: &str) -> bool {
     .is_ok()
 }
 
+/// ---
+/// purpose: 对缺会话的席位做一次捕获尝试
+/// params:
+///   state: 就地改写
+/// returns: 本次是否改动了 state
+/// errors: 捕获过程出错时返回 Provider
+/// ---
 pub(crate) fn refresh_missing_provider_sessions(
     state: &mut serde_json::Value,
 ) -> Result<bool, LifecycleError> {
@@ -1325,6 +1572,15 @@ pub(crate) fn refresh_missing_provider_sessions(
     .map_err(|e| LifecycleError::Provider(e.to_string()))
 }
 
+/// ---
+/// purpose: 有界等待缺会话席位收敛，并逐轮写进度事件
+/// params:
+///   deadline: 等待上限
+///   poll_interval: 轮询间隔
+///   allow_fresh: 只写进事件载荷，不改变收敛判定
+/// returns: 收敛结论
+/// errors: 收敛过程出错时返回 StatePersist
+/// ---
 pub(crate) fn converge_missing_provider_sessions(
     state: &mut serde_json::Value,
     deadline: std::time::Duration,
@@ -1370,6 +1626,10 @@ fn write_session_convergence_progress_event(
         .map_err(|e| e.to_string())
 }
 
+/// ---
+/// purpose: 列出必须等到会话收敛才能 restart 的席位
+/// returns: 排序后的席位 id；只保留无会话、状态为 running 且确有待保留上下文的席位，从未捕获过的席位不进入
+/// ---
 pub(crate) fn restart_required_missing_session_agent_ids(state: &serde_json::Value) -> Vec<String> {
     let mut missing = crate::session_capture::incomplete_resumable_agent_ids(state)
         .into_iter()
@@ -1409,6 +1669,10 @@ pub(crate) fn restart_required_missing_session_agent_ids(state: &serde_json::Val
     missing.sort();
     missing
 }
+/// ---
+/// purpose: 取该席位的窗口名
+/// returns: 席位行里的非空 window，缺失时用席位 id
+/// ---
 pub(super) fn agent_window(agent: &serde_json::Value, agent_id: &AgentId) -> String {
     agent
         .get("window")
@@ -1420,6 +1684,10 @@ pub(super) fn agent_window(agent: &serde_json::Value, agent_id: &AgentId) -> Str
 
 pub(super) use crate::provider::wire::{parse_provider, provider_wire};
 
+/// ---
+/// purpose: 把 auth_mode 字符串解析成枚举
+/// returns: 只认三种取值，未知返回 None
+/// ---
 pub(super) fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     match raw {
         "subscription" => Some(AuthMode::Subscription),
@@ -1429,6 +1697,11 @@ pub(super) fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     }
 }
 
+/// ---
+/// purpose: 从给定目录读出 team spec
+/// returns: 解析后的 YAML
+/// errors: 文件不存在返回 TeamSelect，读文件或解析失败返回 Compile
+/// ---
 pub(super) fn load_team_spec(workspace: &Path) -> Result<YamlValue, LifecycleError> {
     let spec_path = workspace.join("team.spec.yaml");
     if !spec_path.exists() {
@@ -1442,6 +1715,10 @@ pub(super) fn load_team_spec(workspace: &Path) -> Result<YamlValue, LifecycleErr
     yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))
 }
 
+/// ---
+/// purpose: 在 spec 的 agents 列表里找该席位
+/// returns: 命中的节点；该 id 其实是 leader 时返回 None
+/// ---
 pub(super) fn find_spec_agent<'a>(
     spec: &'a YamlValue,
     agent_id: &AgentId,
@@ -1464,10 +1741,18 @@ pub(super) fn find_spec_agent<'a>(
     })
 }
 
+/// ---
+/// purpose: 构造未知席位的错误
+/// returns: 带席位 id 的 RequirementUnmet
+/// ---
 pub(super) fn unknown_worker(agent_id: &AgentId) -> LifecycleError {
     LifecycleError::RequirementUnmet(format!("unknown worker agent id: {agent_id}"))
 }
 
+/// ---
+/// purpose: 定出 session 名，state 缺失时回落到 spec
+/// returns: 依次取 state 的 session_name、spec 的 runtime.session_name、由 team 名派生，最后用默认名
+/// ---
 pub(super) fn state_session_name_from_spec(
     state: &serde_json::Value,
     spec: &YamlValue,
@@ -1492,6 +1777,14 @@ pub(super) fn state_session_name_from_spec(
         .unwrap_or_else(|| SessionName::new("team-agent"))
 }
 
+/// ---
+/// purpose: 把席位标记为已停并清掉 window 与 pane_id 字段（pane_pid 等其余字段保留）
+/// params:
+///   state: 就地改写，非对象时先重置成空对象
+///   spec_agent: 提供 provider 等最小投影
+/// returns: 成功返回空值
+/// errors: state 结构不是对象时返回 StatePersist
+/// ---
 pub(super) fn mark_agent_stopped(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
@@ -1541,6 +1834,13 @@ pub(super) fn mark_agent_stopped(
     Ok(())
 }
 
+/// ---
+/// purpose: 窗口本就存在而未新起进程时，把席位标记为运行中
+/// params:
+///   pane: 探到的现有 pane，用于写 pane id 与进程号
+/// returns: 成功返回空值
+/// errors: state 结构不是对象时返回 StatePersist
+/// ---
 pub(super) fn mark_agent_running_noop(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
@@ -1599,6 +1899,11 @@ pub(super) fn mark_agent_running_noop(
     Ok(())
 }
 
+/// ---
+/// purpose: 写一条起席无操作事件
+/// returns: 成功返回空值
+/// errors: 事件写入失败时返回 StatePersist
+/// ---
 pub(super) fn write_start_agent_noop_event(
     workspace: &Path,
     agent_id: &AgentId,
@@ -1618,6 +1923,10 @@ pub(super) fn write_start_agent_noop_event(
     Ok(())
 }
 
+/// ---
+/// purpose: 判断某 session 里是否存在该窗口
+/// returns: 明确列出该窗口才为 true；列窗口出错或 panic 时为 false
+/// ---
 pub(super) fn window_exists(
     transport: &dyn crate::transport::Transport,
     session_name: &SessionName,
@@ -1631,6 +1940,11 @@ pub(super) fn window_exists(
     }
 }
 
+/// ---
+/// purpose: 在 state 里把该席位的显示标记为已关
+/// params:
+///   state: 就地改写；只有 ghostty 工作区后端会被改写状态与标题，其余后端不动
+/// ---
 pub(super) fn close_agent_display(state: &mut serde_json::Value, agent_id: &AgentId) {
     let Some(display) = state
         .get_mut("agents")
@@ -1658,6 +1972,13 @@ pub(super) fn close_agent_display(state: &mut serde_json::Value, agent_id: &Agen
     }
 }
 
+/// ---
+/// purpose: 丢弃该席位的会话捕获字段并标记为已停
+/// params:
+///   state: 就地改写；只删会话捕获相关字段，工作目录等状态字段保留
+/// returns: 成功返回空值
+/// errors: 席位不存在返回 RequirementUnmet，席位行不是对象返回 StatePersist
+/// ---
 pub(super) fn discard_agent_session_fields(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
@@ -1705,6 +2026,10 @@ pub(super) fn discard_agent_session_fields(
     Ok(())
 }
 
+/// ---
+/// purpose: 判断该席位是否在运行
+/// returns: 状态为 running 或 busy 直接为真；其余状态都退到按 session 与窗口存在性判定
+/// ---
 pub(super) fn agent_is_running(
     state: &serde_json::Value,
     agent_id: &AgentId,
@@ -1736,6 +2061,10 @@ pub(super) fn agent_is_running(
     window_exists(transport, &session_name, window)
 }
 
+/// ---
+/// purpose: 判断该席位是不是动态生成的
+/// returns: state 里记了动态角色文件，或 spec 里标了来源席位时为 true
+/// ---
 pub(super) fn is_dynamic_agent(
     state: &serde_json::Value,
     spec_agent: &YamlValue,
@@ -1754,6 +2083,13 @@ pub(super) fn is_dynamic_agent(
             .is_some_and(|s| !s.is_empty())
 }
 
+/// ---
+/// purpose: 在 spawn 之前预判 tmux 的起法，供审计事件记录
+/// params:
+///   layout_placement: 有布局位置时按是否起新窗口区分
+///   into_existing_session: 目标 session 已存在
+/// returns: new-session、new-window 或 split-window
+/// ---
 /// 0.4.6 Stage 2: predict the tmux start mode BEFORE the spawn call, so
 /// the `provider.worker.spawn_argv` event can record what the spawn will
 /// actually do. Same logic as `tmux_start_mode_for_spawn` in agent.rs
@@ -1780,6 +2116,10 @@ pub(super) fn predict_tmux_start_mode(
     }
 }
 
+/// ---
+/// purpose: 从盘上读该席位当前的 spawn 世代号
+/// returns: 读到的值；读不出 state 或字段缺失时为 0
+/// ---
 /// 0.4.6 Stage 2: read state.agents[agent_id].spawn_epoch from disk to
 /// stamp the spawn_argv event with the current cohort identifier. Returns
 /// 0 if the agent row / field is missing.
@@ -1795,6 +2135,12 @@ pub(super) fn state_spawn_epoch_for_agent(workspace: &Path, agent_id: &AgentId) 
         .unwrap_or(0)
 }
 
+/// ---
+/// purpose: 新起进程后清掉该席位的活动观测字段
+/// params:
+///   agent: 就地删除观测字段；生命周期与拓扑字段一概不动
+/// returns: 清完之后观测缺失表示未知，不等于空闲
+/// ---
 /// 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
 /// clear the per-agent turn/activity observation set on a successful new
 /// worker process cohort. Called from `mark_agent_started` /

@@ -10,6 +10,18 @@
 //! Contract: successful binding hooks register leader entries under isolated
 //! `$HOME/.team-agent/leaders`; leaders/send consume that host index only as
 //! discovery, then validate canonical state before delivery or refusal.
+//!
+//! ---
+//! purpose: E7 host leader registry contract with isolated tmux fixtures
+//! contract:
+//!   provides:
+//!     - hermetic HOME, per-case sockets, and exact process ownership
+//!   depends:
+//!     - tests/support/hermetic.rs
+//!   boundary:
+//!     - registry remains discovery-only; fixture teardown never scans host resources
+//! maturity: wired
+//! ---
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -25,8 +37,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
-use serial_test::{file_serial, serial};
+use serial_test::serial;
 use sha2::{Digest, Sha256};
+
+use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 
 #[allow(dead_code)]
 #[path = "../src/app_server_test_support.rs"]
@@ -36,12 +50,12 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e7_binding_success_hooks_write_schema_v1_registry_entries_atomically() {
+    let env = HermeticTestEnv::enter("e7-binding-success-hooks");
     let mut failures = Vec::new();
 
     for verb in ["attach-leader", "claim-leader", "takeover"] {
-        if let Err(error) = assert_tmux_binding_registers(verb) {
+        if let Err(error) = assert_tmux_binding_registers(&env, verb) {
             failures.push(error);
         }
     }
@@ -56,7 +70,8 @@ fn e7_binding_success_hooks_write_schema_v1_registry_entries_atomically() {
 #[test]
 #[serial(env)]
 fn e7_app_server_binding_success_hook_writes_registry_entry() {
-    let case = RuntimeCase::new("app-server-bind", "alpha");
+    let env = HermeticTestEnv::enter("e7-app-server-bind");
+    let case = RuntimeCase::new(&env, "app-server-bind", "alpha");
     case.seed_state_without_receiver("alpha");
     let fake = app_server_test_support::FakeAppServer::start(
         "e7-app-bind",
@@ -120,9 +135,9 @@ fn e7_app_server_binding_success_hook_writes_registry_entry() {
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e7_shutdown_unregisters_matching_registry_entry_only_after_canonical_success() {
-    let case = RuntimeCase::new("shutdown-unregister", "alpha");
+    let env = HermeticTestEnv::enter("e7-shutdown-unregister");
+    let case = RuntimeCase::new(&env, "shutdown-unregister", "alpha");
     let _pane = case.start_leader_pane("worker-placeholder");
     case.seed_state_without_receiver("alpha");
     let stale_path = write_registry_entry(
@@ -163,11 +178,11 @@ fn e7_shutdown_unregisters_matching_registry_entry_only_after_canonical_success(
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
-    let home = temp_home("leaders-list");
-    let live_a = RuntimeCase::with_home("leaders-live-a", "alpha", home.clone());
-    let live_b = RuntimeCase::with_home("leaders-live-b", "beta", home.clone());
+    let env = HermeticTestEnv::enter("e7-leaders-list");
+    let home = env.home().to_path_buf();
+    let live_a = RuntimeCase::with_home(&env, "leaders-live-a", "alpha", home.clone());
+    let live_b = RuntimeCase::with_home(&env, "leaders-live-b", "beta", home.clone());
     let pane_a = live_a.start_leader_pane("leader");
     let pane_b = live_b.start_leader_pane("leader");
     live_a.seed_state_with_receiver("alpha", &pane_a, 1);
@@ -193,6 +208,7 @@ fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
 
     let first = run_cli_with_home(
         &home,
+        &live_a.tmux_socket,
         &live_a.workspace,
         vec!["leaders".into(), "--json".into()],
     );
@@ -208,6 +224,7 @@ fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
     live_b.kill_session();
     let stale = run_cli_with_home(
         &home,
+        &live_a.tmux_socket,
         &live_a.workspace,
         vec!["leaders".into(), "--json".into()],
     );
@@ -227,7 +244,7 @@ fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
         "E7 RED: killed target must be STALE with machine-readable stale_reason; output={stale_json}"
     );
 
-    let live_c = RuntimeCase::with_home("leaders-live-c", "alpha", home.clone());
+    let live_c = RuntimeCase::with_home(&env, "leaders-live-c", "alpha", home.clone());
     let pane_c = live_c.start_leader_pane("leader");
     live_c.seed_state_with_receiver("alpha", &pane_c, 1);
     write_registry_entry(
@@ -242,6 +259,7 @@ fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
 
     let ambiguous = run_cli_with_home(
         &home,
+        &live_a.tmux_socket,
         &live_a.workspace,
         vec!["leaders".into(), "--json".into()],
     );
@@ -256,13 +274,13 @@ fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale() {
-    let home = temp_home("send-to-leader");
-    let sender = RuntimeCase::with_home("sender", "sender", home.clone());
+    let env = HermeticTestEnv::enter("e7-send-to-leader");
+    let home = env.home().to_path_buf();
+    let sender = RuntimeCase::with_home(&env, "sender", "sender", home.clone());
     sender.seed_state_without_receiver("sender");
 
-    let target = RuntimeCase::with_home("send-live-target", "alpha", home.clone());
+    let target = RuntimeCase::with_home(&env, "send-live-target", "alpha", home.clone());
     let pane = target.start_leader_pane("leader");
     target.seed_state_with_receiver("alpha", &pane, 1);
     write_registry_entry(
@@ -314,12 +332,13 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         .and_then(Value::as_str)
         .is_some());
     assert_pane_not_contains(
+        &target.tmux_socket,
         &pane,
         &live_token,
         "unique live --to-leader must not bypass coordinator delivery",
     );
 
-    let duplicate = RuntimeCase::with_home("send-live-duplicate", "alpha", home.clone());
+    let duplicate = RuntimeCase::with_home(&env, "send-live-duplicate", "alpha", home.clone());
     let duplicate_pane = duplicate.start_leader_pane("leader");
     duplicate.seed_state_with_receiver("alpha", &duplicate_pane, 1);
     write_registry_entry(
@@ -362,11 +381,13 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         "E7 RED: ambiguous refusal must list candidates; output={ambiguous_json}"
     );
     assert_pane_not_contains(
+        &target.tmux_socket,
         &pane,
         &ambiguous_token,
         "ambiguous send must not inject into first candidate",
     );
     assert_pane_not_contains(
+        &duplicate.tmux_socket,
         &duplicate_pane,
         &ambiguous_token,
         "ambiguous send must not inject into second candidate",
@@ -378,7 +399,7 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         "E7 RED: ambiguous send must not create target DB rows"
     );
 
-    let stale = RuntimeCase::with_home("send-stale-target", "deadteam", home.clone());
+    let stale = RuntimeCase::with_home(&env, "send-stale-target", "deadteam", home.clone());
     let stale_pane = stale.start_leader_pane("leader");
     stale.seed_state_with_receiver_status("deadteam", &stale_pane, 3, "down");
     write_registry_entry(
@@ -412,6 +433,7 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         "E7 RED: dead/down registry target must fail closed as registry_stale; output={stale_json}"
     );
     assert_pane_not_contains(
+        &target.tmux_socket,
         &pane,
         &stale_token,
         "stale registry target must not misroute to another live leader",
@@ -425,12 +447,12 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
-    let home = temp_home("send-to-leader-mailbox");
-    let sender = RuntimeCase::with_home("sender-mailbox", "sender", home.clone());
+    let env = HermeticTestEnv::enter("e7-send-to-leader-mailbox");
+    let home = env.home().to_path_buf();
+    let sender = RuntimeCase::with_home(&env, "sender-mailbox", "sender", home.clone());
     sender.seed_state_without_receiver("sender");
-    let target = RuntimeCase::with_home("mailbox-target", "mailbox", home.clone());
+    let target = RuntimeCase::with_home(&env, "mailbox-target", "mailbox", home.clone());
     target.seed_state_without_receiver("mailbox");
     write_registry_entry(
         &home,
@@ -481,19 +503,29 @@ fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
         Some(false),
         "E7 RED: mailbox queue is not physical delivery; delivered must be false; output={body}"
     );
+    let message_id = body
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|message_id| !message_id.is_empty())
+        .expect("E7 RED: mailbox response must include a durable message_id");
     assert_eq!(
         message_count(&target.workspace, &token),
         1,
         "E7 RED: mailbox path must write exactly one target team.db message row"
     );
+    assert_eq!(
+        message_status(&target.workspace, message_id).as_deref(),
+        Some("queued_until_leader_attach"),
+        "E7 RED: mailbox row must remain queued until leader attach; message_id={message_id} body={body}"
+    );
 }
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e7_registry_gc_prunes_unbound_stale_entries_without_deleting_live_entries() {
-    let home = temp_home("registry-gc");
-    let live = RuntimeCase::with_home("gc-live", "live", home.clone());
+    let env = HermeticTestEnv::enter("e7-registry-gc");
+    let home = env.home().to_path_buf();
+    let live = RuntimeCase::with_home(&env, "gc-live", "live", home.clone());
     let live_pane = live.start_leader_pane("leader");
     live.seed_state_with_receiver("live", &live_pane, 1);
     let live_path = write_registry_entry(
@@ -506,7 +538,7 @@ fn e7_registry_gc_prunes_unbound_stale_entries_without_deleting_live_entries() {
         "seed",
     );
 
-    let stale = RuntimeCase::with_home("gc-stale", "stale", home.clone());
+    let stale = RuntimeCase::with_home(&env, "gc-stale", "stale", home.clone());
     stale.seed_state_without_receiver("stale");
     let stale_path = write_registry_entry(
         &home,
@@ -520,6 +552,7 @@ fn e7_registry_gc_prunes_unbound_stale_entries_without_deleting_live_entries() {
 
     let output = run_cli_with_home(
         &home,
+        &live.tmux_socket,
         &live.workspace,
         vec!["leaders".into(), "--json".into()],
     );
@@ -540,8 +573,8 @@ fn e7_registry_gc_prunes_unbound_stale_entries_without_deleting_live_entries() {
     );
 }
 
-fn assert_tmux_binding_registers(verb: &str) -> Result<(), String> {
-    let case = RuntimeCase::new(&format!("bind-{verb}"), "alpha");
+fn assert_tmux_binding_registers(env: &HermeticTestEnv, verb: &str) -> Result<(), String> {
+    let case = RuntimeCase::new(env, &format!("bind-{verb}"), "alpha");
     let pane = case.start_leader_pane("leader");
     let second_pane = case.start_extra_pane("new-leader");
     match verb {
@@ -753,8 +786,8 @@ fn leader_by_name<'a>(body: &'a Value, name: &str) -> Option<&'a Value> {
         })
 }
 
-fn assert_pane_not_contains(pane: &str, token: &str, label: &str) {
-    let text = capture_pane(pane);
+fn assert_pane_not_contains(socket: &Path, pane: &str, token: &str, label: &str) {
+    let text = capture_pane(socket, pane);
     assert!(
         !text.contains(token),
         "{label}; pane={pane} token={token} capture={text:?}"
@@ -781,18 +814,23 @@ fn json_output_result(output: &Output) -> Result<Value, String> {
         .map_err(|error| format!("stdout must be JSON: {error}; stdout={stdout:?}"))
 }
 
-fn run_cli_with_home(home: &Path, cwd: &Path, args: Vec<String>) -> Output {
-    run_cli_with_home_env(home, cwd, args, &[])
+fn run_cli_with_home(home: &Path, socket: &Path, cwd: &Path, args: Vec<String>) -> Output {
+    run_cli_with_home_env(home, socket, cwd, args, &[])
 }
 
 fn run_cli_with_home_env(
     home: &Path,
+    socket: &Path,
     cwd: &Path,
     args: Vec<String>,
     env_pairs: &[(&str, String)],
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
-    command.args(args).current_dir(cwd).env("HOME", home);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("TMUX", format!("{},12345,0", socket.display()));
     for key in [
         "TEAM_AGENT_LEADER_PANE_ID",
         "TEAM_AGENT_LEADER_SESSION_UUID",
@@ -801,7 +839,6 @@ fn run_cli_with_home_env(
         "TEAM_AGENT_TEAM_ID",
         "TEAM_AGENT_WORKSPACE",
         "TEAM_AGENT_OWNER_TEAM_ID",
-        "TMUX",
         "TMUX_PANE",
     ] {
         command.env_remove(key);
@@ -942,6 +979,17 @@ fn message_count(workspace: &Path, token: &str) -> i64 {
     .unwrap_or(0)
 }
 
+fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
+    let db = workspace.join(".team/runtime/team.db");
+    let conn = Connection::open(db).ok()?;
+    conn.query_row(
+        "select status from messages where message_id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 fn channel_for_pane(case: &RuntimeCase, pane: &str) -> Value {
     json!({
         "pane_id": pane,
@@ -951,20 +999,19 @@ fn channel_for_pane(case: &RuntimeCase, pane: &str) -> Value {
     })
 }
 
-fn capture_pane(pane: &str) -> String {
+fn capture_pane(socket: &Path, pane: &str) -> String {
     let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", pane])
+        .args([
+            "-S",
+            socket.to_str().expect("tmux socket utf8"),
+            "capture-pane",
+            "-p",
+            "-t",
+            pane,
+        ])
         .output()
         .expect("tmux capture-pane");
     String::from_utf8_lossy(&output.stdout).to_string()
-}
-
-fn temp_home(tag: &str) -> PathBuf {
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("ta-e7-{tag}-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("create temp home root");
-    root.join("home")
 }
 
 fn unique_token(prefix: &str) -> String {
@@ -972,23 +1019,29 @@ fn unique_token(prefix: &str) -> String {
     format!("{prefix}_{}_{}", std::process::id(), n)
 }
 
-struct RuntimeCase {
+struct RuntimeCase<'a> {
+    env: &'a HermeticTestEnv,
     root: PathBuf,
     home: PathBuf,
     workspace: PathBuf,
     session_name: String,
+    tmux_socket: PathBuf,
 }
 
-impl RuntimeCase {
-    fn new(tag: &str, team_key: &str) -> Self {
-        Self::with_home(tag, team_key, temp_home(tag))
+impl<'a> RuntimeCase<'a> {
+    fn new(env: &'a HermeticTestEnv, tag: &str, team_key: &str) -> Self {
+        let home = env.root().join(format!(
+            "home-{tag}-{}",
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        Self::with_home(env, tag, team_key, home)
     }
 
-    fn with_home(tag: &str, _team_key: &str, home: PathBuf) -> Self {
+    fn with_home(env: &'a HermeticTestEnv, tag: &str, _team_key: &str, home: PathBuf) -> Self {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("ta-e7-case-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = env
+            .root()
+            .join(format!("ta-e7-case-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&root).expect("create case root");
         std::fs::create_dir_all(&home).expect("create home");
         let workspace = root.join("workspace");
@@ -1007,6 +1060,8 @@ impl RuntimeCase {
             home,
             workspace,
             session_name,
+            env,
+            tmux_socket: short_tmux_socket(&format!("e7-{tag}")),
         }
     }
 
@@ -1015,21 +1070,30 @@ impl RuntimeCase {
     }
 
     fn run_cli(&self, args: Vec<String>) -> Output {
-        run_cli_with_home(&self.home, &self.workspace, args)
+        run_cli_with_home(&self.home, &self.tmux_socket, &self.workspace, args)
     }
 
     fn run_cli_with_env(&self, args: Vec<String>, env_pairs: &[(&str, String)]) -> Output {
-        run_cli_with_home_env(&self.home, &self.workspace, args, env_pairs)
+        run_cli_with_home_env(
+            &self.home,
+            &self.tmux_socket,
+            &self.workspace,
+            args,
+            env_pairs,
+        )
     }
 
     fn start_leader_pane(&self, window: &str) -> String {
+        let socket = self.tmux_socket.to_str().expect("tmux socket utf8");
         let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session_name])
+            .args(["-S", socket, "kill-session", "-t", &self.session_name])
             .output();
         let program = self.provider_program();
         let cwd = self.workspace_arg();
         let output = Command::new("tmux")
             .args([
+                "-S",
+                socket,
                 "new-session",
                 "-d",
                 "-s",
@@ -1047,14 +1111,20 @@ impl RuntimeCase {
             "tmux new-session failed: stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
-        self.pane_id_for(window)
+        let pane = self.pane_id_for(window);
+        self.register_pane_pid(&pane);
+        self.env.register_owned_tmux_socket(&self.tmux_socket);
+        pane
     }
 
     fn start_extra_pane(&self, window: &str) -> String {
+        let socket = self.tmux_socket.to_str().expect("tmux socket utf8");
         let program = self.provider_program();
         let cwd = self.workspace_arg();
         let output = Command::new("tmux")
             .args([
+                "-S",
+                socket,
                 "new-window",
                 "-d",
                 "-t",
@@ -1072,13 +1142,24 @@ impl RuntimeCase {
             "tmux new-window failed: stderr={}",
             String::from_utf8_lossy(&output.stderr)
         );
-        self.pane_id_for(window)
+        let pane = self.pane_id_for(window);
+        self.register_pane_pid(&pane);
+        pane
     }
 
     fn pane_id_for(&self, window: &str) -> String {
         let target = format!("{}:{window}", self.session_name);
+        let socket = self.tmux_socket.to_str().expect("tmux socket utf8");
         let output = Command::new("tmux")
-            .args(["display-message", "-p", "-t", &target, "#{pane_id}"])
+            .args([
+                "-S",
+                socket,
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{pane_id}",
+            ])
             .output()
             .expect("tmux display-message");
         assert!(
@@ -1100,27 +1181,32 @@ impl RuntimeCase {
     }
 
     fn tmux_socket(&self) -> Option<String> {
-        let output = Command::new("tmux")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                &self.session_name,
-                "#{socket_path}",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .filter(|value| !value.is_empty())
+        Some(self.tmux_socket.to_string_lossy().to_string())
     }
 
     fn kill_session(&self) {
+        let socket = self.tmux_socket.to_str().expect("tmux socket utf8");
         let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &self.session_name])
+            .args(["-S", socket, "kill-session", "-t", &self.session_name])
             .output();
+    }
+
+    fn register_pane_pid(&self, pane: &str) {
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                self.tmux_socket.to_str().expect("tmux socket utf8"),
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{pane_pid}",
+            ])
+            .output()
+            .expect("tmux pane pid");
+        if let Ok(pid) = String::from_utf8_lossy(&output.stdout).trim().parse() {
+            self.env.register_owned_pid(pid);
+        }
     }
 
     fn seed_state_without_receiver(&self, team_key: &str) {
@@ -1219,9 +1305,8 @@ impl RuntimeCase {
     }
 }
 
-impl Drop for RuntimeCase {
+impl Drop for RuntimeCase<'_> {
     fn drop(&mut self) {
         self.kill_session();
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }

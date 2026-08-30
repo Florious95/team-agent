@@ -1,3 +1,73 @@
+/// ---
+/// purpose: scoped MCP no-compaction update_state filesystem contract
+/// contract:
+///   provides:
+///     - name: update_state_path_contracts
+///       what: proves the raw no-compaction response preserves its state-file path in an owned fixture
+///   depends:
+///     - name: mcp_state_fixture
+///       what: fixture-owned root and provenance from tests.rs
+/// boundary:
+///   - retain the raw {ok,state_file} result shape
+///   - the owned selector checks workspace, state-file, and runtime paths remain fixture-owned
+/// maturity: wired
+/// ---
+
+fn verify_cleanup_surviving_receipt(
+    receipt_path: &std::path::Path,
+    raw_workspace: &std::path::Path,
+    canonical_workspace: &std::path::Path,
+    state_file: &std::path::Path,
+    runtime_state: &std::path::Path,
+) {
+    let bytes = std::fs::read(receipt_path)
+        .expect("provenance receipt must survive fixture Drop");
+    let receipt: Value = serde_json::from_slice(&bytes).expect("provenance receipt must be JSON");
+    assert_eq!(receipt["schema"], json!("mcp-state-provenance-v1"));
+    let payload = &receipt["payload"];
+    let payload_bytes = serde_json::to_vec(payload).unwrap();
+    assert_eq!(
+        receipt["payload_sha256"],
+        json!(format!("{:x}", sha2::Sha256::digest(&payload_bytes)))
+    );
+    assert_eq!(
+        payload["raw_workspace"],
+        json!(raw_workspace.display().to_string())
+    );
+    assert_eq!(
+        payload["canonical_workspace"],
+        json!(canonical_workspace.display().to_string())
+    );
+    assert_eq!(
+        payload["resolved_state_file"],
+        json!(state_file.display().to_string())
+    );
+    assert_eq!(
+        payload["runtime_state_path"],
+        json!(runtime_state.display().to_string())
+    );
+    let facts = payload["facts"].as_array().unwrap();
+    for name in [
+        "root",
+        "raw_workspace",
+        "canonical_workspace",
+        "team_dir",
+        "runtime_dir",
+        "state_parent",
+        "runtime_state",
+        "state_file",
+    ] {
+        let fact = facts
+            .iter()
+            .find(|fact| fact["name"] == json!(name))
+            .unwrap_or_else(|| panic!("provenance fact missing: {name}"));
+        assert!(fact["path"].as_str().is_some());
+        assert!(fact["uid"].as_u64().is_some());
+        assert!(fact["mode"].as_u64().is_some());
+        assert!(fact["device"].as_u64().is_some());
+    }
+}
+
     #[test]
     fn dispatch_send_message_worker_accepted_returned_verbatim() {
         // A-7: accepted requires a REAL stored message_id (no fabricated ids), so the
@@ -52,8 +122,10 @@
     // state_file (not a golden whitelist key), so the key vanishes.
     #[test]
     fn update_state_state_file_survives_no_compaction() {
+        let fixture = McpStateFixture::new("writable");
+        let expected = fixture.state_file("team_state.md");
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("update-state-raw"),
+            &fixture.workspace,
             Some(AgentId::new("leader")),
             None,
         );
@@ -62,6 +134,33 @@
         assert!(v.get("state_file").and_then(Value::as_str).is_some(),
             "state_file must survive (update_state is not _compact_tool_result'd)");
         assert_eq!(keys(&v), vec!["ok", "state_file"]);
+        let returned_state_file = PathBuf::from(v["state_file"].as_str().unwrap());
+        assert_eq!(returned_state_file, expected);
+        let runtime_state = crate::state::persist::runtime_state_path(&fixture.workspace);
+        assert!(fixture.under_root(&returned_state_file));
+        assert!(fixture.under_root(&runtime_state));
+        let canonical_workspace =
+            crate::model::paths::canonical_run_workspace(&fixture.workspace).unwrap();
+        let receipt = fixture.record_provenance(&fixture.workspace, &returned_state_file);
+        let root = fixture.root.clone();
+        drop(fixture);
+        assert!(!root.exists(), "fixture root must be removed before receipt verification");
+        verify_cleanup_surviving_receipt(
+            &receipt,
+            &root.join("workspace"),
+            &canonical_workspace,
+            &returned_state_file,
+            &runtime_state,
+        );
+        let receipt_bytes = std::fs::read(&receipt).unwrap();
+        println!(
+            "F10_PROVENANCE_RECEIPT path={} sha256={:x} payload={}",
+            receipt.display(),
+            sha2::Sha256::digest(&receipt_bytes),
+            String::from_utf8_lossy(&receipt_bytes)
+        );
+        std::fs::remove_file(&receipt).unwrap();
+        assert!(!receipt.exists(), "cleanup must remove only the exact receipt path");
     }
 
     // ── #36 report_result setdefault: populated envelope keys WIN over args ─────

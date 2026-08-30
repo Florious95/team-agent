@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mcp_sim_harness::McpSimHarness;
 use rusqlite::params;
 use serde_json::{json, Value};
+use serial_test::serial;
 use team_agent::cli::{
     cmd_diagnose, cmd_doctor, cmd_init, cmd_preflight, cmd_validate, cmd_wait_ready, CmdOutput,
     DiagnoseArgs, DoctorArgs, ExitCode, InitArgs, PreflightArgs, ValidateArgs, WaitReadyArgs,
@@ -32,8 +33,10 @@ use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 #[test]
+#[serial(env)]
 fn diagnose_live_fake_team_uses_active_team_projection() {
-    let root = tmp_dir("diagnose-projection");
+    let env = hermetic_guard::HermeticTestEnv::enter("diagnose-projection");
+    let root = env.workspace("diagnose-projection");
     let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
     seed_selected_team_state(&root, "teamA", &team, true);
 
@@ -65,6 +68,75 @@ fn diagnose_live_fake_team_uses_active_team_projection() {
             .as_array()
             .is_some_and(|issues| issues.iter().any(|issue| issue.as_str() == Some("leader_not_attached"))),
         "selected team has an attached leader_receiver; raw top-level leader_not_attached is a false positive; out={out}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn diagnose_selected_team_without_registry_is_unbound() {
+    let env = hermetic_guard::HermeticTestEnv::enter("diagnose-registry-missing");
+    let root = env.workspace("diagnose-registry-missing");
+    let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
+    seed_selected_team_state(&root, "teamA", &team, false);
+
+    let mut state = load_runtime_state(&root).unwrap();
+    state["teams"]["teamA"]["leader_receiver"] = json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "pane_id": "%1",
+        "provider": "fake",
+        "owner_epoch": 1
+    });
+    save_runtime_state(&root, &state).unwrap();
+
+    let out = json_result(
+        cmd_diagnose(&DiagnoseArgs {
+            workspace: root,
+            json: true,
+            team: None,
+        })
+        .expect("diagnose should return JSON"),
+    );
+    assert!(
+        out["issues"].as_array().is_some_and(|issues| issues
+            .iter()
+            .any(|issue| issue.as_str() == Some("leader_not_attached"))),
+        "state-only attached fixture must remain unbound without a registry row; out={out}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
+    let env = hermetic_guard::HermeticTestEnv::enter("diagnose-registry-mismatch");
+    let root = env.workspace("diagnose-registry-mismatch");
+    let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
+    seed_selected_team_state(&root, "teamA", &team, false);
+
+    let mut state = load_runtime_state(&root).unwrap();
+    state["teams"]["teamA"]["leader_receiver"] = json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "pane_id": "%1",
+        "provider": "fake",
+        "owner_epoch": 1
+    });
+    save_runtime_state(&root, &state).unwrap();
+    write_registry_entry(&root, "teamA", "/foreign/workspace", 1);
+
+    let out = json_result(
+        cmd_diagnose(&DiagnoseArgs {
+            workspace: root,
+            json: true,
+            team: None,
+        })
+        .expect("diagnose should return JSON"),
+    );
+    assert!(
+        out["issues"].as_array().is_some_and(|issues| issues
+            .iter()
+            .any(|issue| issue.as_str() == Some("leader_not_attached"))),
+        "attached state with a foreign-workspace registry row must remain unbound; out={out}"
     );
 }
 
@@ -597,6 +669,30 @@ fn seed_selected_team_state(root: &Path, team_key: &str, team_dir: &Path, attach
         "teams": Value::Object(teams),
     });
     save_runtime_state(root, &state).unwrap();
+    if attached {
+        write_registry_entry(root, team_key, &root.to_string_lossy(), 1);
+    }
+}
+
+fn write_registry_entry(root: &Path, team_key: &str, authorized_workspace: &str, owner_epoch: u64) {
+    let entry = team_agent::leader::registry::build_entry(
+        root,
+        team_key,
+        "direct_tmux",
+        json!({
+            "status": "attached",
+            "pane_id": "%1",
+            "provider": "fake",
+            "authorized_team_workspace": authorized_workspace
+        }),
+        owner_epoch,
+        "sweep-254-selected-team-fixture",
+        "2026-08-25T00:00:00Z".to_string(),
+    );
+    assert!(
+        team_agent::leader::registry::write_entry_best_effort(&entry).is_some(),
+        "hermetic HOME must accept a leaders/ registry write"
+    );
 }
 
 fn insert_result(

@@ -1,3 +1,22 @@
+//! ---
+//! purpose: 单个席位在 runtime state 里的行的构造，含 MCP 配置落盘与审批策略投影
+//! contract:
+//!   provides:
+//!     - name: running_agent_state
+//!       what: 构造 running 席位的 state 行，同时写出该席位的 MCP 配置文件
+//!     - name: effective_approval_policy
+//!       what: 把 bypass 审批结论投影成 state 里的 JSON
+//!     - name: effective_approval_policy_from_agent
+//!       what: 由席位行自己的 dangerously_skip_permissions 算审批策略
+//!   depends:
+//!     - crate::provider
+//!     - crate::provider::bypass_flags
+//!     - crate::lifecycle::launch::mcp_config
+//! boundary:
+//!   - 只构造与落 MCP 配置，不 spawn 也不改窗口
+//!   - 审批结论只认席位自己的声明，不做全队继承
+//! maturity: wired
+//! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +33,15 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 构造某席位 running 状态的 state 行
+/// params:
+///   spawn_cwd: 该席位进程的工作目录
+///   started_agent: 本次 spawn 结果，用于取布局窗口
+///   pane_id: 该席位的 pane，空串时不写入
+/// returns: 含状态、provider、模型、auth_mode、窗口、MCP 配置路径、spawn 时间与 pane 信息的行
+/// errors: 取 provider MCP 配置失败返回 Provider，写 MCP 配置文件失败返回 StatePersist
+/// ---
 pub(super) fn running_agent_state(
     agent: &Value,
     id: &str,
@@ -141,6 +169,10 @@ pub(super) fn running_agent_state(
     Ok(serde_json::Value::Object(state))
 }
 
+/// ---
+/// purpose: 把 bypass 审批结论投影成落盘用的 JSON
+/// returns: 含 enabled、来源、是否继承与显式确认位；来源为 runtime_config 且启用时视为已显式确认
+/// ---
 pub(crate) fn effective_approval_policy(safety: &DangerousApproval) -> serde_json::Value {
     serde_json::json!({
         "enabled": safety.enabled,
@@ -153,6 +185,11 @@ pub(crate) fn effective_approval_policy(safety: &DangerousApproval) -> serde_jso
     })
 }
 
+/// ---
+/// purpose: 把审批策略写进席位 state 行
+/// params:
+///   agent_state: 就地写入 effective_approval_policy 字段
+/// ---
 pub(crate) fn persist_effective_approval_policy(
     agent_state: &mut serde_json::Map<String, serde_json::Value>,
     safety: &DangerousApproval,
@@ -163,6 +200,10 @@ pub(crate) fn persist_effective_approval_policy(
     );
 }
 
+/// ---
+/// purpose: 给出审批来源的稳定 wire 字符串
+/// returns: runtime_config、leader_process 或 disabled
+/// ---
 pub(super) fn dangerous_approval_source_str(source: DangerousApprovalSource) -> &'static str {
     match source {
         DangerousApprovalSource::RuntimeConfig => "runtime_config",
@@ -171,6 +212,11 @@ pub(super) fn dangerous_approval_source_str(source: DangerousApprovalSource) -> 
     }
 }
 
+/// ---
+/// purpose: 由 JSON 席位行自己的 bypass 声明算出审批策略
+/// returns: 未声明时全为关闭；声明为真时记 runtime_config 来源并带该 provider 的 bypass argv
+/// contract_id: lifecycle.agent_state.approval_policy_from_agent
+/// ---
 /// 0.5.66 bypass 单源:从 agent 行 + provider 构造 approval policy JSON
 /// (restart/fork/add 落盘用;取代全队 `DangerousApproval` 派生)。
 pub(crate) fn effective_approval_policy_from_agent(
@@ -217,6 +263,11 @@ fn provider_wire_str(provider: Provider) -> &'static str {
     }
 }
 
+/// ---
+/// purpose: 由席位行自身算出审批策略并写回同一行
+/// params:
+///   agent_state: 既是来源也是写入目标
+/// ---
 /// 0.5.66 bypass 单源:从 agent 行(state Map)+ provider 落盘 approval policy。
 /// 目标与来源是同一 agent 行。
 pub(crate) fn persist_effective_approval_policy_from_agent(
@@ -230,6 +281,12 @@ pub(crate) fn persist_effective_approval_policy_from_agent(
     );
 }
 
+/// ---
+/// purpose: 由 YAML spec 里的 agent 声明算出审批策略并写进 state 行
+/// params:
+///   agent: YAML 侧的 agent 节点，提供 bypass 声明
+///   agent_state: 写入目标
+/// ---
 /// 0.5.66 bypass 单源:yaml spec agent 版(launch/state_projection 用)。
 pub(crate) fn persist_effective_approval_policy_from_yaml_agent(
     agent_state: &mut serde_json::Map<String, serde_json::Value>,

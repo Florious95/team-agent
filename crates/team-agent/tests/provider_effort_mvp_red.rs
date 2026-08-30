@@ -70,6 +70,23 @@ fn provider_effort_support_matrix() {
         !ProviderEffort::Max.is_supported_by(Provider::Codex),
         "Codex must NOT support max"
     );
+    // Grok: same matrix as Codex (CLI allow-list is xhigh|high|medium|low).
+    for e in [
+        ProviderEffort::Low,
+        ProviderEffort::Medium,
+        ProviderEffort::High,
+        ProviderEffort::XHigh,
+    ] {
+        assert!(
+            e.is_supported_by(Provider::Grok),
+            "Grok must support {}",
+            e.as_str()
+        );
+    }
+    assert!(
+        !ProviderEffort::Max.is_supported_by(Provider::Grok),
+        "Grok must NOT support max"
+    );
     // Copilot/Gemini/Fake: none.
     for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
         for e in [
@@ -154,6 +171,70 @@ mod adapter_argv {
                 .any(|a| a.starts_with("model_reasoning_effort=")),
             "no model_reasoning_effort=… when None; got {:?}",
             plan.argv
+        );
+    }
+
+    fn grok_ctx<'a>(effort: Option<ProviderEffort>) -> ProviderCommandContext<'a> {
+        ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: Some("you are X"),
+            model: Some("grok-4.6"),
+            tools: &[],
+            profile_launch: None,
+            agent_id_hint: Some("dev"),
+            effort,
+        }
+    }
+
+    #[test]
+    fn grok_fresh_argv_contains_adjacent_effort_medium() {
+        let adapter = get_adapter(Provider::Grok);
+        let plan = adapter
+            .build_command_plan(grok_ctx(Some(ProviderEffort::Medium)))
+            .expect("grok plan");
+        let argv = &plan.argv;
+        let pos = argv
+            .iter()
+            .position(|a| a == "--effort")
+            .unwrap_or_else(|| panic!("--effort missing in {argv:?}"));
+        assert_eq!(
+            argv[pos + 1],
+            "medium",
+            "--effort must be followed by 'medium'"
+        );
+    }
+
+    #[test]
+    fn grok_fresh_argv_omits_effort_when_none() {
+        let adapter = get_adapter(Provider::Grok);
+        let plan = adapter
+            .build_command_plan(grok_ctx(None))
+            .expect("grok plan");
+        let count = plan.argv.iter().filter(|a| *a == "--effort").count();
+        assert_eq!(
+            count, 0,
+            "no --effort when effort is None; got {:?}",
+            plan.argv
+        );
+    }
+
+    #[test]
+    fn grok_resume_argv_contains_adjacent_effort_medium() {
+        let adapter = get_adapter(Provider::Grok);
+        let sid = team_agent::provider::SessionId::new("sess-grok-effort");
+        let plan = adapter
+            .build_resume_command_plan(Some(&sid), grok_ctx(Some(ProviderEffort::Medium)))
+            .expect("grok resume plan");
+        let argv = &plan.argv;
+        let pos = argv
+            .iter()
+            .position(|a| a == "--effort")
+            .unwrap_or_else(|| panic!("--effort missing on resume in {argv:?}"));
+        assert_eq!(argv[pos + 1], "medium");
+        assert!(
+            argv.iter().any(|a| a == "--resume"),
+            "resume argv must still resume; got {argv:?}"
         );
     }
 

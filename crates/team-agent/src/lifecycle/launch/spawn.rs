@@ -1,3 +1,22 @@
+//! ---
+//! purpose: 冷启路径的 worker spawn 执行器，按 spec 逐个起席并汇总启动结果
+//! contract:
+//!   provides:
+//!     - name: spawn_agents
+//!       what: 按 spec 顺序起各非 paused 席位，返回已起席位清单
+//!     - name: agent_id_spec_source_path
+//!       what: 尽力还原某席位角色文档的路径，用于审计事件
+//!   depends:
+//!     - crate::transport::Transport
+//!     - crate::provider
+//!     - crate::state::persist
+//!     - crate::lifecycle::profile_launch
+//!     - crate::lifecycle::worker_command_context
+//! boundary:
+//!   - 只负责起席与收集结果，state 落盘由 state_projection 负责
+//!   - 启动提示按掉与 fast 模式启用都是尽力而为，失败不阻断
+//! maturity: wired
+//! ---
 //!
 //! unit-8 (Stage 3) — `lifecycle::launch::spawn` phase boundary.
 //!
@@ -22,6 +41,14 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 
 use super::*;
 
+/// ---
+/// purpose: 按 spec 顺序起各席位
+/// params:
+///   spec_path: spec 路径，team 目录优先取 state 里的 team_dir
+///   session_name: 目标 tmux session
+/// returns: 已起席位清单，含目标 pane、启动模式、布局与显示信息；spawn 后 pane 已死的席位被跳过
+/// errors: 命令拼装或 transport spawn 失败时返回 LifecycleError
+/// ---
 pub(super) fn spawn_agents(
     workspace: &Path,
     spec_path: &Path,
@@ -43,7 +70,6 @@ pub(super) fn spawn_agents(
     let team_dir = team_dir_buf
         .as_deref()
         .unwrap_or_else(|| spec_path.parent().unwrap_or_else(|| Path::new(".")));
-    ensure_exclusive_grok_cwd(spec, workspace)?;
     let runtime_fast = matches!(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))
@@ -208,8 +234,12 @@ pub(super) fn spawn_agents(
             )?;
         }
         fill_spawn_placeholders_full(&mut plan.argv, workspace, agent_id_raw, Some(&mcp_team_id));
-        let mut env =
-            inherited_env_with_team_overrides(workspace, agent_id_raw, Some(&mcp_team_id));
+        let mut env = inherited_env_with_team_overrides(
+            workspace,
+            agent_id_raw,
+            Some(&mcp_team_id),
+            Some(auth_mode_env_value(auth_mode)),
+        );
         apply_profile_launch_env(&mut env, &profile_launch);
         apply_mcp_auto_approval_env(&mut env, &safety);
         // Python providers.py:145 + launch/core.py:253 — fresh launch runs the worker
@@ -257,9 +287,25 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // 0.5.67 Cursor 方案 1 变体: role 经 workspace rules 文件注入 (不 argv)。
+        // Cursor: role 经 .cursor/rules；MCP 身份必须写进 mcp.json env
+        // （不继承父进程 TEAM_AGENT_*）。--workspace 钉物理路径。
+        // mcp.json last-writer：同 workspace 第二 CursorAgent 拒绝。
         if matches!(provider, Provider::CursorAgent) {
+            refuse_second_cursor_occupant(workspace, agent_id_raw, Some(spec))?;
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
+            apply_cursor_mcp_overlay(workspace, &mcp_config)?;
+            enable_cursor_workspace_mcp(workspace)?;
+            apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+            let proxy = apply_cursor_subscription_proxy_env(&mut env);
+            let event_log = crate::event_log::EventLog::new(workspace);
+            let _ = event_log.write(
+                "provider.cursor.proxy_presence",
+                serde_json::json!({
+                    "agent_id": agent_id_raw,
+                    "https_proxy": proxy.https_proxy,
+                    "no_proxy": proxy.no_proxy,
+                }),
+            );
         }
         // Grok 无 --mcp-config；写 <cwd>/.grok/config.toml 让 CLI 读到 team-agent。
         if matches!(provider, Provider::Grok) {
@@ -411,6 +457,10 @@ pub(super) fn spawn_agents(
     Ok(started)
 }
 
+/// ---
+/// purpose: 尽力还原某席位角色文档的路径
+/// returns: state 里有 team_dir 时用它下的 agents 目录，否则退到 workspace 下的当前团队目录
+/// ---
 /// 0.5.66 bypass 单源 §2.7:审计事件里角色 md 的 spec 来源路径(尽力解析,失败空串)。
 pub(crate) fn agent_id_spec_source_path(workspace: &Path, agent_id: &str) -> String {
     let team_dir = crate::state::persist::load_runtime_state(workspace)

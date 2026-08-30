@@ -1,3 +1,33 @@
+//! ---
+//! purpose: 整队重建，先算 resume 计划与拒绝结论，再做破坏性拆除与重起
+//! contract:
+//!   provides:
+//!     - name: restart
+//!       what: 整队重建入口，解析 team 与它实际使用的 transport 后执行
+//!     - name: restart_with_transport_with_session_convergence_deadline
+//!       what: 重建的实体实现，含入口门、spec 重建、计划分类、四种拒绝与重起
+//!     - name: RestartPhaseTimer
+//!       what: 阶段计时器，把 restart 与 launch 的分段耗时写成事件
+//!     - name: restart_candidates
+//!       what: 列出本 workspace 可重启的团队
+//!     - name: select_restart_state
+//!       what: 按 team 参数或唯一性选出重启目标
+//!   depends:
+//!     - crate::lifecycle::lock
+//!     - crate::lifecycle::display
+//!     - crate::lifecycle::restart::selection
+//!     - crate::lifecycle::restart::preflight
+//!     - crate::lifecycle::restart::remove
+//!     - crate::state::selector
+//!     - crate::state::projection
+//!     - crate::state::persist
+//!     - crate::event_log::EventLog
+//! boundary:
+//!   - 四种拒绝一律先于任何 teardown 产出，拒绝时现场不变
+//!   - 每个非 paused 席位必发一条 resume 决策事件
+//!   - 只有计划里不含 Resumed 时才并行起席，串行臂的会话消失检测没有并发等价物
+//! maturity: wired
+//! ---
 use super::common::*;
 use super::selection::classify_restart_plan_with_resume_validation;
 use super::*;
@@ -17,16 +47,31 @@ pub(crate) struct RestartPhaseTimer {
 }
 
 impl RestartPhaseTimer {
+/// ---
+/// purpose: 起一个阶段计时器
+/// returns: 以当前单调时钟为起点的计时器
+/// ---
     pub(crate) fn start() -> Self {
         Self {
             started_at: std::time::Instant::now(),
         }
     }
 
+/// ---
+/// purpose: 取从起点到现在的毫秒数
+/// returns: 毫秒数，溢出时取上限值
+/// ---
     pub(crate) fn elapsed_ms(&self) -> u64 {
         u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
+/// ---
+/// purpose: 写一条带阶段名与已用毫秒数的事件
+/// params:
+///   kind: 事件名，restart.phase 或 launch.phase
+///   phase: 阶段名
+/// returns: 写事件失败被吞掉，不影响主流程
+/// ---
     pub(crate) fn emit(&self, workspace: &Path, kind: &'static str, phase: &'static str) {
         let event_log = crate::event_log::EventLog::new(workspace);
         let _ = event_log.write(
@@ -41,6 +86,15 @@ impl RestartPhaseTimer {
 
 // ── lifecycle::restart —— 整队 Route B resume-or-fresh 重建 ──────────────────
 
+/// ---
+/// purpose: 整队重建的对外入口
+/// params:
+///   allow_fresh: 允许把不可 resume 的席位改跑全新会话
+///   team: 指定团队，None 时按唯一性选
+/// returns: 重建报告，含成功与失败席位，或四种拒绝之一
+/// errors: 选不到 team 返回 TeamSelect，路径归一失败返回 StatePersist
+/// contract_id: lifecycle.rebuild.restart_entry
+/// ---
 /// `restart(workspace, allow_fresh, team)`(`restart/orchestration.py:26`)。整队重建:
 /// **先**算 resume 决策(Route B)+ `first_send_at` 严格校验(corrupt → hard refuse),
 /// **再**做破坏性 teardown(关显示、建 session)、起后 leader rebind、adaptive 显示重建。
@@ -53,6 +107,14 @@ pub fn restart(
     restart_with_session_convergence_deadline(workspace, allow_fresh, team, None)
 }
 
+/// ---
+/// purpose: 带会话收敛等待上限的整队重建入口
+/// params:
+///   session_converge_deadline_ms: 等待会话收敛的上限，None 用默认
+/// returns: 重建报告
+/// errors: 同 restart
+/// contract_id: lifecycle.rebuild.restart_entry
+/// ---
 pub fn restart_with_session_convergence_deadline(
     workspace: &Path,
     allow_fresh: bool,
@@ -106,6 +168,12 @@ fn resolve_restart_context(
     })
 }
 
+/// ---
+/// purpose: 带注入 transport 的整队重建入口
+/// returns: 重建报告
+/// errors: 透传实体实现的错误
+/// contract_id: lifecycle.rebuild.restart_entry
+/// ---
 /// `restart` with an injected transport (tests: recording mock; prod: real TmuxBackend). The Route-B
 /// resume/fresh worker spawn + start_coordinator are wired here over `transport`. (rt-host-a sweep:
 /// was a stub returning RequirementUnmet at the spawn boundary — never spawned/resumed/started coordinator.)
@@ -118,6 +186,13 @@ pub(crate) fn restart_with_transport(
     restart_with_transport_with_readiness_deadline(workspace, allow_fresh, team, transport, None)
 }
 
+/// ---
+/// purpose: 带就绪等待上限的重建入口
+/// params:
+///   readiness_deadline_ms: 等待就绪的上限
+/// returns: 重建报告；注意本入口把 RefusedResumeNotReady 重映射成 RefusedResumeAtomicity 并把原因记为会话捕获未收敛，两种拒绝在此入口不可分辨
+/// errors: 透传实体实现的错误
+/// ---
 pub(crate) fn restart_with_transport_with_readiness_deadline(
     workspace: &Path,
     allow_fresh: bool,
@@ -158,6 +233,14 @@ pub(crate) fn restart_with_transport_with_readiness_deadline(
     }
 }
 
+/// ---
+/// purpose: 整队重建的实体实现
+/// params:
+///   session_converge_deadline_ms: 会话收敛等待上限
+///   readiness_deadline_ms: 就绪等待上限
+/// returns: 重建报告，或计划分类给出的拒绝结论
+/// errors: 归一路径失败返回 StatePersist；无本地 team 上下文或 spec 缺失返回 TeamSelect
+/// ---
 pub(crate) fn restart_with_transport_with_session_convergence_deadline(
     workspace: &Path,
     allow_fresh: bool,
@@ -2829,6 +2912,13 @@ fn apply_marked_respawn(
     );
 }
 
+/// ---
+/// purpose: 写一条 per-worker 的启动分段耗时事件
+/// params:
+///   source: 事件来源，launch 或 restart
+///   command_plan_ms: 命令拼装耗时，调用方给不出真实值时可能是占位 0
+/// returns: 写事件失败被吞掉
+/// ---
 /// 0.5.38 Step 1 (`.team/artifacts/startup-latency-locate.md` §5): per-worker
 /// timing tag so operators can pinpoint whether wall time is spent in
 /// command plan compilation, transport spawn, pane verification, or the
@@ -2865,6 +2955,10 @@ pub(crate) fn write_worker_spawn_timing_event(
     );
 }
 
+/// ---
+/// purpose: 从 state 里取某席位的 provider wire 名
+/// returns: 取到的名字，缺失时为 fake
+/// ---
 pub(crate) fn provider_wire_from_state<'a>(
     state: &'a serde_json::Value,
     agent_id: &str,
@@ -3112,6 +3206,11 @@ fn write_restart_resume_decision_event(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
+/// ---
+/// purpose: 列出本 workspace 里可重启的团队
+/// returns: 每个团队一条候选；没有活团队但顶层 state 有可重启形状时返回它自己
+/// errors: 读 runtime state 失败时返回 StatePersist
+/// ---
 /// `restart_candidates(workspace)`(`restart/selection.py:12`)。从 snapshot + active
 /// state 收集可重启 team。
 pub(crate) fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidate>, LifecycleError> {
@@ -3134,6 +3233,13 @@ pub(crate) fn restart_candidates(workspace: &Path) -> Result<Vec<RestartCandidat
         .collect())
 }
 
+/// ---
+/// purpose: 选出本次重启的目标团队
+/// params:
+///   team: 指定团队名，None 时按唯一性选
+/// returns: 选中的候选
+/// errors: 选不出或选中的 state 不具备可重启形状时返回 TeamSelect
+/// ---
 /// `select_restart_state(workspace, team)`(`restart/selection.py:49`)。按 `--team` 或
 /// 唯一性选一个;歧义/未找到 → `TeamSelect`。
 pub(crate) fn select_restart_state(

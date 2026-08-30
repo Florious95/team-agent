@@ -1,3 +1,34 @@
+//! ---
+//! purpose: coordinator 子系统装配面——声明各子模块并把它们的公开面重导出到 crate::coordinator
+//! contract:
+//!   provides:
+//!     - name: run_daemon
+//!       what: per-workspace daemon 进程入口（主循环 + 退避）
+//!     - name: coordinator_health
+//!       what: pid/metadata/schema 三合一健康判定
+//!     - name: start_coordinator
+//!       what: 幂等启动 daemon 子进程
+//!     - name: stop_coordinator
+//!       what: 停 daemon 并清 pid/meta
+//!     - name: run_watch
+//!       what: team-agent watch 的只读事件流主循环
+//!     - name: detect_whole_team_gone
+//!       what: 不依赖 coordinator 存活的整队消失判定
+//!   depends:
+//!     - crate::state
+//!     - crate::message_store
+//!     - crate::messaging
+//!     - crate::transport
+//!     - crate::provider
+//!     - crate::leader
+//!     - crate::event_log
+//! boundary:
+//!   - 不实现消息投递与结果回收本体（在 crate::messaging，本模块只按固定顺序调用）
+//!   - 不直接依赖任何 provider client crate，provider 一律经 ProviderAdapter trait
+//!   - 不做物理注入/键盘写入，注入归 crate::transport
+//!   - 无 pending obligation 时不注入任何探索性 prompt
+//! maturity: wired
+//! ---
 //!
 //! step 12 · coordinator — daemon lifecycle / single-tick orchestration SKELETON (ROUND-0).
 //!

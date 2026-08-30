@@ -227,13 +227,12 @@ fn rm039_stat001_status_resolves_active_team_when_root_team_key_missing() {
 #[test]
 fn status_port_status_compact_json_shape_against_seeded_fixture() {
     // cmd_status json branch (detail=false) delegates status_port::status(compact=true).
-    // 0.4.x compact slim: exactly 7 top-level fields; diagnostics moved
-    // to --detail. Plan: .team/artifacts/status-compact-plan.md.
+    // Compact slim is the original 7 keys plus `grok_slot` and
+    // `grok_identity_slot_ok`. `ok` is command success (always true here).
     let ws = seed_status_workspace();
     let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
         .expect("seeded fixture status should project a value");
     let obj = v.as_object().expect("--json status is a dict");
-    // Exactly these 7 keys, no more.
     let expected: std::collections::BTreeSet<&str> = [
         "ok",
         "team",
@@ -242,6 +241,8 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
         "ready",
         "not_ready",
         "agents",
+        "grok_slot",
+        "grok_identity_slot_ok",
     ]
     .iter()
     .copied()
@@ -249,7 +250,30 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
     let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(
         actual, expected,
-        "0.4.x compact must expose exactly 7 keys; got {actual:?}"
+        "compact must expose the original 7 keys plus grok_slot and grok_identity_slot_ok (9); got {actual:?}"
+    );
+    let grok_slot = obj
+        .get("grok_slot")
+        .and_then(serde_json::Value::as_object)
+        .expect("compact must carry grok_slot");
+    let grok_ok = grok_slot
+        .get("consistent")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && grok_slot
+            .get("readable")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    assert_eq!(
+        obj.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "compact ok is command success and must stay true; grok_slot={grok_slot:?}"
+    );
+    assert_eq!(
+        obj.get("grok_identity_slot_ok")
+            .and_then(serde_json::Value::as_bool),
+        Some(grok_ok),
+        "grok_identity_slot_ok must follow readable∧consistent; grok_slot={grok_slot:?}"
     );
     // Diagnostic keys must NOT leak into the default compact payload.
     for forbidden in [
@@ -278,6 +302,44 @@ fn status_port_status_compact_json_shape_against_seeded_fixture() {
     assert!(
         obj["agents"].as_object().unwrap().contains_key("a1"),
         "seeded agent a1 must appear in compact agents projection"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn status_compact_reports_identity_slot_health_on_grok_identity_slot_ok() {
+    // 已废除的行为：旧实现看不见 grok 身份槽。此墓碑留下槽健康断言。
+    // 2026-08-18 裁定：`ok` 是命令成功标志，成功投影必须恒真；身份槽健康
+    // 走顶层 `grok_identity_slot_ok`，不再重载 `ok`。
+    // 2026-08-18 身份串台：judge-g 的产出从 developer-d61 的通道报出并占掉
+    // 后者 exactly-once report_result。那时若完全不报槽健康才是一句谎。
+    let ws = seed_status_workspace();
+    let grok = ws.join(".grok");
+    std::fs::create_dir_all(&grok).unwrap();
+    std::fs::write(
+        grok.join("config.toml"),
+        "[mcp_servers.team_orchestrator.env]\nTEAM_AGENT_ID = \"impostor-seat\"\n",
+    )
+    .unwrap();
+
+    let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+        .expect("mismatched grok slot must still project compact status");
+    assert_eq!(
+        v.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "successful status must keep ok=true; slot health is a sibling key; got {v}"
+    );
+    assert_eq!(
+        v.get("grok_identity_slot_ok")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "identity-slot mismatch must force grok_identity_slot_ok=false; got {v}"
+    );
+    assert_eq!(
+        v.pointer("/grok_slot/consistent")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "fixture must actually be a slot mismatch; got {v}"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -617,8 +679,14 @@ fn cmd_send_default_human_output_is_one_line_without_false_delivered() {
         "channel:",
         "reminder:",
     ] {
+        // 字段级匹配，⛔ 不用裸 contains：人类输出以 " " 连接 `"{key}: {value}"`
+        // （send/presentation.rs 的 `parts.join(" ")` / `send_human_field`），
+        // 所以一个字段只可能出现在行首或某个空格之后。裸子串会让
+        // `turn_verification:` 误命中名单里的 `verification:`（该键由 ab2134c0
+        // 有意加进人类输出名单）——那是判据误伤，不是产品缺陷。
+        let present = text.starts_with(hidden) || text.contains(&format!(" {hidden}"));
         assert!(
-            !text.contains(hidden),
+            !present,
             "default send output should hide {hidden} unless needed; got {text}"
         );
     }
@@ -913,10 +981,8 @@ fn run_send_legacy_task_flag_is_internalized_before_persistence() {
         ExitCode::Ok,
         "legacy --task is sunset-noticed and ignored; public send persists without caller binding"
     );
-    let connection = rusqlite::Connection::open(
-        ws.join(".team").join("runtime").join("team.db"),
-    )
-    .unwrap();
+    let connection =
+        rusqlite::Connection::open(ws.join(".team").join("runtime").join("team.db")).unwrap();
     let task_id: Option<String> = connection
         .query_row(
             "SELECT task_id FROM messages WHERE content = 'go' ORDER BY rowid DESC LIMIT 1",
@@ -924,7 +990,10 @@ fn run_send_legacy_task_flag_is_internalized_before_persistence() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(task_id, None, "caller-supplied task ids must not reach storage");
+    assert_eq!(
+        task_id, None,
+        "caller-supplied task ids must not reach storage"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

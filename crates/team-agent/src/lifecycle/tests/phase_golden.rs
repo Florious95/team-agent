@@ -102,18 +102,10 @@ fn phase_b_golden_events_state_status_zero_drift() {
         team_key: "teamdir",
         lifecycle_op: phase_b_reset_discard_session,
     });
-    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
-        std::fs::write(&baseline, pretty(&actual)).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&baseline)
-        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
-    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    let expected = load_phase_golden(&baseline);
     assert_eq!(
-        actual,
-        expected,
-        "phase B golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+        actual, expected,
+        "phase B golden drift; surgical key edits only — do not regenerate the file"
     );
 }
 
@@ -126,18 +118,10 @@ fn phase_c_golden_events_state_status_zero_drift() {
         team_key: "teamdir",
         lifecycle_op: phase_b_reset_discard_session,
     });
-    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
-        std::fs::write(&baseline, pretty(&actual)).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&baseline)
-        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
-    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    let expected = load_phase_golden(&baseline);
     assert_eq!(
-        actual,
-        expected,
-        "phase C golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+        actual, expected,
+        "phase C golden drift; surgical key edits only — do not regenerate the file"
     );
 }
 
@@ -150,18 +134,10 @@ fn phase_d_golden_events_state_status_zero_drift() {
         team_key: "teamdir",
         lifecycle_op: phase_b_reset_discard_session,
     });
-    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
-        std::fs::write(&baseline, pretty(&actual)).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&baseline)
-        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
-    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    let expected = load_phase_golden(&baseline);
     assert_eq!(
-        actual,
-        expected,
-        "phase D golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+        actual, expected,
+        "phase D golden drift; surgical key edits only — do not regenerate the file"
     );
 }
 
@@ -174,18 +150,10 @@ fn phase_e_golden_events_state_status_zero_drift() {
         team_key: "teamdir",
         lifecycle_op: phase_b_reset_discard_session,
     });
-    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
-        std::fs::write(&baseline, pretty(&actual)).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&baseline)
-        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
-    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    let expected = load_phase_golden(&baseline);
     assert_eq!(
-        actual,
-        expected,
-        "phase E golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+        actual, expected,
+        "phase E golden drift; surgical key edits only — do not regenerate the file"
     );
 }
 
@@ -198,18 +166,39 @@ fn phase_f_golden_events_state_status_zero_drift() {
         team_key: "teamdir",
         lifecycle_op: phase_b_reset_discard_session,
     });
-    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
-        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
-        std::fs::write(&baseline, pretty(&actual)).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&baseline)
-        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
-    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    let expected = load_phase_golden(&baseline);
     assert_eq!(
-        actual,
-        expected,
-        "phase F golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+        actual, expected,
+        "phase F golden drift; surgical key edits only — do not regenerate the file"
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn phase_golden_unbound_not_ready_requires_claim_leader() {
+    // 已废除的行为：旧实现只说不 ready、不说怎么恢复，把人晾在原地。此断言证明它确实没了。
+    // Independent of golden.json so a later regenerate cannot erase it.
+    // Companion status keys grok_slot ← 77bddb95 / 0c319cca; next_action ← 080903a2.
+    let compact = run_compact_status_after_quick_start();
+    let not_ready = compact
+        .get("not_ready")
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("compact must carry not_ready; got {compact}"));
+    let reasons = not_ready
+        .get("reasons")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("leader_receiver_unbound")),
+        "tombstone fixture must still produce leader_receiver_unbound; not_ready={not_ready:?}"
+    );
+    assert_eq!(
+        not_ready.get("next_action").and_then(Value::as_str),
+        Some("claim-leader"),
+        "when not_ready.reasons contains leader_receiver_unbound, next_action must be claim-leader; not_ready={not_ready:?}"
     );
 }
 
@@ -464,6 +453,59 @@ fn phase_fixture_path(phase: &str) -> PathBuf {
         .join("fixtures")
         .join("0_5_0_phase_golden")
         .join(phase)
+}
+
+fn load_phase_golden(path: &Path) -> Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", path.display()));
+    let stripped = strip_full_line_json_comments(&text);
+    serde_json::from_str(&stripped).unwrap_or_else(|e| {
+        panic!(
+            "parse golden baseline {} after stripping // review comments: {e}",
+            path.display()
+        )
+    })
+}
+
+fn strip_full_line_json_comments(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn run_compact_status_after_quick_start() -> Value {
+    let hermetic = HermeticTestEnv::enter("tombstone-claim-leader");
+    let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
+    let team = two_worker_team_dir(&hermetic);
+    let workspace = team.parent().expect("workspace").to_path_buf();
+    seed_healthy_coordinator(&workspace);
+    let launch_transport = codex_ready_transport();
+    quick_start_with_transport_in_workspace_with_display(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &launch_transport,
+        false,
+    )
+    .expect("tombstone fixture must quick-start");
+    let status = cmd_status(&StatusArgs {
+        agent: None,
+        workspace,
+        detail: false,
+        summary: false,
+        json: true,
+        team: Some("teamdir".to_string()),
+    });
+    match cmd_value(status) {
+        Value::Object(map) => map
+            .get("output")
+            .cloned()
+            .unwrap_or_else(|| panic!("compact status missing output")),
+        other => panic!("compact status must be a JSON object, got {other}"),
+    }
 }
 
 struct EnvVarGuard {
@@ -841,12 +883,6 @@ fn key_is_id(key: &str, text: &str) -> bool {
         || key.ends_with("_message_id")
         || key.ends_with("_result_id")
         || text.starts_with("msg_")
-}
-
-fn pretty(value: &Value) -> String {
-    let mut text = serde_json::to_string_pretty(value).unwrap();
-    text.push('\n');
-    text
 }
 
 #[test]

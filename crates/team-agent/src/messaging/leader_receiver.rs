@@ -134,6 +134,7 @@ pub fn send_to_leader_receiver_with_presentation(
                 reason: Some(DeliveryRefusal::Duplicate),
                 channel: Some("leader_receiver".to_string()),
                 ack_forced_off: requires_ack,
+                turn_verification: None,
             });
         }
         PersistResolution::Persisted(persisted) => persisted.message_id,
@@ -176,6 +177,7 @@ pub fn send_to_leader_receiver_with_presentation(
                 reason: None,
                 channel: Some("leader_receiver".to_string()),
                 ack_forced_off: requires_ack,
+                turn_verification: None,
             });
         }
     }
@@ -213,6 +215,7 @@ pub fn send_to_leader_receiver_with_presentation(
         reason: None,
         channel: Some("leader_receiver".to_string()),
         ack_forced_off: requires_ack,
+        turn_verification: None,
     })
 }
 
@@ -259,6 +262,7 @@ pub fn deliver_to_leader_fallback_pane(
             reason: None,
             channel: Some("leader_receiver".to_string()),
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
 
@@ -274,6 +278,7 @@ pub fn deliver_to_leader_fallback_pane(
             reason: None,
             channel: Some("leader_receiver".to_string()),
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
 
@@ -316,6 +321,7 @@ pub fn deliver_to_leader_fallback_pane(
             reason: Some(DeliveryRefusal::LeaderNotAttached),
             channel: Some("fallback_pane".to_string()),
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
 
@@ -390,9 +396,40 @@ pub fn deliver_to_leader_fallback_pane(
             reason: Some(DeliveryRefusal::LeaderNotAttached),
             channel: Some("rebind_required".to_string()),
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
     let target = Target::Pane(PaneId::new(channel.pane_id));
+    if super::delivery::token_already_visible(
+        transport.as_ref(),
+        state,
+        "leader",
+        &target,
+        message_id,
+    ) {
+        event_log.write(
+            "leader_receiver.duplicate_token_refused",
+            serde_json::json!({
+                "message_id": message_id,
+                "result_id": result_id,
+                "pane_id": pane_id,
+                "reason": "message_token_already_visible",
+                "delivered_via": "fallback_pane",
+            }),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: true,
+            status: DeliveryStatus::AlreadyDelivered,
+            message_status: MessageStatusShadow("delivered".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some("message_token_already_visible".to_string()),
+            stage: Some(DeliveryStage::Submit),
+            reason: None,
+            channel: Some("fallback_pane".to_string()),
+            ack_forced_off: false,
+            turn_verification: None,
+        });
+    }
     let inject_result: Result<InjectReport, TransportError> =
         transport.inject(&target, &payload, Key::Enter, true);
 
@@ -443,6 +480,7 @@ pub fn deliver_to_leader_fallback_pane(
                             reason: None,
                             channel: Some("leader_acceptance_pending".to_string()),
                             ack_forced_off: false,
+                            turn_verification: None,
                         });
                     }
                     super::delivery::LeaderReceiptObservation::TokenObserved => {}
@@ -470,6 +508,7 @@ pub fn deliver_to_leader_fallback_pane(
                     reason: None,
                     channel: Some("fallback_pane".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 })
             } else {
                 let reason = format!(
@@ -496,6 +535,7 @@ pub fn deliver_to_leader_fallback_pane(
                     reason: None,
                     channel: Some("fallback_pane".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 })
             }
         }
@@ -538,6 +578,7 @@ pub fn deliver_to_leader_fallback_pane(
                 reason: Some(DeliveryRefusal::TmuxTargetMissing),
                 channel: Some(channel),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
     }
@@ -656,7 +697,17 @@ fn message_already_delivered(
         .optional()?;
     Ok(matches!(
         status.as_deref(),
-        Some("delivered" | "acknowledged" | "submitted" | "submitted_unverified")
+        Some(
+            "delivered"
+                | "acknowledged"
+                | "submitted"
+                | "submitted_unverified"
+                | "submitted_pending_acceptance"
+                | "injected_awaiting_receipt"
+                | "visible"
+                | "injected"
+                | "consumed"
+        )
     ))
 }
 
@@ -730,5 +781,6 @@ pub fn enqueue_leader_mailbox_until_attach(
         reason: None,
         channel: Some("leader_mailbox".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }

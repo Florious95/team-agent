@@ -882,6 +882,16 @@ fn merge_agent_projection(
                 if !tombstoned_for_projection
                     && latest_has_protected_live_topology(latest_agent, team_alive)
                 {
+                    // A lifecycle-authoritative writer may have loaded its whole
+                    // projection before this peer finalized. Preserve the complete
+                    // latest peer row rather than treating that untouched omission
+                    // as an intentional delete. Ordinary saves (with no topology
+                    // authority) retain the conflict so omission cannot clobber a
+                    // live row.
+                    if !topology_update_agent_ids.is_empty() {
+                        slot.insert(latest_agent.clone());
+                        continue;
+                    }
                     return Err(save_conflict(
                         projection,
                         agent_id,
@@ -896,7 +906,20 @@ fn merge_agent_projection(
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
                     let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
-                        return Err(save_conflict(projection, agent_id, fields));
+                        if !topology_update_agent_ids.is_empty()
+                            && lifecycle_peer_snapshot_is_stale(existing.get(), latest_agent)
+                        {
+                            // A lifecycle writer may have loaded a complete
+                            // peer row before that peer finalized. Its own
+                            // topology authority is limited to the IDs it
+                            // explicitly reports; preserve the latest peer
+                            // row instead of surfacing a stale self-conflict.
+                            preserve_latest_topology(existing.get_mut(), latest_agent);
+                        } else if lifecycle_placeholder(existing.get()) {
+                            preserve_latest_topology(existing.get_mut(), latest_agent);
+                        } else {
+                            return Err(save_conflict(projection, agent_id, fields));
+                        }
                     }
                 }
                 if !skip_capture_backfill || !skip_capture_backfill_agent_ids.contains(agent_id) {
@@ -906,6 +929,58 @@ fn merge_agent_projection(
         }
     }
     Ok(())
+}
+
+fn lifecycle_placeholder(agent: &Value) -> bool {
+    matches!(
+        agent.get("status").and_then(Value::as_str),
+        Some("reserved" | "starting")
+    )
+}
+
+fn lifecycle_peer_snapshot_is_stale(incoming: &Value, latest: &Value) -> bool {
+    // A concurrent clone/restart can have promoted its peer to `running`
+    // while its capture tuple is still pending.  That row is still a
+    // lifecycle snapshot, not a completed topology observation; preserving
+    // the latest peer avoids making the concurrent writer lose on a pane
+    // binding it never owned.  A completed row remains epoch-ordered below,
+    // so a newer/equal completed topology still conflicts.
+    if incoming
+        .get("_pending_session_id")
+        .and_then(Value::as_str)
+        .is_some_and(|session| !session.is_empty())
+    {
+        return true;
+    }
+    let Some(incoming_epoch) = incoming.get("spawn_epoch").and_then(Value::as_u64) else {
+        return false;
+    };
+    let Some(latest_epoch) = latest.get("spawn_epoch").and_then(Value::as_u64) else {
+        return false;
+    };
+    incoming_epoch < latest_epoch
+}
+
+fn preserve_latest_topology(incoming: &mut Value, latest: &Value) {
+    let Some(incoming) = incoming.as_object_mut() else {
+        return;
+    };
+    // A stale add/clone writer can carry a placeholder row (`starting`) after
+    // a peer has completed its spawn. Preserve the completed lifecycle and
+    // capture tuple together with topology; otherwise a later peer save can
+    // regress the finalized row back to `starting` while returning success.
+    if latest.get("status").and_then(Value::as_str) == Some("running") {
+        // The finalized row is authoritative as a whole. Copying a hand-picked
+        // field list can leave stale capture/metadata keys from the placeholder
+        // and is not equivalent to preserving the peer that already finalized.
+        *incoming = latest.as_object().cloned().unwrap_or_default();
+        return;
+    }
+    for field in LIVE_TOPOLOGY_FIELDS {
+        if let Some(value) = latest.get(field).filter(|value| json_truthy(value)) {
+            incoming.insert(field.to_string(), value.clone());
+        }
+    }
 }
 
 fn save_conflict(projection: &str, agent_id: &str, fields: Vec<&'static str>) -> StateError {
@@ -2003,13 +2078,8 @@ mod tests {
                 "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
             },
         });
-        save_runtime_state_with_lifecycle_topology_authority(
-            &ws,
-            &incoming,
-            "team-a",
-            &["target"],
-        )
-        .unwrap();
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["target"])
+            .unwrap();
         let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
         assert!(
             target.get("pane_id").is_none(),
@@ -2019,6 +2089,229 @@ mod tests {
             target.get("window").is_none(),
             "target window was intentionally cleared: {target}"
         );
+    }
+
+    #[test]
+    fn lifecycle_authority_preserves_stale_omitted_finalized_peer() {
+        let latest_state = || {
+            json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "f1": {
+                        "agent_id": "f1",
+                        "provider": "codex",
+                        "role": "Developer",
+                        "model": "gpt-5.5",
+                        "status": "running",
+                        "session_id": "session-f1",
+                        "rollout_path": "/tmp/f1.jsonl",
+                        "captured_at": "2026-08-28T00:00:00Z",
+                        "captured_via": "contract-fixture",
+                        "attribution_confidence": "high",
+                        "capture_state": "complete",
+                        "spawn_cwd": "/tmp/f1",
+                        "owner_team_id": "team-a",
+                        "pane_id": "%1",
+                        "pane_pid": 101,
+                        "window": "f1",
+                        "spawned_at": "2026-08-28T00:00:01Z",
+                        "spawn_epoch": 1
+                    }
+                }
+            })
+        };
+        let f2 = json!({
+            "agent_id": "f2",
+            "provider": "codex",
+            "role": "Developer",
+            "model": "gpt-5.5",
+            "status": "running",
+            "session_id": "session-f2",
+            "rollout_path": "/tmp/f2.jsonl",
+            "captured_at": "2026-08-28T00:00:02Z",
+            "captured_via": "contract-fixture",
+            "attribution_confidence": "high",
+            "capture_state": "complete",
+            "spawn_cwd": "/tmp/f2",
+            "owner_team_id": "team-a",
+            "pane_id": "%2",
+            "pane_pid": 102,
+            "window": "f2",
+            "spawned_at": "2026-08-28T00:00:03Z",
+            "spawn_epoch": 1
+        });
+
+        // A stale f2 finalization omitted the peer that finalized after its
+        // snapshot. Lifecycle authority preserves f1 byte-for-byte and writes f2.
+        let ws = temp_ws();
+        let latest = latest_state();
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {"f2": f2.clone()}
+        });
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved["agents"]["f1"], latest["agents"]["f1"]);
+        assert_eq!(saved["agents"]["f2"], f2);
+
+        // Captured R4 f1/f2 shape: the writer includes a stale, already
+        // running f1 snapshot while finalizing f2. Lifecycle authority must
+        // preserve f1 byte-for-byte rather than report SaveConflict for its
+        // five topology fields.
+        let ws = temp_ws();
+        let latest = latest_state();
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "f1": {
+                    "agent_id": "f1",
+                    "provider": "codex",
+                    "status": "running",
+                    "session_id": "session-f1",
+                    "rollout_path": "/tmp/f1.jsonl",
+                    "captured_at": "2026-08-28T00:00:00Z",
+                    "captured_via": "contract-fixture",
+                    "attribution_confidence": "high",
+                    "capture_state": "complete",
+                    "spawn_cwd": "/tmp/f1",
+                    "owner_team_id": "team-a",
+                    "pane_id": "%stale",
+                    "pane_pid": 999,
+                    "window": "f1-stale",
+                    "spawned_at": "2026-08-27T23:59:59Z",
+                    "spawn_epoch": 0
+                },
+                "f2": f2.clone()
+            }
+        });
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(saved["agents"]["f1"], latest["agents"]["f1"]);
+        assert_eq!(saved["agents"]["f2"], f2);
+
+        // The same omission without lifecycle authority remains a conflict.
+        let ws = temp_ws();
+        let latest = latest_state();
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {"f2": f2.clone()}
+        });
+        assert!(matches!(
+            save_runtime_state(&ws, &incoming),
+            Err(StateError::SaveConflict(_))
+        ));
+        assert_eq!(read_state(&ws), latest);
+
+        // Explicit deletion remains authoritative and must not be resurrected.
+        let ws = temp_ws();
+        let latest = latest_state();
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {"f2": f2}
+        });
+        save_runtime_state_with_deleted_agents(&ws, &incoming, &["f1"]).unwrap();
+        let saved = read_state(&ws);
+        assert!(saved["agents"].get("f1").is_none());
+        assert!(saved["agents"].get("f2").is_some());
+    }
+
+    #[test]
+    fn lifecycle_authority_preserves_complete_latest_row_for_starting_peer() {
+        let ws = temp_ws();
+        let latest = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "f1": {
+                    "agent_id": "f1",
+                    "provider": "codex",
+                    "status": "running",
+                    "session_id": "session-f1",
+                    "rollout_path": "/tmp/f1.jsonl",
+                    "captured_at": "2026-08-28T00:00:00Z",
+                    "captured_via": "contract-fixture",
+                    "attribution_confidence": "high",
+                    "capture_state": "complete",
+                    "spawn_cwd": "/tmp/f1",
+                    "owner_team_id": "team-a",
+                    "pane_id": "%1",
+                    "pane_pid": 101,
+                    "window": "f1",
+                    "spawned_at": "2026-08-28T00:00:01Z",
+                    "spawn_epoch": 1
+                }
+            }
+        });
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "f1": {
+                    "agent_id": "f1",
+                    "provider": "codex",
+                    "status": "starting",
+                    "stale_metadata": "must-not-survive"
+                },
+                "f2": {"agent_id": "f2", "status": "starting"}
+            }
+        });
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+            .unwrap();
+        assert_eq!(read_state(&ws)["agents"]["f1"], latest["agents"]["f1"]);
+    }
+
+    #[test]
+    fn lifecycle_authority_still_conflicts_on_different_completed_topology() {
+        let ws = temp_ws();
+        let latest = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "f1": {
+                    "agent_id": "f1",
+                    "status": "running",
+                    "pane_id": "%1",
+                    "pane_pid": 101,
+                    "window": "f1",
+                    "spawned_at": "2026-08-28T00:00:01Z",
+                    "spawn_epoch": 1
+                }
+            }
+        });
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "f1": {
+                    "agent_id": "f1",
+                    "status": "running",
+                    "pane_id": "%9",
+                    "pane_pid": 109,
+                    "window": "f1-new",
+                    "spawned_at": "2026-08-28T00:00:09Z",
+                    "spawn_epoch": 9
+                },
+                "f2": {"agent_id": "f2", "status": "running"}
+            }
+        });
+        let err =
+            save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, "team-a", &["f2"])
+                .expect_err("two completed topologies for f1 must conflict");
+        assert!(matches!(err, StateError::SaveConflict(_)));
+        assert!(err.to_string().contains("agent_id=f1"));
     }
 
     #[test]

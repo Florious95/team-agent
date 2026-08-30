@@ -1,9 +1,25 @@
+//! ---
+//! purpose: 把已认领消息注入目标 pane 并记录投递阶段
+//! contract:
+//!   provides:
+//!     - name: deliver_stored_message
+//!       what: 单次物理注入；grok 队列默认再按回车顶出；cursor 打开单回车闸且不 flush send-now
+//! boundary:
+//!   - 不把物理 success 写成 delivered
+//!   - 不重粘文本
+//!   - error-bypass（target_resolved+error）只经 claim 原子闸，禁止旁路双投
+//!   - 物理 Enter 已出（pane/转录已有 token）后 observer/state 落盘失败不得返 Err 重投
+//!   - 提交前持久化失败仍返 Err，由 batch 记 item_blocked 隔离
+//!   - 同 message_id 的 token 已在 pane/转录则拒绝二次注入
+//! maturity: wired
+//! ---
 //!
 //! internal_delivery.py + delivery.py — coordinator/调度器侧 thin wrapper + 单条 tmux 注入投递
 //! + trust 有界重试 + turn-open arm (card §16/§65)。
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension};
 
@@ -15,8 +31,9 @@ use crate::provider::wire::{
     is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
 };
 use crate::transport::{
-    submit_verification_wire, InjectPayload, InjectReport, InjectVerification, Key, PaneId,
-    PaneInfo, SessionName, SubmitObserver, SubmitVerification, Target, Transport, WindowName,
+    submit_verification_wire, turn_verification_wire, CaptureRange, InjectPayload, InjectReport,
+    InjectVerification, Key, PaneId, PaneInfo, SessionName, SubmitObserver, SubmitVerification,
+    Target, Transport, WindowName,
 };
 
 use super::helpers::{message_exists, MessageStatusShadow};
@@ -75,6 +92,7 @@ pub fn deliver_stored_message(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -183,6 +201,7 @@ pub fn deliver_pending_message(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
     let message = message_for_delivery(store, message_id)?;
@@ -197,6 +216,7 @@ pub fn deliver_pending_message(
             reason: Some(DeliveryRefusal::UnknownRecipient),
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
     let mut canonical_owner_team_id = message.owner_team_id.clone();
@@ -272,8 +292,6 @@ pub fn deliver_pending_message(
     }
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
-    } else if message.status == "target_resolved" && message.error.is_some() {
-        bump_delivery_attempts(store, message_id)?
     } else {
         return Ok(DeliveryOutcome {
             ok: false,
@@ -285,8 +303,31 @@ pub fn deliver_pending_message(
             reason: Some(DeliveryRefusal::MessageAlreadyClaimed),
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     };
+    // Attach may requeue this row after the coordinator captured `state` but
+    // before this claim. Revalidate through the same owner-team projection
+    // that carries a canonical top-level leader binding into the scoped view.
+    let fresh_leader_state = if message.recipient == "leader" {
+        Some(match canonical_owner_team_id.as_deref() {
+            Some(team) => match project_state_for_owner_team(
+                workspace,
+                team,
+                &serde_json::Value::Null,
+                Some(store),
+                Some(message_id),
+                Some(event_log),
+            )? {
+                OwnerTeamProjection::Projected { state, .. } => state,
+                OwnerTeamProjection::Refused(outcome) => return Ok(outcome),
+            },
+            None => crate::state::persist::load_runtime_state(workspace)?,
+        })
+    } else {
+        None
+    };
+    let state = fresh_leader_state.as_ref().unwrap_or(state);
     if message.recipient == "leader" {
         let Some(receiver) = leader_receiver_value(state) else {
             store.mark(message_id, "failed", Some("leader_not_attached"))?;
@@ -315,6 +356,7 @@ pub fn deliver_pending_message(
                 reason: Some(DeliveryRefusal::LeaderNotAttached),
                 channel: Some("rebind_required".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             });
         };
         if let Some(outcome) = leader_receiver_transport_conflict_outcome(
@@ -346,6 +388,7 @@ pub fn deliver_pending_message(
                     reason: None,
                     channel: Some("rebind_required".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
             crate::messaging::LeaderChannelResolution::Unbound(reason) => {
@@ -385,6 +428,7 @@ pub fn deliver_pending_message(
                     reason: Some(refusal),
                     channel: Some("rebind_required".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
         }
@@ -432,6 +476,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: None,
             });
         }
     };
@@ -480,6 +525,30 @@ pub fn deliver_pending_message(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
+        });
+    }
+    if token_already_visible(transport, state, &message.recipient, &target, message_id) {
+        event_log.write(
+            "delivery.duplicate_token_refused",
+            serde_json::json!({
+                "message_id": message_id,
+                "recipient": message.recipient,
+                "reason": "message_token_already_visible",
+            }),
+        )?;
+        store.mark(message_id, "delivered", None)?;
+        return Ok(DeliveryOutcome {
+            ok: true,
+            status: DeliveryStatus::AlreadyDelivered,
+            message_status: MessageStatusShadow("delivered".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some("message_token_already_visible".to_string()),
+            stage: Some(DeliveryStage::Submit),
+            reason: None,
+            channel: None,
+            ack_forced_off: false,
+            turn_verification: None,
         });
     }
     let rendered = render_message(
@@ -503,14 +572,54 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
-    let inject_report = match transport.inject_with_submit_observer(
-        &target,
-        &payload,
-        Key::Enter,
-        true,
-        Some(&submit_observer),
-    ) {
-        Ok(report) => report,
+    let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
+    let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
+        paste_to_submit_floor_for_recipient(state, &message.recipient),
+        || {
+            crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
+                transport.inject_with_submit_observer(
+                    &target,
+                    &payload,
+                    Key::Enter,
+                    true,
+                    Some(&submit_observer),
+                )
+            })
+        },
+    );
+    let inject_report = match inject_attempt {
+        Ok(report) => {
+            // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
+            // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
+            // cursor：第二下 Enter 打断进行中回合，不走 flush。
+            if !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
+                match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
+                    Ok(flush) if flush.extra_enters > 0 => {
+                        let _ = event_log.write(
+                            "send.grok_send_now",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "recipient": message.recipient,
+                                "extra_enters": flush.extra_enters,
+                                "mark_cleared": flush.mark_cleared,
+                            }),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = event_log.write(
+                            "send.grok_send_now_failed",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "recipient": message.recipient,
+                                "error": error.to_string(),
+                            }),
+                        );
+                    }
+                }
+            }
+            report
+        }
         Err(error) => {
             let reason = format!("inject_failed:{error}");
             if message.recipient == "leader" {
@@ -538,6 +647,7 @@ pub fn deliver_pending_message(
                     reason: Some(DeliveryRefusal::LeaderNotAttached),
                     channel: Some("rebind_required".to_string()),
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
             if transport_error_is_target_missing(&error) {
@@ -582,6 +692,7 @@ pub fn deliver_pending_message(
                     reason: None,
                     channel: None,
                     ack_forced_off: false,
+                    turn_verification: None,
                 });
             }
             store.mark(message_id, "target_resolved", Some(&reason))?;
@@ -595,12 +706,26 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: None,
             });
         }
     };
     if let Some(error) = submit_observer.take_error() {
-        return Err(error);
+        // Token on pane/transcript = physical Enter already out → degrade.
+        // Poison before submit (no token) still returns Err → item_blocked.
+        absorb_state_error_only_after_physical_submit(
+            transport,
+            state,
+            &message.recipient,
+            &target,
+            message_id,
+            event_log,
+            "submit_observer",
+            error,
+        )?;
     }
+    persist_submit_verification(workspace, message_id, &inject_report);
+    let turn_verification = inject_report.turn_verification;
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
     // A successful tmux command is never provider-acceptance proof. Leader and
@@ -655,6 +780,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: Some(turn_verification),
             });
         }
         store.mark(message_id, "submitted_unverified", Some(&reason))?;
@@ -668,6 +794,7 @@ pub fn deliver_pending_message(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: Some(turn_verification),
         });
     }
     // S1-CAPTURE-001 (0.4.8, CR M4 Claude phase-1): for Claude/ClaudeCode
@@ -733,6 +860,7 @@ pub fn deliver_pending_message(
                 reason: None,
                 channel: None,
                 ack_forced_off: false,
+                turn_verification: Some(turn_verification),
             });
         }
     }
@@ -745,7 +873,9 @@ pub fn deliver_pending_message(
                     "leader_receiver.receipt_source_unavailable",
                     serde_json::json!({"message_id": message_id}),
                 )?;
-                return Ok(leader_receipt_source_unavailable_outcome(message_id));
+                let mut outcome = leader_receipt_source_unavailable_outcome(message_id);
+                outcome.turn_verification = Some(turn_verification);
+                return Ok(outcome);
             }
             LeaderReceiptObservation::TokenAbsent => {
                 store.mark(message_id, "submitted_pending_acceptance", None)?;
@@ -756,10 +886,10 @@ pub fn deliver_pending_message(
                         "reason": "provider_receipt_not_observed",
                     }),
                 )?;
-                return Ok(leader_acceptance_pending_outcome(
-                    message_id,
-                    "submitted_pending_acceptance",
-                ));
+                let mut outcome =
+                    leader_acceptance_pending_outcome(message_id, "submitted_pending_acceptance");
+                outcome.turn_verification = Some(turn_verification);
+                return Ok(outcome);
             }
             LeaderReceiptObservation::TokenObserved => {}
         }
@@ -782,14 +912,26 @@ pub fn deliver_pending_message(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: Some(turn_verification),
     };
-    stamp_first_send_at_if_leader_to_worker_scoped(
+    if let Err(error) = stamp_first_send_at_if_leader_to_worker_scoped(
         workspace,
         &message.sender,
         &message.recipient,
         canonical_owner_team_id.as_deref(),
-    )?;
-    record_turn_open_if_leader_to_worker_scoped(
+    ) {
+        absorb_state_error_only_after_physical_submit(
+            transport,
+            state,
+            &message.recipient,
+            &target,
+            message_id,
+            event_log,
+            "stamp_first_send_at",
+            error,
+        )?;
+    }
+    if let Err(error) = record_turn_open_if_leader_to_worker_scoped(
         workspace,
         &message.sender,
         &message.recipient,
@@ -797,7 +939,18 @@ pub fn deliver_pending_message(
         event_log,
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
-    )?;
+    ) {
+        absorb_state_error_only_after_physical_submit(
+            transport,
+            state,
+            &message.recipient,
+            &target,
+            message_id,
+            event_log,
+            "turn_open_after_delivery",
+            error,
+        )?;
+    }
     Ok(outcome)
 }
 
@@ -864,6 +1017,7 @@ pub(crate) fn mark_worker_target_missing(
         reason: Some(DeliveryRefusal::TmuxTargetMissing),
         channel: Some("delivery_blocked".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -902,6 +1056,27 @@ pub fn requeue_worker_target_missing_messages(
     }
     let _ = workspace;
     Ok(ids)
+}
+
+/// 把 post-Enter 消费判定落到 workspace，供确认面扫盘。
+///
+/// //! purpose: persist SubmitVerification after inject
+/// //! contract: file contains Debug variant name (SubmitConsumptionUnverified / EnterSentWithoutPlaceholderCheck)
+/// //! boundary: write failure must not fail delivery
+fn persist_submit_verification(workspace: &Path, message_id: &str, report: &InjectReport) {
+    let dir = workspace.join(".team").join("runtime");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = serde_json::json!({
+        "message_id": message_id,
+        "submit_verification": format!("{:?}", report.submit_verification),
+        "inject_verification": format!("{:?}", report.inject_verification),
+        "turn_verification": turn_verification_wire(report.turn_verification),
+        "submit_verified": inject_submit_verified(report),
+        "attempts": report.attempts,
+    });
+    let _ = std::fs::write(dir.join("submit-verification.json"), format!("{body}\n"));
 }
 
 /// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
@@ -1018,6 +1193,7 @@ fn deliver_leader_via_app_server(
                 reason: None,
                 channel: Some("codex_app_server".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
         Err(error) => app_server_delivery_failure(
@@ -1064,6 +1240,7 @@ fn app_server_delivery_failure(
                 reason: Some(DeliveryRefusal::RecipientBusy),
                 channel: Some("leader_busy".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
         crate::codex_app_server::AppServerError::ThreadStale { expected, actual } => {
@@ -1103,6 +1280,7 @@ fn app_server_delivery_failure(
                 reason: Some(DeliveryRefusal::MissingPermissions),
                 channel: Some("codex_app_server".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             })
         }
         crate::codex_app_server::AppServerError::ProtocolMismatch(_)
@@ -1155,6 +1333,7 @@ fn rebind_required_outcome(message_id: &str, action: &str) -> DeliveryOutcome {
         reason: Some(DeliveryRefusal::LeaderNotAttached),
         channel: Some("rebind_required".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -1558,6 +1737,7 @@ fn leader_receiver_transport_conflict_outcome(
                 reason: Some(DeliveryRefusal::LeaderNotAttached),
                 channel: Some("rebind_required".to_string()),
                 ack_forced_off: false,
+                turn_verification: None,
             }));
         }
     }
@@ -1973,23 +2153,6 @@ fn message_for_delivery(
     Ok(message)
 }
 
-fn bump_delivery_attempts(store: &MessageStore, message_id: &str) -> Result<u32, MessagingError> {
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    conn.execute(
-        "update messages
-         set delivery_attempts = delivery_attempts + 1,
-             updated_at = ?2
-         where message_id = ?1",
-        params![message_id, chrono::Utc::now().to_rfc3339()],
-    )?;
-    let attempts = conn.query_row(
-        "select delivery_attempts from messages where message_id = ?1",
-        params![message_id],
-        |row| row.get::<_, i64>(0),
-    )?;
-    Ok(attempts.max(0) as u32)
-}
-
 /// Pre-inject gate (Contract B): peek the recipient pane and answer "is there an
 /// actionable provider startup prompt right now (trust menu or update prompt)" using
 /// the SHARED provider/startup_prompt recognizers — no second classifier, no provider
@@ -2062,6 +2225,40 @@ fn recipient_pane_has_actionable_startup_prompt(
     }
 }
 
+fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Provider> {
+    state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .and_then(|agent| agent.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_canonical_provider)
+}
+
+fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool {
+    matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent)
+    )
+}
+
+/// ---
+/// purpose: paste→Enter 地板按收件人 provider 选择
+/// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
+/// boundary: 不改 cursor 单回车闸；不把地板套到 claude/codex
+/// ---
+pub(crate) fn paste_to_submit_floor_for_recipient(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Duration {
+    match recipient_provider(state, recipient) {
+        Some(Provider::CursorAgent) | Some(Provider::Grok) => {
+            crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR
+        }
+        _ => Duration::ZERO,
+    }
+}
+
 fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
     state
         .get("agents")
@@ -2129,6 +2326,7 @@ fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> Delivery
         reason: None,
         channel: Some("leader_acceptance_pending".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -2143,6 +2341,7 @@ pub(crate) fn leader_receipt_source_unavailable_outcome(message_id: &str) -> Del
         reason: None,
         channel: Some("leader_receipt_source_unavailable".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     }
 }
 
@@ -2184,6 +2383,7 @@ fn observe_pending_leader_acceptance(
         reason: None,
         channel: Some("leader_receiver".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2214,6 +2414,7 @@ pub fn handle_trust_retry_needed(
             reason: None,
             channel: None,
             ack_forced_off: false,
+            turn_verification: None,
         });
     }
     let next_attempt = payload.attempt.saturating_add(1);
@@ -2254,6 +2455,7 @@ pub fn handle_trust_retry_needed(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2751,6 +2953,7 @@ fn refuse_owner_team_resolution(
         reason: Some(refusal),
         channel: Some("owner_team_resolution".to_string()),
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2808,6 +3011,7 @@ pub fn retry_injection_after_trust_auto_answer(
         reason: None,
         channel: None,
         ack_forced_off: false,
+        turn_verification: None,
     })
 }
 
@@ -2844,6 +3048,134 @@ fn rollout_tail_contains(path: &std::path::Path, needle: &str, tail_bytes: u64) 
     rollout_tail_contains_result(path, needle, tail_bytes).unwrap_or(false)
 }
 
+fn message_token_marker(message_id: &str) -> String {
+    format!("[team-agent-token:{message_id}]")
+}
+
+fn text_contains_message_token(text: &str, message_id: &str) -> bool {
+    !message_id.is_empty() && text.contains(&message_token_marker(message_id))
+}
+
+/// ---
+/// purpose: 同 message_id 已在 pane 或转录出现则视为已注入
+/// contract:
+///   provides:
+///     - name: token_already_visible
+///       what: capture Tail(80) 或 recipient rollout_path 尾含 `[team-agent-token:{id}]` 则为 true
+/// boundary:
+///   - capture 失败不当已见（倒向允许注入，避免丢信）
+///   - 不请求 Full（wave-2：滚出屏的 trust 残渣不当成已见/可行动）
+///   - 不把 JSON 字段里的 message_id 当 pane token
+/// ---
+pub(crate) fn token_already_visible(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+    target: &Target,
+    message_id: &str,
+) -> bool {
+    if message_id.is_empty() {
+        return false;
+    }
+    let marker = message_token_marker(message_id);
+    match transport.capture(target, CaptureRange::Tail(80)) {
+        Ok(captured) if text_contains_message_token(&captured.text, message_id) => return true,
+        _ => {}
+    }
+    recipient_transcript_contains(state, recipient, &marker)
+}
+
+fn recipient_transcript_contains(state: &serde_json::Value, recipient: &str, marker: &str) -> bool {
+    for path in recipient_transcript_paths(state, recipient) {
+        if rollout_tail_contains(&path, marker, 64 * 1024) {
+            return true;
+        }
+    }
+    false
+}
+
+fn recipient_transcript_paths(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    let push = |paths: &mut Vec<std::path::PathBuf>, value: Option<&serde_json::Value>| {
+        if let Some(path) = value
+            .and_then(serde_json::Value::as_str)
+            .filter(|p| !p.is_empty())
+        {
+            paths.push(std::path::PathBuf::from(path));
+        }
+    };
+    if recipient == "leader" {
+        push(
+            &mut paths,
+            leader_receiver_record_path(state, "rollout_path"),
+        );
+    }
+    let agent = state.get("agents").and_then(|agents| agents.get(recipient));
+    push(
+        &mut paths,
+        agent.and_then(|agent| agent.get("rollout_path")),
+    );
+    paths
+}
+
+fn leader_receiver_record_path<'a>(
+    state: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get(field))
+        .or_else(|| {
+            let active = state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)?;
+            state
+                .get("teams")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|teams| teams.get(active))
+                .and_then(|team| team.get("leader_receiver"))
+                .and_then(|receiver| receiver.get(field))
+        })
+}
+
+fn absorb_state_error_only_after_physical_submit(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+    target: &Target,
+    message_id: &str,
+    event_log: &EventLog,
+    stage: &str,
+    error: MessagingError,
+) -> Result<(), MessagingError> {
+    if token_already_visible(transport, state, recipient, target, message_id) {
+        log_post_physical_submit_state_error(event_log, message_id, stage, &error)
+    } else {
+        Err(error)
+    }
+}
+
+fn log_post_physical_submit_state_error(
+    event_log: &EventLog,
+    message_id: &str,
+    stage: &str,
+    error: &MessagingError,
+) -> Result<(), MessagingError> {
+    event_log.write(
+        "delivery.post_submit_state_degraded",
+        serde_json::json!({
+            "message_id": message_id,
+            "stage": stage,
+            "error": error.to_string(),
+            "physical_submit": true,
+        }),
+    )?;
+    Ok(())
+}
+
 fn rollout_tail_contains_result(
     path: &std::path::Path,
     needle: &str,
@@ -2859,4 +3191,37 @@ fn rollout_tail_contains_result(
     file.take(tail_bytes).read_to_end(&mut buf)?;
     let haystack = String::from_utf8_lossy(&buf);
     Ok(haystack.contains(needle))
+}
+
+#[cfg(test)]
+mod paste_floor_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn state_with_provider(provider: &str) -> serde_json::Value {
+        serde_json::json!({
+            "agents": { "w1": { "provider": provider } }
+        })
+    }
+
+    #[test]
+    fn grok_paste_to_submit_floor_matches_cursor() {
+        let grok = paste_to_submit_floor_for_recipient(&state_with_provider("grok"), "w1");
+        let cursor = paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
+        assert_eq!(grok, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
+        assert_eq!(cursor, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
+        assert_eq!(grok, cursor);
+    }
+
+    #[test]
+    fn claude_and_codex_paste_to_submit_floor_stays_zero() {
+        assert_eq!(
+            paste_to_submit_floor_for_recipient(&state_with_provider("claude"), "w1"),
+            Duration::ZERO
+        );
+        assert_eq!(
+            paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
+            Duration::ZERO
+        );
+    }
 }
