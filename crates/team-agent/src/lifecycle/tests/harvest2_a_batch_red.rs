@@ -229,7 +229,7 @@ got {status:?}"
 #[test]
 #[serial(t3_event)]
 fn t3_unknown_business_status_is_preserved_without_normalized_event() {
-    let harness = McpSimHarness::new();
+    let harness = McpSimHarness::new_without_tmux();
     let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
     let status = "garbage-status-xyz";
     let call = worker.call_tool(
