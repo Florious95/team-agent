@@ -88,8 +88,24 @@ const R8_TEST: &str = concat!(
 /// selected test in a child process so HermeticTestEnv never mutates the parent
 /// test process. This preserves default libtest parallelism without serializing
 /// unrelated tests.
-fn run_process_isolated(_marker: &str, _test_name: &str, body: impl FnOnce()) {
-    body();
+fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
+    if std::env::var_os(marker).is_some() {
+        body();
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("current lib-test executable"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(marker, "1")
+        .output()
+        .expect("run fixture in isolated child test process");
+    assert!(
+        output.status.success(),
+        "isolated child test failed: test={test_name} status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 /// Gate6 CI-hermeticity revision: the R7 fixture must pin the process-ancestry
