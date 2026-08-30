@@ -20,6 +20,7 @@ on:
           - f05-rec002
           - f07-c5-diagnostic
           - f11-e6
+          - f11-e6-cohort
           - f14-containment
           - f14-a3-e2e-default
           - f14-a3-same-composition-e2e-diagnostic
@@ -212,6 +213,9 @@ jobs:
               ;;
             f11-e6)
               cargo test -p team-agent --locked --test e6_offline_mailbox_toname_e2e_contract e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once -- --exact --nocapture
+              ;;
+            f11-e6-cohort)
+              cargo test -p team-agent --locked --test e2e --test e2e_bypass_single_source --test e6_offline_mailbox_toname_contract --test e6_offline_mailbox_toname_e2e_contract -- --nocapture
               ;;
             f14-containment)
               cargo test -p team-agent --locked --test e2e framework::containment_tests::f14_owned_socket_registration_is_exact_and_drop_spares_unregistered_socket -- --exact --nocapture --test-threads=1
