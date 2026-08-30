@@ -36,7 +36,6 @@ pub(crate) struct LifecycleLockRequest<'a> {
 }
 
 pub(crate) struct LifecycleLockGuard {
-    #[allow(dead_code)]
     file: std::fs::File,
 }
 

@@ -201,7 +201,13 @@ impl crate::transport::Transport for LaneTransport {
         r: crate::transport::CaptureRange,
     ) -> Result<crate::transport::CapturedText, crate::transport::TransportError> {
         Ok(crate::transport::CapturedText {
-            text: String::new(),
+            // A fresh worker has reached the ready prompt by the time this
+            // deterministic lifecycle replay observes its pane.  Returning
+            // the stable ready marker keeps the replay focused on the
+            // single-lock transaction instead of burning the provider's
+            // bounded startup-prompt polling interval on an unobservable
+            // empty screen.
+            text: "OpenAI Codex\n›".to_string(),
             range: r,
         })
     }

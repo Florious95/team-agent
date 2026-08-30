@@ -77,6 +77,15 @@ pub fn clone_agent(
         as_agent_id,
         source_session_id.as_ref(),
     );
+    if let Some((session_id, backing_path)) = verified.as_ref() {
+        persist_clone_session(
+            &selected.run_workspace,
+            selected.team_key.as_str(),
+            as_agent_id,
+            session_id,
+            backing_path,
+        )?;
+    }
     let (session_id, backing_path, backing_state) = match verified {
         Some((session_id, backing_path)) => (
             Some(session_id),
@@ -108,13 +117,80 @@ fn read_agent_session(
         .and_then(|agents| agents.get(agent_id.as_str()))?;
     let session = agent
         .get("session_id")
+        .or_else(|| agent.get("_pending_session_id"))
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())?;
     let backing = agent
         .get("rollout_path")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)?;
+        .map(std::path::PathBuf::from)
+        .or_else(|| find_claude_backing(agent, session))?;
     let distinct = source_session_id.is_none_or(|source| source.as_str() != session);
     (distinct && backing.is_file()).then(|| (SessionId::new(session), backing))
+}
+
+fn find_claude_backing(agent: &serde_json::Value, session: &str) -> Option<std::path::PathBuf> {
+    let root = agent
+        .get("claude_projects_root")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".claude/projects"))
+        })?;
+    let target = format!("{session}.jsonl");
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(target.as_str()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn persist_clone_session(
+    workspace: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    session_id: &SessionId,
+    backing_path: &Path,
+) -> Result<(), LifecycleError> {
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace,
+        operation: "clone-session-bind",
+        team: Some(team_key),
+        agent_id: Some(agent_id),
+    })?;
+    let mut state = crate::state::projection::select_runtime_state(workspace, Some(team_key))
+        .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
+    let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    agent.insert(
+        "session_id".to_string(),
+        serde_json::json!(session_id.as_str()),
+    );
+    agent.insert(
+        "rollout_path".to_string(),
+        serde_json::json!(backing_path.to_string_lossy().to_string()),
+    );
+    agent.insert("captured_via".to_string(), serde_json::json!("clone-agent"));
+    crate::lifecycle::launch::save_launched_team_state_for_key(
+        workspace,
+        &state,
+        Some(team_key),
+        Some(agent_id.as_str()),
+    )
 }
