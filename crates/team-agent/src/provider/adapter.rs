@@ -358,6 +358,12 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: false,
             },
+            Provider::Pi => ProviderCaps {
+                resume: true,
+                fork: false,
+                native_mcp_config: false,
+                writes_global_settings: false,
+            },
             Provider::Fake => ProviderCaps {
                 resume: false,
                 fork: false,
@@ -408,6 +414,7 @@ impl ProviderAdapter for BasicProviderAdapter {
             // Cursor: 登录探测未接。U-17 前不得把未观测写成 Present（shim 对
             // `cursor-agent status` 会假绿 Logged in）。缺键 ≠ 已知未登录，故不用 Missing。
             Provider::CursorAgent => AuthHintStatus::Unknown,
+            Provider::Pi => AuthHintStatus::Unknown,
             _ => match auth_mode {
                 AuthMode::Subscription => AuthHintStatus::Present,
                 AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
@@ -491,6 +498,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                 false,
                 None,
             )?),
+            Provider::Pi => Err(ProviderError::Command(
+                "Pi commands require the shared lifecycle materializer".to_string(),
+            )),
             Provider::Fake => Ok(fake_worker_command()),
         }
     }
@@ -645,6 +655,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                     managed_mcp_config: false,
                 })
             }
+            Provider::Pi => Err(ProviderError::Command(
+                "Pi commands require the shared lifecycle materializer".to_string(),
+            )),
             _ => self
                 .build_command_with_tools(
                     ctx.auth_mode,
@@ -843,6 +856,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.insert(2, session_id.as_str().to_string());
                 Ok(argv)
             }
+            Provider::Pi => Err(ProviderError::ResumeUnavailable(
+                "pi resume requires the captured exact session path".to_string(),
+            )),
             Provider::GeminiCli | Provider::Fake => Err(ProviderError::ResumeUnavailable(format!(
                 "{} resume requires session_id",
                 provider_wire(self.provider)
@@ -1068,7 +1084,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push("--fork-session".to_string());
                 Ok(argv)
             }
-            Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => {
+            Provider::Pi | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => {
                 Err(ProviderError::CapabilityUnsupported(format!(
                     "{} does not support native session fork",
                     provider_wire(self.provider)
@@ -1271,6 +1287,12 @@ impl ProviderAdapter for BasicProviderAdapter {
                 r"working|processing",
                 r"Error|panic",
             ),
+            // Pi: 无已验证 turn-state 检测；占位串不会匹配真实 pane chrome。
+            Provider::Pi => patterns(
+                r"pi-idle-unset-until-turn-state",
+                r"pi-busy-unset-until-turn-state",
+                r"pi-error-unset-until-turn-state",
+            ),
             // Grok: 暂无专有 status 正则, 沿用 generic。
             Provider::Grok | Provider::GeminiCli | Provider::Fake => {
                 patterns(r">", r"working|processing", r"Error|Traceback")
@@ -1285,8 +1307,12 @@ impl ProviderAdapter for BasicProviderAdapter {
         }
     }
 
-    fn validate_model(&self, _model: &str) -> Result<bool, ProviderError> {
-        Ok(true)
+    fn validate_model(&self, model: &str) -> Result<bool, ProviderError> {
+        if self.provider != Provider::Pi {
+            return Ok(true);
+        }
+        let (_, catalog) = crate::lifecycle::launch::pi_mcp::resolve_pi_executable_chain()?;
+        Ok(crate::lifecycle::launch::pi_mcp::select_exact_pi_model(&catalog, model).is_ok())
     }
 }
 

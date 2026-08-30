@@ -122,6 +122,7 @@ pub(super) fn candidate_session_files(
             Provider::Copilot
             | Provider::Grok
             | Provider::CursorAgent
+            | Provider::Pi
             | Provider::GeminiCli
             | Provider::Fake => {}
         }

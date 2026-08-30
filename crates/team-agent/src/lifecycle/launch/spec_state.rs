@@ -599,6 +599,7 @@ pub(crate) fn provider_display_str(provider: Provider) -> &'static str {
         Provider::GeminiCli => "gemini_cli",
         Provider::Grok => "grok",
         Provider::CursorAgent => "cursor_agent",
+        Provider::Pi => "pi",
         Provider::Fake => "fake",
     }
 }

@@ -215,7 +215,7 @@ fn latest_explicit_error_fact_for_record(
         Provider::Claude | Provider::ClaudeCode => claude_latest_explicit_error_fact(record),
         // C-3-5 cr verdict: copilot N35 通知不依赖 turn-state 分类;一期 Unknown,
         // 与 GeminiCli/Fake 同精神。二期接 sqlite turns 表后再回填。
-        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
+        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::Pi | Provider::GeminiCli
         | Provider::Fake => None,
     }
 }
@@ -379,7 +379,7 @@ fn extract_lifecycle_facts(
             Provider::Codex => codex_lifecycle_fact(record),
             // C-3-1 cr verdict: copilot lifecycle facts 一期不导出(classify→None,
             // Unknown);二期读 sqlite turns 表(turn_index/assistant_response)。
-            Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
+            Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::Pi | Provider::GeminiCli
             | Provider::Fake => None,
         })
         .collect()

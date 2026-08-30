@@ -236,6 +236,7 @@ impl SmokeTarget {
             Provider::Copilot
             | Provider::Grok
             | Provider::CursorAgent
+            | Provider::Pi
             | Provider::GeminiCli
             | Provider::Fake => {
                 Err("unsupported_provider_smoke_skipped")

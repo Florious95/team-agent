@@ -307,6 +307,8 @@ pub(crate) use mcp_config::{
     write_worker_mcp_config_for_provider,
 };
 
+pub(crate) mod pi_mcp;
+
 mod cursor_mcp;
 pub use cursor_mcp::{
     apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,

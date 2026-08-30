@@ -1349,7 +1349,7 @@ pub(super) fn resume_backing_probe_for_agent(
                     crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
                 })
         }
-        Provider::GeminiCli | Provider::Fake => false,
+        Provider::Pi | Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic

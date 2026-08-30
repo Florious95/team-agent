@@ -36,6 +36,7 @@ pub(crate) fn provider_wire(provider: Provider) -> &'static str {
         Provider::GeminiCli => "gemini_cli",
         Provider::Grok => "grok",
         Provider::CursorAgent => "cursor_agent",
+        Provider::Pi => "pi",
         Provider::Fake => "fake",
     }
 }
@@ -83,6 +84,7 @@ pub(crate) fn requires_resume_backing(provider: Provider) -> bool {
             | Provider::Copilot
             | Provider::Grok
             | Provider::CursorAgent
+            | Provider::Pi
     )
 }
 
@@ -95,6 +97,7 @@ pub(crate) fn provider_model_keys(provider: Provider) -> &'static [&'static str]
         Provider::GeminiCli => &["gemini_cli"],
         Provider::Grok => &["grok"],
         Provider::CursorAgent => &["cursor_agent"],
+        Provider::Pi => &["pi"],
         Provider::Fake => &["fake"],
     }
 }
@@ -106,7 +109,7 @@ pub(crate) fn builtin_provider_model(provider: Provider) -> Option<&'static str>
         // grok: compiler 另有缺 model 硬闸，这里的 builtin 不再被 grok 角色吃到。
         // cursor_agent: 禁止隐式默认（本机 shim 会剥 sonnet-4-thinking）；缺 model 编译失败。
         Provider::Grok => Some("grok-4"),
-        Provider::CursorAgent => None,
+        Provider::CursorAgent | Provider::Pi => None,
         Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }
@@ -130,6 +133,7 @@ pub(crate) fn aliases(provider: Provider) -> &'static [&'static str] {
         // 是 exec 二进制名, 仅作 alias (不参与 command-text 子串匹配, 见
         // leader/provider_attribution.rs TODO)。
         Provider::CursorAgent => &["cursor_agent", "agent"],
+        Provider::Pi => &["pi"],
         Provider::Fake => &["fake"],
     }
 }
@@ -146,6 +150,7 @@ pub(crate) fn command_name(provider: Provider) -> &'static str {
         Provider::GeminiCli => "gemini",
         Provider::Grok => "grok",
         Provider::CursorAgent => "agent",
+        Provider::Pi => "pi",
         Provider::Fake => "team-agent",
     }
 }
@@ -158,6 +163,7 @@ const ALL_PROVIDERS: &[Provider] = &[
     Provider::GeminiCli,
     Provider::Grok,
     Provider::CursorAgent,
+    Provider::Pi,
     Provider::Fake,
 ];
 
