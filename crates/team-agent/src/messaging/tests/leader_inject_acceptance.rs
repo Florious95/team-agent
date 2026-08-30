@@ -106,15 +106,16 @@ fn claimed_leader_delivery_revalidates_a_stale_unattached_snapshot() {
     std::fs::write(&rollout, "").unwrap();
     let current_state = serde_json::json!({
         "active_team_key": "acceptance-team",
+        "session_name": "team-acceptance",
+        "leader_receiver": {
+            "pane_id": "%leader",
+            "status": "attached",
+            "provider": "claude",
+            "rollout_path": rollout,
+        },
         "teams": {
             "acceptance-team": {
                 "session_name": "team-acceptance",
-                "leader_receiver": {
-                    "pane_id": "%leader",
-                    "status": "attached",
-                    "provider": "claude",
-                    "rollout_path": rollout,
-                }
             }
         }
     });
