@@ -1977,7 +1977,7 @@ fn marker_position_from_bottom(text: &str, marker: &str) -> Option<u32> {
     None
 }
 
-fn provider_busy_signal_in_tail(text: &str) -> bool {
+pub(crate) fn provider_busy_signal_in_tail(text: &str) -> bool {
     text.lines()
         .rev()
         .filter(|line| !line.trim().is_empty())

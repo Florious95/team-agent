@@ -1312,6 +1312,9 @@ fn fire_due_scheduled_events_fires_each_scheduled_kind() {
 
 struct UnverifiedInjectTransport {
     readback_visible: bool,
+    final_enter_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    final_enter_succeeds: bool,
+    final_capture: Option<&'static str>,
 }
 impl Transport for UnverifiedInjectTransport {
     fn kind(&self) -> BackendKind {
@@ -1359,11 +1362,21 @@ impl Transport for UnverifiedInjectTransport {
         })
     }
     fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
-        Ok(())
+        if let Some(count) = &self.final_enter_count {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if self.final_enter_succeeds {
+            Ok(())
+        } else {
+            Err(TransportError::Inject {
+                stage: crate::transport::InjectStage::Submit,
+                source: std::io::Error::other("final Enter failed"),
+            })
+        }
     }
     fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
-            text: String::new(),
+            text: self.final_capture.unwrap_or_default().to_string(),
             range,
         })
     }
@@ -1632,6 +1645,9 @@ fn deliver_pending_submit_unverified_is_not_saved_by_readback() {
         &store,
         &UnverifiedInjectTransport {
             readback_visible: true,
+            final_enter_count: None,
+            final_enter_succeeds: true,
+            final_capture: None,
         },
         &message_id,
         &log,
@@ -1682,6 +1698,9 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
         &store,
         &UnverifiedInjectTransport {
             readback_visible: false,
+            final_enter_count: None,
+            final_enter_succeeds: true,
+            final_capture: None,
         },
         &message_id,
         &log,
@@ -1704,6 +1723,116 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
                 == Some("send.failed_notification")
         ),
         "exhausted unverified send must queue a leader-visible notification; got {events:?}"
+    );
+}
+
+#[test]
+fn grok_final_enter_fallback_success_marks_delivered_without_leader_alert() {
+    let ws = tmp_ws("grokfallbacksuccess");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-grokfallbacksuccess",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "grok", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+    let final_enter_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let transport = UnverifiedInjectTransport {
+        readback_visible: true,
+        final_enter_count: Some(std::sync::Arc::clone(&final_enter_count)),
+        final_enter_succeeds: true,
+        final_capture: Some("● working"),
+    };
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
+
+    assert!(out.ok);
+    assert_eq!(out.message_status.0, "delivered");
+    assert_eq!(
+        final_enter_count.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "Grok fallback must send exactly one final Enter"
+    );
+    let events = log.tail(0).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")
+            })
+            .count(),
+        0,
+        "fallback success must not emit terminal send.failed; events={events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("send.failed_notification")
+            )
+            .count(),
+        0,
+        "fallback success must suppress the leader alert; events={events:?}"
+    );
+}
+
+#[test]
+fn grok_final_enter_fallback_failure_alerts_leader_once() {
+    let ws = tmp_ws("grokfallbackfailure");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-grokfallbackfailure",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "grok", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+    let final_enter_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let transport = UnverifiedInjectTransport {
+        readback_visible: true,
+        final_enter_count: Some(std::sync::Arc::clone(&final_enter_count)),
+        final_enter_succeeds: false,
+        final_capture: None,
+    };
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
+
+    assert!(!out.ok);
+    assert_eq!(out.message_status.0, "failed");
+    assert_eq!(
+        final_enter_count.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "Grok fallback failure still gets only one final Enter"
+    );
+    let events = log.tail(0).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")
+            })
+            .count(),
+        1,
+        "fallback failure must emit one terminal send.failed; events={events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("send.failed_notification")
+            )
+            .count(),
+        1,
+        "fallback failure must alert the leader once; events={events:?}"
     );
 }
 
