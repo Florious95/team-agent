@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use crate::lifecycle::launch::pi_mcp::pi_seat_paths;
 use crate::messaging::delivery::{
     paste_to_submit_floor_for_recipient, recipient_allows_explicit_queue_flush, recipient_is_busy,
     recipient_requires_single_enter,
@@ -9,7 +10,7 @@ use crate::messaging::delivery::{
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 use crate::provider::session_scan::{scan_session_candidates_once, CaptureSessionContext};
-use crate::provider::{ProviderError, SessionId};
+use crate::provider::{get_adapter, AuthMode, ProviderError, SessionId};
 
 static NEXT_ROOT: AtomicU32 = AtomicU32::new(0);
 
@@ -198,4 +199,18 @@ fn pi_delivery_submits_one_enter_and_never_flushes_or_retries() {
     );
     assert!(recipient_requires_single_enter(&busy, "worker-a"));
     assert!(!recipient_allows_explicit_queue_flush(&busy, "worker-a"));
+}
+
+#[test]
+fn pi_clone_is_fresh_and_fork_is_not_clone() {
+    let workspace = Path::new("/workspace");
+    let source_paths = pi_seat_paths(workspace, "team-a", "source");
+    let clone_paths = pi_seat_paths(workspace, "team-a", "clone");
+    assert_ne!(source_paths.runtime_root, clone_paths.runtime_root);
+    assert_ne!(source_paths.wrapper, clone_paths.wrapper);
+    assert_ne!(source_paths.sessions, clone_paths.sessions);
+
+    let source_session = SessionId::new("652756ea-aaee-4437-a30f-40c5606826d5");
+    let fork = get_adapter(Provider::Pi).fork(Some(&source_session), AuthMode::Subscription, None);
+    assert!(matches!(fork, Err(ProviderError::CapabilityUnsupported(_))));
 }

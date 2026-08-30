@@ -183,7 +183,11 @@ pub(crate) fn annotate_runtime_tmux_endpoint(
     transport: &dyn Transport,
     workspace: &Path,
 ) {
-    let Some(endpoint) = transport.tmux_endpoint() else {
+    let transport_endpoint = transport.tmux_endpoint();
+    let endpoint = crate::tmux_backend::owning_tmux_endpoint_from_state(state)
+        .map(|(endpoint, _source)| endpoint.to_string())
+        .or_else(|| transport_endpoint.clone());
+    let Some(endpoint) = endpoint else {
         return;
     };
     let endpoint_for_state = if Path::new(&endpoint).is_absolute() || endpoint == "default" {
@@ -208,8 +212,10 @@ pub(crate) fn annotate_runtime_tmux_endpoint(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         );
-        if let Some(source) = selected_tmux_socket_source(transport, workspace) {
-            obj.insert("tmux_socket_source".to_string(), serde_json::json!(source));
+        if transport_endpoint.as_deref() == Some(endpoint.as_str()) {
+            if let Some(source) = selected_tmux_socket_source(transport, workspace) {
+                obj.insert("tmux_socket_source".to_string(), serde_json::json!(source));
+            }
         }
     }
 }

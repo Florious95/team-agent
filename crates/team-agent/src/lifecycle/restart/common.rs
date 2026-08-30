@@ -37,6 +37,7 @@
 //! maturity: wired
 //! ---
 use super::*;
+use crate::transport::Transport;
 
 pub(super) struct SpawnedAgentWindow {
     pub spawn: crate::transport::SpawnResult,
@@ -340,11 +341,15 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref().unwrap_or(""),
     );
-    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
-        workspace,
-        agent_id.as_str(),
-        &mcp_config,
-    )?;
+    let mcp_config_path = if provider == Provider::Pi {
+        None
+    } else {
+        Some(crate::lifecycle::launch::write_worker_mcp_config(
+            workspace,
+            agent_id.as_str(),
+            &mcp_config,
+        )?)
+    };
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -374,20 +379,75 @@ pub(super) fn spawn_agent_window(
         agent_id_hint: Some(agent_id.as_str()),
         effort: restart_effort,
     };
-    let mut plan = match resume_session_id {
-        Some(session_id) => adapter
-            .build_resume_command_plan(Some(session_id), context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        None => adapter
-            .build_command_plan(context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+    let pi_spawn_cwd = (provider == Provider::Pi)
+        .then(|| {
+            agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .flatten();
+    let spawn_cwd = spawn_cwd_override
+        .or(pi_spawn_cwd.as_deref())
+        .unwrap_or(workspace);
+    let mut plan = if provider == Provider::Pi {
+        let model = command_model.ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi restart requires an explicit qualified model".to_string(),
+            )
+        })?;
+        let effort = restart_effort.ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi restart requires an explicit thinking effort".to_string(),
+            )
+        })?;
+        let request = crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+            workspace,
+            team_id: team_id.as_deref().unwrap_or(""),
+            agent_id: agent_id.as_str(),
+            model,
+            effort,
+            system_prompt: &system_prompt,
+            tool_categories: &resolved_tool_refs,
+            team_mcp_tools: &["send_message", "report_result"],
+            mcp_config: &mcp_config,
+        };
+        match resume_session_id {
+            Some(session_id) => {
+                let rollout_path = agent_rollout_path(agent).ok_or_else(|| {
+                    LifecycleError::RequirementUnmet(
+                        "Pi resume requires the persisted exact session path".to_string(),
+                    )
+                })?;
+                crate::lifecycle::launch::pi_mcp::materialize_pi_resume_plan(
+                    request,
+                    session_id,
+                    rollout_path.as_path(),
+                    spawn_cwd,
+                )
+            }
+            None => crate::lifecycle::launch::pi_mcp::materialize_pi_plan(request),
+        }
+        .map_err(|e| LifecycleError::Provider(e.to_string()))?
+    } else {
+        match resume_session_id {
+            Some(session_id) => adapter
+                .build_resume_command_plan(Some(session_id), context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+            None => adapter
+                .build_command_plan(context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+        }
     };
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-        crate::lifecycle::launch::point_native_mcp_config_at_file(
-            &mut plan.argv,
-            provider,
-            &mcp_config_path,
-        );
+        if let Some(mcp_config_path) = mcp_config_path.as_ref() {
+            crate::lifecycle::launch::point_native_mcp_config_at_file(
+                &mut plan.argv,
+                provider,
+                mcp_config_path,
+            );
+        }
     }
     crate::lifecycle::launch::fill_spawn_placeholders_full(
         &mut plan.argv,
@@ -446,8 +506,9 @@ pub(super) fn spawn_agent_window(
     //
     // NOTE: Step 4 will thread the YAML spec down to here so we can honour
     // a per-agent YAML `spawn_cwd` field if one is set. Until then, override
-    // > workspace; state-based override is silently dropped.
-    let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
+    // > workspace; state-based override is silently dropped for existing
+    // providers. Pi is the narrow exception because exact header/path resume
+    // must preserve the captured cwd or refuse.
     // 0.4.x provider effort MVP step 9: scrub CLAUDE_EFFORT for Claude
     // worker spawn so a parent shell env cannot silently override the
     // framework's effort decision.
@@ -912,6 +973,14 @@ pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
             )));
         }
     }
+    if let Some((endpoint, source)) = crate::tmux_backend::owning_tmux_endpoint_from_state(state) {
+        let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+        return Ok(crate::tmux_backend::RuntimeTmuxBackendSelection {
+            tmux_endpoint_used: backend.tmux_endpoint(),
+            backend,
+            tmux_endpoint_source: source,
+        });
+    }
     Ok(
         crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
             run_workspace,
@@ -928,6 +997,9 @@ pub(super) fn lifecycle_worker_tmux_backend_for_state(
     run_workspace: &Path,
     state: &serde_json::Value,
 ) -> crate::tmux_backend::TmuxBackend {
+    if let Some((endpoint, _source)) = crate::tmux_backend::owning_tmux_endpoint_from_state(state) {
+        return crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+    }
     crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(run_workspace, Some(state))
         .backend
 }
@@ -1091,12 +1163,34 @@ fn json_team_identity_matches(existing: &serde_json::Value, compact: &serde_json
 /// returns: 非空的 session_name，缺失时退到默认名
 /// ---
 pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
+    worker_session_name_from_state(state)
+        .map(SessionName::new)
+        .unwrap_or_else(|| SessionName::new("team-agent"))
+}
+
+fn worker_session_name_from_state(state: &serde_json::Value) -> Option<&str> {
     state
         .get("session_name")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(SessionName::new)
-        .unwrap_or_else(|| SessionName::new("team-agent"))
+        .or_else(|| {
+            let team_key = state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)
+                .filter(|team_key| !team_key.is_empty())?;
+            state
+                .get("teams")?
+                .get(team_key)?
+                .pointer("/leader_receiver/session_name")?
+                .as_str()
+                .filter(|session| !session.is_empty())
+        })
+        .or_else(|| {
+            state
+                .pointer("/leader_receiver/session_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|session| !session.is_empty())
+        })
 }
 
 /// ---
@@ -1104,11 +1198,7 @@ pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
 /// returns: 记了则 true
 /// ---
 pub(super) fn session_name_present(state: &serde_json::Value) -> bool {
-    state
-        .get("session_name")
-        .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
+    worker_session_name_from_state(state).is_some()
 }
 
 /// ---
@@ -1349,7 +1439,23 @@ pub(super) fn resume_backing_probe_for_agent(
                     crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
                 })
         }
-        Provider::Pi | Provider::GeminiCli | Provider::Fake => false,
+        Provider::Pi => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            rollout_path.is_some_and(|path| {
+                crate::provider::session_scan::pi::validate_exact_backing(
+                    path.as_path(),
+                    session_id,
+                    &spawn_cwd,
+                )
+                .is_ok()
+            })
+        }
+        Provider::GeminiCli | Provider::Fake => false,
     };
 
     // Deduplicate while preserving order (HashSet would lose deterministic

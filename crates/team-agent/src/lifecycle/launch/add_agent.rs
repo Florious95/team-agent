@@ -20,7 +20,7 @@
 //! boundary:
 //!   - 不拷贝外部角色文件进 team 目录，就地读取编译
 //!   - 起席一律走 restart 的 start_agent_at_paths，本文件不直接 spawn
-//!   - 回滚只恢复 spec 字节与 runtime state，不回收已 spawn 的 pane
+//!   - start path 按 exact pane receipt 回收已 spawn pane；本文件恢复 spec/state，并删除新 Pi 席位的 exact wrapper
 //! maturity: wired
 //! ---
 use std::collections::{BTreeMap, BTreeSet};
@@ -217,18 +217,14 @@ pub fn add_agent(
     ) {
         Ok(selected) => selected,
         Err(_) if workspace.join("TEAM.md").exists() => {
-            // **0.3.24 add-agent socket drift fix**: even on the TEAM.md fallback
-            // path (no spec yet), prefer the state-aware resolver. It reads the
-            // team's persisted `tmux_endpoint` (set at `team-agent launch` time)
-            // and routes the new agent's spawn to the SAME tmux socket the live
-            // team uses. Cold workspaces / first-agent paths safely fall back to
-            // `TmuxBackend::for_workspace(team_workspace)` inside the resolver.
-            let team_ws = team_workspace(workspace);
+            // The MCP server already passes the canonical run workspace here.
+            // Reapplying team_workspace() would strip the scratch root and bind
+            // the first dynamic worker to the parent workspace's tmux server.
             let transport =
                 crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-                    &team_ws, team,
+                    workspace, team,
                 )
-                .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&team_ws));
+                .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(workspace));
             return add_agent_with_transport(
                 workspace,
                 agent_id,
@@ -516,6 +512,28 @@ pub(super) fn maybe_fail_force_recreate_after_spawn() -> Result<(), LifecycleErr
     )))
 }
 
+fn rollback_added_pi_wrapper(
+    run_workspace: &Path,
+    team_key: &str,
+    agent_id: &AgentId,
+    role_meta: &Value,
+) -> Result<(), LifecycleError> {
+    if role_meta.get("provider").and_then(Value::as_str) != Some("pi") {
+        return Ok(());
+    }
+    let wrapper =
+        crate::lifecycle::launch::pi_mcp::pi_seat_paths(run_workspace, team_key, agent_id.as_str())
+            .wrapper;
+    match std::fs::remove_file(&wrapper) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LifecycleError::StatePersist(format!(
+            "failed to roll back added Pi wrapper {}: {error}",
+            wrapper.display()
+        ))),
+    }
+}
+
 /// ---
 /// purpose: 加席的实体实现，含 owner 门、重名拒绝、重编译 spec 原子写、席位 state upsert 与起席
 /// params:
@@ -701,6 +719,8 @@ fn add_agent_with_transport_at_paths_reserved(
     ) {
         Ok(started) => started,
         Err(error) => {
+            let wrapper_rollback =
+                rollback_added_pi_wrapper(run_workspace, &canonical_team_key, agent_id, &meta);
             rollback_add_agent_atomic(
                 run_workspace,
                 &spec_path,
@@ -709,15 +729,42 @@ fn add_agent_with_transport_at_paths_reserved(
                 agent_id,
                 "start_agent_failed",
             );
-            return Err(error);
+            return match wrapper_rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(LifecycleError::StatePersist(format!(
+                    "{error}; {rollback_error}"
+                ))),
+            };
         }
     };
     let (env, start_mode) = match started {
         StartAgentOutcome::Running {
             env, start_mode, ..
         } => (env, start_mode),
-        StartAgentOutcome::Noop { env, .. } => (env, StartMode::Noop),
+        StartAgentOutcome::Noop { .. } => {
+            let wrapper_rollback =
+                rollback_added_pi_wrapper(run_workspace, &canonical_team_key, agent_id, &meta);
+            rollback_add_agent_atomic(
+                run_workspace,
+                &spec_path,
+                pre_spec_text.as_deref(),
+                None,
+                agent_id,
+                "added_agent_noop",
+            );
+            let error = LifecycleError::RequirementUnmet(format!(
+                "newly added agent {agent_id} returned start_agent.noop"
+            ));
+            return match wrapper_rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(LifecycleError::StatePersist(format!(
+                    "{error}; {rollback_error}"
+                ))),
+            };
+        }
         StartAgentOutcome::Paused { .. } => {
+            let wrapper_rollback =
+                rollback_added_pi_wrapper(run_workspace, &canonical_team_key, agent_id, &meta);
             rollback_add_agent_atomic(
                 run_workspace,
                 &spec_path,
@@ -726,9 +773,14 @@ fn add_agent_with_transport_at_paths_reserved(
                 agent_id,
                 "added_agent_paused",
             );
-            return Err(LifecycleError::RequirementUnmet(format!(
-                "added agent {agent_id} is paused"
-            )));
+            let error =
+                LifecycleError::RequirementUnmet(format!("added agent {agent_id} is paused"));
+            return match wrapper_rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(LifecycleError::StatePersist(format!(
+                    "{error}; {rollback_error}"
+                ))),
+            };
         }
     };
     if let Some(reservation) = reservation {

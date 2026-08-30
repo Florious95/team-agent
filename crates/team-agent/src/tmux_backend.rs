@@ -240,6 +240,8 @@ impl TmuxSocketEndpoint {
 pub(crate) enum RuntimeTmuxEndpointSource {
     StateTmuxEndpoint,
     StateTmuxSocket,
+    LeaderReceiverTmuxEndpoint,
+    LeaderReceiverTmuxSocket,
     WorkspaceFallback,
 }
 
@@ -253,6 +255,8 @@ impl RuntimeTmuxEndpointSource {
         match self {
             Self::StateTmuxEndpoint => "state.tmux_endpoint",
             Self::StateTmuxSocket => "state.tmux_socket",
+            Self::LeaderReceiverTmuxEndpoint => "leader_receiver.tmux_endpoint",
+            Self::LeaderReceiverTmuxSocket => "leader_receiver.tmux_socket",
             Self::WorkspaceFallback => "workspace_fallback",
         }
     }
@@ -608,6 +612,50 @@ fn runtime_tmux_endpoint_from_state(
     })
 }
 
+/// ---
+/// purpose: 读取 selected team's persisted leader receiver endpoint
+/// params:
+///   state: 运行期全量或 selected-team 投影 JSON
+/// returns: nested selected receiver 优先，其次投影顶层 receiver；二者都缺则 None
+/// boundary: 只读 owning receiver，不读取普通 tmux_endpoint，不探活
+/// ---
+pub(crate) fn owning_tmux_endpoint_from_state(
+    state: &serde_json::Value,
+) -> Option<(&str, RuntimeTmuxEndpointSource)> {
+    fn receiver_endpoint(state: &serde_json::Value) -> Option<(&str, RuntimeTmuxEndpointSource)> {
+        state
+            .pointer("/leader_receiver/tmux_endpoint")
+            .and_then(serde_json::Value::as_str)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(|endpoint| {
+                (
+                    endpoint,
+                    RuntimeTmuxEndpointSource::LeaderReceiverTmuxEndpoint,
+                )
+            })
+            .or_else(|| {
+                state
+                    .pointer("/leader_receiver/tmux_socket")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|endpoint| !endpoint.is_empty())
+                    .map(|endpoint| {
+                        (
+                            endpoint,
+                            RuntimeTmuxEndpointSource::LeaderReceiverTmuxSocket,
+                        )
+                    })
+            })
+    }
+
+    state
+        .get("active_team_key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|team_key| !team_key.is_empty())
+        .and_then(|team_key| state.get("teams").and_then(|teams| teams.get(team_key)))
+        .and_then(receiver_endpoint)
+        .or_else(|| receiver_endpoint(state))
+}
+
 /// CP-1 socket name: SHORT + DETERMINISTIC per canonical workspace path. `ta-` + 12 hex chars of a
 /// stable FNV-1a hash over the canonicalized path. AF_UNIX `sun_path` is ~104 chars and the socket
 /// lives at `/tmp/tmux-<uid>/<name>`, so we must NOT use the (~88-char) session name. §10: a
@@ -651,6 +699,10 @@ pub fn runtime_tmux_endpoint_from_state_pub(
         let src = match source {
             RuntimeTmuxEndpointSource::StateTmuxEndpoint => "state.tmux_endpoint",
             RuntimeTmuxEndpointSource::StateTmuxSocket => "state.tmux_socket",
+            RuntimeTmuxEndpointSource::LeaderReceiverTmuxEndpoint => {
+                "leader_receiver.tmux_endpoint"
+            }
+            RuntimeTmuxEndpointSource::LeaderReceiverTmuxSocket => "leader_receiver.tmux_socket",
             RuntimeTmuxEndpointSource::WorkspaceFallback => "workspace_fallback",
         };
         (endpoint.to_string(), src)

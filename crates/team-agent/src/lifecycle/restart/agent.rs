@@ -399,85 +399,97 @@ pub(crate) fn start_agent_at_paths(
         return Err(error);
     }
     let actual_spawn_window = spawn.spawn.window.as_str().to_string();
-    mark_agent_started(
-        &mut state,
-        agent_id,
-        &actual_spawn_window,
-        &spawn,
-        transport,
-        &safety,
-        start_mode,
-    )?;
-    // 0.5.66 bypass 单源 §2.7:启动即带 bypass → 审计留痕。
-    if safety.enabled {
-        let state_agent = state
-            .get("agents")
-            .and_then(|v| v.get(agent_id.as_str()));
-        let _ = crate::event_log::EventLog::new(workspace).write(
-            "worker.spawn_dangerously_skip_permissions",
-            serde_json::json!({
-                "agent_id": agent_id.as_str(),
-                "role": state_agent
-                    .and_then(|a| a.get("role"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-                "provider": state_agent
-                    .and_then(|a| a.get("provider"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-                "trigger": "start-agent",
-                "spec_source_path": crate::lifecycle::launch::agent_id_spec_source_path(
-                    workspace, agent_id.as_str(),
-                ),
-            }),
+    let post_spawn = (|| -> Result<bool, LifecycleError> {
+        mark_agent_started(
+            &mut state,
+            agent_id,
+            &actual_spawn_window,
+            &spawn,
+            transport,
+            &safety,
+            start_mode,
+        )?;
+        // 0.5.66 bypass 单源 §2.7:启动即带 bypass → 审计留痕。
+        if safety.enabled {
+            let state_agent = state.get("agents").and_then(|v| v.get(agent_id.as_str()));
+            let _ = crate::event_log::EventLog::new(workspace).write(
+                "worker.spawn_dangerously_skip_permissions",
+                serde_json::json!({
+                    "agent_id": agent_id.as_str(),
+                    "role": state_agent
+                        .and_then(|a| a.get("role"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                    "provider": state_agent
+                        .and_then(|a| a.get("provider"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                    "trigger": "start-agent",
+                    "spec_source_path": crate::lifecycle::launch::agent_id_spec_source_path(
+                        workspace, agent_id.as_str(),
+                    ),
+                }),
+            );
+        }
+        // **0.3.24 add-agent socket drift fix**: keep `state.tmux_endpoint` /
+        // `state.tmux_socket` synchronized with the transport actually used for the
+        // spawn. Without this, add-agent / fork-agent could spawn to a socket that
+        // never gets persisted, and the next coordinator tick would re-resolve to
+        // the workspace-hash socket and lose the new pane. Annotation runs inside
+        // the same `save_restart_projected_state` window — no parallel "annotate
+        // after spawn" race with coordinator and no double source of truth.
+        crate::lifecycle::launch::annotate_runtime_tmux_endpoint(&mut state, transport, workspace);
+        let team_key = restart_projection_team_key(&state, team);
+        // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+        // clear the matching `agent_health` observation on the new spawn cohort
+        // so five-line status summary and status --json do not surface a stale
+        // WORKING row from the pre-shutdown process. Best-effort: DB failure
+        // must not fail the start-agent path.
+        let _ = crate::db::agent_health_capture::clear_agent_health_observation(
+            workspace, &team_key, agent_id,
         );
-    }
-    // **0.3.24 add-agent socket drift fix**: keep `state.tmux_endpoint` /
-    // `state.tmux_socket` synchronized with the transport actually used for the
-    // spawn. Without this, add-agent / fork-agent could spawn to a socket that
-    // never gets persisted, and the next coordinator tick would re-resolve to
-    // the workspace-hash socket and lose the new pane. Annotation runs inside
-    // the same `save_restart_projected_state` window — no parallel "annotate
-    // after spawn" race with coordinator and no double source of truth.
-    crate::lifecycle::launch::annotate_runtime_tmux_endpoint(&mut state, transport, workspace);
-    let team_key = restart_projection_team_key(&state, team);
-    // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
-    // clear the matching `agent_health` observation on the new spawn cohort
-    // so five-line status summary and status --json do not surface a stale
-    // WORKING row from the pre-shutdown process. Best-effort: DB failure
-    // must not fail the start-agent path.
-    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
-        workspace, &team_key, agent_id,
-    );
-    let skip_capture_backfill = if matches!(
-        start_mode,
-        StartMode::Fresh | StartMode::FreshAfterMissingRollout
-    ) {
-        vec![agent_id.as_str()]
-    } else {
-        Vec::new()
+        let skip_capture_backfill = if matches!(
+            start_mode,
+            StartMode::Fresh | StartMode::FreshAfterMissingRollout
+        ) {
+            vec![agent_id.as_str()]
+        } else {
+            Vec::new()
+        };
+        save_restart_projected_state_with_capture_backfill_skip(
+            workspace,
+            &mut state,
+            &team_key,
+            &skip_capture_backfill,
+            &[agent_id.as_str()],
+        )?;
+        write_start_agent_start_event(
+            workspace,
+            agent_id,
+            &agent,
+            provider,
+            &spawn.plan,
+            start_mode,
+            &session_name,
+            &actual_spawn_window,
+            spawn_session_id,
+            tmux_start_mode_for_spawn(&spawn, into_existing_session),
+        )?;
+        replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
+        Ok(start_coordinator_for_workspace(workspace, Some(&team_key))?.ok)
+    })();
+    let coordinator_started = match post_spawn {
+        Ok(started) => started,
+        Err(error) => {
+            if let Err(rollback_error) = transport.kill_pane(&spawn.spawn.pane_id) {
+                return Err(LifecycleError::RequirementUnmet(format!(
+                    "{error}; failed to roll back spawned pane {}: {rollback_error}",
+                    spawn.spawn.pane_id.as_str()
+                )));
+            }
+            return Err(error);
+        }
     };
-    save_restart_projected_state_with_capture_backfill_skip(
-        workspace,
-        &mut state,
-        &team_key,
-        &skip_capture_backfill,
-        &[agent_id.as_str()],
-    )?;
-    write_start_agent_start_event(
-        workspace,
-        agent_id,
-        &agent,
-        provider,
-        start_mode,
-        &session_name,
-        &actual_spawn_window,
-        spawn_session_id,
-        tmux_start_mode_for_spawn(&spawn, into_existing_session),
-    )?;
-    replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
-    let coordinator = start_coordinator_for_workspace(workspace, Some(&team_key))?;
-    let coordinator_started = coordinator.ok;
     Ok(StartAgentOutcome::Running {
         env: AgentActionEnvelope {
             agent_id: agent_id.clone(),
@@ -1772,95 +1784,13 @@ fn write_start_agent_start_event(
     agent_id: &AgentId,
     agent: &serde_json::Value,
     provider: crate::provider::Provider,
+    plan: &crate::provider::CommandPlan,
     start_mode: StartMode,
     session_name: &SessionName,
     window: &str,
     session_id: Option<&SessionId>,
     tmux_start_mode: &'static str,
 ) -> Result<(), LifecycleError> {
-    let auth_mode = agent_auth_mode(agent);
-    let model = agent.get("model").and_then(|v| v.as_str());
-    let adapter = crate::provider::get_adapter(provider);
-    // Contract C / F6.4: event log must record the same context-aware argv that the
-    // actual spawn used — so the role/tools/MCP context appears in `start_agent.agent_start`.
-    let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
-        agent,
-        Some(agent_id.as_str()),
-        provider,
-    )?;
-    let system_prompt =
-        crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
-    let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
-        &command_agent,
-        provider,
-    )?;
-    let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
-    let mcp_config = adapter
-        .mcp_config(auth_mode)
-        .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-    let team_id = agent.get("owner_team_id").and_then(|v| v.as_str());
-    let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
-        mcp_config,
-        workspace,
-        agent_id.as_str(),
-        team_id.unwrap_or(""),
-    );
-    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
-        workspace,
-        agent_id.as_str(),
-        &mcp_config,
-    )?;
-    let profile_launch =
-        crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
-            workspace,
-            agent_id.as_str(),
-            agent,
-            Some(&mcp_config),
-        )?;
-    let command_model = profile_launch.command_overrides.model.as_deref().or(model);
-    // 0.4.x provider effort MVP: start_agent path preserves effort from the
-    // persisted agent JSON.
-    let start_agent_effort =
-        crate::lifecycle::launch::provider_effort_for_spawn_json(&agent, provider);
-    if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
-        &agent,
-        provider,
-        agent_id.as_str(),
-    ) {
-        let _ = crate::event_log::EventLog::new(workspace)
-            .write("provider.effort_unsupported", event_value);
-    }
-    let context = crate::provider::ProviderCommandContext {
-        auth_mode,
-        mcp_config: Some(&mcp_config),
-        system_prompt: Some(system_prompt.as_str()),
-        model: command_model,
-        tools: &resolved_tool_refs,
-        profile_launch: Some(&profile_launch),
-        agent_id_hint: Some(agent_id.as_str()),
-        effort: start_agent_effort,
-    };
-    let mut plan = match session_id {
-        Some(session_id) => adapter
-            .build_resume_command_plan(Some(session_id), context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        None => adapter
-            .build_command_plan(context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-    };
-    if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-        crate::lifecycle::launch::point_native_mcp_config_at_file(
-            &mut plan.argv,
-            provider,
-            &mcp_config_path,
-        );
-    }
-    crate::lifecycle::launch::fill_spawn_placeholders_full(
-        &mut plan.argv,
-        workspace,
-        agent_id.as_str(),
-        team_id,
-    );
     crate::event_log::EventLog::new(workspace)
         .write(
             "start_agent.agent_start",

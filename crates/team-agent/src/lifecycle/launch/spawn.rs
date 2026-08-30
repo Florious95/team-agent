@@ -135,12 +135,16 @@ pub(super) fn spawn_agents(
             .mcp_config(auth_mode)
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         let mcp_config = resolve_mcp_config(mcp_config, workspace, agent_id_raw, &mcp_team_id);
-        let mcp_config_path = write_worker_mcp_config_for_provider(
-            workspace,
-            agent_id_raw,
-            &mcp_config,
-            Some(provider),
-        )?;
+        let mcp_config_path = if provider == Provider::Pi {
+            None
+        } else {
+            Some(write_worker_mcp_config_for_provider(
+                workspace,
+                agent_id_raw,
+                &mcp_config,
+                Some(provider),
+            )?)
+        };
         let profile_dir = team_dir.join("profiles");
         let profile_launch =
             crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
@@ -159,24 +163,54 @@ pub(super) fn spawn_agents(
             let _ = crate::event_log::EventLog::new(workspace)
                 .write("provider.effort_unsupported", event_value);
         }
-        let mut plan = adapter
-            .build_command_plan(crate::provider::ProviderCommandContext {
-                auth_mode,
-                mcp_config: Some(&mcp_config),
-                system_prompt: Some(system_prompt.as_str()),
-                model: command_model,
-                tools: &resolved_tool_refs,
-                profile_launch: Some(&profile_launch),
-                // Layer 1 self-healing (architect probe 2026-06-22): expose
-                // agent_id as a display-name hint so Claude / Copilot
-                // adapters can pass `--name <agent_id>`. Codex has no
-                // equivalent flag and ignores the hint.
-                agent_id_hint: Some(agent_id_raw),
-                effort: agent_effort,
-            })
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?;
+        let command_context = crate::provider::ProviderCommandContext {
+            auth_mode,
+            mcp_config: Some(&mcp_config),
+            system_prompt: Some(system_prompt.as_str()),
+            model: command_model,
+            tools: &resolved_tool_refs,
+            profile_launch: Some(&profile_launch),
+            // Layer 1 self-healing (architect probe 2026-06-22): expose
+            // agent_id as a display-name hint so Claude / Copilot
+            // adapters can pass `--name <agent_id>`. Codex has no
+            // equivalent flag and ignores the hint.
+            agent_id_hint: Some(agent_id_raw),
+            effort: agent_effort,
+        };
+        let mut plan = if provider == Provider::Pi {
+            let model = command_model.ok_or_else(|| {
+                LifecycleError::RequirementUnmet(
+                    "Pi launch requires an explicit qualified model".to_string(),
+                )
+            })?;
+            let effort = agent_effort.ok_or_else(|| {
+                LifecycleError::RequirementUnmet(
+                    "Pi launch requires an explicit thinking effort".to_string(),
+                )
+            })?;
+            crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
+                crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+                    workspace,
+                    team_id: &mcp_team_id,
+                    agent_id: agent_id_raw,
+                    model,
+                    effort,
+                    system_prompt: &system_prompt,
+                    tool_categories: &resolved_tool_refs,
+                    team_mcp_tools: &["send_message", "report_result"],
+                    mcp_config: &mcp_config,
+                },
+            )
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?
+        } else {
+            adapter
+                .build_command_plan(command_context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?
+        };
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-            point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
+            if let Some(mcp_config_path) = mcp_config_path.as_ref() {
+                point_native_mcp_config_at_file(&mut plan.argv, provider, mcp_config_path);
+            }
         }
         // C-A-4 cr verdict v2 — Copilot BYOK(compatible_api)硬性校验:
         // "A model is required for BYOK"(help-providers 原文)。检查 agent
