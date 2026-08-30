@@ -164,8 +164,9 @@ fn red_v3_residual_sweep_must_not_reap_leaders_tmux_server() {
     if pid_alive(fixture.worker_pid) {
         failures.push(format!(
             "sanity: worker pane process {} must die in bare shutdown (server-only protection, \
-NOT a tree protection)",
-            fixture.worker_pid
+NOT a tree protection); stat={:?}",
+            fixture.worker_pid,
+            process_stat(fixture.worker_pid)
         ));
     }
     if !pid_alive(server_pid) {
@@ -323,11 +324,19 @@ fn wait_pid_for_cmdline(unique_path: &Path) -> u32 {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    process_stat(pid).is_some_and(|stat| !stat.starts_with('Z'))
+}
+
+fn process_stat(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!stat.is_empty()).then_some(stat)
 }
 
 /// State fixture mirroring the real-machine `.team/runtime/state.json` shape
