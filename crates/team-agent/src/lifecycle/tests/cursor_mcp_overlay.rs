@@ -28,6 +28,7 @@ use team_agent::provider::McpConfig;
 use team_agent::transport::test_support::OfflineTransport;
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_overlay_writes_identity_into_mcp_json_env() {
     let ws = tmp_dir("cursor-mcp-id");
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("seat-a", &ws.to_string_lossy()))
@@ -70,6 +71,7 @@ fn cursor_overlay_writes_identity_into_mcp_json_env() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_overlay_refuses_missing_identity() {
     let ws = tmp_dir("cursor-mcp-missing-id");
     let cfg = McpConfig {
@@ -94,6 +96,7 @@ fn cursor_overlay_refuses_missing_identity() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_overlay_keeps_unrelated_servers_and_replaces_orchestrator() {
     let ws = tmp_dir("cursor-mcp-merge");
     let dir = ws.join(".cursor");
@@ -128,6 +131,7 @@ fn cursor_overlay_keeps_unrelated_servers_and_replaces_orchestrator() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_second_seat_keeps_both_identities_when_isolated() {
     let ws = tmp_dir("cursor-mcp-two");
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("first", "/ws")).expect("first");
@@ -145,6 +149,7 @@ fn cursor_second_seat_keeps_both_identities_when_isolated() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 #[serial(env)]
 fn cursor_shared_overlay_last_writer_is_the_destruction_tooth() {
     let previous = std::env::var("TEAM_AGENT_CURSOR_MCP_ISOLATION").ok();
@@ -165,6 +170,7 @@ fn cursor_shared_overlay_last_writer_is_the_destruction_tooth() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_enable_argv_is_documented_subcommand_without_workspace_flag() {
     let argv = cursor_mcp_enable_argv();
     assert_eq!(
@@ -179,6 +185,7 @@ fn cursor_enable_argv_is_documented_subcommand_without_workspace_flag() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_enable_failure_preserves_cwd_config_identity_and_redacted_stderr() {
     let ws = tmp_dir("cursor-enable-diagnostic");
     apply_cursor_mcp_overlay(
@@ -243,6 +250,7 @@ fn cursor_enable_failure_preserves_cwd_config_identity_and_redacted_stderr() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_workspace_flag_is_rewritten_to_physical_path() {
     let ws = tmp_dir("cursor-phys");
     let mut argv = vec![
@@ -256,6 +264,7 @@ fn cursor_workspace_flag_is_rewritten_to_physical_path() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_spawn_pointers_use_per_seat_workspace_and_add_dir() {
     let ws = tmp_dir("cursor-pointers");
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("seat-p", &ws.to_string_lossy()))
@@ -277,6 +286,7 @@ fn cursor_spawn_pointers_use_per_seat_workspace_and_add_dir() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 #[serial(env)]
 fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
     let prev = std::env::var("HTTPS_PROXY").ok();
@@ -302,6 +312,7 @@ fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn cursor_spawn_writes_identity_into_project_mcp_json() {
     let ws = tmp_dir("cursor-mcp-spawn");
     let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
@@ -413,6 +424,7 @@ fn restore_isolation_env(previous: Option<String>) {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 fn refuse_second_allows_when_isolation_on() {
     let ws = tmp_dir("cursor-refuse-iso-on");
     let spec = team_agent::model::yaml::loads(
@@ -423,6 +435,7 @@ fn refuse_second_allows_when_isolation_on() {
 }
 
 #[test]
+#[serial(cursor_mcp_isolation)]
 #[serial(env)]
 fn refuse_second_still_blocks_when_isolation_disabled() {
     let previous = std::env::var("TEAM_AGENT_CURSOR_MCP_ISOLATION").ok();
