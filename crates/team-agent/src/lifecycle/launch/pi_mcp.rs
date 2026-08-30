@@ -26,14 +26,7 @@ use crate::model::enums::ProviderEffort;
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 use crate::provider::{CommandPlan, McpConfig, ProviderError, SessionId};
 
-const PI_VERSION: &str = "0.84.3";
 const ADAPTER_NAME: &str = "pi-mcp-adapter";
-const ADAPTER_VERSION: &str = "2.30.0";
-const ADAPTER_ENTRY: &str = "./index.ts";
-const ADAPTER_PACKAGE_SHA256: &str =
-    "ce8b8b6154e83e9732c58bd993e7ed69390617616f4f0e7330274d5ee9e2f620";
-const ADAPTER_INDEX_SHA256: &str =
-    "16d260ac25b66346baab6ecef76680324336953bafc7be8cf95b3df5c611b89e";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PiExecutableFileType {
@@ -224,32 +217,54 @@ pub(crate) fn verify_started_pi_model(selected: &str, observed: &str) -> Result<
 }
 
 /// ---
-/// purpose: 校验首版支持的 pi-mcp-adapter package/version/entry/digests
-/// returns: 所有 identity 字段命中冻结 snapshot 时成功
-/// errors: 任一字段漂移时返回 ProviderError
+/// purpose: 校验 pi-mcp-adapter 的公共 package/entry 能力
+/// returns: package identity 与可解析的 absolute entry 完整时成功
+/// errors: package 或 entry 缺失时返回 ProviderError；version/digests 仅保留为观测值
 /// ---
 pub(crate) fn validate_pi_adapter_identity(
     identity: &PiAdapterIdentity,
 ) -> Result<(), ProviderError> {
     if identity.package_name != ADAPTER_NAME
-        || identity.version != ADAPTER_VERSION
-        || identity.extension_entry != ADAPTER_ENTRY
+        || identity.extension_entry.is_empty()
         || !identity.package_json.is_absolute()
         || !identity.index_ts.is_absolute()
-        || identity.package_json_sha256 != ADAPTER_PACKAGE_SHA256
-        || identity.index_ts_sha256 != ADAPTER_INDEX_SHA256
     {
         return Err(ProviderError::Command(
-            "Pi MCP adapter identity does not match the supported 2.30.0 snapshot".to_string(),
+            "Pi MCP adapter package or extension entry is not resolvable".to_string(),
         ));
     }
+    let package_root = identity.package_json.parent().ok_or_else(|| {
+        ProviderError::Command("Pi MCP adapter package root is not resolvable".to_string())
+    })?;
+    let extension_entry = Path::new(&identity.extension_entry);
+    if extension_entry.is_absolute() {
+        return Err(ProviderError::Command(
+            "Pi MCP adapter extension entry must be package-relative".to_string(),
+        ));
+    }
+    let declared_entry =
+        std::fs::canonicalize(package_root.join(extension_entry)).map_err(|error| {
+            ProviderError::Io(format!(
+                "Pi MCP adapter extension entry {}: {error}",
+                identity.index_ts.display()
+            ))
+        })?;
+    let loaded_entry = std::fs::canonicalize(&identity.index_ts)
+        .map_err(|error| ProviderError::Io(format!("{}: {error}", identity.index_ts.display())))?;
+    if declared_entry != loaded_entry || !identity.package_json.is_file() {
+        return Err(ProviderError::Command(
+            "Pi MCP adapter package or extension entry is not loadable".to_string(),
+        ));
+    }
+    std::fs::read(&loaded_entry)
+        .map_err(|error| ProviderError::Io(format!("{}: {error}", loaded_entry.display())))?;
     Ok(())
 }
 
 /// ---
-/// purpose: 校验 Pi launch/real path、版本、catalog 与 adapter identity
-/// returns: 首版冻结 executable chain 完整时成功
-/// errors: 缺路径或 identity 漂移时返回 ProviderError
+/// purpose: 校验 Pi launch/real path、catalog 与 adapter 公共能力
+/// returns: executable chain 与 capability receipts 完整时成功
+/// errors: 缺路径、catalog receipt 或 adapter capability 时返回 ProviderError
 /// ---
 pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<(), ProviderError> {
     if !chain.path_entry.is_absolute()
@@ -258,7 +273,6 @@ pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<
         || chain.path_entry_type != PiExecutableFileType::Wrapper
         || chain.launch_executable != chain.path_entry
         || chain.real_binary == chain.launch_executable
-        || chain.pi_version != PI_VERSION
         || chain.catalog_sha256.len() != 64
         || !chain
             .catalog_sha256
@@ -267,7 +281,7 @@ pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<
         || chain.catalog_sha256.bytes().all(|byte| byte == b'0')
     {
         return Err(ProviderError::Command(
-            "Pi executable chain does not match the supported 0.84.3 snapshot".to_string(),
+            "Pi executable chain does not provide the required public protocol".to_string(),
         ));
     }
     validate_pi_adapter_identity(&chain.adapter)
@@ -404,11 +418,14 @@ pub(crate) fn validate_pi_wrapper_source(
     if !source.contains(adapter_path.as_ref())
         || !source.contains(candidate.as_ref())
         || !source.contains("createMcpAdapter")
+        || !source.contains("mcpServers")
+        || !source.contains("team_orchestrator")
         || !source.contains("lazy")
         || !source.contains("directTools")
         || !source.contains("false")
         || !source.contains("toolPrefix")
         || !source.contains("server")
+        || !source.contains("includeTools")
         || source.contains("--mcp-config")
     {
         return Err(ProviderError::Command(
@@ -638,7 +655,7 @@ fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, Pr
 /// ---
 /// purpose: 从当前 PATH 环境测量 Pi launch/real executable、catalog 与 adapter
 /// returns: 已验证的 chain 与同次 live catalog exact ids
-/// errors: 缺失、命令失败或任一冻结 identity 漂移时返回 ProviderError
+/// errors: 缺失、命令失败或任一公共 protocol capability 缺失时返回 ProviderError
 /// ---
 pub(crate) fn resolve_pi_executable_chain(
 ) -> Result<(PiExecutableChain, Vec<String>), ProviderError> {
@@ -658,11 +675,6 @@ pub(crate) fn resolve_pi_executable_chain(
             ProviderError::Command(format!("Pi version output is not UTF-8: {error}"))
         })?;
     let version = version.trim().to_string();
-    if version != PI_VERSION {
-        return Err(ProviderError::Command(format!(
-            "unsupported Pi version {version:?}; expected {PI_VERSION}"
-        )));
-    }
     let launch_identity = std::fs::canonicalize(&path_entry)
         .map_err(|error| ProviderError::Io(format!("{}: {error}", path_entry.display())))?;
     let real_binary = path_entries
@@ -676,18 +688,12 @@ pub(crate) fn resolve_pi_executable_chain(
                 "Pi PATH wrapper has no independently resolved real executable".to_string(),
             )
         })?;
-    let real_version =
+    let _real_version =
         String::from_utf8(command_stdout(&real_binary, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!(
                 "Pi real binary version output is not UTF-8: {error}"
             ))
         })?;
-    if real_version.trim() != PI_VERSION {
-        return Err(ProviderError::Command(format!(
-            "unsupported Pi real binary version {:?}; expected {PI_VERSION}",
-            real_version.trim()
-        )));
-    }
     let catalog = command_stdout(&path_entry, &["--list-models"])?;
     let models = parse_pi_list_models_table(&catalog)?;
     let adapter = discover_pi_adapter(&path_entry)?;
