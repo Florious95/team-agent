@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serial_test::serial;
+use sha2::{Digest, Sha256};
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::lifecycle::{
     apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
@@ -174,6 +175,70 @@ fn cursor_enable_argv_is_documented_subcommand_without_workspace_flag() {
             "enable".to_string(),
             "team_orchestrator".to_string()
         ]
+    );
+}
+
+#[test]
+fn cursor_enable_failure_preserves_cwd_config_identity_and_redacted_stderr() {
+    let ws = tmp_dir("cursor-enable-diagnostic");
+    apply_cursor_mcp_overlay(
+        &ws,
+        &sample_mcp_config("diagnostic-seat", &ws.to_string_lossy()),
+    )
+    .expect("write fake cursor overlay");
+    let cwd = physical_workspace_path(&cursor_mcp_project_dir(&ws, "diagnostic-seat").unwrap());
+    let config_path = cwd.join(".cursor/mcp.json");
+    let config_body = std::fs::read(&config_path).expect("read fake overlay identity");
+    let config_metadata = std::fs::metadata(&config_path).expect("fake overlay metadata");
+    let expected_hash = format!("{:x}", Sha256::digest(&config_body));
+    let benign = format!("benign first-enable diagnostic {}", "x".repeat(700));
+    let secret_value = "must-not-leak-secret-value";
+    let stderr =
+        format!("{benign}\nAuthorization: Bearer sk-{secret_value} token={secret_value}\n");
+    let argv = cursor_mcp_enable_argv();
+    let error = LifecycleError::cursor_mcp_enable_failure(
+        &argv,
+        &cwd,
+        Some(23),
+        b"out",
+        stderr.as_bytes(),
+        None,
+    );
+    let LifecycleError::RequirementUnmet(report) = error else {
+        panic!("expected RequirementUnmet diagnostic")
+    };
+
+    assert!(report.contains("argv: agent mcp enable team_orchestrator"));
+    assert!(report.contains(&format!("cwd: {}", cwd.display())));
+    assert!(report.contains(&format!("config_path: {}", config_path.display())));
+    assert!(report.contains("config_exists: true"));
+    assert!(report.contains(&format!("config_size: {}", config_body.len())));
+    assert!(report.contains(&format!("config_sha256: {expected_hash}")));
+    assert!(report.contains("stdout_len: 3"));
+    assert!(report.contains(&format!("stderr_len: {}", stderr.len())));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(report.contains(&format!(
+            "config_mode: 0o{:o}",
+            config_metadata.permissions().mode()
+        )));
+    }
+    #[cfg(not(unix))]
+    assert!(report.contains("config_mode: unavailable_non_unix"));
+
+    let safe = report
+        .lines()
+        .find_map(|line| line.strip_prefix("stderr_first_safe: "))
+        .expect("bounded benign stderr must be retained");
+    assert!(safe.starts_with("benign first-enable diagnostic"));
+    assert_eq!(safe.len(), 512, "safe stderr must be capped at 512 bytes");
+    assert!(!report.contains("Authorization"));
+    assert!(!report.contains("Bearer"));
+    assert!(!report.contains(secret_value));
+    assert!(
+        !report.contains("TEAM_AGENT_AUTH_MODE"),
+        "diagnostic must not include overlay JSON contents"
     );
 }
 

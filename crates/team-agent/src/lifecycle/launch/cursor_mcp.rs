@@ -26,6 +26,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 use crate::lifecycle::LifecycleError;
 use crate::model::yaml::Value as YamlValue;
 use crate::provider::wire::command_name;
@@ -43,6 +45,123 @@ const REQUIRED_IDENTITY_KEYS: &[&str] = &[
     "TEAM_AGENT_OWNER_TEAM_ID",
     "TEAM_AGENT_AUTH_MODE",
 ];
+
+const CURSOR_ENABLE_STDERR_MAX_BYTES: usize = 512;
+const CURSOR_ENABLE_SECRET_INDICATORS: &[&str] = &[
+    "authorization",
+    "bearer",
+    "api_key",
+    "cookie",
+    "password",
+    "token=",
+    "sk-",
+];
+
+impl LifecycleError {
+    pub(crate) fn cursor_mcp_enable_failure(
+        argv: &[String],
+        physical_cwd: &Path,
+        exit_code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        spawn_error: Option<&str>,
+    ) -> Self {
+        let config_path = physical_cwd.join(".cursor").join("mcp.json");
+        let metadata = std::fs::metadata(&config_path).ok();
+        let config_exists = metadata.is_some();
+        let config_size = metadata
+            .as_ref()
+            .map(|value| value.len().to_string())
+            .unwrap_or_else(|| "unavailable".to_string());
+        #[cfg(unix)]
+        let config_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata
+                .as_ref()
+                .map(|value| format!("0o{:o}", value.permissions().mode()))
+                .unwrap_or_else(|| "unavailable".to_string())
+        };
+        #[cfg(not(unix))]
+        let config_mode = "unavailable_non_unix".to_string();
+        let config_sha256 = std::fs::read(&config_path)
+            .ok()
+            .map(|body| format!("{:x}", Sha256::digest(body)))
+            .unwrap_or_else(|| "unavailable".to_string());
+        let stderr_fact = bounded_safe_cursor_stderr(stderr)
+            .map(|safe| format!("stderr_first_safe: {safe}"))
+            .unwrap_or_else(|| "stderr_redacted".to_string());
+        let (reason, action) = match spawn_error {
+            Some(error) => (
+                format!("cannot run cursor MCP enable: {error}"),
+                format!(
+                    "install cursor-agent on PATH (same binary as `{}`) and retry",
+                    argv[0]
+                ),
+            ),
+            None => (
+                "without enable, cursor keeps MCP as not loaded (needs approval)".to_string(),
+                format!(
+                    "from that directory run `{} mcp enable team_orchestrator`",
+                    argv[0]
+                ),
+            ),
+        };
+        LifecycleError::RequirementUnmet(format!(
+            "error: `{}` failed (exit {})\n\
+             reason: {reason}\n\
+             argv: {}\n\
+             cwd: {}\n\
+             config_path: {}\n\
+             config_exists: {config_exists}\n\
+             config_mode: {config_mode}\n\
+             config_size: {config_size}\n\
+             config_sha256: {config_sha256}\n\
+             stdout_len: {}\n\
+             stderr_len: {}\n\
+             {stderr_fact}\n\
+             action: {action}",
+            argv.join(" "),
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unavailable".to_string()),
+            argv.join(" "),
+            physical_cwd.display(),
+            config_path.display(),
+            stdout.len(),
+            stderr.len(),
+        ))
+    }
+}
+
+fn bounded_safe_cursor_stderr(stderr: &[u8]) -> Option<String> {
+    let stderr = String::from_utf8_lossy(stderr);
+    let mut safe = String::new();
+    'lines: for line in stderr.lines() {
+        let lower = line.to_ascii_lowercase();
+        if CURSOR_ENABLE_SECRET_INDICATORS
+            .iter()
+            .any(|indicator| lower.contains(indicator))
+        {
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !safe.is_empty() {
+            if safe.len() == CURSOR_ENABLE_STDERR_MAX_BYTES {
+                break;
+            }
+            safe.push('\n');
+        }
+        for character in line.chars() {
+            if safe.len() + character.len_utf8() > CURSOR_ENABLE_STDERR_MAX_BYTES {
+                break 'lines;
+            }
+            safe.push(character);
+        }
+    }
+    (!safe.is_empty()).then_some(safe)
+}
 
 /// ---
 /// purpose: 给出 workspace 的物理路径
@@ -324,7 +443,7 @@ pub fn cursor_mcp_enable_argv() -> Vec<String> {
 /// ---
 /// purpose: 在工程根下执行 cursor 的 MCP 启用命令（getcwd 分片，不改 HOME）
 /// returns: 测试隔离环境或显式跳过标志下直接成功，避免写用户全局配置
-/// errors: 命令跑不起来或退出码非零时返回 RequirementUnmet，错误里只记输出长度不记内容
+/// errors: 命令跑不起来或退出码非零时返回 RequirementUnmet，附带有界脱敏诊断但不读出 json 内容
 /// ---
 pub fn enable_cursor_workspace_mcp(
     workspace: &Path,
@@ -340,33 +459,31 @@ pub fn enable_cursor_workspace_mcp(
     let argv = cursor_mcp_enable_argv();
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&physical);
-    let output = cmd.output().map_err(|e| {
-            LifecycleError::RequirementUnmet(format!(
-                "error: cannot run `{} mcp enable team_orchestrator`\n\
-                 reason: {e}\n\
-                 action: install cursor-agent on PATH (same binary as `agent`) and retry",
-                argv[0]
-            ))
-        })?;
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(error) => {
+            let error = error.to_string();
+            return Err(LifecycleError::cursor_mcp_enable_failure(
+                &argv,
+                &physical,
+                None,
+                &[],
+                &[],
+                Some(&error),
+            ));
+        }
+    };
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Err(LifecycleError::RequirementUnmet(format!(
-        "error: `{} mcp enable team_orchestrator` failed (exit {:?})\n\
-         reason: without enable, cursor keeps MCP as not loaded (needs approval)\n\
-         cwd: {}\n\
-         stdout_len: {}\n\
-         stderr_len: {}\n\
-         action: from that directory run `{} mcp enable team_orchestrator`",
-        argv[0],
+    Err(LifecycleError::cursor_mcp_enable_failure(
+        &argv,
+        &physical,
         output.status.code(),
-        physical.display(),
-        stdout.len(),
-        stderr.len(),
-        argv[0]
-    )))
+        &output.stdout,
+        &output.stderr,
+        None,
+    ))
 }
 
 /// ---
