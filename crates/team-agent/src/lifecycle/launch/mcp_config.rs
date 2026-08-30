@@ -11,7 +11,7 @@
 //!     - name: reconcile_grok_toml_per_seat_keys
 //!       what: 起 grok 席前清掉共享 toml 里遗留的 per-seat 键并留审计事件
 //!     - name: ensure_grok_login_and_folder_trust
-//!       what: grok 未登录或目录未信任时拒绝起席
+//!       what: grok 未登录时拒绝起席；目录信任与用户同意由可见 Grok TUI 负责
 //!     - name: point_native_mcp_config_at_file
 //!       what: 把 argv 里的 MCP 配置参数改指到已落盘的文件
 //!   depends:
@@ -29,7 +29,6 @@
 //! ---
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
@@ -381,20 +380,19 @@ fn grok_occupied_cwd_error(
 }
 
 /// ---
-/// purpose: 起 grok 席前确认已登录且该目录已被信任
+/// purpose: 起 grok 席前确认已登录；目录信任与用户同意交给可见 Grok TUI
 /// params:
-///   cwd: 席位的工作目录，用于判断目录信任
-/// returns: 通过返回空值；关闭 folder-trust 的环境变量下跳过信任检查
-/// errors: HOME 未设、登录态文件缺失或为空、目录未被信任时返回 RequirementUnmet
+///   _cwd: 席位的工作目录；保留参数以维持现有调用契约
+/// returns: 登录态存在时返回空值
+/// errors: HOME 未设、登录态文件缺失或为空时返回 RequirementUnmet
 /// ---
-/// 未登录 / 目录未信任时不许起出「能收信、没有手」的 grok 席。
-/// 登录态看 `$HOME/.grok/auth.json`；目录信任看 `$HOME/.grok/trusted_folders.toml`
-/// （与 grok `--trust` / `/hooks-trust` 同一份；未信任则项目作用域 MCP 不生效）。
-/// `GROK_FOLDER_TRUST=0` 时 grok 自己关掉 folder-trust，本检查跟着放行。
-pub(crate) fn ensure_grok_login_and_folder_trust(cwd: &Path) -> Result<(), LifecycleError> {
+/// 未登录时不许起出「能收信、没有手」的 grok 席。登录态只看
+/// `$HOME/.grok/auth.json`；Team Agent 不判断或改变目录信任，Grok TUI
+/// 如需用户同意会在可见 pane 内自行询问。
+pub(crate) fn ensure_grok_login_and_folder_trust(_cwd: &Path) -> Result<(), LifecycleError> {
     let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         LifecycleError::RequirementUnmet(
-            "error: HOME is unset; cannot verify grok login or folder trust\n\
+            "error: HOME is unset; cannot verify grok login\n\
                  action: export HOME and retry"
                 .to_string(),
         )
@@ -405,15 +403,6 @@ pub(crate) fn ensure_grok_login_and_folder_trust(cwd: &Path) -> Result<(), Lifec
             "error: grok is not logged in (missing or empty {})\n\
              action: run `grok login` then retry add-agent/launch",
             grok_home.join("auth.json").display()
-        )));
-    }
-    if folder_trust_required() && !grok_folder_is_trusted(&grok_home, cwd) {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "error: grok folder is not trusted; project-scope MCP at {}/.grok/config.toml will not load\n\
-             cwd: {}\n\
-             action: from that directory run `grok --trust` (or `/hooks-trust` in a grok session), then retry",
-            cwd.display(),
-            cwd.display()
         )));
     }
     Ok(())
@@ -428,44 +417,6 @@ fn grok_auth_present(grok_home: &Path) -> bool {
         return false;
     };
     value.as_object().is_some_and(|map| !map.is_empty())
-}
-
-fn folder_trust_required() -> bool {
-    !matches!(
-        std::env::var("GROK_FOLDER_TRUST").ok().as_deref(),
-        Some("0") | Some("false") | Some("off")
-    )
-}
-
-fn grok_folder_is_trusted(grok_home: &Path, cwd: &Path) -> bool {
-    let text = std::fs::read_to_string(grok_home.join("trusted_folders.toml")).unwrap_or_default();
-    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    grok_trusted_folders(&text).into_iter().any(|trusted| {
-        let trusted = std::fs::canonicalize(&trusted).unwrap_or(trusted);
-        cwd == trusted || cwd.starts_with(&trusted)
-    })
-}
-
-fn grok_trusted_folders(text: &str) -> Vec<PathBuf> {
-    let mut current = None;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("[folders.\"") {
-            current = rest.strip_suffix("\"]").map(str::to_string);
-            continue;
-        }
-        if trimmed.starts_with('[') {
-            current = None;
-            continue;
-        }
-        if trimmed == "trusted = true" {
-            if let Some(path) = current.take() {
-                out.push(PathBuf::from(path));
-            }
-        }
-    }
-    out
 }
 
 /// ---

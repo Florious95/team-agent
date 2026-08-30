@@ -183,7 +183,7 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
 fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
     let ws = tmp_dir("grok-cwd-coexist");
     let home = tmp_dir("grok-cwd-coexist-home");
-    seed_grok_home(&home, Some(&ws));
+    seed_grok_home(&home);
     let _guard = HomeGuard::set(&home);
     let team = write_grok_team_agents(&ws, "grokteam", &["g1", "g2"]);
 
@@ -211,7 +211,7 @@ fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
 fn leftover_per_seat_key_is_cleared_before_start() {
     let ws = tmp_dir("grok-cwd-per-seat");
     let home = tmp_dir("grok-cwd-per-seat-home");
-    seed_grok_home(&home, Some(&ws));
+    seed_grok_home(&home);
     let _guard = HomeGuard::set(&home);
     let grok = ws.join(".grok");
     std::fs::create_dir_all(&grok).unwrap();
@@ -281,43 +281,10 @@ TEAM_AGENT_WORKSPACE = "/stale-ws"
 
 #[test]
 #[serial(env)]
-fn grok_untrusted_folder_refuses_to_start() {
-    let ws = tmp_dir("grok-untrusted");
-    let home = tmp_dir("grok-untrusted-home");
-    seed_grok_home(&home, None);
-    let _guard = HomeGuard::set(&home);
-    let team = write_grok_team(&ws, "grokteam", "grok_writer");
-    let err = quick_start_with_transport_in_workspace(
-        &ws,
-        &team,
-        None,
-        true,
-        Some("grokteam"),
-        &OfflineTransport::new(),
-    )
-    .expect_err("untrusted folder must not start a grok seat");
-    let text = err.to_string();
-    assert!(
-        text.contains("not trusted") && text.contains("action:"),
-        "untrusted-folder error must be actionable; err={text}"
-    );
-    assert!(
-        text.contains("grok --trust") || text.contains("/hooks-trust"),
-        "next step must name grok --trust or /hooks-trust; err={text}"
-    );
-}
-
-#[test]
-#[serial(env)]
 fn grok_missing_login_refuses_to_start() {
     let ws = tmp_dir("grok-nologin");
     let home = tmp_dir("grok-nologin-home");
     std::fs::create_dir_all(home.join(".grok")).unwrap();
-    std::fs::write(
-        home.join(".grok").join("trusted_folders.toml"),
-        format!("[folders.\"{}\"]\ntrusted = true\n", ws.display()),
-    )
-    .unwrap();
     let _guard = HomeGuard::set(&home);
     let err = ensure_grok_login_and_folder_trust(&ws).expect_err("missing auth.json");
     match err {
@@ -333,10 +300,27 @@ fn grok_missing_login_refuses_to_start() {
 
 #[test]
 #[serial(env)]
+fn grok_login_present_allows_start_without_inspect_or_toml_trust() {
+    let ws = tmp_dir("grok-login-only");
+    let home = tmp_dir("grok-login-only-home");
+    seed_grok_home(&home);
+    let _guard = HomeGuard::set(&home);
+
+    assert!(!home.join("bin/grok").exists(), "no inspect shim may exist");
+    assert!(
+        !home.join(".grok/trusted_folders.toml").exists(),
+        "no trusted TOML may be required"
+    );
+    ensure_grok_login_and_folder_trust(&ws)
+        .expect("valid login alone must allow Grok TUI to own folder consent");
+}
+
+#[test]
+#[serial(env)]
 fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
     let ws = tmp_dir("grok-mcp-overlay");
     let home = tmp_dir("grok-mcp-overlay-home");
-    seed_grok_home(&home, Some(&ws));
+    seed_grok_home(&home);
     let _guard = HomeGuard::set(&home);
     let team = write_grok_team(&ws, "grokteam", "grok_writer");
     let config_path = ws.join(".grok").join("config.toml");
@@ -451,36 +435,39 @@ fn write_grok_team_agents(ws: &Path, team_key: &str, agent_ids: &[&str]) -> Path
     team
 }
 
-fn seed_grok_home(home: &Path, trusted_cwd: Option<&Path>) {
+fn seed_grok_home(home: &Path) {
     let grok = home.join(".grok");
     std::fs::create_dir_all(&grok).unwrap();
     std::fs::write(grok.join("auth.json"), r#"{"test":"ok"}"#).unwrap();
-    if let Some(cwd) = trusted_cwd {
-        std::fs::write(
-            grok.join("trusted_folders.toml"),
-            format!("[folders.\"{}\"]\ntrusted = true\n", cwd.display()),
-        )
-        .unwrap();
-    }
 }
 
 struct HomeGuard {
-    prev: Option<String>,
+    prev_home: Option<String>,
+    prev_path: Option<String>,
 }
 
 impl HomeGuard {
     fn set(home: &Path) -> Self {
-        let prev = std::env::var("HOME").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_path = std::env::var("PATH").ok();
         std::env::set_var("HOME", home);
-        Self { prev }
+        std::env::set_var("PATH", home.join("bin"));
+        Self {
+            prev_home,
+            prev_path,
+        }
     }
 }
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
-        match &self.prev {
+        match &self.prev_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+        match &self.prev_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
     }
 }
