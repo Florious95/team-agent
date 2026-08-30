@@ -314,7 +314,7 @@ impl McpSimHarness {
                             "worker_c": {"status": "running"}
                         },
                         "tasks": [
-                            {"id": "task_mcp", "assignee": "worker_a", "status": "pending", "result_route": "pipeline"}
+                            {"id": "task_mcp", "assignee": "worker_a", "status": "pending"}
                         ]
                     },
                     "teamB": {
