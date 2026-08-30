@@ -17,8 +17,6 @@ team-agent --help
 team-agent doctor --help
 ```
 
-**Launch** from a tmux-addressable pane: `team-agent claude` or `team-agent codex`, then `team-agent quick-start .team/current`. Do not start a real team from a naked terminal. Existing tmux/Ghostty layouts are valid if `quick-start` runs from the leader pane.
-
 **Operate**
 
 - Dispatch: `team-agent send TO MESSAGE` (positional TO; `--watch-result` is deprecated). After success, do not poll with `sleep` / `status` / `inbox` / `collect`.
