@@ -201,7 +201,7 @@ fn cursor_enable_failure_preserves_cwd_config_identity_and_redacted_stderr() {
     let benign = format!("benign first-enable diagnostic {}", "x".repeat(700));
     let secret_value = "must-not-leak-secret-value";
     let stderr =
-        format!("{benign}\nAuthorization: Bearer sk-{secret_value} token={secret_value}\n");
+        format!("Authorization: Bearer sk-{secret_value} token={secret_value}\n{benign}\n");
     let argv = cursor_mcp_enable_argv();
     let error = LifecycleError::cursor_mcp_enable_failure(
         &argv,
