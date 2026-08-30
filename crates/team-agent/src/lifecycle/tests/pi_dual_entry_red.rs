@@ -10,6 +10,39 @@ use crate::transport::test_support::OfflineTransport;
 use crate::transport::{Transport, WindowName};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic_guard;
+use hermetic_guard::HermeticTestEnv;
+
+const PI_DUAL_ENTRY_CHILD: &str = "TEAM_AGENT_TEST_PI_DUAL_ENTRY_CHILD";
+const PI_DUAL_ENTRY_PARENT_PID: &str = "TEAM_AGENT_TEST_PI_DUAL_ENTRY_PARENT_PID";
+const PI_DUAL_ENTRY_TEST: &str = concat!(
+    "lifecycle::tests::pi_dual_entry_red::",
+    "pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable"
+);
+
+fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
+    if std::env::var_os(marker).is_some() {
+        body();
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("current lib-test executable"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(marker, "1")
+        .env(PI_DUAL_ENTRY_PARENT_PID, std::process::id().to_string())
+        .output()
+        .expect("run Pi send_message fixture in isolated child test process");
+    assert!(
+        output.status.success(),
+        "isolated Pi child test failed: test={test_name} status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
 
 #[cfg(unix)]
 const FILE_H_NATIVE_COMPILE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
@@ -148,6 +181,20 @@ impl Drop for EnvVarGuard {
 
 #[test]
 fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
+    run_process_isolated(PI_DUAL_ENTRY_CHILD, PI_DUAL_ENTRY_TEST, || {
+        let hermetic = HermeticTestEnv::enter("pi-dual-entry-send");
+        let parent_pid = std::env::var(PI_DUAL_ENTRY_PARENT_PID)
+            .expect("isolated child receives the parent test process id");
+        assert_ne!(
+            std::process::id().to_string(),
+            parent_pid,
+            "Pi send_message fixture must not run in the parent lib-test process"
+        );
+        pi_leader_and_teammate_body(&hermetic);
+    });
+}
+
+fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     let spec = COMMAND_SPECS
         .iter()
         .find(|spec| spec.name == "pi")
@@ -204,8 +251,7 @@ fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
         );
     }
 
-    let root = std::env::temp_dir().join(format!("team-agent-pi-core-dual-{}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("create role fixture");
+    let root = hermetic.workspace("core-dual");
     let role = root.join("worker.md");
     std::fs::write(
         &role,
@@ -246,12 +292,7 @@ fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
         .to_string()
         .contains("shared lifecycle materializer"));
 
-    let dynamic_root = std::env::temp_dir().join(format!(
-        "team-agent-pi-teammate-dual-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dynamic_root);
-    std::fs::create_dir_all(&dynamic_root).expect("create dynamic root");
+    let dynamic_root = hermetic.workspace("teammate-dual");
     let fake_role = "---\nname: mate\nrole: Dynamic Worker\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\ndynamic\n";
 
     let (success_team, success_role) =
