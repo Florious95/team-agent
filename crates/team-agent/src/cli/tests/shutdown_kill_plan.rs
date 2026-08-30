@@ -792,6 +792,7 @@ struct CleanShutdownTransport {
     kill_server_called: Mutex<bool>,
     probe_timeout_kind: Option<&'static str>,
     targets_persist_after_kill: bool,
+    kill_session_error: Option<String>,
     // E49 (0.3.24 P0, shutdown kills leader CLI): record per-pane / per-window /
     // per-session kill targets so RED contracts can assert (a) the leader pane is
     // never killed and (b) worker panes ARE killed via the new per-pane path.
@@ -808,6 +809,7 @@ impl CleanShutdownTransport {
             kill_server_called: Mutex::new(false),
             probe_timeout_kind: None,
             targets_persist_after_kill: false,
+            kill_session_error: None,
             killed_panes: Mutex::new(Vec::new()),
             killed_window_targets: Mutex::new(Vec::new()),
             killed_sessions: Mutex::new(Vec::new()),
@@ -830,6 +832,11 @@ impl CleanShutdownTransport {
 
     fn with_targets_persist_after_kill(mut self) -> Self {
         self.targets_persist_after_kill = true;
+        self
+    }
+
+    fn with_kill_session_error(mut self, detail: impl Into<String>) -> Self {
+        self.kill_session_error = Some(detail.into());
         self
     }
 
@@ -946,7 +953,19 @@ impl Transport for CleanShutdownTransport {
             .unwrap()
             .push(session.as_str().to_string());
         *self.session_present.lock().unwrap() = false;
-        Ok(())
+        match self.kill_session_error.as_deref() {
+            Some(detail) => Err(TransportError::Subprocess {
+                argv: vec![
+                    "tmux".to_string(),
+                    "kill-session".to_string(),
+                    "-t".to_string(),
+                    session.as_str().to_string(),
+                ],
+                code: Some(1),
+                stderr: detail.to_string(),
+            }),
+            None => Ok(()),
+        }
     }
 
     fn kill_server(&self) -> Result<(), TransportError> {
@@ -1403,6 +1422,8 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
         ])
         .with_targets_persist_after_kill();
 
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let event_start = event_log.tail(0).expect("events before shutdown").len();
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
 
@@ -1413,7 +1434,96 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
          the team session — leader pane lives elsewhere so this is safe. Got \
          transport killed_sessions={killed_sessions:?}"
     );
+    if out["ok"] != json!(true) {
+        let events = event_log.tail(0).expect("events after shutdown");
+        let invocation_events = events
+            .into_iter()
+            .skip(event_start)
+            .take(64)
+            .collect::<Vec<_>>();
+        panic!(
+            "E49 external-leader shutdown returned a non-clean outcome: workspace tag=e49-external-leader-still-kills, expected session=team-external, shutdown report={out}, killed_sessions={killed_sessions:?}, bounded invocation events={invocation_events:?}"
+        );
+    }
     assert_eq!(out["ok"], json!(true));
+}
+
+#[test]
+fn e49_external_leader_non_clean_diagnostic_is_bounded_and_still_kills() {
+    let ws = tmp_shutdown_workspace("e49-external-leader-non-clean");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-external",
+            "is_external_leader": true,
+            "leader_receiver": {"pane_id": "%leaderelsewhere"},
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "w1", "pane_id": "%w1"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%w1"),
+            session: SessionName::new("team-external"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("w1")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_kill_session_error("deterministic E49 kill-session failure");
+
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let event_start = event_log.tail(0).expect("events before shutdown").len();
+    let diagnostic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+            .expect("shutdown should complete");
+        let killed_sessions = transport.killed_sessions_observed();
+        assert!(
+            killed_sessions.iter().any(|s| s == "team-external"),
+            concat!(
+                "E49 non-clean path must still attempt kill_session(team-external); ",
+                "got killed_sessions={:?}"
+            ),
+            killed_sessions
+        );
+        if out["ok"] != json!(true) {
+            let events = event_log.tail(0).expect("events after shutdown");
+            let invocation_events = events
+                .into_iter()
+                .skip(event_start)
+                .take(64)
+                .collect::<Vec<_>>();
+            panic!(
+                "E49 external-leader shutdown returned a non-clean outcome: workspace tag=e49-external-leader-non-clean, expected session=team-external, shutdown report={out}, killed_sessions={killed_sessions:?}, bounded invocation events={invocation_events:?}"
+            );
+        }
+    }))
+    .expect_err("deterministic kill-session error must exercise the diagnostic path");
+    let diagnostic = diagnostic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| diagnostic.downcast_ref::<&str>().map(ToString::to_string))
+        .expect("diagnostic panic should carry text");
+    let bounded_events = diagnostic
+        .split("bounded invocation events=")
+        .nth(1)
+        .expect("diagnostic should include bounded invocation events");
+    let event_count = bounded_events.matches("\"event\":").count();
+    assert!(
+        event_count > 0,
+        "diagnostic should include invocation events"
+    );
+    assert!(
+        event_count <= 64,
+        "diagnostic must be bounded to 64 invocation events, got {event_count}"
+    );
 }
 
 /// E49 regression guard: managed topology where the leader anchor pane is NOT
