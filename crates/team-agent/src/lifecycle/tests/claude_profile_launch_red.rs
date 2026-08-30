@@ -133,19 +133,40 @@ fn launch_restart_start_add_and_fork_all_delegate_to_the_profile_launch_resolver
         ("launch quick-start", &launch, "spawn_agents"),
         ("add-agent", &launch, "add_agent_with_transport"),
         ("fork-agent", &launch, "fork_agent_with_transport"),
-        ("restart", &restart_common, "restart_with_transport"),
-        ("start-agent", &restart_agent, "start_agent_at_paths"),
+        (
+            "restart/start shared spawn",
+            &restart_common,
+            "pub(super) fn spawn_agent_window(",
+        ),
     ];
     for (surface, source, entry) in surfaces {
         let section = source
             .find(entry)
             .map(|idx| &source[idx..])
-            .unwrap_or(source.as_str());
+            .unwrap_or_else(|| panic!("{surface} entry missing: {entry}"));
         assert!(
             section.contains("prepare_provider_profile_launch"),
             "{surface} must call the single profile resolver before building/spawning provider argv; entry={entry}"
         );
     }
+
+    let start_agent = restart_agent
+        .find("pub(crate) fn start_agent_at_paths(")
+        .map(|idx| &restart_agent[idx..])
+        .unwrap_or_else(|| panic!("start-agent entry missing: start_agent_at_paths"));
+    assert!(
+        start_agent.contains("spawn_agent_window("),
+        "start-agent must delegate provider argv construction to the shared restart/start spawn path"
+    );
+
+    let spawn_agent_window = restart_common
+        .find("pub(super) fn spawn_agent_window(")
+        .map(|idx| &restart_common[idx..])
+        .unwrap_or_else(|| panic!("restart/start shared spawn entry missing"));
+    assert!(
+        spawn_agent_window.contains("prepare_provider_profile_launch_from_json("),
+        "shared restart/start spawn must call the JSON profile launch resolver"
+    );
 }
 
 #[test]
