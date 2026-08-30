@@ -11,6 +11,29 @@
 //! queues one target `team.db` row as `queued_until_leader_attach`. Later
 //! `attach-leader` replays that same message id exactly once to the new leader
 //! pane.
+//!
+//! ---
+//! purpose: E6 real-CLI mailbox contract with an isolated tmux fixture
+//! contract:
+//!   provides:
+//!     - hermetic workspace, HOME, and exact tmux endpoint ownership
+//!   depends:
+//!     - tests/support/hermetic.rs
+//! boundary:
+//!   - never uses ambient serial-test locks or the default tmux server
+//! arch:
+//!   allowed_dependencies:
+//!     - rusqlite
+//!     - serde_json
+//!     - serial_test
+//!     - std
+//!   unresolved_disposition:
+//!     - rule: unanchored_relative_path
+//!       scope: task-scoped test-helper calls only
+//!       disposition: bounded_unknown_no_production_edge
+//!       rationale: required row/event/receipt probes remain test-local.
+//! maturity: wired
+//! ---
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -21,15 +44,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
-use serde_json::Value;
-use serial_test::{file_serial, serial};
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
+use serial_test::serial;
+
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[serial(env)]
-#[file_serial(tmux)]
 fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     let case = E6Case::new("real-cli-mailbox");
     case.write_fake_team("twitter-autopub", "fake-worker");
@@ -187,6 +213,19 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         row.delivery_attempts, 0,
         "E6 e2e RED: queued mailbox must not be claimed/delivered before leader attach"
     );
+    assert_eq!(
+        row.error, None,
+        "E6 e2e RED: queued mailbox must not carry a failure before replay"
+    );
+    assert_eq!(
+        row.delivered_at, None,
+        "E6 e2e RED: queued mailbox must not carry a delivery timestamp before replay"
+    );
+    assert_event_for_message(
+        case.target_workspace(),
+        "leader_mailbox.queued_until_attach",
+        &message_id,
+    );
 
     let state = runtime_state(case.target_workspace());
     let session_name = state
@@ -226,6 +265,42 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         String::from_utf8_lossy(&attach.stderr)
     );
 
+    let attached_state = runtime_state(case.target_workspace());
+    let receiver = attached_state
+        .pointer(&format!("/teams/{}/leader_receiver", case.team_key))
+        .expect("attached leader receiver in state");
+    assert_eq!(
+        receiver.get("status").and_then(Value::as_str),
+        Some("attached")
+    );
+    assert_eq!(
+        receiver.get("pane_id").and_then(Value::as_str),
+        Some(pane.as_str())
+    );
+    assert_eq!(
+        receiver.get("session_name").and_then(Value::as_str),
+        Some(session_name.as_str())
+    );
+    assert_eq!(
+        receiver.get("tmux_socket").and_then(Value::as_str),
+        Some(tmux_socket.as_str())
+    );
+    assert_eq!(
+        receiver.get("window_name").and_then(Value::as_str),
+        Some("leader")
+    );
+    assert_eq!(
+        receiver.get("window_index").and_then(Value::as_str),
+        Some("1")
+    );
+    assert!(
+        receiver
+            .get("pane_tty")
+            .and_then(Value::as_str)
+            .is_some_and(|tty| !tty.is_empty()),
+        "E6 e2e RED: attached target must persist pane tty; receiver={receiver}"
+    );
+
     // Injection-case revision (MUST-10 boundary): attach must wake the mailbox
     // and physically inject, but a physical submit is not a provider receipt —
     // the SAME row parks as injected_awaiting_receipt, never jumps straight
@@ -234,6 +309,9 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         case.target_workspace(),
         &message_id,
         "injected_awaiting_receipt",
+        &case.team_key,
+        &tmux_socket,
+        &pane,
     );
     assert!(
         accepted,
@@ -256,6 +334,44 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     assert_eq!(
         rows_after_attach[0].message_id, message_id,
         "E6 e2e RED: attach replay must preserve the original queued message_id"
+    );
+    let row = &rows_after_attach[0];
+    assert_eq!(
+        row.delivery_attempts, 1,
+        "E6 e2e RED: attach replay must have exactly one winning claim; row={row:?}"
+    );
+    assert_eq!(
+        row.error.as_deref(),
+        Some("leader_receipt_source_unavailable"),
+        "E6 e2e RED: receipt-source failure must be persisted on the same row; row={row:?}"
+    );
+    assert_eq!(
+        row.delivered_at, None,
+        "E6 e2e RED: physical injection must not infer a provider receipt; row={row:?}"
+    );
+    let receipt = delivery_token(case.target_workspace(), &message_id)
+        .expect("delivery token for physically injected message");
+    assert_eq!(receipt.unique_token, message_id);
+    assert!(
+        !receipt.injected_at.is_empty(),
+        "delivery token must persist inject time"
+    );
+    assert_eq!(
+        receipt.consumed_at, None,
+        "source-unavailable receipt cannot be consumed"
+    );
+    assert_eq!(
+        receipt.failed_at, None,
+        "source-unavailable is not an inject failure"
+    );
+    assert_eq!(
+        receipt.failure_reason, None,
+        "source-unavailable has its own typed boundary"
+    );
+    assert_event_for_message(
+        case.target_workspace(),
+        "leader_receiver.receipt_source_unavailable",
+        &message_id,
     );
 }
 
@@ -299,6 +415,17 @@ struct MessageRow {
     recipient: Option<String>,
     status: Option<String>,
     delivery_attempts: i64,
+    delivered_at: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct DeliveryToken {
+    unique_token: String,
+    injected_at: String,
+    consumed_at: Option<String>,
+    failed_at: Option<String>,
+    failure_reason: Option<String>,
 }
 
 fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
@@ -309,7 +436,7 @@ fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
     let conn = Connection::open(db).expect("open team.db");
     let mut stmt = conn
         .prepare(
-            "select message_id, owner_team_id, recipient, status, delivery_attempts \
+            "select message_id, owner_team_id, recipient, status, delivery_attempts, delivered_at, error \
              from messages where content like ?1 order by created_at",
         )
         .expect("prepare message query");
@@ -320,6 +447,8 @@ fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
             recipient: row.get(2)?,
             status: row.get(3)?,
             delivery_attempts: row.get(4)?,
+            delivered_at: row.get(5)?,
+            error: row.get(6)?,
         })
     })
     .expect("query messages")
@@ -327,26 +456,207 @@ fn message_rows(workspace: &Path, token: &str) -> Vec<MessageRow> {
     .collect()
 }
 
-fn wait_for_message_status(workspace: &Path, message_id: &str, status: &str) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn delivery_token(workspace: &Path, message_id: &str) -> Option<DeliveryToken> {
     let db = workspace.join(".team/runtime/team.db");
+    let conn = Connection::open(db).expect("open team.db");
+    conn.query_row(
+        "select unique_token, injected_at, consumed_at, failed_at, failure_reason \
+         from delivery_tokens where message_id = ?1",
+        [message_id],
+        |row| {
+            Ok(DeliveryToken {
+                unique_token: row.get(0)?,
+                injected_at: row.get(1)?,
+                consumed_at: row.get(2)?,
+                failed_at: row.get(3)?,
+                failure_reason: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .expect("query delivery token")
+}
+
+fn assert_event_for_message(workspace: &Path, event_name: &str, message_id: &str) {
+    let path = workspace.join(".team/logs/events.jsonl");
+    let matching = std::fs::read_to_string(&path)
+        .expect("read event log")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| {
+            event.get("event").and_then(Value::as_str) == Some(event_name)
+                && event.get("message_id").and_then(Value::as_str) == Some(message_id)
+        });
+    assert!(
+        matching.is_some(),
+        "E6 e2e RED: expected durable {event_name} event bound to message_id={message_id}"
+    );
+}
+
+fn query_message_status(workspace: &Path, message_id: &str) -> Result<Option<String>, String> {
+    let db = workspace.join(".team/runtime/team.db");
+    if !db.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open(&db).map_err(|error| format!("open {}: {error}", db.display()))?;
+    conn.query_row(
+        "select status from messages where message_id = ?1",
+        [message_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| format!("query status for {message_id}: {error}"))
+}
+
+fn wait_for_message_status(
+    workspace: &Path,
+    message_id: &str,
+    status: &str,
+    team_key: &str,
+    tmux_socket: &str,
+    pane: &str,
+) -> bool {
+    let started = Instant::now();
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if db.exists() {
-            let conn = Connection::open(&db).expect("open team.db");
-            let current = conn
-                .query_row(
-                    "select status from messages where message_id = ?1",
-                    [message_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok();
-            if current.as_deref() == Some(status) {
+        match query_message_status(workspace, message_id) {
+            Ok(Some(current)) if current == status => {
+                emit_replay_status_receipt(
+                    workspace,
+                    message_id,
+                    team_key,
+                    tmux_socket,
+                    pane,
+                    "observed",
+                    started.elapsed().as_millis(),
+                );
                 return true;
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) => {
+                panic!("E6 replay status query failed before assertion: {error}");
             }
         }
         thread::sleep(Duration::from_millis(250));
     }
-    false
+    emit_replay_status_receipt(
+        workspace,
+        message_id,
+        team_key,
+        tmux_socket,
+        pane,
+        "timeout",
+        started.elapsed().as_millis(),
+    );
+    panic!("E6 replay did not reach expected status {status:?}");
+}
+
+fn emit_replay_status_receipt(
+    workspace: &Path,
+    message_id: &str,
+    team_key: &str,
+    tmux_socket: &str,
+    pane: &str,
+    outcome: &str,
+    wait_elapsed_ms: u128,
+) {
+    let row = message_rows_by_id(workspace, message_id);
+    let token = delivery_token(workspace, message_id).map(|token| {
+        json!({
+            "unique_token": token.unique_token,
+            "injected_at": token.injected_at,
+            "consumed_at": token.consumed_at,
+            "failed_at": token.failed_at,
+            "failure_reason": token.failure_reason,
+        })
+    });
+    let runtime = workspace.join(".team/runtime");
+    let events = std::fs::read_to_string(workspace.join(".team/logs/events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("message_id").and_then(Value::as_str) == Some(message_id))
+        .collect::<Vec<_>>();
+
+    eprintln!(
+        "E6_DIAGNOSTIC_TMUX_CALL socket={tmux_socket} pane={pane} format=session,window,pane,pid,tty,dead,command"
+    );
+    let tmux = Command::new("tmux")
+        .args([
+            "-S",
+            tmux_socket,
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_tty}\t#{pane_dead}\t#{pane_current_command}",
+        ])
+        .output()
+        .map(|output| {
+            json!({
+                "status": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+            })
+        })
+        .unwrap_or_else(|error| json!({"spawn_error": error.to_string()}));
+
+    eprintln!(
+        "E6_REPLAY_STATUS_RECEIPT {}",
+        json!({
+            "outcome": outcome,
+            "wait_elapsed_ms": wait_elapsed_ms,
+            "workspace": workspace,
+            "team_key": team_key,
+            "message_id": message_id,
+            "message_row": row,
+            "delivery_token": token,
+            "leader_receiver": runtime_state(workspace)
+                .pointer(&format!("/teams/{team_key}/leader_receiver"))
+                .cloned(),
+            "coordinator": read_json_or_error(&runtime.join("coordinator.json")),
+            "coordinator_tick": read_json_or_error(&runtime.join("coordinator_tick.json")),
+            "coordinator_pid": std::fs::read_to_string(runtime.join("coordinator.pid"))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default(),
+            "message_events": events,
+            "tmux": tmux,
+        })
+    );
+}
+
+fn message_rows_by_id(workspace: &Path, message_id: &str) -> Value {
+    let db = workspace.join(".team/runtime/team.db");
+    let conn = match Connection::open(&db) {
+        Ok(conn) => conn,
+        Err(error) => return json!({"open_error": error.to_string(), "path": db}),
+    };
+    conn.query_row(
+        "select message_id, owner_team_id, recipient, status, delivery_attempts, delivered_at, error \
+         from messages where message_id = ?1",
+        [message_id],
+        |row| {
+            Ok(json!({
+                "message_id": row.get::<_, String>(0)?,
+                "owner_team_id": row.get::<_, Option<String>>(1)?,
+                "recipient": row.get::<_, Option<String>>(2)?,
+                "status": row.get::<_, Option<String>>(3)?,
+                "delivery_attempts": row.get::<_, i64>(4)?,
+                "delivered_at": row.get::<_, Option<String>>(5)?,
+                "error": row.get::<_, Option<String>>(6)?,
+            }))
+        },
+    )
+    .optional()
+    .map(|value| json!({"row": value}))
+    .unwrap_or_else(|error| json!({"query_error": error.to_string()}))
+}
+
+fn read_json_or_error(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .map_err(|error| error.to_string())
+        .and_then(|text| serde_json::from_str(&text).map_err(|error| error.to_string()))
+        .unwrap_or_else(|error| json!({"path": path, "read_error": error}))
 }
 
 fn wait_for_pane_token(tmux_socket: &str, pane: &str, token: &str) -> String {
@@ -366,28 +676,45 @@ fn capture_pane(tmux_socket: &str, pane: &str) -> String {
     let output = Command::new("tmux")
         .args(["-S", tmux_socket, "capture-pane", "-p", "-t", pane])
         .output()
-        .expect("tmux capture-pane");
+        .unwrap_or_else(|error| {
+            panic!(
+                "E6 apparatus fixture child/probe-exit: tmux capture-pane could not spawn; socket={tmux_socket} pane={pane} error={error}"
+            )
+        });
+    assert_fixture_command_success(
+        "tmux capture-pane",
+        &output,
+        &format!("socket={tmux_socket} pane={pane}"),
+    );
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+fn assert_fixture_command_success(label: &str, output: &Output, context: &str) {
+    assert!(
+        output.status.success(),
+        "E6 apparatus fixture child/probe-exit: {label} exited unsuccessfully; {context} code={:?} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct E6Case {
-    root: PathBuf,
+    env: HermeticTestEnv,
     home: PathBuf,
     target_workspace: PathBuf,
     sender_workspace: PathBuf,
     team_dir: PathBuf,
     team_key: String,
+    tmux_socket: PathBuf,
 }
 
 impl E6Case {
     fn new(tag: &str) -> Self {
+        let env = HermeticTestEnv::enter(&format!("e6-{tag}"));
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::var_os("TEAM_AGENT_TEST_TMPDIR")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-            .unwrap_or_else(std::env::temp_dir);
-        let root = base.join(format!("ta-e6-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = env
+            .root()
+            .join(format!("ta-e6-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&root).expect("create e6 test root");
         let home = root.join("home");
         let target_workspace = root.join("target-ws");
@@ -397,7 +724,6 @@ impl E6Case {
             std::fs::create_dir_all(dir).expect("create e6 test dir");
         }
         Self {
-            root,
             home,
             target_workspace: std::fs::canonicalize(target_workspace)
                 .expect("canonical target workspace"),
@@ -409,6 +735,8 @@ impl E6Case {
             // don't collide on a fixed key like "mail059". Session
             // names derived from team_key inherit the uniqueness.
             team_key: format!("mail059-{}-{n}", std::process::id()),
+            env,
+            tmux_socket: short_tmux_socket(&format!("e6-{tag}")),
         }
     }
 
@@ -466,7 +794,11 @@ impl E6Case {
         identity: Option<&str>,
     ) -> Output {
         let mut command = Command::new(bin());
-        command.args(args).current_dir(cwd).env("HOME", &self.home);
+        command
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", &self.home)
+            .env("TMUX", format!("{},12345,0", self.tmux_socket.display()));
         for key in [
             "TEAM_AGENT_LEADER_PANE_ID",
             "TEAM_AGENT_LEADER_SESSION_UUID",
@@ -512,13 +844,34 @@ impl E6Case {
                 "/bin/cat",
             ])
             .output()
-            .expect("tmux new-window");
-        assert!(
-            output.status.success(),
-            "E6 e2e RED setup: tmux new-window leader failed; stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .unwrap_or_else(|error| panic!("E6 apparatus fixture child/probe-exit: tmux new-window could not spawn; error={error}"));
+        assert_fixture_command_success("tmux new-window leader", &output, "leader pane creation");
+        self.register_pane_pid(&String::from_utf8_lossy(&output.stdout).trim());
+        self.env.register_owned_tmux_socket(&self.tmux_socket);
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn register_pane_pid(&self, pane: &str) {
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                self.tmux_socket.to_str().expect("tmux socket utf8"),
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{pane_pid}",
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("E6 apparatus fixture child/probe-exit: tmux display-message could not spawn; pane={pane} error={error}"));
+        assert_fixture_command_success(
+            "tmux display-message pane pid",
+            &output,
+            &format!("pane={pane}"),
+        );
+        if let Ok(pid) = String::from_utf8_lossy(&output.stdout).trim().parse() {
+            self.env.register_owned_pid(pid);
+        }
     }
 }
 
@@ -530,6 +883,7 @@ impl Drop for E6Case {
         // sockets — the fallback only kills the endpoint recorded in
         // the state file THIS fixture wrote.
         for workspace in [&self.target_workspace, &self.sender_workspace] {
+            register_persisted_pid(&self.env, workspace);
             let shutdown = Command::new(bin())
                 .args([
                     "shutdown",
@@ -540,36 +894,31 @@ impl Drop for E6Case {
                     "--json",
                 ])
                 .env("HOME", &self.home)
+                .env("TMUX", format!("{},12345,0", self.tmux_socket.display()))
                 .output();
-            if !matches!(&shutdown, Ok(out) if out.status.success()) {
-                if let Some(socket) = read_persisted_tmux_socket(workspace) {
-                    if let Some(socket_str) = socket.to_str() {
-                        let _ = Command::new("tmux")
-                            .args(["-S", socket_str, "kill-server"])
-                            .output();
-                    }
-                    let _ = std::fs::remove_file(&socket);
-                }
+            if !matches!(&shutdown, Ok(output) if output.status.success()) {
+                let _ = Command::new("tmux")
+                    .args([
+                        "-S",
+                        self.tmux_socket.to_str().expect("tmux socket utf8"),
+                        "kill-server",
+                    ])
+                    .output();
             }
         }
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
-fn read_persisted_tmux_socket(workspace: &Path) -> Option<PathBuf> {
+fn register_persisted_pid(env: &HermeticTestEnv, workspace: &Path) {
     let state_path = workspace.join(".team/runtime/state.json");
-    let text = std::fs::read_to_string(&state_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let socket = value
-        .get("tmux_socket")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            value
-                .get("tmux_endpoint")
-                .and_then(serde_json::Value::as_str)
-        })?;
-    if socket.is_empty() {
-        return None;
+    let Ok(_) = std::fs::read_to_string(&state_path) else {
+        return;
+    };
+    let pid_path = workspace.join(".team/runtime/coordinator.pid");
+    if let Some(pid) = std::fs::read_to_string(pid_path)
+        .ok()
+        .and_then(|pid| pid.trim().parse().ok())
+    {
+        env.register_owned_pid(pid);
     }
-    Some(PathBuf::from(socket))
 }

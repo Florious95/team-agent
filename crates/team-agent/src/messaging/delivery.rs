@@ -306,6 +306,28 @@ pub fn deliver_pending_message(
             turn_verification: None,
         });
     };
+    // Attach may requeue this row after the coordinator captured `state` but
+    // before this claim. Revalidate through the same owner-team projection
+    // that carries a canonical top-level leader binding into the scoped view.
+    let fresh_leader_state = if message.recipient == "leader" {
+        Some(match canonical_owner_team_id.as_deref() {
+            Some(team) => match project_state_for_owner_team(
+                workspace,
+                team,
+                &serde_json::Value::Null,
+                Some(store),
+                Some(message_id),
+                Some(event_log),
+            )? {
+                OwnerTeamProjection::Projected { state, .. } => state,
+                OwnerTeamProjection::Refused(outcome) => return Ok(outcome),
+            },
+            None => crate::state::persist::load_runtime_state(workspace)?,
+        })
+    } else {
+        None
+    };
+    let state = fresh_leader_state.as_ref().unwrap_or(state);
     if message.recipient == "leader" {
         let Some(receiver) = leader_receiver_value(state) else {
             store.mark(message_id, "failed", Some("leader_not_attached"))?;

@@ -100,6 +100,72 @@ fn attached_leader_mailbox_is_rechecked_by_the_normal_delivery_tick() {
 }
 
 #[test]
+fn claimed_leader_delivery_revalidates_a_stale_unattached_snapshot() {
+    let workspace = tmp_ws("leader-inject-acceptance-stale-attach");
+    let rollout = workspace.join("leader.jsonl");
+    std::fs::write(&rollout, "").unwrap();
+    let current_state = serde_json::json!({
+        "active_team_key": "acceptance-team",
+        "session_name": "team-acceptance",
+        "leader_receiver": {
+            "pane_id": "%leader",
+            "status": "attached",
+            "provider": "claude",
+            "rollout_path": rollout,
+        },
+        "teams": {
+            "acceptance-team": {
+                "session_name": "team-acceptance",
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&workspace, &current_state).unwrap();
+    let store = MessageStore::open(&workspace).unwrap();
+    let event_log = EventLog::new(&workspace);
+    let message_id = store
+        .create_message(
+            None,
+            "worker",
+            "leader",
+            "stale attach canary",
+            None,
+            false,
+            Some("acceptance-team"),
+        )
+        .unwrap();
+    let stale_state = serde_json::json!({
+        "active_team_key": "acceptance-team",
+        "teams": {
+            "acceptance-team": {
+                "session_name": "team-acceptance"
+            }
+        }
+    });
+    let transport = RecordingTransport::new("");
+
+    let outcome = deliver_pending_message(
+        &workspace,
+        &store,
+        &transport,
+        &message_id,
+        &event_log,
+        &stale_state,
+    )
+    .expect("delivery from stale coordinator snapshot");
+
+    assert_ne!(
+        outcome.reason,
+        Some(DeliveryRefusal::LeaderNotAttached),
+        "a claim made after attach must revalidate durable state before writing leader_not_attached"
+    );
+    assert_ne!(
+        outcome.message_status.0, "failed",
+        "a stale pre-attach snapshot must not strand the requeued row"
+    );
+    assert_eq!(transport.inject_count(), 1);
+}
+
+#[test]
 fn leader_submit_without_receipt_source_cannot_park_forever_without_a_completion_writer() {
     let case = Case::new_without_rollout("missing-receipt-source");
     let transport = RecordingTransport::new("");
