@@ -70,6 +70,8 @@ const NEW: &str = "cp_fork";
 const R7_CHILD: &str = "TEAM_AGENT_TEST_CF_R7_CHILD";
 const R7B_CHILD: &str = "TEAM_AGENT_TEST_CF_R7B_CHILD";
 const R8_CHILD: &str = "TEAM_AGENT_TEST_CF_R8_CHILD";
+const ISOLATION_GUARD_CHILD: &str = "TEAM_AGENT_TEST_CF_ISOLATION_GUARD_CHILD";
+const PARENT_PID_ENV: &str = "TEAM_AGENT_TEST_CF_PARENT_PID";
 const R7_TEST: &str = concat!(
     "lifecycle::tests::clone_fork_copilot_perms_red::",
     "r7_fork_effective_permissions_are_clamped_to_leader_guardrail"
@@ -81,6 +83,10 @@ const R7B_TEST: &str = concat!(
 const R8_TEST: &str = concat!(
     "lifecycle::tests::clone_fork_copilot_perms_red::",
     "r8_copilot_fork_is_no_longer_capability_refused"
+);
+const ISOLATION_GUARD_TEST: &str = concat!(
+    "lifecycle::tests::clone_fork_copilot_perms_red::",
+    "copilot_clone_fork_env_fixtures_run_outside_parent_process"
 );
 
 /// These fixtures need process-global HOME and TEAM_AGENT_* overrides, while the
@@ -97,6 +103,7 @@ fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
     let output = Command::new(std::env::current_exe().expect("current lib-test executable"))
         .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
         .env(marker, "1")
+        .env(PARENT_PID_ENV, std::process::id().to_string())
         .output()
         .expect("run fixture in isolated child test process");
     assert!(
@@ -106,6 +113,19 @@ fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+fn copilot_clone_fork_env_fixtures_run_outside_parent_process() {
+    run_process_isolated(ISOLATION_GUARD_CHILD, ISOLATION_GUARD_TEST, || {
+        let parent_pid = std::env::var(PARENT_PID_ENV)
+            .expect("isolated child receives the parent test process id");
+        assert_ne!(
+            std::process::id().to_string(),
+            parent_pid,
+            "clone/fork env fixtures must never run in the parent lib-test process"
+        );
+    });
 }
 
 /// Gate6 CI-hermeticity revision: the R7 fixture must pin the process-ancestry
