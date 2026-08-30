@@ -2,7 +2,7 @@
 name: team-agent
 description: Use only when the user explicitly asks to start, operate, inspect, shutdown, or restart a Team Agent team. Treat the team-agent CLI as a sealed appliance.
 requires_team_agent: ">=0.5.0"
-last_verified_against: "0.5.66"
+last_verified_against: "0.5.69"
 ---
 
 # Team Agent
@@ -31,16 +31,21 @@ The current user-facing agent is the leader (orchestrate only). Workers call `re
 
 ## Provider Capability Matrix
 
-Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md`. These two are in the runtime but were missing from that table:
+Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md`. These providers are in the runtime but were missing from that table:
 
 | Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
 |---|---|---|---|---|
 | `grok` | yes (`--resume <id>`, archive-gated) | no | yes (role `model` required) | yes (`--fork-session` + new `--session-id`) |
 | `cursor_agent` | yes (argv `--resume <chatId>`, archive-gated) | no | required on role; same-family catalog id can take effect; unknown id silent-fallback; pane chrome ≠ proven live | **no — `CapabilityUnsupported`** |
+| `pi` | yes (exact session backing) | no | required exact catalog id | **no — `CapabilityUnsupported`** |
 
-Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
+Grok / `cursor_agent` / `pi` have no JSONL turn-state reader (classify → Unknown).
 
 ## Provider Prep
+
+### Pi provider notes
+
+Pi roles require `provider: pi`, `auth_mode: subscription`, an exact catalog `model`, explicit `effort`, and `dangerously_skip_permissions: true`; for TeamMate messaging use `tools: [mcp_team]` (`provider_builtin` is unsupported). Pi uses standard MCP, so adapter version and digest are diagnostic only; `stop-agent` then `start-agent` resumes the exact session, while `reset-agent --discard-session` starts fresh.
 
 ### Cursor provider notes
 

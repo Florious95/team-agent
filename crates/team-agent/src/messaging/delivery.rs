@@ -760,6 +760,56 @@ pub fn deliver_pending_message(
             }),
         )?;
         if inject_report.attempts >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
+            if recipient_provider(state, &message.recipient) == Some(Provider::Grok)
+                && grok_final_enter_fallback(
+                    transport,
+                    &target,
+                    message_id,
+                    &inject_report,
+                    event_log,
+                )?
+            {
+                store.mark(message_id, "delivered", None)?;
+                let mut delivered_event = serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": message.recipient,
+                    "delivered_via": "grok_final_enter_fallback",
+                });
+                if let Some(metadata) = resolved.metadata.as_ref() {
+                    append_target_metadata(&mut delivered_event, metadata);
+                }
+                event_log.write("message.delivered", delivered_event)?;
+                let outcome = DeliveryOutcome {
+                    ok: true,
+                    status: DeliveryStatus::Delivered,
+                    message_status: MessageStatusShadow("delivered".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some("grok_final_enter_fallback".to_string()),
+                    stage: Some(DeliveryStage::Submit),
+                    reason: None,
+                    channel: None,
+                    ack_forced_off: false,
+                    turn_verification: Some(turn_verification),
+                };
+                if let Err(error) = stamp_first_send_at_if_leader_to_worker_scoped(
+                    workspace,
+                    &message.sender,
+                    &message.recipient,
+                    canonical_owner_team_id.as_deref(),
+                ) {
+                    absorb_state_error_only_after_physical_submit(
+                        transport,
+                        state,
+                        &message.recipient,
+                        &target,
+                        message_id,
+                        event_log,
+                        "stamp_first_send_at",
+                        error,
+                    )?;
+                }
+                return Ok(outcome);
+            }
             store.mark(message_id, "failed", Some("send_unverified_exhausted"))?;
             emit_send_failed_exhausted(
                 workspace,
@@ -954,6 +1004,60 @@ pub fn deliver_pending_message(
         )?;
     }
     Ok(outcome)
+}
+
+/// Grok can leave a pasted message in its composer after the bounded
+/// submit-and-verify attempts. Give the TUI one settled transition window,
+/// then send exactly one final Enter and use the token readback as the
+/// delivery gate. This is deliberately provider-local and one-shot.
+fn grok_final_enter_fallback(
+    transport: &dyn Transport,
+    target: &Target,
+    message_id: &str,
+    inject_report: &InjectReport,
+    event_log: &EventLog,
+) -> Result<bool, MessagingError> {
+    const WAIT: Duration = Duration::from_secs(10);
+    event_log.write(
+        "send.grok_final_enter_fallback_wait",
+        serde_json::json!({"message_id": message_id, "wait_seconds": 10}),
+    )?;
+    std::thread::sleep(WAIT);
+
+    let enter_result = transport.send_keys(target, &[Key::Enter]);
+    event_log.write(
+        "send.grok_final_enter_fallback_enter",
+        serde_json::json!({
+            "message_id": message_id,
+            "enter_count": 1,
+            "ok": enter_result.is_ok(),
+        }),
+    )?;
+    if enter_result.is_err() {
+        return Ok(false);
+    }
+
+    let marker = message_token_marker(message_id);
+    let verified = matches!(
+        inject_report.inject_verification,
+        InjectVerification::CaptureContainsToken
+    ) && transport
+        .capture(target, CaptureRange::Tail(40))
+        .ok()
+        .is_some_and(|captured| {
+            crate::tmux_backend::consumption_from_capture(&captured.text, &marker, true, None)
+                == Some(true)
+                || crate::tmux_backend::provider_busy_signal_in_tail(&captured.text)
+        });
+    event_log.write(
+        if verified {
+            "send.grok_final_enter_fallback_verified"
+        } else {
+            "send.grok_final_enter_fallback_unverified"
+        },
+        serde_json::json!({"message_id": message_id, "verified": verified}),
+    )?;
+    Ok(verified)
 }
 
 fn block_missing_worker_target(
