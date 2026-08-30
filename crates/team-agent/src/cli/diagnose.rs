@@ -9,6 +9,74 @@ use crate::model::pane_authority_refusal::{
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PiBackingStatus {
+    Pending,
+    Captured,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PiMcpStatus {
+    Unavailable,
+    ConfiguredLazy,
+    RoundtripVerified,
+}
+
+pub(crate) struct PiDoctorInput {
+    pub executable_chain_verified: bool,
+    pub pi_version: Option<String>,
+    pub adapter_version: Option<String>,
+    pub catalog_sha256: Option<String>,
+    pub selected_model: Option<String>,
+    pub candidate_executable: Option<std::path::PathBuf>,
+    pub wrapper: Option<std::path::PathBuf>,
+    pub mcp_roundtrip_at: Option<String>,
+    pub backing: PiBackingStatus,
+    pub activity: crate::provider::TurnState,
+    pub activity_source: crate::provider::ClassifySource,
+    pub env_key_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PiDoctorFacts {
+    pub mcp: PiMcpStatus,
+    pub mcp_connected: bool,
+    pub backing: PiBackingStatus,
+    pub activity: crate::provider::TurnState,
+    pub activity_source: crate::provider::ClassifySource,
+    pub auth_hint: crate::provider::AuthHintStatus,
+}
+
+pub(crate) fn pi_doctor_facts(input: PiDoctorInput) -> PiDoctorFacts {
+    let mcp = if input.mcp_roundtrip_at.is_some() {
+        PiMcpStatus::RoundtripVerified
+    } else if input.wrapper.is_some() {
+        PiMcpStatus::ConfiguredLazy
+    } else {
+        PiMcpStatus::Unavailable
+    };
+    let _ = (
+        input.executable_chain_verified,
+        input.pi_version,
+        input.adapter_version,
+        input.catalog_sha256,
+        input.selected_model,
+        input.candidate_executable,
+        input.env_key_names,
+    );
+    PiDoctorFacts {
+        mcp,
+        mcp_connected: mcp == PiMcpStatus::RoundtripVerified,
+        backing: input.backing,
+        activity: input.activity,
+        activity_source: input.activity_source,
+        auth_hint: crate::provider::AuthHintStatus::Unknown,
+    }
+}
+
 /// 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): classify a tmux
 /// transport error string into a diagnose issue id. When the underlying
 /// tmux subprocess stderr contains `server exited unexpectedly`, the
@@ -1424,6 +1492,11 @@ fn fake_agent_started(agent: &Value) -> bool {
 }
 
 fn agent_mcp_ready(agent: &Value) -> bool {
+    if agent.get("provider").and_then(Value::as_str) == Some("pi") {
+        // The generated wrapper proves configured-lazy only. No persisted
+        // objective Pi MCP roundtrip receipt exists on the readiness path yet.
+        return false;
+    }
     agent
         .get("mcp_config")
         .and_then(Value::as_str)
@@ -1567,6 +1640,7 @@ pub(crate) fn provider_doctor_checks() -> Value {
         crate::provider::Provider::GeminiCli,
         crate::provider::Provider::Grok,
         crate::provider::Provider::CursorAgent,
+        crate::provider::Provider::Pi,
         crate::provider::Provider::Fake,
     ] {
         let adapter = crate::provider::get_adapter(provider);

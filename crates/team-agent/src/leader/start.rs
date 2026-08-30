@@ -285,10 +285,58 @@ fn leader_start_plan_with_ambient_authority(
         ),
         _ => None,
     };
+    let provider_argv = if provider == Provider::Pi && mode != LeaderStartMode::AttachExisting {
+        let parsed = crate::lifecycle::launch::pi_mcp::parse_pi_leader_args(provider_args)
+            .map_err(|error| LeaderError::Start(error.to_string()))?;
+        let mcp_config = adapter
+            .mcp_config(crate::model::enums::AuthMode::Subscription)
+            .map_err(|error| LeaderError::Start(error.to_string()))?;
+        let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
+            mcp_config,
+            workspace,
+            "leader",
+            identity.team_id.as_str(),
+        );
+        let prompt = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
+        let tools = ["mcp_team", "fs_read", "fs_list", "fs_write", "execute_bash"];
+        let team_mcp_tools = [
+            "assign_task",
+            "send_message",
+            "update_state",
+            "get_team_status",
+            "stop_agent",
+            "reset_agent",
+            "add_agent",
+            "clone_agent",
+            "fork_agent",
+            "request_human",
+            "stuck_list",
+            "stuck_cancel",
+        ];
+        crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
+            crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+                workspace,
+                team_id: identity.team_id.as_str(),
+                agent_id: "leader",
+                model: &parsed.model,
+                effort: parsed.effort,
+                system_prompt: &prompt,
+                tool_categories: &tools,
+                team_mcp_tools: &team_mcp_tools,
+                mcp_config: &mcp_config,
+            },
+        )
+        .map_err(|error| LeaderError::Start(error.to_string()))?
+        .argv
+    } else if provider == Provider::Pi {
+        Vec::new()
+    } else {
+        provider_command_argv(provider, provider_args)
+    };
     let argv = start_argv(
         mode,
         provider,
-        provider_args,
+        &provider_argv,
         workspace,
         session_name.as_ref(),
         managed_window.as_ref(),
@@ -305,7 +353,6 @@ fn leader_start_plan_with_ambient_authority(
     } else {
         leader_env.clone()
     };
-    let provider_argv = provider_command_argv(provider, provider_args);
     Ok(LeaderStartPlan {
         mode,
         provider,
@@ -970,20 +1017,15 @@ fn managed_leader_window_for_launch(
 fn start_argv(
     mode: LeaderStartMode,
     provider: Provider,
-    provider_args: &[String],
+    provider_argv: &[String],
     workspace: &Path,
     session_name: Option<&SessionName>,
     leader_window: Option<&WindowName>,
     leader_env: &BTreeMap<String, String>,
     managed_client_attach_mode: Option<ManagedClientAttachMode>,
 ) -> Result<Vec<String>, LeaderError> {
-    let provider_cmd = provider_command_name(provider).to_string();
     match mode {
-        LeaderStartMode::ExecProvider => {
-            let mut argv = vec![provider_cmd];
-            argv.extend(normalized_provider_args(provider_args));
-            Ok(argv)
-        }
+        LeaderStartMode::ExecProvider => Ok(provider_argv.to_vec()),
         LeaderStartMode::ManagedTmuxClient => {
             let Some(session) = session_name else {
                 return Err(LeaderError::Start(
@@ -1021,13 +1063,11 @@ fn start_argv(
             if let Some(path) = std::env::var_os("PATH").and_then(|p| p.into_string().ok()) {
                 exports.push(shlex_quote(&format!("PATH={path}")));
             }
-            let mut provider_argv = vec![provider_cmd];
-            provider_argv.extend(normalized_provider_args(provider_args));
             let shell = format!(
                 "cd {} && export {} && exec {}",
                 shlex_quote(&resolved_workspace.to_string_lossy()),
                 exports.join(" "),
-                shell_join(&provider_argv)
+                shell_join(provider_argv)
             );
             let argv = vec![
                 "tmux".to_string(),

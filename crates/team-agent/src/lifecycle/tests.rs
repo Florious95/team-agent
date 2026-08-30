@@ -84,6 +84,8 @@ mod pi_command_red;
 mod pi_compiler_red;
 mod pi_dual_entry_red;
 mod pi_executable_mcp_red;
+mod pi_lifecycle_doctor_red;
+mod pi_session_delivery_red;
 mod quick_start_worker_readiness_red;
 mod realmachine_clusters_1_6_red;
 mod realmachine_residual_g1_g4_red;

@@ -572,11 +572,11 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
         resolved.metadata.as_ref(),
     );
-    let recipient_cursor = recipient_is_cursor_agent(state, &message.recipient);
+    let recipient_single_enter = recipient_requires_single_enter(state, &message.recipient);
     let inject_attempt = crate::tmux_backend::with_paste_to_submit_floor(
         paste_to_submit_floor_for_recipient(state, &message.recipient),
         || {
-            crate::tmux_backend::with_cursor_single_enter(recipient_cursor, || {
+            crate::tmux_backend::with_cursor_single_enter(recipient_single_enter, || {
                 transport.inject_with_submit_observer(
                     &target,
                     &payload,
@@ -592,7 +592,9 @@ pub fn deliver_pending_message(
             // grok 忙时第一次回车只入显式队列。默认 send-now：只重按回车顶出去。
             // 无 `Enter:send now` 时零次额外按键，claude/codex 行为不变。
             // cursor：第二下 Enter 打断进行中回合，不走 flush。
-            if !crate::provider::submit_now::keep_provider_queue_requested() && !recipient_cursor {
+            if !crate::provider::submit_now::keep_provider_queue_requested()
+                && recipient_allows_explicit_queue_flush(state, &message.recipient)
+            {
                 match crate::provider::submit_now::flush_explicit_queue(transport, &target) {
                     Ok(flush) if flush.extra_enters > 0 => {
                         let _ = event_log.write(
@@ -2239,13 +2241,6 @@ fn recipient_provider(state: &serde_json::Value, recipient: &str) -> Option<Prov
         .and_then(parse_canonical_provider)
 }
 
-fn recipient_is_cursor_agent(state: &serde_json::Value, recipient: &str) -> bool {
-    matches!(
-        recipient_provider(state, recipient),
-        Some(Provider::CursorAgent)
-    )
-}
-
 /// ---
 /// purpose: paste→Enter 地板按收件人 provider 选择
 /// contract: CursorAgent 与 Grok 为 1s；其余（含 claude）为 ZERO
@@ -2263,7 +2258,32 @@ pub(crate) fn paste_to_submit_floor_for_recipient(
     }
 }
 
-fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
+/// ---
+/// purpose: 判断收件 provider 是否必须禁止 submit observer 重按 Enter
+/// returns: CursorAgent 与 Pi 为 true，其余为 false
+/// ---
+pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
+    matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent | Provider::Pi)
+    )
+}
+
+/// ---
+/// purpose: 判断收件 provider 是否允许 Grok send-now 显式队列 flush
+/// returns: CursorAgent 与 Pi 为 false，其余为 true
+/// ---
+pub(crate) fn recipient_allows_explicit_queue_flush(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> bool {
+    !matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent | Provider::Pi)
+    )
+}
+
+pub(crate) fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
     state
         .get("agents")
         .and_then(serde_json::Value::as_object)

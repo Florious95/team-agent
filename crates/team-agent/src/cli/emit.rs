@@ -262,9 +262,10 @@ const DISPATCH_COMMANDS: &[&str] = &[
 const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start"];
 // Command grammar, not provider identity parsing: these are top-level CLI
 // passthrough verbs for starting a leader under a provider executable.
-const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot", "grok", "cursor"];
+const LEADER_PASSTHROUGH_COMMANDS: &[&str] =
+    &["codex", "claude", "copilot", "grok", "cursor", "pi"];
 
-fn is_leader_passthrough_command(command: &str) -> bool {
+pub(crate) fn is_leader_passthrough_command(command: &str) -> bool {
     LEADER_PASSTHROUGH_COMMANDS.contains(&command)
         && matches!(
             command_spec(command).map(|spec| spec.kind),
@@ -285,7 +286,7 @@ fn is_known_subcommand(command: &str) -> bool {
     command_spec(command).is_some_and(|spec| spec.command_help)
 }
 
-fn default_help() -> String {
+pub(crate) fn default_help() -> String {
     let mut out = String::from("usage: team-agent <command> [options]\n");
     append_help_section(
         &mut out,
@@ -310,7 +311,7 @@ fn default_help() -> String {
         "Guided recovery",
         &["claim-leader", "takeover", "attach-leader"],
     );
-    out.push_str("\nProvider launchers:\n  team-agent codex|claude|copilot|grok|cursor ...\n");
+    out.push_str("\nProvider launchers:\n  team-agent codex|claude|copilot|grok|cursor|pi ...\n");
     out.push_str("\nRun `team-agent <command> --help` for command flags.");
     out
 }
