@@ -11,6 +11,71 @@ use crate::transport::{Transport, WindowName};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+const FILE_H_NATIVE_COMPILE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+#[cfg(unix)]
+const FILE_H_NATIVE_READINESS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct FileHCommandTimeout {
+    stage: &'static str,
+    pid: u32,
+    deadline: std::time::Duration,
+    elapsed: std::time::Duration,
+    reaped_status: std::process::ExitStatus,
+}
+
+#[cfg(unix)]
+fn run_file_h_command_with_deadline(
+    command: &mut std::process::Command,
+    stage: &'static str,
+    deadline: std::time::Duration,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> Result<std::process::Output, FileHCommandTimeout> {
+    let stdout_file = std::fs::File::create(stdout_path)
+        .unwrap_or_else(|error| panic!("{stage}: create stdout receipt failed: {error}"));
+    let stderr_file = std::fs::File::create(stderr_path)
+        .unwrap_or_else(|error| panic!("{stage}: create stderr receipt failed: {error}"));
+    let mut child = command
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .unwrap_or_else(|error| panic!("{stage}: spawn failed: {error}"));
+    let pid = child.id();
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|error| panic!("{stage}: poll pid {pid} failed: {error}"))
+        {
+            return Ok(std::process::Output {
+                status,
+                stdout: std::fs::read(stdout_path).unwrap_or_default(),
+                stderr: std::fs::read(stderr_path).unwrap_or_default(),
+            });
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= deadline {
+            child
+                .kill()
+                .unwrap_or_else(|error| panic!("{stage}: kill exact pid {pid} failed: {error}"));
+            let reaped_status = child
+                .wait()
+                .unwrap_or_else(|error| panic!("{stage}: reap exact pid {pid} failed: {error}"));
+            return Err(FileHCommandTimeout {
+                stage,
+                pid,
+                deadline,
+                elapsed,
+                reaped_status,
+            });
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
+}
+
 fn dynamic_add_fixture(root: &Path, label: &str, role_doc: &str) -> (PathBuf, PathBuf) {
     let team = root.join(label);
     std::fs::create_dir_all(team.join("agents")).expect("create dynamic team fixture");
@@ -455,6 +520,7 @@ fn pi_leader_and_teammate_share_provider_plan_but_are_separately_launchable() {
             r#"#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int has_arg(int argc, char **argv, const char *needle) {
     for (int i = 1; i < argc; i++) {
@@ -464,6 +530,7 @@ static int has_arg(int argc, char **argv, const char *needle) {
 }
 
 int main(int argc, char **argv) {
+    if (getenv("TEAM_AGENT_PI_TEST_HANG") != NULL) for (;;) pause();
     const char *log_path = getenv("TEAM_AGENT_PI_TMUX_LOG");
     const char *socket = getenv("TEAM_AGENT_PI_OWNING_SOCKET");
     const char *session = getenv("TEAM_AGENT_PI_OWNING_SESSION");
@@ -489,25 +556,57 @@ int main(int argc, char **argv) {
 "#,
         )
         .expect("write native tmux shim source");
-        let compile = std::process::Command::new("cc")
-            .args(["-O0", "-o"])
-            .arg(&shim)
-            .arg(&shim_source)
-            .output()
-            .expect("compile native tmux shim");
+        let compile = run_file_h_command_with_deadline(
+            std::process::Command::new("cc")
+                .args(["-O0", "-o"])
+                .arg(&shim)
+                .arg(&shim_source),
+            "File-H native fake compile",
+            FILE_H_NATIVE_COMPILE_DEADLINE,
+            &shim_root.join("compile.stdout"),
+            &shim_root.join("compile.stderr"),
+        )
+        .unwrap_or_else(|timeout| panic!("{timeout:?}"));
         assert!(
             compile.status.success(),
             "native tmux shim compile failed: {}",
             String::from_utf8_lossy(&compile.stderr)
         );
-        let preflight = std::process::Command::new(&shim)
-            .args(["-S", live_socket, "has-session"])
-            .env("TEAM_AGENT_PI_TMUX_LOG", shim_root.join("preflight.log"))
-            .env("TEAM_AGENT_PI_OWNING_SOCKET", live_socket)
-            .env("TEAM_AGENT_PI_OWNING_SESSION", live_session)
-            .env("TEAM_AGENT_PI_RUN_WORKSPACE", &live)
-            .output()
-            .expect("execute native tmux shim preflight");
+        let tooth_started = std::time::Instant::now();
+        let tooth = run_file_h_command_with_deadline(
+            std::process::Command::new(&shim).env("TEAM_AGENT_PI_TEST_HANG", "1"),
+            "File-H native fake readiness timeout tooth",
+            FILE_H_NATIVE_READINESS_DEADLINE,
+            &shim_root.join("readiness-tooth.stdout"),
+            &shim_root.join("readiness-tooth.stderr"),
+        )
+        .expect_err("non-exiting native fake must hit the readiness deadline");
+        assert_eq!(tooth.stage, "File-H native fake readiness timeout tooth");
+        assert_eq!(tooth.deadline, FILE_H_NATIVE_READINESS_DEADLINE);
+        assert!(!tooth.reaped_status.success(), "{tooth:?}");
+        assert!(
+            !crate::platform::process::pid_is_alive(tooth.pid),
+            "readiness timeout must leave its exact child dead and reaped: {tooth:?}"
+        );
+        assert!(
+            tooth_started.elapsed()
+                <= FILE_H_NATIVE_READINESS_DEADLINE + std::time::Duration::from_secs(1),
+            "readiness timeout tooth exceeded its deadline plus reap allowance: {tooth:?}"
+        );
+
+        let preflight = run_file_h_command_with_deadline(
+            std::process::Command::new(&shim)
+                .args(["-S", live_socket, "has-session"])
+                .env("TEAM_AGENT_PI_TMUX_LOG", shim_root.join("preflight.log"))
+                .env("TEAM_AGENT_PI_OWNING_SOCKET", live_socket)
+                .env("TEAM_AGENT_PI_OWNING_SESSION", live_session)
+                .env("TEAM_AGENT_PI_RUN_WORKSPACE", &live),
+            "File-H native fake has-session preflight",
+            FILE_H_NATIVE_READINESS_DEADLINE,
+            &shim_root.join("preflight.stdout"),
+            &shim_root.join("preflight.stderr"),
+        )
+        .unwrap_or_else(|timeout| panic!("{timeout:?}"));
         assert!(
             preflight.status.success(),
             "native tmux shim preflight failed: {}",
