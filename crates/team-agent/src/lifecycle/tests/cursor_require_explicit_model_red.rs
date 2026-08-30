@@ -8,8 +8,8 @@
 //!       what: 写了 model 则该值进入 `--model <值>`
 //!     - name: cursor-effort-refuses-compile
 //!       what: 角色写 effort 则失败，不得丢掉后仍起席
-//!     - name: cursor-second-seat-refuses
-//!       what: 同 workspace 第二 CursorAgent 拒绝，文案含 TEAM_AGENT_ID/mcp.json
+//!     - name: cursor-second-seat-isolated-identity
+//!       what: 默认 per-seat MCP 隔离时同 workspace 两个 CursorAgent 都启动且身份各自保留
 //! boundary:
 //!   - 只钉 Provider::CursorAgent；不改 grok/claude 路径
 //! maturity: wired
@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serial_test::serial;
+use team_agent::lifecycle::cursor_mcp_json_path;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::transport::test_support::OfflineTransport;
 
@@ -126,7 +127,9 @@ fn cursor_role_with_effort_refuses_to_start() {
 
 #[test]
 #[serial(env)]
-fn cursor_second_seat_in_same_workspace_is_refused() {
+fn cursor_second_seat_in_same_workspace_uses_isolated_identity() {
+    let previous_isolation = std::env::var("TEAM_AGENT_CURSOR_MCP_ISOLATION").ok();
+    std::env::remove_var("TEAM_AGENT_CURSOR_MCP_ISOLATION");
     let ws = tmp_dir("cursor-two");
     let team = ws.join("cursortm");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -153,19 +156,34 @@ fn cursor_second_seat_in_same_workspace_is_refused() {
         Some("cursortm"),
         &transport,
     );
-    let err = match result {
-        Ok(report) => panic!("second cursor seat must refuse; report={report:?}"),
-        Err(error) => error.to_string(),
-    };
+    restore_isolation_env(previous_isolation);
+    result.expect("default per-seat MCP isolation must allow both Cursor seats");
+    let records = transport.spawn_records();
+    assert_eq!(
+        records.len(),
+        2,
+        "both Cursor seats must spawn; records={records:?}"
+    );
+
+    let first = std::fs::read_to_string(cursor_mcp_json_path(&ws, "cursor_a").unwrap())
+        .expect("first seat MCP config");
+    let second = std::fs::read_to_string(cursor_mcp_json_path(&ws, "cursor_b").unwrap())
+        .expect("second seat MCP config");
     assert!(
-        err.contains("TEAM_AGENT_ID") && err.contains("mcp.json"),
-        "error must name the last-writer identity file; err={err}"
+        first.contains("\"cursor_a\"") && !first.contains("\"cursor_b\""),
+        "first seat must retain its own TEAM_AGENT_ID"
     );
     assert!(
-        transport.spawn_records().is_empty(),
-        "must refuse before any cursor spawn; records={:?}",
-        transport.spawn_records()
+        second.contains("\"cursor_b\"") && !second.contains("\"cursor_a\""),
+        "second seat must retain its own TEAM_AGENT_ID"
     );
+}
+
+fn restore_isolation_env(previous: Option<String>) {
+    match previous {
+        Some(value) => std::env::set_var("TEAM_AGENT_CURSOR_MCP_ISOLATION", value),
+        None => std::env::remove_var("TEAM_AGENT_CURSOR_MCP_ISOLATION"),
+    }
 }
 
 fn first_spawn_argv(transport: &OfflineTransport) -> Vec<String> {
