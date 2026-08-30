@@ -306,6 +306,17 @@ pub fn deliver_pending_message(
             turn_verification: None,
         });
     };
+    // Attach may requeue this row after the coordinator captured `state` but
+    // before this claim. Revalidate the durable receiver before refusing it.
+    let fresh_leader_state = if message.recipient == "leader" {
+        Some(scoped_state_for_write(
+            workspace,
+            canonical_owner_team_id.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let state = fresh_leader_state.as_ref().unwrap_or(state);
     if message.recipient == "leader" {
         let Some(receiver) = leader_receiver_value(state) else {
             store.mark(message_id, "failed", Some("leader_not_attached"))?;
