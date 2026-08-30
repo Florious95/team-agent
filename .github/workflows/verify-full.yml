@@ -16,6 +16,7 @@ on:
         type: choice
         options:
           - full
+          - a6-message-funnel
           - f04-r4
           - f05-rec002
           - f07-c5-diagnostic
@@ -202,6 +203,9 @@ jobs:
           case "${TEST_PROFILE}" in
             full)
               cargo test --workspace --all-targets --locked --no-fail-fast
+              ;;
+            a6-message-funnel)
+              cargo test -p team-agent --locked --test mcp_simulated_worker_source_red -- --nocapture
               ;;
             f04-r4)
               cargo test -p team-agent --test clone_fork_parallel_lifecycle_red --locked r4_parallel_n_clones_have_pairwise_unique_new_sessions -- --exact --nocapture --test-threads=1
