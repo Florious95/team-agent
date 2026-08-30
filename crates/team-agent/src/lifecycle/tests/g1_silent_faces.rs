@@ -518,8 +518,11 @@ fn assert_provider_mcp_table(case: &Case, provider: Provider, clone_id: &str) {
         }
         Provider::CursorAgent => {
             apply_cursor_mcp_overlay(&overlay_root, &cfg).expect("cursor overlay");
-            let text = std::fs::read_to_string(overlay_root.join(".cursor/mcp.json"))
-                .expect("cursor mcp.json");
+            let text = std::fs::read_to_string(
+                team_agent::lifecycle::cursor_mcp_json_path(&overlay_root, clone_id)
+                    .expect("iso path"),
+            )
+            .expect("cursor mcp.json");
             assert!(
                 text.contains("\"team_orchestrator\""),
                 "cursor MCP injection must keep team_orchestrator; text={text}"

@@ -309,10 +309,16 @@ pub(crate) use mcp_config::{
 
 pub(crate) mod pi_mcp;
 
+mod cursor_mcp_iso;
+pub use cursor_mcp_iso::{
+    cursor_mcp_isolation_enabled, cursor_mcp_json_path, cursor_mcp_project_dir,
+    materialize_cursor_mcp_project,
+};
 mod cursor_mcp;
 pub use cursor_mcp::{
-    apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,
-    enable_cursor_workspace_mcp, physical_workspace_path, refuse_second_cursor_occupant,
+    apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
+    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, enable_cursor_workspace_mcp,
+    physical_workspace_path, refuse_second_cursor_occupant,
 };
 
 mod cursor_create_chat;

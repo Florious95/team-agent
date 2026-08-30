@@ -321,15 +321,23 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // Cursor: role 经 .cursor/rules；MCP 身份必须写进 mcp.json env
-        // （不继承父进程 TEAM_AGENT_*）。--workspace 钉物理路径。
-        // mcp.json last-writer：同 workspace 第二 CursorAgent 拒绝。
+        // Cursor: role 经 .cursor/rules。MCP 身份默认写 provider-config/<id>/cursor
+        // （不继承父进程 TEAM_AGENT_*）。--workspace 指该工程根，--add-dir 真 workspace。
+        // 隔离关闭时仍拒绝第二席（共用 mcp.json last-writer）。不改 HOME。
         if matches!(provider, Provider::CursorAgent) {
             refuse_second_cursor_occupant(workspace, agent_id_raw, Some(spec))?;
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
             apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-            enable_cursor_workspace_mcp(workspace)?;
-            apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+            let project = if crate::lifecycle::launch::cursor_mcp_isolation_enabled() {
+                Some(crate::lifecycle::launch::cursor_mcp_project_dir(
+                    workspace,
+                    agent_id_raw,
+                )?)
+            } else {
+                None
+            };
+            enable_cursor_workspace_mcp(workspace, project.as_deref())?;
+            apply_cursor_spawn_workspace_pointers(&mut plan.argv, workspace, agent_id_raw)?;
             let proxy = apply_cursor_subscription_proxy_env(&mut env);
             let event_log = crate::event_log::EventLog::new(workspace);
             let _ = event_log.write(

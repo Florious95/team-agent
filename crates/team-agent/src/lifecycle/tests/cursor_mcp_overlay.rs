@@ -1,6 +1,6 @@
 //! purpose: cursor 席位必须把身份写进它实际会读的 mcp.json env
-//! contract: overlay 后 `<workspace>/.cursor/mcp.json` 含 team_orchestrator.env.TEAM_AGENT_ID
-//!   （不是 `.team/runtime/mcp/*.json`，也不是靠 pane env 继承）
+//! contract: overlay 后 provider-config/<id>/cursor/.cursor/mcp.json 含 team_orchestrator.env.TEAM_AGENT_ID
+//!   （不是改 HOME，也不是靠 pane env 继承）
 //! boundary: 只覆盖 cursor launch 产物；不改 claude/codex/copilot/grok 路径
 //!
 //! 生产侧判据，未经血统审计。
@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::lifecycle::{
-    apply_cursor_mcp_overlay, apply_cursor_subscription_proxy_env,
-    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, physical_workspace_path,
-    LifecycleError,
+    apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
+    apply_cursor_subscription_proxy_env, apply_cursor_workspace_physical_path,
+    cursor_mcp_enable_argv, cursor_mcp_json_path, cursor_mcp_project_dir, physical_workspace_path,
+    refuse_second_cursor_occupant, LifecycleError,
 };
 use team_agent::provider::McpConfig;
 use team_agent::transport::test_support::OfflineTransport;
@@ -30,7 +31,17 @@ fn cursor_overlay_writes_identity_into_mcp_json_env() {
     let ws = tmp_dir("cursor-mcp-id");
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("seat-a", &ws.to_string_lossy()))
         .expect("overlay write");
-    let text = std::fs::read_to_string(ws.join(".cursor/mcp.json")).unwrap();
+    let path = cursor_mcp_json_path(&ws, "seat-a").unwrap();
+    let rendered = path.to_string_lossy();
+    assert!(
+        rendered.contains("provider-config") && rendered.contains("/cursor/"),
+        "identity must land under provider-config/<id>/cursor, not a HOME fork: {rendered}"
+    );
+    assert!(
+        !rendered.contains("/.team/runtime/cursor-mcp/"),
+        "must not use the rejected COPILOT_HOME-style cursor-mcp tree: {rendered}"
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
     assert!(
         text.contains("\"team_orchestrator\""),
         "cursor overlay must use the canonical server name"
@@ -99,34 +110,56 @@ fn cursor_overlay_keeps_unrelated_servers_and_replaces_orchestrator() {
     .unwrap();
 
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("seat-b", "/ws-b")).expect("overlay merge");
-    let text = std::fs::read_to_string(dir.join("mcp.json")).unwrap();
+    let project = std::fs::read_to_string(dir.join("mcp.json")).unwrap();
     assert!(
-        text.contains("keep-me"),
-        "unrelated project MCP servers must survive"
+        project.contains("keep-me"),
+        "unrelated project MCP servers must survive in workspace mcp.json"
     );
     assert!(
-        !text.contains("/old/team-agent") && !text.contains("/stale"),
-        "stale orchestrator/legacy names must be replaced"
+        !project.contains("/old/team-agent") && !project.contains("/stale"),
+        "stale orchestrator/legacy names must be scrubbed from the shared project file"
     );
+    let isolated = std::fs::read_to_string(cursor_mcp_json_path(&ws, "seat-b").unwrap()).unwrap();
     assert!(
-        text.contains("seat-b") && text.contains("/ws-b"),
-        "new identity must land"
+        isolated.contains("seat-b") && isolated.contains("/ws-b"),
+        "new identity must land in the per-seat mcp.json"
     );
 }
 
 #[test]
-fn cursor_second_seat_overwrites_json_identity_without_exclusive_gate() {
+fn cursor_second_seat_keeps_both_identities_when_isolated() {
     let ws = tmp_dir("cursor-mcp-two");
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("first", "/ws")).expect("first");
     apply_cursor_mcp_overlay(&ws, &sample_mcp_config("second", "/ws")).expect("second");
+    let first = std::fs::read_to_string(cursor_mcp_json_path(&ws, "first").unwrap()).unwrap();
+    let second = std::fs::read_to_string(cursor_mcp_json_path(&ws, "second").unwrap()).unwrap();
+    assert!(
+        first.contains("\"first\"") && !first.contains("\"second\""),
+        "seat first must keep its TEAM_AGENT_ID"
+    );
+    assert!(
+        second.contains("\"second\"") && !second.contains("\"first\""),
+        "seat second must keep its TEAM_AGENT_ID"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn cursor_shared_overlay_last_writer_is_the_destruction_tooth() {
+    let previous = std::env::var("TEAM_AGENT_CURSOR_MCP_ISOLATION").ok();
+    std::env::set_var("TEAM_AGENT_CURSOR_MCP_ISOLATION", "0");
+    let ws = tmp_dir("cursor-mcp-shared-red");
+    apply_cursor_mcp_overlay(&ws, &sample_mcp_config("first", "/ws")).expect("first");
+    apply_cursor_mcp_overlay(&ws, &sample_mcp_config("second", "/ws")).expect("second");
     let text = std::fs::read_to_string(ws.join(".cursor/mcp.json")).unwrap();
+    restore_isolation_env(previous);
     assert!(
         text.contains("second"),
-        "last writer wins on a shared --workspace; no grok-style exclusive gate"
+        "destruction: shared mcp.json last writer is second"
     );
     assert!(
         !text.contains("\"first\""),
-        "previous seat identity must not remain in the single json file"
+        "destruction: criterion 2 goes red — first identity is gone"
     );
 }
 
@@ -158,6 +191,27 @@ fn cursor_workspace_flag_is_rewritten_to_physical_path() {
 }
 
 #[test]
+fn cursor_spawn_pointers_use_per_seat_workspace_and_add_dir() {
+    let ws = tmp_dir("cursor-pointers");
+    apply_cursor_mcp_overlay(&ws, &sample_mcp_config("seat-p", &ws.to_string_lossy()))
+        .expect("overlay");
+    let mut argv = vec![
+        "agent".to_string(),
+        "--workspace".to_string(),
+        ws.to_string_lossy().into_owned(),
+    ];
+    apply_cursor_spawn_workspace_pointers(&mut argv, &ws, "seat-p").expect("pointers");
+    let project = physical_workspace_path(&cursor_mcp_project_dir(&ws, "seat-p").unwrap());
+    let team = physical_workspace_path(&ws);
+    assert_eq!(argv[2], project.to_string_lossy().as_ref());
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == team.to_string_lossy().as_ref()),
+        "true workspace must be added with documented --add-dir: {argv:?}"
+    );
+}
+
+#[test]
 #[serial(env)]
 fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
     let prev = std::env::var("HTTPS_PROXY").ok();
@@ -186,7 +240,7 @@ fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
 fn cursor_spawn_writes_identity_into_project_mcp_json() {
     let ws = tmp_dir("cursor-mcp-spawn");
     let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
-    let config_path = ws.join(".cursor").join("mcp.json");
+    let config_path = cursor_mcp_json_path(&ws, "cursor_writer").expect("iso path");
     assert!(
         !config_path.exists(),
         "precondition: project cursor mcp.json must be absent before spawn"
@@ -204,7 +258,7 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
 
     let text = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
         panic!(
-            "cursor spawn must materialize {}; cursor only reads this workspace file: {err}",
+            "cursor spawn must materialize per-seat {}; cursor reads --workspace/.cursor/mcp.json: {err}",
             config_path.display()
         )
     });
@@ -284,4 +338,49 @@ fn tmp_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::canonicalize(dir).unwrap()
+}
+
+fn restore_isolation_env(previous: Option<String>) {
+    match previous {
+        Some(value) => std::env::set_var("TEAM_AGENT_CURSOR_MCP_ISOLATION", value),
+        None => std::env::remove_var("TEAM_AGENT_CURSOR_MCP_ISOLATION"),
+    }
+}
+
+#[test]
+fn refuse_second_allows_when_isolation_on() {
+    let ws = tmp_dir("cursor-refuse-iso-on");
+    let spec = team_agent::model::yaml::loads(
+        "agents:\n  - id: a\n    provider: cursor_agent\n  - id: b\n    provider: cursor_agent\n",
+    )
+    .expect("spec");
+    refuse_second_cursor_occupant(&ws, "b", Some(&spec)).expect("isolation on allows second");
+}
+
+#[test]
+#[serial(env)]
+fn refuse_second_still_blocks_when_isolation_disabled() {
+    let previous = std::env::var("TEAM_AGENT_CURSOR_MCP_ISOLATION").ok();
+    std::env::set_var("TEAM_AGENT_CURSOR_MCP_ISOLATION", "0");
+    let ws = tmp_dir("cursor-refuse-iso-off");
+    let spec = team_agent::model::yaml::loads(
+        "agents:\n  - id: a\n    provider: cursor_agent\n  - id: b\n    provider: cursor_agent\n",
+    )
+    .expect("spec");
+    let err = refuse_second_cursor_occupant(&ws, "b", Some(&spec));
+    restore_isolation_env(previous);
+    let err = err.expect_err("isolation off must fail-closed");
+    match err {
+        LifecycleError::RequirementUnmet(text) => {
+            assert!(
+                text.contains("cursor_agent seat already occupies this workspace"),
+                "fail-closed text must stay: {text}"
+            );
+            assert!(
+                text.contains("last-writer"),
+                "reason must still name last-writer: {text}"
+            );
+        }
+        other => panic!("expected RequirementUnmet, got {other:?}"),
+    }
 }
