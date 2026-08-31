@@ -302,7 +302,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Core",
-        &["quick-start", "send", "status", "collect", "results", "models"],
+        &["quick-start", "send", "status", "collect", "models"],
     );
     append_help_section(
         &mut out,
