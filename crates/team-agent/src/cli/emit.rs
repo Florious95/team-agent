@@ -126,6 +126,15 @@ fn write_stdout_line(text: &str) -> std::io::Result<()> {
     stdout.write_all(b"\n")
 }
 
+#[cfg(test)]
+pub(crate) fn __test_dispatch(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+) -> Result<ExitCode, CliError> {
+    dispatch(command, args, cwd)
+}
+
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     let Some(spec) = command_spec(command) else {
         return Ok(emit_unknown_subcommand_usage(command));
@@ -188,6 +197,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         // (workspace, team_key) tuple and delegates to the E6 named-leader
         // delivery path — no separate route authority.
         "leaders" => cmd_leaders(&leaders_args(args, cwd)).map(emit_result),
+        "models" => cmd_models(&models_args(args)?).map(emit_result),
         "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
@@ -239,6 +249,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "sessions",
     // 0.5.9 E7: host leader discovery command surface.
     "leaders",
+    "models",
     "validate",
     "install-skill",
     "profile",
@@ -291,7 +302,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Core",
-        &["quick-start", "send", "status", "collect", "results"],
+        &["quick-start", "send", "status", "collect", "models"],
     );
     append_help_section(
         &mut out,
@@ -376,6 +387,7 @@ fn command_help(command: Option<&str>) -> String {
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
+        Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]\n\nPrints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]".to_string(),
@@ -1051,6 +1063,23 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         no_display: parsed.no_display,
         json: parsed.json,
         backend: parsed.backend,
+    })
+}
+
+fn models_args(args: &[String]) -> Result<ModelsArgs, CliError> {
+    let parsed = parse_args(args);
+    let provider = parsed
+        .provider
+        .ok_or_else(|| CliError::Usage("models requires --provider pi".to_string()))?;
+    if provider != "pi" {
+        return Err(CliError::Usage(format!(
+            "models supports only --provider pi, got {provider:?}"
+        )));
+    }
+    Ok(ModelsArgs {
+        provider,
+        search: parsed.search,
+        json: parsed.json,
     })
 }
 
