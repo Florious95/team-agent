@@ -2522,10 +2522,10 @@ fn write_restart_agent_failed_event(
                 "session_id": decision.session_id.as_ref().map(|session| session.as_str()),
                 "phase": phase,
                 "error": error,
-                "action": format!(
-                    "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
-                    decision.agent_id,
-                    decision.agent_id
+                "action": restart_failure_action(
+                    &decision.agent_id,
+                    phase,
+                    decision.session_id.as_ref(),
                 ),
                 "log": format!(
                     ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
@@ -3008,12 +3008,28 @@ fn restart_failure_next_actions(failed_agents: &[RestartFailedAgent]) -> Vec<Str
     failed_agents
         .iter()
         .map(|failure| {
-            format!(
-                "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
-                failure.agent_id, failure.agent_id
+            restart_failure_action(
+                &failure.agent_id,
+                &failure.phase,
+                failure.session_id.as_ref(),
             )
         })
         .collect()
+}
+
+pub(crate) fn restart_failure_action(
+    agent_id: &AgentId,
+    phase: &str,
+    session_id: Option<&SessionId>,
+) -> String {
+    if phase == "spawn" && session_id.is_none() {
+        return format!(
+            "worker {agent_id} failed before a pane was created; inspect the reported provider error, then rerun `team-agent restart --allow-fresh`"
+        );
+    }
+    format!(
+        "inspect worker {agent_id} output, then reset that worker with `team-agent reset-agent {agent_id}` or rerun `team-agent restart --allow-fresh`"
+    )
 }
 
 fn start_mode_wire(mode: StartMode) -> &'static str {

@@ -3393,6 +3393,40 @@ pub mod lifecycle_port {
                 Some(crate::cli::QUICK_START_REMINDER)
             );
         }
+
+        #[test]
+        fn spawn_failure_without_session_does_not_claim_a_worker_pane_exists() {
+            let value = restart_value(
+                crate::lifecycle::RestartReport::Failed {
+                    session_name: crate::transport::SessionName::new("team-current"),
+                    failed_agents: vec![crate::lifecycle::RestartFailedAgent {
+                        agent_id: crate::model::ids::AgentId::new("coder"),
+                        restart_mode: crate::lifecycle::StartMode::Fresh,
+                        decision: crate::lifecycle::ResumeDecision::FreshStart,
+                        session_id: None,
+                        phase: "spawn".to_string(),
+                        error: "provider io error".to_string(),
+                    }],
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                },
+                None,
+            );
+            let action = value
+                .pointer("/failed_agents/0/action")
+                .and_then(Value::as_str)
+                .expect("spawn failure action");
+
+            assert!(
+                action.contains("before a pane was created"),
+                "action={action}"
+            );
+            assert!(
+                !action.contains("inspect worker coder output"),
+                "action={action}"
+            );
+            assert!(!action.contains("restart-agent"), "action={action}");
+        }
     }
 
     fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
@@ -3436,10 +3470,10 @@ pub mod lifecycle_port {
                     "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
                     "phase": failure.phase,
                     "error": failure.error,
-                    "action": format!(
-                        "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
-                        failure.agent_id,
-                        failure.agent_id
+                    "action": crate::lifecycle::restart_failure_action(
+                        &failure.agent_id,
+                        &failure.phase,
+                        failure.session_id.as_ref(),
                     ),
                     "log": format!(
                         ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
@@ -3470,10 +3504,10 @@ pub mod lifecycle_port {
                     "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
                     "phase": failure.phase,
                     "error": failure.error,
-                    "action": format!(
-                        "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
-                        failure.agent_id,
-                        failure.agent_id
+                    "action": crate::lifecycle::restart_failure_action(
+                        &failure.agent_id,
+                        &failure.phase,
+                        failure.session_id.as_ref(),
                     ),
                     "log": format!(
                         ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
