@@ -29,7 +29,7 @@ Pi roles preserve the direct Pi login, model defaults, extensions/plugins, skill
 
 ## Operate
 
-- Send: `team-agent send TO MESSAGE` using an in-team short name or fully qualified `<workspace>::<team>/<agent>`. Do not poll after success.
+- Send: `team-agent send TO MESSAGE` using an in-team short name or fully qualified `<workspace>::<team>/<agent>`; these are co-equal positional TO forms. For example, `team-agent send reviewer "..."` uses an in-team short name. Do not poll after success.
 - Inspect: `team-agent status` or `team-agent status --json`; `ok: true` with `ready: false` is not a crash.
 - On a structured failure with an `action`, run that action first, then stop. Never guess flags.
 - Never rewrite a user-supplied model id or read `.env` files.
