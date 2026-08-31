@@ -1,6 +1,6 @@
 # Team Agent operator handbook
 
-This is the long-form operator reference. The sealed CLI face is `skills/team-agent/SKILL.md` (≤60 lines). Do not drop the r13-corrected 0.5.66 facts below.
+This is the long-form operator reference. The sealed CLI face is `../SKILL.md` (≤60 lines). Do not drop the r13-corrected 0.5.66 facts below.
 
 
 # Team Agent

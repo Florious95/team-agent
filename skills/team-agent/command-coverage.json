@@ -3,7 +3,7 @@
   "authority": {
     "kind": "normative_handbook_plus_live_help",
     "handbook": {
-      "path": "docs/reference/team-agent-operator.md",
+      "path": "skills/team-agent/references/team-agent-operator.md",
       "start_marker": "<!-- command-coverage:normative-start -->",
       "end_marker": "<!-- command-coverage:normative-end -->"
     },

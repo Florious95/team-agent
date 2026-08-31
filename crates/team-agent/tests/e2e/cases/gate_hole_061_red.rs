@@ -323,7 +323,7 @@ fn tooth_3a_every_skill_command_is_recorded_losslessly() {
         "TOOTH-3A AUTHORITY-METADATA RED: unsupported command authority kind"
     );
     assert_eq!(
-        authority.handbook.path, "docs/reference/team-agent-operator.md",
+        authority.handbook.path, "skills/team-agent/references/team-agent-operator.md",
         "TOOTH-3A AUTHORITY-METADATA RED: handbook path must be repository canonical"
     );
     assert_eq!(
