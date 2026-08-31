@@ -591,6 +591,55 @@ fn executable_file_type(path: &Path) -> Result<PiExecutableFileType, ProviderErr
 /// Discover candidates with one PATH-first catalog observation. This deliberately
 /// does not resolve adapters or scan wrapper chains; callers use it only for
 /// rejecting an unqualified role model before lifecycle mutation.
+pub(crate) fn run_pi_catalog(
+    executable: &Path,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let mut child = Command::new(executable)
+        .arg("--list-models")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "Pi executable is unavailable on PATH".to_string())?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        "Pi model catalog output unavailable".to_string()
+    })?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
+        let _ = sender.send((result, bytes));
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let (result, bytes) = receiver.recv_timeout(timeout.saturating_sub(start.elapsed()))
+                    .map_err(|_| "Pi model catalog command timed out".to_string())?;
+                if !status.success() { return Err("Pi model catalog command failed".into()); }
+                result.map_err(|_| "Pi model catalog could not be read".to_string())?;
+                if bytes.len() as u64 > max_bytes { return Err("Pi model catalog exceeds the bounded output limit".into()); }
+                return Ok(bytes);
+            }
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Pi model catalog command timed out".into());
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Pi model catalog command could not be observed".into());
+            }
+        }
+    }
+}
+
 pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, ProviderError> {
     let path = std::env::var_os("PATH")
         .ok_or_else(|| ProviderError::Command("PATH is not set".to_string()))?;
@@ -598,7 +647,8 @@ pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, Provid
         .map(|directory| directory.join("pi"))
         .find(|candidate| candidate.is_file())
         .ok_or_else(|| ProviderError::Command("Pi executable not found on PATH".to_string()))?;
-    let catalog = bounded_catalog_stdout(&executable)?;
+    let catalog = run_pi_catalog(&executable, Duration::from_secs(10), 1024 * 1024)
+        .map_err(ProviderError::Command)?;
     let models = parse_pi_list_models_table(&catalog)?;
     Ok(models
         .into_iter()
@@ -608,44 +658,6 @@ pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, Provid
                 .is_some_and(|(_, name)| name == requested)
         })
         .collect())
-}
-
-fn bounded_catalog_stdout(executable: &Path) -> Result<Vec<u8>, ProviderError> {
-    const LIMIT: u64 = 1024 * 1024;
-    const TIMEOUT: Duration = Duration::from_secs(10);
-    let mut child = Command::new(executable)
-        .arg("--list-models")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| ProviderError::Io(format!("Pi catalog command: {error}")))?;
-    let stdout = child.stdout.take().ok_or_else(|| ProviderError::Command("Pi model catalog output unavailable".into()))?;
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(LIMIT + 1).read_to_end(&mut bytes);
-        let _ = sender.send((result, bytes));
-    });
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let (result, bytes) = receiver.recv_timeout(TIMEOUT.saturating_sub(start.elapsed()))
-                    .map_err(|_| ProviderError::Command("Pi model catalog command timed out".into()))?;
-                result.map_err(|error| ProviderError::Io(format!("Pi model catalog output: {error}")))?;
-                if !status.success() { return Err(ProviderError::Command("Pi model catalog command failed".into())); }
-                if bytes.len() as u64 > LIMIT { return Err(ProviderError::Command("Pi model catalog output exceeded limit".into())); }
-                return Ok(bytes);
-            }
-            Ok(None) if start.elapsed() >= TIMEOUT => {
-                let _ = child.kill();
-                return Err(ProviderError::Command("Pi model catalog command timed out".into()));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(ProviderError::Io(format!("Pi model catalog command: {error}"))),
-        }
-    }
 }
 
 fn pi_path_entries() -> Result<Vec<PathBuf>, ProviderError> {

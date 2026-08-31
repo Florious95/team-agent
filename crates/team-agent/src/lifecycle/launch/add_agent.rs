@@ -447,6 +447,7 @@ pub(super) fn force_recreate_with_transport_locked(
             role_file_path.display()
         )));
     }
+    preflight_pi_role_model(role_file_path)?;
     let snapshot = crate::lifecycle::restart::remove::ForceRecreateSnapshot::capture(
         run_workspace,
         agent_id,
