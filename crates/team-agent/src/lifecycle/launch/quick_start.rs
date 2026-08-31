@@ -446,6 +446,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
         team_depth.parent_team_key.as_deref(),
         team_depth.team_depth,
     )?;
+    register_quick_start_binding_if_attached(&workspace, &state_team_key);
     launch.leader_receiver_attached =
         launched_team_receiver_is_attached(&workspace, &state_team_key);
     launch.session_capture_incomplete_agents =
@@ -518,4 +519,44 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
         display_backend,
         worker_readiness,
     })
+}
+
+/// Publish the derived host-registry row only after the canonical quick-start
+/// owner and receiver agree. The registry is not ownership authority, and a
+/// write failure remains an honest readiness degradation.
+fn register_quick_start_binding_if_attached(workspace: &Path, team_key: &str) {
+    let Ok(state) = load_runtime_state(workspace) else {
+        return;
+    };
+    let Some(team) = state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(team_key))
+    else {
+        return;
+    };
+    let owner_pane = team
+        .get("team_owner")
+        .and_then(|owner| owner.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let receiver = team.get("leader_receiver");
+    let receiver_pane = receiver
+        .and_then(|receiver| receiver.get("pane_id").or_else(|| receiver.get("pane")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if owner_pane.is_empty()
+        || owner_pane != receiver_pane
+        || receiver
+            .and_then(|receiver| receiver.get("status"))
+            .and_then(serde_json::Value::as_str)
+            != Some("attached")
+    {
+        return;
+    }
+    let _ = crate::leader::registry::register_binding_from_state_best_effort(
+        workspace,
+        Some(team_key),
+        "quick-start",
+    );
 }

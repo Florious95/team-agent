@@ -246,7 +246,7 @@ pub(super) fn save_launched_team_state_for_key(
     team_key: Option<&str>,
     added_agent_id: Option<&str>,
 ) -> Result<(), LifecycleError> {
-    let existing = load_runtime_state(workspace).unwrap_or_else(|_| serde_json::json!({}));
+    let mut existing = load_runtime_state(workspace).unwrap_or_else(|_| serde_json::json!({}));
     let launched_key = team_key
         .filter(|key| !key.is_empty())
         .map(str::to_string)
@@ -280,6 +280,7 @@ pub(super) fn save_launched_team_state_for_key(
         obj.entry("is_external_leader".to_string())
             .or_insert(serde_json::Value::Bool(false));
     }
+    reuse_quick_start_owner_or_refuse(&mut existing, &launched_key, &mut launched)?;
     promote_launched_binding_from_team_entry(&mut launched, &launched_key);
     preserve_existing_leader_topology(&existing, &launched_key, &mut launched);
     drop_foreign_seeded_owner(&existing, &launched_key, &mut launched);
@@ -298,6 +299,190 @@ pub(super) fn save_launched_team_state_for_key(
     crate::state::repository::StateRepository::new(workspace)
         .save(intent, &projected)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+/// Preserve an existing binding at the launch-state write boundary.
+/// A launcher-only `current` entry is the provisional identity of the team
+/// that quick-start is materialising, so the same caller consumes and reuses
+/// it. A different owner fails closed; only a state with no owner and no
+/// receiver reaches the normal first-claim seed.
+fn reuse_quick_start_owner_or_refuse(
+    existing: &mut serde_json::Value,
+    launched_key: &str,
+    launched: &mut serde_json::Value,
+) -> Result<(), LifecycleError> {
+    let teams = existing.get("teams").and_then(serde_json::Value::as_object);
+    let target = teams.and_then(|teams| teams.get(launched_key));
+    let provisional_current = target.is_none()
+        && launched_key != crate::state::projection::CURRENT_TEAM_ALIAS
+        && existing
+            .get("active_team_key")
+            .and_then(serde_json::Value::as_str)
+            == Some(crate::state::projection::CURRENT_TEAM_ALIAS)
+        && teams
+            .and_then(|teams| teams.get(crate::state::projection::CURRENT_TEAM_ALIAS))
+            .is_some_and(launcher_only_owner_entry);
+    let source_key = if target.is_some() {
+        launched_key
+    } else if provisional_current {
+        crate::state::projection::CURRENT_TEAM_ALIAS
+    } else {
+        return Ok(());
+    };
+    let Some(existing_team) = teams.and_then(|teams| teams.get(source_key)).cloned() else {
+        return Ok(());
+    };
+    let owner = existing_team
+        .get("team_owner")
+        .filter(|value| !value.is_null());
+    let receiver = existing_team
+        .get("leader_receiver")
+        .filter(|value| !value.is_null());
+    if owner.is_none() && receiver.is_none() {
+        return Ok(());
+    }
+    let caller_team = launched
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(launched_key));
+    let caller_owner = caller_team.and_then(|team| team.get("team_owner"));
+    let caller_receiver = caller_team.and_then(|team| team.get("leader_receiver"));
+    let caller_pane = caller_owner
+        .and_then(|owner| owner.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let owner_pane = owner
+        .and_then(|owner| owner.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let receiver_pane = receiver
+        .and_then(|receiver| receiver.get("pane_id").or_else(|| receiver.get("pane")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let caller_receiver_pane = caller_receiver
+        .and_then(|receiver| receiver.get("pane_id").or_else(|| receiver.get("pane")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let owner_uuid = owner
+        .and_then(|owner| owner.get("leader_session_uuid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let receiver_uuid = receiver
+        .and_then(|receiver| receiver.get("leader_session_uuid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let caller_uuid = caller_owner
+        .and_then(|owner| owner.get("leader_session_uuid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let caller_receiver_uuid = caller_receiver
+        .and_then(|receiver| receiver.get("leader_session_uuid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let receiver_socket = receiver
+        .and_then(|receiver| receiver.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let caller_receiver_socket = caller_receiver
+        .and_then(|receiver| receiver.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if owner_pane.is_empty()
+        || owner_uuid.is_empty()
+        || receiver_socket.is_empty()
+        || caller_pane != owner_pane
+        || owner_pane != receiver_pane
+        || caller_receiver_pane != receiver_pane
+        || caller_uuid != owner_uuid
+        || receiver_uuid != owner_uuid
+        || caller_receiver_uuid != owner_uuid
+        || caller_receiver_socket != receiver_socket
+        || receiver
+            .and_then(|receiver| receiver.get("status"))
+            .and_then(serde_json::Value::as_str)
+            != Some("attached")
+        || caller_receiver
+            .and_then(|receiver| receiver.get("status"))
+            .and_then(serde_json::Value::as_str)
+            != Some("attached")
+    {
+        return Err(quick_start_owner_refusal(owner, caller_owner));
+    }
+    let epoch = existing_team
+        .get("owner_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            owner
+                .and_then(|owner| owner.get("owner_epoch"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            receiver
+                .and_then(|receiver| receiver.get("owner_epoch"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or(0);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_team_owner(owner.cloned().unwrap_or(serde_json::Value::Null))
+        .with_leader_receiver(receiver.cloned().unwrap_or(serde_json::Value::Null))
+        .with_owner_epoch(epoch);
+    crate::state::ownership::write_owner(launched, launched_key, record);
+    if provisional_current {
+        if let Some(teams) = existing
+            .get_mut("teams")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            teams.remove(crate::state::projection::CURRENT_TEAM_ALIAS);
+        }
+    }
+    Ok(())
+}
+
+fn launcher_only_owner_entry(team: &serde_json::Value) -> bool {
+    team.get("spec_path").is_none()
+        && team.get("team_dir").is_none()
+        && team
+            .get("session_name")
+            .is_none_or(serde_json::Value::is_null)
+        && team
+            .get("agents")
+            .is_none_or(|agents| agents.as_object().is_some_and(|agents| agents.is_empty()))
+        && team
+            .get("tasks")
+            .is_none_or(|tasks| tasks.as_array().is_some_and(|tasks| tasks.is_empty()))
+}
+
+fn quick_start_owner_refusal(
+    owner: Option<&serde_json::Value>,
+    caller: Option<&serde_json::Value>,
+) -> LifecycleError {
+    let owner_uuid = owner
+        .and_then(|value| value.get("leader_session_uuid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let caller_uuid = caller
+        .and_then(|value| value.get("leader_session_uuid"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let same_uuid = !owner_uuid.is_empty() && owner_uuid == caller_uuid;
+    let (reason_kind, action) = if same_uuid {
+        ("sticky_bind_collision", "team-agent claim-leader --confirm")
+    } else {
+        ("owner_takeover_required", "team-agent takeover --confirm")
+    };
+    LifecycleError::OwnerRefused(
+        serde_json::json!({
+            "ok": false,
+            "status": "refused",
+            "reason": "team_owner_mismatch",
+            "reason_kind": reason_kind,
+            "error": "not_owner",
+            "action": action,
+            "team_owner": owner.cloned().unwrap_or(serde_json::Value::Null),
+            "caller": caller.cloned().unwrap_or(serde_json::Value::Null),
+        })
+        .to_string(),
+    )
 }
 
 /// ---
@@ -431,6 +616,164 @@ mod merge_workspace_team_state_with_key_tests {
             Some(&json!("team-child")),
             "launched team must still be inserted under its runtime key: {merged}"
         );
+    }
+}
+
+#[cfg(test)]
+mod quick_start_owner_resolution_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn workspace(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "team-agent-quick-start-owner-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create workspace");
+        path
+    }
+
+    fn binding(pane: &str, claimed_via: &str, epoch: u64) -> serde_json::Value {
+        json!({
+            "team_owner": {
+                "pane_id": pane,
+                "provider": "codex",
+                "leader_session_uuid": "leader-uuid",
+                "owner_epoch": epoch,
+                "claimed_via": claimed_via
+            },
+            "leader_receiver": {
+                "mode": "direct_tmux",
+                "status": "attached",
+                "pane_id": pane,
+                "leader_session_uuid": "leader-uuid",
+                "owner_epoch": epoch,
+                "tmux_socket": "/tmp/tmux-owner"
+            },
+            "owner_epoch": epoch
+        })
+    }
+
+    fn launched(team: &str, pane: &str) -> serde_json::Value {
+        let mut value = json!({
+            "workspace": "/tmp/quick-start-owner-fixture",
+            "team_key": team,
+            "active_team_key": team,
+            "session_name": format!("team-{team}"),
+            "agents": {"worker": {"status": "starting"}},
+            "teams": {}
+        });
+        let seed = binding(pane, "quick-start", 1);
+        let record = crate::state::ownership::OwnershipWrite::new()
+            .with_team_owner(seed["team_owner"].clone())
+            .with_leader_receiver(seed["leader_receiver"].clone())
+            .with_owner_epoch(1);
+        crate::state::ownership::write_owner(&mut value, team, record);
+        value
+    }
+
+    #[test]
+    fn already_owned_quick_start_reuses_binding_without_claiming_again() {
+        let workspace = workspace("reuse");
+        let mut existing_binding = binding("%41", "claim-leader", 7);
+        existing_binding["agents"] = json!({});
+        existing_binding["tasks"] = json!([]);
+        existing_binding["session_name"] = serde_json::Value::Null;
+        existing_binding["active_team_key"] = json!("current");
+        let existing = json!({
+            "active_team_key": "current",
+            "team_key": "current",
+            "teams": {"current": existing_binding}
+        });
+        crate::state::persist::save_runtime_state(&workspace, &existing)
+            .expect("seed launcher binding");
+
+        save_launched_team_state_for_key(
+            &workspace,
+            &launched("actual-team", "%41"),
+            Some("actual-team"),
+            None,
+        )
+        .expect("same leader owner must be reused");
+
+        let saved = load_runtime_state(&workspace).expect("load saved state");
+        assert_eq!(
+            saved.pointer("/teams/actual-team/team_owner/claimed_via"),
+            Some(&json!("claim-leader")),
+            "quick-start must preserve the launcher ownership record instead of claiming again: {saved}"
+        );
+        assert_eq!(
+            saved.pointer("/teams/actual-team/owner_epoch"),
+            Some(&json!(7)),
+            "reusing the owner must not advance or reset its epoch: {saved}"
+        );
+        assert!(
+            saved.pointer("/teams/current").is_none(),
+            "the launcher-only current alias must be consumed by the real team key: {saved}"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn unowned_quick_start_performs_the_first_claim() {
+        let workspace = workspace("first-claim");
+        save_launched_team_state_for_key(
+            &workspace,
+            &launched("actual-team", "%42"),
+            Some("actual-team"),
+            None,
+        )
+        .expect("an actually unowned team may take its first owner");
+
+        let saved = load_runtime_state(&workspace).expect("load saved state");
+        assert_eq!(
+            saved.pointer("/teams/actual-team/team_owner/claimed_via"),
+            Some(&json!("quick-start"))
+        );
+        assert_eq!(
+            saved.pointer("/teams/actual-team/team_owner/pane_id"),
+            Some(&json!("%42"))
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn different_owner_quick_start_refuses_without_rewriting_owner() {
+        let workspace = workspace("foreign-owner");
+        let mut existing_binding = binding("%52", "managed-leader", 9);
+        existing_binding["team_owner"]["leader_session_uuid"] = json!("foreign-uuid");
+        existing_binding["leader_receiver"]["leader_session_uuid"] = json!("foreign-uuid");
+        existing_binding["leader_receiver"]["tmux_socket"] = json!("/tmp/tmux-foreign");
+        let existing = json!({
+            "active_team_key": "actual-team",
+            "team_key": "actual-team",
+            "session_name": "team-actual-team",
+            "teams": {"actual-team": existing_binding}
+        });
+        crate::state::persist::save_runtime_state(&workspace, &existing)
+            .expect("seed foreign owner");
+
+        let error = save_launched_team_state_for_key(
+            &workspace,
+            &launched("actual-team", "%52"),
+            Some("actual-team"),
+            None,
+        )
+        .expect_err("a different live owner must fail closed");
+        assert!(
+            error.to_string().contains("team_owner_mismatch"),
+            "refusal must retain the shared owner-gate reason: {error}"
+        );
+        let saved = load_runtime_state(&workspace).expect("reload unchanged state");
+        assert_eq!(
+            saved.pointer("/teams/actual-team/team_owner/leader_session_uuid"),
+            Some(&json!("foreign-uuid")),
+            "refusal must not steal or rewrite ownership: {saved}"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
 
