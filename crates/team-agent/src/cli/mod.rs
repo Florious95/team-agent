@@ -2791,7 +2791,9 @@ pub mod lifecycle_port {
     fn agent_action_value(agent: &str, workspace: &Path, team: Option<&str>, mut value: Value) -> Value {
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
             if let Some(object) = value.as_object_mut() {
-                object.insert("send_commands".to_string(), json!([super::adapters::send_command(agent, workspace, team)]));
+                if let Some(command) = super::adapters::send_command(agent, workspace, team) {
+                    object.insert("send_commands".to_string(), json!([command]));
+                }
             }
         }
         value

@@ -192,23 +192,27 @@ fn append_send_guidance(value: &mut Value, workspace: &Path, team: Option<&str>)
     let commands: Vec<Value> = agents
         .iter()
         .filter_map(Value::as_str)
-        .map(|agent| Value::String(send_command(agent, workspace, team)))
+        .filter_map(|agent| send_command(agent, workspace, team).map(Value::String))
         .collect();
-    if let Some(object) = value.as_object_mut() {
-        object.insert("send_commands".to_string(), Value::Array(commands));
+    if !commands.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("send_commands".to_string(), Value::Array(commands));
+        }
     }
 }
 
-pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) -> String {
+pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) -> Option<String> {
+    let workspace = workspace.to_str()?;
     let mut command = format!(
-        "team-agent send {agent} \\\"MESSAGE\\\" --workspace {}",
-        shell_quote(&workspace.to_string_lossy())
+        "team-agent send {} \\\"MESSAGE\\\" --workspace {}",
+        shell_quote(agent),
+        shell_quote(workspace)
     );
     if let Some(team) = team {
         command.push_str(" --team ");
         command.push_str(&shell_quote(team));
     }
-    command
+    Some(command)
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1605,7 +1609,7 @@ mod tests {
 
     use super::{agent_pane_id, append_send_guidance, quickstart_human, send_command};
     use serde_json::json;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
     #[test]
@@ -1650,11 +1654,25 @@ mod tests {
 
     #[test]
     fn send_guidance_is_copyable_and_preserves_explicit_scope() {
-        let command = send_command("worker", Path::new("/tmp/my workspace"), Some("team-a"));
+        let command = send_command("worker name; echo unsafe", Path::new("/tmp/my workspace"), Some("team-a"))
+            .unwrap();
         assert_eq!(
             command,
-            "team-agent send worker \\\"MESSAGE\\\" --workspace '/tmp/my workspace' --team team-a"
+            "team-agent send 'worker name; echo unsafe' \\\"MESSAGE\\\" --workspace '/tmp/my workspace' --team team-a"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_workspace_fails_closed_without_send_guidance() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let workspace = PathBuf::from(OsString::from_vec(b"/tmp/workspace-\xff".to_vec()));
+        assert!(send_command("worker", &workspace, None).is_none());
+        let mut value = json!({"ok": true, "agent_ids": ["worker"]});
+        append_send_guidance(&mut value, &workspace, None);
+        assert!(value.get("send_commands").is_none());
     }
 
     #[test]
