@@ -1846,3 +1846,34 @@ fn lanea_fork_rollback_complete_on_post_spawn_failure() {
     // Golden contract (operations.py:384-394): a post-spawn failure kills the spawned window, restores
     // the old spec text + prior state, and runs cleanup_mcp before re-raising.
 }
+
+#[test]
+#[serial_test::serial(env)]
+fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    seed_healthy_coordinator(&ws);
+    let role_dir = ws.join("role-masters");
+    std::fs::create_dir_all(&role_dir).unwrap();
+    let role = role_dir.join("invalid-pi.md");
+    std::fs::write(&role, CHARLIE_ROLE.replace("provider: codex\nmodel: gpt-5.5", "provider: pi\nmodel: gpt-5.6-sol")).unwrap();
+    let spec_before = std::fs::read(selected_spec_path(&ws)).unwrap();
+    let state_before = std::fs::read(crate::state::persist::runtime_state_path(&ws)).unwrap();
+    let normal = crate::lifecycle::add_agent_with_transport(&ws, &aid("charlie"), &role, false, None, &tx)
+        .expect_err("invalid Pi model must fail before reservation");
+    assert!(matches!(normal, crate::lifecycle::LifecycleError::PiModelPreflight { .. }));
+    assert_eq!(spec_before, std::fs::read(selected_spec_path(&ws)).unwrap());
+    assert_eq!(state_before, std::fs::read(crate::state::persist::runtime_state_path(&ws)).unwrap());
+    assert!(tx.spawns().is_empty());
+
+    let force = crate::lifecycle::add_agent_with_transport_force(&ws, &aid("alpha"), &role, false, None, true, &tx)
+        .expect_err("invalid Pi replacement must fail before old-seat consumption");
+    assert!(matches!(force, crate::lifecycle::LifecycleError::PiModelPreflight { .. }));
+    assert_eq!(spec_before, std::fs::read(selected_spec_path(&ws)).unwrap());
+    assert_eq!(state_before, std::fs::read(crate::state::persist::runtime_state_path(&ws)).unwrap());
+    assert!(tx.spawns().is_empty());
+    assert!(tx.killed().is_empty());
+}
