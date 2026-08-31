@@ -18,8 +18,8 @@ fn command_for_model(model: &str) -> Vec<String> {
     build_pi_command_argv(PiCommandRequest {
         executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/t1/w1/team-mcp.ts"),
-        model,
-        effort: ProviderEffort::Medium,
+        model: Some(model),
+        effort: Some(ProviderEffort::Medium),
         system_prompt: "worker contract",
         tool_categories: &["mcp_team"],
         session_dir: Path::new("/workspace/.team/runtime/pi/t1/w1/sessions"),

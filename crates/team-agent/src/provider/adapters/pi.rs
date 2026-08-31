@@ -47,8 +47,8 @@ pub(crate) enum PiSessionSelector<'a> {
 pub(crate) struct PiCommandRequest<'a> {
     pub executable: &'a Path,
     pub extension: &'a Path,
-    pub model: &'a str,
-    pub effort: ProviderEffort,
+    pub model: Option<&'a str>,
+    pub effort: Option<ProviderEffort>,
     pub system_prompt: &'a str,
     pub tool_categories: &'a [&'a str],
     pub session_dir: &'a Path,
@@ -67,12 +67,12 @@ pub(crate) fn build_pi_command_argv(
     if request.executable.as_os_str().is_empty()
         || request.extension.as_os_str().is_empty()
         || request.session_dir.as_os_str().is_empty()
-        || request.model.trim().is_empty()
+        || request.model.is_some_and(|model| model.trim().is_empty())
         || request.system_prompt.trim().is_empty()
         || request.agent_id.trim().is_empty()
     {
         return Err(ProviderError::Command(
-            "Pi command requires executable, extension, model, prompt, session directory, and agent id"
+            "Pi command requires executable, extension, prompt, session directory, and agent id"
                 .to_string(),
         ));
     }
@@ -108,17 +108,23 @@ pub(crate) fn build_pi_command_argv(
         "--no-prompt-templates".to_string(),
         "--tui-mode".to_string(),
         "regular".to_string(),
-        "--model".to_string(),
-        request.model.to_string(),
-        "--thinking".to_string(),
-        request.effort.as_str().to_string(),
+    ];
+    if let Some(model) = request.model {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    if let Some(effort) = request.effort {
+        argv.push("--thinking".to_string());
+        argv.push(effort.as_str().to_string());
+    }
+    argv.extend([
         "--system-prompt".to_string(),
         request.system_prompt.to_string(),
         "--tools".to_string(),
         tools.into_iter().collect::<Vec<_>>().join(","),
         "--session-dir".to_string(),
         request.session_dir.to_string_lossy().into_owned(),
-    ];
+    ]);
     // The shared lifecycle materializer always revalidates resume root/path/header.
     // Keep the pure argv builder usable before a fixture root is materialized, while
     // refusing a missing exact file once the recorded path's parent exists.

@@ -224,12 +224,27 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     );
     let leader = parse_pi_leader_args(&leader_argv[2..])
         .expect("leader exact model and effort must compile into the shared plan input");
-    assert_eq!(leader.model, "team-agent/qwen3.8-27b");
-    assert_eq!(leader.effort, ProviderEffort::Max);
+    assert_eq!(leader.model.as_deref(), Some("team-agent/qwen3.8-27b"));
+    assert_eq!(leader.effort, Some(ProviderEffort::Max));
+
+    let defaults = parse_pi_leader_args(&[]).expect("leader provider defaults");
+    assert_eq!(defaults.model, None);
+    assert_eq!(defaults.effort, None);
+    assert_eq!(
+        parse_pi_leader_args(&["--thinking".to_string(), "medium".to_string()])
+            .expect("explicit thinking only")
+            .effort,
+        Some(ProviderEffort::Medium)
+    );
+    assert_eq!(
+        parse_pi_leader_args(&["--model".to_string(), "team-agent/qwen3.8-27b".to_string(),])
+            .expect("explicit model only")
+            .model
+            .as_deref(),
+        Some("team-agent/qwen3.8-27b")
+    );
 
     for invalid in [
-        vec!["--thinking".to_string(), "medium".to_string()],
-        vec!["--model".to_string(), "team-agent/qwen3.8-27b".to_string()],
         vec![
             "--model".to_string(),
             "qwen3.8-27b".to_string(),
@@ -247,7 +262,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     ] {
         assert!(
             parse_pi_leader_args(&invalid).is_err(),
-            "leader input must refuse missing, ambiguous, or materializer-owned fields: {invalid:?}"
+            "leader input must refuse ambiguous or materializer-owned fields: {invalid:?}"
         );
     }
 
@@ -267,12 +282,15 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
 
     std::fs::write(
         &role,
-        "---\nname: worker-a\nrole: developer\nprovider: pi\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\nworker contract\n",
+        "---\nname: worker-a\nrole: developer\nprovider: pi\nauth_mode: subscription\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\nworker contract\n",
     )
-    .expect("write missing-model teammate role");
+    .expect("write provider-default teammate role");
+    let defaults = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
+        .expect("provider: pi teammate may use Pi model and effort defaults");
+    assert_eq!(defaults.agent.get("model"), Some(&Value::Null));
     assert!(
-        compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace").is_err(),
-        "provider: pi teammate without an exact model must refuse"
+        defaults.agent.get("effort").is_none(),
+        "omitted Pi model and effort must remain absent"
     );
     std::fs::remove_dir_all(root).expect("remove role fixture");
 

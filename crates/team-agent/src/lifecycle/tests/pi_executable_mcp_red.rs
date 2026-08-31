@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::lifecycle::launch::pi_mcp::{
-    parse_pi_list_models_table, validate_pi_adapter_identity, validate_pi_executable_chain,
-    validate_pi_wrapper_source, write_pi_wrapper, PiAdapterIdentity, PiExecutableChain,
-    PiExecutableFileType, PiWrapperRequest,
+    parse_pi_list_models_table, resolve_pi_executable_chain, validate_pi_adapter_identity,
+    validate_pi_executable_chain, validate_pi_wrapper_source, write_pi_wrapper, PiAdapterIdentity,
+    PiExecutableChain, PiExecutableFileType, PiWrapperRequest,
 };
 use crate::provider::McpConfig;
 
@@ -19,6 +19,7 @@ const CATALOG_DIGEST: &str = "726cedb6c3f6fe80a0d7b98918d8ed5063695e01f510a48f46
 static NEXT_ROOT: AtomicU32 = AtomicU32::new(0);
 const PI_WRAPPER_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_CHILD";
 const PI_WRAPPER_NEGATIVE_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_NEGATIVE_CHILD";
+const PI_SYMLINK_CHILD: &str = "TEAM_AGENT_TEST_PI_SYMLINK_CHILD";
 const PI_WRAPPER_PARENT_PID: &str = "TEAM_AGENT_TEST_PI_WRAPPER_PARENT_PID";
 const PI_WRAPPER_TEST: &str = concat!(
     "lifecycle::tests::pi_executable_mcp_red::",
@@ -27,6 +28,10 @@ const PI_WRAPPER_TEST: &str = concat!(
 const PI_WRAPPER_NEGATIVE_TEST: &str = concat!(
     "lifecycle::tests::pi_executable_mcp_red::",
     "pi_wrapper_import_failure_has_no_ambient_merge_fallback"
+);
+const PI_SYMLINK_TEST: &str = concat!(
+    "lifecycle::tests::pi_executable_mcp_red::",
+    "pi_standard_npm_symlink_is_a_verified_launch_entry"
 );
 
 fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
@@ -163,6 +168,52 @@ fn pi_executable_chain_freezes_wrapper_real_binary_catalog_and_plugin_identity()
     assert!(parse_pi_list_models_table(b"provider model\n").is_err());
     assert!(parse_pi_list_models_table(b"provider model\nmalformed\n").is_err());
     std::fs::remove_dir_all(root).expect("remove executable chain fixture");
+}
+
+#[test]
+fn pi_standard_npm_symlink_is_a_verified_launch_entry() {
+    run_process_isolated(PI_SYMLINK_CHILD, PI_SYMLINK_TEST, || {
+        assert_isolated_child();
+        let root = temp_root("npm-symlink");
+        let bin = root.join("bin");
+        let package_root = root.join("pi-mcp-adapter");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::create_dir_all(&package_root).expect("create adapter root");
+        let real = root.join("cli.js");
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) printf '0.84.4\\n' ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\n  *) exit 64 ;;\nesac\n",
+            package_root.display()
+        );
+        std::fs::write(&real, script).expect("write protocol-capable Pi entry");
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))
+            .expect("make Pi entry executable");
+        std::os::unix::fs::symlink(&real, bin.join("pi")).expect("create npm-style symlink");
+        std::fs::write(
+            package_root.join("package.json"),
+            br#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#,
+        )
+        .expect("write adapter package");
+        std::fs::write(
+            package_root.join("index.ts"),
+            b"export const createMcpAdapter = () => {};\n",
+        )
+        .expect("write adapter entry");
+        unsafe {
+            std::env::set_var("PATH", &bin);
+        }
+
+        let (chain, models) = resolve_pi_executable_chain()
+            .expect("a standard npm symlink must materialize without a custom wrapper");
+        assert_eq!(chain.path_entry, bin.join("pi"));
+        assert_eq!(chain.path_entry_type, PiExecutableFileType::Symlink);
+        assert_eq!(chain.launch_executable, bin.join("pi"));
+        assert_eq!(
+            chain.real_binary,
+            std::fs::canonicalize(&real).expect("canonical real Pi entry")
+        );
+        assert_eq!(models, ["team-agent/qwen3.8-27b"]);
+        std::fs::remove_dir_all(root).expect("remove symlink fixture");
+    });
 }
 
 #[test]

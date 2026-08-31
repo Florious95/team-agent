@@ -270,7 +270,10 @@ pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<
     if !chain.path_entry.is_absolute()
         || !chain.launch_executable.is_absolute()
         || !chain.real_binary.is_absolute()
-        || chain.path_entry_type != PiExecutableFileType::Wrapper
+        || !matches!(
+            chain.path_entry_type,
+            PiExecutableFileType::Wrapper | PiExecutableFileType::Symlink
+        )
         || chain.launch_executable != chain.path_entry
         || chain.real_binary == chain.launch_executable
         || chain.catalog_sha256.len() != 64
@@ -482,14 +485,14 @@ pub(crate) fn write_pi_wrapper(request: PiWrapperRequest<'_>) -> Result<PathBuf,
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PiLeaderArgs {
-    pub model: String,
-    pub effort: ProviderEffort,
+    pub model: Option<String>,
+    pub effort: Option<ProviderEffort>,
 }
 
 /// ---
 /// purpose: 解析 Pi leader 唯一允许的 model/thinking 输入
-/// returns: 显式 qualified model 与 effort
-/// errors: 缺失、重复、未知或 materializer-owned flag 时返回 ProviderError
+/// returns: 仅保留调用方显式给出的 qualified model 与 effort
+/// errors: 重复、未知或 materializer-owned flag 时返回 ProviderError
 /// ---
 pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, ProviderError> {
     let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
@@ -519,24 +522,17 @@ pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, Prov
         }
         index += 2;
     }
-    let model = model.ok_or_else(|| {
-        ProviderError::Command("Pi leader requires an explicit --model".to_string())
-    })?;
-    if model.contains('*')
-        || !model
-            .split_once('/')
-            .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
-    {
+    if model.as_ref().is_some_and(|model| {
+        model.contains('*')
+            || !model
+                .split_once('/')
+                .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
+    }) {
         return Err(ProviderError::Command(
             "Pi leader --model must be a qualified exact id".to_string(),
         ));
     }
-    Ok(PiLeaderArgs {
-        model,
-        effort: effort.ok_or_else(|| {
-            ProviderError::Command("Pi leader requires an explicit --thinking".to_string())
-        })?,
-    })
+    Ok(PiLeaderArgs { model, effort })
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -660,16 +656,26 @@ fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, Pr
 pub(crate) fn resolve_pi_executable_chain(
 ) -> Result<(PiExecutableChain, Vec<String>), ProviderError> {
     let path_entries = pi_path_entries()?;
-    let path_entry = path_entries
-        .iter()
-        .find_map(|candidate| {
-            (executable_file_type(candidate).ok()? == PiExecutableFileType::Wrapper)
-                .then(|| candidate.clone())
-        })
-        .ok_or_else(|| {
-            ProviderError::Command("Pi PATH has no verified wrapper launch executable".to_string())
-        })?;
-    let path_entry_type = PiExecutableFileType::Wrapper;
+    let wrapper_entry = path_entries.iter().find_map(|candidate| {
+        (executable_file_type(candidate).ok()? == PiExecutableFileType::Wrapper)
+            .then(|| candidate.clone())
+    });
+    let (path_entry, path_entry_type) = if let Some(path_entry) = wrapper_entry {
+        (path_entry, PiExecutableFileType::Wrapper)
+    } else {
+        let path_entry = path_entries
+            .iter()
+            .find_map(|candidate| {
+                (executable_file_type(candidate).ok()? == PiExecutableFileType::Symlink)
+                    .then(|| candidate.clone())
+            })
+            .ok_or_else(|| {
+                ProviderError::Command(
+                    "Pi PATH has no verified wrapper or npm symlink launch executable".to_string(),
+                )
+            })?;
+        (path_entry, PiExecutableFileType::Symlink)
+    };
     let version =
         String::from_utf8(command_stdout(&path_entry, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!("Pi version output is not UTF-8: {error}"))
@@ -677,17 +683,21 @@ pub(crate) fn resolve_pi_executable_chain(
     let version = version.trim().to_string();
     let launch_identity = std::fs::canonicalize(&path_entry)
         .map_err(|error| ProviderError::Io(format!("{}: {error}", path_entry.display())))?;
-    let real_binary = path_entries
-        .iter()
-        .find_map(|candidate| {
-            let real = std::fs::canonicalize(candidate).ok()?;
-            (real != launch_identity).then_some(real)
-        })
-        .ok_or_else(|| {
-            ProviderError::Command(
-                "Pi PATH wrapper has no independently resolved real executable".to_string(),
-            )
-        })?;
+    let real_binary = if path_entry_type == PiExecutableFileType::Symlink {
+        launch_identity
+    } else {
+        path_entries
+            .iter()
+            .find_map(|candidate| {
+                let real = std::fs::canonicalize(candidate).ok()?;
+                (real != launch_identity).then_some(real)
+            })
+            .ok_or_else(|| {
+                ProviderError::Command(
+                    "Pi PATH wrapper has no independently resolved real executable".to_string(),
+                )
+            })?
+    };
     let _real_version =
         String::from_utf8(command_stdout(&real_binary, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!(
@@ -714,8 +724,8 @@ pub(crate) struct PiMaterializeRequest<'a> {
     pub workspace: &'a Path,
     pub team_id: &'a str,
     pub agent_id: &'a str,
-    pub model: &'a str,
-    pub effort: ProviderEffort,
+    pub model: Option<&'a str>,
+    pub effort: Option<ProviderEffort>,
     pub system_prompt: &'a str,
     pub tool_categories: &'a [&'a str],
     pub team_mcp_tools: &'a [&'a str],
@@ -752,7 +762,10 @@ fn materialize_pi_plan_with_session(
     resume: Option<(&SessionId, &Path, &Path)>,
 ) -> Result<CommandPlan, ProviderError> {
     let (chain, catalog) = resolve_pi_executable_chain()?;
-    let model = select_exact_pi_model(&catalog, request.model)?;
+    let model = request
+        .model
+        .map(|model| select_exact_pi_model(&catalog, model))
+        .transpose()?;
     let paths = pi_seat_paths(request.workspace, request.team_id, request.agent_id);
     let resume = if let Some((session_id, session_path, spawn_cwd)) = resume {
         let session_root = std::fs::canonicalize(&paths.sessions).map_err(|error| {
@@ -795,7 +808,7 @@ fn materialize_pi_plan_with_session(
         let argv = build_pi_command_argv(PiCommandRequest {
             executable: &chain.launch_executable,
             extension: &wrapper,
-            model: &model,
+            model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
             tool_categories: request.tool_categories,
@@ -809,7 +822,7 @@ fn materialize_pi_plan_with_session(
         let argv = build_pi_command_argv(PiCommandRequest {
             executable: &chain.launch_executable,
             extension: &wrapper,
-            model: &model,
+            model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
             tool_categories: request.tool_categories,

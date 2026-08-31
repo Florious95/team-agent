@@ -7,14 +7,27 @@ fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
     PiCommandRequest {
         executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts"),
-        model: "team-agent/qwen3.8-27b",
-        effort: ProviderEffort::High,
+        model: Some("team-agent/qwen3.8-27b"),
+        effort: Some(ProviderEffort::High),
         system_prompt: "frozen worker prompt",
         tool_categories: &["mcp_team", "fs_read", "fs_write", "execute_bash"],
         session_dir: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/sessions"),
         session,
         agent_id: "worker-a",
     }
+}
+
+#[test]
+fn pi_command_omits_unset_model_and_thinking_flags() {
+    let mut request = request(PiSessionSelector::Fresh {
+        session_id: "a2320d4e-7b3a-44ae-b3b8-d5de57033b01",
+    });
+    request.model = None;
+    request.effort = None;
+    let argv = build_pi_command_argv(request).expect("Pi provider defaults");
+
+    assert!(!argv.iter().any(|arg| arg == "--model"), "argv={argv:?}");
+    assert!(!argv.iter().any(|arg| arg == "--thinking"), "argv={argv:?}");
 }
 
 #[test]

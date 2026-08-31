@@ -392,12 +392,20 @@ fn compile_role_agent_with_mode(
     let provider = required_string(&meta, role_path, "provider")?;
     require_explicit_grok_role_model(&meta, role_path, &provider)?;
     require_explicit_cursor_role_model(&meta, role_path, &provider)?;
-    require_explicit_pi_role_fields(&meta, role_path, &provider)?;
-    let model = resolve_model(&meta, team_meta, &provider);
+    validate_pi_role_fields(&meta, role_path, &provider)?;
+    let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
+    let model = if is_pi {
+        string_field(&meta, "model")
+            .filter(|value| !value.trim().is_empty())
+            .map(Value::Str)
+            .unwrap_or(Value::Null)
+    } else {
+        resolve_model(&meta, team_meta, &provider)
+    };
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
         .unwrap_or_else(|| "subscription".to_string());
-    if parse_canonical_provider(&provider) == Some(Provider::Pi) && auth_mode != "subscription" {
+    if is_pi && auth_mode != "subscription" {
         return Err(ModelError::Validation(format!(
             "{}: Pi roles support subscription auth_mode only",
             role_path.display()
@@ -473,7 +481,11 @@ fn compile_role_agent_with_mode(
         Some(raw) if !raw.trim().is_empty() => ProviderEffort::parse(raw.trim()),
         _ => None,
     };
-    let resolved_effort = role_effort.or(team_effort);
+    let resolved_effort = if is_pi {
+        role_effort
+    } else {
+        role_effort.or(team_effort)
+    };
     if let Some(effort) = resolved_effort {
         // Reject max + non-Claude at compile time.
         let provider_str = agent_items
@@ -619,39 +631,23 @@ model: sonnet-4-thinking",
     )))
 }
 
-fn require_explicit_pi_role_fields(
-    meta: &Value,
-    path: &Path,
-    provider: &str,
-) -> Result<(), ModelError> {
+fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<(), ModelError> {
     if parse_canonical_provider(provider) != Some(Provider::Pi) {
         return Ok(());
     }
-    let model = string_field(meta, "model")
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
+    if let Some(model) = string_field(meta, "model").filter(|value| !value.trim().is_empty()) {
+        let (catalog, name) = model.trim().split_once('/').ok_or_else(|| {
             ModelError::Validation(format!(
-                "{}: Pi roles require an explicit qualified exact model",
+                "{}: Pi roles require a qualified exact model such as provider/model",
                 path.display()
             ))
         })?;
-    let (catalog, name) = model.trim().split_once('/').ok_or_else(|| {
-        ModelError::Validation(format!(
-            "{}: Pi roles require a qualified exact model such as provider/model",
-            path.display()
-        ))
-    })?;
-    if catalog.is_empty() || name.is_empty() || model.contains('*') {
-        return Err(ModelError::Validation(format!(
-            "{}: Pi roles require a qualified exact model",
-            path.display()
-        )));
-    }
-    if !string_field(meta, "effort").is_some_and(|value| !value.trim().is_empty()) {
-        return Err(ModelError::Validation(format!(
-            "{}: Pi roles require explicit effort",
-            path.display()
-        )));
+        if catalog.is_empty() || name.is_empty() || model.contains('*') {
+            return Err(ModelError::Validation(format!(
+                "{}: Pi roles require a qualified exact model",
+                path.display()
+            )));
+        }
     }
     let tools = required_tools(meta, path)?;
     if !tools.iter().any(|tool| tool == "mcp_team") {
@@ -660,13 +656,7 @@ fn require_explicit_pi_role_fields(
             path.display()
         )));
     }
-    match meta.get("dangerously_skip_permissions") {
-        Some(Value::Bool(true)) => Ok(()),
-        _ => Err(ModelError::Validation(format!(
-            "{}: Pi roles require dangerously_skip_permissions: true",
-            path.display()
-        ))),
-    }
+    Ok(())
 }
 
 /// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。
