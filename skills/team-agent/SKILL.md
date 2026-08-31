@@ -2,7 +2,7 @@
 name: team-agent
 description: Use only when the user explicitly asks to start, operate, inspect, shutdown, or restart a Team Agent team. Treat the team-agent CLI as a sealed appliance.
 requires_team_agent: ">=0.5.0"
-last_verified_against: "0.5.69"
+last_verified_against: "0.5.70"
 ---
 
 # Team Agent
