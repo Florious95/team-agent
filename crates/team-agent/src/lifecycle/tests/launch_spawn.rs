@@ -375,6 +375,88 @@ fn quick_start_invalid_role_doc_surfaces_real_compile_error() {
     );
 }
 
+#[test]
+fn quick_start_injected_pi_preflight_is_typed_and_mutation_free() {
+    let role_doc = QS_VALID_ROLE.replace(
+        "provider: codex\nmodel: gpt-5.5",
+        "provider: pi\nmodel: gpt-5.6-sol",
+    );
+    let team = quick_start_team_dir(&role_doc);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let role_path = team.join("agents/implementer.md");
+    let team_md_path = team.join("TEAM.md");
+    let local_spec_path = team.join("team.spec.yaml");
+    let runtime_state_path = crate::state::persist::runtime_state_path(&workspace);
+    let runtime_spec_path = crate::model::paths::runtime_spec_path(&workspace, "quickteam");
+    let pi_paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+        &workspace,
+        "quickteam",
+        "implementer",
+    );
+    let role_before = std::fs::read(&role_path).unwrap();
+    let team_md_before = std::fs::read(&team_md_path).unwrap();
+    for path in [
+        &local_spec_path,
+        &runtime_state_path,
+        &runtime_spec_path,
+        &pi_paths.wrapper,
+        &pi_paths.sessions,
+    ] {
+        assert!(!path.exists(), "precondition: {} must be absent", path.display());
+    }
+
+    let transport = OfflineTransport::new();
+    let mut calls = 0;
+    let mut discover = |requested: &str| {
+        calls += 1;
+        assert_eq!(requested, "gpt-5.6-sol");
+        Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+    };
+    let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &transport,
+        true,
+        &mut discover,
+    )
+    .expect_err("unqualified Pi role must fail before quick-start mutation");
+    drop(discover);
+    assert_eq!(calls, 1);
+    match error {
+        LifecycleError::PiModelPreflight {
+            requested,
+            candidates,
+            action,
+            not_ready,
+        } => {
+            assert_eq!(requested, "gpt-5.6-sol");
+            assert_eq!(candidates, vec!["openai-codex/gpt-5.6-sol"]);
+            assert_eq!(
+                action,
+                "copy a candidate into the role, or run `team-agent models --provider pi --search gpt-5.6-sol`"
+            );
+            assert!(!not_ready);
+        }
+        other => panic!("expected typed Pi preflight error, got {other:?}"),
+    }
+    assert_eq!(role_before, std::fs::read(&role_path).unwrap());
+    assert_eq!(team_md_before, std::fs::read(&team_md_path).unwrap());
+    for path in [
+        &local_spec_path,
+        &runtime_state_path,
+        &runtime_spec_path,
+        &pi_paths.wrapper,
+        &pi_paths.sessions,
+    ] {
+        assert!(!path.exists(), "quick-start preflight created {}", path.display());
+    }
+    assert!(transport.calls().is_empty(), "no transport calls before preflight rejection");
+    assert!(transport.spawn_records().is_empty());
+}
+
 // P0 — launch (dry_run) over a real compiled spec must resolve the REAL route/permission plan
 // (no spawn) — NOT the hardcoded RequirementUnmet stub. Golden: launch/core.py dry_run resolves
 // routing + permissions without starting any process.

@@ -1848,7 +1848,6 @@ fn lanea_fork_rollback_complete_on_post_spawn_failure() {
 }
 
 #[test]
-#[serial_test::serial(env)]
 fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
     let ws = lanea_ws_agents(json!({
         "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
@@ -1859,21 +1858,124 @@ fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
     let role_dir = ws.join("role-masters");
     std::fs::create_dir_all(&role_dir).unwrap();
     let role = role_dir.join("invalid-pi.md");
-    std::fs::write(&role, CHARLIE_ROLE.replace("provider: codex\nmodel: gpt-5.5", "provider: pi\nmodel: gpt-5.6-sol")).unwrap();
-    let spec_before = std::fs::read(selected_spec_path(&ws)).unwrap();
-    let state_before = std::fs::read(crate::state::persist::runtime_state_path(&ws)).unwrap();
-    let normal = crate::lifecycle::add_agent_with_transport(&ws, &aid("charlie"), &role, false, None, &tx)
-        .expect_err("invalid Pi model must fail before reservation");
-    assert!(matches!(normal, crate::lifecycle::LifecycleError::PiModelPreflight { .. }));
-    assert_eq!(spec_before, std::fs::read(selected_spec_path(&ws)).unwrap());
-    assert_eq!(state_before, std::fs::read(crate::state::persist::runtime_state_path(&ws)).unwrap());
-    assert!(tx.spawns().is_empty());
+    std::fs::write(
+        &role,
+        CHARLIE_ROLE.replace(
+            "provider: codex\nmodel: gpt-5.5",
+            "provider: pi\nmodel: gpt-5.6-sol",
+        ),
+    )
+    .unwrap();
 
-    let force = crate::lifecycle::add_agent_with_transport_force(&ws, &aid("alpha"), &role, false, None, true, &tx)
-        .expect_err("invalid Pi replacement must fail before old-seat consumption");
-    assert!(matches!(force, crate::lifecycle::LifecycleError::PiModelPreflight { .. }));
-    assert_eq!(spec_before, std::fs::read(selected_spec_path(&ws)).unwrap());
-    assert_eq!(state_before, std::fs::read(crate::state::persist::runtime_state_path(&ws)).unwrap());
-    assert!(tx.spawns().is_empty());
-    assert!(tx.killed().is_empty());
+    let spec_path = selected_spec_path(&ws);
+    let state_path = crate::state::persist::runtime_state_path(&ws);
+    let event_path = ws.join(".team/logs/events.jsonl");
+    let copied_role = ws.join("agents/charlie.md");
+    let team_state_path = ws.join("team_state.md");
+    let charlie_paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+        &ws,
+        "laneateam",
+        "charlie",
+    );
+    let alpha_paths =
+        crate::lifecycle::launch::pi_mcp::pi_seat_paths(&ws, "laneateam", "alpha");
+    let spec_before = std::fs::read(&spec_path).unwrap();
+    let state_before = std::fs::read(&state_path).unwrap();
+    let role_before = std::fs::read(&role).unwrap();
+    let alpha_before = serde_json::from_slice::<serde_json::Value>(&state_before).unwrap()
+        ["agents"]["alpha"]
+        .clone();
+    for path in [
+        &event_path,
+        &copied_role,
+        &team_state_path,
+        &charlie_paths.wrapper,
+        &charlie_paths.sessions,
+        &alpha_paths.wrapper,
+        &alpha_paths.sessions,
+    ] {
+        assert!(!path.exists(), "precondition: {} must be absent", path.display());
+    }
+
+    let assert_diagnostic = |error: crate::lifecycle::LifecycleError| match error {
+        crate::lifecycle::LifecycleError::PiModelPreflight {
+            requested,
+            candidates,
+            action,
+            not_ready,
+        } => {
+            assert_eq!(requested, "gpt-5.6-sol");
+            assert_eq!(candidates, vec!["openai-codex/gpt-5.6-sol"]);
+            assert_eq!(
+                action,
+                "copy a candidate into the role, or run `team-agent models --provider pi --search gpt-5.6-sol`"
+            );
+            assert!(!not_ready);
+        }
+        other => panic!("expected typed Pi preflight error, got {other:?}"),
+    };
+    let assert_unchanged = || {
+        assert_eq!(spec_before, std::fs::read(&spec_path).unwrap());
+        assert_eq!(state_before, std::fs::read(&state_path).unwrap());
+        assert_eq!(role_before, std::fs::read(&role).unwrap());
+        for path in [
+            &event_path,
+            &copied_role,
+            &team_state_path,
+            &charlie_paths.wrapper,
+            &charlie_paths.sessions,
+            &alpha_paths.wrapper,
+            &alpha_paths.sessions,
+        ] {
+            assert!(!path.exists(), "preflight created {}", path.display());
+        }
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        assert_eq!(state["agents"]["alpha"], alpha_before);
+        assert!(state["agents"].get("charlie").is_none(), "no reservation row");
+        assert!(tx.spawns().is_empty());
+        assert!(tx.killed().is_empty());
+    };
+
+    let mut normal_calls = 0;
+    let mut normal_discover = |requested: &str| {
+        normal_calls += 1;
+        assert_eq!(requested, "gpt-5.6-sol");
+        Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+    };
+    let normal = crate::lifecycle::add_agent_with_transport_pi_preflight(
+        &ws,
+        &aid("charlie"),
+        &role,
+        false,
+        None,
+        &tx,
+        &mut normal_discover,
+    )
+    .expect_err("invalid Pi model must fail before reservation");
+    drop(normal_discover);
+    assert_eq!(normal_calls, 1);
+    assert_diagnostic(normal);
+    assert_unchanged();
+
+    let mut force_calls = 0;
+    let mut force_discover = |requested: &str| {
+        force_calls += 1;
+        assert_eq!(requested, "gpt-5.6-sol");
+        Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+    };
+    let force = crate::lifecycle::add_agent_with_transport_force_pi_preflight(
+        &ws,
+        &aid("alpha"),
+        &role,
+        false,
+        None,
+        true,
+        &tx,
+        &mut force_discover,
+    )
+    .expect_err("invalid Pi replacement must fail before old-seat consumption");
+    drop(force_discover);
+    assert_eq!(force_calls, 1);
+    assert_diagnostic(force);
+    assert_unchanged();
 }
