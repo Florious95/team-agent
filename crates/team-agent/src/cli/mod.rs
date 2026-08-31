@@ -2662,7 +2662,9 @@ pub mod lifecycle_port {
                     "target": target,
                     "session_id": session_id.as_ref().map(|id| id.as_str()),
                     "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
-                    "rollout_path": rollout_path.as_ref().map(|path| path.to_string_lossy()),
+                    "rollout_path": rollout_path
+                        .as_ref()
+                        .map(|path| path.as_path().to_string_lossy().to_string()),
                     "coordinator_started": env.coordinator_started,
                     "state_file": env.state_file.to_string_lossy(),
                 }),
