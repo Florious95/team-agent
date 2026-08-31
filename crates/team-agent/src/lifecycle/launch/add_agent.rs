@@ -97,10 +97,19 @@ fn discover_pi_model_candidates(requested: &str) -> Result<Vec<String>, ()> {
     crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
 }
 
-fn preflight_pi_role_model_with(
+fn preflight_role_with_pi_model(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
     role_file_path: &Path,
     discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
 ) -> Result<(), LifecycleError> {
+    if !role_file_path.exists() {
+        return Err(LifecycleError::Compile(format!(
+            "role file not found: {}",
+            role_file_path.display()
+        )));
+    }
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|error| LifecycleError::Compile(error.to_string()))?;
     crate::compiler::preflight_pi_role_model_with(&meta, discover).map_err(|error| {
@@ -110,7 +119,23 @@ fn preflight_pi_role_model_with(
             action: error.action,
             not_ready: error.not_ready,
         }
-    })
+    })?;
+    let team_meta = crate::compiler::read_front_matter(&team_dir.join("TEAM.md"))
+        .map(|(meta, _)| meta)
+        .unwrap_or(Value::Null);
+    let compiled = crate::compiler::compile_role_agent(
+        role_file_path,
+        &team_meta,
+        &run_workspace.display().to_string(),
+    )
+    .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+    if compiled.id != agent_id.as_str() {
+        return Err(LifecycleError::Compile(format!(
+            "role file declares name '{}' but add-agent id is '{}'",
+            compiled.id, agent_id
+        )));
+    }
+    Ok(())
 }
 
 fn reserve_agent_slot(
@@ -282,7 +307,13 @@ fn add_agent_with_pi_preflight(
         team: Some(selected.team_key.as_str()),
         agent_id: Some(agent_id),
     })?;
-    preflight_pi_role_model_with(role_file_path, discover)?;
+    preflight_role_with_pi_model(
+        &selected.run_workspace,
+        &selected.team_dir,
+        agent_id,
+        role_file_path,
+        discover,
+    )?;
     let reservation = reserve_agent_slot(
         &selected.run_workspace,
         Some(selected.team_key.as_str()),
@@ -442,7 +473,13 @@ pub(crate) fn add_agent_with_transport_pi_preflight(
         team,
         agent_id: Some(agent_id),
     })?;
-    preflight_pi_role_model_with(role_file_path, discover)?;
+    preflight_role_with_pi_model(
+        &run_workspace,
+        workspace,
+        agent_id,
+        role_file_path,
+        discover,
+    )?;
     let reservation = reserve_agent_slot(&run_workspace, team, agent_id)?;
     drop(lifecycle_lock);
     add_agent_with_transport_at_paths_reserved(
@@ -547,14 +584,13 @@ pub(super) fn force_recreate_with_transport_locked(
     discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
 ) -> Result<AddAgentReport, LifecycleError> {
     // Reject an unusable replacement source before consuming the old seat.
-    // Deeper compile/spawn failures remain covered by the transaction snapshot.
-    if !role_file_path.exists() {
-        return Err(LifecycleError::Compile(format!(
-            "role file not found: {}",
-            role_file_path.display()
-        )));
-    }
-    preflight_pi_role_model_with(role_file_path, discover)?;
+    preflight_role_with_pi_model(
+        run_workspace,
+        team_dir,
+        agent_id,
+        role_file_path,
+        discover,
+    )?;
     let snapshot = crate::lifecycle::restart::remove::ForceRecreateSnapshot::capture(
         run_workspace,
         agent_id,

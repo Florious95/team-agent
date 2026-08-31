@@ -1848,7 +1848,7 @@ fn lanea_fork_rollback_complete_on_post_spawn_failure() {
 }
 
 #[test]
-fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
+fn schema_invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
     let ws = lanea_ws_agents(json!({
         "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
         "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
@@ -1860,10 +1860,12 @@ fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
     let role = role_dir.join("invalid-pi.md");
     std::fs::write(
         &role,
-        CHARLIE_ROLE.replace(
-            "provider: codex\nmodel: gpt-5.5",
-            "provider: pi\nmodel: gpt-5.6-sol",
-        ),
+        CHARLIE_ROLE
+            .replace(
+                "provider: codex\nmodel: gpt-5.5",
+                "provider: pi\nmodel: openai-codex/gpt-5.6-sol",
+            )
+            .replace("  - mcp_team", "  - fs_read"),
     )
     .unwrap();
 
@@ -1897,27 +1899,16 @@ fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
         assert!(!path.exists(), "precondition: {} must be absent", path.display());
     }
 
-    let assert_diagnostic = |error: crate::lifecycle::LifecycleError| match error {
-        crate::lifecycle::LifecycleError::PiModelPreflight {
-            requested,
-            candidates,
-            action,
-            not_ready,
-        } => {
-            assert_eq!(requested, "gpt-5.6-sol");
-            assert_eq!(candidates, vec!["openai-codex/gpt-5.6-sol"]);
-            assert_eq!(
-                action,
-                "copy a candidate into the role, or run `team-agent models --provider pi --search gpt-5.6-sol`"
-            );
-            assert!(!not_ready);
+    let assert_schema_error = |error: crate::lifecycle::LifecycleError| match error {
+        crate::lifecycle::LifecycleError::Compile(message) => {
+            assert!(message.contains("Pi roles require mcp_team"), "{message}");
         }
-        other => panic!("expected typed Pi preflight error, got {other:?}"),
+        other => panic!("expected Pi role schema error, got {other:?}"),
     };
-    let assert_unchanged = || {
+    let assert_unchanged = |expected_role: &[u8]| {
         assert_eq!(spec_before, std::fs::read(&spec_path).unwrap());
         assert_eq!(state_before, std::fs::read(&state_path).unwrap());
-        assert_eq!(role_before, std::fs::read(&role).unwrap());
+        assert_eq!(expected_role, std::fs::read(&role).unwrap());
         for path in [
             &event_path,
             &copied_role,
@@ -1937,10 +1928,9 @@ fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
     };
 
     let mut normal_calls = 0;
-    let mut normal_discover = |requested: &str| {
+    let mut normal_discover = |_requested: &str| {
         normal_calls += 1;
-        assert_eq!(requested, "gpt-5.6-sol");
-        Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+        Ok(Vec::new())
     };
     let normal = crate::lifecycle::add_agent_with_transport_pi_preflight(
         &ws,
@@ -1951,17 +1941,16 @@ fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
         &tx,
         &mut normal_discover,
     )
-    .expect_err("invalid Pi model must fail before reservation");
+    .expect_err("invalid Pi schema must fail before reservation");
     drop(normal_discover);
-    assert_eq!(normal_calls, 1);
-    assert_diagnostic(normal);
-    assert_unchanged();
+    assert_eq!(normal_calls, 0);
+    assert_schema_error(normal);
+    assert_unchanged(&role_before);
 
     let mut force_calls = 0;
-    let mut force_discover = |requested: &str| {
+    let mut force_discover = |_requested: &str| {
         force_calls += 1;
-        assert_eq!(requested, "gpt-5.6-sol");
-        Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+        Ok(Vec::new())
     };
     let force = crate::lifecycle::add_agent_with_transport_force_pi_preflight(
         &ws,
@@ -1973,9 +1962,55 @@ fn invalid_pi_role_is_rejected_before_normal_and_force_mutation() {
         &tx,
         &mut force_discover,
     )
-    .expect_err("invalid Pi replacement must fail before old-seat consumption");
+    .expect_err("invalid Pi replacement schema must fail before old-seat consumption");
     drop(force_discover);
-    assert_eq!(force_calls, 1);
-    assert_diagnostic(force);
-    assert_unchanged();
+    assert_eq!(force_calls, 0);
+    assert_schema_error(force);
+    assert_unchanged(&role_before);
+
+    std::fs::write(
+        &role,
+        CHARLIE_ROLE.replace(
+            "provider: codex\nmodel: gpt-5.5",
+            "provider: pi\nmodel: gpt-5.6-sol",
+        ),
+    )
+    .unwrap();
+    let model_role_before = std::fs::read(&role).unwrap();
+    let assert_model_diagnostic = |error: crate::lifecycle::LifecycleError| match error {
+        crate::lifecycle::LifecycleError::PiModelPreflight {
+            requested,
+            candidates,
+            not_ready,
+            ..
+        } => {
+            assert_eq!(requested, "gpt-5.6-sol");
+            assert_eq!(candidates, vec!["openai-codex/gpt-5.6-sol"]);
+            assert!(!not_ready);
+        }
+        other => panic!("expected typed Pi preflight error, got {other:?}"),
+    };
+    for (force, agent_id) in [(false, "charlie"), (true, "alpha")] {
+        let mut calls = 0;
+        let mut discover = |requested: &str| {
+            calls += 1;
+            assert_eq!(requested, "gpt-5.6-sol");
+            Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+        };
+        let error = crate::lifecycle::add_agent_with_transport_force_pi_preflight(
+            &ws,
+            &aid(agent_id),
+            &role,
+            false,
+            None,
+            force,
+            &tx,
+            &mut discover,
+        )
+        .expect_err("unqualified Pi model must fail before mutation");
+        drop(discover);
+        assert_eq!(calls, 1);
+        assert_model_diagnostic(error);
+        assert_unchanged(&model_role_before);
+    }
 }

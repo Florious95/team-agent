@@ -457,6 +457,73 @@ fn quick_start_injected_pi_preflight_is_typed_and_mutation_free() {
     assert!(transport.spawn_records().is_empty());
 }
 
+#[test]
+fn quick_start_schema_invalid_pi_role_is_mutation_free() {
+    let role_doc = QS_VALID_ROLE
+        .replace(
+            "provider: codex\nmodel: gpt-5.5",
+            "provider: pi\nmodel: openai-codex/gpt-5.6-sol",
+        )
+        .replace("  - mcp_team", "  - fs_read");
+    let team = quick_start_team_dir(&role_doc);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let role_path = team.join("agents/implementer.md");
+    let team_md_path = team.join("TEAM.md");
+    let role_before = std::fs::read(&role_path).unwrap();
+    let team_md_before = std::fs::read(&team_md_path).unwrap();
+    let pi_paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+        &workspace,
+        "quickteam",
+        "implementer",
+    );
+    let absent_paths = [
+        team.join("team.spec.yaml"),
+        crate::state::persist::runtime_state_path(&workspace),
+        crate::model::paths::runtime_spec_path(&workspace, "quickteam"),
+        workspace.join("team_state.md"),
+        workspace.join(".team/logs/events.jsonl"),
+        workspace.join(".team/runtime/team.db"),
+        pi_paths.wrapper,
+        pi_paths.sessions,
+    ];
+    for path in &absent_paths {
+        assert!(!path.exists(), "precondition: {} must be absent", path.display());
+    }
+
+    let transport = OfflineTransport::new();
+    let mut calls = 0;
+    let mut discover = |_requested: &str| {
+        calls += 1;
+        Ok(Vec::new())
+    };
+    let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &transport,
+        true,
+        &mut discover,
+    )
+    .expect_err("invalid Pi schema must fail before quick-start mutation");
+    drop(discover);
+    assert_eq!(calls, 0, "qualified models must not invoke discovery");
+    match error {
+        LifecycleError::Compile(message) => {
+            assert!(message.contains("Pi roles require mcp_team"), "{message}");
+        }
+        other => panic!("expected Pi role schema error, got {other:?}"),
+    }
+    assert_eq!(role_before, std::fs::read(&role_path).unwrap());
+    assert_eq!(team_md_before, std::fs::read(&team_md_path).unwrap());
+    for path in &absent_paths {
+        assert!(!path.exists(), "schema preflight created {}", path.display());
+    }
+    assert!(transport.calls().is_empty(), "no transport calls before schema rejection");
+    assert!(transport.spawn_records().is_empty());
+}
+
 // P0 — launch (dry_run) over a real compiled spec must resolve the REAL route/permission plan
 // (no spawn) — NOT the hardcoded RequirementUnmet stub. Golden: launch/core.py dry_run resolves
 // routing + permissions without starting any process.
