@@ -178,23 +178,13 @@ pub(super) fn spawn_agents(
             effort: agent_effort,
         };
         let mut plan = if provider == Provider::Pi {
-            let model = command_model.ok_or_else(|| {
-                LifecycleError::RequirementUnmet(
-                    "Pi launch requires an explicit qualified model".to_string(),
-                )
-            })?;
-            let effort = agent_effort.ok_or_else(|| {
-                LifecycleError::RequirementUnmet(
-                    "Pi launch requires an explicit thinking effort".to_string(),
-                )
-            })?;
             crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
                 crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
                     workspace,
                     team_id: &mcp_team_id,
                     agent_id: agent_id_raw,
-                    model,
-                    effort,
+                    model: command_model,
+                    effort: agent_effort,
                     system_prompt: &system_prompt,
                     tool_categories: &resolved_tool_refs,
                     team_mcp_tools: &["send_message", "report_result"],

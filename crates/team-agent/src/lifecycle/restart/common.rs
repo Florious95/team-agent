@@ -392,22 +392,12 @@ pub(super) fn spawn_agent_window(
         .or(pi_spawn_cwd.as_deref())
         .unwrap_or(workspace);
     let mut plan = if provider == Provider::Pi {
-        let model = command_model.ok_or_else(|| {
-            LifecycleError::RequirementUnmet(
-                "Pi restart requires an explicit qualified model".to_string(),
-            )
-        })?;
-        let effort = restart_effort.ok_or_else(|| {
-            LifecycleError::RequirementUnmet(
-                "Pi restart requires an explicit thinking effort".to_string(),
-            )
-        })?;
         let request = crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
             workspace,
             team_id: team_id.as_deref().unwrap_or(""),
             agent_id: agent_id.as_str(),
-            model,
-            effort,
+            model: command_model,
+            effort: restart_effort,
             system_prompt: &system_prompt,
             tool_categories: &resolved_tool_refs,
             team_mcp_tools: &["send_message", "report_result"],

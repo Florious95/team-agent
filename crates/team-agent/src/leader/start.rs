@@ -318,7 +318,7 @@ fn leader_start_plan_with_ambient_authority(
                 workspace,
                 team_id: identity.team_id.as_str(),
                 agent_id: "leader",
-                model: &parsed.model,
+                model: parsed.model.as_deref(),
                 effort: parsed.effort,
                 system_prompt: &prompt,
                 tool_categories: &tools,

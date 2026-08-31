@@ -2,7 +2,7 @@
 name: team-agent
 description: Use only when the user explicitly asks to start, operate, inspect, shutdown, or restart a Team Agent team. Treat the team-agent CLI as a sealed appliance.
 requires_team_agent: ">=0.5.0"
-last_verified_against: "0.5.66"
+last_verified_against: "0.5.69"
 ---
 
 # Team Agent
@@ -41,6 +41,12 @@ Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md
 Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
 
 ## Provider Prep
+
+### Pi TeamMate roles
+
+Use the standard role schema with `provider: pi`, a block-style `tools` list containing `mcp_team`, and the required boolean `dangerously_skip_permissions`. That role boolean is the only bypass setting; `TEAM.md` `dangerous_auto_approve` is compatibility input, not a second user-facing switch.
+
+Pi TeamMates keep the same login, model, extensions/plugins, skills, context files, project trust, and tools as a direct `pi` run on that machine. Team Agent only appends the role contract, a per-seat Team MCP registration, and per-seat session storage; do not duplicate those direct Pi settings in the role. `model` and `effort` remain optional compatibility overrides, and explicit values are passed through.
 
 ### Cursor provider notes
 

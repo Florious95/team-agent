@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::lifecycle::launch::pi_mcp::{
-    parse_pi_list_models_table, validate_pi_adapter_identity, validate_pi_executable_chain,
-    validate_pi_wrapper_source, write_pi_wrapper, PiAdapterIdentity, PiExecutableChain,
-    PiExecutableFileType, PiWrapperRequest,
+    parse_pi_list_models_table, resolve_pi_executable_chain, validate_pi_adapter_identity,
+    validate_pi_executable_chain, validate_pi_wrapper_source, write_pi_wrapper, PiAdapterIdentity,
+    PiExecutableChain, PiExecutableFileType, PiWrapperRequest,
 };
 use crate::provider::McpConfig;
 
@@ -18,15 +18,20 @@ const INDEX_DIGEST: &str = "16d260ac25b66346baab6ecef76680324336953bafc7be8cf95b
 const CATALOG_DIGEST: &str = "726cedb6c3f6fe80a0d7b98918d8ed5063695e01f510a48f46c4bad5daab49fe";
 static NEXT_ROOT: AtomicU32 = AtomicU32::new(0);
 const PI_WRAPPER_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_CHILD";
-const PI_WRAPPER_NEGATIVE_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_NEGATIVE_CHILD";
+const PI_WRAPPER_AMBIENT_CHILD: &str = "TEAM_AGENT_TEST_PI_WRAPPER_AMBIENT_CHILD";
+const PI_SYMLINK_CHILD: &str = "TEAM_AGENT_TEST_PI_SYMLINK_CHILD";
 const PI_WRAPPER_PARENT_PID: &str = "TEAM_AGENT_TEST_PI_WRAPPER_PARENT_PID";
 const PI_WRAPPER_TEST: &str = concat!(
     "lifecycle::tests::pi_executable_mcp_red::",
     "pi_wrapper_is_atomic_per_seat_and_embeds_exact_candidate"
 );
-const PI_WRAPPER_NEGATIVE_TEST: &str = concat!(
+const PI_WRAPPER_AMBIENT_TEST: &str = concat!(
     "lifecycle::tests::pi_executable_mcp_red::",
-    "pi_wrapper_import_failure_has_no_ambient_merge_fallback"
+    "pi_wrapper_runtime_registration_does_not_copy_ambient_config"
+);
+const PI_SYMLINK_TEST: &str = concat!(
+    "lifecycle::tests::pi_executable_mcp_red::",
+    "pi_standard_npm_symlink_is_a_verified_launch_entry"
 );
 
 fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
@@ -166,6 +171,60 @@ fn pi_executable_chain_freezes_wrapper_real_binary_catalog_and_plugin_identity()
 }
 
 #[test]
+fn pi_standard_npm_symlink_is_a_verified_launch_entry() {
+    run_process_isolated(PI_SYMLINK_CHILD, PI_SYMLINK_TEST, || {
+        assert_isolated_child();
+        let root = temp_root("npm-symlink");
+        let bin = root.join("bin");
+        let later_bin = root.join("later-bin");
+        let package_root = root.join("pi-mcp-adapter");
+        std::fs::create_dir_all(&bin).expect("create bin");
+        std::fs::create_dir_all(&later_bin).expect("create later bin");
+        std::fs::create_dir_all(&package_root).expect("create adapter root");
+        let real = root.join("cli.js");
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) printf '0.84.4\\n' ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\n  *) exit 64 ;;\nesac\n",
+            package_root.display()
+        );
+        std::fs::write(&real, &script).expect("write protocol-capable Pi entry");
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))
+            .expect("make Pi entry executable");
+        std::os::unix::fs::symlink(&real, bin.join("pi")).expect("create npm-style symlink");
+        std::fs::write(later_bin.join("pi"), script).expect("write later Pi wrapper");
+        std::fs::set_permissions(later_bin.join("pi"), std::fs::Permissions::from_mode(0o755))
+            .expect("make later Pi wrapper executable");
+        std::fs::write(
+            package_root.join("package.json"),
+            br#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#,
+        )
+        .expect("write adapter package");
+        std::fs::write(
+            package_root.join("index.ts"),
+            b"export const createMcpAdapter = () => {};\n",
+        )
+        .expect("write adapter entry");
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                std::env::join_paths([&bin, &later_bin]).expect("join fixture PATH"),
+            );
+        }
+
+        let (chain, models) = resolve_pi_executable_chain()
+            .expect("the first PATH Pi entry must define direct Pi behavior");
+        assert_eq!(chain.path_entry, bin.join("pi"));
+        assert_eq!(chain.path_entry_type, PiExecutableFileType::Symlink);
+        assert_eq!(chain.launch_executable, bin.join("pi"));
+        assert_eq!(
+            chain.real_binary,
+            std::fs::canonicalize(&real).expect("canonical real Pi entry")
+        );
+        assert_eq!(models, ["team-agent/qwen3.8-27b"]);
+        std::fs::remove_dir_all(root).expect("remove symlink fixture");
+    });
+}
+
+#[test]
 fn pi_adapter_detector_requires_exact_2_30_0_entry_and_digest() {
     let root = temp_root("adapter-identity");
     let exact = adapter_identity(&root);
@@ -234,17 +293,36 @@ fn pi_wrapper_is_atomic_body(hermetic: &HermeticTestEnv) {
     );
 
     let source = std::fs::read_to_string(&written).expect("read wrapper");
-    assert!(source.contains(adapter.index_ts.to_string_lossy().as_ref()));
     assert!(source.contains(candidate.to_string_lossy().as_ref()));
     assert!(source.contains("TEAM_AGENT_ID") && source.contains("worker-a"));
     assert!(source.contains("TEAM_AGENT_OWNER_TEAM_ID") && source.contains("team-a"));
-    assert!(source.contains("lifecycle") && source.contains("lazy"));
-    assert!(source.contains("directTools") && source.contains("false"));
-    assert!(source.contains("toolPrefix") && source.contains("server"));
+    assert!(source.contains("pi-mcp-adapter:runtime-register:v1"));
+    assert!(source.contains("session_start") && source.contains("session_shutdown"));
     assert!(source.contains("includeTools"));
     assert!(source.contains("send_message") && source.contains("report_result"));
+    assert!(!source.contains("createMcpAdapter"));
+    assert!(!source.contains("directTools"));
+    assert!(!source.contains("toolPrefix"));
+    assert!(!source.contains("\"lifecycle\""));
     assert!(!source.contains("command: \"team-agent\""));
     assert!(!source.contains("--mcp-config"));
+
+    let other_destination = workspace.join(".team/runtime/pi/team-a/worker-b/team-mcp.ts");
+    write_pi_wrapper(PiWrapperRequest {
+        destination: &other_destination,
+        adapter: &adapter,
+        candidate_executable: &candidate,
+        mcp_config: &mcp_config(&candidate, &workspace, "worker-b"),
+        team_id: "team-a",
+        agent_id: "worker-b",
+        workspace: &workspace,
+        include_tools: &["send_message", "report_result"],
+    })
+    .expect("write second seat wrapper");
+    let other_source = std::fs::read_to_string(&other_destination).expect("read second wrapper");
+    assert!(source.contains("worker-a") && !source.contains("worker-b"));
+    assert!(other_source.contains("worker-b") && !other_source.contains("worker-a"));
+    assert_ne!(written, other_destination);
 
     let entries = std::fs::read_dir(destination.parent().expect("wrapper parent"))
         .expect("list wrapper parent")
@@ -259,8 +337,8 @@ fn pi_wrapper_is_atomic_body(hermetic: &HermeticTestEnv) {
 }
 
 #[test]
-fn pi_wrapper_import_failure_has_no_ambient_merge_fallback() {
-    run_process_isolated(PI_WRAPPER_NEGATIVE_CHILD, PI_WRAPPER_NEGATIVE_TEST, || {
+fn pi_wrapper_runtime_registration_does_not_copy_ambient_config() {
+    run_process_isolated(PI_WRAPPER_AMBIENT_CHILD, PI_WRAPPER_AMBIENT_TEST, || {
         let hermetic = HermeticTestEnv::enter("pi-wrapper-negative-send");
         assert_isolated_child();
         pi_wrapper_import_failure_body(&hermetic);
@@ -293,24 +371,13 @@ fn pi_wrapper_import_failure_body(hermetic: &HermeticTestEnv) {
         workspace: &workspace,
         include_tools: &["send_message", "report_result"],
     })
-    .expect("isolated wrapper ignores ambient config");
+    .expect("runtime wrapper leaves ambient config to direct Pi");
     let source = std::fs::read_to_string(&destination).expect("wrapper source");
     assert!(!source.contains("ambient-evil"));
     validate_pi_wrapper_source(&source, &adapter, &candidate)
-        .expect("exact isolated import and candidate");
-
-    let broken = source.replace(
-        adapter.index_ts.to_string_lossy().as_ref(),
-        "/missing/pi-mcp-adapter/index.ts",
-    );
-    let error = validate_pi_wrapper_source(&broken, &adapter, &candidate)
-        .expect_err("broken import must refuse");
-    let text = error.to_string();
-    assert!(
-        text.contains("import") || text.contains("adapter"),
-        "got {text}"
-    );
-    assert!(!broken.contains("--mcp-config"));
+        .expect("runtime registration and exact candidate");
+    assert!(!source.contains("createMcpAdapter"));
+    assert!(!source.contains("--mcp-config"));
 
     let missing_proxy_tools = source.replace("\"includeTools\"", "\"missingTools\"");
     validate_pi_wrapper_source(&missing_proxy_tools, &adapter, &candidate)

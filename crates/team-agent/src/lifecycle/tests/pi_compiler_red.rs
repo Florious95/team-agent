@@ -14,6 +14,13 @@ const CATALOG: &[u8] = include_bytes!("fixtures/pi_list_models_g0.stdout.txt");
 static NEXT_ROLE: AtomicU32 = AtomicU32::new(0);
 
 fn compile_pi_role(front_matter: &str) -> Result<CompiledRole, ModelError> {
+    compile_pi_role_with_team(front_matter, &Value::Map(Vec::new()))
+}
+
+fn compile_pi_role_with_team(
+    front_matter: &str,
+    team_meta: &Value,
+) -> Result<CompiledRole, ModelError> {
     let seq = NEXT_ROLE.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
         "team-agent-pi-compiler-{}-{seq}",
@@ -26,7 +33,7 @@ fn compile_pi_role(front_matter: &str) -> Result<CompiledRole, ModelError> {
         format!("---\n{front_matter}\n---\nPi worker contract.\n"),
     )
     .expect("write role fixture");
-    let result = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace");
+    let result = compile_role_agent(&role, team_meta, "/workspace");
     std::fs::remove_dir_all(root).expect("remove role fixture root");
     result
 }
@@ -48,8 +55,8 @@ fn command(tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<St
     build_pi_command_argv(PiCommandRequest {
         executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/t1/pi-worker/team-mcp.ts"),
-        model,
-        effort,
+        model: Some(model),
+        effort: Some(effort),
         system_prompt: "Pi worker contract.",
         tool_categories: tools,
         session_dir: Path::new("/workspace/.team/runtime/pi/t1/pi-worker/sessions"),
@@ -62,19 +69,15 @@ fn command(tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<St
 }
 
 #[test]
-fn pi_role_requires_qualified_model_explicit_effort_and_mcp_team() {
+fn pi_role_requires_mcp_team_and_preserves_provider_defaults() {
     let positive = compile_pi_role(&valid_role_with(""));
     assert!(positive.is_ok(), "fully explicit Pi role must compile");
 
-    let missing_model = valid_role_with("").replace("model: team-agent/qwen3.8-27b\n", "");
-    let missing_effort = valid_role_with("").replace("effort: medium\n", "");
     let missing_mcp = valid_role_with("").replace("  - mcp_team\n", "");
     let unqualified =
         valid_role_with("").replace("model: team-agent/qwen3.8-27b", "model: qwen3.8-27b");
 
     for (label, role) in [
-        ("model", missing_model),
-        ("effort", missing_effort),
         ("mcp_team", missing_mcp),
         ("qualified exact model", unqualified),
     ] {
@@ -85,13 +88,45 @@ fn pi_role_requires_qualified_model_explicit_effort_and_mcp_team() {
         );
     }
 
+    let defaults = valid_role_with("")
+        .replace("model: team-agent/qwen3.8-27b\n", "")
+        .replace("effort: medium\n", "");
+    let team_meta = Value::Map(vec![
+        (
+            "provider_models".to_string(),
+            Value::Map(vec![(
+                "pi".to_string(),
+                Value::Str("team-default/forced-model".to_string()),
+            )]),
+        ),
+        (
+            "default_model".to_string(),
+            Value::Str("global-default/forced-model".to_string()),
+        ),
+        (
+            "provider_effort".to_string(),
+            Value::Str("high".to_string()),
+        ),
+    ]);
+    let compiled = compile_pi_role_with_team(&defaults, &team_meta)
+        .expect("Pi model and effort may use provider defaults");
+    assert_eq!(
+        compiled.agent.get("model"),
+        Some(&Value::Null),
+        "omitted Pi model must not inherit a synthesized framework default"
+    );
+    assert!(
+        compiled.agent.get("effort").is_none(),
+        "omitted Pi effort must not inherit a synthesized framework default"
+    );
+
     let models = parse_pi_list_models_table(CATALOG).expect("catalog fixture");
     assert!(select_exact_pi_model(&models, "team-agent/qwen3.8-27b").is_ok());
     assert!(select_exact_pi_model(&models, "foo/bar").is_err());
 }
 
 #[test]
-fn pi_role_requires_intrinsic_unrestricted_ack_true() {
+fn pi_role_uses_standard_bypass_field_without_fabricating_argv() {
     let compiled = compile_pi_role(&valid_role_with("")).expect("true acknowledgement");
     assert_eq!(
         compiled.agent.get("dangerously_skip_permissions"),
@@ -122,10 +157,16 @@ fn pi_role_requires_intrinsic_unrestricted_ack_true() {
         "dangerously_skip_permissions: true",
         "dangerously_skip_permissions: false",
     );
-    let error = compile_error(compile_pi_role(&false_ack));
-    let text = error.to_string();
+    let compiled = compile_pi_role(&false_ack).expect("standard false bypass value");
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(false))
+    );
+
+    let missing_ack = valid_role_with("").replace("dangerously_skip_permissions: true\n", "");
+    let text = compile_error(compile_pi_role(&missing_ack)).to_string();
     assert!(
-        text.contains("dangerously_skip_permissions") && text.contains("true"),
+        text.contains("missing front matter field dangerously_skip_permissions"),
         "got {text}"
     );
 }
@@ -153,7 +194,7 @@ fn pi_max_effort_is_supported_without_model_suffix() {
 }
 
 #[test]
-fn pi_tools_allowlist_keeps_mcp_and_rejects_unknown_categories() {
+fn pi_role_tools_validate_team_capabilities_without_replacing_direct_pi_tools() {
     assert_eq!(pi_tool_mapping("mcp_team"), PiToolMapping::Mcp);
     assert_eq!(
         pi_tool_mapping("fs_read"),
@@ -194,14 +235,9 @@ fn pi_tools_allowlist_keeps_mcp_and_rejects_unknown_categories() {
         ProviderEffort::Medium,
         "team-agent/qwen3.8-27b",
     )
-    .expect("known allowlist");
-    let tools = argv
-        .windows(2)
-        .find(|pair| pair[0] == "--tools")
-        .map(|pair| pair[1].as_str())
-        .expect("--tools value");
-    assert_eq!(
-        tools, "bash,edit,find,grep,ls,mcp,read,write",
-        "tools must be sorted and deduplicated"
+    .expect("known standard role tools");
+    assert!(
+        !argv.iter().any(|arg| arg == "--tools"),
+        "role tools validate Team Agent capabilities but must not replace direct Pi tools: {argv:?}"
     );
 }

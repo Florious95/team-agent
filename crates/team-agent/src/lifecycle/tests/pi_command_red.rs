@@ -7,8 +7,8 @@ fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
     PiCommandRequest {
         executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts"),
-        model: "team-agent/qwen3.8-27b",
-        effort: ProviderEffort::High,
+        model: Some("team-agent/qwen3.8-27b"),
+        effort: Some(ProviderEffort::High),
         system_prompt: "frozen worker prompt",
         tool_categories: &["mcp_team", "fs_read", "fs_write", "execute_bash"],
         session_dir: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/sessions"),
@@ -18,7 +18,20 @@ fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
 }
 
 #[test]
-fn pi_command_is_exact_regular_tui_and_has_no_ambient_flags() {
+fn pi_command_omits_unset_model_and_thinking_flags() {
+    let mut request = request(PiSessionSelector::Fresh {
+        session_id: "a2320d4e-7b3a-44ae-b3b8-d5de57033b01",
+    });
+    request.model = None;
+    request.effort = None;
+    let argv = build_pi_command_argv(request).expect("Pi provider defaults");
+
+    assert!(!argv.iter().any(|arg| arg == "--model"), "argv={argv:?}");
+    assert!(!argv.iter().any(|arg| arg == "--thinking"), "argv={argv:?}");
+}
+
+#[test]
+fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
     let fresh = build_pi_command_argv(request(PiSessionSelector::Fresh {
         session_id: "da8c3622-2378-4d05-a26c-e826a6ef6d63",
     }))
@@ -27,23 +40,14 @@ fn pi_command_is_exact_regular_tui_and_has_no_ambient_flags() {
         fresh,
         [
             "/verified/pi",
-            "--no-extensions",
             "-e",
             "/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts",
-            "--no-approve",
-            "--no-context-files",
-            "--no-skills",
-            "--no-prompt-templates",
-            "--tui-mode",
-            "regular",
             "--model",
             "team-agent/qwen3.8-27b",
             "--thinking",
             "high",
-            "--system-prompt",
+            "--append-system-prompt",
             "frozen worker prompt",
-            "--tools",
-            "bash,edit,mcp,read,write",
             "--session-dir",
             "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
             "--session-id",
@@ -88,6 +92,14 @@ fn pi_command_is_exact_regular_tui_and_has_no_ambient_flags() {
             "--force",
             "--trust",
             "--sandbox",
+            "--no-extensions",
+            "--no-approve",
+            "--no-context-files",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--tui-mode",
+            "--tools",
+            "--system-prompt",
         ] {
             assert!(
                 !argv.iter().any(|arg| arg == forbidden),
@@ -98,23 +110,26 @@ fn pi_command_is_exact_regular_tui_and_has_no_ambient_flags() {
 }
 
 #[test]
-fn pi_command_uses_no_context_no_extensions_no_approve() {
+fn pi_command_keeps_direct_plugins_skills_context_auth_and_tools() {
     let argv = build_pi_command_argv(request(PiSessionSelector::Fresh {
         session_id: "76f682b1-ecc3-4586-850f-ab2e2bb04cb3",
     }))
     .expect("fresh Pi command");
 
-    for required in [
+    for forbidden in [
         "--no-context-files",
         "--no-extensions",
         "--no-approve",
         "--no-skills",
         "--no-prompt-templates",
+        "--tools",
+        "--system-prompt",
+        "--tui-mode",
     ] {
         assert_eq!(
-            argv.iter().filter(|arg| arg.as_str() == required).count(),
-            1,
-            "required isolation flag must occur once: {required}; argv={argv:?}"
+            argv.iter().filter(|arg| arg.as_str() == forbidden).count(),
+            0,
+            "TeamMate Pi must preserve the direct Pi default instead of adding {forbidden}; argv={argv:?}"
         );
     }
     assert!(argv.windows(2).any(|pair| {
@@ -124,5 +139,7 @@ fn pi_command_uses_no_context_no_extensions_no_approve() {
         ]
     }));
     assert_eq!(argv.iter().filter(|arg| arg.as_str() == "-e").count(), 1);
-    assert!(!argv.iter().any(|arg| arg == "--approve"));
+    assert!(argv
+        .windows(2)
+        .any(|pair| pair == ["--append-system-prompt", "frozen worker prompt"]));
 }

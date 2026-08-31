@@ -5,7 +5,7 @@
 //!     - name: materialize_pi_plan
 //!       what: 为 leader 与 TeamMate 生成同一来源的 Pi CommandPlan
 //!     - name: write_pi_wrapper
-//!       what: 原子写入 0600 isolated lazy MCP wrapper
+//!       what: 原子写入 0600 per-seat runtime MCP registration extension
 //! boundary:
 //!   - 不枚举 Pi session；resume 只重验调用方给出的 exact backing
 //!   - 不投递消息、不执行 cleanup 或 doctor 判定
@@ -270,7 +270,10 @@ pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<
     if !chain.path_entry.is_absolute()
         || !chain.launch_executable.is_absolute()
         || !chain.real_binary.is_absolute()
-        || chain.path_entry_type != PiExecutableFileType::Wrapper
+        || !matches!(
+            chain.path_entry_type,
+            PiExecutableFileType::Wrapper | PiExecutableFileType::Symlink
+        )
         || chain.launch_executable != chain.path_entry
         || chain.real_binary == chain.launch_executable
         || chain.catalog_sha256.len() != 64
@@ -350,15 +353,6 @@ fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderE
         serde_json::Value::String(expected.to_string_lossy().into_owned()),
     );
     server.insert(
-        "lifecycle".to_string(),
-        serde_json::Value::String("lazy".to_string()),
-    );
-    server.insert("directTools".to_string(), serde_json::Value::Bool(false));
-    server.insert(
-        "toolPrefix".to_string(),
-        serde_json::Value::String("server".to_string()),
-    );
-    server.insert(
         "includeTools".to_string(),
         serde_json::Value::Array(
             request
@@ -389,55 +383,69 @@ fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderE
         "TEAM_AGENT_OWNER_TEAM_ID".to_string(),
         serde_json::Value::String(request.team_id.to_string()),
     );
-    let config = serde_json::json!({
-        "mcpServers": {
-            "team_orchestrator": serde_json::Value::Object(server)
-        }
-    });
-    let import = serde_json::to_string(&request.adapter.index_ts)
-        .map_err(|error| ProviderError::Command(format!("serialize Pi adapter path: {error}")))?;
-    let config = serde_json::to_string_pretty(&config)
-        .map_err(|error| ProviderError::Command(format!("serialize Pi MCP config: {error}")))?;
+    let definition = serde_json::to_string_pretty(&serde_json::Value::Object(server))
+        .map_err(|error| ProviderError::Command(format!("serialize Pi MCP server: {error}")))?;
     Ok(format!(
-        "import {{ createMcpAdapter }} from {import};\n\nexport default createMcpAdapter({{ config: {config} }});\n"
+        r#"const MCP_RUNTIME_REGISTER_EVENT = "pi-mcp-adapter:runtime-register:v1";
+
+export default function teamAgentMcp(pi: any) {{
+  let registration: {{ dispose(): Promise<void> }} | undefined;
+
+  pi.on("session_start", () => {{
+    if (registration) return;
+    const request: any = {{
+      version: 1,
+      name: "team_orchestrator",
+      definition: {definition},
+    }};
+    pi.events.emit(MCP_RUNTIME_REGISTER_EVENT, request);
+    if (!request.result) throw new Error("pi-mcp-adapter is not enabled");
+    if (!request.result.ok) throw request.result.error;
+    registration = request.result.registration;
+  }});
+
+  pi.on("session_shutdown", async () => {{
+    const current = registration;
+    registration = undefined;
+    await current?.dispose();
+  }});
+}}
+"#
     ))
 }
 
 /// ---
-/// purpose: 静态核对 wrapper 的 exact import、candidate 与 lazy isolation 字段
-/// returns: wrapper 保持冻结隔离合同则成功
-/// errors: identity 缺失或出现 mcp-config fallback 时返回 ProviderError
+/// purpose: 静态核对 wrapper 只做 per-seat runtime MCP registration
+/// returns: wrapper 保留 direct Pi 配置且冻结 seat identity 时成功
+/// errors: identity、runtime registration 或 candidate 缺失时返回 ProviderError
 /// ---
 pub(crate) fn validate_pi_wrapper_source(
     source: &str,
     adapter: &PiAdapterIdentity,
     candidate_executable: &Path,
 ) -> Result<(), ProviderError> {
-    let adapter_path = adapter.index_ts.to_string_lossy();
+    validate_pi_adapter_identity(adapter)?;
     let candidate = candidate_executable.to_string_lossy();
-    if !source.contains(adapter_path.as_ref())
-        || !source.contains(candidate.as_ref())
-        || !source.contains("createMcpAdapter")
-        || !source.contains("mcpServers")
+    if !source.contains(candidate.as_ref())
+        || !source.contains("pi-mcp-adapter:runtime-register:v1")
+        || !source.contains("session_start")
+        || !source.contains("session_shutdown")
         || !source.contains("team_orchestrator")
-        || !source.contains("lazy")
-        || !source.contains("directTools")
-        || !source.contains("false")
-        || !source.contains("toolPrefix")
-        || !source.contains("server")
         || !source.contains("includeTools")
+        || source.contains("createMcpAdapter")
+        || source.contains("directTools")
+        || source.contains("toolPrefix")
         || source.contains("--mcp-config")
     {
         return Err(ProviderError::Command(
-            "Pi wrapper source does not preserve the isolated adapter/candidate contract"
-                .to_string(),
+            "Pi wrapper source does not preserve direct Pi plus per-seat runtime MCP".to_string(),
         ));
     }
     Ok(())
 }
 
 /// ---
-/// purpose: 在 seat root 原子写入 mode 0600 的 isolated lazy MCP wrapper
+/// purpose: 在 seat root 原子写入 mode 0600 的 runtime MCP registration extension
 /// returns: 最终 wrapper 路径
 /// errors: identity、序列化、目录、写盘或 rename 失败时返回 ProviderError
 /// ---
@@ -482,14 +490,14 @@ pub(crate) fn write_pi_wrapper(request: PiWrapperRequest<'_>) -> Result<PathBuf,
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PiLeaderArgs {
-    pub model: String,
-    pub effort: ProviderEffort,
+    pub model: Option<String>,
+    pub effort: Option<ProviderEffort>,
 }
 
 /// ---
 /// purpose: 解析 Pi leader 唯一允许的 model/thinking 输入
-/// returns: 显式 qualified model 与 effort
-/// errors: 缺失、重复、未知或 materializer-owned flag 时返回 ProviderError
+/// returns: 仅保留调用方显式给出的 qualified model 与 effort
+/// errors: 重复、未知或 materializer-owned flag 时返回 ProviderError
 /// ---
 pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, ProviderError> {
     let args = args.strip_prefix(&["--".to_string()]).unwrap_or(args);
@@ -519,24 +527,17 @@ pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, Prov
         }
         index += 2;
     }
-    let model = model.ok_or_else(|| {
-        ProviderError::Command("Pi leader requires an explicit --model".to_string())
-    })?;
-    if model.contains('*')
-        || !model
-            .split_once('/')
-            .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
-    {
+    if model.as_ref().is_some_and(|model| {
+        model.contains('*')
+            || !model
+                .split_once('/')
+                .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
+    }) {
         return Err(ProviderError::Command(
             "Pi leader --model must be a qualified exact id".to_string(),
         ));
     }
-    Ok(PiLeaderArgs {
-        model,
-        effort: effort.ok_or_else(|| {
-            ProviderError::Command("Pi leader requires an explicit --thinking".to_string())
-        })?,
-    })
+    Ok(PiLeaderArgs { model, effort })
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -598,7 +599,7 @@ fn command_stdout(executable: &Path, args: &[&str]) -> Result<Vec<u8>, ProviderE
 }
 
 fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, ProviderError> {
-    let listing = command_stdout(launch_executable, &["list", "--no-approve"])?;
+    let listing = command_stdout(launch_executable, &["list"])?;
     let listing = std::str::from_utf8(&listing).map_err(|error| {
         ProviderError::Command(format!("Pi package list is not UTF-8: {error}"))
     })?;
@@ -660,16 +661,16 @@ fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, Pr
 pub(crate) fn resolve_pi_executable_chain(
 ) -> Result<(PiExecutableChain, Vec<String>), ProviderError> {
     let path_entries = pi_path_entries()?;
-    let path_entry = path_entries
-        .iter()
-        .find_map(|candidate| {
-            (executable_file_type(candidate).ok()? == PiExecutableFileType::Wrapper)
-                .then(|| candidate.clone())
-        })
-        .ok_or_else(|| {
-            ProviderError::Command("Pi PATH has no verified wrapper launch executable".to_string())
-        })?;
-    let path_entry_type = PiExecutableFileType::Wrapper;
+    let path_entry = path_entries[0].clone();
+    let path_entry_type = executable_file_type(&path_entry)?;
+    if !matches!(
+        path_entry_type,
+        PiExecutableFileType::Wrapper | PiExecutableFileType::Symlink
+    ) {
+        return Err(ProviderError::Command(
+            "the direct Pi PATH entry is not a verified wrapper or npm symlink".to_string(),
+        ));
+    }
     let version =
         String::from_utf8(command_stdout(&path_entry, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!("Pi version output is not UTF-8: {error}"))
@@ -677,17 +678,21 @@ pub(crate) fn resolve_pi_executable_chain(
     let version = version.trim().to_string();
     let launch_identity = std::fs::canonicalize(&path_entry)
         .map_err(|error| ProviderError::Io(format!("{}: {error}", path_entry.display())))?;
-    let real_binary = path_entries
-        .iter()
-        .find_map(|candidate| {
-            let real = std::fs::canonicalize(candidate).ok()?;
-            (real != launch_identity).then_some(real)
-        })
-        .ok_or_else(|| {
-            ProviderError::Command(
-                "Pi PATH wrapper has no independently resolved real executable".to_string(),
-            )
-        })?;
+    let real_binary = if path_entry_type == PiExecutableFileType::Symlink {
+        launch_identity
+    } else {
+        path_entries
+            .iter()
+            .find_map(|candidate| {
+                let real = std::fs::canonicalize(candidate).ok()?;
+                (real != launch_identity).then_some(real)
+            })
+            .ok_or_else(|| {
+                ProviderError::Command(
+                    "Pi PATH wrapper has no independently resolved real executable".to_string(),
+                )
+            })?
+    };
     let _real_version =
         String::from_utf8(command_stdout(&real_binary, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!(
@@ -714,8 +719,8 @@ pub(crate) struct PiMaterializeRequest<'a> {
     pub workspace: &'a Path,
     pub team_id: &'a str,
     pub agent_id: &'a str,
-    pub model: &'a str,
-    pub effort: ProviderEffort,
+    pub model: Option<&'a str>,
+    pub effort: Option<ProviderEffort>,
     pub system_prompt: &'a str,
     pub tool_categories: &'a [&'a str],
     pub team_mcp_tools: &'a [&'a str],
@@ -752,7 +757,10 @@ fn materialize_pi_plan_with_session(
     resume: Option<(&SessionId, &Path, &Path)>,
 ) -> Result<CommandPlan, ProviderError> {
     let (chain, catalog) = resolve_pi_executable_chain()?;
-    let model = select_exact_pi_model(&catalog, request.model)?;
+    let model = request
+        .model
+        .map(|model| select_exact_pi_model(&catalog, model))
+        .transpose()?;
     let paths = pi_seat_paths(request.workspace, request.team_id, request.agent_id);
     let resume = if let Some((session_id, session_path, spawn_cwd)) = resume {
         let session_root = std::fs::canonicalize(&paths.sessions).map_err(|error| {
@@ -795,7 +803,7 @@ fn materialize_pi_plan_with_session(
         let argv = build_pi_command_argv(PiCommandRequest {
             executable: &chain.launch_executable,
             extension: &wrapper,
-            model: &model,
+            model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
             tool_categories: request.tool_categories,
@@ -809,7 +817,7 @@ fn materialize_pi_plan_with_session(
         let argv = build_pi_command_argv(PiCommandRequest {
             executable: &chain.launch_executable,
             extension: &wrapper,
-            model: &model,
+            model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
             tool_categories: request.tool_categories,
