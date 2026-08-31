@@ -134,6 +134,7 @@ fn run_catalog(program: &Path, timeout: Duration, max_bytes: u64) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[cfg(unix)]
     #[test]
