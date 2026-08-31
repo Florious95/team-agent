@@ -394,10 +394,10 @@ pub fn preflight_pi_role_model(meta: &Value) -> Result<(), PiModelPreflightError
 
 pub fn preflight_pi_role_model_with<F>(
     meta: &Value,
-    discover: F,
+    mut discover: F,
 ) -> Result<(), PiModelPreflightError>
 where
-    F: FnOnce(&str) -> Result<Vec<String>, ()>,
+    F: FnMut(&str) -> Result<Vec<String>, ()>,
 {
     if parse_canonical_provider(meta.get("provider").and_then(Value::as_str).unwrap_or(""))
         != Some(Provider::Pi)
@@ -431,6 +431,18 @@ where
 }
 
 pub fn preflight_pi_models_in_team(team_dir: &Path) -> Result<(), PiModelPreflightError> {
+    preflight_pi_models_in_team_with(team_dir, |requested| {
+        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    })
+}
+
+pub fn preflight_pi_models_in_team_with<F>(
+    team_dir: &Path,
+    mut discover: F,
+) -> Result<(), PiModelPreflightError>
+where
+    F: FnMut(&str) -> Result<Vec<String>, ()>,
+{
     let agents_dir = team_dir.join("agents");
     let entries = std::fs::read_dir(&agents_dir).map_err(|_| PiModelPreflightError {
         requested: "<role directory>".into(),
@@ -451,7 +463,7 @@ pub fn preflight_pi_models_in_team(team_dir: &Path) -> Result<(), PiModelPreflig
             action: "repair the role document and retry".into(),
             not_ready: true,
         })?;
-        preflight_pi_role_model(&meta)?;
+        preflight_pi_role_model_with(&meta, &mut discover)?;
     }
     Ok(())
 }

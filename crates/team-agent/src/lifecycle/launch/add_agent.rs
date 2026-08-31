@@ -94,15 +94,17 @@ impl Drop for AgentReservation {
 }
 
 fn preflight_pi_role_model(role_file_path: &Path) -> Result<(), LifecycleError> {
+    preflight_pi_role_model_with(role_file_path, |requested| crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ()))
+}
+
+fn preflight_pi_role_model_with<F>(role_file_path: &Path, mut discover: F) -> Result<(), LifecycleError>
+where
+    F: FnMut(&str) -> Result<Vec<String>, ()>,
+{
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-    crate::compiler::preflight_pi_role_model(&meta).map_err(|error| {
-        LifecycleError::PiModelPreflight {
-            requested: error.requested,
-            candidates: error.candidates,
-            action: error.action,
-            not_ready: error.not_ready,
-        }
+    crate::compiler::preflight_pi_role_model_with(&meta, &mut discover).map_err(|error| {
+        LifecycleError::PiModelPreflight { requested: error.requested, candidates: error.candidates, action: error.action, not_ready: error.not_ready }
     })
 }
 
