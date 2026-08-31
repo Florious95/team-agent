@@ -93,6 +93,19 @@ impl Drop for AgentReservation {
     }
 }
 
+fn preflight_pi_role_model(role_file_path: &Path) -> Result<(), LifecycleError> {
+    let (meta, _) = crate::compiler::read_front_matter(role_file_path)
+        .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+    crate::compiler::preflight_pi_role_model(&meta).map_err(|error| {
+        LifecycleError::PiModelPreflight {
+            requested: error.requested,
+            candidates: error.candidates,
+            action: error.action,
+            not_ready: error.not_ready,
+        }
+    })
+}
+
 fn reserve_agent_slot(
     workspace: &Path,
     team: Option<&str>,
@@ -242,6 +255,7 @@ pub fn add_agent(
         team: Some(selected.team_key.as_str()),
         agent_id: Some(agent_id),
     })?;
+    preflight_pi_role_model(role_file_path)?;
     let reservation = reserve_agent_slot(
         &selected.run_workspace,
         Some(selected.team_key.as_str()),
@@ -349,6 +363,7 @@ pub(crate) fn add_agent_with_transport(
         team,
         agent_id: Some(agent_id),
     })?;
+    preflight_pi_role_model(role_file_path)?;
     let reservation = reserve_agent_slot(&run_workspace, team, agent_id)?;
     drop(lifecycle_lock);
     add_agent_with_transport_at_paths_reserved(

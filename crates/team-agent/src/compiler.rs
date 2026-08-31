@@ -366,6 +366,85 @@ pub struct CompiledRole {
     pub agent: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiModelPreflightError {
+    pub requested: String,
+    pub candidates: Vec<String>,
+    pub action: String,
+    pub not_ready: bool,
+}
+
+impl std::fmt::Display for PiModelPreflightError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Pi role model {:?} is not a qualified exact model",
+            self.requested
+        )
+    }
+}
+
+/// Shared admission gate: omitted and qualified models pass; only an
+/// unqualified present model causes one bounded catalog observation.
+pub fn preflight_pi_role_model(meta: &Value) -> Result<(), PiModelPreflightError> {
+    if parse_canonical_provider(meta.get("provider").and_then(Value::as_str).unwrap_or(""))
+        != Some(Provider::Pi)
+    {
+        return Ok(());
+    }
+    let Some(model) = string_field(meta, "model").filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let requested = model.trim().to_string();
+    if requested.split_once('/').is_some_and(|(provider, name)| {
+        !provider.is_empty() && !name.is_empty() && !requested.contains('*')
+    }) {
+        return Ok(());
+    }
+    let (candidates, not_ready) =
+        match crate::lifecycle::launch::pi_mcp::pi_model_candidates(&requested) {
+            Ok(candidates) => (candidates, false),
+            Err(_) => (Vec::new(), true),
+        };
+    let action = if candidates.is_empty() {
+        format!("run `team-agent models --provider pi --search {requested}`")
+    } else {
+        format!("copy a candidate into the role, or run `team-agent models --provider pi --search {requested}`")
+    };
+    Err(PiModelPreflightError {
+        requested,
+        candidates,
+        action,
+        not_ready,
+    })
+}
+
+pub fn preflight_pi_models_in_team(team_dir: &Path) -> Result<(), PiModelPreflightError> {
+    let agents_dir = team_dir.join("agents");
+    let entries = std::fs::read_dir(&agents_dir).map_err(|_| PiModelPreflightError {
+        requested: "<role directory>".into(),
+        candidates: Vec::new(),
+        action: "repair the role directory and retry".into(),
+        not_ready: true,
+    })?;
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        let (meta, _) = read_front_matter(&path).map_err(|_| PiModelPreflightError {
+            requested: path.display().to_string(),
+            candidates: Vec::new(),
+            action: "repair the role document and retry".into(),
+            not_ready: true,
+        })?;
+        preflight_pi_role_model(&meta)?;
+    }
+    Ok(())
+}
+
 /// 把一份 role 文档编译成 agent spec 条目。`team_meta` 供 model/auth_mode 继承;
 /// `workspace_s` 是 working_directory。**纯读 `role_path`,无任何文件落地。**
 pub fn compile_role_agent(

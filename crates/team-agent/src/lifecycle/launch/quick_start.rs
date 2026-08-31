@@ -295,6 +295,14 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
             agents_dir.display()
         )));
     }
+    crate::compiler::preflight_pi_models_in_team(agents_dir).map_err(|error| {
+        LifecycleError::PiModelPreflight {
+            requested: error.requested,
+            candidates: error.candidates,
+            action: error.action,
+            not_ready: error.not_ready,
+        }
+    })?;
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;

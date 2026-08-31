@@ -586,6 +586,28 @@ fn executable_file_type(path: &Path) -> Result<PiExecutableFileType, ProviderErr
     }
 }
 
+/// Discover candidates with one PATH-first catalog observation. This deliberately
+/// does not resolve adapters or scan wrapper chains; callers use it only for
+/// rejecting an unqualified role model before lifecycle mutation.
+pub(crate) fn pi_model_candidates(requested: &str) -> Result<Vec<String>, ProviderError> {
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| ProviderError::Command("PATH is not set".to_string()))?;
+    let executable = std::env::split_paths(&path)
+        .map(|directory| directory.join("pi"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| ProviderError::Command("Pi executable not found on PATH".to_string()))?;
+    let catalog = command_stdout(&executable, &["--list-models"])?;
+    let models = parse_pi_list_models_table(&catalog)?;
+    Ok(models
+        .into_iter()
+        .filter(|model| {
+            model
+                .rsplit_once('/')
+                .is_some_and(|(_, name)| name == requested)
+        })
+        .collect())
+}
+
 fn pi_path_entries() -> Result<Vec<PathBuf>, ProviderError> {
     let path = std::env::var_os("PATH")
         .ok_or_else(|| ProviderError::Command("PATH is not set".to_string()))?;
