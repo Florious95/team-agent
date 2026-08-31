@@ -92,7 +92,8 @@ pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline
 // timer + worker timing writer so `lifecycle::launch::launch_with_transport_in_workspace`
 // can emit the same instrumentation event family with `source="launch"`.
 pub(crate) use rebuild::{
-    provider_wire_from_state, write_worker_spawn_timing_event, RestartPhaseTimer,
+    provider_wire_from_state, restart_failure_action, write_worker_spawn_timing_event,
+    RestartPhaseTimer,
 };
 pub use rebuild::{restart, restart_with_session_convergence_deadline};
 pub(crate) use rebuild::{

@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::lifecycle::launch::pi_mcp::{
-    parse_pi_list_models_table, resolve_pi_executable_chain, validate_pi_adapter_identity,
-    validate_pi_executable_chain, validate_pi_wrapper_source, write_pi_wrapper, PiAdapterIdentity,
-    PiExecutableChain, PiExecutableFileType, PiWrapperRequest,
+    parse_pi_list_models_table, pi_seat_paths, resolve_pi_executable_chain,
+    validate_pi_adapter_identity, validate_pi_executable_chain, validate_pi_wrapper_source,
+    write_pi_wrapper, write_pi_wrapper_with_publish, PiAdapterIdentity, PiExecutableChain,
+    PiExecutableFileType, PiWrapperRequest,
 };
 use crate::provider::McpConfig;
 
@@ -334,6 +335,124 @@ fn pi_wrapper_is_atomic_body(hermetic: &HermeticTestEnv) {
         "atomic write must not leave a temporary or backup sibling"
     );
     std::fs::remove_dir_all(root).expect("remove wrapper fixture");
+}
+
+#[test]
+fn pi_leader_wrapper_materializes_from_empty_unicode_wsl_workspace() {
+    let root = temp_root("empty-unicode-leader");
+    let workspace = root.join("mnt/f/测试基础设施");
+    let candidate = root.join("candidate/team-agent");
+    std::fs::create_dir_all(&workspace).expect("create empty Unicode workspace");
+    std::fs::create_dir_all(candidate.parent().expect("candidate parent"))
+        .expect("create candidate parent");
+    std::fs::write(&candidate, b"candidate").expect("write candidate fixture");
+    assert!(
+        !workspace.join(".team").exists(),
+        "fixture must begin without a .team directory"
+    );
+
+    let paths = pi_seat_paths(&workspace, "current", "leader");
+    let adapter = adapter_identity(&root);
+    let written = write_pi_wrapper(PiWrapperRequest {
+        destination: &paths.wrapper,
+        adapter: &adapter,
+        candidate_executable: &candidate,
+        mcp_config: &mcp_config(&candidate, &workspace, "leader"),
+        team_id: "current",
+        agent_id: "leader",
+        workspace: &workspace,
+        include_tools: &["assign_task", "send_message"],
+    })
+    .expect("materialize Pi leader wrapper from an empty Unicode workspace");
+
+    assert_eq!(written, paths.wrapper);
+    assert!(written.is_file(), "published leader wrapper must exist");
+    assert!(
+        paths.runtime_root.is_dir(),
+        "leader runtime root must be created recursively"
+    );
+    let source = std::fs::read_to_string(&written).expect("read complete leader wrapper");
+    validate_pi_wrapper_source(&source, &adapter, &candidate)
+        .expect("published leader wrapper must be complete and valid");
+    assert!(source.contains("TEAM_AGENT_ID") && source.contains("leader"));
+    assert!(source.contains("TEAM_AGENT_OWNER_TEAM_ID") && source.contains("current"));
+    std::fs::remove_dir_all(root).expect("remove Unicode leader fixture");
+}
+
+#[test]
+fn pi_wrapper_permissions_are_finalized_before_atomic_publish() {
+    let source = include_str!("../launch/pi_mcp.rs");
+    let write_start = source
+        .find("pub(crate) fn write_pi_wrapper")
+        .expect("write_pi_wrapper source");
+    let write_source = &source[write_start..];
+    let permissions = write_source
+        .find("file.set_permissions")
+        .expect("wrapper permissions must use the open temp-file handle");
+    let publish = write_source
+        .find("publish(&temp, request.destination)")
+        .expect("atomic wrapper publish");
+
+    assert!(
+        permissions < publish,
+        "DrvFS may not resolve the destination immediately after rename; finalize mode through the open temp-file handle before publishing"
+    );
+    assert!(
+        !write_source.contains("std::fs::set_permissions(request.destination"),
+        "atomic publish must not require a second destination-path lookup"
+    );
+}
+
+#[test]
+fn pi_wrapper_publish_needs_no_final_path_metadata_lookup() {
+    let root = temp_root("publish-path-enoent");
+    let workspace = root.join("mnt/f/测试基础设施");
+    let candidate = root.join("candidate/team-agent");
+    std::fs::create_dir_all(&workspace).expect("create Unicode workspace");
+    std::fs::create_dir_all(candidate.parent().expect("candidate parent"))
+        .expect("create candidate parent");
+    std::fs::write(&candidate, b"candidate").expect("write candidate fixture");
+
+    let paths = pi_seat_paths(&workspace, "current", "leader");
+    let published_parent = paths.runtime_root.clone();
+    let hidden_parent = published_parent.with_file_name("leader-after-rename");
+    let adapter = adapter_identity(&root);
+    write_pi_wrapper_with_publish(
+        PiWrapperRequest {
+            destination: &paths.wrapper,
+            adapter: &adapter,
+            candidate_executable: &candidate,
+            mcp_config: &mcp_config(&candidate, &workspace, "leader"),
+            team_id: "current",
+            agent_id: "leader",
+            workspace: &workspace,
+            include_tools: &["assign_task", "send_message"],
+        },
+        |temp, destination| {
+            std::fs::rename(temp, destination)?;
+            std::fs::rename(&published_parent, &hidden_parent)?;
+            assert_eq!(
+                std::fs::metadata(destination)
+                    .expect_err("simulate DrvFS final-path metadata ENOENT after rename")
+                    .kind(),
+                std::io::ErrorKind::NotFound
+            );
+            Ok(())
+        },
+    )
+    .expect("successful publish must not perform final-path metadata operations");
+
+    let published = hidden_parent.join("team-mcp.ts");
+    assert!(published.is_file(), "rename published a complete wrapper");
+    assert_eq!(
+        std::fs::metadata(&published)
+            .expect("published wrapper metadata through converged path")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    std::fs::remove_dir_all(root).expect("remove publish-path fixture");
 }
 
 #[test]

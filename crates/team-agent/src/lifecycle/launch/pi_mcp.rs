@@ -450,13 +450,24 @@ pub(crate) fn validate_pi_wrapper_source(
 /// errors: identity、序列化、目录、写盘或 rename 失败时返回 ProviderError
 /// ---
 pub(crate) fn write_pi_wrapper(request: PiWrapperRequest<'_>) -> Result<PathBuf, ProviderError> {
+    write_pi_wrapper_with_publish(request, |from, to| std::fs::rename(from, to))
+}
+
+pub(crate) fn write_pi_wrapper_with_publish(
+    request: PiWrapperRequest<'_>,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<PathBuf, ProviderError> {
     let source = render_pi_wrapper(&request)?;
     validate_pi_wrapper_source(&source, request.adapter, request.candidate_executable)?;
     let parent = request.destination.parent().ok_or_else(|| {
         ProviderError::Io("Pi wrapper destination has no parent directory".to_string())
     })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", parent.display())))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        ProviderError::Io(format!(
+            "Pi wrapper atomic write stage=create_parent path={}: {error}",
+            parent.display()
+        ))
+    })?;
     let temp = parent.join(format!(".team-mcp.ts.{}.tmp", std::process::id()));
     let write_result = (|| {
         let mut file = OpenOptions::new()
@@ -464,22 +475,38 @@ pub(crate) fn write_pi_wrapper(request: PiWrapperRequest<'_>) -> Result<PathBuf,
             .write(true)
             .mode(0o600)
             .open(&temp)
-            .map_err(|error| ProviderError::Io(format!("{}: {error}", temp.display())))?;
-        file.write_all(source.as_bytes())
-            .map_err(|error| ProviderError::Io(format!("{}: {error}", temp.display())))?;
-        file.sync_all()
-            .map_err(|error| ProviderError::Io(format!("{}: {error}", temp.display())))?;
-        std::fs::rename(&temp, request.destination).map_err(|error| {
+            .map_err(|error| {
+                ProviderError::Io(format!(
+                    "Pi wrapper atomic write stage=open_temp path={}: {error}",
+                    temp.display()
+                ))
+            })?;
+        file.write_all(source.as_bytes()).map_err(|error| {
             ProviderError::Io(format!(
-                "rename {} to {}: {error}",
+                "Pi wrapper atomic write stage=write_temp path={}: {error}",
+                temp.display()
+            ))
+        })?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                ProviderError::Io(format!(
+                    "Pi wrapper atomic write stage=chmod_temp_fd path={}: {error}",
+                    temp.display()
+                ))
+            })?;
+        file.sync_all().map_err(|error| {
+            ProviderError::Io(format!(
+                "Pi wrapper atomic write stage=fsync_temp path={}: {error}",
+                temp.display()
+            ))
+        })?;
+        publish(&temp, request.destination).map_err(|error| {
+            ProviderError::Io(format!(
+                "Pi wrapper atomic write stage=rename_publish from={} to={}: {error}",
                 temp.display(),
                 request.destination.display()
             ))
         })?;
-        std::fs::set_permissions(request.destination, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| {
-                ProviderError::Io(format!("{}: {error}", request.destination.display()))
-            })?;
         Ok(request.destination.to_path_buf())
     })();
     if write_result.is_err() {
