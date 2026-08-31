@@ -5,7 +5,7 @@
 //!     - name: materialize_pi_plan
 //!       what: 为 leader 与 TeamMate 生成同一来源的 Pi CommandPlan
 //!     - name: write_pi_wrapper
-//!       what: 原子写入 0600 isolated lazy MCP wrapper
+//!       what: 原子写入 0600 per-seat runtime MCP registration extension
 //! boundary:
 //!   - 不枚举 Pi session；resume 只重验调用方给出的 exact backing
 //!   - 不投递消息、不执行 cleanup 或 doctor 判定
@@ -353,15 +353,6 @@ fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderE
         serde_json::Value::String(expected.to_string_lossy().into_owned()),
     );
     server.insert(
-        "lifecycle".to_string(),
-        serde_json::Value::String("lazy".to_string()),
-    );
-    server.insert("directTools".to_string(), serde_json::Value::Bool(false));
-    server.insert(
-        "toolPrefix".to_string(),
-        serde_json::Value::String("server".to_string()),
-    );
-    server.insert(
         "includeTools".to_string(),
         serde_json::Value::Array(
             request
@@ -392,55 +383,69 @@ fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderE
         "TEAM_AGENT_OWNER_TEAM_ID".to_string(),
         serde_json::Value::String(request.team_id.to_string()),
     );
-    let config = serde_json::json!({
-        "mcpServers": {
-            "team_orchestrator": serde_json::Value::Object(server)
-        }
-    });
-    let import = serde_json::to_string(&request.adapter.index_ts)
-        .map_err(|error| ProviderError::Command(format!("serialize Pi adapter path: {error}")))?;
-    let config = serde_json::to_string_pretty(&config)
-        .map_err(|error| ProviderError::Command(format!("serialize Pi MCP config: {error}")))?;
+    let definition = serde_json::to_string_pretty(&serde_json::Value::Object(server))
+        .map_err(|error| ProviderError::Command(format!("serialize Pi MCP server: {error}")))?;
     Ok(format!(
-        "import {{ createMcpAdapter }} from {import};\n\nexport default createMcpAdapter({{ config: {config} }});\n"
+        r#"const MCP_RUNTIME_REGISTER_EVENT = "pi-mcp-adapter:runtime-register:v1";
+
+export default function teamAgentMcp(pi: any) {{
+  let registration: {{ dispose(): Promise<void> }} | undefined;
+
+  pi.on("session_start", () => {{
+    if (registration) return;
+    const request: any = {{
+      version: 1,
+      name: "team_orchestrator",
+      definition: {definition},
+    }};
+    pi.events.emit(MCP_RUNTIME_REGISTER_EVENT, request);
+    if (!request.result) throw new Error("pi-mcp-adapter is not enabled");
+    if (!request.result.ok) throw request.result.error;
+    registration = request.result.registration;
+  }});
+
+  pi.on("session_shutdown", async () => {{
+    const current = registration;
+    registration = undefined;
+    await current?.dispose();
+  }});
+}}
+"#
     ))
 }
 
 /// ---
-/// purpose: 静态核对 wrapper 的 exact import、candidate 与 lazy isolation 字段
-/// returns: wrapper 保持冻结隔离合同则成功
-/// errors: identity 缺失或出现 mcp-config fallback 时返回 ProviderError
+/// purpose: 静态核对 wrapper 只做 per-seat runtime MCP registration
+/// returns: wrapper 保留 direct Pi 配置且冻结 seat identity 时成功
+/// errors: identity、runtime registration 或 candidate 缺失时返回 ProviderError
 /// ---
 pub(crate) fn validate_pi_wrapper_source(
     source: &str,
     adapter: &PiAdapterIdentity,
     candidate_executable: &Path,
 ) -> Result<(), ProviderError> {
-    let adapter_path = adapter.index_ts.to_string_lossy();
+    validate_pi_adapter_identity(adapter)?;
     let candidate = candidate_executable.to_string_lossy();
-    if !source.contains(adapter_path.as_ref())
-        || !source.contains(candidate.as_ref())
-        || !source.contains("createMcpAdapter")
-        || !source.contains("mcpServers")
+    if !source.contains(candidate.as_ref())
+        || !source.contains("pi-mcp-adapter:runtime-register:v1")
+        || !source.contains("session_start")
+        || !source.contains("session_shutdown")
         || !source.contains("team_orchestrator")
-        || !source.contains("lazy")
-        || !source.contains("directTools")
-        || !source.contains("false")
-        || !source.contains("toolPrefix")
-        || !source.contains("server")
         || !source.contains("includeTools")
+        || source.contains("createMcpAdapter")
+        || source.contains("directTools")
+        || source.contains("toolPrefix")
         || source.contains("--mcp-config")
     {
         return Err(ProviderError::Command(
-            "Pi wrapper source does not preserve the isolated adapter/candidate contract"
-                .to_string(),
+            "Pi wrapper source does not preserve direct Pi plus per-seat runtime MCP".to_string(),
         ));
     }
     Ok(())
 }
 
 /// ---
-/// purpose: 在 seat root 原子写入 mode 0600 的 isolated lazy MCP wrapper
+/// purpose: 在 seat root 原子写入 mode 0600 的 runtime MCP registration extension
 /// returns: 最终 wrapper 路径
 /// errors: identity、序列化、目录、写盘或 rename 失败时返回 ProviderError
 /// ---
@@ -594,7 +599,7 @@ fn command_stdout(executable: &Path, args: &[&str]) -> Result<Vec<u8>, ProviderE
 }
 
 fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, ProviderError> {
-    let listing = command_stdout(launch_executable, &["list", "--no-approve"])?;
+    let listing = command_stdout(launch_executable, &["list"])?;
     let listing = std::str::from_utf8(&listing).map_err(|error| {
         ProviderError::Command(format!("Pi package list is not UTF-8: {error}"))
     })?;
@@ -656,26 +661,16 @@ fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, Pr
 pub(crate) fn resolve_pi_executable_chain(
 ) -> Result<(PiExecutableChain, Vec<String>), ProviderError> {
     let path_entries = pi_path_entries()?;
-    let wrapper_entry = path_entries.iter().find_map(|candidate| {
-        (executable_file_type(candidate).ok()? == PiExecutableFileType::Wrapper)
-            .then(|| candidate.clone())
-    });
-    let (path_entry, path_entry_type) = if let Some(path_entry) = wrapper_entry {
-        (path_entry, PiExecutableFileType::Wrapper)
-    } else {
-        let path_entry = path_entries
-            .iter()
-            .find_map(|candidate| {
-                (executable_file_type(candidate).ok()? == PiExecutableFileType::Symlink)
-                    .then(|| candidate.clone())
-            })
-            .ok_or_else(|| {
-                ProviderError::Command(
-                    "Pi PATH has no verified wrapper or npm symlink launch executable".to_string(),
-                )
-            })?;
-        (path_entry, PiExecutableFileType::Symlink)
-    };
+    let path_entry = path_entries[0].clone();
+    let path_entry_type = executable_file_type(&path_entry)?;
+    if !matches!(
+        path_entry_type,
+        PiExecutableFileType::Wrapper | PiExecutableFileType::Symlink
+    ) {
+        return Err(ProviderError::Command(
+            "the direct Pi PATH entry is not a verified wrapper or npm symlink".to_string(),
+        ));
+    }
     let version =
         String::from_utf8(command_stdout(&path_entry, &["--version"])?).map_err(|error| {
             ProviderError::Command(format!("Pi version output is not UTF-8: {error}"))

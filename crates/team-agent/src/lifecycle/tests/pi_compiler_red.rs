@@ -194,7 +194,7 @@ fn pi_max_effort_is_supported_without_model_suffix() {
 }
 
 #[test]
-fn pi_tools_allowlist_keeps_mcp_and_rejects_unknown_categories() {
+fn pi_role_tools_validate_team_capabilities_without_replacing_direct_pi_tools() {
     assert_eq!(pi_tool_mapping("mcp_team"), PiToolMapping::Mcp);
     assert_eq!(
         pi_tool_mapping("fs_read"),
@@ -235,14 +235,9 @@ fn pi_tools_allowlist_keeps_mcp_and_rejects_unknown_categories() {
         ProviderEffort::Medium,
         "team-agent/qwen3.8-27b",
     )
-    .expect("known allowlist");
-    let tools = argv
-        .windows(2)
-        .find(|pair| pair[0] == "--tools")
-        .map(|pair| pair[1].as_str())
-        .expect("--tools value");
-    assert_eq!(
-        tools, "bash,edit,find,grep,ls,mcp,read,write",
-        "tools must be sorted and deduplicated"
+    .expect("known standard role tools");
+    assert!(
+        !argv.iter().any(|arg| arg == "--tools"),
+        "role tools validate Team Agent capabilities but must not replace direct Pi tools: {argv:?}"
     );
 }

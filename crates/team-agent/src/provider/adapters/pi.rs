@@ -3,14 +3,13 @@
 //! contract:
 //!   provides:
 //!     - name: build_pi_command_argv
-//!       what: 仅从已验证输入构造隔离的 regular-TUI Pi argv
+//!       what: 仅从已验证输入构造保留 direct Pi 配置的 Team Agent argv
 //! boundary:
 //!   - 不发现 executable、catalog、adapter 或 MCP 配置
 //!   - 除 resume exact backing 存在性外不读文件；不写文件、不启动进程
 //! maturity: wired
 //! ---
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::model::enums::ProviderEffort;
@@ -57,7 +56,7 @@ pub(crate) struct PiCommandRequest<'a> {
 }
 
 /// ---
-/// purpose: 从已验证 semantic request 构造无 ambient flag 的 Pi argv
+/// purpose: 从已验证 semantic request 构造仅追加 Team Agent MCP/提示/session 的 Pi argv
 /// returns: exact ordered fresh/resume argv
 /// errors: 必需字段、mcp_team 或工具 category 非法时返回 ProviderError
 /// ---
@@ -77,13 +76,11 @@ pub(crate) fn build_pi_command_argv(
         ));
     }
 
-    let mut tools = BTreeSet::new();
+    let mut has_mcp = false;
     for category in request.tool_categories {
         match pi_tool_mapping(category) {
-            PiToolMapping::Mcp => {
-                tools.insert("mcp");
-            }
-            PiToolMapping::Builtin(names) => tools.extend(names.iter().copied()),
+            PiToolMapping::Mcp => has_mcp = true,
+            PiToolMapping::Builtin(_) => {}
             PiToolMapping::Unsupported => {
                 return Err(ProviderError::Command(format!(
                     "Pi does not support Team Agent tool category {category:?}"
@@ -91,7 +88,7 @@ pub(crate) fn build_pi_command_argv(
             }
         }
     }
-    if !tools.contains("mcp") {
+    if !has_mcp {
         return Err(ProviderError::Command(
             "Pi command requires mcp_team".to_string(),
         ));
@@ -99,15 +96,8 @@ pub(crate) fn build_pi_command_argv(
 
     let mut argv = vec![
         request.executable.to_string_lossy().into_owned(),
-        "--no-extensions".to_string(),
         "-e".to_string(),
         request.extension.to_string_lossy().into_owned(),
-        "--no-approve".to_string(),
-        "--no-context-files".to_string(),
-        "--no-skills".to_string(),
-        "--no-prompt-templates".to_string(),
-        "--tui-mode".to_string(),
-        "regular".to_string(),
     ];
     if let Some(model) = request.model {
         argv.push("--model".to_string());
@@ -118,10 +108,8 @@ pub(crate) fn build_pi_command_argv(
         argv.push(effort.as_str().to_string());
     }
     argv.extend([
-        "--system-prompt".to_string(),
+        "--append-system-prompt".to_string(),
         request.system_prompt.to_string(),
-        "--tools".to_string(),
-        tools.into_iter().collect::<Vec<_>>().join(","),
         "--session-dir".to_string(),
         request.session_dir.to_string_lossy().into_owned(),
     ]);

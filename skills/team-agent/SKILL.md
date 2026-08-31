@@ -46,7 +46,7 @@ Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown).
 
 Use the standard role schema with `provider: pi`, a block-style `tools` list containing `mcp_team`, and the required boolean `dangerously_skip_permissions`. That role boolean is the only bypass setting; `TEAM.md` `dangerous_auto_approve` is compatibility input, not a second user-facing switch.
 
-`model` and `effort` are optional for Pi TeamMates. When omitted, Team Agent leaves both flags absent so Pi uses its own configured/default values. Explicit values are passed through.
+Pi TeamMates keep the same login, model, extensions/plugins, skills, context files, project trust, and tools as a direct `pi` run on that machine. Team Agent only appends the role contract, a per-seat Team MCP registration, and per-seat session storage; do not duplicate those direct Pi settings in the role. `model` and `effort` remain optional compatibility overrides, and explicit values are passed through.
 
 ### Cursor provider notes
 
