@@ -2643,9 +2643,46 @@ pub mod lifecycle_port {
             allow_fresh,
             team,
         ) {
-            Ok(report) => {
-                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
+            Ok(crate::lifecycle::StartAgentOutcome::Running {
+                env,
+                start_mode,
+                target,
+                session_id,
+                new_session_id,
+                rollout_path,
+            }) => Ok(agent_action_value(
+                agent,
+                workspace,
+                team,
+                json!({
+                    "ok": true,
+                    "agent_id": env.agent_id.as_str(),
+                    "status": "running",
+                    "start_mode": start_mode,
+                    "target": target,
+                    "session_id": session_id.as_ref().map(|id| id.as_str()),
+                    "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
+                    "rollout_path": rollout_path.as_ref().map(|path| path.to_string_lossy()),
+                    "coordinator_started": env.coordinator_started,
+                    "state_file": env.state_file.to_string_lossy(),
+                }),
+            )),
+            Ok(crate::lifecycle::StartAgentOutcome::Noop { env, target }) => {
+                Ok(agent_action_value(agent, workspace, team, json!({
+                    "ok": true,
+                    "agent_id": env.agent_id.as_str(),
+                    "status": "already_running",
+                    "target": target,
+                    "coordinator_started": env.coordinator_started,
+                    "state_file": env.state_file.to_string_lossy(),
+                })))
             }
+            Ok(crate::lifecycle::StartAgentOutcome::Paused { agent_id }) => Ok(json!({
+                "ok": false,
+                "agent_id": agent_id.as_str(),
+                "status": "paused",
+                "reason": "agent_paused",
+            })),
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -2732,14 +2769,32 @@ pub mod lifecycle_port {
             team,
             force,
         ) {
-            Ok(report) => Ok(json!({
-                "ok": true,
-                "agent_id": agent,
-                "role_file": report.role_file.to_string_lossy(),
-            })),
+            Ok(report) => Ok(agent_action_value(
+                agent,
+                workspace,
+                team,
+                json!({
+                    "ok": true,
+                    "agent_id": report.env.agent_id.as_str(),
+                    "status": "running",
+                    "start_mode": report.start_mode,
+                    "role_file": report.role_file.to_string_lossy(),
+                    "coordinator_started": report.env.coordinator_started,
+                    "state_file": report.env.state_file.to_string_lossy(),
+                }),
+            )),
             Err(e) => Ok(error_value(e)),
         }
     }
+    fn agent_action_value(agent: &str, workspace: &Path, team: Option<&str>, mut value: Value) -> Value {
+        if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("send_commands".to_string(), json!([super::adapters::send_command(agent, workspace, team)]));
+            }
+        }
+        value
+    }
+
     ///
     /// `runtime.fork_agent`(`cmd_fork_agent`;`--as` 必需)。
     pub fn fork_agent(
@@ -3306,6 +3361,7 @@ pub mod lifecycle_port {
                     "reason": readiness_json.get("reason").cloned().unwrap_or(Value::Null),
                     "ready": readiness_json.get("ready").cloned().unwrap_or(Value::Bool(false)),
                     "session_name": session_name.as_str(),
+                    "agent_ids": launch.started.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
                     "dry_run": launch.dry_run,
                     "display_backend": display_backend,
                     "next_actions": next_actions,
