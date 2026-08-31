@@ -371,14 +371,11 @@ fn pi_leader_wrapper_materializes_from_empty_unicode_wsl_workspace() {
         paths.runtime_root.is_dir(),
         "leader runtime root must be created recursively"
     );
-    assert_eq!(
-        std::fs::metadata(&written)
-            .expect("leader wrapper metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
+    let source = std::fs::read_to_string(&written).expect("read complete leader wrapper");
+    validate_pi_wrapper_source(&source, &adapter, &candidate)
+        .expect("published leader wrapper must be complete and valid");
+    assert!(source.contains("TEAM_AGENT_ID") && source.contains("leader"));
+    assert!(source.contains("TEAM_AGENT_OWNER_TEAM_ID") && source.contains("current"));
     std::fs::remove_dir_all(root).expect("remove Unicode leader fixture");
 }
 
