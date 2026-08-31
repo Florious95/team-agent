@@ -337,6 +337,13 @@
       "plan": "Execute the compact-skill positional send smoke with representative target and message tokens, then bind delivery truth."
     },
     {
+      "command": "team-agent send AGENT MESSAGE",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:messaging",
+      "plan": "Execute a representative positional send with explicit agent and message tokens, then bind recipient and delivery truth."
+    },
+    {
       "command": "team-agent send reviewer \"...\"",
       "bucket": "declared_gap",
       "covered": false,
