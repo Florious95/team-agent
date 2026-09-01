@@ -2596,11 +2596,16 @@ fn record_current_turn_after_inject_if_leader_to_worker_scoped(
     let message_id = Some(message_id.to_string());
     let mut state = scoped_state_for_write(workspace, owner_team_id)?;
     arm_turn_open(workspace, &mut state, recipient, &message_id, owner_team_id)?;
+    let reapply_error = RefCell::new(None);
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
         // Re-evaluate against the latest state after a scoped-state conflict.
-        arm_turn_open(workspace, latest, recipient, &message_id, owner_team_id)
-            .expect("runtime DB must remain available during state reapply");
+        if let Err(error) = arm_turn_open(workspace, latest, recipient, &message_id, owner_team_id) {
+            *reapply_error.borrow_mut() = Some(error);
+        }
     })?;
+    if let Some(error) = reapply_error.into_inner() {
+        return Err(error);
+    }
     let mut event = serde_json::json!({"agent_id": recipient, "message_id": message_id});
     if let Some(metadata) = metadata {
         append_target_metadata(&mut event, metadata);
@@ -2629,16 +2634,21 @@ fn record_turn_open_if_leader_to_worker_scoped(
         &delivered.message_id,
         owner_team_id,
     )?;
+    let reapply_error = RefCell::new(None);
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
-        arm_turn_open(
+        if let Err(error) = arm_turn_open(
             workspace,
             latest,
             recipient,
             &delivered.message_id,
             owner_team_id,
-        )
-        .expect("runtime DB must remain available during state reapply");
+        ) {
+            *reapply_error.borrow_mut() = Some(error);
+        }
     })?;
+    if let Some(error) = reapply_error.into_inner() {
+        return Err(error);
+    }
     let mut event = serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id});
     if let Some(metadata) = metadata {
         append_target_metadata(&mut event, metadata);
@@ -3289,5 +3299,33 @@ mod paste_floor_tests {
             paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn nested_delivery_preserves_open_original_turn() {
+        let workspace = std::env::temp_dir().join(format!("team-agent-attribution-{}", super::next_run_id()));
+        let store = MessageStore::open(&workspace).unwrap();
+        let original = store.create_message(None, "leader", "w1", "original", None, false, Some("teamA")).unwrap();
+        store.mark(&original, "delivered", None).unwrap();
+        let nested = store.create_message(None, "leader", "w1", "nested", None, false, Some("teamA")).unwrap();
+        store.mark(&nested, "delivered", None).unwrap();
+        let mut state = serde_json::json!({"agents":{"w1":{"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}}});
+        arm_turn_open(&workspace, &mut state, "w1", &Some(nested), Some("teamA")).unwrap();
+        assert_eq!(state.pointer("/agents/w1/current_turn_message_id").and_then(|v| v.as_str()), Some(original.as_str()));
+        assert_eq!(state.pointer("/coordinator/turn_open/turn_id").and_then(|v| v.as_str()), Some(original.as_str()));
+    }
+
+    #[test]
+    fn completed_original_allows_next_turn_to_arm() {
+        let workspace = std::env::temp_dir().join(format!("team-agent-attribution-{}", super::next_run_id()));
+        let store = MessageStore::open(&workspace).unwrap();
+        let original = store.create_message(None, "leader", "w1", "original", None, false, Some("teamA")).unwrap();
+        store.mark(&original, "delivered", None).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        conn.execute("insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at) values ('res_done', 'teamA', ?1, 'w1', '{}', 'success', '9999')", rusqlite::params![original]).unwrap();
+        let next = "msg_next".to_string();
+        let mut state = serde_json::json!({"agents":{"w1":{"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}}});
+        arm_turn_open(&workspace, &mut state, "w1", &Some(next.clone()), Some("teamA")).unwrap();
+        assert_eq!(state.pointer("/agents/w1/current_turn_message_id").and_then(|v| v.as_str()), Some(next.as_str()));
     }
 }

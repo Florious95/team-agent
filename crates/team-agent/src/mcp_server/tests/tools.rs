@@ -6,10 +6,32 @@
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
         );
+        seed_report_message(
+            &tools.workspace,
+            "msg_env",
+            "teamA",
+            "delivered",
+            "2026-07-06T13:24:25.000000+00:00",
+        );
+        seed_report_scope_state(
+            &tools.workspace,
+            &json!({
+                "active_team_key": "teamA",
+                "teams": {"teamA": {
+                    "team_key": "teamA",
+                    "coordinator": {"turn_open": {
+                        "armed": true, "node_id": "worker-7", "turn_id": "msg_env"
+                    }},
+                    "agents": {"worker-7": {
+                        "id": "worker-7", "current_turn_message_id": "msg_env"
+                    }}
+                }}
+            }),
+        );
         let ok = tools.report_result(
             None, Some("done it"), ResultStatus::Success,
             None, None, None, None, None,
-            Some("task-env"), None, // explicit task, implicit agent
+            None, None, // implicit task and agent
         ).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
         // C17/bug-085: env id wins over leader/unknown. agent_id is a guaranteed-present
