@@ -434,31 +434,7 @@ fn message_is_reportable(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> bool {
-    conn.query_row(
-        "select 1 from messages m
-         where m.message_id = ?1
-           and m.recipient = ?2
-           and (?3 is null or m.owner_team_id = ?3)
-           and (m.task_id is null or m.task_id = '')
-           and m.status in ('delivered', 'target_resolved', 'submitted', 'injected', 'visible')
-           and (m.status = 'delivered' or m.error is null)
-           and m.created_at >= coalesce((
-             select max(r.created_at) from results r
-             where r.agent_id = m.recipient
-               and (?3 is null or r.owner_team_id = m.owner_team_id)
-           ), '0000')
-           and not exists (
-             select 1 from results r
-             where r.task_id = m.message_id and r.agent_id = m.recipient
-           )
-         limit 1",
-        params![message_id, agent_id, owner_team_id],
-        |_| Ok(()),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .is_some()
+    crate::messaging::helpers::message_is_reportable(conn, message_id, agent_id, owner_team_id)
 }
 
 fn latest_reportable_message_from_db(

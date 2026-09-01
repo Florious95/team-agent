@@ -9,7 +9,7 @@
         let ok = tools.report_result(
             None, Some("done it"), ResultStatus::Success,
             None, None, None, None, None,
-            None, None, // no explicit task/agent
+            Some("task-env"), None, // explicit task, implicit agent
         ).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
         // C17/bug-085: env id wins over leader/unknown. agent_id is a guaranteed-present
@@ -189,7 +189,7 @@
     }
 
     #[test]
-    fn report_result_target_resolved_without_current_turn_uses_task_fallback() {
+    fn report_result_target_resolved_without_current_turn_fails_closed() {
         let ws = unique_ws("report-target-resolved-no-current");
         seed_report_message(
             &ws,
@@ -225,22 +225,13 @@
             Some(AgentId::new("probe-worker")),
             Some(TeamKey::new("gate055")),
         );
-        let ok = tools.report_result(
+        let error = tools.report_result(
             None, Some("target resolved only"), ResultStatus::Success,
             None, None, None, None, None,
             None, None,
-        ).expect("report ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_ne!(
-            v.get("task_id"),
-            Some(&json!("msg_target_only")),
-            "0.5.16 locate §4/§7.7: target_resolved is a delivery claim, not physical-submit proof"
-        );
-        assert_eq!(
-            v.get("task_id"),
-            Some(&json!("task_initial")),
-            "without a current-turn pointer, no-task report_result falls through to task fallback"
-        );
+        ).expect_err("implicit attribution must fail closed");
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
     }
 
     #[test]
@@ -266,17 +257,13 @@
             Some(AgentId::new("probe-worker")),
             Some(TeamKey::new("gate055")),
         );
-        let ok = tools.report_result(
+        let error = tools.report_result(
             None, Some("manual follow-up"), ResultStatus::Success,
             None, None, None, None, None,
             None, None,
-        ).expect("report ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(
-            v.get("task_id"),
-            Some(&json!("manual")),
-            "old delivered messages older than latest result must not be reused"
-        );
+        ).expect_err("implicit attribution must fail closed");
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
     }
 
     // ════════════════════════════════════════════════════════════════════════

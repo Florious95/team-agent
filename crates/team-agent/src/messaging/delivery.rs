@@ -36,7 +36,7 @@ use crate::transport::{
     Target, Transport, WindowName,
 };
 
-use super::helpers::{message_exists, MessageStatusShadow};
+use super::helpers::{message_exists, message_is_reportable, MessageStatusShadow};
 use super::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError,
     PaneWidthQuery, TrustRetryPayload, SEND_RETRY_MAX_ATTEMPTS,
@@ -2595,9 +2595,11 @@ fn record_current_turn_after_inject_if_leader_to_worker_scoped(
     }
     let message_id = Some(message_id.to_string());
     let mut state = scoped_state_for_write(workspace, owner_team_id)?;
-    arm_turn_open(&mut state, recipient, &message_id);
+    arm_turn_open(workspace, &mut state, recipient, &message_id, owner_team_id)?;
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
-        arm_turn_open(latest, recipient, &message_id);
+        // Re-evaluate against the latest state after a scoped-state conflict.
+        arm_turn_open(workspace, latest, recipient, &message_id, owner_team_id)
+            .expect("runtime DB must remain available during state reapply");
     })?;
     let mut event = serde_json::json!({"agent_id": recipient, "message_id": message_id});
     if let Some(metadata) = metadata {
@@ -2620,9 +2622,22 @@ fn record_turn_open_if_leader_to_worker_scoped(
         return Ok(());
     }
     let mut state = scoped_state_for_write(workspace, owner_team_id)?;
-    arm_turn_open(&mut state, recipient, &delivered.message_id);
+    arm_turn_open(
+        workspace,
+        &mut state,
+        recipient,
+        &delivered.message_id,
+        owner_team_id,
+    )?;
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
-        arm_turn_open(latest, recipient, &delivered.message_id);
+        arm_turn_open(
+            workspace,
+            latest,
+            recipient,
+            &delivered.message_id,
+            owner_team_id,
+        )
+        .expect("runtime DB must remain available during state reapply");
     })?;
     let mut event = serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id});
     if let Some(metadata) = metadata {
@@ -2632,9 +2647,35 @@ fn record_turn_open_if_leader_to_worker_scoped(
     Ok(())
 }
 
-fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Option<String>) {
+fn arm_turn_open(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    recipient: &str,
+    message_id: &Option<String>,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
+    let existing = state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agent| agent.get("current_turn_message_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let preserve = if let Some(existing) = existing.as_deref() {
+        let store = MessageStore::open(workspace)?;
+        let conn = crate::db::schema::open_db(store.db_path())?;
+        message_is_reportable(&conn, existing, recipient, owner_team_id)
+    } else {
+        false
+    };
+    let authoritative = if preserve {
+        Some(existing.as_ref().expect("preserve implies existing"))
+    } else {
+        message_id.as_ref()
+    };
     let Some(root) = state.as_object_mut() else {
-        return;
+        return Ok(());
     };
     let coordinator = root
         .entry("coordinator")
@@ -2642,7 +2683,7 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
     if let Some(obj) = coordinator.as_object_mut() {
         obj.insert(
             "turn_open".to_string(),
-            serde_json::json!({"armed": true, "node_id": recipient, "turn_id": message_id}),
+            serde_json::json!({"armed": true, "node_id": recipient, "turn_id": authoritative}),
         );
     }
     if let Some(agent) = root
@@ -2658,11 +2699,12 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
         // (whitelisted for the transition) and `mcp_server/helpers.rs`; other
         // messaging/lifecycle/mcp_server code MUST NOT treat this as
         // authoritative task state.
-        let field = message_id.as_ref().map_or(serde_json::Value::Null, |id| {
+        let field = authoritative.map_or(serde_json::Value::Null, |id| {
             serde_json::Value::String(id.clone())
         });
         agent.insert("current_turn_message_id".to_string(), field);
     }
+    Ok(())
 }
 
 /// `_stamp_first_send_at_if_leader_to_worker` (`delivery.py:380`):首次 leader→worker 投递戳

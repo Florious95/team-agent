@@ -21,10 +21,9 @@ use crate::state::persist::{
 use crate::messaging::{self, DeliveryStatus, MessageTarget, SendOptions, TrustedSender};
 
 use super::helpers::{
-    current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
-    ensure_object, enum_value, is_worker_recipient, json_dumps_default, latest_task_for_assignee,
-    non_empty_string, object_fields, requires_ack_for_target, tool_runtime_error,
-    DirectMessageAttribution,
+    current_reportable_message_for, delivery_outcome_value, ensure_object, enum_value,
+    is_worker_recipient, json_dumps_default, non_empty_string, object_fields,
+    requires_ack_for_target, tool_runtime_error,
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, report_result_integrity_warnings,
@@ -460,72 +459,35 @@ impl TeamOrchestratorTools {
                 );
             }
             if !obj.contains_key("task_id") {
-                // Blocker-1 (prerelease 0.4.0): scoped-team task inference +
-                // message-scoped fallback, before defaulting to "manual".
-                //   1. explicit arg
-                //   2. current physical direct turn for this agent
-                //   3. bounded latest reportable direct message with no result yet
-                //   4. latest nonterminal assigned task in teams.<owner>.tasks,
-                //      only when no newer failed/refused/blocked direct turn blocks fallback
-                //   5. "manual" — truly uncorrelated; collect still rejects
                 let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
-                let mut attributed_message_id = None;
-                let mut attribution_scope = None;
-                let mut task_id_source = None;
-                let resolved = if let Some(task_id) = task_id {
-                    task_id.to_string()
-                } else if let Some(agent) = self.agent_id.as_ref() {
-                    if let Some(message_id) = current_reportable_message_for(
-                        &self.workspace,
-                        agent.as_str(),
-                        owner_team_id_str.as_deref(),
-                    ) {
-                        attributed_message_id = Some(message_id.clone());
-                        attribution_scope = Some("message");
-                        task_id_source = Some("current_turn_message");
-                        message_id
-                    } else {
-                        match direct_message_attribution_for(
+                let (resolved, attributed_message_id, attribution_scope, task_id_source) =
+                    if let Some(task_id) = task_id {
+                        (task_id.to_string(), None, None, None)
+                    } else if let Some(agent) = self.agent_id.as_ref() {
+                        let Some(message_id) = current_reportable_message_for(
                             &self.workspace,
                             agent.as_str(),
                             owner_team_id_str.as_deref(),
-                        ) {
-                            DirectMessageAttribution::Reportable(message_id) => {
-                                attributed_message_id = Some(message_id.clone());
-                                attribution_scope = Some("message");
-                                task_id_source = Some("direct_message");
-                                message_id
-                            }
-                            DirectMessageAttribution::BlockedByNewer {
-                                message_id,
-                                status,
-                                error,
-                            } => {
-                                push_report_warning(
-                                    obj,
-                                    serde_json::json!({
-                                        "code": "result_attribution_blocked_by_newer_direct_message",
-                                        "field": "task_id",
-                                        "severity": "warning",
-                                        "advisory": true,
-                                        "message_id": message_id,
-                                        "message_status": status,
-                                        "message_error": error,
-                                    }),
-                                );
-                                "manual".to_string()
-                            }
-                            DirectMessageAttribution::None => latest_task_for_assignee(
-                                &self.workspace,
-                                agent.as_str(),
-                                owner_team_id_str.as_deref(),
-                            )
-                            .unwrap_or_else(|| "manual".to_string()),
-                        }
-                    }
-                } else {
-                    "manual".to_string()
-                };
+                        ) else {
+                            return Err(ToolError::new(
+                                ToolErrorReason::InvalidToolArguments,
+                                "no active result attribution; supply explicit task_id",
+                                "ResultAttributionUnavailable",
+                            ));
+                        };
+                        (
+                            message_id.clone(),
+                            Some(message_id),
+                            Some("message"),
+                            Some("current_turn_message"),
+                        )
+                    } else {
+                        return Err(ToolError::new(
+                            ToolErrorReason::InvalidToolArguments,
+                            "no active result attribution; supply explicit task_id",
+                            "ResultAttributionUnavailable",
+                        ));
+                    };
                 obj.insert("task_id".to_string(), Value::String(resolved));
                 if let Some(message_id) = attributed_message_id {
                     obj.entry("attributed_message_id")
