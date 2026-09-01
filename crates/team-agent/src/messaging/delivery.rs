@@ -2594,8 +2594,7 @@ fn record_current_turn_after_inject_if_leader_to_worker_scoped(
         return Ok(());
     }
     let message_id = Some(message_id.to_string());
-    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
-    arm_turn_open(workspace, &mut state, recipient, &message_id, owner_team_id)?;
+    let state = scoped_state_for_write(workspace, owner_team_id)?;
     save_turn_state_reapplying_after_conflict(
         workspace,
         &state,
@@ -2623,14 +2622,7 @@ fn record_turn_open_if_leader_to_worker_scoped(
     if !delivered.ok || !matches!(sender, "leader" | "Leader") || recipient == "leader" {
         return Ok(());
     }
-    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
-    arm_turn_open(
-        workspace,
-        &mut state,
-        recipient,
-        &delivered.message_id,
-        owner_team_id,
-    )?;
+    let state = scoped_state_for_write(workspace, owner_team_id)?;
     save_turn_state_reapplying_after_conflict(
         workspace,
         &state,
@@ -2810,7 +2802,15 @@ fn save_turn_state_reapplying_after_conflict(
     message_id: &Option<String>,
     owner_team_id: Option<&str>,
 ) -> Result<(), MessagingError> {
-    match save_scoped_state(workspace, state, owner_team_id) {
+    let mut candidate = state.clone();
+    arm_turn_open(
+        workspace,
+        &mut candidate,
+        recipient,
+        message_id,
+        owner_team_id,
+    )?;
+    match save_scoped_state(workspace, &candidate, owner_team_id) {
         Ok(()) => Ok(()),
         Err(MessagingError::State(crate::state::StateError::SaveConflict(_))) => {
             let mut latest = scoped_state_for_write(workspace, owner_team_id)?;
