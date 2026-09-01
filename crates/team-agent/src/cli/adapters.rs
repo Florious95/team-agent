@@ -102,7 +102,7 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
-    let value = lifecycle_port::quick_start(
+    let mut value = lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,
         args.name.as_deref(),
@@ -111,6 +111,7 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         !args.no_display,
         args.backend.as_deref(),
     )?;
+    append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
     let readiness = value.get("readiness").and_then(Value::as_object);
     let all_resumable_have_session = readiness
         .and_then(|readiness| readiness.get("all_resumable_have_session"))
@@ -156,16 +157,72 @@ fn quickstart_human(value: &Value) -> String {
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    if attach.is_empty() {
-        return append_reminder(summary.to_string(), crate::cli::QUICK_START_REMINDER);
-    }
+    let sends: Vec<&str> = value
+        .get("send_commands")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     let mut out = String::from(summary);
-    out.push_str("\n\nattach:");
-    for cmd in attach {
-        out.push_str("\n  ");
-        out.push_str(cmd);
+    if !attach.is_empty() {
+        out.push_str("\n\nattach:");
+        for cmd in attach {
+            out.push_str("\n  ");
+            out.push_str(cmd);
+        }
+    }
+    if !sends.is_empty() {
+        out.push_str("\n\nsend:");
+        for cmd in sends {
+            out.push_str("\n  ");
+            out.push_str(cmd);
+        }
     }
     append_reminder(out, crate::cli::QUICK_START_REMINDER)
+}
+
+fn append_send_guidance(value: &mut Value, workspace: &Path, team: Option<&str>) {
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    let agents = value
+        .get("agent_ids")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let commands: Vec<Value> = agents
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|agent| send_command(agent, workspace, team).map(Value::String))
+        .collect();
+    if !commands.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("send_commands".to_string(), Value::Array(commands));
+        }
+    }
+}
+
+pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) -> Option<String> {
+    let workspace = workspace.to_str()?;
+    let mut command = format!(
+        "team-agent send {} \\\"MESSAGE\\\" --workspace {}",
+        shell_quote(agent),
+        shell_quote(workspace)
+    );
+    if let Some(team) = team {
+        command.push_str(" --team ");
+        command.push_str(&shell_quote(team));
+    }
+    Some(command)
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':')
+    }) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn append_reminder(text: String, reminder: &str) -> String {
@@ -1550,8 +1607,9 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{agent_pane_id, quickstart_human};
+    use super::{agent_pane_id, append_send_guidance, quickstart_human, send_command};
     use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
     #[test]
@@ -1592,6 +1650,46 @@ mod tests {
             quickstart_human(&value2),
             format!("s\n{}", crate::cli::QUICK_START_REMINDER)
         );
+    }
+
+    #[test]
+    fn send_guidance_is_copyable_and_preserves_explicit_scope() {
+        let command = send_command("worker name; echo unsafe", Path::new("/tmp/my workspace"), Some("team-a"))
+            .unwrap();
+        assert_eq!(
+            command,
+            "team-agent send 'worker name; echo unsafe' \\\"MESSAGE\\\" --workspace '/tmp/my workspace' --team team-a"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_workspace_fails_closed_without_send_guidance() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let workspace = PathBuf::from(OsString::from_vec(b"/tmp/workspace-\xff".to_vec()));
+        assert!(send_command("worker", &workspace, None).is_none());
+        let mut value = json!({"ok": true, "agent_ids": ["worker"]});
+        append_send_guidance(&mut value, &workspace, None);
+        assert!(value.get("send_commands").is_none());
+    }
+
+    #[test]
+    fn quick_start_guidance_lists_every_known_agent_without_guessing() {
+        let mut value = json!({"ok": true, "agent_ids": ["sol", "luna"]});
+        append_send_guidance(&mut value, Path::new("/tmp/ws"), Some("team"));
+        let commands = value.get("send_commands").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].as_str().unwrap().contains("send sol"));
+        assert!(commands[1].as_str().unwrap().contains("send luna"));
+    }
+
+    #[test]
+    fn error_results_do_not_get_send_guidance() {
+        let mut value = json!({"ok": false, "agent_ids": ["worker"]});
+        append_send_guidance(&mut value, Path::new("/tmp/ws"), None);
+        assert!(value.get("send_commands").is_none());
     }
 
     #[test]
