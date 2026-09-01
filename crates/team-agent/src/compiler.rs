@@ -444,12 +444,18 @@ where
     F: FnMut(&str) -> Result<Vec<String>, ()>,
 {
     let agents_dir = team_dir.join("agents");
-    let entries = std::fs::read_dir(&agents_dir).map_err(|_| PiModelPreflightError {
-        requested: "<role directory>".into(),
-        candidates: Vec::new(),
-        action: "repair the role directory and retry".into(),
-        not_ready: true,
-    })?;
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(PiModelPreflightError {
+                requested: "<role directory>".into(),
+                candidates: Vec::new(),
+                action: "repair the role directory and retry".into(),
+                not_ready: true,
+            })
+        }
+    };
     let mut paths = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
