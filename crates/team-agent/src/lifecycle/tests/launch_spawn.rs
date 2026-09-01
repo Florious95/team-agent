@@ -376,6 +376,66 @@ fn quick_start_invalid_role_doc_surfaces_real_compile_error() {
 }
 
 #[test]
+fn quick_start_absent_or_empty_roles_preserves_compile_outcome_without_pi_preflight_mutation() {
+    for (label, create_agents, expected) in [
+        ("absent", false, "missing agents directory"),
+        ("empty", true, "no role docs found"),
+    ] {
+        let team = temp_ws().join(format!("teamdir-{label}"));
+        std::fs::create_dir_all(&team).unwrap();
+        std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+        if create_agents {
+            std::fs::create_dir(team.join("agents")).unwrap();
+        }
+        let workspace = crate::model::paths::team_workspace(&team).unwrap();
+        let team_md_before = std::fs::read(team.join("TEAM.md")).unwrap();
+        let absent_paths = [
+            team.join("team.spec.yaml"),
+            crate::state::persist::runtime_state_path(&workspace),
+            crate::model::paths::runtime_spec_path(&workspace, "quickteam"),
+            workspace.join("team_state.md"),
+            workspace.join(".team/logs/events.jsonl"),
+            workspace.join(".team/runtime/team.db"),
+        ];
+        for path in &absent_paths {
+            assert!(!path.exists(), "precondition: {} must be absent", path.display());
+        }
+
+        let transport = OfflineTransport::new();
+        let mut calls = 0;
+        let mut discover = |_requested: &str| {
+            calls += 1;
+            Ok(Vec::new())
+        };
+        let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+            &workspace,
+            &team,
+            None,
+            true,
+            None,
+            &transport,
+            true,
+            &mut discover,
+        )
+        .expect_err("an empty role input must preserve the existing compile outcome");
+        drop(discover);
+        assert_eq!(calls, 0, "{label} role input must not invoke Pi discovery");
+        match error {
+            LifecycleError::Compile(message) => {
+                assert!(message.contains(expected), "{label}: {message}");
+            }
+            other => panic!("{label}: expected existing compile outcome, got {other:?}"),
+        }
+        assert_eq!(team_md_before, std::fs::read(team.join("TEAM.md")).unwrap());
+        for path in &absent_paths {
+            assert!(!path.exists(), "{label} role input created {}", path.display());
+        }
+        assert!(transport.calls().is_empty(), "{label}: no transport mutation");
+        assert!(transport.spawn_records().is_empty(), "{label}: no spawn");
+    }
+}
+
+#[test]
 fn quick_start_injected_pi_preflight_is_typed_and_mutation_free() {
     let role_doc = QS_VALID_ROLE.replace(
         "provider: codex\nmodel: gpt-5.5",

@@ -45,7 +45,7 @@ const BASELINE_VISIBLE_COMMANDS: &[&str] = &[
     "send",
     "status",
     "collect",
-    "results",
+    "models",
     "restart",
     "shutdown",
     "add-agent",
