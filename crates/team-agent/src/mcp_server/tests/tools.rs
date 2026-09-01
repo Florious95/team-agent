@@ -1,13 +1,14 @@
     #[test]
     fn report_result_infers_agent_from_env_when_not_explicit() {
         // env identity present, no explicit agent_id → envelope.agent_id == env id.
+        let workspace = unique_ws("report-env");
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("report-env"),
+            &workspace,
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
         );
         seed_report_message_for(
-            &tools.workspace,
+            &workspace,
             "msg_env",
             "teamA",
             "worker-7",
@@ -15,7 +16,7 @@
             "2026-07-06T13:24:25.000000+00:00",
         );
         seed_report_scope_state(
-            &tools.workspace,
+            &workspace,
             &json!({
                 "active_team_key": "teamA",
                 "teams": {"teamA": {
