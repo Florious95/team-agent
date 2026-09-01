@@ -134,10 +134,7 @@ fn run_catalog(program: &Path, timeout: Duration, max_bytes: u64) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
-
-    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(unix)]
     #[test]
@@ -157,10 +154,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn real_dispatcher_isolated_success_json_human_and_no_match() {
-        let path = fixture("printf 'provider model\\nopenai-codex gpt-5.6-sol\\n'");
-        let dir = path.parent().unwrap().to_path_buf();
-        let pi = dir.join("pi");
-        std::fs::rename(&path, &pi).unwrap();
+        let pi = fixture("printf 'provider model\\nopenai-codex gpt-5.6-sol\\n'");
+        let dir = pi.parent().unwrap().to_path_buf();
         let run_child = |args: &[&str], model: &str| {
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -225,8 +220,7 @@ mod tests {
                 .count(),
             3
         );
-        let _ = std::fs::remove_file(pi.with_extension("count"));
-        let _ = std::fs::remove_file(pi);
+        cleanup_fixture(&pi);
     }
 
     #[test]
@@ -248,11 +242,20 @@ mod tests {
     #[cfg(unix)]
     fn fixture(body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "team-agent-pi-fixture-{}-{sequence}",
-            std::process::id(),
-        ));
+        let root = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!(
+                "team-agent-pi-fixture-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("pi");
         std::fs::write(
             &path,
             format!("#!/bin/sh\nprintf '%s\\n' \"$#:$1\" >> \"$0.count\"\n{body}\n"),
@@ -262,6 +265,11 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    fn cleanup_fixture(path: &Path) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[cfg(unix)]
@@ -277,8 +285,7 @@ mod tests {
             std::fs::read_to_string(path.with_extension("count")).unwrap(),
             "1:--list-models\n"
         );
-        let _ = std::fs::remove_file(path.with_extension("count"));
-        let _ = std::fs::remove_file(path);
+        cleanup_fixture(&path);
     }
 
     #[cfg(unix)]
@@ -289,8 +296,7 @@ mod tests {
         let result = run_catalog(&path, Duration::from_millis(40), 1024);
         assert!(started.elapsed() < Duration::from_millis(500));
         assert!(result.unwrap_err().contains("timed out"));
-        let _ = std::fs::remove_file(path.with_extension("count"));
-        let _ = std::fs::remove_file(path);
+        cleanup_fixture(&path);
     }
 
     #[cfg(unix)]
@@ -340,8 +346,7 @@ mod tests {
             }
             other => panic!("expected provider refusal, got {other:?}"),
         }
-        let _ = std::fs::remove_file(path.with_extension("count"));
-        let _ = std::fs::remove_file(path);
+        cleanup_fixture(&path);
     }
 
     #[cfg(unix)]
@@ -384,7 +389,7 @@ mod tests {
         .unwrap_err()
         .contains("unavailable"));
         for path in [fail, big, slow] {
-            let _ = std::fs::remove_file(path);
+            cleanup_fixture(&path);
         }
     }
 
