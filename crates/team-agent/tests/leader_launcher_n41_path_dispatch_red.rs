@@ -532,6 +532,11 @@ impl Case {
     }
 
     fn run_in_pty(&self, args: &[&str], ambient: Ambient) -> Output {
+        let pane_provider = match args.first().copied() {
+            Some("codex") => "codex",
+            Some("pi") => "pi",
+            other => panic!("fixture requires an exact launcher provider, got {other:?}"),
+        };
         let (master, slave, tty) = open_pty().expect("allocate isolated controlling tty");
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
         command
@@ -551,6 +556,7 @@ impl Case {
             .env("TEAM_AGENT_TEST_SOURCE_ENDPOINT", &self.source_endpoint)
             .env("TEAM_AGENT_TEST_REQUESTED_WORKSPACE", &self.workspace)
             .env("TEAM_AGENT_TEST_PANE_TTY", &tty)
+            .env("TEAM_AGENT_TEST_PANE_PROVIDER", pane_provider)
             .env("TEAM_AGENT_TEST_PI_ADAPTER_ROOT", &self.pi_adapter_root)
             .env(
                 "TEAM_AGENT_TEST_PANE_WORKSPACE",
@@ -753,6 +759,7 @@ exit 0
 "#;
 
 const TMUX_SHIM: &str = r#"#!/bin/sh
+: "${TEAM_AGENT_TEST_PANE_PROVIDER:?missing deterministic pane provider}"
 printf '%s\n' "$*" >> "$TEAM_AGENT_TEST_TMUX_LOG"
 selector=
 previous=
@@ -785,12 +792,14 @@ case " $* " in
   *" list-panes "*)
     if [ "$selector" = "$TEAM_AGENT_TEST_SOURCE_ENDPOINT" ] && \
        [ "$TEAM_AGENT_TEST_SOURCE_PANE_PRESENT" = "1" ]; then
-      printf '%%ambient-n41\tforeign-source\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4101\t\n' \
-        "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
+      printf '%%ambient-n41\tforeign-source\t0\t%s\t0\t%s\t%s\t1\t%s\t1\t0\t4101\t\n' \
+        "$TEAM_AGENT_TEST_PANE_PROVIDER" "$TEAM_AGENT_TEST_PANE_TTY" \
+        "$TEAM_AGENT_TEST_PANE_PROVIDER" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
     fi
     if [ "$selector" = "$TEAM_AGENT_TEST_TARGET_ENDPOINT" ]; then
-      printf '%%ambient-n41\ttarget-source\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4102\t\n' \
-        "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
+      printf '%%ambient-n41\ttarget-source\t0\t%s\t0\t%s\t%s\t1\t%s\t1\t0\t4102\t\n' \
+        "$TEAM_AGENT_TEST_PANE_PROVIDER" "$TEAM_AGENT_TEST_PANE_TTY" \
+        "$TEAM_AGENT_TEST_PANE_PROVIDER" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
     fi
     if [ "$selector" = "$TEAM_AGENT_TEST_TARGET_SOCKET_NAME" ] || \
        [ "$selector" = "$TEAM_AGENT_TEST_TARGET_ENDPOINT" ]; then
@@ -798,15 +807,16 @@ case " $* " in
       if [ -f "$TEAM_AGENT_TEST_SPAWN_SESSION" ]; then
         managed_session=$(cat "$TEAM_AGENT_TEST_SPAWN_SESSION")
       fi
-      printf '%%managed-n41\t%s\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4103\t\n' \
-        "$managed_session" "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
+      printf '%%managed-n41\t%s\t0\t%s\t0\t%s\t%s\t1\t%s\t1\t0\t4103\t\n' \
+        "$managed_session" "$TEAM_AGENT_TEST_PANE_PROVIDER" "$TEAM_AGENT_TEST_PANE_TTY" \
+        "$TEAM_AGENT_TEST_PANE_PROVIDER" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
     fi
     exit 0
     ;;
   *" display-message "*)
     case "$last" in
       '#{pane_id}') printf '%s\n' "${target:-%managed-n41}" ;;
-      '#{pane_current_command}') printf 'codex\n' ;;
+      '#{pane_current_command}') printf '%s\n' "$TEAM_AGENT_TEST_PANE_PROVIDER" ;;
       '#{pane_current_path}') printf '%s\n' "$TEAM_AGENT_TEST_PANE_WORKSPACE" ;;
       '#{pane_tty}') printf '%s\n' "$TEAM_AGENT_TEST_PANE_TTY" ;;
       '#{pane_dead}') printf '0\n' ;;
