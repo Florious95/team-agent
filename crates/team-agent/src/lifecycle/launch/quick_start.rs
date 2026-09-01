@@ -39,6 +39,7 @@ use super::*;
 trait FreshQuickStartLeaderBindingOps {
     fn caller_pane(&mut self) -> Option<String>;
     fn explicit_provider(&mut self) -> Option<String>;
+    fn tmux_endpoint(&mut self) -> Option<String>;
     fn observe_command(&mut self, pane: &PaneId) -> Option<String>;
     fn live_binding_elsewhere(&mut self, pane: &PaneId, workspace: &Path, team_key: &str) -> bool;
     fn attach(
@@ -67,6 +68,10 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
         std::env::var("TEAM_AGENT_LEADER_PROVIDER")
             .ok()
             .filter(|provider| !provider.is_empty())
+    }
+
+    fn tmux_endpoint(&mut self) -> Option<String> {
+        self.transport.tmux_endpoint()
     }
 
     fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
@@ -119,6 +124,121 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 }
 
+struct BindingFileSnapshot {
+    path: PathBuf,
+    bytes: Option<Vec<u8>>,
+}
+
+impl BindingFileSnapshot {
+    fn capture(path: PathBuf) -> Self {
+        let bytes = std::fs::read(&path).ok();
+        Self { path, bytes }
+    }
+
+    fn restore(&self) {
+        match &self.bytes {
+            Some(bytes) => {
+                let tmp = self.path.with_extension(format!(
+                    "rollback-{}",
+                    std::process::id()
+                ));
+                if std::fs::write(&tmp, bytes).is_ok()
+                    && std::fs::rename(&tmp, &self.path).is_err()
+                {
+                    let _ = std::fs::remove_file(tmp);
+                }
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+fn binding_snapshots(workspace: &Path, team_key: &str) -> Vec<BindingFileSnapshot> {
+    let mut snapshots = vec![BindingFileSnapshot::capture(
+        crate::state::persist::runtime_state_path(workspace),
+    )];
+    if let Some(dir) = crate::leader::registry::registry_dir() {
+        snapshots.push(BindingFileSnapshot::capture(dir.join(format!(
+            "{}__{team_key}.json",
+            crate::leader::registry::workspace_hash(workspace)
+        ))));
+    }
+    snapshots
+}
+
+fn same_workspace(left: &Path, right: &Path) -> bool {
+    std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf())
+        == std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
+}
+
+fn persisted_binding_matches_verified_pane(
+    state: &serde_json::Value,
+    workspace: &Path,
+    pane: &PaneId,
+    provider: crate::provider::Provider,
+    endpoint: Option<&str>,
+) -> bool {
+    let Some(endpoint) = endpoint.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if state
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| !same_workspace(Path::new(value), workspace))
+    {
+        return false;
+    }
+    let Some(owner) = state.get("team_owner").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let Some(receiver) = state
+        .get("leader_receiver")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let provider = serde_json::to_value(provider)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string));
+    let Some(provider) = provider.as_deref() else {
+        return false;
+    };
+    let owner_epoch = owner.get("owner_epoch").and_then(serde_json::Value::as_u64);
+    let receiver_epoch = receiver
+        .get("owner_epoch")
+        .and_then(serde_json::Value::as_u64);
+    let owner_uuid = owner
+        .get("leader_session_uuid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    let receiver_uuid = receiver
+        .get("leader_session_uuid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty());
+    receiver.get("status").and_then(serde_json::Value::as_str) == Some("attached")
+        && receiver.get("mode").and_then(serde_json::Value::as_str) == Some("direct_tmux")
+        && owner.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane.as_str())
+        && receiver.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane.as_str())
+        && owner.get("provider").and_then(serde_json::Value::as_str) == Some(provider)
+        && receiver.get("provider").and_then(serde_json::Value::as_str) == Some(provider)
+        && owner_epoch.is_some_and(|epoch| epoch > 0)
+        && owner_epoch == receiver_epoch
+        && owner_uuid.is_some()
+        && owner_uuid == receiver_uuid
+        && receiver
+            .get("tmux_socket")
+            .and_then(serde_json::Value::as_str)
+            == Some(endpoint)
+        && receiver
+            .get("authorized_team_workspace")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none_or(|value| same_workspace(Path::new(value), workspace))
+}
+
 fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     workspace: &Path,
     team_key: &str,
@@ -134,12 +254,6 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
         return false;
     }
     let mut state = resolved.state;
-    if ["team_owner", "leader_receiver"]
-        .iter()
-        .any(|key| state.get(*key).is_some_and(|value| !value.is_null()))
-    {
-        return false;
-    }
     let Some(pane) = ops.caller_pane().filter(|pane| !pane.is_empty()) else {
         return false;
     };
@@ -160,13 +274,37 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     if ops.live_binding_elsewhere(&pane, workspace, team_key) {
         return false;
     }
-    if !ops.attach(workspace, &mut state, &pane, provider) {
+    let endpoint = ops.tmux_endpoint();
+    // initial_runtime_state seeds the verified caller into the launched team's
+    // dual state before spawn. That is the transaction's candidate, not an
+    // already-owned-team refusal: it still needs the canonical registry commit.
+    let has_persisted_binding = ["team_owner", "leader_receiver"]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(|value| !value.is_null()));
+    if has_persisted_binding
+        && !persisted_binding_matches_verified_pane(
+            &state,
+            workspace,
+            &pane,
+            provider,
+            endpoint.as_deref(),
+        )
+    {
         return false;
     }
-    if !ops.register(workspace, team_key) {
-        return false;
+    // Registry publication is the commit point. Restore both persisted surfaces
+    // byte for byte when attach, publication, or canonical readback does not finish.
+    let snapshots = binding_snapshots(workspace, team_key);
+    let attached = has_persisted_binding || ops.attach(workspace, &mut state, &pane, provider);
+    let committed = attached
+        && ops.register(workspace, team_key)
+        && ops.canonical_readback(workspace, team_key);
+    if !committed {
+        for snapshot in snapshots.iter().rev() {
+            snapshot.restore();
+        }
     }
-    ops.canonical_readback(workspace, team_key)
+    committed
 }
 
 fn bind_fresh_quick_start_leader(
@@ -680,7 +818,9 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
          already-initialised teams)"
             .to_string(),
     );
-    if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
+    if selected_tmux_socket_source(transport, &workspace) == Some("workspace")
+        && crate::tmux_backend::socket_probe_missing_for_workspace(&workspace)
+    {
         next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
             &workspace,
         ));
@@ -733,6 +873,7 @@ mod fresh_quick_start_leader_binding_tests {
     struct MockOps {
         pane: Option<String>,
         explicit_provider: Option<String>,
+        endpoint: Option<String>,
         command: Option<String>,
         live_elsewhere: bool,
         attach_ok: bool,
@@ -749,6 +890,7 @@ mod fresh_quick_start_leader_binding_tests {
             Self {
                 pane: Some("%42".to_string()),
                 explicit_provider: Some("pi".to_string()),
+                endpoint: Some("/private/tmp/tmux-test/default".to_string()),
                 command: Some("pi".to_string()),
                 live_elsewhere: false,
                 attach_ok: true,
@@ -769,6 +911,10 @@ mod fresh_quick_start_leader_binding_tests {
 
         fn explicit_provider(&mut self) -> Option<String> {
             self.explicit_provider.clone()
+        }
+
+        fn tmux_endpoint(&mut self) -> Option<String> {
+            self.endpoint.clone()
         }
 
         fn observe_command(&mut self, _pane: &PaneId) -> Option<String> {
@@ -794,32 +940,51 @@ mod fresh_quick_start_leader_binding_tests {
             self.attach_calls += 1;
             self.attached_provider = Some(provider);
             if !self.attach_ok {
+                state["failed_attach_mutation"] = json!(true);
+                let _ = crate::state::persist::save_runtime_state(workspace, state);
                 return false;
             }
-            state["team_owner"] = json!({"pane_id": pane.as_str()});
             state["leader_receiver"] = json!({
+                "mode": "direct_tmux",
                 "pane_id": pane.as_str(),
                 "status": "attached",
-                "transport_kind": "direct_tmux"
+                "provider": "pi",
+                "leader_session_uuid": "uuid-fresh",
+                "owner_epoch": 1,
+                "tmux_socket": self.endpoint
+            });
+            state["team_owner"] = json!({
+                "pane_id": pane.as_str(),
+                "provider": "pi",
+                "leader_session_uuid": "uuid-fresh",
+                "owner_epoch": 1
             });
             crate::state::persist::save_runtime_state(workspace, state).is_ok()
         }
 
         fn register(&mut self, workspace: &Path, _team_key: &str) -> bool {
             self.register_calls += 1;
-            let persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
+            let mut persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
             assert_eq!(
                 persisted
                     .pointer("/leader_receiver/pane_id")
                     .and_then(serde_json::Value::as_str),
                 Some("%42")
             );
+            if !self.register_ok {
+                persisted["failed_registry_mutation"] = json!(true);
+                crate::state::persist::save_runtime_state(workspace, &persisted).unwrap();
+            }
             self.register_ok
         }
 
         fn canonical_readback(&mut self, workspace: &Path, _team_key: &str) -> bool {
             self.readback_calls += 1;
-            let persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
+            let mut persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
+            if !self.readback_ok {
+                persisted["failed_readback_mutation"] = json!(true);
+                crate::state::persist::save_runtime_state(workspace, &persisted).unwrap();
+            }
             self.readback_ok
                 && persisted
                     .get("leader_receiver")
@@ -860,6 +1025,10 @@ mod fresh_quick_start_leader_binding_tests {
             "team_mismatch",
             "existing_owner",
             "existing_receiver",
+            "provider_mismatch",
+            "socket_mismatch",
+            "workspace_mismatch",
+            "dual_state_mismatch",
             "live_other_scope",
         ] {
             let workspace = workspace(case);
@@ -886,6 +1055,26 @@ mod fresh_quick_start_leader_binding_tests {
                 "existing_receiver" => {
                     state["leader_receiver"] = json!({"pane_id": "%old"})
                 }
+                "provider_mismatch" | "socket_mismatch" | "workspace_mismatch"
+                | "dual_state_mismatch" => {
+                    state["workspace"] = json!(workspace);
+                    state["team_owner"] = json!({
+                        "pane_id": "%42", "provider": "pi",
+                        "leader_session_uuid": "uuid-fresh", "owner_epoch": 1
+                    });
+                    state["leader_receiver"] = json!({
+                        "mode": "direct_tmux", "status": "attached", "pane_id": "%42",
+                        "provider": "pi", "leader_session_uuid": "uuid-fresh", "owner_epoch": 1,
+                        "tmux_socket": "/private/tmp/tmux-test/default"
+                    });
+                    match case {
+                        "provider_mismatch" => state["leader_receiver"]["provider"] = json!("codex"),
+                        "socket_mismatch" => state["leader_receiver"]["tmux_socket"] = json!("/tmp/other"),
+                        "workspace_mismatch" => state["workspace"] = json!(workspace.join("other")),
+                        "dual_state_mismatch" => state["team_owner"]["owner_epoch"] = json!(2),
+                        _ => unreachable!(),
+                    }
+                }
                 "live_other_scope" => ops.live_elsewhere = true,
                 "team_mismatch" => {}
                 _ => unreachable!(),
@@ -908,48 +1097,242 @@ mod fresh_quick_start_leader_binding_tests {
         }
     }
 
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let old = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self(old)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var("HOME", value);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn ambient_dual_state_workspace(tag: &str) -> PathBuf {
+        let workspace = workspace(tag);
+        let ambient = "/private/tmp/tmux-test/default";
+        crate::state::persist::save_runtime_state(
+            &workspace,
+            &json!({
+                "workspace": workspace,
+                "active_team_key": "fresh",
+                "team_key": "fresh",
+                "session_name": "team-fresh",
+                "agents": {"sol": {"status": "running", "provider": "pi"}},
+                "teams": {
+                    "current": {
+                        "team_key": "current",
+                        "session_name": "team-parent",
+                        "agents": {}
+                    },
+                    "fresh": {
+                        "workspace": workspace,
+                        "team_key": "fresh",
+                        "session_name": "team-fresh",
+                        "agents": {"sol": {"status": "running", "provider": "pi"}},
+                        "team_owner": {
+                            "pane_id": "%42",
+                            "provider": "pi",
+                            "leader_session_uuid": "uuid-fresh",
+                            "owner_epoch": 1
+                        },
+                        "leader_receiver": {
+                            "mode": "direct_tmux",
+                            "status": "attached",
+                            "pane_id": "%42",
+                            "provider": "pi",
+                            "leader_session_uuid": "uuid-fresh",
+                            "owner_epoch": 1,
+                            "tmux_socket": ambient
+                        },
+                        "owner_epoch": 1
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        workspace
+    }
+
+    struct AmbientRegistryOps {
+        readback_ok: bool,
+        attach_calls: usize,
+    }
+
+    impl FreshQuickStartLeaderBindingOps for AmbientRegistryOps {
+        fn caller_pane(&mut self) -> Option<String> {
+            Some("%42".to_string())
+        }
+
+        fn explicit_provider(&mut self) -> Option<String> {
+            Some("pi".to_string())
+        }
+
+        fn tmux_endpoint(&mut self) -> Option<String> {
+            Some("/private/tmp/tmux-test/default".to_string())
+        }
+
+        fn observe_command(&mut self, _pane: &PaneId) -> Option<String> {
+            Some("pi".to_string())
+        }
+
+        fn live_binding_elsewhere(
+            &mut self,
+            _pane: &PaneId,
+            _workspace: &Path,
+            _team_key: &str,
+        ) -> bool {
+            false
+        }
+
+        fn attach(
+            &mut self,
+            _workspace: &Path,
+            _state: &mut serde_json::Value,
+            _pane: &PaneId,
+            _provider: crate::provider::Provider,
+        ) -> bool {
+            self.attach_calls += 1;
+            false
+        }
+
+        fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
+            crate::leader::registry::register_binding_from_state_best_effort(
+                workspace,
+                Some(team_key),
+                "quick-start",
+            )
+            .is_some_and(|outcome| outcome.status == "registered" && outcome.path.is_some())
+        }
+
+        fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool {
+            self.readback_ok && launched_team_receiver_is_attached(workspace, team_key)
+        }
+    }
+
     #[test]
-    fn attach_registry_or_readback_failure_never_reports_bound() {
-        let attach_workspace = workspace("attach-failure");
-        let mut attach_ops = MockOps {
-            attach_ok: false,
-            ..MockOps::default()
-        };
-        assert!(!bind_fresh_quick_start_leader_with(
-            &attach_workspace,
-            "fresh",
-            &mut attach_ops
+    #[serial_test::serial(env)]
+    fn ambient_dual_state_registers_and_reads_back_when_workspace_socket_is_missing() {
+        let workspace = ambient_dual_state_workspace("ambient-dual-state");
+        let home = workspace.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        assert!(crate::tmux_backend::socket_probe_missing_for_workspace(
+            &workspace
         ));
-        assert_eq!(attach_ops.attach_calls, 1);
-        assert_eq!(attach_ops.register_calls, 0);
-        assert_eq!(attach_ops.readback_calls, 0);
-
-        let registry_workspace = workspace("registry-failure");
-        let mut registry_ops = MockOps {
-            register_ok: false,
-            ..MockOps::default()
+        let mut ops = AmbientRegistryOps {
+            readback_ok: true,
+            attach_calls: 0,
         };
-        assert!(!bind_fresh_quick_start_leader_with(
-            &registry_workspace,
+        assert!(bind_fresh_quick_start_leader_with(
+            &workspace,
             "fresh",
-            &mut registry_ops
+            &mut ops
         ));
-        assert_eq!(registry_ops.attach_calls, 1);
-        assert_eq!(registry_ops.register_calls, 1);
-        assert_eq!(registry_ops.readback_calls, 0);
+        assert_eq!(ops.attach_calls, 0, "preseeded dual state must not reattach");
+        let path = crate::leader::registry::registry_dir().unwrap().join(format!(
+            "{}__fresh.json",
+            crate::leader::registry::workspace_hash(&workspace)
+        ));
+        let entry: crate::leader::registry::LeaderRegistryEntry =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            entry.channel.get("tmux_socket").and_then(serde_json::Value::as_str),
+            Some("/private/tmp/tmux-test/default")
+        );
+    }
 
-        let readback_workspace = workspace("readback-failure");
-        let mut readback_ops = MockOps {
+    #[test]
+    fn attach_registry_or_readback_failure_rolls_back_exact_state_bytes() {
+        for (case, mut ops) in [
+            (
+                "attach-failure",
+                MockOps {
+                    attach_ok: false,
+                    ..MockOps::default()
+                },
+            ),
+            (
+                "registry-failure",
+                MockOps {
+                    register_ok: false,
+                    ..MockOps::default()
+                },
+            ),
+            (
+                "readback-failure",
+                MockOps {
+                    readback_ok: false,
+                    ..MockOps::default()
+                },
+            ),
+        ] {
+            let workspace = workspace(case);
+            let state_path = crate::state::persist::runtime_state_path(&workspace);
+            let before = std::fs::read(&state_path).unwrap();
+            assert!(!bind_fresh_quick_start_leader_with(
+                &workspace,
+                "fresh",
+                &mut ops
+            ));
+            assert_eq!(
+                std::fs::read(&state_path).unwrap(),
+                before,
+                "{case} left partial state bytes"
+            );
+            match case {
+                "attach-failure" => {
+                    assert_eq!(ops.attach_calls, 1);
+                    assert_eq!(ops.register_calls, 0);
+                    assert_eq!(ops.readback_calls, 0);
+                }
+                "registry-failure" => {
+                    assert_eq!(ops.attach_calls, 1);
+                    assert_eq!(ops.register_calls, 1);
+                    assert_eq!(ops.readback_calls, 0);
+                }
+                "readback-failure" => {
+                    assert_eq!(ops.attach_calls, 1);
+                    assert_eq!(ops.register_calls, 1);
+                    assert_eq!(ops.readback_calls, 1);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn failed_canonical_readback_removes_new_registry_bytes_and_preserves_dual_state_bytes() {
+        let workspace = ambient_dual_state_workspace("ambient-readback-rollback");
+        let home = workspace.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let state_path = crate::state::persist::runtime_state_path(&workspace);
+        let before = std::fs::read(&state_path).unwrap();
+        let registry_path = crate::leader::registry::registry_dir().unwrap().join(format!(
+            "{}__fresh.json",
+            crate::leader::registry::workspace_hash(&workspace)
+        ));
+        let mut ops = AmbientRegistryOps {
             readback_ok: false,
-            ..MockOps::default()
+            attach_calls: 0,
         };
         assert!(!bind_fresh_quick_start_leader_with(
-            &readback_workspace,
+            &workspace,
             "fresh",
-            &mut readback_ops
+            &mut ops
         ));
-        assert_eq!(readback_ops.attach_calls, 1);
-        assert_eq!(readback_ops.register_calls, 1);
-        assert_eq!(readback_ops.readback_calls, 1);
+        assert_eq!(std::fs::read(state_path).unwrap(), before);
+        assert!(!registry_path.exists(), "failed readback left registry bytes");
     }
 }
