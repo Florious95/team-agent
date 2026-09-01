@@ -307,6 +307,13 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     committed
 }
 
+fn should_emit_workspace_socket_missing_hint(
+    selected_source: Option<&str>,
+    workspace_socket_missing: bool,
+) -> bool {
+    workspace_socket_missing && selected_source != Some("leader_env")
+}
+
 fn bind_fresh_quick_start_leader(
     workspace: &Path,
     team_key: &str,
@@ -687,7 +694,12 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
                     .to_string(),
             ];
             if session_name.is_some() {
-                if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
+                if should_emit_workspace_socket_missing_hint(
+                    state
+                        .get("tmux_socket_source")
+                        .and_then(serde_json::Value::as_str),
+                    crate::tmux_backend::socket_probe_missing_for_workspace(&workspace),
+                ) {
                     next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
                         &workspace,
                     ));
@@ -818,9 +830,10 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
          already-initialised teams)"
             .to_string(),
     );
-    if selected_tmux_socket_source(transport, &workspace) == Some("workspace")
-        && crate::tmux_backend::socket_probe_missing_for_workspace(&workspace)
-    {
+    if should_emit_workspace_socket_missing_hint(
+        selected_tmux_socket_source(transport, &workspace),
+        crate::tmux_backend::socket_probe_missing_for_workspace(&workspace),
+    ) {
         next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
             &workspace,
         ));
@@ -1308,6 +1321,23 @@ mod fresh_quick_start_leader_binding_tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn socket_missing_hint_is_suppressed_only_for_selected_leader_env_transport() {
+        assert!(!should_emit_workspace_socket_missing_hint(
+            Some("leader_env"),
+            true
+        ));
+        assert!(should_emit_workspace_socket_missing_hint(
+            Some("workspace"),
+            true
+        ));
+        assert!(should_emit_workspace_socket_missing_hint(None, true));
+        assert!(!should_emit_workspace_socket_missing_hint(
+            Some("workspace"),
+            false
+        ));
     }
 
     #[test]
