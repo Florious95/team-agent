@@ -638,6 +638,14 @@ pub struct LeadersArgs {
     pub json: bool,
 }
 
+/// Read-only Pi model catalog discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelsArgs {
+    pub provider: String,
+    pub search: Option<String>,
+    pub json: bool,
+}
+
 /// `validate [spec=team.spec.yaml] --json`(`parser.py:120`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidateArgs {

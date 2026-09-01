@@ -85,6 +85,7 @@ pub(crate) enum DispatchKind {
     E2e,
     Peek,
     Coordinator,
+    Models,
 }
 
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
@@ -131,6 +132,7 @@ pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
     DispatchKind::E2e,
     DispatchKind::Peek,
     DispatchKind::Coordinator,
+    DispatchKind::Models,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,8 +164,9 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec { name: "quick-start", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::QuickStart), summary: "start or attach a team from TEAM.md", usage: "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "send", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Send), summary: "persist a message for an in-team short name or fully-qualified logical recipient", usage: "usage: team-agent send TO MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--mailbox] [--json]\nTO forms are co-equal: an in-team short name (for example `team-agent send reviewer \"Review\"`) or `<workspace>::<team>/<agent>`.", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, alias_of: None, sunset: Some("next compatibility release"), action: Some("use positional logical TO and the returned message id"), governance: None },
     CommandSpec { name: "status", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Status), summary: "show current team status", usage: "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
+    CommandSpec { name: "models", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Models), summary: "list exact provider model ids", usage: "usage: team-agent models --provider pi [--search TEXT] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "collect", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Collect), summary: "collect reported results", usage: "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
-    CommandSpec { name: "results", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Results), summary: "read reported results for a case", usage: "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
+    CommandSpec { name: "results", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Results), summary: "read reported results for a case", usage: "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "wait", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Wait), summary: "block until a task result is stored", usage: "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "restart", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Restart), summary: "restart the selected team", usage: "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "shutdown", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Shutdown), summary: "stop the selected team", usage: "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
