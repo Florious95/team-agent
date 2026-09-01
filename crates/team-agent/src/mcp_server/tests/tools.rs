@@ -211,6 +211,34 @@
     }
 
     #[test]
+    fn implicit_report_after_nested_delivery_stores_original_exactly() {
+        let ws = unique_ws("report-nested-original");
+        seed_report_message(&ws, "original", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_message(&ws, "nested", "gate055", "delivered", "2026-07-06T13:25:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"original"}},"agents":{"probe-worker":{"current_turn_message_id":"original"}}}}}));
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+        let value = serde_json::to_value(tools.report_result(None, Some("done"), ResultStatus::Success, None, None, None, None, None, None, None).unwrap()).unwrap();
+        assert_eq!(value.get("task_id"), Some(&json!("original")));
+        assert_eq!(value.get("attributed_message_id"), Some(&json!("original")));
+        let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
+        let (task, envelope): (String, String) = conn.query_row("select task_id,envelope from results", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(task, "original");
+        assert!(envelope.contains("original"));
+        assert_eq!(conn.query_row("select count(*) from results where task_id='nested'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn implicit_report_missing_authority_stores_no_result() {
+        let ws = unique_ws("report-no-authority");
+        seed_report_message(&ws, "historical", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","tasks":[{"id":"assigned","assignee":"probe-worker","status":"pending"}],"agents":{"probe-worker":{}}}}}));
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+        assert!(tools.report_result(None, Some("no authority"), ResultStatus::Success, None, None, None, None, None, None, None).is_err());
+        let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
+        assert_eq!(conn.query_row("select count(*) from results", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
     fn report_result_target_resolved_without_current_turn_fails_closed() {
         let ws = unique_ws("report-target-resolved-no-current");
         seed_report_message(
