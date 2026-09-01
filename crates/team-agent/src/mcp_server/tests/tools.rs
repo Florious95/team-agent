@@ -234,27 +234,27 @@
     fn implicit_report_after_nested_delivery_stores_original_exactly() {
         let ws = unique_ws("report-nested-original");
         std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
-        seed_report_message(&ws, "original", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
-        seed_report_message(&ws, "nested", "gate055", "delivered", "2026-07-06T13:25:25.000000+00:00");
-        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"original"}},"agents":{"probe-worker":{"current_turn_message_id":"original"}}}}}));
+        seed_report_message(&ws, "msg_original", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_message(&ws, "msg_nested", "gate055", "delivered", "2026-07-06T13:25:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"msg_original"}},"agents":{"probe-worker":{"current_turn_message_id":"msg_original"}}}}}));
         let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
         let value = serde_json::to_value(tools.report_result(None, Some("done"), ResultStatus::Success, None, None, None, None, None, None, None).unwrap()).unwrap();
-        assert_eq!(value.get("task_id"), Some(&json!("original")));
-        assert_eq!(value.get("attributed_message_id"), Some(&json!("original")));
+        assert_eq!(value.get("task_id"), Some(&json!("msg_original")));
+        assert_eq!(value.get("attributed_message_id"), Some(&json!("msg_original")));
         let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
         let (task, envelope): (String, String) = conn.query_row("select task_id,envelope from results", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(task, "original");
+        assert_eq!(task, "msg_original");
         let envelope: Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(envelope["task_id"], json!("original"));
-        assert_eq!(envelope["attributed_message_id"], json!("original"));
+        assert_eq!(envelope["task_id"], json!("msg_original"));
+        assert_eq!(envelope["attributed_message_id"], json!("msg_original"));
         assert_eq!(envelope["task_id_source"], json!("current_turn_message"));
-        assert_eq!(conn.query_row("select count(*) from results where task_id='nested'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        let original_rows = crate::messaging::results::results_for_case(&ws, "original", Some("gate055"), None).unwrap();
+        assert_eq!(conn.query_row("select count(*) from results where task_id='msg_nested'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        let original_rows = crate::messaging::results::results_for_case(&ws, "msg_original", Some("gate055"), None).unwrap();
         assert_eq!(original_rows.len(), 1);
-        assert!(crate::messaging::results::results_for_case(&ws, "nested", Some("gate055"), None).unwrap().is_empty());
+        assert!(crate::messaging::results::results_for_case(&ws, "msg_nested", Some("gate055"), None).unwrap().is_empty());
         let collected = crate::messaging::collect_for_team(&ws, None, false, Some("gate055")).unwrap();
         assert_eq!(collected["collected_results"].as_array().unwrap().len(), 1);
-        assert_eq!(collected["collected_results"][0]["task_id"], json!("original"));
+        assert_eq!(collected["collected_results"][0]["task_id"], json!("msg_original"));
         assert_eq!(collected["collected_results"][0]["scope"], json!("message"));
     }
 
@@ -297,17 +297,17 @@
     fn ordinary_direct_report_queries_and_collects_exact_message() {
         let ws = unique_ws("report-ordinary-direct");
         std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
-        seed_report_message(&ws, "direct", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
-        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"direct"}},"agents":{"probe-worker":{"current_turn_message_id":"direct"}}}}}));
+        seed_report_message(&ws, "msg_direct", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"msg_direct"}},"agents":{"probe-worker":{"current_turn_message_id":"msg_direct"}}}}}));
         let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
         tools.report_result(None, Some("ordinary"), ResultStatus::Success, None, None, None, None, None, None, None).unwrap();
-        let queried = crate::messaging::results::results_for_case(&ws, "direct", Some("gate055"), None).unwrap();
+        let queried = crate::messaging::results::results_for_case(&ws, "msg_direct", Some("gate055"), None).unwrap();
         assert_eq!(queried.len(), 1);
-        assert_eq!(queried[0]["task_id"], json!("direct"));
-        assert!(crate::messaging::results::results_for_case(&ws, "nested", Some("gate055"), None).unwrap().is_empty());
+        assert_eq!(queried[0]["task_id"], json!("msg_direct"));
+        assert!(crate::messaging::results::results_for_case(&ws, "msg_nested", Some("gate055"), None).unwrap().is_empty());
         let collected = crate::messaging::collect_for_team(&ws, None, false, Some("gate055")).unwrap();
         assert_eq!(collected["collected_results"].as_array().unwrap().len(), 1);
-        assert_eq!(collected["collected_results"][0]["task_id"], json!("direct"));
+        assert_eq!(collected["collected_results"][0]["task_id"], json!("msg_direct"));
         assert_eq!(collected["collected_results"][0]["scope"], json!("message"));
     }
 
