@@ -134,7 +134,10 @@ fn run_catalog(program: &Path, timeout: Duration, max_bytes: u64) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
+
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(unix)]
     #[test]
@@ -245,13 +248,10 @@ mod tests {
     #[cfg(unix)]
     fn fixture(body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "team-agent-pi-fixture-{}-{}",
+            "team-agent-pi-fixture-{}-{sequence}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
         ));
         std::fs::write(
             &path,
