@@ -220,6 +220,16 @@ fn bind_provider_from_env_or_pane(command: &str, pane: Option<PaneInfo>) -> Prov
         .unwrap_or(Provider::Codex)
 }
 
+pub(crate) fn strict_owner_bind_provider(
+    explicit_provider: Option<&str>,
+    observed_command: &str,
+) -> Option<Provider> {
+    match explicit_provider.filter(|value| !value.is_empty()) {
+        Some(raw) => super::helpers::parse_provider(raw),
+        None => super::attribute_command_provider(observed_command),
+    }
+}
+
 pub fn owner_bind_provider_wire(command: &str) -> &'static str {
     if let Ok(raw) = std::env::var("TEAM_AGENT_LEADER_PROVIDER") {
         // env 显式 provider:经 parse_provider(单一表,知 copilot)校验后透传其 wire 串;
@@ -339,6 +349,17 @@ mod e11_provider_bind_tests {
             Some(Provider::Copilot)
         );
         assert_eq!(owner_bind_provider_wire("copilot --banner"), "copilot");
+    }
+
+    #[test]
+    fn strict_provider_never_falls_back_from_unknown_explicit_or_command() {
+        assert_eq!(
+            strict_owner_bind_provider(Some("pi"), "codex"),
+            Some(Provider::Pi)
+        );
+        assert_eq!(strict_owner_bind_provider(Some("unknown"), "codex"), None);
+        assert_eq!(strict_owner_bind_provider(None, "pi"), Some(Provider::Pi));
+        assert_eq!(strict_owner_bind_provider(None, "node"), None);
     }
 
     #[test]

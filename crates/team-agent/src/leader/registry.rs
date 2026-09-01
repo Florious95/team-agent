@@ -243,7 +243,10 @@ pub fn register_binding_from_state_best_effort(
     );
     let event_log = crate::event_log::EventLog::new(workspace);
     let write_result = write_entry_best_effort(&entry);
-    if write_result.is_some() {
+    // Fresh quick-start is acquisition-only: it must never displace another
+    // same-pane row. Its caller performs a validated-LIVE check before this
+    // write; manual/restart ownership paths keep existing behavior.
+    if write_result.is_some() && source != "quick-start" {
         let _ = mark_displaced_same_pane_entries_unbound(&entry);
     }
     let status = if let Some(path) = &write_result {
@@ -541,6 +544,27 @@ pub fn list_validated_with_gc() -> Vec<(LeaderRegistryEntry, &'static str, Optio
         out.push((entry, status, reason));
     }
     out
+}
+
+/// Refuse a fresh quick-start binding when the caller pane already backs a
+/// canonically LIVE receiver for another workspace/team. This is read-only:
+/// quick-start never displaces or takes over an existing binding.
+#[must_use]
+pub(crate) fn live_same_pane_binding_elsewhere(
+    pane_id: &str,
+    workspace: &Path,
+    team_key: &str,
+) -> bool {
+    let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    list_validated_no_gc().into_iter().any(|(entry, status, _)| {
+        status == "LIVE"
+            && entry
+                .channel
+                .get("pane_id")
+                .and_then(Value::as_str)
+                == Some(pane_id)
+            && (entry.workspace != workspace || entry.team_key != team_key)
+    })
 }
 
 /// Same as `list_validated_with_gc` but preserves all entries. `send

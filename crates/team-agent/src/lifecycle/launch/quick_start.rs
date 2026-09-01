@@ -30,11 +30,156 @@ use crate::model::ids::AgentId;
 use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
-use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
+use crate::transport::{PaneField, PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 use super::*;
+
+trait FreshQuickStartLeaderBindingOps {
+    fn caller_pane(&mut self) -> Option<String>;
+    fn explicit_provider(&mut self) -> Option<String>;
+    fn observe_command(&mut self, pane: &PaneId) -> Option<String>;
+    fn live_binding_elsewhere(&mut self, pane: &PaneId, workspace: &Path, team_key: &str) -> bool;
+    fn attach(
+        &mut self,
+        workspace: &Path,
+        state: &mut serde_json::Value,
+        pane: &PaneId,
+        provider: crate::provider::Provider,
+    ) -> bool;
+    fn register(&mut self, workspace: &Path, team_key: &str) -> bool;
+    fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool;
+}
+
+struct RuntimeFreshQuickStartLeaderBindingOps<'a> {
+    transport: &'a dyn Transport,
+}
+
+impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<'_> {
+    fn caller_pane(&mut self) -> Option<String> {
+        std::env::var("TMUX_PANE")
+            .ok()
+            .filter(|pane| !pane.is_empty())
+    }
+
+    fn explicit_provider(&mut self) -> Option<String> {
+        std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+            .ok()
+            .filter(|provider| !provider.is_empty())
+    }
+
+    fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
+        self.transport
+            .query(&Target::Pane(pane.clone()), PaneField::PaneCurrentCommand)
+            .ok()
+            .flatten()
+            .filter(|command| !command.trim().is_empty())
+    }
+
+    fn live_binding_elsewhere(&mut self, pane: &PaneId, workspace: &Path, team_key: &str) -> bool {
+        crate::leader::registry::live_same_pane_binding_elsewhere(
+            pane.as_str(),
+            workspace,
+            team_key,
+        )
+    }
+
+    fn attach(
+        &mut self,
+        workspace: &Path,
+        state: &mut serde_json::Value,
+        pane: &PaneId,
+        provider: crate::provider::Provider,
+    ) -> bool {
+        let event_log = crate::event_log::EventLog::new(workspace);
+        crate::leader::attach_leader_to_state(
+            workspace,
+            state,
+            Some(pane),
+            provider,
+            &event_log,
+            crate::leader::LeaseSource::QuickStart,
+            true,
+        )
+        .is_ok()
+    }
+
+    fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
+        crate::leader::registry::register_binding_from_state_best_effort(
+            workspace,
+            Some(team_key),
+            "quick-start",
+        )
+        .is_some_and(|outcome| outcome.status == "registered" && outcome.path.is_some())
+    }
+
+    fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool {
+        launched_team_receiver_is_attached(workspace, team_key)
+    }
+}
+
+fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
+    workspace: &Path,
+    team_key: &str,
+    ops: &mut O,
+) -> bool {
+    let Ok(resolved) = crate::state::projection::resolve_runtime_team_scope(
+        workspace,
+        Some(team_key),
+    ) else {
+        return false;
+    };
+    if resolved.canonical_team_key != team_key {
+        return false;
+    }
+    let mut state = resolved.state;
+    if ["team_owner", "leader_receiver"]
+        .iter()
+        .any(|key| state.get(*key).is_some_and(|value| !value.is_null()))
+    {
+        return false;
+    }
+    let Some(pane) = ops.caller_pane().filter(|pane| !pane.is_empty()) else {
+        return false;
+    };
+    let pane = PaneId::new(pane);
+    let Some(command) = ops
+        .observe_command(&pane)
+        .filter(|command| !command.trim().is_empty())
+    else {
+        return false;
+    };
+    let explicit_provider = ops.explicit_provider();
+    let Some(provider) = crate::leader::owner_bind::strict_owner_bind_provider(
+        explicit_provider.as_deref(),
+        &command,
+    ) else {
+        return false;
+    };
+    if ops.live_binding_elsewhere(&pane, workspace, team_key) {
+        return false;
+    }
+    if !ops.attach(workspace, &mut state, &pane, provider) {
+        return false;
+    }
+    if !ops.register(workspace, team_key) {
+        return false;
+    }
+    ops.canonical_readback(workspace, team_key)
+}
+
+fn bind_fresh_quick_start_leader(
+    workspace: &Path,
+    team_key: &str,
+    transport: &dyn Transport,
+) -> bool {
+    bind_fresh_quick_start_leader_with(
+        workspace,
+        team_key,
+        &mut RuntimeFreshQuickStartLeaderBindingOps { transport },
+    )
+}
 
 /// ---
 /// purpose: 由角色目录推出 workspace 后一键起队
@@ -480,8 +625,11 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         team_depth.parent_team_key.as_deref(),
         team_depth.team_depth,
     )?;
+    // Fresh initialization owns this one fail-closed bind attempt. It is
+    // independent of display layout, so --no-display never suppresses receiver
+    // binding. Readiness receives true only after canonical registry readback.
     launch.leader_receiver_attached =
-        launched_team_receiver_is_attached(&workspace, &state_team_key);
+        bind_fresh_quick_start_leader(&workspace, &state_team_key, transport);
     launch.session_capture_incomplete_agents =
         quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
@@ -552,4 +700,256 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         display_backend,
         worker_readiness,
     })
+}
+
+#[cfg(test)]
+mod fresh_quick_start_leader_binding_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn workspace(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ta-quick-start-bind-{tag}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        crate::state::persist::save_runtime_state(
+            &path,
+            &json!({
+                "active_team_key": "fresh",
+                "team_key": "fresh",
+                "session_name": "team-fresh",
+                "agents": {"sol": {"status": "running", "provider": "pi"}}
+            }),
+        )
+        .unwrap();
+        path
+    }
+
+    struct MockOps {
+        pane: Option<String>,
+        explicit_provider: Option<String>,
+        command: Option<String>,
+        live_elsewhere: bool,
+        attach_ok: bool,
+        register_ok: bool,
+        readback_ok: bool,
+        attach_calls: usize,
+        register_calls: usize,
+        readback_calls: usize,
+        attached_provider: Option<crate::provider::Provider>,
+    }
+
+    impl Default for MockOps {
+        fn default() -> Self {
+            Self {
+                pane: Some("%42".to_string()),
+                explicit_provider: Some("pi".to_string()),
+                command: Some("pi".to_string()),
+                live_elsewhere: false,
+                attach_ok: true,
+                register_ok: true,
+                readback_ok: true,
+                attach_calls: 0,
+                register_calls: 0,
+                readback_calls: 0,
+                attached_provider: None,
+            }
+        }
+    }
+
+    impl FreshQuickStartLeaderBindingOps for MockOps {
+        fn caller_pane(&mut self) -> Option<String> {
+            self.pane.clone()
+        }
+
+        fn explicit_provider(&mut self) -> Option<String> {
+            self.explicit_provider.clone()
+        }
+
+        fn observe_command(&mut self, _pane: &PaneId) -> Option<String> {
+            self.command.clone()
+        }
+
+        fn live_binding_elsewhere(
+            &mut self,
+            _pane: &PaneId,
+            _workspace: &Path,
+            _team_key: &str,
+        ) -> bool {
+            self.live_elsewhere
+        }
+
+        fn attach(
+            &mut self,
+            workspace: &Path,
+            state: &mut serde_json::Value,
+            pane: &PaneId,
+            provider: crate::provider::Provider,
+        ) -> bool {
+            self.attach_calls += 1;
+            self.attached_provider = Some(provider);
+            if !self.attach_ok {
+                return false;
+            }
+            state["team_owner"] = json!({"pane_id": pane.as_str()});
+            state["leader_receiver"] = json!({
+                "pane_id": pane.as_str(),
+                "status": "attached",
+                "transport_kind": "direct_tmux"
+            });
+            crate::state::persist::save_runtime_state(workspace, state).is_ok()
+        }
+
+        fn register(&mut self, workspace: &Path, _team_key: &str) -> bool {
+            self.register_calls += 1;
+            let persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
+            assert_eq!(
+                persisted
+                    .pointer("/leader_receiver/pane_id")
+                    .and_then(serde_json::Value::as_str),
+                Some("%42")
+            );
+            self.register_ok
+        }
+
+        fn canonical_readback(&mut self, workspace: &Path, _team_key: &str) -> bool {
+            self.readback_calls += 1;
+            let persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
+            self.readback_ok
+                && persisted
+                    .get("leader_receiver")
+                    .is_some_and(|receiver| !receiver.is_null())
+        }
+    }
+
+    #[test]
+    fn fresh_binding_persists_then_registers_then_requires_canonical_readback() {
+        let workspace = workspace("positive");
+        let mut ops = MockOps::default();
+        assert!(bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            &mut ops
+        ));
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attach_calls, 1);
+        assert_eq!(ops.register_calls, 1);
+        assert_eq!(ops.readback_calls, 1);
+        let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(
+            state
+                .pointer("/leader_receiver/pane_id")
+                .and_then(serde_json::Value::as_str),
+            Some("%42")
+        );
+    }
+
+    #[test]
+    fn every_pre_attach_refusal_is_byte_preserving_and_never_registers() {
+        for case in [
+            "missing_pane",
+            "unverifiable_pane",
+            "empty_command",
+            "unknown_provider",
+            "unknown_explicit_provider",
+            "team_mismatch",
+            "existing_owner",
+            "existing_receiver",
+            "live_other_scope",
+        ] {
+            let workspace = workspace(case);
+            let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+            let mut ops = MockOps::default();
+            let team_key = if case == "team_mismatch" {
+                "other"
+            } else {
+                "fresh"
+            };
+            match case {
+                "missing_pane" => ops.pane = None,
+                "unverifiable_pane" => ops.command = None,
+                "empty_command" => ops.command = Some("  ".to_string()),
+                "unknown_provider" => {
+                    ops.explicit_provider = None;
+                    ops.command = Some("node".to_string());
+                }
+                "unknown_explicit_provider" => {
+                    ops.explicit_provider = Some("unknown".to_string());
+                    ops.command = Some("codex".to_string());
+                }
+                "existing_owner" => state["team_owner"] = json!({"pane_id": "%old"}),
+                "existing_receiver" => {
+                    state["leader_receiver"] = json!({"pane_id": "%old"})
+                }
+                "live_other_scope" => ops.live_elsewhere = true,
+                "team_mismatch" => {}
+                _ => unreachable!(),
+            }
+            crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+            let before = std::fs::read(crate::state::persist::runtime_state_path(&workspace))
+                .unwrap();
+            assert!(
+                !bind_fresh_quick_start_leader_with(&workspace, team_key, &mut ops),
+                "{case} must refuse"
+            );
+            assert_eq!(
+                before,
+                std::fs::read(crate::state::persist::runtime_state_path(&workspace)).unwrap(),
+                "{case} changed state bytes"
+            );
+            assert_eq!(ops.attach_calls, 0, "{case} reached attach");
+            assert_eq!(ops.register_calls, 0, "{case} reached registry write");
+            assert_eq!(ops.readback_calls, 0, "{case} reached readback");
+        }
+    }
+
+    #[test]
+    fn attach_registry_or_readback_failure_never_reports_bound() {
+        let attach_workspace = workspace("attach-failure");
+        let mut attach_ops = MockOps {
+            attach_ok: false,
+            ..MockOps::default()
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &attach_workspace,
+            "fresh",
+            &mut attach_ops
+        ));
+        assert_eq!(attach_ops.attach_calls, 1);
+        assert_eq!(attach_ops.register_calls, 0);
+        assert_eq!(attach_ops.readback_calls, 0);
+
+        let registry_workspace = workspace("registry-failure");
+        let mut registry_ops = MockOps {
+            register_ok: false,
+            ..MockOps::default()
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &registry_workspace,
+            "fresh",
+            &mut registry_ops
+        ));
+        assert_eq!(registry_ops.attach_calls, 1);
+        assert_eq!(registry_ops.register_calls, 1);
+        assert_eq!(registry_ops.readback_calls, 0);
+
+        let readback_workspace = workspace("readback-failure");
+        let mut readback_ops = MockOps {
+            readback_ok: false,
+            ..MockOps::default()
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &readback_workspace,
+            "fresh",
+            &mut readback_ops
+        ));
+        assert_eq!(readback_ops.attach_calls, 1);
+        assert_eq!(readback_ops.register_calls, 1);
+        assert_eq!(readback_ops.readback_calls, 1);
+    }
 }
