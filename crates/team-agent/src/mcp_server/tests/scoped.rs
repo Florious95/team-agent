@@ -189,25 +189,21 @@ fn verify_cleanup_surviving_receipt(
         assert_eq!(v.get("task_id"), Some(&json!("env-task")), "envelope task_id wins (setdefault)");
     }
 
-    // ── #44 report_result task_id inference from state (_latest_task_for_assignee)
-    // GOLDEN (probe_report evidence): env agent worker-7, state tasks=[{id:t-42,
-    // assignee:worker-7,status:pending}], report with NO task_id → task_id "t-42".
-    // Rust has no _latest_task_for_assignee; hard-codes "manual".
+    // Result attribution is a current-turn authority, not a latest-task heuristic.
     #[test]
-    fn report_result_infers_task_id_from_latest_assigned_task() {
+    fn report_result_latest_assigned_task_without_current_turn_fails_closed() {
         let cws = seed_state_ws("report-infer-task", &json!({
             "agents": {}, "active_team_key": null,
             "tasks": [{"id": "t-42", "assignee": "worker-7", "status": "pending"}]
         }));
         let tools = TeamOrchestratorTools::with_identity(&cws, Some(AgentId::new("worker-7")), None);
-        let ok = tools.report_result(
+        let error = tools.report_result(
             None, Some("done it"), ResultStatus::Success,
             None, None, None, None, None,
             None, None,
-        ).expect("report ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(v.get("task_id"), Some(&json!("t-42")),
-            "task_id inferred from latest non-terminal assigned task, not 'manual'");
+        ).expect_err("latest assigned task must not become implicit result authority");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
     }
 
     // ── #42 get_visible_peers reads seeded state (sorted live peers) ────────────

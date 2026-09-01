@@ -360,8 +360,9 @@ fn current_turn_message_for(
     owner_team_id: Option<&str>,
 ) -> Option<String> {
     let state = report_scope_state(workspace, owner_team_id)?;
-    current_turn_id_from_state(&state, agent_id)
-        .filter(|message_id| message_is_reportable(conn, message_id, agent_id, owner_team_id))
+    current_turn_id_from_state(&state, agent_id).filter(|message_id| {
+        message_is_reportable(conn, message_id, agent_id, owner_team_id).unwrap_or(false)
+    })
 }
 
 fn report_scope_state(workspace: &Path, owner_team_id: Option<&str>) -> Option<Value> {
@@ -433,7 +434,7 @@ fn message_is_reportable(
     message_id: &str,
     agent_id: &str,
     owner_team_id: Option<&str>,
-) -> bool {
+) -> Result<bool, crate::messaging::MessagingError> {
     crate::messaging::helpers::message_is_reportable(conn, message_id, agent_id, owner_team_id)
 }
 
@@ -473,7 +474,9 @@ fn latest_direct_message_from_db(
                ), '0000')
                and not exists (
                  select 1 from results r
-                 where r.task_id = m.message_id and r.agent_id = m.recipient
+                 where r.task_id = m.message_id
+                   and r.agent_id = m.recipient
+                   and (?2 is null or r.owner_team_id = m.owner_team_id)
                )
              order by m.created_at desc,
                case when m.status = 'delivered' then 0 else 1 end

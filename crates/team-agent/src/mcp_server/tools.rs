@@ -383,9 +383,9 @@ impl TeamOrchestratorTools {
         Ok(())
     }
 
-    /// `report_result` (`tools.py:249-279`): build & normalize the result envelope
-    /// (inferring `task_id`/`agent_id` with byte-stable `"manual"`/`"unknown"`
-    /// fallbacks), then delegate to [`messaging::report_result`] and compact.
+    /// `report_result` (`tools.py:249-279`): build and normalize the result envelope.
+    /// An omitted task id requires validated current-turn authority; agent identity
+    /// retains the byte-stable `"unknown"` compatibility fallback.
     #[allow(clippy::too_many_arguments)]
     pub fn report_result(
         &self,

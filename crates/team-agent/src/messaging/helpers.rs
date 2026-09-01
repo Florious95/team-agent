@@ -48,9 +48,10 @@ pub(crate) fn message_is_reportable(
     message_id: &str,
     agent_id: &str,
     owner_team_id: Option<&str>,
-) -> bool {
-    conn.query_row(
-        "select 1 from messages m
+) -> Result<bool, MessagingError> {
+    Ok(conn
+        .query_row(
+            "select 1 from messages m
          where m.message_id = ?1
            and m.recipient = ?2
            and (?3 is null or m.owner_team_id = ?3)
@@ -64,16 +65,16 @@ pub(crate) fn message_is_reportable(
            ), '0000')
            and not exists (
              select 1 from results r
-             where r.task_id = m.message_id and r.agent_id = m.recipient
+             where r.task_id = m.message_id
+               and r.agent_id = m.recipient
+               and (?3 is null or r.owner_team_id = m.owner_team_id)
            )
          limit 1",
-        params![message_id, agent_id, owner_team_id],
-        |_| Ok(()),
-    )
-    .optional()
-    .ok()
-    .flatten()
-    .is_some()
+            params![message_id, agent_id, owner_team_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 pub(crate) fn message_exists(
