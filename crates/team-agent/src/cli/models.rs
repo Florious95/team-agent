@@ -1,12 +1,9 @@
 //! Read-only Pi model catalog discovery for `team-agent models`.
 use super::{CliError, CmdOutput, CmdResult, ExitCode, ModelsArgs};
 use serde_json::{json, Value};
-use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 
@@ -131,63 +128,13 @@ fn current_role_model_from(
 
 /// Injectable executable, deadline, and byte-limit boundary for deterministic tests.
 fn run_catalog(program: &Path, timeout: Duration, max_bytes: u64) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(program)
-        .arg("--list-models")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "Pi executable is unavailable on PATH".to_string())?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        reap_child(&mut child);
-        "Pi model catalog output unavailable".to_string()
-    })?;
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
-        let _ = sender.send((result, bytes));
-    });
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let remaining = timeout.saturating_sub(start.elapsed());
-                let (result, bytes) = match receiver.recv_timeout(remaining) {
-                    Ok(value) => value,
-                    Err(_) => return Err("Pi model catalog command timed out".into()),
-                };
-                if !status.success() {
-                    return Err("Pi model catalog command failed".into());
-                }
-                result.map_err(|_| "Pi model catalog could not be read".to_string())?;
-                if bytes.len() as u64 > max_bytes {
-                    return Err("Pi model catalog exceeds the bounded output limit".into());
-                }
-                return Ok(bytes);
-            }
-            Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                reap_child(&mut child);
-                // Do not wait for the reader: a descendant may retain the inherited stdout pipe.
-                return Err("Pi model catalog command timed out".into());
-            }
-            Err(_) => {
-                reap_child(&mut child);
-                // The reader is detached on incomplete observation for the same reason.
-                return Err("Pi model catalog command could not be observed".into());
-            }
-        }
-    }
-}
-fn reap_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    crate::lifecycle::launch::pi_mcp::run_pi_catalog(program, timeout, max_bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[cfg(unix)]
     #[test]

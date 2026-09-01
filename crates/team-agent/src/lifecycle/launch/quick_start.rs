@@ -281,23 +281,57 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     transport: &dyn Transport,
     open_display: bool,
 ) -> Result<QuickStartReport, LifecycleError> {
-    // B-7 / 036b N38 三行 fail-fast — TEAM_AGENT_LEADER_PANE_ID 主动路径在 quick-start
-    // 入口验活;死/缺(Dead)的 pane 必须明确报错,不可 silent bind 到 spawner /
-    // owner_bind / lease / display 任一消费点。被动路径(display/seed 等)各自走
-    // 降级+event,不在这里挡。错误三行式:error(含 pane id 字面)/action(unset
-    // 或修 env)/log(env var 名)。
-    let team_workspace = team_workspace(agents_dir);
-    let warning_workspaces = [workspace, team_workspace.as_path()];
-    validate_active_leader_pane_env_with_workspaces(transport, &warning_workspaces)?;
+    let mut discover = |requested: &str| {
+        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    };
+    quick_start_with_transport_in_workspace_with_display_pi_preflight(
+        workspace,
+        agents_dir,
+        name,
+        yes,
+        team_id,
+        transport,
+        open_display,
+        &mut discover,
+    )
+}
+
+pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    team_id: Option<&str>,
+    transport: &dyn Transport,
+    open_display: bool,
+    discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
+) -> Result<QuickStartReport, LifecycleError> {
     if !agents_dir.exists() {
         return Err(LifecycleError::Compile(format!(
             "agents dir not found: {}",
             agents_dir.display()
         )));
     }
+    crate::compiler::preflight_pi_models_in_team_with(agents_dir, discover).map_err(|error| {
+        LifecycleError::PiModelPreflight {
+            requested: error.requested,
+            candidates: error.candidates,
+            action: error.action,
+            not_ready: error.not_ready,
+        }
+    })?;
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    // B-7 / 036b N38 三行 fail-fast — TEAM_AGENT_LEADER_PANE_ID 主动路径在 quick-start
+    // 入口验活;死/缺(Dead)的 pane 必须明确报错,不可 silent bind 到 spawner /
+    // owner_bind / lease / display 任一消费点。被动路径(display/seed 等)各自走
+    // 降级+event,不在这里挡。错误三行式:error(含 pane id 字面)/action(unset
+    // 或修 env)/log(env var 名)。 Role/schema and Pi model admission above is pure and
+    // must finish before this validation can emit a warning event.
+    let team_workspace = team_workspace(agents_dir);
+    let warning_workspaces = [workspace.as_path(), team_workspace.as_path()];
+    validate_active_leader_pane_env_with_workspaces(transport, &warning_workspaces)?;
     override_spec_workspace(&mut spec, &workspace);
     if !open_display {
         override_spec_display_backend(&mut spec, "none");

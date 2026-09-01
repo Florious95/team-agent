@@ -3016,6 +3016,15 @@ pub mod lifecycle_port {
     }
 
     fn error_value(error: crate::lifecycle::LifecycleError) -> Value {
+        if let crate::lifecycle::LifecycleError::PiModelPreflight {
+            requested,
+            candidates,
+            action,
+            not_ready,
+        } = error
+        {
+            return json!({"ok": false, "error": "pi model preflight failed", "pi": {"requested_model": requested, "candidates": candidates, "not_ready": not_ready, "action": action.clone(), "next_action": action}});
+        }
         let message = error.to_string();
         let mut payload = json!({"ok": false, "error": message});
         if let Some(next_action) = error_next_action(&message) {

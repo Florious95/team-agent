@@ -375,6 +375,215 @@ fn quick_start_invalid_role_doc_surfaces_real_compile_error() {
     );
 }
 
+#[test]
+fn quick_start_absent_or_empty_roles_preserves_compile_outcome_without_pi_preflight_mutation() {
+    for (label, create_agents, expected) in [
+        ("absent", false, "missing agents directory"),
+        ("empty", true, "no role docs found"),
+    ] {
+        let team = temp_ws().join(format!("teamdir-{label}"));
+        std::fs::create_dir_all(&team).unwrap();
+        std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+        if create_agents {
+            std::fs::create_dir(team.join("agents")).unwrap();
+        }
+        let workspace = crate::model::paths::team_workspace(&team).unwrap();
+        let team_md_before = std::fs::read(team.join("TEAM.md")).unwrap();
+        let absent_paths = [
+            team.join("team.spec.yaml"),
+            crate::state::persist::runtime_state_path(&workspace),
+            crate::model::paths::runtime_spec_path(&workspace, "quickteam"),
+            workspace.join("team_state.md"),
+            workspace.join(".team/logs/events.jsonl"),
+            workspace.join(".team/runtime/team.db"),
+        ];
+        for path in &absent_paths {
+            assert!(!path.exists(), "precondition: {} must be absent", path.display());
+        }
+
+        let transport = OfflineTransport::new();
+        let mut calls = 0;
+        let mut discover = |_requested: &str| {
+            calls += 1;
+            Ok(Vec::new())
+        };
+        let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+            &workspace,
+            &team,
+            None,
+            true,
+            None,
+            &transport,
+            true,
+            &mut discover,
+        )
+        .expect_err("an empty role input must preserve the existing compile outcome");
+        drop(discover);
+        assert_eq!(calls, 0, "{label} role input must not invoke Pi discovery");
+        match error {
+            LifecycleError::Compile(message) => {
+                assert!(message.contains(expected), "{label}: {message}");
+            }
+            other => panic!("{label}: expected existing compile outcome, got {other:?}"),
+        }
+        assert_eq!(team_md_before, std::fs::read(team.join("TEAM.md")).unwrap());
+        for path in &absent_paths {
+            assert!(!path.exists(), "{label} role input created {}", path.display());
+        }
+        assert!(transport.calls().is_empty(), "{label}: no transport mutation");
+        assert!(transport.spawn_records().is_empty(), "{label}: no spawn");
+    }
+}
+
+#[test]
+fn quick_start_injected_pi_preflight_is_typed_and_mutation_free() {
+    let role_doc = QS_VALID_ROLE.replace(
+        "provider: codex\nmodel: gpt-5.5",
+        "provider: pi\nmodel: gpt-5.6-sol",
+    );
+    let team = quick_start_team_dir(&role_doc);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let role_path = team.join("agents/implementer.md");
+    let team_md_path = team.join("TEAM.md");
+    let local_spec_path = team.join("team.spec.yaml");
+    let runtime_state_path = crate::state::persist::runtime_state_path(&workspace);
+    let runtime_spec_path = crate::model::paths::runtime_spec_path(&workspace, "quickteam");
+    let pi_paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+        &workspace,
+        "quickteam",
+        "implementer",
+    );
+    let role_before = std::fs::read(&role_path).unwrap();
+    let team_md_before = std::fs::read(&team_md_path).unwrap();
+    for path in [
+        &local_spec_path,
+        &runtime_state_path,
+        &runtime_spec_path,
+        &pi_paths.wrapper,
+        &pi_paths.sessions,
+    ] {
+        assert!(!path.exists(), "precondition: {} must be absent", path.display());
+    }
+
+    let transport = OfflineTransport::new();
+    let mut calls = 0;
+    let mut discover = |requested: &str| {
+        calls += 1;
+        assert_eq!(requested, "gpt-5.6-sol");
+        Ok(vec!["openai-codex/gpt-5.6-sol".into()])
+    };
+    let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &transport,
+        true,
+        &mut discover,
+    )
+    .expect_err("unqualified Pi role must fail before quick-start mutation");
+    drop(discover);
+    assert_eq!(calls, 1);
+    match error {
+        LifecycleError::PiModelPreflight {
+            requested,
+            candidates,
+            action,
+            not_ready,
+        } => {
+            assert_eq!(requested, "gpt-5.6-sol");
+            assert_eq!(candidates, vec!["openai-codex/gpt-5.6-sol"]);
+            assert_eq!(
+                action,
+                "copy a candidate into the role, or run `team-agent models --provider pi --search gpt-5.6-sol`"
+            );
+            assert!(!not_ready);
+        }
+        other => panic!("expected typed Pi preflight error, got {other:?}"),
+    }
+    assert_eq!(role_before, std::fs::read(&role_path).unwrap());
+    assert_eq!(team_md_before, std::fs::read(&team_md_path).unwrap());
+    for path in [
+        &local_spec_path,
+        &runtime_state_path,
+        &runtime_spec_path,
+        &pi_paths.wrapper,
+        &pi_paths.sessions,
+    ] {
+        assert!(!path.exists(), "quick-start preflight created {}", path.display());
+    }
+    assert!(transport.calls().is_empty(), "no transport calls before preflight rejection");
+    assert!(transport.spawn_records().is_empty());
+}
+
+#[test]
+fn quick_start_schema_invalid_pi_role_is_mutation_free() {
+    let role_doc = QS_VALID_ROLE
+        .replace(
+            "provider: codex\nmodel: gpt-5.5",
+            "provider: pi\nmodel: openai-codex/gpt-5.6-sol",
+        )
+        .replace("  - mcp_team", "  - fs_read");
+    let team = quick_start_team_dir(&role_doc);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let role_path = team.join("agents/implementer.md");
+    let team_md_path = team.join("TEAM.md");
+    let role_before = std::fs::read(&role_path).unwrap();
+    let team_md_before = std::fs::read(&team_md_path).unwrap();
+    let pi_paths = crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+        &workspace,
+        "quickteam",
+        "implementer",
+    );
+    let absent_paths = [
+        team.join("team.spec.yaml"),
+        crate::state::persist::runtime_state_path(&workspace),
+        crate::model::paths::runtime_spec_path(&workspace, "quickteam"),
+        workspace.join("team_state.md"),
+        workspace.join(".team/logs/events.jsonl"),
+        workspace.join(".team/runtime/team.db"),
+        pi_paths.wrapper,
+        pi_paths.sessions,
+    ];
+    for path in &absent_paths {
+        assert!(!path.exists(), "precondition: {} must be absent", path.display());
+    }
+
+    let transport = OfflineTransport::new();
+    let mut calls = 0;
+    let mut discover = |_requested: &str| {
+        calls += 1;
+        Ok(Vec::new())
+    };
+    let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &transport,
+        true,
+        &mut discover,
+    )
+    .expect_err("invalid Pi schema must fail before quick-start mutation");
+    drop(discover);
+    assert_eq!(calls, 0, "qualified models must not invoke discovery");
+    match error {
+        LifecycleError::Compile(message) => {
+            assert!(message.contains("Pi roles require mcp_team"), "{message}");
+        }
+        other => panic!("expected Pi role schema error, got {other:?}"),
+    }
+    assert_eq!(role_before, std::fs::read(&role_path).unwrap());
+    assert_eq!(team_md_before, std::fs::read(&team_md_path).unwrap());
+    for path in &absent_paths {
+        assert!(!path.exists(), "schema preflight created {}", path.display());
+    }
+    assert!(transport.calls().is_empty(), "no transport calls before schema rejection");
+    assert!(transport.spawn_records().is_empty());
+}
+
 // P0 — launch (dry_run) over a real compiled spec must resolve the REAL route/permission plan
 // (no spawn) — NOT the hardcoded RequirementUnmet stub. Golden: launch/core.py dry_run resolves
 // routing + permissions without starting any process.

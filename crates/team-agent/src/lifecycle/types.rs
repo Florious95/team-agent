@@ -495,6 +495,14 @@ pub enum LifecycleError {
     /// 编译 spec / role doc 失败(`compile_team`/`compile_role_doc_agent`)。
     #[error("spec compile failed: {0}")]
     Compile(String),
+    /// Pi model/schema admission failed before lifecycle reservation or writes.
+    #[error("pi model preflight failed: {requested}")]
+    PiModelPreflight {
+        requested: String,
+        candidates: Vec<String>,
+        action: String,
+        not_ready: bool,
+    },
     /// provider 命令构造 / resume 不可用(`ResumeUnavailable`)。
     #[error("provider error: {0}")]
     Provider(String),
