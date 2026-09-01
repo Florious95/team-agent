@@ -10,7 +10,9 @@
 //!   refusal, while the explicit `--allow-nested-attach` opt-in permits the
 //!   nested attach;
 //! - a stale pane id from the real incident does not collapse the different-
-//!   server branch into the generic ambient-pane-observation refusal.
+//!   server branch into the generic ambient-pane-observation refusal;
+//! - Pi's zero-argument managed entry execs in a positively verified current
+//!   workspace pane without weakening the other providers or explicit paths.
 //!
 //! The public CLI is executed by absolute Cargo binary path. No real provider
 //! or tmux server is used: a hermetic PATH shim records the physical route,
@@ -18,7 +20,7 @@
 //! package-owned target tmpdir.
 //!
 //! ---
-//! purpose: Exercise the five N41 managed-launcher route contracts through hermetic tmux and provider recorders.
+//! purpose: Exercise N41 and Pi current-pane managed-launcher route contracts through hermetic tmux and provider recorders.
 //! contract:
 //!   depends:
 //!     - team-agent launcher route behavior
@@ -150,6 +152,136 @@ fn n41_same_server_switches_client_instead_of_running_provider_in_caller_pane() 
 
 #[test]
 #[serial(env)]
+fn pi_zero_arg_verified_different_server_executes_in_current_pane() {
+    let case = Case::new("pi-different-server-current-pane");
+    let output = case.run_in_pty(&["pi"], Ambient::DifferentServerLivePane);
+    let log = case.tmux_log();
+    let provider_log = case.provider_log();
+
+    assert!(
+        output.status.success(),
+        "verified Pi current-pane launch must succeed: {}",
+        output_text(&output)
+    );
+    assert_eq!(
+        observed_route(&log, &provider_log, output.status.success()),
+        ObservedRoute::DirectProvider,
+        "Pi zero-arg launch in a verified workspace pane on another server must exec in-place; \
+         tmux_log={log:?} provider_log={provider_log:?}"
+    );
+    assert!(
+        provider_log.lines().any(|line| line.starts_with("launch provider=pi args=")),
+        "direct plan must carry canonical Pi leader env and the materialized Pi argv; \
+         provider_log={provider_log:?}"
+    );
+    assert!(
+        !has_operation(&log, "new-session")
+            && !has_operation(&log, "attach-session")
+            && !has_operation(&log, "switch-client"),
+        "current-pane Pi route must contain no tmux launch/attach argv; tmux_log={log:?}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn pi_zero_arg_verified_same_server_also_executes_in_current_pane() {
+    let case = Case::new("pi-same-server-current-pane");
+    let output = case.run_in_pty(&["pi"], Ambient::SameServer);
+    let log = case.tmux_log();
+
+    assert_eq!(
+        observed_route(&log, &case.provider_log(), output.status.success()),
+        ObservedRoute::DirectProvider,
+        "the already verified caller pane is Pi's user-facing terminal, so same-server Pi \
+         replaces the current process instead of switching away from it; tmux_log={log:?} \
+         provider_log={:?} output={}",
+        case.provider_log(),
+        output_text(&output)
+    );
+}
+
+#[test]
+#[serial(env)]
+fn pi_zero_arg_unverifiable_ambient_pane_refuses_before_launch() {
+    let case = Case::new("pi-unverifiable-pane");
+    let output = case.run_in_pty(&["pi"], Ambient::DifferentServerMissingPane);
+
+    assert!(!output.status.success(), "unverifiable Pi pane must refuse");
+    assert_eq!(case.provider_launches(), 0, "provider must not launch");
+    assert!(
+        !has_operation(&case.tmux_log(), "attach-session")
+            && !has_operation(&case.tmux_log(), "switch-client"),
+        "unverifiable authority must fail closed before attach"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn pi_zero_arg_invalid_ambient_tuple_refuses_before_launch() {
+    let case = Case::new("pi-invalid-ambient-tuple");
+    let output = case.run_in_pty(&["pi"], Ambient::InvalidTuple);
+
+    assert!(!output.status.success(), "invalid Pi tmux tuple must refuse");
+    assert_eq!(case.provider_launches(), 0, "provider must not launch");
+    assert!(
+        output_text(&output).contains("AmbientTmuxEndpointUnavailable"),
+        "refusal must retain the exact endpoint-authority reason: {}",
+        output_text(&output)
+    );
+}
+
+#[test]
+#[serial(env)]
+fn pi_zero_arg_workspace_mismatch_refuses_before_launch() {
+    let case = Case::new("pi-workspace-mismatch");
+    let output = case.run_in_pty(&["pi"], Ambient::DifferentServerWrongWorkspace);
+
+    assert!(!output.status.success(), "mismatched Pi pane cwd must refuse");
+    assert_eq!(case.provider_launches(), 0, "provider must not launch");
+    assert!(
+        output_text(&output).contains("PaneWorkspaceMismatch"),
+        "refusal must retain the exact pane-authority reason: {}",
+        output_text(&output)
+    );
+}
+
+#[test]
+#[serial(env)]
+fn pi_outside_tmux_keeps_standard_managed_attach() {
+    let case = Case::new("pi-outside-tmux");
+    let output = case.run_in_pty(&["pi"], Ambient::None);
+
+    assert_eq!(
+        observed_route(&case.tmux_log(), &case.provider_log(), output.status.success()),
+        ObservedRoute::AttachSession,
+        "outside-tmux Pi behavior remains the managed attach path; tmux_log={:?} output={}",
+        case.tmux_log(),
+        output_text(&output)
+    );
+}
+
+#[test]
+#[serial(env)]
+fn pi_explicit_nested_attach_keeps_managed_attach_semantics() {
+    let case = Case::new("pi-explicit-nested-attach");
+    let output = case.run_in_pty(
+        &["pi", "--allow-nested-attach"],
+        Ambient::DifferentServerLivePane,
+    );
+
+    assert_eq!(
+        observed_route(&case.tmux_log(), &case.provider_log(), output.status.success()),
+        ObservedRoute::AttachSession,
+        "explicit Pi nested attach must not be captured by the zero-arg current-pane route; \
+         tmux_log={:?} provider_log={:?} output={}",
+        case.tmux_log(),
+        case.provider_log(),
+        output_text(&output)
+    );
+}
+
+#[test]
+#[serial(env)]
 fn n41_different_server_default_refuses_with_n38_and_zero_launch() {
     let case = Case::new("n41-different-server-live");
     let output = case.run_in_pty(
@@ -255,9 +387,11 @@ fn assert_different_server_default_refusal(case: &Case, output: &Output, signatu
 #[derive(Clone, Copy)]
 enum Ambient {
     None,
+    InvalidTuple,
     SameServer,
     DifferentServerLivePane,
     DifferentServerMissingPane,
+    DifferentServerWrongWorkspace,
 }
 
 impl Ambient {
@@ -273,6 +407,8 @@ struct Case {
     env: hermetic_guard::HermeticTestEnv,
     workspace: PathBuf,
     fake_bin: PathBuf,
+    later_bin: PathBuf,
+    pi_adapter_root: PathBuf,
     tmpdir: PathBuf,
     target_socket_name: String,
     target_endpoint: PathBuf,
@@ -312,9 +448,28 @@ impl Case {
         let env = hermetic_guard::HermeticTestEnv::enter(tag);
         let workspace = env.workspace("requested");
         let fake_bin = env.root().join("fake-bin");
+        let later_bin = env.root().join("later-bin");
+        let pi_adapter_root = env.root().join("pi-mcp-adapter");
         fs::create_dir_all(&fake_bin).expect("create fake bin");
+        fs::create_dir_all(&later_bin).expect("create later bin");
+        fs::create_dir_all(&pi_adapter_root).expect("create Pi adapter root");
         write_executable(&fake_bin.join("tmux"), TMUX_SHIM);
         write_executable(&fake_bin.join("codex"), PROVIDER_SHIM);
+        let pi_real = env.root().join("pi-real");
+        write_executable(&pi_real, PI_SHIM);
+        std::os::unix::fs::symlink(&pi_real, fake_bin.join("pi"))
+            .expect("create npm-style Pi symlink");
+        write_executable(&later_bin.join("pi"), PI_SHIM);
+        fs::write(
+            pi_adapter_root.join("package.json"),
+            br#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#,
+        )
+        .expect("write Pi adapter package");
+        fs::write(
+            pi_adapter_root.join("index.ts"),
+            b"export const createMcpAdapter = () => {};\n",
+        )
+        .expect("write Pi adapter entry");
 
         let short_root_base = if cfg!(target_os = "macos") {
             PathBuf::from("/private/tmp")
@@ -363,6 +518,8 @@ impl Case {
             _socket_root: owned_socket_root,
             workspace,
             fake_bin,
+            later_bin,
+            pi_adapter_root,
             tmpdir,
             target_socket_name,
             target_endpoint,
@@ -394,6 +551,15 @@ impl Case {
             .env("TEAM_AGENT_TEST_SOURCE_ENDPOINT", &self.source_endpoint)
             .env("TEAM_AGENT_TEST_REQUESTED_WORKSPACE", &self.workspace)
             .env("TEAM_AGENT_TEST_PANE_TTY", &tty)
+            .env("TEAM_AGENT_TEST_PI_ADAPTER_ROOT", &self.pi_adapter_root)
+            .env(
+                "TEAM_AGENT_TEST_PANE_WORKSPACE",
+                if matches!(ambient, Ambient::DifferentServerWrongWorkspace) {
+                    self.env.root().join("wrong-workspace")
+                } else {
+                    self.workspace.clone()
+                },
+            )
             .env(
                 "TEAM_AGENT_TEST_SOURCE_PANE_PRESENT",
                 if ambient.pane_present() { "1" } else { "0" },
@@ -410,12 +576,19 @@ impl Case {
                     .env_remove("TMUX")
                     .env("TMUX_PANE", "%stray-without-tmux");
             }
+            Ambient::InvalidTuple => {
+                command
+                    .env("TMUX", "relative-socket,not-a-pid")
+                    .env("TMUX_PANE", AMBIENT_PANE);
+            }
             Ambient::SameServer => {
                 command
                     .env("TMUX", self.tmux_tuple(&self.target_endpoint))
                     .env("TMUX_PANE", AMBIENT_PANE);
             }
-            Ambient::DifferentServerLivePane | Ambient::DifferentServerMissingPane => {
+            Ambient::DifferentServerLivePane
+            | Ambient::DifferentServerMissingPane
+            | Ambient::DifferentServerWrongWorkspace => {
                 command
                     .env("TMUX", self.tmux_tuple(&self.source_endpoint))
                     .env("TMUX_PANE", AMBIENT_PANE);
@@ -444,8 +617,9 @@ impl Case {
 
     fn test_path(&self) -> String {
         format!(
-            "{}:{}",
+            "{}:{}:{}",
             self.fake_bin.display(),
+            self.later_bin.display(),
             std::env::var("PATH").unwrap_or_default()
         )
     }
@@ -568,6 +742,16 @@ printf 'launch %s\n' "$*" >> "$TEAM_AGENT_TEST_PROVIDER_LOG"
 exit 0
 "#;
 
+const PI_SHIM: &str = r#"#!/bin/sh
+case "${1-}" in
+  --version) printf '0.84.4\n' ;;
+  --list-models) printf 'provider model\nteam-agent qwen3.8-27b\n' ;;
+  list) printf 'npm:pi-mcp-adapter\n%s\n' "$TEAM_AGENT_TEST_PI_ADAPTER_ROOT" ;;
+  *) printf 'launch provider=%s args=%s\n' "$TEAM_AGENT_LEADER_PROVIDER" "$*" >> "$TEAM_AGENT_TEST_PROVIDER_LOG" ;;
+esac
+exit 0
+"#;
+
 const TMUX_SHIM: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$TEAM_AGENT_TEST_TMUX_LOG"
 selector=
@@ -602,11 +786,11 @@ case " $* " in
     if [ "$selector" = "$TEAM_AGENT_TEST_SOURCE_ENDPOINT" ] && \
        [ "$TEAM_AGENT_TEST_SOURCE_PANE_PRESENT" = "1" ]; then
       printf '%%ambient-n41\tforeign-source\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4101\t\n' \
-        "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_REQUESTED_WORKSPACE"
+        "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
     fi
     if [ "$selector" = "$TEAM_AGENT_TEST_TARGET_ENDPOINT" ]; then
       printf '%%ambient-n41\ttarget-source\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4102\t\n' \
-        "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_REQUESTED_WORKSPACE"
+        "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
     fi
     if [ "$selector" = "$TEAM_AGENT_TEST_TARGET_SOCKET_NAME" ] || \
        [ "$selector" = "$TEAM_AGENT_TEST_TARGET_ENDPOINT" ]; then
@@ -615,7 +799,7 @@ case " $* " in
         managed_session=$(cat "$TEAM_AGENT_TEST_SPAWN_SESSION")
       fi
       printf '%%managed-n41\t%s\t0\tcodex\t0\t%s\tcodex\t1\t%s\t1\t0\t4103\t\n' \
-        "$managed_session" "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_REQUESTED_WORKSPACE"
+        "$managed_session" "$TEAM_AGENT_TEST_PANE_TTY" "$TEAM_AGENT_TEST_PANE_WORKSPACE"
     fi
     exit 0
     ;;
@@ -623,7 +807,7 @@ case " $* " in
     case "$last" in
       '#{pane_id}') printf '%s\n' "${target:-%managed-n41}" ;;
       '#{pane_current_command}') printf 'codex\n' ;;
-      '#{pane_current_path}') printf '%s\n' "$TEAM_AGENT_TEST_REQUESTED_WORKSPACE" ;;
+      '#{pane_current_path}') printf '%s\n' "$TEAM_AGENT_TEST_PANE_WORKSPACE" ;;
       '#{pane_tty}') printf '%s\n' "$TEAM_AGENT_TEST_PANE_TTY" ;;
       '#{pane_dead}') printf '0\n' ;;
       '#{session_name}') printf 'managed-leader\n' ;;
