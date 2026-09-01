@@ -33,6 +33,7 @@
   "files": [
     "npm/bincheck.mjs",
     "npm/install.mjs",
+    "npm/check-skill-links.mjs",
     "skills",
     "templates",
     "examples",

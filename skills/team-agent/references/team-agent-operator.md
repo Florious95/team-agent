@@ -1,6 +1,6 @@
 # Team Agent operator handbook
 
-This is the long-form operator reference. The sealed CLI face is `skills/team-agent/SKILL.md` (≤60 lines). Do not drop the r13-corrected 0.5.66 facts below.
+This is the long-form operator reference. The sealed CLI face is `../SKILL.md` (≤60 lines). Do not drop the r13-corrected 0.5.66 facts below.
 
 
 # Team Agent
@@ -511,6 +511,7 @@ team-agent send --task task_initial "Start"
 team-agent send --watch-result
 team-agent send --watch-result coder "Do the bounded task"
 team-agent send TO MESSAGE
+team-agent send AGENT MESSAGE
 team-agent send reviewer "..."
 team-agent send reviewer "Review this change"
 team-agent shutdown --workspace . --keep-logs
@@ -522,6 +523,8 @@ team-agent status --detail --json
 team-agent status --json
 team-agent status coder
 ```
+
+Here `AGENT` is the in-team short-name specialization of positional `TO`, not a second command syntax or new behavior.
 
 The exact frozen CLI root help is a complementary public-surface authority:
 `team-agent --help` must expose the root verb for every canonical command that
