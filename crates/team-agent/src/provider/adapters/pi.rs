@@ -50,7 +50,8 @@ pub(crate) struct PiCommandRequest<'a> {
     pub effort: Option<ProviderEffort>,
     pub system_prompt: &'a str,
     pub tool_categories: &'a [&'a str],
-    pub session_dir: &'a Path,
+    /// Team-owned session root for isolated seats; `None` preserves Pi's native default.
+    pub session_dir: Option<&'a Path>,
     pub session: PiSessionSelector<'a>,
     pub agent_id: &'a str,
 }
@@ -65,14 +66,15 @@ pub(crate) fn build_pi_command_argv(
 ) -> Result<Vec<String>, ProviderError> {
     if request.executable.as_os_str().is_empty()
         || request.extension.as_os_str().is_empty()
-        || request.session_dir.as_os_str().is_empty()
+        || request
+            .session_dir
+            .is_some_and(|session_dir| session_dir.as_os_str().is_empty())
         || request.model.is_some_and(|model| model.trim().is_empty())
         || request.system_prompt.trim().is_empty()
         || request.agent_id.trim().is_empty()
     {
         return Err(ProviderError::Command(
-            "Pi command requires executable, extension, prompt, session directory, and agent id"
-                .to_string(),
+            "Pi command requires executable, extension, prompt, and agent id".to_string(),
         ));
     }
 
@@ -110,9 +112,13 @@ pub(crate) fn build_pi_command_argv(
     argv.extend([
         "--append-system-prompt".to_string(),
         request.system_prompt.to_string(),
-        "--session-dir".to_string(),
-        request.session_dir.to_string_lossy().into_owned(),
     ]);
+    if let Some(session_dir) = request.session_dir {
+        argv.extend([
+            "--session-dir".to_string(),
+            session_dir.to_string_lossy().into_owned(),
+        ]);
+    }
     // The shared lifecycle materializer always revalidates resume root/path/header.
     // Keep the pure argv builder usable before a fixture root is materialized, while
     // refusing a missing exact file once the recorded path's parent exists.

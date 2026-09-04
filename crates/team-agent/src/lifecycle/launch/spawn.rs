@@ -189,6 +189,7 @@ pub(super) fn spawn_agents(
                     tool_categories: &resolved_tool_refs,
                     team_mcp_tools: &["send_message", "report_result"],
                     mcp_config: &mcp_config,
+                    session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
                 },
             )
             .map_err(|e| LifecycleError::Provider(e.to_string()))?

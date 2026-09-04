@@ -816,6 +816,27 @@ pub(crate) fn resolve_pi_executable_chain(
     Ok((chain, models))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PiSessionScope {
+    Isolated,
+    NativeDefault,
+}
+
+/// Zero-argument managed Pi is the interactive leader entry. Only that route
+/// may use Pi's cwd-keyed native session root; every explicit or worker route
+/// remains Team Agent session-isolated.
+pub(crate) fn pi_leader_session_scope(
+    provider_args: &[String],
+    external_path: bool,
+    allow_nested_attach: bool,
+) -> PiSessionScope {
+    if provider_args.is_empty() && !external_path && !allow_nested_attach {
+        PiSessionScope::NativeDefault
+    } else {
+        PiSessionScope::Isolated
+    }
+}
+
 pub(crate) struct PiMaterializeRequest<'a> {
     pub workspace: &'a Path,
     pub team_id: &'a str,
@@ -826,11 +847,13 @@ pub(crate) struct PiMaterializeRequest<'a> {
     pub tool_categories: &'a [&'a str],
     pub team_mcp_tools: &'a [&'a str],
     pub mcp_config: &'a McpConfig,
+    pub session_scope: PiSessionScope,
 }
 
 /// ---
 /// purpose: 共享物化 Pi leader 与 TeamMate 的 wrapper、UUID 和 CommandPlan
-/// returns: fresh Pi CommandPlan，含 expected UUID 与 seat session root
+/// returns: fresh Pi CommandPlan；isolated seats carry their session root, while the
+///          interactive leader preserves Pi's native default root
 /// errors: resolver、exact model、wrapper 或 argv 构造失败时返回 ProviderError
 /// ---
 pub(crate) fn materialize_pi_plan(
@@ -863,8 +886,18 @@ fn materialize_pi_plan_with_session(
         .map(|model| select_exact_pi_model(&catalog, model))
         .transpose()?;
     let paths = pi_seat_paths(request.workspace, request.team_id, request.agent_id);
+    let session_dir = match request.session_scope {
+        PiSessionScope::Isolated => Some(paths.sessions.as_path()),
+        PiSessionScope::NativeDefault => None,
+    };
     let resume = if let Some((session_id, session_path, spawn_cwd)) = resume {
-        let session_root = std::fs::canonicalize(&paths.sessions).map_err(|error| {
+        let session_dir = session_dir.ok_or_else(|| {
+            ProviderError::ResumeUnavailable(format!(
+                "Pi session root is unavailable {}",
+                paths.sessions.display()
+            ))
+        })?;
+        let session_root = std::fs::canonicalize(session_dir).map_err(|error| {
             ProviderError::ResumeUnavailable(format!(
                 "Pi session root is unavailable {}: {error}",
                 paths.sessions.display()
@@ -885,8 +918,11 @@ fn materialize_pi_plan_with_session(
         let _ = spawn_cwd;
         Some((session_id, exact_path))
     } else {
-        std::fs::create_dir_all(&paths.sessions)
-            .map_err(|error| ProviderError::Io(format!("{}: {error}", paths.sessions.display())))?;
+        if let Some(session_dir) = session_dir {
+            std::fs::create_dir_all(session_dir).map_err(|error| {
+                ProviderError::Io(format!("{}: {error}", session_dir.display()))
+            })?;
+        }
         None
     };
     let candidate = candidate_from_mcp_config(request.mcp_config)?;
@@ -908,7 +944,7 @@ fn materialize_pi_plan_with_session(
             effort: request.effort,
             system_prompt: request.system_prompt,
             tool_categories: request.tool_categories,
-            session_dir: &paths.sessions,
+            session_dir,
             session: PiSessionSelector::Resume { path: &exact_path },
             agent_id: request.agent_id,
         })?;
@@ -922,7 +958,7 @@ fn materialize_pi_plan_with_session(
             effort: request.effort,
             system_prompt: request.system_prompt,
             tool_categories: request.tool_categories,
-            session_dir: &paths.sessions,
+            session_dir,
             session: PiSessionSelector::Fresh {
                 session_id: session_id.as_str(),
             },
@@ -933,7 +969,7 @@ fn materialize_pi_plan_with_session(
     Ok(CommandPlan {
         argv,
         expected_session_id,
-        provider_projects_root: Some(paths.sessions),
+        provider_projects_root: session_dir.map(Path::to_path_buf),
         managed_mcp_config: false,
     })
 }

@@ -162,6 +162,7 @@ pub(crate) fn prepare_leader_start_with_nested_attach(
         std::env::var_os("TMUX").is_some(),
         managed_client_attach_mode,
         managed_exec_provider,
+        allow_nested_attach,
     )?;
     Ok(PreparedLeaderStart {
         plan,
@@ -196,6 +197,7 @@ pub(crate) fn leader_start_plan_after_ambient_authority_check(
         in_tmux,
         managed_client_attach_mode,
         false,
+        false,
     )
 }
 
@@ -210,6 +212,7 @@ fn leader_start_plan_with_ambient_authority(
     in_tmux: bool,
     managed_client_attach_mode: Option<ManagedClientAttachMode>,
     managed_exec_provider: bool,
+    allow_nested_attach: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
@@ -327,6 +330,11 @@ fn leader_start_plan_with_ambient_authority(
                 tool_categories: &tools,
                 team_mcp_tools: &team_mcp_tools,
                 mcp_config: &mcp_config,
+                session_scope: crate::lifecycle::launch::pi_mcp::pi_leader_session_scope(
+                    provider_args,
+                    external_path,
+                    allow_nested_attach,
+                ),
             },
         )
         .map_err(|error| LeaderError::Start(error.to_string()))?

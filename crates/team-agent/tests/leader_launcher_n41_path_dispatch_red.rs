@@ -175,6 +175,11 @@ fn pi_zero_arg_verified_different_server_executes_in_current_pane() {
          provider_log={provider_log:?}"
     );
     assert!(
+        !provider_log.contains("--session-dir"),
+        "interactive zero-argument Pi leader must preserve Pi's native session root; \
+         provider_log={provider_log:?}"
+    );
+    assert!(
         !has_operation(&log, "new-session")
             && !has_operation(&log, "attach-session")
             && !has_operation(&log, "switch-client"),
@@ -188,15 +193,21 @@ fn pi_zero_arg_verified_same_server_also_executes_in_current_pane() {
     let case = Case::new("pi-same-server-current-pane");
     let output = case.run_in_pty(&["pi"], Ambient::SameServer);
     let log = case.tmux_log();
+    let provider_log = case.provider_log();
 
     assert_eq!(
-        observed_route(&log, &case.provider_log(), output.status.success()),
+        observed_route(&log, &provider_log, output.status.success()),
         ObservedRoute::DirectProvider,
         "the already verified caller pane is Pi's user-facing terminal, so same-server Pi \
          replaces the current process instead of switching away from it; tmux_log={log:?} \
          provider_log={:?} output={}",
-        case.provider_log(),
+        provider_log,
         output_text(&output)
+    );
+    assert!(
+        !provider_log.contains("--session-dir"),
+        "same-server interactive Pi leader must preserve Pi's native session root; \
+         provider_log={provider_log:?}"
     );
 }
 
@@ -251,12 +262,18 @@ fn pi_outside_tmux_keeps_standard_managed_attach() {
     let case = Case::new("pi-outside-tmux");
     let output = case.run_in_pty(&["pi"], Ambient::None);
 
+    let tmux_log = case.tmux_log();
     assert_eq!(
-        observed_route(&case.tmux_log(), &case.provider_log(), output.status.success()),
+        observed_route(&tmux_log, &case.provider_log(), output.status.success()),
         ObservedRoute::AttachSession,
         "outside-tmux Pi behavior remains the managed attach path; tmux_log={:?} output={}",
-        case.tmux_log(),
+        tmux_log,
         output_text(&output)
+    );
+    assert!(
+        !tmux_log.contains("--session-dir"),
+        "outside-tmux zero-argument Pi leader must preserve Pi's native session root; \
+         tmux_log={tmux_log:?}"
     );
 }
 
@@ -269,14 +286,20 @@ fn pi_explicit_nested_attach_keeps_managed_attach_semantics() {
         Ambient::DifferentServerLivePane,
     );
 
+    let tmux_log = case.tmux_log();
+    let provider_log = case.provider_log();
     assert_eq!(
-        observed_route(&case.tmux_log(), &case.provider_log(), output.status.success()),
+        observed_route(&tmux_log, &provider_log, output.status.success()),
         ObservedRoute::AttachSession,
         "explicit Pi nested attach must not be captured by the zero-arg current-pane route; \
          tmux_log={:?} provider_log={:?} output={}",
-        case.tmux_log(),
-        case.provider_log(),
+        tmux_log,
+        provider_log,
         output_text(&output)
+    );
+    assert!(
+        tmux_log.contains("--session-dir"),
+        "explicit nested Pi route must retain its Team Agent session root; tmux_log={tmux_log:?}"
     );
 }
 
