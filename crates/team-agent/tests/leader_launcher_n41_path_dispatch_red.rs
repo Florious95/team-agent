@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use serial_test::serial;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::Transport;
@@ -170,15 +170,13 @@ fn pi_zero_arg_verified_different_server_executes_in_current_pane() {
          tmux_log={log:?} provider_log={provider_log:?}"
     );
     assert!(
-        provider_log.lines().any(|line| line.starts_with("launch provider=pi args=")),
+        provider_log
+            .lines()
+            .any(|line| line.starts_with("launch provider=pi args=")),
         "direct plan must carry canonical Pi leader env and the materialized Pi argv; \
          provider_log={provider_log:?}"
     );
-    assert!(
-        !provider_log.contains("--session-dir"),
-        "interactive zero-argument Pi leader must preserve Pi's native session root; \
-         provider_log={provider_log:?}"
-    );
+    assert_no_pi_session_override(&provider_log, &case.workspace);
     assert!(
         !has_operation(&log, "new-session")
             && !has_operation(&log, "attach-session")
@@ -204,11 +202,7 @@ fn pi_zero_arg_verified_same_server_also_executes_in_current_pane() {
         provider_log,
         output_text(&output)
     );
-    assert!(
-        !provider_log.contains("--session-dir"),
-        "same-server interactive Pi leader must preserve Pi's native session root; \
-         provider_log={provider_log:?}"
-    );
+    assert_no_pi_session_override(&provider_log, &case.workspace);
 }
 
 #[test]
@@ -232,7 +226,10 @@ fn pi_zero_arg_invalid_ambient_tuple_refuses_before_launch() {
     let case = Case::new("pi-invalid-ambient-tuple");
     let output = case.run_in_pty(&["pi"], Ambient::InvalidTuple);
 
-    assert!(!output.status.success(), "invalid Pi tmux tuple must refuse");
+    assert!(
+        !output.status.success(),
+        "invalid Pi tmux tuple must refuse"
+    );
     assert_eq!(case.provider_launches(), 0, "provider must not launch");
     assert!(
         output_text(&output).contains("AmbientTmuxEndpointUnavailable"),
@@ -247,7 +244,10 @@ fn pi_zero_arg_workspace_mismatch_refuses_before_launch() {
     let case = Case::new("pi-workspace-mismatch");
     let output = case.run_in_pty(&["pi"], Ambient::DifferentServerWrongWorkspace);
 
-    assert!(!output.status.success(), "mismatched Pi pane cwd must refuse");
+    assert!(
+        !output.status.success(),
+        "mismatched Pi pane cwd must refuse"
+    );
     assert_eq!(case.provider_launches(), 0, "provider must not launch");
     assert!(
         output_text(&output).contains("PaneWorkspaceMismatch"),
@@ -270,11 +270,7 @@ fn pi_outside_tmux_keeps_standard_managed_attach() {
         tmux_log,
         output_text(&output)
     );
-    assert!(
-        !tmux_log.contains("--session-dir"),
-        "outside-tmux zero-argument Pi leader must preserve Pi's native session root; \
-         tmux_log={tmux_log:?}"
-    );
+    assert_no_pi_session_override(&tmux_log, &case.workspace);
 }
 
 #[test]
@@ -297,10 +293,38 @@ fn pi_explicit_nested_attach_keeps_managed_attach_semantics() {
         provider_log,
         output_text(&output)
     );
-    assert!(
-        tmux_log.contains("--session-dir"),
-        "explicit nested Pi route must retain its Team Agent session root; tmux_log={tmux_log:?}"
+    assert_pi_session_pair(&tmux_log, &case.workspace);
+}
+
+#[test]
+#[serial(env)]
+fn pi_explicit_model_uses_exact_leader_seat_session_root() {
+    let case = Case::new("pi-explicit-model-seat-root");
+    let output = case.run_in_pty(
+        &["pi", "--", "--model", "team-agent/qwen3.8-27b"],
+        Ambient::None,
     );
+
+    assert!(
+        output.status.success(),
+        "explicit Pi model launch must succeed: {}",
+        output_text(&output)
+    );
+    assert_pi_session_pair(&case.tmux_log(), &case.workspace);
+}
+
+#[test]
+#[serial(env)]
+fn pi_external_leader_uses_exact_leader_seat_session_root() {
+    let case = Case::new("pi-external-leader-seat-root");
+    let output = case.run_in_pty(&["pi", "--external-leader"], Ambient::None);
+
+    assert!(
+        output.status.success(),
+        "external Pi leader launch must succeed: {}",
+        output_text(&output)
+    );
+    assert_pi_session_pair(&case.tmux_log(), &case.workspace);
 }
 
 #[test]
@@ -696,6 +720,51 @@ fn observed_route(tmux_log: &str, provider_log: &str, success: bool) -> Observed
 fn has_operation(log: &str, operation: &str) -> bool {
     log.lines()
         .any(|line| line.split_whitespace().any(|token| token == operation))
+}
+
+fn pi_session_root(workspace: &Path) -> PathBuf {
+    workspace
+        .join(".team")
+        .join("runtime")
+        .join("pi")
+        .join("current")
+        .join("leader")
+        .join("sessions")
+}
+
+fn log_tokens(log: &str) -> Vec<&str> {
+    log.lines()
+        .flat_map(|line| line.split_whitespace())
+        .map(|token| token.trim_matches(|character| character == '\'' || character == '"'))
+        .collect()
+}
+
+fn assert_pi_session_pair(log: &str, workspace: &Path) {
+    let expected = pi_session_root(workspace);
+    let tokens = log_tokens(log);
+    assert!(
+        tokens.windows(2).any(|pair| {
+            pair[0] == "--session-dir" && pair[1] == expected.to_string_lossy().as_ref()
+        }),
+        "Pi isolated leader route must pass the exact seat session-dir pair; expected={} log={log:?}",
+        expected.display()
+    );
+}
+
+fn assert_no_pi_session_override(log: &str, workspace: &Path) {
+    let expected = pi_session_root(workspace);
+    let tokens = log_tokens(log);
+    assert!(
+        !tokens.iter().any(|token| *token == "--session-dir"),
+        "Native-default Pi leader must not receive --session-dir; log={log:?}"
+    );
+    assert!(
+        !tokens
+            .iter()
+            .any(|token| *token == expected.to_string_lossy().as_ref()),
+        "Native-default Pi leader must not receive the leader seat root; expected={} log={log:?}",
+        expected.display()
+    );
 }
 
 fn json_stdout(label: &str, output: &Output) -> Value {
