@@ -9,7 +9,8 @@ use crate::lifecycle::launch::pi_mcp::{
     validate_pi_adapter_identity, validate_pi_executable_chain, validate_pi_wrapper_source,
     write_pi_wrapper, write_pi_wrapper_with_publish,
 };
-use crate::lifecycle::{spawn_agents, start_agent_with_transport};
+use crate::lifecycle::launch::spawn_agents;
+use crate::lifecycle::start_agent_with_transport;
 use crate::model::enums::ProviderEffort;
 use crate::provider::session_scan::{CaptureSessionContext, scan_session_candidates_once};
 use crate::provider::{McpConfig, Provider, SessionId};
