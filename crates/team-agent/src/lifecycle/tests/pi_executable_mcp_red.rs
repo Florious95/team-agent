@@ -2,6 +2,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::lifecycle::launch::launch_with_transport_in_workspace;
 use crate::lifecycle::launch::pi_mcp::{
     PiAdapterIdentity, PiExecutableChain, PiExecutableFileType, PiMaterializeRequest,
     PiSessionScope, PiWrapperRequest, materialize_pi_plan, materialize_pi_resume_plan,
@@ -9,12 +10,10 @@ use crate::lifecycle::launch::pi_mcp::{
     validate_pi_adapter_identity, validate_pi_executable_chain, validate_pi_wrapper_source,
     write_pi_wrapper, write_pi_wrapper_with_publish,
 };
-use crate::lifecycle::launch::spawn_agents;
 use crate::lifecycle::start_agent_with_transport;
 use crate::model::enums::ProviderEffort;
 use crate::provider::session_scan::{CaptureSessionContext, scan_session_candidates_once};
 use crate::provider::{McpConfig, Provider, SessionId};
-use crate::transport::SessionName;
 use crate::transport::test_support::OfflineTransport;
 
 #[path = "../../../tests/support/hermetic.rs"]
@@ -722,10 +721,17 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     )
     .expect("parse worker Pi spec");
     std::fs::write(&spec_path, crate::model::yaml::dumps(&spec)).expect("write worker Pi spec");
-    let session = SessionName::new("team-workers");
     let transport = OfflineTransport::new();
-    let started = spawn_agents(&worker_workspace, &spec_path, &spec, &session, &transport)
-        .expect("worker fresh spawn construction");
+    let started = launch_with_transport_in_workspace(
+        &worker_workspace,
+        &spec_path,
+        false,
+        true,
+        true,
+        &transport,
+    )
+    .expect("worker fresh spawn construction")
+    .started;
     assert_eq!(started.len(), 2, "both Pi worker seats must be spawned");
     for worker in ["worker-a", "worker-b"] {
         let paths = pi_seat_paths(&worker_workspace, "team-a", worker);
