@@ -260,6 +260,7 @@ fn concurrent_first_claims_persist_shared_conditional_write_winner() {
 
     let nonce_file = hermetic.root().join("live-pane-nonce");
     let observers = hermetic.root().join("empty-observers");
+    let arrivals = hermetic.root().join("set-option-arrivals");
     let set_log = hermetic.root().join("set-option.log");
     let fake_tmux = shared_nonce_fake_tmux_bin(hermetic.root());
     let path = format!(
@@ -344,8 +345,17 @@ fn concurrent_first_claims_persist_shared_conditional_write_winner() {
 
     assert!(
         observers.join("a").is_file() && observers.join("b").is_file(),
-        "both claims must observe an empty live nonce before either conditional write; observers={:?}",
+        "both claims must lock an empty first inventory before either write; observers={:?}",
         std::fs::read_dir(&observers)
+            .map(|entries| entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+    assert!(
+        arrivals.join("a").is_file() && arrivals.join("b").is_file(),
+        "both claims must arrive at set-option before the nonce is published; arrivals={:?}",
+        std::fs::read_dir(&arrivals)
             .map(|entries| entries
                 .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
                 .collect::<Vec<_>>())
@@ -417,16 +427,53 @@ fn shared_nonce_fake_tmux_bin(root: &Path) -> PathBuf {
     let bin_dir = root.join("shared-nonce-fake-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let tmux = bin_dir.join("tmux");
-    // Pane-local only-if-unset, matching tmux `set-option -p -o`. Concurrent
-    // first claims rendezvous on empty list-panes observations via observer
-    // files (busy-wait on those files, not a sleep race), then serialize the
-    // conditional write with mkdir.
+    // Concurrent first claims: lock the first inventory as empty, wait until
+    // both set-option -o clients arrive before publishing, then mkdir-lock and
+    // rename a complete nonce into place. Waits are file rendezvous with a
+    // wall-clock deadline, not sleep-based races.
     let script = r##"#!/bin/sh
 root=$(dirname "$FAKE_NONCE_FILE")
 observers="$root/empty-observers"
+arrivals="$root/set-option-arrivals"
 setlog="$root/set-option.log"
 lockdir="$root/nonce.lockdir"
 needed=${FAKE_EMPTY_NEEDED:-2}
+deadline=${FAKE_WAIT_DEADLINE_SECS:-3}
+
+file_count() {
+  ls -1 "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+
+wait_for_files() {
+  dir=$1
+  need=$2
+  what=$3
+  mkdir -p "$dir"
+  start=$(date +%s)
+  while :; do
+    have=$(file_count "$dir")
+    [ -n "$have" ] || have=0
+    if [ "$have" -ge "$need" ]; then
+      return 0
+    fi
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$deadline" ]; then
+      printf 'fake-tmux fixture timeout: %s have=%s need=%s\n' "$what" "$have" "$need" >&2
+      exit 42
+    fi
+  done
+}
+
+acquire_lock() {
+  start=$(date +%s)
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$deadline" ]; then
+      printf 'fake-tmux fixture timeout: nonce lock\n' >&2
+      exit 42
+    fi
+  done
+}
 
 read_nonce() {
   if [ -f "$FAKE_NONCE_FILE" ]; then
@@ -434,22 +481,37 @@ read_nonce() {
   fi
 }
 
-wait_for_empty_observers() {
-  [ -n "$FAKE_EMPTY_OBSERVER_ID" ] || return 0
-  nonce=$(read_nonce)
-  [ -z "$nonce" ] || return 0
-  [ -f "$observers/$FAKE_EMPTY_OBSERVER_ID" ] && return 0
-  mkdir -p "$observers"
-  printf 'empty\n' > "$observers/$FAKE_EMPTY_OBSERVER_ID"
-  while [ "$(ls -1 "$observers" | wc -l | tr -d ' ')" -lt "$needed" ]; do
-    :
-  done
+publish_nonce() {
+  staging="$root/nonce.staging.$$"
+  if ! printf '%s' "$1" > "$staging"; then
+    rm -f "$staging"
+    rmdir "$lockdir" 2>/dev/null
+    printf 'fake-tmux fixture error: staging nonce write failed\n' >&2
+    exit 42
+  fi
+  if ! mv "$staging" "$FAKE_NONCE_FILE"; then
+    rm -f "$staging"
+    rmdir "$lockdir" 2>/dev/null
+    printf 'fake-tmux fixture error: nonce publish failed\n' >&2
+    exit 42
+  fi
 }
 
 case " $* " in
   *" list-panes "*)
-    wait_for_empty_observers
-    nonce=$(read_nonce)
+    nonce=""
+    if [ -n "$FAKE_EMPTY_OBSERVER_ID" ]; then
+      if [ ! -f "$observers/$FAKE_EMPTY_OBSERVER_ID" ]; then
+        mkdir -p "$observers"
+        printf 'empty\n' > "$observers/$FAKE_EMPTY_OBSERVER_ID"
+        wait_for_files "$observers" "$needed" "empty list-panes observers"
+        nonce=""
+      else
+        nonce=$(read_nonce)
+      fi
+    else
+      nonce=$(read_nonce)
+    fi
     cwd="${FAKE_PANE_CWD:-/tmp}"
     printf '%%9\tteam-current\t0\tleader\t0\t/dev/ttys001\tcodex\t1\t%s\t1\t0\t4242\t%s\n' "$cwd" "$nonce"
     exit 0
@@ -462,21 +524,19 @@ case " $* " in
       last=$arg
     done
     printf 'id=%s o=%s nonce=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" "$has_o" "$last" >> "$setlog"
-    while ! mkdir "$lockdir" 2>/dev/null; do
-      if [ "$has_o" = 1 ] && [ -s "$FAKE_NONCE_FILE" ]; then
-        printf 'already_set id=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" >> "$setlog"
-        echo "already set: @team_agent_pane_binding_nonce" >&2
-        exit 1
-      fi
-      :
-    done
-    if [ "$has_o" = 1 ] && [ -s "$FAKE_NONCE_FILE" ]; then
+    if [ -n "$FAKE_EMPTY_OBSERVER_ID" ]; then
+      mkdir -p "$arrivals"
+      printf 'here\n' > "$arrivals/$FAKE_EMPTY_OBSERVER_ID"
+      wait_for_files "$arrivals" "$needed" "set-option arrivals"
+    fi
+    acquire_lock
+    if [ "$has_o" = 1 ] && [ -f "$FAKE_NONCE_FILE" ]; then
       rmdir "$lockdir"
       printf 'already_set id=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" >> "$setlog"
       echo "already set: @team_agent_pane_binding_nonce" >&2
       exit 1
     fi
-    printf '%s' "$last" > "$FAKE_NONCE_FILE"
+    publish_nonce "$last"
     printf 'wrote id=%s nonce=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" "$last" >> "$setlog"
     rmdir "$lockdir"
     exit 0
