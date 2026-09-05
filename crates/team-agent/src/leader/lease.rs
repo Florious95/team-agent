@@ -1371,6 +1371,7 @@ fn prior_provider(state: &Value) -> Provider {
         .unwrap_or(Provider::Codex)
 }
 
+#[derive(Clone)]
 struct LeaderClaimTarget {
     provider: Provider,
     leader_session_uuid: Option<crate::model::ids::LeaderSessionUuid>,
@@ -2682,6 +2683,36 @@ mod tests {
         assert_eq!(second.status, LeaseStatus::AlreadyBound);
         assert_eq!(
             second.receiver.as_ref().and_then(|receiver| receiver.binding_nonce.as_deref()),
+            Some("live-shared-nonce")
+        );
+
+        let internal_target = LeaderClaimTarget {
+            scope_authority: None,
+            authorized_team_workspace: None,
+            binding_nonce: None,
+            team_id: Some("internal".to_string()),
+            ..target.clone()
+        };
+        let internal = claim_lease_no_incident_with_target(
+            &workspace,
+            &mut state,
+            Some("internal"),
+            &TeamKey::new("internal"),
+            &caller,
+            false,
+            &event_log,
+            &liveness,
+            Some(&internal_target),
+            internal_target.pane_info.as_ref(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(internal.status, LeaseStatus::AlreadyBound);
+        assert_eq!(
+            internal
+                .receiver
+                .as_ref()
+                .and_then(|receiver| receiver.binding_nonce.as_deref()),
             Some("live-shared-nonce")
         );
 
