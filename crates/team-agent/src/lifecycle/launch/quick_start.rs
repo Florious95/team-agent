@@ -1265,6 +1265,45 @@ mod fresh_quick_start_leader_binding_tests {
     }
 
     #[test]
+    fn live_other_scope_refusal_clears_seeded_owner_binding() {
+        let workspace = workspace("live-other-scope-seeded");
+        let endpoint = "/private/tmp/tmux-test/default";
+        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        state["workspace"] = json!(workspace);
+        state["team_owner"] = json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1
+        });
+        state["leader_receiver"] = json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1,
+            "tmux_socket": endpoint
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut ops = MockOps {
+            live_elsewhere: true,
+            ..MockOps::default()
+        };
+
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            &mut ops
+        ));
+        let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert!(
+            after.get("leader_receiver").is_none() && after.get("team_owner").is_none(),
+            "refused fresh binding must not leave an already_bound owner behind: {after}"
+        );
+    }
+
+    #[test]
     fn attach_registry_or_readback_failure_rolls_back_exact_state_bytes() {
         for (case, mut ops) in [
             (
