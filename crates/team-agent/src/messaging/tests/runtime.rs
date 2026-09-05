@@ -3421,3 +3421,173 @@ fn gate054_fallback_pane_grep_guard_no_cross_server_chain_when_socket_recorded()
         "fallback injection must consume the shared resolver's typed channel"
     );
 }
+
+fn delivery_blocked_channel_reasons(ws: &std::path::Path) -> Vec<String> {
+    EventLog::new(ws)
+        .tail(80)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.get("event") == Some(&serde_json::json!("leader_receiver.delivery_blocked")))
+        .filter_map(|event| {
+            event
+                .get("channel_reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn live_leader_pane(ws: &std::path::Path, pane_id: &str) -> PaneInfo {
+    let mut pane = pane_info(pane_id, "team-current", "leader");
+    pane.current_path = Some(ws.to_path_buf());
+    pane
+}
+
+#[test]
+fn owner_projection_null_fallback_projects_nested_current_receiver() {
+    let ws = tmp_ws("proj-null-current");
+    let socket = "/tmp/ta-proj-null-current.sock";
+    let state = serde_json::json!({
+        "active_team_key": "current",
+        "team_key": "current",
+        "teams": {
+            "current": {
+                "team_key": "current",
+                "leader_receiver": {
+                    "status": "attached",
+                    "mode": "direct_tmux",
+                    "pane_id": "%9",
+                    "tmux_socket": socket
+                },
+                "agents": {}
+            }
+        },
+        "agents": {}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(None, "w1", "leader", "nested current", None, false, Some("current"))
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![live_leader_pane(&ws, "%9")]);
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &serde_json::json!({}))
+        .unwrap();
+
+    assert!(
+        !delivery_blocked_channel_reasons(&ws)
+            .iter()
+            .any(|reason| reason == "receiver_missing"),
+        "fresh Null fallback must project teams.current, not return Null; out={out:?} reasons={:?}",
+        delivery_blocked_channel_reasons(&ws)
+    );
+    assert_ne!(
+        out.channel.as_deref(),
+        Some("rebind_required"),
+        "nested current receiver must be visible to deliver_pending; out={out:?}"
+    );
+}
+
+#[test]
+fn owner_projection_non_object_does_not_match_current() {
+    assert!(
+        !crate::messaging::delivery::top_level_state_matches_owner_team(
+            &serde_json::Value::Null,
+            "current"
+        ),
+        "Null must not match current through team_state_key default"
+    );
+    assert!(
+        !crate::messaging::delivery::top_level_state_matches_owner_team(
+            &serde_json::json!([]),
+            "current"
+        ),
+        "non-object must not match current"
+    );
+}
+
+#[test]
+fn owner_projection_legacy_top_level_receiver_survives_null_fallback() {
+    let ws = tmp_ws("proj-legacy-top");
+    let socket = "/tmp/ta-proj-legacy-top.sock";
+    let state = serde_json::json!({
+        "active_team_key": "current",
+        "leader_receiver": {
+            "status": "attached",
+            "mode": "direct_tmux",
+            "pane_id": "%3",
+            "tmux_socket": socket
+        },
+        "agents": {}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(None, "w1", "leader", "legacy top", None, false, Some("current"))
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![live_leader_pane(&ws, "%3")]);
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &serde_json::json!({}))
+        .unwrap();
+
+    assert!(
+        !delivery_blocked_channel_reasons(&ws)
+            .iter()
+            .any(|reason| reason == "receiver_missing"),
+        "legacy top-level receiver must remain usable; out={out:?}"
+    );
+}
+
+#[test]
+fn owner_projection_missing_selected_does_not_borrow_sibling() {
+    let ws = tmp_ws("proj-no-sibling");
+    let socket = "/tmp/ta-proj-no-sibling.sock";
+    let state = serde_json::json!({
+        "active_team_key": "alpha",
+        "team_key": "alpha",
+        "teams": {
+            "alpha": {
+                "team_key": "alpha",
+                "agents": {}
+            },
+            "beta": {
+                "team_key": "beta",
+                "leader_receiver": {
+                    "status": "attached",
+                    "mode": "direct_tmux",
+                    "pane_id": "%beta",
+                    "tmux_socket": socket
+                },
+                "agents": {}
+            }
+        },
+        "agents": {}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(None, "w1", "leader", "alpha has no receiver", None, false, Some("alpha"))
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![live_leader_pane(&ws, "%beta")]);
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &serde_json::json!({}))
+        .unwrap();
+
+    assert!(
+        delivery_blocked_channel_reasons(&ws)
+            .iter()
+            .any(|reason| reason == "receiver_missing"),
+        "alpha must not borrow beta's receiver; out={out:?} reasons={:?}",
+        delivery_blocked_channel_reasons(&ws)
+    );
+    assert_eq!(transport.inject_targets().len(), 0, "must not inject into the sibling pane");
+}
