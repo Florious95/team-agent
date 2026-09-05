@@ -8,6 +8,7 @@
 - PR base：`release/0.5.74-startup-routing`
 - 冻结 base SHA：`f2926d467f45d684549054bcc562607a255e6eea`
 - 修复提交：`79d7930aeb65f3ad2987d554913f1fb1aaa70400`
+- PR 当前 head：`ef6e07c5637a04512a1db924ae6bc63a956a3287`
 
 ## 根因与范围
 
@@ -26,6 +27,7 @@ installed CLI 0.5.72 对 Pi role 的 `provider_builtin` 只做通用 canonical �
 ## 验证记录
 
 - `git diff --check`：通过。
+- `node npm/check-skill-links.mjs --root skills/team-agent`：通过，检查 5 个 Markdown 文件。
 - installed `team-agent 0.5.72` 复现：Pi role（`model: openai-codex/gpt-5.6-luna`、`mcp_team`、`fs_read`、`provider_builtin`）执行 `team-agent compile --team ... --out ... --json`，退出码 0，生成 spec 含 `provider_builtin`；这是修复前证据。
 - grok-bot-tests preflight：执行，成功；Rust/Cargo 1.95.0，cargo-fmt/rustfmt 1.9.0，nproc=8，远端可用磁盘满足门槛。
 - grok-bot-tests sync：全新单次 unit `gb-79d7930a-pi-tool-contract-a1` 超时 180 秒；随后 `status.sh` 为 `State=missing`，未启动 Cargo。
