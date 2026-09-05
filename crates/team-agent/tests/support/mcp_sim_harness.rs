@@ -259,6 +259,7 @@ impl McpSimHarness {
         let worker_a = self.panes["worker_a"].as_str();
         let worker_b = self.panes["worker_b"].as_str();
         let worker_c = self.panes["worker_c"].as_str();
+        let session_name = self.session.as_str();
         // 0.4.0 refactor: lifecycle ops (stop_agent, restart, reset) now
         // run through `ensure_owner_allowed_for_state`. The MCP sim spawns
         // `worker_b` as the caller, so seed the team owner pane to worker_b
@@ -268,11 +269,40 @@ impl McpSimHarness {
         // `team_owner_mismatch`. The test contract is about the LIFECYCLE
         // side effect, not the owner gate (which has its own dedicated
         // tests in state/owner_gate.rs).
+        //
+        // Owner-team delivery projects `teams.<owner>` as the inject view
+        // (`project_top_level_view`). Nested teamA must therefore carry the
+        // same session_name and worker pane/window bindings as the current
+        // derived snapshot; status-only nested agents make peer broadcast
+        // persist rows but resolve SessionWindow with an empty session, so
+        // worker_b/worker_c panes never show the canary. Leader inject still
+        // uses top-level `leader_receiver` via carry; do not copy that into
+        // nested teamA (`clear_leader_receiver_binding` only clears top-level).
+        let agents = json!({
+            "worker_a": {
+                "provider": "fake",
+                "status": "running",
+                "window": "worker_a",
+                "pane_id": worker_a
+            },
+            "worker_b": {
+                "provider": "fake",
+                "status": "running",
+                "window": "worker_b",
+                "pane_id": worker_b
+            },
+            "worker_c": {
+                "provider": "fake",
+                "status": "running",
+                "window": "worker_c",
+                "pane_id": worker_c
+            }
+        });
         team_agent::state::persist::save_runtime_state(
             &self.workspace,
             &json!({
                 "active_team_key": "teamA",
-                "session_name": self.session.as_str(),
+                "session_name": session_name,
                 "leader": {"id": "leader"},
                 "team_owner": {
                     "owner_epoch": 1,
@@ -286,33 +316,11 @@ impl McpSimHarness {
                     "provider": "codex",
                     "leader_session_uuid": "leader-session-team-a"
                 },
-                "agents": {
-                    "worker_a": {
-                        "provider": "fake",
-                        "status": "running",
-                        "window": "worker_a",
-                        "pane_id": worker_a
-                    },
-                    "worker_b": {
-                        "provider": "fake",
-                        "status": "running",
-                        "window": "worker_b",
-                        "pane_id": worker_b
-                    },
-                    "worker_c": {
-                        "provider": "fake",
-                        "status": "running",
-                        "window": "worker_c",
-                        "pane_id": worker_c
-                    }
-                },
+                "agents": agents,
                 "teams": {
                     "teamA": {
-                        "agents": {
-                            "worker_a": {"status": "running"},
-                            "worker_b": {"status": "running"},
-                            "worker_c": {"status": "running"}
-                        },
+                        "session_name": session_name,
+                        "agents": agents,
                         "tasks": [
                             {"id": "task_mcp", "assignee": "worker_a", "status": "pending"}
                         ]

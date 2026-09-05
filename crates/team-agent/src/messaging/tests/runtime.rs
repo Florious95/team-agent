@@ -3585,3 +3585,73 @@ fn owner_projection_missing_selected_does_not_borrow_sibling() {
     );
     assert_eq!(transport.inject_targets().len(), 0, "must not inject into the sibling pane");
 }
+
+#[test]
+fn owner_projection_peer_inject_uses_nested_worker_pane_not_top_level() {
+    let ws = tmp_ws("proj-peer-nested");
+    let state = serde_json::json!({
+        "active_team_key": "teamA",
+        "session_name": "team-top",
+        "agents": {
+            "worker_b": {
+                "provider": "fake",
+                "status": "running",
+                "window": "worker_b",
+                "pane_id": "%top-b"
+            }
+        },
+        "teams": {
+            "teamA": {
+                "session_name": "team-nested",
+                "agents": {
+                    "worker_b": {
+                        "provider": "fake",
+                        "status": "running",
+                        "window": "worker_b",
+                        "pane_id": "%nested-b"
+                    }
+                }
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(
+            None,
+            "worker_a",
+            "worker_b",
+            "MCP_SIM_BROADCAST_CANARY",
+            None,
+            false,
+            Some("teamA"),
+        )
+        .unwrap();
+    let transport = OfflineTransport::new().with_targets(vec![
+        pane_info("%top-b", "team-top", "worker_b"),
+        pane_info("%nested-b", "team-nested", "worker_b"),
+    ]);
+
+    let out = deliver_pending_message(
+        &ws,
+        &store,
+        &transport,
+        &message_id,
+        &log,
+        &serde_json::json!({}),
+    )
+    .unwrap();
+
+    let targets = transport.inject_targets();
+    assert!(
+        !targets.is_empty(),
+        "owner teamA peer inject must attempt the nested worker pane; out={out:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .all(|target| target == &Target::Pane(PaneId::new("%nested-b"))),
+        "owner teamA peer inject must select nested worker pane %nested-b, not top-level %top-b; out={out:?} targets={targets:?}"
+    );
+}
