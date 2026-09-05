@@ -142,6 +142,50 @@ fn different_pane_entries_do_not_unbind_each_other() {
 
 #[test]
 #[serial(env)]
+fn same_pane_different_socket_entries_remain_attached_across_teams() {
+    let before = HermeticTestEnv::real_home_registry_snapshot();
+    let env = HermeticTestEnv::enter("lc3-cross-socket-same-pane");
+    env.scrub_tmux();
+    let ws_a = env.workspace("a");
+    let ws_b = env.workspace("b");
+    let socket_a = "/tmp/lc3-socket-a";
+    let socket_b = "/tmp/lc3-socket-b";
+    seed_attached_state(&ws_a, "teama", "%1", socket_a);
+    seed_attached_state(&ws_b, "teamb", "%1", socket_b);
+    let a = build_entry(
+        &ws_a,
+        "teama",
+        "direct_tmux",
+        json!({"status":"attached","pane_id":"%1","tmux_socket":socket_a}),
+        1,
+        "claim-leader",
+        "2026-08-18T00:00:00Z".to_string(),
+    );
+    let b = build_entry(
+        &ws_b,
+        "teamb",
+        "direct_tmux",
+        json!({"status":"attached","pane_id":"%1","tmux_socket":socket_b}),
+        1,
+        "claim-leader",
+        "2026-08-18T00:00:00Z".to_string(),
+    );
+    let a_path = write_entry_best_effort(&a).expect("write a");
+    assert!(write_entry_best_effort(&b).is_some(), "write b");
+    register_binding_from_state_best_effort(&ws_b, Some("teamb"), "claim-leader")
+        .expect("register b");
+    let persisted_a: team_agent::leader::registry::LeaderRegistryEntry =
+        serde_json::from_slice(&fs::read(a_path).expect("read a registry entry"))
+            .expect("decode a registry entry");
+    assert_eq!(
+        persisted_a.status, "attached",
+        "pane ids are tmux-server local; independent sockets must not displace each other"
+    );
+    env.assert_real_registry_unchanged(before);
+}
+
+#[test]
+#[serial(env)]
 fn same_pane_same_socket_entries_remain_attached_across_teams() {
     let before = HermeticTestEnv::real_home_registry_snapshot();
     let env = HermeticTestEnv::enter("lc3-same-pane");

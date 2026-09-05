@@ -129,6 +129,9 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         .get("status")
         .and_then(Value::as_str)
         .map(str::to_string);
+    if !args.detail {
+        lifecycle_port::compact_quick_start_value(&mut value);
+    }
     if args.json
         || value.get("ok").and_then(Value::as_bool) == Some(false)
         || session_capture_incomplete
@@ -1403,15 +1406,16 @@ pub fn cmd_shutdown(args: &ShutdownArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_restart`(`commands.py:344`)。
 pub fn cmd_restart(args: &RestartArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        lifecycle_port::restart(
-            &args.workspace,
-            args.allow_fresh,
-            args.team.as_deref(),
-            args.session_converge_deadline_ms,
-        )?,
-        args.json,
-    ))
+    let mut value = lifecycle_port::restart(
+        &args.workspace,
+        args.allow_fresh,
+        args.team.as_deref(),
+        args.session_converge_deadline_ms,
+    )?;
+    if !args.detail {
+        lifecycle_port::compact_restart_value(&mut value);
+    }
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_start_agent`(`commands.py:348`)。

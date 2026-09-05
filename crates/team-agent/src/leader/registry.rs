@@ -243,12 +243,6 @@ pub fn register_binding_from_state_best_effort(
     );
     let event_log = crate::event_log::EventLog::new(workspace);
     let write_result = write_entry_best_effort(&entry);
-    // Fresh quick-start is acquisition-only: it must never displace another
-    // same-pane row. Its caller performs a validated-LIVE check before this
-    // write; manual/restart ownership paths keep existing behavior.
-    if write_result.is_some() && source != "quick-start" {
-        let _ = mark_displaced_same_pane_entries_unbound(&entry);
-    }
     let status = if let Some(path) = &write_result {
         let _ = event_log.write(
             EVENT_REGISTERED,
@@ -279,72 +273,6 @@ pub fn register_binding_from_state_best_effort(
         source: source.to_string(),
         owner_epoch: entry.owner_epoch,
     })
-}
-
-/// Stored registry status after another workspace claimed the same pane.
-pub const REGISTRY_STATUS_UNBOUND: &str = "unbound";
-
-/// When workspace B claims a pane on another tmux socket, an attached registry
-/// row naming that physical pane is no longer deliverable. Mark that row
-/// unbound, while allowing one pane on one socket to manage multiple Teams.
-/// Does not change pane-side authorization storage.
-pub fn mark_displaced_same_pane_entries_unbound(winner: &LeaderRegistryEntry) -> Vec<PathBuf> {
-    let Some(winner_pane) = winner
-        .channel
-        .get("pane_id")
-        .and_then(Value::as_str)
-        .filter(|pane| !pane.is_empty())
-    else {
-        return Vec::new();
-    };
-    let winner_socket = winner
-        .channel
-        .get("tmux_socket")
-        .and_then(Value::as_str)
-        .filter(|socket| !socket.is_empty());
-    let mut displaced = Vec::new();
-    for (path, mut entry) in read_all_entries() {
-        if entry.workspace_hash == winner.workspace_hash && entry.team_key == winner.team_key {
-            continue;
-        }
-        if entry.status != "attached" {
-            continue;
-        }
-        let Some(pane) = entry
-            .channel
-            .get("pane_id")
-            .and_then(Value::as_str)
-            .filter(|pane| !pane.is_empty())
-        else {
-            continue;
-        };
-        if pane != winner_pane {
-            continue;
-        }
-        let Some(socket) = entry
-            .channel
-            .get("tmux_socket")
-            .and_then(Value::as_str)
-            .filter(|socket| !socket.is_empty())
-        else {
-            continue;
-        };
-        let Some(winner_socket) = winner_socket else {
-            continue;
-        };
-        // A leader pane is a valid shared owner identity within one tmux
-        // server: one pane may launch independent Teams. Only a pane on a
-        // different socket can be a displaced physical binding.
-        if socket == winner_socket {
-            continue;
-        }
-        entry.status = REGISTRY_STATUS_UNBOUND.to_string();
-        entry.updated_at = chrono::Utc::now().to_rfc3339();
-        if write_entry_best_effort(&entry).is_some() {
-            displaced.push(path);
-        }
-    }
-    displaced
 }
 
 fn entry_filename(entry: &LeaderRegistryEntry) -> String {
@@ -548,46 +476,6 @@ pub fn list_validated_with_gc() -> Vec<(LeaderRegistryEntry, &'static str, Optio
         out.push((entry, status, reason));
     }
     out
-}
-
-/// Refuse a fresh quick-start binding when the caller pane is already a
-/// canonically LIVE receiver on another tmux socket. A pane may intentionally
-/// back multiple workspace/Team rows on the same socket; this is read-only:
-/// quick-start never displaces or takes over an existing binding.
-#[must_use]
-pub(crate) fn live_same_pane_binding_elsewhere(
-    pane_id: &str,
-    endpoint: Option<&str>,
-    workspace: &Path,
-    team_key: &str,
-) -> bool {
-    let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    list_validated_no_gc().into_iter().any(|(entry, status, _)| {
-        if status != "LIVE"
-            || entry
-                .channel
-                .get("pane_id")
-                .and_then(Value::as_str)
-                != Some(pane_id)
-            || (entry.workspace == workspace && entry.team_key == team_key)
-        {
-            return false;
-        }
-        // A pane id is only comparable within its tmux server. Sharing the
-        // caller pane across Teams on that server is intentional; a matching
-        // pane id on another socket remains a distinct live binding.
-        match (
-            endpoint.filter(|value| !value.is_empty()),
-            entry
-                .channel
-                .get("tmux_socket")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty()),
-        ) {
-            (Some(caller), Some(recorded)) => caller != recorded,
-            _ => true,
-        }
-    })
 }
 
 /// Same as `list_validated_with_gc` but preserves all entries. `send
