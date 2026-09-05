@@ -378,6 +378,63 @@ impl TmuxBackend {
         self.run_ok(&argv)
     }
 
+    /// Set the pane-instance nonce only when the pane option is unset. tmux
+    /// serializes commands at the server, so concurrent first claims have one
+    /// winner; losers read back that winner instead of persisting a stale nonce.
+    pub(crate) fn set_pane_binding_nonce_if_unset(
+        &self,
+        pane: &PaneId,
+        nonce: &str,
+    ) -> Result<String, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "set-option".to_string(),
+            "-p".to_string(),
+            "-o".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            TMUX_PANE_BINDING_NONCE_OPTION.to_string(),
+            nonce.to_string(),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if output.success {
+            return Ok(nonce.to_string());
+        }
+        if output
+            .stderr
+            .to_ascii_lowercase()
+            .contains("already set")
+        {
+            return self.read_pane_binding_nonce(pane);
+        }
+        Err(subprocess_error(argv, output))
+    }
+
+    fn read_pane_binding_nonce(&self, pane: &PaneId) -> Result<String, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "show-options".to_string(),
+            "-p".to_string(),
+            "-v".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            TMUX_PANE_BINDING_NONCE_OPTION.to_string(),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if !output.success {
+            return Err(subprocess_error(argv, output));
+        }
+        let nonce = output.stdout.trim();
+        if nonce.is_empty() {
+            return Err(TransportError::Subprocess {
+                argv,
+                code: output.code,
+                stderr: "pane binding nonce remained unset after conditional write".to_string(),
+            });
+        }
+        Ok(nonce.to_string())
+    }
+
     /// Backend with an injected runner (tests: canned/recording tmux output). Shared default socket.
     /// ---
     /// purpose: 用注入的 runner 构造后端(测试用录制/罐装 tmux 输出),绑共享默认 socket
