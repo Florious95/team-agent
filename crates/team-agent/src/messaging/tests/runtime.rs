@@ -1,5 +1,6 @@
 use super::*;
 use crate::transport::test_support::OfflineTransport;
+use crate::transport::{PaneId, Target};
 
 fn pane_info(pane_id: &str, session: &str, window: &str) -> PaneInfo {
     PaneInfo {
@@ -3446,7 +3447,6 @@ fn live_leader_pane(ws: &std::path::Path, pane_id: &str) -> PaneInfo {
 #[test]
 fn owner_projection_null_fallback_projects_nested_current_receiver() {
     let ws = tmp_ws("proj-null-current");
-    let socket = "/tmp/ta-proj-null-current.sock";
     let state = serde_json::json!({
         "active_team_key": "current",
         "team_key": "current",
@@ -3456,8 +3456,7 @@ fn owner_projection_null_fallback_projects_nested_current_receiver() {
                 "leader_receiver": {
                     "status": "attached",
                     "mode": "direct_tmux",
-                    "pane_id": "%9",
-                    "tmux_socket": socket
+                    "pane_id": "%9"
                 },
                 "agents": {}
             }
@@ -3470,9 +3469,7 @@ fn owner_projection_null_fallback_projects_nested_current_receiver() {
     let message_id = store
         .create_message(None, "w1", "leader", "nested current", None, false, Some("current"))
         .unwrap();
-    let transport = OfflineTransport::new()
-        .with_tmux_endpoint(socket)
-        .with_targets(vec![live_leader_pane(&ws, "%9")]);
+    let transport = OfflineTransport::new().with_targets(vec![live_leader_pane(&ws, "%9")]);
 
     let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &serde_json::json!({}))
         .unwrap();
@@ -3484,10 +3481,10 @@ fn owner_projection_null_fallback_projects_nested_current_receiver() {
         "fresh Null fallback must project teams.current, not return Null; out={out:?} reasons={:?}",
         delivery_blocked_channel_reasons(&ws)
     );
-    assert_ne!(
-        out.channel.as_deref(),
-        Some("rebind_required"),
-        "nested current receiver must be visible to deliver_pending; out={out:?}"
+    assert_eq!(
+        transport.inject_targets(),
+        vec![Target::Pane(PaneId::new("%9"))],
+        "nested current receiver must select pane %9; out={out:?}"
     );
 }
 
@@ -3512,14 +3509,12 @@ fn owner_projection_non_object_does_not_match_current() {
 #[test]
 fn owner_projection_legacy_top_level_receiver_survives_null_fallback() {
     let ws = tmp_ws("proj-legacy-top");
-    let socket = "/tmp/ta-proj-legacy-top.sock";
     let state = serde_json::json!({
         "active_team_key": "current",
         "leader_receiver": {
             "status": "attached",
             "mode": "direct_tmux",
-            "pane_id": "%3",
-            "tmux_socket": socket
+            "pane_id": "%3"
         },
         "agents": {}
     });
@@ -3529,9 +3524,7 @@ fn owner_projection_legacy_top_level_receiver_survives_null_fallback() {
     let message_id = store
         .create_message(None, "w1", "leader", "legacy top", None, false, Some("current"))
         .unwrap();
-    let transport = OfflineTransport::new()
-        .with_tmux_endpoint(socket)
-        .with_targets(vec![live_leader_pane(&ws, "%3")]);
+    let transport = OfflineTransport::new().with_targets(vec![live_leader_pane(&ws, "%3")]);
 
     let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &serde_json::json!({}))
         .unwrap();
@@ -3542,12 +3535,16 @@ fn owner_projection_legacy_top_level_receiver_survives_null_fallback() {
             .any(|reason| reason == "receiver_missing"),
         "legacy top-level receiver must remain usable; out={out:?}"
     );
+    assert_eq!(
+        transport.inject_targets(),
+        vec![Target::Pane(PaneId::new("%3"))],
+        "legacy top-level receiver must select pane %3; out={out:?}"
+    );
 }
 
 #[test]
 fn owner_projection_missing_selected_does_not_borrow_sibling() {
     let ws = tmp_ws("proj-no-sibling");
-    let socket = "/tmp/ta-proj-no-sibling.sock";
     let state = serde_json::json!({
         "active_team_key": "alpha",
         "team_key": "alpha",
@@ -3561,8 +3558,7 @@ fn owner_projection_missing_selected_does_not_borrow_sibling() {
                 "leader_receiver": {
                     "status": "attached",
                     "mode": "direct_tmux",
-                    "pane_id": "%beta",
-                    "tmux_socket": socket
+                    "pane_id": "%beta"
                 },
                 "agents": {}
             }
@@ -3575,9 +3571,7 @@ fn owner_projection_missing_selected_does_not_borrow_sibling() {
     let message_id = store
         .create_message(None, "w1", "leader", "alpha has no receiver", None, false, Some("alpha"))
         .unwrap();
-    let transport = OfflineTransport::new()
-        .with_tmux_endpoint(socket)
-        .with_targets(vec![live_leader_pane(&ws, "%beta")]);
+    let transport = OfflineTransport::new().with_targets(vec![live_leader_pane(&ws, "%beta")]);
 
     let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &serde_json::json!({}))
         .unwrap();

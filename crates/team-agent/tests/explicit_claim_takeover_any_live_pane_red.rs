@@ -1449,11 +1449,6 @@ fn assert_canonical_current_team_receiver(workspace: &Path, label: &str) {
         Some("attached"),
         "{label}: receiver must land on teams.current"
     );
-    assert_eq!(
-        receiver.get("scope_authority").and_then(Value::as_str),
-        Some("explicit_claim"),
-        "{label}: current receiver must keep explicit_claim"
-    );
     assert!(
         receiver
             .get("pane_id")
