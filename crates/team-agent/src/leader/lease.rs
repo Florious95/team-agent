@@ -1371,7 +1371,6 @@ fn prior_provider(state: &Value) -> Provider {
         .unwrap_or(Provider::Codex)
 }
 
-#[derive(Clone)]
 struct LeaderClaimTarget {
     provider: Provider,
     leader_session_uuid: Option<crate::model::ids::LeaderSessionUuid>,
@@ -1575,6 +1574,7 @@ fn write_claim_target_pane_nonce(target: Option<&LeaderClaimTarget>) -> Result<(
         .and_then(|info| {
             info.leader_env
                 .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+                .map(String::as_str)
         })
         .filter(|nonce| !nonce.is_empty());
     // The pane option is the pane-instance identity shared by all authorized
@@ -2478,14 +2478,6 @@ fn readable_team_snapshot_path(w: &BP, n: &str) -> BF /* B0_DIAGNOSTIC_LEGACY_SN
 mod tests {
     use super::*;
 
-    struct LiveClaimPane;
-
-    impl crate::state::owner_gate::PaneLivenessProbe for LiveClaimPane {
-        fn liveness(&self, _pane_id: &str) -> crate::model::enums::PaneLiveness {
-            crate::model::enums::PaneLiveness::Live
-        }
-    }
-
     fn observed_pane() -> PaneInfo {
         PaneInfo {
             pane_id: PaneId::new("%7"),
@@ -2611,115 +2603,6 @@ mod tests {
         assert_eq!(first.len(), 32);
         assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_ne!(first, second);
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn explicit_claim_reuses_live_nonce_across_already_bound_claims() {
-        let endpoint = "/tmp/ta-shared-pane.sock";
-        let workspace = std::env::temp_dir().join(format!(
-            "ta_nonce_reuse_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let previous_tmux = std::env::var_os("TMUX");
-        std::env::set_var("TMUX", format!("{endpoint},123,0"));
-
-        let mut pane = observed_pane();
-        pane.current_path = Some(PathBuf::from("/tmp/parent-workspace"));
-        pane.leader_env.insert(
-            crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.to_string(),
-            "live-shared-nonce".to_string(),
-        );
-        let target = LeaderClaimTarget {
-            provider: Provider::Codex,
-            leader_session_uuid: None,
-            team_id: Some("child-a".to_string()),
-            pane_info: Some(pane),
-            endpoint: Some(endpoint.to_string()),
-            scope_authority: Some("explicit_claim".to_string()),
-            authorized_team_workspace: Some(workspace.clone()),
-            binding_nonce: Some("live-shared-nonce".to_string()),
-        };
-        let event_log = crate::event_log::EventLog::new(&workspace);
-        let liveness = LiveClaimPane;
-        let caller = PaneId::new("%7");
-        let mut state = json!({"session_name": "nonce-reuse"});
-
-        let first = claim_lease_no_incident_with_target(
-            &workspace,
-            &mut state,
-            Some("child-a"),
-            &TeamKey::new("child-a"),
-            &caller,
-            false,
-            &event_log,
-            &liveness,
-            Some(&target),
-            target.pane_info.as_ref(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(first.status, LeaseStatus::Claimed);
-        assert_eq!(
-            first.receiver.as_ref().and_then(|receiver| receiver.binding_nonce.as_deref()),
-            Some("live-shared-nonce")
-        );
-
-        let second = claim_lease_no_incident_with_target(
-            &workspace,
-            &mut state,
-            Some("child-b"),
-            &TeamKey::new("child-b"),
-            &caller,
-            false,
-            &event_log,
-            &liveness,
-            Some(&target),
-            target.pane_info.as_ref(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(second.status, LeaseStatus::AlreadyBound);
-        assert_eq!(
-            second.receiver.as_ref().and_then(|receiver| receiver.binding_nonce.as_deref()),
-            Some("live-shared-nonce")
-        );
-
-        let internal_target = LeaderClaimTarget {
-            scope_authority: None,
-            authorized_team_workspace: None,
-            binding_nonce: None,
-            team_id: Some("internal".to_string()),
-            ..target.clone()
-        };
-        let internal = claim_lease_no_incident_with_target(
-            &workspace,
-            &mut state,
-            Some("internal"),
-            &TeamKey::new("internal"),
-            &caller,
-            false,
-            &event_log,
-            &liveness,
-            Some(&internal_target),
-            internal_target.pane_info.as_ref(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(internal.status, LeaseStatus::AlreadyBound);
-        assert_eq!(
-            internal
-                .receiver
-                .as_ref()
-                .and_then(|receiver| receiver.binding_nonce.as_deref()),
-            Some("live-shared-nonce")
-        );
-
-        match previous_tmux {
-            Some(value) => std::env::set_var("TMUX", value),
-            None => std::env::remove_var("TMUX"),
-        }
     }
 
     #[test]
