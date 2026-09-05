@@ -147,7 +147,11 @@ impl SupermarketCase {
         let all_workers_spawned = json
             .pointer("/readiness/all_workers_spawned")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || json
+                .pointer("/worker_readiness/all_workers_spawned")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         let status = json
             .pointer("/status")
             .and_then(Value::as_str)

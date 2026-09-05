@@ -206,6 +206,10 @@ pub enum StateWriteIntent<'a> {
     ClaimLeader {
         team_key: &'a str,
     },
+    ClearExactTeamOwner {
+        team_key: &'a str,
+        seed: &'a Value,
+    },
     LeaderBindingRestoreNonTargetTeams {
         target_team_key: &'a str,
     },
@@ -383,7 +387,10 @@ fn route_direct(
         // scoped preserve-claim-fields variant at :1702 uses the team-tombstoned
         // agents helper.
         StateWriteIntent::ClaimLeader { team_key } => {
-            helper_write_root_with_receiver_authority(workspace, state, team_key)
+            helper_write_root_with_receiver_authority(workspace, state, team_key, None)
+        }
+        StateWriteIntent::ClearExactTeamOwner { team_key, seed } => {
+            helper_write_root_with_receiver_authority(workspace, state, team_key, Some(seed))
         }
         StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
             helper_write_root_without_migrations(workspace, state)
@@ -391,7 +398,7 @@ fn route_direct(
         // LeaderStartBinding -> managed/exec/external all root-save at
         // leader/start.rs:795/903/946.
         StateWriteIntent::LeaderStartBinding { team_key, .. } => {
-            helper_write_root_with_receiver_authority(workspace, state, team_key)
+            helper_write_root_with_receiver_authority(workspace, state, team_key, None)
         }
         // CoordinatorTick dispatches to the existing scoped helper
         // (`save_team_scoped_state`) preserving coordinator/tick.rs:427.

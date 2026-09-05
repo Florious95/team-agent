@@ -298,20 +298,19 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
         && ops.register(workspace, team_key)
         && ops.canonical_readback(workspace, team_key);
     if !committed {
-        if fresh_seeded_binding
-            && seeded_owner.is_some_and(|seed| {
-                state
+        if let Some(seed) = seeded_owner.filter(|seed| {
+            fresh_seeded_binding
+                && state
                     .get("team_owner")
-                    .is_some_and(|current| current == seed)
-            })
-        {
+                    .is_some_and(|current| current == *seed)
+        }) {
             // Restore only the registry surface. The initial runtime state may
             // already contain a caller-seeded owner; restoring it after a failed
             // commit would make a later claim falsely report already_bound.
             for snapshot in snapshots.iter().skip(1).rev() {
                 snapshot.restore();
             }
-            clear_fresh_binding_on_refusal(workspace, &mut state, team_key)?;
+            clear_fresh_binding_on_refusal(workspace, &mut state, team_key, seed)?;
         } else {
             // No caller-seeded owner was ours to clean up, so restore all
             // surfaces byte-for-byte after an attach/register/readback failure.
@@ -334,33 +333,11 @@ fn clear_fresh_binding_on_refusal(
     workspace: &Path,
     state: &mut serde_json::Value,
     team_key: &str,
+    seed: &serde_json::Value,
 ) -> Result<(), LifecycleError> {
-    // A projected team state carries the seeded owner both at the root and in
-    // `teams.<key>`. The repository deliberately preserves a newer owner from
-    // disk, so make the selected team tombstone newer before removing the
-    // candidate; otherwise a failed fresh bind can be resurrected by the
-    // lock-held merge and later look already_bound.
-    let current_epoch = [
-        state.get("owner_epoch"),
-        state
-            .get("team_owner")
-            .and_then(|owner| owner.get("owner_epoch")),
-        state
-            .get("leader_receiver")
-            .and_then(|receiver| receiver.get("owner_epoch")),
-        state
-            .get("teams")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|teams| teams.get(team_key))
-            .and_then(serde_json::Value::as_object)
-            .and_then(|team| team.get("owner_epoch")),
-    ]
-    .into_iter()
-    .flatten()
-    .filter_map(serde_json::Value::as_u64)
-    .max()
-    .unwrap_or(0);
-    let next_epoch = current_epoch.saturating_add(1);
+    // Tombstone only this attempt's seed. The lock-held persist merge compares
+    // the on-disk owner to `seed`; a concurrent equal-epoch owner is copied
+    // back and the epoch is not bumped.
     if let Some(obj) = state.as_object_mut() {
         obj.remove("leader_receiver");
         obj.remove("team_owner");
@@ -374,11 +351,10 @@ fn clear_fresh_binding_on_refusal(
     {
         team.insert("leader_receiver".to_string(), serde_json::Value::Null);
         team.insert("team_owner".to_string(), serde_json::Value::Null);
-        team.insert("owner_epoch".to_string(), serde_json::json!(next_epoch));
     }
     crate::state::repository::StateRepository::new(workspace)
         .save(
-            crate::state::repository::StateWriteIntent::ClaimLeader { team_key },
+            crate::state::repository::StateWriteIntent::ClearExactTeamOwner { team_key, seed },
             state,
         )
         .map_err(|error| LifecycleError::StatePersist(format!(
@@ -1361,6 +1337,264 @@ mod fresh_quick_start_leader_binding_tests {
             std::fs::read(crate::state::persist::runtime_state_path(&workspace)).unwrap(),
             "historical claimed_via alone must not authorize cleanup"
         );
+    }
+
+    fn matching_seed() -> serde_json::Value {
+        json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1,
+            "claimed_via": "quick-start"
+        })
+    }
+
+    fn matching_receiver() -> serde_json::Value {
+        json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1,
+            "tmux_socket": "/private/tmp/tmux-test/default"
+        })
+    }
+
+    fn workspace_with_matching_seed(tag: &str) -> (PathBuf, serde_json::Value) {
+        let workspace = workspace(tag);
+        let seed = matching_seed();
+        crate::state::persist::save_runtime_state(
+            &workspace,
+            &json!({
+                "workspace": workspace,
+                "active_team_key": "fresh",
+                "team_key": "fresh",
+                "session_name": "team-fresh",
+                "agents": {"sol": {"status": "running", "provider": "pi"}},
+                "teams": {
+                    "fresh": {
+                        "workspace": workspace,
+                        "team_key": "fresh",
+                        "session_name": "team-fresh",
+                        "agents": {"sol": {"status": "running", "provider": "pi"}},
+                        "team_owner": seed,
+                        "leader_receiver": matching_receiver(),
+                        "owner_epoch": 1
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let seed = crate::state::persist::load_runtime_state(&workspace).unwrap()["teams"]["fresh"]
+            ["team_owner"]
+            .clone();
+        (workspace, seed)
+    }
+
+    struct ConcurrentTakeover {
+        owner: serde_json::Value,
+        receiver: serde_json::Value,
+        epoch: u64,
+    }
+
+    fn takeover_binding(epoch: u64) -> ConcurrentTakeover {
+        ConcurrentTakeover {
+            owner: json!({
+                "pane_id": "%99",
+                "provider": "codex",
+                "leader_session_uuid": "uuid-other",
+                "owner_epoch": epoch,
+                "claimed_via": "claim-leader"
+            }),
+            receiver: json!({
+                "mode": "direct_tmux",
+                "status": "attached",
+                "pane_id": "%99",
+                "provider": "codex",
+                "leader_session_uuid": "uuid-other",
+                "owner_epoch": epoch,
+                "tmux_socket": "/private/tmp/tmux-test/other"
+            }),
+            epoch,
+        }
+    }
+
+    struct SeedCleanupOps {
+        inner: MockOps,
+        takeover: Option<ConcurrentTakeover>,
+        poison_state_file: bool,
+    }
+
+    impl FreshQuickStartLeaderBindingOps for SeedCleanupOps {
+        fn caller_pane(&mut self) -> Option<String> {
+            self.inner.caller_pane()
+        }
+
+        fn explicit_provider(&mut self) -> Option<String> {
+            self.inner.explicit_provider()
+        }
+
+        fn tmux_endpoint(&mut self) -> Option<String> {
+            self.inner.tmux_endpoint()
+        }
+
+        fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
+            self.inner.observe_command(pane)
+        }
+
+        fn attach(
+            &mut self,
+            workspace: &Path,
+            state: &mut serde_json::Value,
+            pane: &PaneId,
+            provider: crate::provider::Provider,
+        ) -> bool {
+            self.inner.attach(workspace, state, pane, provider)
+        }
+
+        fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
+            self.inner.register_calls += 1;
+            if let Some(takeover) = &self.takeover {
+                let mut persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
+                persisted["teams"][team_key]["team_owner"] = takeover.owner.clone();
+                persisted["teams"][team_key]["leader_receiver"] = takeover.receiver.clone();
+                persisted["teams"][team_key]["owner_epoch"] = json!(takeover.epoch);
+                crate::state::persist::save_runtime_state(workspace, &persisted).unwrap();
+            }
+            if self.poison_state_file {
+                let path = crate::state::persist::runtime_state_path(workspace);
+                let _ = std::fs::remove_file(&path);
+                std::fs::create_dir_all(&path).unwrap();
+            }
+            false
+        }
+
+        fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool {
+            self.inner.canonical_readback(workspace, team_key)
+        }
+    }
+
+    fn failed_register_ops(takeover: Option<ConcurrentTakeover>, poison: bool) -> SeedCleanupOps {
+        SeedCleanupOps {
+            inner: MockOps {
+                register_ok: false,
+                ..MockOps::default()
+            },
+            takeover,
+            poison_state_file: poison,
+        }
+    }
+
+    fn assert_fresh_binding_kept(
+        persisted: &serde_json::Value,
+        takeover: &ConcurrentTakeover,
+    ) {
+        assert_eq!(
+            persisted["teams"]["fresh"]["team_owner"],
+            takeover.owner,
+            "concurrent team_owner must survive seeded cleanup"
+        );
+        assert_eq!(
+            persisted["teams"]["fresh"]["leader_receiver"],
+            takeover.receiver,
+            "concurrent leader_receiver must survive seeded cleanup"
+        );
+        assert_eq!(
+            persisted["teams"]["fresh"]["owner_epoch"],
+            json!(takeover.epoch),
+            "concurrent owner_epoch must survive seeded cleanup"
+        );
+    }
+
+    #[test]
+    fn seeded_cleanup_clears_exact_seed_through_bind_repository_entry() {
+        let (workspace, seed) = workspace_with_matching_seed("seed-cleanup-success");
+        let mut ops = failed_register_ops(None, false);
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops
+        )
+        .unwrap());
+        let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert!(
+            persisted
+                .pointer("/teams/fresh/team_owner")
+                .is_some_and(serde_json::Value::is_null),
+            "matching seed must be cleared via bind/repository; got {}",
+            persisted["teams"]["fresh"]["team_owner"]
+        );
+        assert!(
+            persisted
+                .pointer("/teams/fresh/leader_receiver")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert_eq!(
+            persisted["teams"]["fresh"]["owner_epoch"],
+            json!(1),
+            "seed cleanup must not bump owner_epoch"
+        );
+    }
+
+    #[test]
+    fn seeded_cleanup_preserves_equal_epoch_persisted_concurrent_owner() {
+        let (workspace, seed) = workspace_with_matching_seed("seed-cleanup-concurrent");
+        let takeover = takeover_binding(1);
+        let mut ops = failed_register_ops(Some(takeover_binding(1)), false);
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops
+        )
+        .unwrap());
+        assert_fresh_binding_kept(
+            &crate::state::persist::load_runtime_state(&workspace).unwrap(),
+            &takeover,
+        );
+    }
+
+    #[test]
+    fn seeded_cleanup_preserves_epoch2_takeover_owner_receiver_epoch() {
+        let (workspace, seed) = workspace_with_matching_seed("seed-cleanup-epoch2");
+        let takeover = takeover_binding(2);
+        let mut ops = failed_register_ops(Some(takeover_binding(2)), false);
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops
+        )
+        .unwrap());
+        assert_fresh_binding_kept(
+            &crate::state::persist::load_runtime_state(&workspace).unwrap(),
+            &takeover,
+        );
+    }
+
+    #[test]
+    fn seeded_cleanup_propagates_persist_error() {
+        let (workspace, seed) = workspace_with_matching_seed("seed-cleanup-persist-err");
+        let mut ops = failed_register_ops(None, true);
+        let error = bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops,
+        )
+        .expect_err("poisoned state.json must surface cleanup persist failure");
+        match error {
+            LifecycleError::StatePersist(text) => {
+                assert!(
+                    text.contains("quick-start binding cleanup failed"),
+                    "unexpected persist error: {text}"
+                );
+            }
+            other => panic!("expected StatePersist, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(crate::state::persist::runtime_state_path(&workspace));
     }
 
     #[test]

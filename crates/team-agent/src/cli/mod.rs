@@ -3233,14 +3233,30 @@ pub mod lifecycle_port {
         );
     }
 
+    const COMPACT_READINESS_KEYS: [&str; 6] = [
+        "all_workers_spawned",
+        "state",
+        "ready",
+        "reason",
+        "next_action",
+        "unhealthy_agents",
+    ];
+
+    fn compact_readiness_object(value: Option<&mut Value>) {
+        let Some(object) = value.and_then(Value::as_object_mut) else {
+            return;
+        };
+        object.retain(|key, _| COMPACT_READINESS_KEYS.contains(&key.as_str()));
+    }
+
     pub(crate) fn compact_quick_start_value(value: &mut Value) {
         if let Some(object) = value.as_object_mut() {
-            // The top-level outcome, status/reason, readiness verdict and
-            // attach/send commands are the operator contract. The duplicated
-            // readiness blocks and launch bookkeeping are diagnostics only.
-            for key in ["readiness", "agent_ids", "dry_run"] {
-                object.remove(key);
-            }
+            // Default contract: outcome, error/next action, attach/send, and a
+            // short readiness verdict. Diagnostic aliases stay behind --detail.
+            object.remove("agent_ids");
+            object.remove("dry_run");
+            compact_readiness_object(object.get_mut("readiness"));
+            compact_readiness_object(object.get_mut("worker_readiness"));
         }
     }
 
@@ -3429,29 +3445,65 @@ pub mod lifecycle_port {
 
         #[test]
         fn quick_start_default_receipt_is_compact_but_detail_preserves_readiness() {
+            let readiness = json!({
+                "all_spawned": true,
+                "all_workers_spawned": true,
+                "all_attached_receiver": false,
+                "attached_receiver": false,
+                "leader_receiver_attached": false,
+                "all_resumable_have_session": true,
+                "all_resumable_agents_have_sessions": true,
+                "ready": false,
+                "state": "leader_receiver_unbound",
+                "session_capture_complete": true,
+                "session_capture_incomplete": false,
+                "incomplete_session_capture_agents": [],
+                "pending_session_agent_ids": [],
+                "reason": "launched team has no attached leader receiver",
+                "next_action": "claim-leader"
+            });
             let detail = json!({
                 "ok": false,
                 "status": "leader_receiver_unbound",
-                "reason": "leader receiver is not attached",
+                "reason": "launched team has no attached leader receiver",
                 "ready": false,
                 "session_name": "team-fresh",
                 "next_actions": ["claim-leader"],
-                "attach_commands": [],
-                "send_commands": [],
+                "attach_commands": ["tmux attach"],
+                "send_commands": ["team-agent send worker hi"],
                 "agent_ids": ["worker"],
-                "readiness": {"leader_receiver_attached": false},
-                "worker_readiness": {"state": "pending_tool_load"},
+                "readiness": readiness.clone(),
+                "worker_readiness": readiness,
                 "dry_run": false
             });
             let mut default = detail.clone();
             compact_quick_start_value(&mut default);
             assert_eq!(default["status"], json!("leader_receiver_unbound"));
-            assert_eq!(default["reason"], json!("leader receiver is not attached"));
+            assert_eq!(
+                default["reason"],
+                json!("launched team has no attached leader receiver")
+            );
             assert_eq!(default["next_actions"], json!(["claim-leader"]));
-            assert!(default.get("readiness").is_none());
-            assert!(default.get("worker_readiness").is_some());
-            assert!(detail.get("readiness").is_some());
-            assert!(detail.get("worker_readiness").is_some());
+            assert_eq!(default["attach_commands"], json!(["tmux attach"]));
+            assert_eq!(
+                default["send_commands"],
+                json!(["team-agent send worker hi"])
+            );
+            assert!(default.get("agent_ids").is_none());
+            assert!(default.get("dry_run").is_none());
+            assert_eq!(default["readiness"]["all_workers_spawned"], json!(true));
+            assert_eq!(default["readiness"]["state"], json!("leader_receiver_unbound"));
+            assert_eq!(default["readiness"]["next_action"], json!("claim-leader"));
+            assert!(default["readiness"].get("all_spawned").is_none());
+            assert!(default["readiness"].get("all_attached_receiver").is_none());
+            assert!(default["readiness"].get("leader_receiver_attached").is_none());
+            assert_eq!(
+                default["worker_readiness"]["all_workers_spawned"],
+                json!(true)
+            );
+            assert!(default["worker_readiness"].get("all_spawned").is_none());
+            assert!(detail["readiness"].get("all_spawned").is_some());
+            assert!(detail["worker_readiness"].get("leader_receiver_attached").is_some());
         }
 
         #[test]
