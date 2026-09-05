@@ -1993,6 +1993,69 @@ fn set_pane_binding_nonce_is_socket_scoped_and_pane_local() {
     );
 }
 
+#[test]
+fn set_pane_binding_nonce_if_unset_reads_existing_winner() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let runner = MockCommandRunner {
+        recorded: Arc::clone(&rec),
+        stdin_recorded: Arc::new(Mutex::new(Vec::new())),
+        queue: Mutex::new(
+            vec![
+                MockResp::Out(fail(1, "already set: @team_agent_pane_binding_nonce")),
+                MockResp::Out(ok("winner-nonce\n")),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        default: MockResp::Out(ok("")),
+    };
+    let be =
+        TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), "/tmp/ta-pane-binding.sock");
+    assert_eq!(
+        be.set_pane_binding_nonce_if_unset(&PaneId::new("%7"), "loser-nonce")
+            .expect("read the conditional-write winner"),
+        "winner-nonce"
+    );
+    assert_eq!(
+        rec.lock().unwrap().as_slice(),
+        vec![
+            svec(&[
+                "tmux",
+                "-S",
+                "/tmp/ta-pane-binding.sock",
+                "set-option",
+                "-p",
+                "-o",
+                "-t",
+                "%7",
+                "@team_agent_pane_binding_nonce",
+                "loser-nonce",
+            ]),
+            svec(&[
+                "tmux",
+                "-S",
+                "/tmp/ta-pane-binding.sock",
+                "display-message",
+                "-p",
+                "-t",
+                "%7",
+                "#{@team_agent_pane_binding_nonce}",
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn set_pane_binding_nonce_if_unset_rejects_write_or_read_failure() {
+    let (be, _rec) = backend_with(
+        MockResp::Out(fail(1, "already set: @team_agent_pane_binding_nonce")),
+        vec![MockResp::Out(fail(1, "pane disappeared"))],
+    );
+    assert!(be
+        .set_pane_binding_nonce_if_unset(&PaneId::new("%7"), "nonce-7")
+        .is_err());
+}
+
 // ── 12. attach_session (TRANSPORT TRIO) — `tmux attach-session -t <s>` -> Attached ──────────────
 // Golden tmux attach is `tmux attach-session -t <session>`; a successful attach -> AttachOutcome::
 // Attached. RED today: attach_session is unimplemented!() -> PANIC. The in-process lock asserts the

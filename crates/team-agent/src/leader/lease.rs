@@ -611,7 +611,7 @@ pub fn claim_leader(
         confirm,
         &event_log,
         &liveness,
-        caller_target.as_ref(),
+        caller_target.as_mut(),
         caller_pane_info,
         scoped_team.map(|_| team_id.as_str()),
     )?;
@@ -703,7 +703,7 @@ fn claim_lease_no_incident_with_target(
     confirm: bool,
     event_log: &crate::event_log::EventLog,
     liveness: &dyn crate::state::owner_gate::PaneLivenessProbe,
-    caller_target: Option<&LeaderClaimTarget>,
+    mut caller_target: Option<&mut LeaderClaimTarget>,
     caller_pane_info: Option<&PaneInfo>,
     scoped_team: Option<&str>,
 ) -> Result<LeaseResult, LeaderError> {
@@ -745,9 +745,13 @@ fn claim_lease_no_incident_with_target(
     let non_empty_caller_pane = NonEmptyPaneId::try_from_pane(caller_pane)?;
     let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
     if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
-        write_claim_target_pane_nonce(caller_target)?;
+        if let Some(target) = caller_target.as_deref_mut() {
+            write_claim_target_pane_nonce(target)?;
+        }
         let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
-        let observed_endpoint = caller_target.and_then(|target| target.endpoint.as_deref());
+        let observed_endpoint = caller_target
+            .as_deref()
+            .and_then(|target| target.endpoint.as_deref());
         let convergence_candidate = observed_endpoint.or(current_endpoint.as_deref());
         let candidate_source = if observed_endpoint.is_some() {
             Some("observed_target_endpoint")
@@ -769,7 +773,7 @@ fn claim_lease_no_incident_with_target(
                 pane_info,
                 observed_endpoint.or(current_endpoint.as_deref()),
                 scoped_team.or(team),
-                caller_target,
+                caller_target.as_deref(),
             )
         });
         if converged || observation_refreshed {
@@ -935,23 +939,33 @@ fn claim_lease_no_incident_with_target(
     } else {
         LeaseReason::VacantAcquired
     };
-    write_claim_target_pane_nonce(caller_target)?;
+    if let Some(target) = caller_target.as_deref_mut() {
+        write_claim_target_pane_nonce(target)?;
+    }
     let mut identity = leader_identity_context(workspace, Some(team_id.as_str()), Some(state))?;
-    if let Some(uuid) = caller_target.and_then(|target| target.leader_session_uuid.as_ref()) {
+    if let Some(uuid) = caller_target
+        .as_deref()
+        .and_then(|target| target.leader_session_uuid.as_ref()) {
         identity.leader_session_uuid = uuid.clone();
     }
     let next_epoch = OwnerEpoch(pre_epoch.0.saturating_add(1));
-    let provider = caller_target.map_or_else(|| prior_provider(state), |target| target.provider);
-    let observed_endpoint = caller_target.and_then(|target| target.endpoint.clone());
+    let provider = caller_target
+        .as_deref()
+        .map_or_else(|| prior_provider(state), |target| target.provider);
+    let observed_endpoint = caller_target
+        .as_deref()
+        .and_then(|target| target.endpoint.clone());
     let mut receiver = make_receiver(
         provider,
         &non_empty_caller_pane,
         &identity.leader_session_uuid,
         next_epoch,
         Discovery::ClaimLeader,
-        caller_target.and_then(|target| target.pane_info.clone()),
+        caller_target
+            .as_deref()
+            .and_then(|target| target.pane_info.clone()),
     );
-    if let Some(target) = caller_target {
+    if let Some(target) = caller_target.as_deref() {
         receiver.scope_authority.clone_from(&target.scope_authority);
         receiver
             .authorized_team_workspace
@@ -1551,10 +1565,10 @@ fn workspace_claim_target_from_pane_info(
     claim_target_from_pane_info(target)
 }
 
-fn write_claim_target_pane_nonce(target: Option<&LeaderClaimTarget>) -> Result<(), LeaderError> {
-    let Some(target) = target.filter(|target| target.scope_authority.is_some()) else {
+fn write_claim_target_pane_nonce(target: &mut LeaderClaimTarget) -> Result<(), LeaderError> {
+    if target.scope_authority.is_none() {
         return Ok(());
-    };
+    }
     let endpoint = target.endpoint.as_deref().ok_or_else(|| {
         LeaderError::Validation("explicit claim is missing its tmux endpoint".to_string())
     })?;
@@ -1579,16 +1593,19 @@ fn write_claim_target_pane_nonce(target: Option<&LeaderClaimTarget>) -> Result<(
         .filter(|nonce| !nonce.is_empty());
     // The pane option is the pane-instance identity shared by all authorized
     // teams. Rewriting an observed value would revoke another team's grant.
-    if live_nonce == Some(nonce) {
-        return Ok(());
-    }
-    tmux_backend_for_endpoint(endpoint)
-        .set_pane_binding_nonce(pane, nonce)
-        .map_err(|error| {
-            LeaderError::Validation(format!(
-                "failed to bind the explicit leader pane instance: {error}"
-            ))
-        })
+    let effective_nonce = if let Some(live_nonce) = live_nonce {
+        live_nonce.to_string()
+    } else {
+        tmux_backend_for_endpoint(endpoint)
+            .set_pane_binding_nonce_if_unset(pane, nonce)
+            .map_err(|error| {
+                LeaderError::Validation(format!(
+                    "failed to bind the explicit leader pane instance: {error}"
+                ))
+            })?
+    };
+    target.binding_nonce = Some(effective_nonce);
+    Ok(())
 }
 
 fn canonical_workspace(workspace: &Path) -> PathBuf {
