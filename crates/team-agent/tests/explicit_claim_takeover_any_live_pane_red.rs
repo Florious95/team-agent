@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::thread;
 
 use serde_json::{json, Value};
 use team_agent::messaging::leader_channel::{
@@ -245,6 +246,168 @@ fn cross_workspace_claims_reuse_live_nonce_and_internal_claim_preserves_grants()
     hermetic.assert_real_registry_unchanged(real_registry);
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn concurrent_first_claims_persist_shared_conditional_write_winner() {
+    let real_registry = HermeticTestEnv::real_home_registry_snapshot();
+    let hermetic = HermeticTestEnv::enter("shared-pane-nonce-concurrent");
+    let parent = hermetic.workspace("parent");
+    let workspace_a = hermetic.workspace("external-a");
+    let workspace_b = hermetic.workspace("external-b");
+    for workspace in [&workspace_a, &workspace_b] {
+        seed_runtime_state(workspace);
+    }
+
+    let nonce_file = hermetic.root().join("live-pane-nonce");
+    let observers = hermetic.root().join("empty-observers");
+    let set_log = hermetic.root().join("set-option.log");
+    let fake_tmux = shared_nonce_fake_tmux_bin(hermetic.root());
+    let path = format!(
+        "{}:{}",
+        fake_tmux.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let endpoint = hermetic.root().join("tmux-shared.sock");
+    let tmux = format!("{},123,0", endpoint.display());
+    let parent_path = parent.to_string_lossy().to_string();
+    let nonce_path = nonce_file.to_str().unwrap();
+    let workspace_a_str = workspace_a.to_str().unwrap();
+    let workspace_b_str = workspace_b.to_str().unwrap();
+
+    let (claim_a, claim_b) = thread::scope(|scope| {
+        let handle_a = scope.spawn(|| {
+            hermetic.run_cli_env(
+                &workspace_a,
+                &[
+                    "claim-leader",
+                    "--workspace",
+                    workspace_a_str,
+                    "--team",
+                    "current",
+                    "--confirm",
+                    "--json",
+                ],
+                &[
+                    ("PATH", path.as_str()),
+                    ("TMUX", tmux.as_str()),
+                    ("TMUX_PANE", CALLER_PANE),
+                    ("FAKE_NONCE_FILE", nonce_path),
+                    ("FAKE_EMPTY_OBSERVER_ID", "a"),
+                    ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
+                    ("TEAM_AGENT_MACHINE_FINGERPRINT", "shared-pane-concurrent"),
+                    ("FAKE_PANE_CWD", parent_path.as_str()),
+                ],
+            )
+        });
+        let handle_b = scope.spawn(|| {
+            hermetic.run_cli_env(
+                &workspace_b,
+                &[
+                    "claim-leader",
+                    "--workspace",
+                    workspace_b_str,
+                    "--team",
+                    "current",
+                    "--confirm",
+                    "--json",
+                ],
+                &[
+                    ("PATH", path.as_str()),
+                    ("TMUX", tmux.as_str()),
+                    ("TMUX_PANE", CALLER_PANE),
+                    ("FAKE_NONCE_FILE", nonce_path),
+                    ("FAKE_EMPTY_OBSERVER_ID", "b"),
+                    ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
+                    ("TEAM_AGENT_MACHINE_FINGERPRINT", "shared-pane-concurrent"),
+                    ("FAKE_PANE_CWD", parent_path.as_str()),
+                ],
+            )
+        });
+        (
+            handle_a.join().expect("claim A thread"),
+            handle_b.join().expect("claim B thread"),
+        )
+    });
+
+    assert!(
+        cli_success_failure(&claim_a, "concurrent workspace A claim").is_none(),
+        "concurrent workspace A claim failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&claim_a.stdout),
+        String::from_utf8_lossy(&claim_a.stderr)
+    );
+    assert!(
+        cli_success_failure(&claim_b, "concurrent workspace B claim").is_none(),
+        "concurrent workspace B claim failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&claim_b.stdout),
+        String::from_utf8_lossy(&claim_b.stderr)
+    );
+
+    assert!(
+        observers.join("a").is_file() && observers.join("b").is_file(),
+        "both claims must observe an empty live nonce before either conditional write; observers={:?}",
+        std::fs::read_dir(&observers)
+            .map(|entries| entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+
+    let winner = std::fs::read_to_string(&nonce_file).unwrap();
+    assert!(
+        !winner.trim().is_empty(),
+        "concurrent first claims must persist one live pane nonce"
+    );
+
+    let set_log_text = std::fs::read_to_string(&set_log).unwrap_or_default();
+    let option_attempts = set_log_text
+        .lines()
+        .filter(|line| line.contains(" o=1 "))
+        .count();
+    let writes = set_log_text
+        .lines()
+        .filter(|line| line.starts_with("wrote "))
+        .count();
+    let already_set = set_log_text
+        .lines()
+        .filter(|line| line.starts_with("already_set "))
+        .count();
+    assert_eq!(
+        option_attempts, 2,
+        "both first claims must hit set-option -o after empty observation; log={set_log_text}"
+    );
+    assert_eq!(
+        writes, 1,
+        "only-if-unset must admit exactly one writer; log={set_log_text}"
+    );
+    assert_eq!(
+        already_set, 1,
+        "the losing first claim must take the already-set readback path; log={set_log_text}"
+    );
+
+    let receiver_a = current_receiver(&workspace_a);
+    let receiver_b = current_receiver(&workspace_b);
+    assert_eq!(receiver_a["binding_nonce"], json!(winner.trim()));
+    assert_eq!(receiver_b["binding_nonce"], json!(winner.trim()));
+
+    let _path = hermetic.with_env("PATH", &path);
+    let _tmux = hermetic.with_env("TMUX", &tmux);
+    let _pane = hermetic.with_env("TMUX_PANE", CALLER_PANE);
+    let _cwd = hermetic.with_env("FAKE_PANE_CWD", parent_path.as_str());
+    let _nonce = hermetic.with_env("FAKE_NONCE_FILE", nonce_path);
+    let transport = team_agent::transport_factory::tmux_endpoint_transport(endpoint.to_str().unwrap());
+    for (workspace, receiver) in [(&workspace_a, &receiver_a), (&workspace_b, &receiver_b)] {
+        assert!(
+            matches!(
+                resolve_live_leader_channel(workspace, receiver, &transport),
+                LeaderChannelResolution::Live(_)
+            ),
+            "concurrent first-claim receiver must resolve Live: workspace={} receiver={receiver}",
+            workspace.display()
+        );
+    }
+    hermetic.assert_real_registry_unchanged(real_registry);
+}
+
 fn current_receiver(workspace: &Path) -> Value {
     let state = team_agent::state::persist::load_runtime_state(workspace).unwrap();
     state["teams"]["current"]["leader_receiver"].clone()
@@ -254,20 +417,77 @@ fn shared_nonce_fake_tmux_bin(root: &Path) -> PathBuf {
     let bin_dir = root.join("shared-nonce-fake-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let tmux = bin_dir.join("tmux");
+    // Pane-local only-if-unset, matching tmux `set-option -p -o`. Concurrent
+    // first claims rendezvous on empty list-panes observations via observer
+    // files (busy-wait on those files, not a sleep race), then serialize the
+    // conditional write with mkdir.
     let script = r##"#!/bin/sh
+root=$(dirname "$FAKE_NONCE_FILE")
+observers="$root/empty-observers"
+setlog="$root/set-option.log"
+lockdir="$root/nonce.lockdir"
+needed=${FAKE_EMPTY_NEEDED:-2}
+
+read_nonce() {
+  if [ -f "$FAKE_NONCE_FILE" ]; then
+    cat "$FAKE_NONCE_FILE"
+  fi
+}
+
+wait_for_empty_observers() {
+  [ -n "$FAKE_EMPTY_OBSERVER_ID" ] || return 0
+  nonce=$(read_nonce)
+  [ -z "$nonce" ] || return 0
+  [ -f "$observers/$FAKE_EMPTY_OBSERVER_ID" ] && return 0
+  mkdir -p "$observers"
+  printf 'empty\n' > "$observers/$FAKE_EMPTY_OBSERVER_ID"
+  while [ "$(ls -1 "$observers" | wc -l | tr -d ' ')" -lt "$needed" ]; do
+    :
+  done
+}
+
 case " $* " in
   *" list-panes "*)
-    nonce=""
-    if [ -f "$FAKE_NONCE_FILE" ]; then nonce=$(cat "$FAKE_NONCE_FILE"); fi
+    wait_for_empty_observers
+    nonce=$(read_nonce)
     cwd="${FAKE_PANE_CWD:-/tmp}"
     printf '%%9\tteam-current\t0\tleader\t0\t/dev/ttys001\tcodex\t1\t%s\t1\t0\t4242\t%s\n' "$cwd" "$nonce"
     exit 0
     ;;
   *" set-option "*)
     last=""
-    for arg do last=$arg; done
+    has_o=0
+    for arg do
+      [ "$arg" = "-o" ] && has_o=1
+      last=$arg
+    done
+    printf 'id=%s o=%s nonce=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" "$has_o" "$last" >> "$setlog"
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      if [ "$has_o" = 1 ] && [ -s "$FAKE_NONCE_FILE" ]; then
+        printf 'already_set id=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" >> "$setlog"
+        echo "already set: @team_agent_pane_binding_nonce" >&2
+        exit 1
+      fi
+      :
+    done
+    if [ "$has_o" = 1 ] && [ -s "$FAKE_NONCE_FILE" ]; then
+      rmdir "$lockdir"
+      printf 'already_set id=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" >> "$setlog"
+      echo "already set: @team_agent_pane_binding_nonce" >&2
+      exit 1
+    fi
     printf '%s' "$last" > "$FAKE_NONCE_FILE"
+    printf 'wrote id=%s nonce=%s\n' "${FAKE_EMPTY_OBSERVER_ID:-none}" "$last" >> "$setlog"
+    rmdir "$lockdir"
     exit 0
+    ;;
+  *" show-options "*)
+    nonce=$(read_nonce)
+    if [ -n "$nonce" ]; then
+      printf '%s\n' "$nonce"
+      exit 0
+    fi
+    exit 1
     ;;
   *" display-message "*)
     printf 'codex\n'
