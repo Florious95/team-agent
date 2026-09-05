@@ -554,7 +554,18 @@ pub fn claim_leader(
                     "explicit cross-workspace claim requires an absolute tmux endpoint".to_string(),
                 ));
             }
-            let nonce = next_pane_binding_nonce(workspace, endpoint, &candidate.info.pane_id);
+            // A live pane nonce identifies the pane instance, not this team's
+            // claim. Preserve it so another child team remains authorized.
+            let nonce = pane_binding_nonce_for_claim(
+                workspace,
+                endpoint,
+                &candidate.info.pane_id,
+                candidate
+                    .info
+                    .leader_env
+                    .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+                    .map(String::as_str),
+            );
             target.scope_authority = Some("explicit_claim".to_string());
             target.authorized_team_workspace = Some(canonical_workspace(workspace));
             target.binding_nonce = Some(nonce);
@@ -1557,6 +1568,19 @@ fn write_claim_target_pane_nonce(target: Option<&LeaderClaimTarget>) -> Result<(
     let nonce = target.binding_nonce.as_deref().ok_or_else(|| {
         LeaderError::Validation("explicit claim is missing its pane binding nonce".to_string())
     })?;
+    let live_nonce = target
+        .pane_info
+        .as_ref()
+        .and_then(|info| {
+            info.leader_env
+                .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+        })
+        .filter(|nonce| !nonce.is_empty());
+    // The pane option is the pane-instance identity shared by all authorized
+    // teams. Rewriting an observed value would revoke another team's grant.
+    if live_nonce == Some(nonce) {
+        return Ok(());
+    }
     tmux_backend_for_endpoint(endpoint)
         .set_pane_binding_nonce(pane, nonce)
         .map_err(|error| {
@@ -1589,6 +1613,18 @@ fn next_pane_binding_nonce(workspace: &Path, endpoint: &str, pane: &PaneId) -> S
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn pane_binding_nonce_for_claim(
+    workspace: &Path,
+    endpoint: &str,
+    pane: &PaneId,
+    live_nonce: Option<&str>,
+) -> String {
+    live_nonce
+        .filter(|nonce| !nonce.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| next_pane_binding_nonce(workspace, endpoint, pane))
 }
 
 fn target_leader_session_uuid(target: &PaneInfo) -> Option<crate::model::ids::LeaderSessionUuid> {
@@ -2441,6 +2477,14 @@ fn readable_team_snapshot_path(w: &BP, n: &str) -> BF /* B0_DIAGNOSTIC_LEGACY_SN
 mod tests {
     use super::*;
 
+    struct LiveClaimPane;
+
+    impl crate::state::owner_gate::PaneLivenessProbe for LiveClaimPane {
+        fn liveness(&self, _pane_id: &str) -> crate::model::enums::PaneLiveness {
+            crate::model::enums::PaneLiveness::Live
+        }
+    }
+
     fn observed_pane() -> PaneInfo {
         PaneInfo {
             pane_id: PaneId::new("%7"),
@@ -2566,6 +2610,99 @@ mod tests {
         assert_eq!(first.len(), 32);
         assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn explicit_claim_reuses_live_nonce_across_already_bound_claims() {
+        let endpoint = "/tmp/ta-shared-pane.sock";
+        let workspace = std::env::temp_dir().join(format!(
+            "ta_nonce_reuse_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous_tmux = std::env::var_os("TMUX");
+        std::env::set_var("TMUX", format!("{endpoint},123,0"));
+
+        let mut pane = observed_pane();
+        pane.current_path = Some(PathBuf::from("/tmp/parent-workspace"));
+        pane.leader_env.insert(
+            crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.to_string(),
+            "live-shared-nonce".to_string(),
+        );
+        let target = LeaderClaimTarget {
+            provider: Provider::Codex,
+            leader_session_uuid: None,
+            team_id: Some("child-a".to_string()),
+            pane_info: Some(pane),
+            endpoint: Some(endpoint.to_string()),
+            scope_authority: Some("explicit_claim".to_string()),
+            authorized_team_workspace: Some(workspace.clone()),
+            binding_nonce: Some("live-shared-nonce".to_string()),
+        };
+        let event_log = crate::event_log::EventLog::new(&workspace);
+        let liveness = LiveClaimPane;
+        let caller = PaneId::new("%7");
+        let mut state = json!({"session_name": "nonce-reuse"});
+
+        let first = claim_lease_no_incident_with_target(
+            &workspace,
+            &mut state,
+            Some("child-a"),
+            &TeamKey::new("child-a"),
+            &caller,
+            false,
+            &event_log,
+            &liveness,
+            Some(&target),
+            target.pane_info.as_ref(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(first.status, LeaseStatus::Claimed);
+        assert_eq!(
+            first.receiver.as_ref().and_then(|receiver| receiver.binding_nonce.as_deref()),
+            Some("live-shared-nonce")
+        );
+
+        let second = claim_lease_no_incident_with_target(
+            &workspace,
+            &mut state,
+            Some("child-b"),
+            &TeamKey::new("child-b"),
+            &caller,
+            false,
+            &event_log,
+            &liveness,
+            Some(&target),
+            target.pane_info.as_ref(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(second.status, LeaseStatus::AlreadyBound);
+        assert_eq!(
+            second.receiver.as_ref().and_then(|receiver| receiver.binding_nonce.as_deref()),
+            Some("live-shared-nonce")
+        );
+
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+    }
+
+    #[test]
+    fn explicit_claim_generates_nonce_only_when_live_nonce_is_missing() {
+        let workspace = Path::new("/tmp/workspace-a");
+        let endpoint = "/tmp/team-agent-live.sock";
+        let pane = PaneId::new("%7");
+        let generated = pane_binding_nonce_for_claim(workspace, endpoint, &pane, None);
+        assert_eq!(generated.len(), 32);
+        assert!(generated.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(
+            pane_binding_nonce_for_claim(workspace, endpoint, &pane, Some("live-nonce")),
+            "live-nonce"
+        );
     }
 
     #[test]
