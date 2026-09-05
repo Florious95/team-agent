@@ -243,3 +243,34 @@ fn pi_role_tools_validate_team_capabilities_without_replacing_direct_pi_tools() 
         "role tools validate Team Agent capabilities but must not replace direct Pi tools: {argv:?}"
     );
 }
+
+#[test]
+fn pi_role_rejects_unsupported_categories_during_compile() {
+    compile_pi_role(&valid_role_with("")).expect("supported Pi tools must compile");
+
+    for unsupported in ["git_diff", "network", "provider_builtin"] {
+        let role = valid_role_with("").replace(
+            "  - execute_bash\n",
+            &format!("  - execute_bash\n  - {unsupported}\n"),
+        );
+        let error = compile_error(compile_pi_role(&role)).to_string();
+        assert!(
+            error.contains(&format!("Pi does not support Team Agent tool category {unsupported:?}")),
+            "compile must reject {unsupported} before launch preparation: {error}"
+        );
+        assert!(
+            error.contains("remove it from the role's tools"),
+            "compile error must provide an actionable fix: {error}"
+        );
+    }
+
+    let alias = valid_role_with("").replace(
+        "  - execute_bash\n",
+        "  - execute_bash\n  - @builtin\n",
+    );
+    let error = compile_error(compile_pi_role(&alias)).to_string();
+    assert!(
+        error.contains("Pi does not support Team Agent tool category \"provider_builtin\""),
+        "@builtin must use the same Pi capability contract: {error}"
+    );
+}

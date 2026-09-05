@@ -96,6 +96,8 @@ EOF
 team-agent quick-start .team/current
 ```
 
+That copy-paste role is Codex-specific. Provider tool categories are not portable: Pi roles must contain `mcp_team` and may use only `fs_read`, `fs_list`, `fs_write`, and `execute_bash`; do not carry `provider_builtin`, `git_diff`, or `network` into a Pi role. `team-agent compile`/`validate` rejects an unsupported Pi category before quick-start persists runtime state, and the error names the category to remove.
+
 YAML lists must be block style. Use `tools:\n  - fs_read`; do not use `tools: [fs_read, mcp_team]`.
 
 Display choices (set `display_backend:` in `TEAM.md` to opt in):

@@ -27,6 +27,8 @@ For a Pi worker, use this existing three-step flow:
 
 Pi roles preserve the direct Pi login, model defaults, extensions/plugins, skills, context, trust, and tools. Team Agent adds only per-seat identity/session isolation. `model` and `effort` are optional explicit pass-throughs. Use the shared role schema, a block-style `tools` list containing `mcp_team`, and the required boolean `dangerously_skip_permissions`.
 
+Pi tool contract: use only `mcp_team`, `fs_read`, `fs_list`, `fs_write`, and `execute_bash`. Do not copy `provider_builtin`, `git_diff`, or `network` from a generic Codex role; Pi cannot map those categories. `compile`/`validate` rejects unsupported Pi categories before quick-start persists runtime state.
+
 ## Operate
 
 - Send: `team-agent send TO MESSAGE` using an in-team short name or fully qualified `<workspace>::<team>/<agent>`; these are co-equal positional TO forms. For example, `team-agent send reviewer "..."` uses an in-team short name. Do not poll after success.

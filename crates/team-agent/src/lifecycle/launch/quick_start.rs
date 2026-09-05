@@ -917,6 +917,53 @@ mod fresh_quick_start_leader_binding_tests {
         }
     }
 
+    #[test]
+    fn invalid_pi_tool_category_is_rejected_before_runtime_persistence() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-quick-start-pi-tools-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let team = root.join(".team/current");
+        std::fs::create_dir_all(team.join("agents")).unwrap();
+        std::fs::write(
+            team.join("TEAM.md"),
+            "---\nname: pi-tools\nprovider: pi\n---\n\nPi team.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            team.join("agents/worker.md"),
+            "---\nname: worker\nrole: Worker\nprovider: pi\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n  - fs_read\n  - provider_builtin\n---\n\nWorker.\n",
+        )
+        .unwrap();
+
+        let transport = crate::transport::test_support::OfflineTransport::new();
+        let mut discover = |_requested: &str| -> Result<Vec<String>, ()> { Err(()) };
+        let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+            &root,
+            &team,
+            None,
+            true,
+            None,
+            &transport,
+            false,
+            &mut discover,
+        )
+        .expect_err("invalid Pi category must fail before quick-start persistence");
+        let error = error.to_string();
+        assert!(error.contains("Pi does not support Team Agent tool category \"provider_builtin\""));
+        assert!(error.contains("remove it from the role's tools"));
+        assert!(
+            !crate::state::persist::runtime_state_path(&root).exists(),
+            "quick-start validation failure must not persist runtime state"
+        );
+        assert!(
+            !root.join(".team/runtime").exists(),
+            "quick-start validation failure must not create runtime artifacts"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     impl FreshQuickStartLeaderBindingOps for MockOps {
         fn caller_pane(&mut self) -> Option<String> {
             self.pane.clone()
