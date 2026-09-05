@@ -303,6 +303,71 @@ fn attach_leader_uses_state_recorded_tmux_socket_endpoint() {
 
 #[test]
 #[serial(env)]
+fn attach_leader_prefers_verified_caller_socket_over_worker_socket() {
+    let workspace = tmp_dir("attach-caller-socket");
+    let worker_socket = workspace.join("worker-socket");
+    let caller_socket = workspace.join("caller-socket");
+    save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": "current",
+            "session_name": "team-current",
+            "workspace": workspace.to_string_lossy().to_string(),
+            "tmux_socket": worker_socket.to_string_lossy().to_string(),
+            "agents": {}
+        }),
+    )
+    .expect("seed state with worker socket endpoint");
+    let fake = FakeLauncherTools::new(&workspace);
+    fake.write_tmux_script_for_attach_probe(&worker_socket, "%77");
+    let _env = EnvGuard::set([
+        (
+            "PATH",
+            Some(format!(
+                "{}:{}",
+                fake.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )),
+        ),
+        (
+            "TMUX",
+            Some(format!("{},123,0", caller_socket.display())),
+        ),
+        ("TMUX_PANE", Some("%77".to_string())),
+    ]);
+
+    let attach = Command::new(bin())
+        .args([
+            "attach-leader",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--pane",
+            "%77",
+            "--provider",
+            "claude",
+            "--json",
+        ])
+        .output()
+        .expect("attach leader using caller socket");
+    let stdout = String::from_utf8_lossy(&attach.stdout);
+    let stderr = String::from_utf8_lossy(&attach.stderr);
+    let tmux_log = read_to_string(&fake.tmux_log);
+    assert!(
+        attach.status.success(),
+        "attach-leader must find the caller pane on $TMUX before the persisted worker socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+    );
+    let first_list = tmux_log
+        .lines()
+        .find(|line| line.contains("list-panes"))
+        .unwrap_or("");
+    assert!(
+        first_list.contains(caller_socket.to_str().unwrap()),
+        "caller socket must be probed first for attach target discovery; tmux_log={tmux_log:?}"
+    );
+}
+
+#[test]
+#[serial(env)]
 fn attach_leader_uses_team_scoped_state_socket_endpoint() {
     let workspace = tmp_dir("attach-team-socket");
     let top_socket = workspace.join("top-socket");
@@ -690,10 +755,11 @@ if [ "$1" = "-V" ]; then
 fi
 case " $* " in
   *"-S {} list-panes"*)
-    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{}' '{}'
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{pane_id}' '{workspace}'
     exit 0
     ;;
   *" list-panes "*)
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{pane_id}' '{workspace}'
     exit 0
     ;;
   *)
@@ -703,8 +769,7 @@ esac
 "#,
                 self.tmux_log.display(),
                 socket_path.display(),
-                pane_id,
-                self.bin
+                workspace = self.bin
                     .parent()
                     .expect("workspace fake-bin has parent")
                     .to_string_lossy()

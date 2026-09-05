@@ -124,8 +124,10 @@ team-agent claim-leader --help
 Observed (exit 0):
 
 ```text
-usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]
+usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json] [--detail]
 ```
+
+Default JSON for `quick-start`, `restart`, and `claim-leader` is compact: `ok`, `status`/`reason`, next action, attach/send. `quick-start` keeps a short `readiness` object with `all_workers_spawned`. Pass `--detail` for internal receiver/topology/coordinator diagnostics.
 
 Run `claim-leader` only from the **leader** pane. From a worker pane it refuses and prints a structured `action` (see Failure Rules).
 
@@ -266,7 +268,7 @@ team-agent shutdown --help
 Observed (all exit 0):
 
 ```text
-usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]
+usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]
 usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]
 usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]
 ```
@@ -482,6 +484,7 @@ team-agent approvals <agent_id>
 team-agent approvals [coder]
 team-agent attach-leader
 team-agent claim-leader
+team-agent claim-leader --detail
 team-agent claude
 team-agent clone-agent <source> --as <new>
 team-agent codex
@@ -503,12 +506,14 @@ team-agent quick-start ./roles --team-id alpha
 team-agent quick-start .team/alpha
 team-agent quick-start .team/current
 team-agent quick-start <dir>
+team-agent quick-start --json --detail
 team-agent remove-agent <agent> --workspace . --confirm
 team-agent reset-agent <agent> --discard-session
 team-agent restart
 team-agent restart .
 team-agent restart . --allow-fresh
 team-agent restart . --team <session_name_or_team_name>
+team-agent restart --json --detail
 team-agent send --task task_initial "Start"
 team-agent send --watch-result
 team-agent send --watch-result coder "Do the bounded task"

@@ -3233,6 +3233,33 @@ pub mod lifecycle_port {
         );
     }
 
+    const COMPACT_READINESS_KEYS: [&str; 6] = [
+        "all_workers_spawned",
+        "state",
+        "ready",
+        "reason",
+        "next_action",
+        "unhealthy_agents",
+    ];
+
+    fn compact_readiness_object(value: Option<&mut Value>) {
+        let Some(object) = value.and_then(Value::as_object_mut) else {
+            return;
+        };
+        object.retain(|key, _| COMPACT_READINESS_KEYS.contains(&key.as_str()));
+    }
+
+    pub(crate) fn compact_quick_start_value(value: &mut Value) {
+        if let Some(object) = value.as_object_mut() {
+            // Default contract: outcome, error/next action, attach/send, and a
+            // short readiness verdict. Diagnostic aliases stay behind --detail.
+            object.remove("agent_ids");
+            object.remove("dry_run");
+            compact_readiness_object(object.get_mut("readiness"));
+            compact_readiness_object(object.get_mut("worker_readiness"));
+        }
+    }
+
     fn quick_start_value(report: crate::lifecycle::QuickStartReport) -> Value {
         match report {
             crate::lifecycle::QuickStartReport::Ready {
@@ -3265,6 +3292,7 @@ pub mod lifecycle_port {
                         ),
                         false,
                         json!({
+                            "reason": "worker_unhealthy",
                             "all_spawned": all_spawned,
                             "all_workers_spawned": all_workers_spawned,
                             "all_attached_receiver": all_attached_receiver,
@@ -3383,6 +3411,8 @@ pub mod lifecycle_port {
                 attach_commands,
             } => json!({
                 "ok": false,
+                "status": "existing_runtime",
+                "reason": "team already has runtime state; use restart",
                 "summary": "existing runtime",
                 "team": team,
                 "session_name": session_name.map(|s| s.as_str().to_string()),
@@ -3398,6 +3428,8 @@ pub mod lifecycle_port {
                 attach_commands,
             } => json!({
                 "ok": false,
+                "status": "preflight_blocked",
+                "reason": "quick-start preflight blocked",
                 "summary": summary,
                 "blockers": blockers,
                 "next_actions": next_actions,
@@ -3410,6 +3442,89 @@ pub mod lifecycle_port {
     #[cfg(test)]
     mod quick_start_value_tests {
         use super::*;
+
+        #[test]
+        fn quick_start_default_receipt_is_compact_but_detail_preserves_readiness() {
+            let readiness = json!({
+                "all_spawned": true,
+                "all_workers_spawned": true,
+                "all_attached_receiver": false,
+                "attached_receiver": false,
+                "leader_receiver_attached": false,
+                "all_resumable_have_session": true,
+                "all_resumable_agents_have_sessions": true,
+                "ready": false,
+                "state": "leader_receiver_unbound",
+                "session_capture_complete": true,
+                "session_capture_incomplete": false,
+                "incomplete_session_capture_agents": [],
+                "pending_session_agent_ids": [],
+                "reason": "launched team has no attached leader receiver",
+                "next_action": "claim-leader"
+            });
+            let detail = json!({
+                "ok": false,
+                "status": "leader_receiver_unbound",
+                "reason": "launched team has no attached leader receiver",
+                "ready": false,
+                "session_name": "team-fresh",
+                "next_actions": ["claim-leader"],
+                "attach_commands": ["tmux attach"],
+                "send_commands": ["team-agent send worker hi"],
+                "agent_ids": ["worker"],
+                "readiness": readiness.clone(),
+                "worker_readiness": readiness,
+                "dry_run": false
+            });
+            let mut default = detail.clone();
+            compact_quick_start_value(&mut default);
+            assert_eq!(default["status"], json!("leader_receiver_unbound"));
+            assert_eq!(
+                default["reason"],
+                json!("launched team has no attached leader receiver")
+            );
+            assert_eq!(default["next_actions"], json!(["claim-leader"]));
+            assert_eq!(default["attach_commands"], json!(["tmux attach"]));
+            assert_eq!(
+                default["send_commands"],
+                json!(["team-agent send worker hi"])
+            );
+            assert!(default.get("agent_ids").is_none());
+            assert!(default.get("dry_run").is_none());
+            assert_eq!(default["readiness"]["all_workers_spawned"], json!(true));
+            assert_eq!(default["readiness"]["state"], json!("leader_receiver_unbound"));
+            assert_eq!(default["readiness"]["next_action"], json!("claim-leader"));
+            assert!(default["readiness"].get("all_spawned").is_none());
+            assert!(default["readiness"].get("all_attached_receiver").is_none());
+            assert!(default["readiness"].get("leader_receiver_attached").is_none());
+            assert_eq!(
+                default["worker_readiness"]["all_workers_spawned"],
+                json!(true)
+            );
+            assert!(default["worker_readiness"].get("all_spawned").is_none());
+            assert!(detail["readiness"].get("all_spawned").is_some());
+            assert!(detail["worker_readiness"].get("leader_receiver_attached").is_some());
+        }
+
+        #[test]
+        fn restart_default_receipt_is_compact_but_detail_preserves_coordinator() {
+            let detail = json!({
+                "ok": false,
+                "status": "partial",
+                "reason": "restart_agent_failed",
+                "failed_agents": [{"agent_id": "worker", "error": "spawn failed"}],
+                "next_actions": ["restart-agent worker"],
+                "attach_commands": [],
+                "coordinator": {"status": "running", "transport": "default"}
+            });
+            let mut default = detail.clone();
+            compact_restart_value(&mut default);
+            assert_eq!(default["status"], json!("partial"));
+            assert_eq!(default["reason"], json!("restart_agent_failed"));
+            assert_eq!(default["next_actions"], json!(["restart-agent worker"]));
+            assert!(default.get("coordinator").is_none());
+            assert!(detail.get("coordinator").is_some());
+        }
 
         #[test]
         fn existing_runtime_json_includes_attach_commands() {
@@ -3497,6 +3612,15 @@ pub mod lifecycle_port {
                 "action={action}"
             );
             assert!(!action.contains("restart-agent"), "action={action}");
+        }
+    }
+
+    pub(crate) fn compact_restart_value(value: &mut Value) {
+        if let Some(object) = value.as_object_mut() {
+            // Coordinator internals remain available only through --detail;
+            // outcome, failed-agent errors, attach commands and next actions
+            // stay in the default receipt.
+            object.remove("coordinator");
         }
     }
 
@@ -3855,6 +3979,7 @@ pub mod lifecycle_port {
                     "status_class": "refused_resume_atomicity",
                     "allow_fresh": allow_fresh,
                     "error": error_str,
+                    "next_action": "pass --allow-fresh to start fresh, or restore the provider session backing files",
                     "unresumable": unresumable_detail,
                     "unresumable_ids": unresumable_ids,
                     "reminder": crate::cli::QUICK_START_REMINDER,
@@ -3894,6 +4019,7 @@ pub mod lifecycle_port {
                 "status": "refused_invalid_first_send_at",
                 "allow_fresh": allow_fresh,
                 "error": error,
+                "next_action": "pass --allow-fresh to discard the invalid session marker and start fresh",
                 "invalid": invalid.iter().map(|w| w.worker_id.as_str()).collect::<Vec<_>>(),
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
@@ -5073,6 +5199,31 @@ pub mod leader_port {
             "os_user": owner.os_user.as_deref().unwrap_or(""),
             "claimed_at": owner.claimed_at,
         })
+    }
+
+    pub(crate) fn compact_lease_value(value: &mut Value) {
+        let topology_status = value
+            .get("topology_convergence")
+            .and_then(|topology| topology.get("status"))
+            .cloned();
+        if value.get("reason").is_none() {
+            if let Some(status) = topology_status {
+                if status.as_str() != Some("converged") {
+                    value["reason"] = status;
+                }
+            }
+        }
+        if let Some(obj) = value.as_object_mut() {
+            for key in [
+                "owner_epoch",
+                "leader_receiver",
+                "team_owner",
+                "topology_convergence",
+                "leader_registry",
+            ] {
+                obj.remove(key);
+            }
+        }
     }
 
     fn lease_value(result: crate::leader::LeaseResult) -> Value {
