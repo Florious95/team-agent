@@ -3195,12 +3195,15 @@ mod tests {
         )
         .unwrap();
         let seed = persisted_fresh_owner(&ws);
-        save_runtime_state(
+        save_runtime_state_with_receiver_authority(
             &ws,
             &team_state_with_binding(&ws, takeover_owner(1), takeover_receiver(1), 1),
+            "fresh",
+            None,
         )
         .unwrap();
         let expected = load_runtime_state(&ws).unwrap();
+        assert_fresh_binding(&expected, &takeover_owner(1), &takeover_receiver(1), 1);
         save_runtime_state_with_receiver_authority(
             &ws,
             &tombstone_incoming(&ws, 1),

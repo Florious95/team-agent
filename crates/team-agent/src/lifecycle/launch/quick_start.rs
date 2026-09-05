@@ -1460,7 +1460,17 @@ mod fresh_quick_start_leader_binding_tests {
                 persisted["teams"][team_key]["team_owner"] = takeover.owner.clone();
                 persisted["teams"][team_key]["leader_receiver"] = takeover.receiver.clone();
                 persisted["teams"][team_key]["owner_epoch"] = json!(takeover.epoch);
-                crate::state::persist::save_runtime_state(workspace, &persisted).unwrap();
+                crate::state::persist::save_runtime_state_with_receiver_authority(
+                    workspace,
+                    &persisted,
+                    team_key,
+                    None,
+                )
+                .unwrap();
+                assert_fresh_binding_kept(
+                    &crate::state::persist::load_runtime_state(workspace).unwrap(),
+                    takeover,
+                );
             }
             if self.poison_state_file {
                 let path = crate::state::persist::runtime_state_path(workspace);
