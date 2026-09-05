@@ -2035,11 +2035,12 @@ fn set_pane_binding_nonce_if_unset_reads_existing_winner() {
                 "tmux",
                 "-S",
                 "/tmp/ta-pane-binding.sock",
-                "display-message",
+                "show-options",
                 "-p",
+                "-v",
                 "-t",
                 "%7",
-                "#{@team_agent_pane_binding_nonce}",
+                "@team_agent_pane_binding_nonce",
             ]),
         ]
     );

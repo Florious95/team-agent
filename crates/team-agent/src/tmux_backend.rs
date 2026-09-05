@@ -413,11 +413,12 @@ impl TmuxBackend {
     fn read_pane_binding_nonce(&self, pane: &PaneId) -> Result<String, TransportError> {
         let argv = self.tmux_argv(&[
             "tmux".to_string(),
-            "display-message".to_string(),
+            "show-options".to_string(),
             "-p".to_string(),
+            "-v".to_string(),
             "-t".to_string(),
             pane.as_str().to_string(),
-            format!("#{{{TMUX_PANE_BINDING_NONCE_OPTION}}}"),
+            TMUX_PANE_BINDING_NONCE_OPTION.to_string(),
         ]);
         let output = self.runner.run(&argv)?;
         if !output.success {
