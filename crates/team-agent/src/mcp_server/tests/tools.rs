@@ -1,15 +1,39 @@
     #[test]
     fn report_result_infers_agent_from_env_when_not_explicit() {
         // env identity present, no explicit agent_id → envelope.agent_id == env id.
+        let workspace = unique_ws("report-env");
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("report-env"),
+            &workspace,
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
+        );
+        seed_report_message_for(
+            &workspace,
+            "msg_env",
+            "teamA",
+            "worker-7",
+            "delivered",
+            "2026-07-06T13:24:25.000000+00:00",
+        );
+        seed_report_scope_state(
+            &workspace,
+            &json!({
+                "active_team_key": "teamA",
+                "teams": {"teamA": {
+                    "team_key": "teamA",
+                    "coordinator": {"turn_open": {
+                        "armed": true, "node_id": "worker-7", "turn_id": "msg_env"
+                    }},
+                    "agents": {"worker-7": {
+                        "id": "worker-7", "current_turn_message_id": "msg_env"
+                    }}
+                }}
+            }),
         );
         let ok = tools.report_result(
             None, Some("done it"), ResultStatus::Success,
             None, None, None, None, None,
-            None, None, // no explicit task/agent
+            None, None, // implicit task and agent
         ).expect("report ok");
         let v = serde_json::to_value(&ok).unwrap();
         // C17/bug-085: env id wins over leader/unknown. agent_id is a guaranteed-present
@@ -68,6 +92,24 @@
         status: &str,
         created_at: &str,
     ) {
+        seed_report_message_for(
+            ws,
+            message_id,
+            owner_team_id,
+            "probe-worker",
+            status,
+            created_at,
+        );
+    }
+
+    fn seed_report_message_for(
+        ws: &std::path::Path,
+        message_id: &str,
+        owner_team_id: &str,
+        recipient: &str,
+        status: &str,
+        created_at: &str,
+    ) {
         let store = MessageStore::open(ws).unwrap();
         let conn = crate::db::schema::open_db(store.db_path()).unwrap();
         conn.execute(
@@ -75,10 +117,10 @@
                 message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
                 status, content, artifact_refs, created_at, updated_at, delivered_at,
                 acknowledged_at, error, delivery_attempts
-            ) values (?1, ?2, null, 'leader', 'probe-worker', null, 0,
-                ?3, 'task', '[]', ?4, ?4, case when ?3 = 'delivered' then ?4 else null end,
+            ) values (?1, ?2, null, 'leader', ?3, null, 0,
+                ?4, 'task', '[]', ?5, ?5, case when ?4 = 'delivered' then ?5 else null end,
                 null, null, 0)",
-            rusqlite::params![message_id, owner_team_id, status, created_at],
+            rusqlite::params![message_id, owner_team_id, recipient, status, created_at],
         )
         .unwrap();
     }
@@ -189,7 +231,116 @@
     }
 
     #[test]
-    fn report_result_target_resolved_without_current_turn_uses_task_fallback() {
+    fn implicit_report_after_nested_delivery_stores_original_exactly() {
+        let ws = unique_ws("report-nested-original");
+        std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
+        seed_report_message(&ws, "msg_original", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_message(&ws, "msg_nested", "gate055", "delivered", "2026-07-06T13:25:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"msg_original"}},"agents":{"probe-worker":{"current_turn_message_id":"msg_original"}}}}}));
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+        let value = serde_json::to_value(tools.report_result(None, Some("done"), ResultStatus::Success, None, None, None, None, None, None, None).unwrap()).unwrap();
+        assert_eq!(value.get("task_id"), Some(&json!("msg_original")));
+        assert_eq!(value.get("attributed_message_id"), Some(&json!("msg_original")));
+        let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
+        let (task, envelope): (String, String) = conn.query_row("select task_id,envelope from results", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(task, "msg_original");
+        let envelope: Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(envelope["task_id"], json!("msg_original"));
+        assert_eq!(envelope["attributed_message_id"], json!("msg_original"));
+        assert_eq!(envelope["task_id_source"], json!("current_turn_message"));
+        assert_eq!(conn.query_row("select count(*) from results where task_id='msg_nested'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        let original_rows = crate::messaging::results::results_for_case(&ws, "msg_original", Some("gate055"), None).unwrap();
+        assert_eq!(original_rows.len(), 1);
+        assert!(crate::messaging::results::results_for_case(&ws, "msg_nested", Some("gate055"), None).unwrap().is_empty());
+        let collected = crate::messaging::collect_for_team(&ws, None, false, Some("gate055")).unwrap();
+        assert_eq!(collected["collected_results"].as_array().unwrap().len(), 1);
+        assert_eq!(collected["collected_results"][0]["task_id"], json!("msg_original"));
+        assert_eq!(collected["collected_results"][0]["scope"], json!("message"));
+    }
+
+    #[test]
+    fn nested_explicit_flat_and_envelope_task_ids_remain_exact() {
+        for (tag, envelope, flat_task) in [
+            ("flat", None, Some("explicit-flat")),
+            ("envelope", Some(json!({"task_id":"explicit-envelope"})), None),
+        ] {
+            let ws = unique_ws(&format!("report-nested-explicit-{tag}"));
+            seed_report_message(&ws, "original", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+            seed_report_message(&ws, "nested", "gate055", "delivered", "2026-07-06T13:25:25.000000+00:00");
+            seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"original"}},"agents":{"probe-worker":{"current_turn_message_id":"original"}}}}}));
+            let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+            let value = serde_json::to_value(tools.report_result(envelope.as_ref(), Some("done"), ResultStatus::Success, None, None, None, None, None, flat_task, None).unwrap()).unwrap();
+            let expected = flat_task.unwrap_or("explicit-envelope");
+            assert_eq!(value["task_id"], json!(expected));
+            let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
+            let (task_id, stored): (String, String) = conn.query_row("select task_id,envelope from results", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            assert_eq!(task_id, expected);
+            assert_eq!(serde_json::from_str::<Value>(&stored).unwrap()["task_id"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn sibling_team_result_does_not_retire_current_turn() {
+        let ws = unique_ws("report-team-isolation");
+        seed_report_message(&ws, "shared", "teamA", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_result(&ws, "res-team-b", "teamB", "shared", "9999-01-01T00:00:00+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"teamA","teams":{"teamA":{"team_key":"teamA","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"shared"}},"agents":{"probe-worker":{"current_turn_message_id":"shared"}}},"teamB":{"team_key":"teamB","agents":{"probe-worker":{}}}}}));
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("teamA")));
+        let value = serde_json::to_value(tools.report_result(None, Some("team a"), ResultStatus::Success, None, None, None, None, None, None, None).unwrap()).unwrap();
+        assert_eq!(value["task_id"], json!("shared"));
+        let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
+        assert_eq!(conn.query_row("select count(*) from results where task_id='shared' and owner_team_id='teamA'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("select count(*) from results where task_id='shared' and owner_team_id='teamB'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn ordinary_direct_report_queries_and_collects_exact_message() {
+        let ws = unique_ws("report-ordinary-direct");
+        std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
+        seed_report_message(&ws, "msg_direct", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"msg_direct"}},"agents":{"probe-worker":{"current_turn_message_id":"msg_direct"}}}}}));
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+        tools.report_result(None, Some("ordinary"), ResultStatus::Success, None, None, None, None, None, None, None).unwrap();
+        let queried = crate::messaging::results::results_for_case(&ws, "msg_direct", Some("gate055"), None).unwrap();
+        assert_eq!(queried.len(), 1);
+        assert_eq!(queried[0]["task_id"], json!("msg_direct"));
+        assert!(crate::messaging::results::results_for_case(&ws, "msg_nested", Some("gate055"), None).unwrap().is_empty());
+        let collected = crate::messaging::collect_for_team(&ws, None, false, Some("gate055")).unwrap();
+        assert_eq!(collected["collected_results"].as_array().unwrap().len(), 1);
+        assert_eq!(collected["collected_results"][0]["task_id"], json!("msg_direct"));
+        assert_eq!(collected["collected_results"][0]["scope"], json!("message"));
+    }
+
+    #[test]
+    fn implicit_report_missing_authority_stores_no_result() {
+        let ws = unique_ws("report-no-authority");
+        seed_report_message(&ws, "historical", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","tasks":[{"id":"assigned","assignee":"probe-worker","status":"pending"}],"agents":{"probe-worker":{}}}}}));
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+        let error = tools.report_result(None, Some("no authority"), ResultStatus::Success, None, None, None, None, None, None, None).expect_err("implicit attribution must fail closed");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
+        let conn = crate::db::schema::open_db(MessageStore::open(&ws).unwrap().db_path()).unwrap();
+        assert_eq!(conn.query_row("select count(*) from results", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn implicit_report_authority_query_error_fails_closed_without_storage() {
+        let ws = unique_ws("report-authority-query-error");
+        seed_report_message(&ws, "current", "gate055", "delivered", "2026-07-06T13:24:25.000000+00:00");
+        seed_report_scope_state(&ws, &json!({"active_team_key":"gate055","teams":{"gate055":{"team_key":"gate055","coordinator":{"turn_open":{"armed":true,"node_id":"probe-worker","turn_id":"current"}},"agents":{"probe-worker":{"current_turn_message_id":"current"}}}}}));
+        let store = MessageStore::open(&ws).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        conn.execute("drop table messages", []).unwrap();
+        let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("probe-worker")), Some(TeamKey::new("gate055")));
+        let error = tools.report_result(None, Some("query failure"), ResultStatus::Success, None, None, None, None, None, None, None).expect_err("authority query failure must fail closed");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
+        assert_eq!(conn.query_row("select count(*) from results", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn report_result_target_resolved_without_current_turn_fails_closed() {
         let ws = unique_ws("report-target-resolved-no-current");
         seed_report_message(
             &ws,
@@ -225,22 +376,13 @@
             Some(AgentId::new("probe-worker")),
             Some(TeamKey::new("gate055")),
         );
-        let ok = tools.report_result(
+        let error = tools.report_result(
             None, Some("target resolved only"), ResultStatus::Success,
             None, None, None, None, None,
             None, None,
-        ).expect("report ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_ne!(
-            v.get("task_id"),
-            Some(&json!("msg_target_only")),
-            "0.5.16 locate §4/§7.7: target_resolved is a delivery claim, not physical-submit proof"
-        );
-        assert_eq!(
-            v.get("task_id"),
-            Some(&json!("task_initial")),
-            "without a current-turn pointer, no-task report_result falls through to task fallback"
-        );
+        ).expect_err("implicit attribution must fail closed");
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
     }
 
     #[test]
@@ -266,17 +408,13 @@
             Some(AgentId::new("probe-worker")),
             Some(TeamKey::new("gate055")),
         );
-        let ok = tools.report_result(
+        let error = tools.report_result(
             None, Some("manual follow-up"), ResultStatus::Success,
             None, None, None, None, None,
             None, None,
-        ).expect("report ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(
-            v.get("task_id"),
-            Some(&json!("manual")),
-            "old delivered messages older than latest result must not be reused"
-        );
+        ).expect_err("implicit attribution must fail closed");
+        assert_eq!(error.exc_type, "ResultAttributionUnavailable");
+        assert_eq!(error.reason, ToolErrorReason::InvalidToolArguments);
     }
 
     // ════════════════════════════════════════════════════════════════════════

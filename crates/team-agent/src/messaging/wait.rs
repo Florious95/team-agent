@@ -360,6 +360,113 @@ mod unix {
             format!("wait interrupted by signal {signal}"),
         )
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn workspace(tag: &str) -> PathBuf {
+            let path = std::env::temp_dir().join(format!(
+                "team-agent-wait-{tag}-{}",
+                crate::messaging::helpers::next_run_id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        }
+
+        fn envelope(result_id: &str, task_id: &str) -> serde_json::Value {
+            serde_json::json!({
+                "schema_version":"result_envelope_v1",
+                "result_id":result_id,
+                "task_id":task_id,
+                "agent_id":"worker",
+                "status":"success",
+                "summary":"done",
+                "changes":[],"tests":[],"risks":[],"artifacts":[],"next_actions":[]
+            })
+        }
+
+        #[test]
+        fn fifo_result_before_register_returns_without_waiting() {
+            let ws = workspace("result-first");
+            crate::messaging::report_result_for_owner_team(
+                &ws,
+                &envelope("res-first", "original"),
+                Some("teamA"),
+            )
+            .unwrap();
+            let store = MessageStore::open(&ws).unwrap();
+            let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+            let fifo_path = fifo_path(
+                &std::fs::canonicalize(&ws).unwrap(),
+                "original",
+                "watch-first",
+            )
+            .unwrap();
+            let _fifo = create_fifo(&fifo_path).unwrap();
+            assert!(
+                matches!(register(&conn, "watch-first", "original", &fifo_path).unwrap(), Registration::Completed(id) if id == "res-first")
+            );
+            assert_eq!(
+                conn.query_row(
+                    "select count(*) from result_watchers where watcher_id='watch-first'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+        }
+
+        #[test]
+        fn fifo_register_before_result_wakes_original_once_only() {
+            let ws = workspace("register-first");
+            let store = MessageStore::open(&ws).unwrap();
+            let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+            let canonical = std::fs::canonicalize(&ws).unwrap();
+            let original_path = fifo_path(&canonical, "original", "watch-original").unwrap();
+            let nested_path = fifo_path(&canonical, "nested", "watch-nested").unwrap();
+            let original_fifo = create_fifo(&original_path).unwrap();
+            let _nested_fifo = create_fifo(&nested_path).unwrap();
+            assert!(matches!(
+                register(&conn, "watch-original", "original", &original_path).unwrap(),
+                Registration::Pending
+            ));
+            assert!(matches!(
+                register(&conn, "watch-nested", "nested", &nested_path).unwrap(),
+                Registration::Pending
+            ));
+
+            crate::messaging::report_result_for_owner_team(
+                &ws,
+                &envelope("res-once", "original"),
+                Some("teamA"),
+            )
+            .unwrap();
+            assert_eq!(
+                read_wake_line(original_fifo.reader.as_raw_fd()).unwrap(),
+                "res-once"
+            );
+            let duplicate = crate::messaging::report_result_for_owner_team(
+                &ws,
+                &envelope("res-once", "original"),
+                Some("teamA"),
+            )
+            .unwrap();
+            assert_eq!(duplicate["status"], serde_json::json!("duplicate_ignored"));
+            assert_eq!(conn.query_row("select count(*) from result_watchers where watcher_id='watch-nested' and status='pending'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            let notifications = EventLog::new(&ws)
+                .tail(0)
+                .unwrap()
+                .into_iter()
+                .filter(|event| {
+                    event["event"] == serde_json::json!("result_wake.notified")
+                        && event["task_id"] == serde_json::json!("original")
+                })
+                .count();
+            assert_eq!(notifications, 1);
+        }
+    }
 }
 
 #[cfg(unix)]

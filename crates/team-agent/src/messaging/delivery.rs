@@ -36,7 +36,7 @@ use crate::transport::{
     Target, Transport, WindowName,
 };
 
-use super::helpers::{message_exists, MessageStatusShadow};
+use super::helpers::{message_exists, message_is_reportable, MessageStatusShadow};
 use super::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError,
     PaneWidthQuery, TrustRetryPayload, SEND_RETRY_MAX_ATTEMPTS,
@@ -2594,11 +2594,14 @@ fn record_current_turn_after_inject_if_leader_to_worker_scoped(
         return Ok(());
     }
     let message_id = Some(message_id.to_string());
-    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
-    arm_turn_open(&mut state, recipient, &message_id);
-    save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
-        arm_turn_open(latest, recipient, &message_id);
-    })?;
+    let state = scoped_state_for_write(workspace, owner_team_id)?;
+    save_turn_state_reapplying_after_conflict(
+        workspace,
+        &state,
+        recipient,
+        &message_id,
+        owner_team_id,
+    )?;
     let mut event = serde_json::json!({"agent_id": recipient, "message_id": message_id});
     if let Some(metadata) = metadata {
         append_target_metadata(&mut event, metadata);
@@ -2619,11 +2622,14 @@ fn record_turn_open_if_leader_to_worker_scoped(
     if !delivered.ok || !matches!(sender, "leader" | "Leader") || recipient == "leader" {
         return Ok(());
     }
-    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
-    arm_turn_open(&mut state, recipient, &delivered.message_id);
-    save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
-        arm_turn_open(latest, recipient, &delivered.message_id);
-    })?;
+    let state = scoped_state_for_write(workspace, owner_team_id)?;
+    save_turn_state_reapplying_after_conflict(
+        workspace,
+        &state,
+        recipient,
+        &delivered.message_id,
+        owner_team_id,
+    )?;
     let mut event = serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id});
     if let Some(metadata) = metadata {
         append_target_metadata(&mut event, metadata);
@@ -2632,9 +2638,35 @@ fn record_turn_open_if_leader_to_worker_scoped(
     Ok(())
 }
 
-fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Option<String>) {
+fn arm_turn_open(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    recipient: &str,
+    message_id: &Option<String>,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
+    let existing = state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agents| agents.get(recipient))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|agent| agent.get("current_turn_message_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    let preserve = if let Some(existing) = existing.as_deref() {
+        let store = MessageStore::open(workspace)?;
+        let conn = crate::db::schema::open_db(store.db_path())?;
+        message_is_reportable(&conn, existing, recipient, owner_team_id)?
+    } else {
+        false
+    };
+    let authoritative = if preserve {
+        Some(existing.as_ref().expect("preserve implies existing"))
+    } else {
+        message_id.as_ref()
+    };
     let Some(root) = state.as_object_mut() else {
-        return;
+        return Ok(());
     };
     let coordinator = root
         .entry("coordinator")
@@ -2642,7 +2674,7 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
     if let Some(obj) = coordinator.as_object_mut() {
         obj.insert(
             "turn_open".to_string(),
-            serde_json::json!({"armed": true, "node_id": recipient, "turn_id": message_id}),
+            serde_json::json!({"armed": true, "node_id": recipient, "turn_id": authoritative}),
         );
     }
     if let Some(agent) = root
@@ -2658,11 +2690,12 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
         // (whitelisted for the transition) and `mcp_server/helpers.rs`; other
         // messaging/lifecycle/mcp_server code MUST NOT treat this as
         // authoritative task state.
-        let field = message_id.as_ref().map_or(serde_json::Value::Null, |id| {
+        let field = authoritative.map_or(serde_json::Value::Null, |id| {
             serde_json::Value::String(id.clone())
         });
         agent.insert("current_turn_message_id".to_string(), field);
     }
+    Ok(())
 }
 
 /// `_stamp_first_send_at_if_leader_to_worker` (`delivery.py:380`):首次 leader→worker 投递戳
@@ -2760,6 +2793,32 @@ fn save_scoped_state(
         state,
     )?;
     Ok(())
+}
+
+fn save_turn_state_reapplying_after_conflict(
+    workspace: &Path,
+    state: &serde_json::Value,
+    recipient: &str,
+    message_id: &Option<String>,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
+    let mut candidate = state.clone();
+    arm_turn_open(
+        workspace,
+        &mut candidate,
+        recipient,
+        message_id,
+        owner_team_id,
+    )?;
+    match save_scoped_state(workspace, &candidate, owner_team_id) {
+        Ok(()) => Ok(()),
+        Err(MessagingError::State(crate::state::StateError::SaveConflict(_))) => {
+            let mut latest = scoped_state_for_write(workspace, owner_team_id)?;
+            arm_turn_open(workspace, &mut latest, recipient, message_id, owner_team_id)?;
+            save_scoped_state(workspace, &latest, owner_team_id)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn save_scoped_state_reapplying_after_conflict<F>(
@@ -3231,7 +3290,8 @@ mod paste_floor_tests {
     #[test]
     fn grok_paste_to_submit_floor_matches_cursor() {
         let grok = paste_to_submit_floor_for_recipient(&state_with_provider("grok"), "w1");
-        let cursor = paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
+        let cursor =
+            paste_to_submit_floor_for_recipient(&state_with_provider("cursor_agent"), "w1");
         assert_eq!(grok, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
         assert_eq!(cursor, crate::tmux_backend::CURSOR_PASTE_TO_SUBMIT_FLOOR);
         assert_eq!(grok, cursor);
@@ -3247,5 +3307,129 @@ mod paste_floor_tests {
             paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn nested_delivery_preserves_open_original_turn() {
+        let workspace = std::env::temp_dir().join(format!(
+            "team-agent-attribution-{}",
+            crate::messaging::helpers::next_run_id()
+        ));
+        let store = MessageStore::open(&workspace).unwrap();
+        let original = store
+            .create_message(None, "leader", "w1", "original", None, false, Some("teamA"))
+            .unwrap();
+        store.mark(&original, "delivered", None).unwrap();
+        let nested = store
+            .create_message(None, "leader", "w1", "nested", None, false, Some("teamA"))
+            .unwrap();
+        store.mark(&nested, "delivered", None).unwrap();
+        let mut state = serde_json::json!({"agents":{"w1":{"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}}});
+        arm_turn_open(&workspace, &mut state, "w1", &Some(nested), Some("teamA")).unwrap();
+        assert_eq!(
+            state
+                .pointer("/agents/w1/current_turn_message_id")
+                .and_then(|v| v.as_str()),
+            Some(original.as_str())
+        );
+        assert_eq!(
+            state
+                .pointer("/coordinator/turn_open/turn_id")
+                .and_then(|v| v.as_str()),
+            Some(original.as_str())
+        );
+    }
+
+    #[test]
+    fn completed_original_allows_next_turn_to_arm() {
+        let workspace = std::env::temp_dir().join(format!(
+            "team-agent-attribution-{}",
+            crate::messaging::helpers::next_run_id()
+        ));
+        let store = MessageStore::open(&workspace).unwrap();
+        let original = store
+            .create_message(None, "leader", "w1", "original", None, false, Some("teamA"))
+            .unwrap();
+        store.mark(&original, "delivered", None).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        conn.execute("insert into results(result_id, owner_team_id, task_id, agent_id, envelope, status, created_at) values ('res_done', 'teamA', 'explicit-non-parent', 'w1', '{}', 'success', '9999')", []).unwrap();
+        let next = "msg_next".to_string();
+        let mut state = serde_json::json!({"agents":{"w1":{"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}}});
+        arm_turn_open(
+            &workspace,
+            &mut state,
+            "w1",
+            &Some(next.clone()),
+            Some("teamA"),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .pointer("/agents/w1/current_turn_message_id")
+                .and_then(|v| v.as_str()),
+            Some(next.as_str())
+        );
+    }
+
+    #[test]
+    fn reportability_query_error_never_advances_turn() {
+        let workspace = std::env::temp_dir().join(format!(
+            "team-agent-attribution-error-{}",
+            crate::messaging::helpers::next_run_id()
+        ));
+        let store = MessageStore::open(&workspace).unwrap();
+        let original = store
+            .create_message(None, "leader", "w1", "original", None, false, Some("teamA"))
+            .unwrap();
+        store.mark(&original, "delivered", None).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        conn.execute("drop table results", []).unwrap();
+        let mut state = serde_json::json!({"agents":{"w1":{"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}}});
+        let before = state.clone();
+        assert!(arm_turn_open(
+            &workspace,
+            &mut state,
+            "w1",
+            &Some("nested".to_string()),
+            Some("teamA")
+        )
+        .is_err());
+        assert_eq!(
+            state, before,
+            "authority query failure must not mutate the parent turn"
+        );
+    }
+
+    #[test]
+    fn conflict_reapply_error_preserves_latest_parent_bytes() {
+        let workspace = std::env::temp_dir().join(format!(
+            "team-agent-attribution-conflict-{}",
+            crate::messaging::helpers::next_run_id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let store = MessageStore::open(&workspace).unwrap();
+        let original = store
+            .create_message(None, "leader", "w1", "original", None, false, Some("teamA"))
+            .unwrap();
+        store.mark(&original, "delivered", None).unwrap();
+        let stale = serde_json::json!({"session_name":"teamA","agents":{"w1":{"agent_id":"w1","provider":"codex","window":"old","pane_id":"%1","pane_pid":1,"spawn_epoch":1,"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}}});
+        let latest = serde_json::json!({"session_name":"teamA","agents":{"w1":{"agent_id":"w1","provider":"codex","window":"new","pane_id":"%2","pane_pid":2,"spawn_epoch":2,"current_turn_message_id":original}},"coordinator":{"turn_open":{"armed":true,"node_id":"w1","turn_id":original}},"latest_marker":"keep"});
+        crate::state::persist::save_runtime_state(&workspace, &latest).unwrap();
+        crate::db::schema::open_db(store.db_path())
+            .unwrap()
+            .execute("drop table results", [])
+            .unwrap();
+        let state_path = crate::state::persist::runtime_state_path(&workspace);
+        let before = std::fs::read(&state_path).unwrap();
+        let error = save_turn_state_reapplying_after_conflict(
+            &workspace,
+            &stale,
+            "w1",
+            &Some("nested".to_string()),
+            Some("teamA"),
+        )
+        .expect_err("conflict reapply must return the authority query error");
+        assert!(matches!(error, MessagingError::Sqlite(_)));
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
     }
 }

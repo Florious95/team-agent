@@ -1613,6 +1613,71 @@ fn deliver_pending_submit_verified_overrides_missing_readback() {
 }
 
 #[test]
+fn real_delivery_arm_sites_preserve_original_across_nested_message() {
+    let ws = tmp_ws("nestedarmsites");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-nestedarmsites",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let original = store
+        .create_message(None, "leader", "w1", "original", None, false, None)
+        .unwrap();
+    deliver_pending_message(
+        &ws,
+        &store,
+        &ReadbackMissingTransport,
+        &original,
+        &log,
+        &state,
+    )
+    .unwrap();
+    let nested = store
+        .create_message(None, "leader", "w1", "nested", None, false, None)
+        .unwrap();
+    let current = crate::state::persist::load_runtime_state(&ws).unwrap();
+    deliver_pending_message(
+        &ws,
+        &store,
+        &ReadbackMissingTransport,
+        &nested,
+        &log,
+        &current,
+    )
+    .unwrap();
+
+    let saved = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(
+        saved.pointer("/agents/w1/current_turn_message_id"),
+        Some(&serde_json::json!(original))
+    );
+    assert_eq!(
+        saved.pointer("/coordinator/turn_open/turn_id"),
+        Some(&serde_json::json!(original))
+    );
+    assert_eq!(
+        seed_conn(&store)
+            .query_row(
+                "select status from messages where message_id=?1",
+                sql_params![nested],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "delivered"
+    );
+    let events = log.tail(0).unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == serde_json::json!("turn_open.armed_after_inject")));
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == serde_json::json!("turn_open.armed_after_delivery")));
+}
+
+#[test]
 fn deliver_pending_submit_unverified_is_not_saved_by_readback() {
     let ws = tmp_ws("readbacksaves");
     let store = store_for(&ws);
@@ -3304,19 +3369,11 @@ fn claim_preserves_pending_acceptance_for_all_recipients() {
     };
     assert_eq!(
         row(&leader_message),
-        (
-            "submitted_pending_acceptance".to_string(),
-            None,
-            None
-        )
+        ("submitted_pending_acceptance".to_string(), None, None)
     );
     assert_eq!(
         row(&worker_message),
-        (
-            "submitted_pending_acceptance".to_string(),
-            None,
-            None
-        )
+        ("submitted_pending_acceptance".to_string(), None, None)
     );
 }
 
