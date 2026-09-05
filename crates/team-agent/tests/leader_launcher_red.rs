@@ -755,11 +755,11 @@ if [ "$1" = "-V" ]; then
 fi
 case " $* " in
   *"-S {} list-panes"*)
-    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{}' '{}'
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{pane_id}' '{workspace}'
     exit 0
     ;;
   *" list-panes "*)
-    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{}' '{}'
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{pane_id}' '{workspace}'
     exit 0
     ;;
   *)
@@ -769,8 +769,7 @@ esac
 "#,
                 self.tmux_log.display(),
                 socket_path.display(),
-                pane_id,
-                self.bin
+                workspace = self.bin
                     .parent()
                     .expect("workspace fake-bin has parent")
                     .to_string_lossy()
