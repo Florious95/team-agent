@@ -5,11 +5,21 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
+#[cfg(unix)]
+use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(unix)]
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
 use team_agent::messaging::leader_channel::{
     resolve_live_leader_channel, LeaderChannelResolution,
 };
@@ -418,6 +428,135 @@ fn concurrent_first_claims_persist_shared_conditional_write_winner() {
     hermetic.assert_real_registry_unchanged(real_registry);
 }
 
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(env)]
+fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_result() {
+    let real_registry = HermeticTestEnv::real_home_registry_snapshot();
+    let hermetic = HermeticTestEnv::enter("claim-comms");
+    let parent = hermetic.workspace("parent");
+    let workspace_a = hermetic.workspace("external-a");
+    let workspace_b = hermetic.workspace("external-b");
+    for workspace in [&parent, &workspace_a, &workspace_b] {
+        seed_comms_runtime_state(workspace);
+    }
+
+    let candidate = PathBuf::from(env!("CARGO_BIN_EXE_team-agent"))
+        .canonicalize()
+        .expect("canonicalize candidate team-agent");
+    let candidate_sha = sha256_file(&candidate);
+    let socket = hermetic::short_tmux_socket("claim-comms");
+    let pane = start_shared_leader_pane(&hermetic, &socket, &parent);
+    let tmux = format!("{},12345,0", socket.display());
+    let claim_env = [
+        ("TMUX", tmux.as_str()),
+        ("TMUX_PANE", pane.as_str()),
+        ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
+        ("TEAM_AGENT_MACHINE_FINGERPRINT", "claim-comms"),
+    ];
+
+    let claim_a = claim_current(&hermetic, &workspace_a, &claim_env);
+    assert!(
+        cli_success_failure(&claim_a, "external workspace A claim").is_none(),
+        "external workspace A claim failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&claim_a.stdout),
+        String::from_utf8_lossy(&claim_a.stderr)
+    );
+    let first_nonce = receiver_nonce(&workspace_a);
+    assert!(!first_nonce.is_empty(), "first claim must persist a binding nonce");
+
+    let claim_b = claim_current(&hermetic, &workspace_b, &claim_env);
+    assert!(
+        cli_success_failure(&claim_b, "external workspace B claim").is_none(),
+        "external workspace B claim failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&claim_b.stdout),
+        String::from_utf8_lossy(&claim_b.stderr)
+    );
+    assert_eq!(
+        receiver_nonce(&workspace_b),
+        first_nonce,
+        "second external claim must keep the shared live pane nonce"
+    );
+
+    let mut coord_a = spawn_candidate_coordinator(&hermetic, &candidate, &workspace_a);
+    let mut coord_b = spawn_candidate_coordinator(&hermetic, &candidate, &workspace_b);
+    let receipt = coordinator_identity_receipt(
+        &candidate,
+        &candidate_sha,
+        &workspace_a,
+        coord_a.pid(),
+        &workspace_b,
+        coord_b.pid(),
+    );
+    eprintln!("{receipt}");
+    coord_a.assert_running("workspace A");
+    coord_b.assert_running("workspace B");
+
+    let mut mcp_a = spawn_worker_mcp(&hermetic, &candidate, &workspace_a);
+    let mut mcp_b = spawn_worker_mcp(&hermetic, &candidate, &workspace_b);
+    let pid = std::process::id();
+    let round1 = [
+        format!("CANARY_A1S_{pid}"),
+        format!("CANARY_A1R_{pid}"),
+        format!("CANARY_B1S_{pid}"),
+        format!("CANARY_B1R_{pid}"),
+    ];
+    let bodies_r1 = mcp_round(&mut mcp_a, &mut mcp_b, &round1);
+    wait_for_pane_tokens(&socket, &pane, &round1);
+
+    let claim_internal = claim_current(&hermetic, &parent, &claim_env);
+    assert!(
+        cli_success_failure(&claim_internal, "internal parent claim").is_none(),
+        "internal parent claim failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&claim_internal.stdout),
+        String::from_utf8_lossy(&claim_internal.stderr)
+    );
+    assert_eq!(
+        receiver_nonce(&workspace_a),
+        first_nonce,
+        "internal claim must not rotate workspace A nonce"
+    );
+    assert_eq!(
+        receiver_nonce(&workspace_b),
+        first_nonce,
+        "internal claim must not rotate workspace B nonce"
+    );
+
+    let round2 = [
+        format!("CANARY_A2S_{pid}"),
+        format!("CANARY_A2R_{pid}"),
+        format!("CANARY_B2S_{pid}"),
+        format!("CANARY_B2R_{pid}"),
+    ];
+    let bodies_r2 = mcp_round(&mut mcp_a, &mut mcp_b, &round2);
+    wait_for_pane_tokens(&socket, &pane, &round2);
+
+    for token in round1.iter().chain(round2.iter()) {
+        let in_a = db_contains_token(&workspace_a, token);
+        let in_b = db_contains_token(&workspace_b, token);
+        if token.contains("CANARY_A") {
+            assert!(in_a, "workspace A db missing own token {token}");
+            assert!(!in_b, "workspace B db leaked workspace A token {token}");
+        } else {
+            assert!(in_b, "workspace B db missing own token {token}");
+            assert!(!in_a, "workspace A db leaked workspace B token {token}");
+        }
+    }
+    for body in bodies_r1.iter().chain(bodies_r2.iter()) {
+        assert_ne!(
+            body.get("notification_status"),
+            Some(&json!("queued")),
+            "MCP notification_status must not be queued; body={body}"
+        );
+        assert_ne!(
+            body.get("notification_status"),
+            Some(&json!("queued_only")),
+            "MCP notification_status must not be queued_only; body={body}"
+        );
+    }
+    hermetic.assert_real_registry_unchanged(real_registry);
+}
+
 fn current_receiver(workspace: &Path) -> Value {
     let state = team_agent::state::persist::load_runtime_state(workspace).unwrap();
     state["teams"]["current"]["leader_receiver"].clone()
@@ -675,4 +814,536 @@ esac
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     bin_dir
+}
+
+#[cfg(unix)]
+fn seed_comms_runtime_state(ws: &Path) {
+    team_agent::state::persist::save_runtime_state(
+        ws,
+        &json!({
+            "active_team_key": "current",
+            "session_name": "current",
+            "team_dir": ws.to_string_lossy(),
+            "agents": {
+                "worker_a": {
+                    "provider": "fake",
+                    "status": "running"
+                }
+            },
+            "teams": {
+                "current": {
+                    "session_name": "current",
+                    "team_dir": ws.to_string_lossy(),
+                    "agents": {
+                        "worker_a": { "status": "running" }
+                    },
+                    "tasks": [
+                        { "id": "task_comms", "assignee": "worker_a", "status": "pending" }
+                    ]
+                }
+            },
+            "tasks": [
+                { "id": "task_comms", "assignee": "worker_a", "status": "pending" }
+            ]
+        }),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn claim_current(hermetic: &HermeticTestEnv, workspace: &Path, env: &[(&str, &str)]) -> Output {
+    hermetic.run_cli_env(
+        workspace,
+        &[
+            "claim-leader",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--team",
+            "current",
+            "--confirm",
+            "--json",
+        ],
+        env,
+    )
+}
+
+#[cfg(unix)]
+fn receiver_nonce(workspace: &Path) -> String {
+    current_receiver(workspace)["binding_nonce"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(unix)]
+fn sha256_file(path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(path).unwrap_or_else(|error| {
+        panic!("read {} for sha256: {error}", path.display())
+    }));
+    format!("{:x}", hasher.finalize())
+}
+
+#[cfg(unix)]
+fn start_shared_leader_pane(hermetic: &HermeticTestEnv, socket: &Path, cwd: &Path) -> String {
+    let bin_dir = hermetic.root().join("provider-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let codex = bin_dir.join("codex");
+    if !codex.exists() {
+        std::os::unix::fs::symlink("/bin/cat", &codex).unwrap();
+    }
+    let socket_str = socket.to_str().expect("tmux socket utf8");
+    let session = format!("ta-cc-{}", std::process::id());
+    let _ = Command::new("tmux")
+        .args(["-S", socket_str, "kill-server"])
+        .output();
+    let created = Command::new("tmux")
+        .args([
+            "-S",
+            socket_str,
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-n",
+            "leader",
+            "-c",
+            cwd.to_str().unwrap(),
+            codex.to_str().unwrap(),
+        ])
+        .output()
+        .expect("tmux new-session");
+    assert!(
+        created.status.success(),
+        "tmux new-session failed: stderr={}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let _ = Command::new("tmux")
+        .args([
+            "-S",
+            socket_str,
+            "set-option",
+            "-t",
+            &session,
+            "history-limit",
+            "5000",
+        ])
+        .output();
+    let pane_out = Command::new("tmux")
+        .args([
+            "-S",
+            socket_str,
+            "display-message",
+            "-p",
+            "-t",
+            &format!("{session}:leader"),
+            "#{pane_id}",
+        ])
+        .output()
+        .expect("tmux pane id");
+    assert!(
+        pane_out.status.success(),
+        "tmux pane id failed: stderr={}",
+        String::from_utf8_lossy(&pane_out.stderr)
+    );
+    let pane = String::from_utf8_lossy(&pane_out.stdout).trim().to_string();
+    assert!(
+        pane.starts_with('%'),
+        "expected fixture pane id, got {pane:?}"
+    );
+    hermetic.register_owned_tmux_socket(socket);
+    let pid_out = Command::new("tmux")
+        .args([
+            "-S",
+            socket_str,
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{pane_pid}",
+        ])
+        .output()
+        .expect("tmux pane pid");
+    if let Ok(pid) = String::from_utf8_lossy(&pid_out.stdout).trim().parse() {
+        hermetic.register_owned_pid(pid);
+    }
+    pane
+}
+
+#[cfg(unix)]
+struct OwnedChild {
+    child: Child,
+}
+
+#[cfg(unix)]
+impl OwnedChild {
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn assert_running(&mut self, label: &str) {
+        assert!(
+            self.child.try_wait().unwrap().is_none(),
+            "{label} candidate coordinator exited before identity receipt"
+        );
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn spawn_candidate_coordinator(
+    hermetic: &HermeticTestEnv,
+    candidate: &Path,
+    workspace: &Path,
+) -> OwnedChild {
+    let runtime = workspace.join(".team/runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let log = std::fs::File::create(runtime.join("coordinator-stdio.log")).unwrap();
+    let mut command = Command::new(candidate);
+    command
+        .args([
+            "coordinator",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--tick-interval",
+            "0.25",
+        ])
+        .current_dir(workspace)
+        .env("HOME", hermetic.home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log));
+    for key in hermetic::CALLER_IDENTITY_ENVS {
+        command.env_remove(key);
+    }
+    let child = command.spawn().expect("spawn candidate coordinator");
+    hermetic.register_owned_pid(child.id());
+    OwnedChild { child }
+}
+
+#[cfg(unix)]
+fn coordinator_identity_receipt(
+    candidate: &Path,
+    candidate_sha: &str,
+    workspace_a: &Path,
+    pid_a: u32,
+    workspace_b: &Path,
+    pid_b: u32,
+) -> Value {
+    let meta_a = wait_coordinator_metadata(workspace_a);
+    let meta_b = wait_coordinator_metadata(workspace_b);
+    assert_eq!(
+        meta_a.get("pid").and_then(Value::as_u64),
+        Some(u64::from(pid_a)),
+        "workspace A coordinator.json pid must be the spawned candidate process; metadata={meta_a}"
+    );
+    assert_eq!(
+        meta_b.get("pid").and_then(Value::as_u64),
+        Some(u64::from(pid_b)),
+        "workspace B coordinator.json pid must be the spawned candidate process; metadata={meta_b}"
+    );
+    let path_a = coordinator_binary_path(&meta_a, workspace_a);
+    let path_b = coordinator_binary_path(&meta_b, workspace_b);
+    let sha_a = sha256_file(&path_a);
+    let sha_b = sha256_file(&path_b);
+    assert_eq!(
+        sha_a, candidate_sha,
+        "workspace A coordinator binary_path bytes must match candidate; candidate={} meta={}",
+        candidate.display(),
+        path_a.display()
+    );
+    assert_eq!(
+        sha_b, candidate_sha,
+        "workspace B coordinator binary_path bytes must match candidate; candidate={} meta={}",
+        candidate.display(),
+        path_b.display()
+    );
+    json!({
+        "candidate_binary": {
+            "path": candidate.to_string_lossy(),
+            "sha256": candidate_sha,
+        },
+        "coordinators": [
+            {
+                "workspace": workspace_a.to_string_lossy(),
+                "pid": meta_a.get("pid"),
+                "binary_path": path_a.to_string_lossy(),
+                "sha256": sha_a,
+                "metadata_path": workspace_a.join(".team/runtime/coordinator.json").to_string_lossy(),
+            },
+            {
+                "workspace": workspace_b.to_string_lossy(),
+                "pid": meta_b.get("pid"),
+                "binary_path": path_b.to_string_lossy(),
+                "sha256": sha_b,
+                "metadata_path": workspace_b.join(".team/runtime/coordinator.json").to_string_lossy(),
+            }
+        ]
+    })
+}
+
+#[cfg(unix)]
+fn wait_coordinator_metadata(workspace: &Path) -> Value {
+    let path = workspace.join(".team/runtime/coordinator.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            last = text;
+            if let Ok(value) = serde_json::from_str::<Value>(&last) {
+                if value
+                    .get("binary_path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| !path.is_empty())
+                {
+                    return value;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "coordinator.json missing usable binary_path for {}; last={last:?}",
+        workspace.display()
+    );
+}
+
+#[cfg(unix)]
+fn coordinator_binary_path(metadata: &Value, workspace: &Path) -> PathBuf {
+    let raw = metadata
+        .get("binary_path")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "coordinator.json binary_path field missing for {}; metadata={metadata}",
+                workspace.display()
+            )
+        });
+    PathBuf::from(raw)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(raw))
+}
+
+#[cfg(unix)]
+struct WorkerMcp {
+    child: Child,
+    stdin: ChildStdin,
+    stdout_rx: Receiver<String>,
+    next_id: i64,
+}
+
+#[cfg(unix)]
+impl WorkerMcp {
+    fn call_tool(&mut self, name: &str, arguments: Value) -> Value {
+        let raw = self.rpc("tools/call", json!({"name": name, "arguments": arguments}));
+        let result = raw
+            .get("result")
+            .unwrap_or_else(|| panic!("tools/call {name} missing result: {raw}"));
+        let is_error = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let text = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|item| item.first())
+            .and_then(|item| item.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("{}");
+        let body = serde_json::from_str(text).unwrap_or_else(|_| json!({"raw_text": text}));
+        assert!(
+            !is_error,
+            "MCP tools/call {name} returned isError; body={body} raw={raw}"
+        );
+        assert_ne!(
+            body.get("ok").and_then(Value::as_bool),
+            Some(false),
+            "MCP tools/call {name} body ok=false; body={body} raw={raw}"
+        );
+        body
+    }
+
+    fn rpc(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        writeln!(self.stdin, "{request}").expect("write json-rpc request");
+        self.stdin.flush().expect("flush json-rpc request");
+        let line = self
+            .stdout_rx
+            .recv_timeout(Duration::from_secs(75))
+            .unwrap_or_else(|_| panic!("timed out waiting for MCP {method}"));
+        let value: Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("invalid JSON-RPC for {method}: {error}; line={line}")
+        });
+        assert!(
+            value.get("error").is_none(),
+            "JSON-RPC {method} protocol error: {value}"
+        );
+        value
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WorkerMcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn spawn_worker_mcp(hermetic: &HermeticTestEnv, candidate: &Path, workspace: &Path) -> WorkerMcp {
+    let mut command = Command::new(candidate);
+    command
+        .args(["mcp-server", "--workspace", workspace.to_str().unwrap()])
+        .current_dir(workspace)
+        .env("HOME", hermetic.home())
+        .env("TEAM_AGENT_WORKSPACE", workspace)
+        .env("TEAM_AGENT_ID", "worker_a")
+        .env("TEAM_AGENT_OWNER_TEAM_ID", "current")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for key in ["TMUX", "TMUX_PANE"] {
+        command.env_remove(key);
+    }
+    let mut child = command.spawn().expect("spawn candidate mcp-server");
+    hermetic.register_owned_pid(child.id());
+    let stdin = child.stdin.take().expect("mcp stdin");
+    let stdout = child.stdout.take().expect("mcp stdout");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut client = WorkerMcp {
+        child,
+        stdin,
+        stdout_rx: rx,
+        next_id: 1,
+    };
+    let init = client.rpc("initialize", json!({"protocolVersion": "2024-11-05"}));
+    assert_eq!(
+        init["result"]["serverInfo"]["name"],
+        json!("team_orchestrator"),
+        "mcp-server initialize identity; init={init}"
+    );
+    client
+}
+
+#[cfg(unix)]
+fn mcp_round(mcp_a: &mut WorkerMcp, mcp_b: &mut WorkerMcp, tokens: &[String; 4]) -> Vec<Value> {
+    vec![
+        mcp_a.call_tool(
+            "send_message",
+            json!({"to": "leader", "content": tokens[0]}),
+        ),
+        mcp_a.call_tool(
+            "report_result",
+            json!({
+                "task_id": "task_comms",
+                "agent_id": "worker_a",
+                "status": "success",
+                "summary": tokens[1]
+            }),
+        ),
+        mcp_b.call_tool(
+            "send_message",
+            json!({"to": "leader", "content": tokens[2]}),
+        ),
+        mcp_b.call_tool(
+            "report_result",
+            json!({
+                "task_id": "task_comms",
+                "agent_id": "worker_a",
+                "status": "success",
+                "summary": tokens[3]
+            }),
+        ),
+    ]
+}
+
+#[cfg(unix)]
+fn wait_for_pane_tokens(socket: &Path, pane: &str, tokens: &[String]) {
+    let socket_str = socket.to_str().expect("tmux socket utf8");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        last = capture_fixture_pane(socket_str, pane);
+        if tokens.iter().all(|token| last.contains(token)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    let missing = tokens
+        .iter()
+        .filter(|token| !last.contains(token.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    panic!("fixture pane missing canaries {missing:?}; capture={last:?}");
+}
+
+#[cfg(unix)]
+fn capture_fixture_pane(socket: &str, pane: &str) -> String {
+    let output = Command::new("tmux")
+        .args([
+            "-S",
+            socket,
+            "capture-pane",
+            "-p",
+            "-S",
+            "-2000",
+            "-t",
+            pane,
+        ])
+        .output()
+        .expect("tmux capture-pane");
+    assert!(
+        output.status.success(),
+        "tmux capture-pane failed: socket={socket} pane={pane} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[cfg(unix)]
+fn db_contains_token(workspace: &Path, token: &str) -> bool {
+    let db = workspace.join(".team/runtime/team.db");
+    if !db.exists() {
+        return false;
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let like = format!("%{token}%");
+    let messages = conn
+        .query_row(
+            "select count(*) from messages where content like ?1",
+            [&like],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    let results = conn
+        .query_row(
+            "select count(*) from results where envelope like ?1",
+            [&like],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    messages + results > 0
 }
