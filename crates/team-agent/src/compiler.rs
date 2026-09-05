@@ -30,7 +30,8 @@ use std::path::Path;
 use crate::communication_mode::CommunicationMode;
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
-use crate::model::{paths, spec, yaml, ModelError};
+use crate::model::{paths, permissions, spec, yaml, ModelError};
+use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
 use crate::provider::wire::{
     builtin_provider_model as wire_builtin_provider_model, is_claude_family,
     parse_canonical_provider, provider_model_keys,
@@ -761,6 +762,18 @@ fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<
     if !tools.iter().any(|tool| tool == "mcp_team") {
         return Err(ModelError::Validation(format!(
             "{}: Pi roles require mcp_team",
+            path.display()
+        )));
+    }
+    let expanded = permissions::expand_tool_strings(tools.iter().map(String::as_str));
+    if let Some(category) = first_unsupported_pi_tool_category(
+        expanded
+            .iter()
+            .filter(|category| permissions::is_canonical_tool(category))
+            .map(String::as_str),
+    ) {
+        return Err(ModelError::Validation(format!(
+            "{}: Pi does not support Team Agent tool category {category:?}; remove it from the role's tools",
             path.display()
         )));
     }
