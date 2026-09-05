@@ -761,8 +761,8 @@ fn json_all_workers_spawned(value: &Value) -> bool {
 fn quick_start_spawned_workers(result: &TaResult) -> bool {
     serde_json::from_str::<Value>(&result.stdout)
         .ok()
-        .is_some_and(|value| json_all_workers_spawned(&value))
-        || result.stdout.contains("\"all_workers_spawned\": true")
+        .map(|value| json_all_workers_spawned(&value))
+        .unwrap_or_else(|| result.stdout.contains("\"all_workers_spawned\": true"))
 }
 
 /// These delivery contracts assert persisted/result truth and need the fake
