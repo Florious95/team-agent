@@ -23,6 +23,10 @@ use sha2::{Digest, Sha256};
 use team_agent::messaging::leader_channel::{
     resolve_live_leader_channel, LeaderChannelResolution,
 };
+#[cfg(unix)]
+use team_agent::messaging::leader_channel::LeaderChannelUnbound;
+#[cfg(unix)]
+use team_agent::transport::Transport;
 
 #[path = "support/hermetic.rs"]
 mod hermetic;
@@ -501,7 +505,34 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
         format!("CANARY_B1R_{pid}"),
     ];
     mcp_round(&mut mcp_a, &mut mcp_b, &round1);
-    wait_for_pane_tokens(&fixture.socket, &fixture.pane, &round1);
+    dump_shared_pane_comms_probe(
+        "after_round1_mcp",
+        &workspace_a,
+        &workspace_b,
+        &fixture,
+        &mut coord_a,
+        &mut coord_b,
+        &round1,
+        "",
+    );
+    if let Err(capture) = wait_for_pane_tokens(&fixture.socket, &fixture.pane, &round1) {
+        dump_shared_pane_comms_probe(
+            "round1_wait_failed",
+            &workspace_a,
+            &workspace_b,
+            &fixture,
+            &mut coord_a,
+            &mut coord_b,
+            &round1,
+            &capture,
+        );
+        let missing = round1
+            .iter()
+            .filter(|token| !capture.contains(token.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        panic!("fixture pane missing canaries {missing:?}; capture={capture:?}");
+    }
 
     let claim_internal = claim_current(&hermetic, &parent, &claim_env);
     assert!(
@@ -528,7 +559,34 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
         format!("CANARY_B2R_{pid}"),
     ];
     mcp_round(&mut mcp_a, &mut mcp_b, &round2);
-    wait_for_pane_tokens(&fixture.socket, &fixture.pane, &round2);
+    dump_shared_pane_comms_probe(
+        "after_round2_mcp",
+        &workspace_a,
+        &workspace_b,
+        &fixture,
+        &mut coord_a,
+        &mut coord_b,
+        &round2,
+        "",
+    );
+    if let Err(capture) = wait_for_pane_tokens(&fixture.socket, &fixture.pane, &round2) {
+        dump_shared_pane_comms_probe(
+            "round2_wait_failed",
+            &workspace_a,
+            &workspace_b,
+            &fixture,
+            &mut coord_a,
+            &mut coord_b,
+            &round2,
+            &capture,
+        );
+        let missing = round2
+            .iter()
+            .filter(|token| !capture.contains(token.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        panic!("fixture pane missing canaries {missing:?}; capture={capture:?}");
+    }
 
     for token in round1.iter().chain(round2.iter()) {
         let in_a = db_contains_token(&workspace_a, token);
@@ -1224,7 +1282,7 @@ fn spawn_worker_mcp(hermetic: &HermeticTestEnv, candidate: &Path, workspace: &Pa
         .env("TEAM_AGENT_OWNER_TEAM_ID", "current")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(mcp_stdio_log(workspace)));
     for key in ["TMUX", "TMUX_PANE"] {
         command.env_remove(key);
     }
@@ -1257,52 +1315,87 @@ fn spawn_worker_mcp(hermetic: &HermeticTestEnv, candidate: &Path, workspace: &Pa
 
 #[cfg(unix)]
 fn mcp_round(mcp_a: &mut WorkerMcp, mcp_b: &mut WorkerMcp, tokens: &[String; 4]) {
-    mcp_a.call_tool(
+    log_mcp_response(
+        "A",
         "send_message",
-        json!({"to": "leader", "content": tokens[0]}),
+        mcp_a.call_tool(
+            "send_message",
+            json!({"to": "leader", "content": tokens[0]}),
+        ),
     );
-    mcp_a.call_tool(
+    log_mcp_response(
+        "A",
         "report_result",
-        json!({
-            "task_id": "task_comms",
-            "agent_id": "worker_a",
-            "status": "success",
-            "summary": tokens[1]
-        }),
+        mcp_a.call_tool(
+            "report_result",
+            json!({
+                "task_id": "task_comms",
+                "agent_id": "worker_a",
+                "status": "success",
+                "summary": tokens[1]
+            }),
+        ),
     );
-    mcp_b.call_tool(
+    log_mcp_response(
+        "B",
         "send_message",
-        json!({"to": "leader", "content": tokens[2]}),
+        mcp_b.call_tool(
+            "send_message",
+            json!({"to": "leader", "content": tokens[2]}),
+        ),
     );
-    mcp_b.call_tool(
+    log_mcp_response(
+        "B",
         "report_result",
-        json!({
-            "task_id": "task_comms",
-            "agent_id": "worker_a",
-            "status": "success",
-            "summary": tokens[3]
-        }),
+        mcp_b.call_tool(
+            "report_result",
+            json!({
+                "task_id": "task_comms",
+                "agent_id": "worker_a",
+                "status": "success",
+                "summary": tokens[3]
+            }),
+        ),
     );
 }
 
 #[cfg(unix)]
-fn wait_for_pane_tokens(socket: &Path, pane: &str, tokens: &[String]) {
+fn log_mcp_response(team: &str, tool: &str, body: Value) {
+    eprintln!(
+        "{}",
+        json!({
+            "comms_mcp": {
+                "team": team,
+                "tool": tool,
+                "ok": body.get("ok"),
+                "status": body.get("status"),
+                "reason": body.get("reason"),
+                "channel": body.get("channel"),
+                "message_id": body.get("message_id"),
+                "leader_notified": body.get("leader_notified"),
+                "notification_status": body.get("notification_status"),
+                "notification_channel": body.get("notification_channel"),
+                "notification_message_id": body.get("notification_message_id"),
+                "result_id": body.get("result_id"),
+                "warning": body.get("warning"),
+            }
+        })
+    );
+}
+
+#[cfg(unix)]
+fn wait_for_pane_tokens(socket: &Path, pane: &str, tokens: &[String]) -> Result<String, String> {
     let socket_str = socket.to_str().expect("tmux socket utf8");
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last = String::new();
     while Instant::now() < deadline {
         last = capture_fixture_pane(socket_str, pane);
         if tokens.iter().all(|token| last.contains(token)) {
-            return;
+            return Ok(last);
         }
         thread::sleep(Duration::from_millis(250));
     }
-    let missing = tokens
-        .iter()
-        .filter(|token| !last.contains(token.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    panic!("fixture pane missing canaries {missing:?}; capture={last:?}");
+    Err(last)
 }
 
 #[cfg(unix)]
@@ -1351,4 +1444,374 @@ fn db_contains_token(workspace: &Path, token: &str) -> bool {
         )
         .unwrap_or(0);
     messages + results > 0
+}
+
+#[cfg(unix)]
+fn mcp_stdio_log(workspace: &Path) -> std::fs::File {
+    let runtime = workspace.join(".team/runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::File::create(runtime.join("mcp-stdio.log")).unwrap()
+}
+
+#[cfg(unix)]
+fn dump_shared_pane_comms_probe(
+    stage: &str,
+    workspace_a: &Path,
+    workspace_b: &Path,
+    fixture: &SharedLeaderPane,
+    coord_a: &mut OwnedChild,
+    coord_b: &mut OwnedChild,
+    tokens: &[String],
+    capture: &str,
+) {
+    let live_nonce = fixture_live_nonce(&fixture.socket, &fixture.pane);
+    let probe = json!({
+        "comms_probe": {
+            "stage": stage,
+            "fixture_session_present": fixture_has_session(&fixture.socket, &fixture.session),
+            "fixture_pane_live": fixture_pane_live(&fixture.socket, &fixture.pane),
+            "capture_has_fallback": capture.contains("delivered_via=fallback_pane"),
+            "capture_primary_error_refused": capture.contains("leader_notification_primary_failed:refused"),
+            "missing_tokens": tokens.iter().filter(|token| !capture.contains(token.as_str())).cloned().collect::<Vec<_>>(),
+            "A": workspace_comms_probe(workspace_a, fixture, &live_nonce, coord_a, tokens),
+            "B": workspace_comms_probe(workspace_b, fixture, &live_nonce, coord_b, tokens),
+        }
+    });
+    eprintln!("{probe}");
+}
+
+#[cfg(unix)]
+fn workspace_comms_probe(
+    workspace: &Path,
+    fixture: &SharedLeaderPane,
+    live_nonce: &Option<String>,
+    coord: &mut OwnedChild,
+    tokens: &[String],
+) -> Value {
+    let state = team_agent::state::persist::load_runtime_state(workspace).unwrap_or(json!({}));
+    let top = state.get("leader_receiver").cloned().unwrap_or(json!({}));
+    let team = state
+        .get("teams")
+        .and_then(|teams| teams.get("current"))
+        .and_then(|team| team.get("leader_receiver"))
+        .cloned()
+        .unwrap_or(json!({}));
+    json!({
+        "coordinator": coordinator_probe(workspace, coord),
+        "receiver_top": receiver_probe(&top, workspace, fixture, live_nonce),
+        "receiver_team_current": receiver_probe(&team, workspace, fixture, live_nonce),
+        "resolution_team_endpoint": resolution_probe(workspace, &team, fixture),
+        "resolution_team_workspace_transport": workspace_transport_resolution(workspace, &team),
+        "messages": message_rows(workspace, tokens),
+        "events": typed_delivery_events(workspace),
+        "mcp_stdio_tail": stdio_tail(&workspace.join(".team/runtime/mcp-stdio.log")),
+    })
+}
+
+#[cfg(unix)]
+fn coordinator_probe(workspace: &Path, coord: &mut OwnedChild) -> Value {
+    let alive = match coord.child.try_wait() {
+        Ok(None) => json!({"alive": true}),
+        Ok(Some(status)) => json!({"alive": false, "exit": format!("{status:?}")}),
+        Err(error) => json!({"alive": false, "wait_error": error.to_string()}),
+    };
+    json!({
+        "process": alive,
+        "stdio_tail": stdio_tail(&workspace.join(".team/runtime/coordinator-stdio.log")),
+    })
+}
+
+#[cfg(unix)]
+fn receiver_probe(
+    receiver: &Value,
+    workspace: &Path,
+    fixture: &SharedLeaderPane,
+    live_nonce: &Option<String>,
+) -> Value {
+    let socket = receiver
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let authorized = receiver
+        .get("authorized_team_workspace")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let binding_nonce = receiver
+        .get("binding_nonce")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let authorized_match = !authorized.is_empty()
+        && PathBuf::from(authorized)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(authorized))
+            == workspace
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.to_path_buf());
+    json!({
+        "status": receiver.get("status"),
+        "pane_id": receiver.get("pane_id"),
+        "scope_authority": receiver.get("scope_authority"),
+        "tmux_socket_present": !socket.is_empty(),
+        "tmux_socket_absolute": Path::new(socket).is_absolute(),
+        "tmux_socket_sha12": sha12(socket),
+        "tmux_socket_equals_fixture": socket == fixture.socket.to_string_lossy().as_ref(),
+        "authorized_workspace_matches_request": authorized_match,
+        "binding_nonce_present": !binding_nonce.is_empty(),
+        "binding_nonce_sha12": sha12(binding_nonce),
+        "live_nonce_present": live_nonce.as_ref().is_some_and(|nonce| !nonce.is_empty()),
+        "live_nonce_sha12": live_nonce.as_deref().map(sha12),
+        "binding_matches_live_nonce": match (binding_nonce.is_empty(), live_nonce) {
+            (false, Some(live)) => Some(binding_nonce == live.as_str()),
+            _ => None,
+        },
+    })
+}
+
+#[cfg(unix)]
+fn resolution_probe(workspace: &Path, receiver: &Value, fixture: &SharedLeaderPane) -> Value {
+    if receiver.is_null() || receiver.as_object().is_some_and(|object| object.is_empty()) {
+        return json!({"resolution": "missing_receiver"});
+    }
+    let transport = team_agent::transport_factory::tmux_endpoint_transport(
+        fixture.socket.to_str().expect("fixture socket utf8"),
+    );
+    describe_resolution(workspace, receiver, &transport)
+}
+
+#[cfg(unix)]
+fn workspace_transport_resolution(workspace: &Path, receiver: &Value) -> Value {
+    if receiver.is_null() || receiver.as_object().is_some_and(|object| object.is_empty()) {
+        return json!({"resolution": "missing_receiver"});
+    }
+    let transport = team_agent::transport_factory::tmux_workspace_transport(workspace);
+    describe_resolution(workspace, receiver, &transport)
+}
+
+#[cfg(unix)]
+fn describe_resolution(
+    workspace: &Path,
+    receiver: &Value,
+    transport: &dyn Transport,
+) -> Value {
+    let pane_id = receiver
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let pane_live = transport
+        .list_targets()
+        .ok()
+        .map(|targets| targets.iter().any(|target| target.pane_id.as_str() == pane_id));
+    let transport_endpoint = transport.tmux_endpoint();
+    let transport_endpoint_absolute = transport_endpoint
+        .as_deref()
+        .is_some_and(|endpoint| Path::new(endpoint).is_absolute());
+    let mut probe = json!({
+        "pane_live_on_transport": pane_live,
+        "transport_endpoint_present": transport_endpoint.is_some(),
+        "transport_endpoint_absolute": transport_endpoint_absolute,
+        "transport_endpoint_sha12": transport_endpoint.as_deref().map(sha12),
+    });
+    match resolve_live_leader_channel(workspace, receiver, transport) {
+        LeaderChannelResolution::Live(_) => {
+            probe["resolution"] = json!("Live");
+        }
+        LeaderChannelResolution::Unbound(reason) => {
+            probe["resolution"] = json!("Unbound");
+            probe["reason_code"] = json!(reason.reason_code());
+            if let LeaderChannelUnbound::PaneWorkspaceMismatch(facts) = reason {
+                probe["mismatch_observed_in_requested_workspace"] = json!(
+                    facts.observed_pane_workspace == facts.requested_workspace
+                        || facts
+                            .observed_pane_workspace
+                            .starts_with(&facts.requested_workspace)
+                );
+                probe["mismatch_requested_is_fixture_parent"] = json!(facts
+                    .observed_pane_workspace
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains("parent")));
+            }
+        }
+        LeaderChannelResolution::ProbeFailed(error) => {
+            probe["resolution"] = json!("ProbeFailed");
+            probe["probe_error"] = json!(error);
+        }
+    }
+    probe
+}
+
+#[cfg(unix)]
+fn message_rows(workspace: &Path, tokens: &[String]) -> Value {
+    let db = workspace.join(".team/runtime/team.db");
+    if !db.exists() {
+        return json!({"db_present": false});
+    }
+    let Ok(conn) = rusqlite::Connection::open(&db) else {
+        return json!({"db_present": true, "open": false});
+    };
+    let mut rows = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "select message_id, status, error, recipient, content from messages order by created_at",
+    ) {
+        if let Ok(iter) = stmt.query_map([], |row| {
+            let content = row.get::<_, String>(4).unwrap_or_default();
+            Ok(json!({
+                "message_id": row.get::<_, String>(0)?,
+                "status": row.get::<_, String>(1)?,
+                "error": row.get::<_, Option<String>>(2)?,
+                "recipient": row.get::<_, String>(3)?,
+                "token_hits": tokens.iter().filter(|token| content.contains(token.as_str())).cloned().collect::<Vec<_>>(),
+            }))
+        }) {
+            for row in iter.flatten() {
+                rows.push(row);
+            }
+        }
+    }
+    json!({"db_present": true, "rows": rows})
+}
+
+#[cfg(unix)]
+fn typed_delivery_events(workspace: &Path) -> Value {
+    let path = workspace.join(".team/logs/events.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return json!([]);
+    };
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let event = value
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !keep_delivery_event(event) {
+            continue;
+        }
+        events.push(json!({
+            "event": event,
+            "message_id": value.get("message_id"),
+            "channel": value.get("channel"),
+            "channel_reason": value.get("channel_reason"),
+            "reason": value.get("reason"),
+            "error": value.get("error"),
+            "status": value.get("status"),
+            "delivered_via": value.get("delivered_via"),
+            "primary_error": value.get("primary_error"),
+            "leader_notified": value.get("leader_notified"),
+            "notification_status": value.get("notification_status"),
+            "notification_channel": value.get("notification_channel"),
+            "notification_message_id": value.get("notification_message_id"),
+        }));
+    }
+    json!(events)
+}
+
+#[cfg(unix)]
+fn keep_delivery_event(event: &str) -> bool {
+    let lower = event.to_ascii_lowercase();
+    if lower.contains("argv") || lower.contains("credential") || lower.contains("spawn_env") {
+        return false;
+    }
+    lower.contains("leader_receiver")
+        || lower.contains("deliver_to_leader")
+        || event == "mcp.report_result"
+        || event == "mcp.scope_resolved"
+        || lower.contains("fallback_pane")
+        || event == "message.delivered"
+        || event.starts_with("send.")
+}
+
+#[cfg(unix)]
+fn stdio_tail(path: &Path) -> Value {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return json!([]);
+    };
+    let lines = text
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.contains("argv")
+                && !lower.contains("password")
+                && !lower.contains("authorization")
+                && !lower.contains("api_key")
+        })
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    json!(lines)
+}
+
+#[cfg(unix)]
+fn fixture_live_nonce(socket: &Path, pane: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args([
+            "-S",
+            socket.to_str()?,
+            "show-options",
+            "-p",
+            "-v",
+            "-t",
+            pane,
+            "@team_agent_pane_binding_nonce",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let nonce = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if nonce.is_empty() {
+        None
+    } else {
+        Some(nonce)
+    }
+}
+
+#[cfg(unix)]
+fn fixture_has_session(socket: &Path, session: &str) -> bool {
+    Command::new("tmux")
+        .args([
+            "-S",
+            socket.to_str().unwrap_or(""),
+            "has-session",
+            "-t",
+            session,
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(unix)]
+fn fixture_pane_live(socket: &Path, pane: &str) -> bool {
+    Command::new("tmux")
+        .args([
+            "-S",
+            socket.to_str().unwrap_or(""),
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|id| id.trim() == pane)
+        })
+}
+
+#[cfg(unix)]
+fn sha12(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+        .chars()
+        .take(12)
+        .collect()
 }
