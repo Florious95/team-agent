@@ -75,10 +75,16 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         ],
     );
     let quick_json = json_output(&quick_start, "quick-start fake team");
+    let all_workers_spawned = quick_json
+        .pointer("/readiness/all_workers_spawned")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            quick_json
+                .pointer("/worker_readiness/all_workers_spawned")
+                .and_then(Value::as_bool)
+        });
     assert_eq!(
-        quick_json
-            .pointer("/readiness/all_workers_spawned")
-            .and_then(Value::as_bool),
+        all_workers_spawned,
         Some(true),
         "E6 e2e RED setup: fake worker must be spawned so target team is live even though quick-start may exit nonzero for leader_receiver_unbound; code={:?} output={quick_json}",
         quick_start.status.code()

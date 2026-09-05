@@ -176,6 +176,7 @@ fn red4_live_old_endpoint_is_not_silently_overwritten() {
         TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "RED4 live old endpoint claim-leader");
     assert_binding_ok(&claim, &claim_json, "RED4 live old endpoint claim-leader");

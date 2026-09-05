@@ -238,6 +238,34 @@ fn leader_port_takeover_confirm_without_pane_refuses_caller_pane_missing() {
         );
 }
 
+#[test]
+fn claim_leader_default_response_hides_internal_binding_details() {
+    let mut value = serde_json::json!({
+        "ok": true,
+        "status": "already_bound",
+        "owner_epoch": 3,
+        "bound_pane_id": "%77",
+        "leader_receiver": {"pane_id": "%77"},
+        "team_owner": {"pane_id": "%77"},
+        "topology_convergence": {"status": "not_converged_old_endpoint_live"},
+        "leader_registry": {"status": "registered"}
+    });
+    super::leader_port::compact_lease_value(&mut value);
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["status"], json!("already_bound"));
+    assert_eq!(value["bound_pane_id"], json!("%77"));
+    assert_eq!(value["reason"], json!("not_converged_old_endpoint_live"));
+    for field in [
+        "owner_epoch",
+        "leader_receiver",
+        "team_owner",
+        "topology_convergence",
+        "leader_registry",
+    ] {
+        assert!(value.get(field).is_none(), "default claim response leaked {field}");
+    }
+}
+
 // RED — claim_leader(confirm=false) with no $TMUX_PANE: runtime.claim_leader is
 // ALSO Family A (runtime.py:791) -> the bind gate fires FIRST, so the no-pane
 // refusal is caller_pane_missing (NOT the leader-lane "not_in_tmux_pane").

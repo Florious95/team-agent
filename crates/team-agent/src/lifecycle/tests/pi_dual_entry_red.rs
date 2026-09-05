@@ -320,26 +320,26 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         .get("agents")
         .cloned()
         .expect("fixture agents");
-    let owning_socket = "/private/tmp/tmux-501/ta-owning-team";
+    let receiver_socket = "/private/tmp/tmux-501/ta-leader-receiver";
     let owning_session = "team-agent-leader-pi-owning-team";
-    let wrong_socket = "/private/tmp/tmux-501/ta-workspace-derived";
+    let worker_socket = "/private/tmp/tmux-501/ta-worker-persisted";
     crate::state::persist::save_runtime_state(
         &success_team,
         &json!({
             "active_team_key": "dynamic-success",
-            "tmux_endpoint": wrong_socket,
-            "tmux_socket": wrong_socket,
+            "tmux_endpoint": worker_socket,
+            "tmux_socket": worker_socket,
             "teams": {
                 "dynamic-success": {
                     "agents": success_agents,
                     "team_dir": success_team,
                     "session_name": null,
-                    "tmux_endpoint": wrong_socket,
-                    "tmux_socket": wrong_socket,
+                    "tmux_endpoint": worker_socket,
+                    "tmux_socket": worker_socket,
                     "leader_receiver": {
                         "status": "attached",
                         "session_name": owning_session,
-                        "tmux_socket": owning_socket
+                        "tmux_socket": receiver_socket
                     }
                 }
             }
@@ -351,15 +351,15 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
             &success_team,
             Some("dynamic-success"),
         )
-        .expect("resolve selected owning transport");
+        .expect("resolve selected worker transport");
     assert_eq!(
         selected_transport.tmux_endpoint().as_deref(),
-        Some(owning_socket),
-        "nested selected-team receiver must beat stale top-level and team socket fields"
+        Some(worker_socket),
+        "lifecycle worker transport must use persisted worker endpoint, not receiver endpoint"
     );
     let mut annotation_state =
         crate::state::persist::load_runtime_state(&success_team).expect("load annotation fixture");
-    let wrong_transport = OfflineTransport::new().with_tmux_endpoint(wrong_socket);
+    let wrong_transport = OfflineTransport::new().with_tmux_endpoint(worker_socket);
     crate::lifecycle::launch::annotate_runtime_tmux_endpoint(
         &mut annotation_state,
         &wrong_transport,
@@ -369,18 +369,18 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         annotation_state
             .get("tmux_endpoint")
             .and_then(serde_json::Value::as_str),
-        Some(owning_socket),
-        "worker-derived annotation must not clobber the owning endpoint"
+        Some(worker_socket),
+        "worker-derived annotation must preserve the persisted worker endpoint"
     );
     assert_eq!(
         annotation_state
             .pointer("/teams/dynamic-success/leader_receiver/tmux_socket")
             .and_then(serde_json::Value::as_str),
-        Some(owning_socket)
+        Some(receiver_socket)
     );
     let success_transport = OfflineTransport::new()
         .with_session_present(true)
-        .with_tmux_endpoint(owning_socket);
+        .with_tmux_endpoint(worker_socket);
     crate::lifecycle::add_agent_with_transport(
         &success_team,
         &AgentId::new("mate"),
@@ -516,8 +516,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
             &live,
             &json!({
                 "active_team_key": "current",
-                "tmux_endpoint": wrong_socket,
-                "tmux_socket": wrong_socket,
+                "tmux_endpoint": worker_socket,
+                "tmux_socket": worker_socket,
                 "agents": {
                     "implementer": {
                         "status": "running",
@@ -532,6 +532,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
                         "status": "alive",
                         "team_dir": live,
                         "session_name": null,
+                        "tmux_endpoint": worker_socket,
+                        "tmux_socket": worker_socket,
                         "agents": {
                             "implementer": {
                                 "status": "running",
@@ -655,9 +657,9 @@ int main(int argc, char **argv) {
 
         let preflight = run_file_h_command_with_deadline(
             std::process::Command::new(&shim)
-                .args(["-S", live_socket, "has-session"])
+                .args(["-S", worker_socket, "has-session"])
                 .env("TEAM_AGENT_PI_TMUX_LOG", shim_root.join("preflight.log"))
-                .env("TEAM_AGENT_PI_OWNING_SOCKET", live_socket)
+                .env("TEAM_AGENT_PI_OWNING_SOCKET", worker_socket)
                 .env("TEAM_AGENT_PI_OWNING_SESSION", live_session)
                 .env("TEAM_AGENT_PI_RUN_WORKSPACE", &live),
             "File-H native fake has-session preflight",
@@ -678,7 +680,7 @@ int main(int argc, char **argv) {
         .expect("join native shim PATH");
         let _path = EnvVarGuard::set("PATH", joined_path);
         let _log = EnvVarGuard::set("TEAM_AGENT_PI_TMUX_LOG", &shim_log);
-        let _socket = EnvVarGuard::set("TEAM_AGENT_PI_OWNING_SOCKET", live_socket);
+        let _socket = EnvVarGuard::set("TEAM_AGENT_PI_OWNING_SOCKET", worker_socket);
         let _session = EnvVarGuard::set("TEAM_AGENT_PI_OWNING_SESSION", live_session);
         let _workspace = EnvVarGuard::set("TEAM_AGENT_PI_RUN_WORKSPACE", &live);
 
@@ -689,15 +691,15 @@ int main(int argc, char **argv) {
         );
         let result = tools
             .add_agent("mate", "roles/mate.md")
-            .expect("public MCP add must use the nested owning receiver");
+            .expect("public MCP add must use the persisted worker endpoint");
         assert_eq!(
             result.fields.get("ok").and_then(serde_json::Value::as_bool),
             Some(true)
         );
         let tmux_argv = std::fs::read_to_string(&shim_log).expect("read tmux shim log");
         assert!(
-            tmux_argv.contains(&format!("-S {live_socket}")),
-            "public add must address the selected owning socket: {tmux_argv}"
+            tmux_argv.contains(&format!("-S {worker_socket}")),
+            "public add must address the persisted worker socket: {tmux_argv}"
         );
         assert!(
             tmux_argv.contains(&format!(
