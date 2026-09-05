@@ -266,7 +266,7 @@ fn pi_role_rejects_unsupported_categories_during_compile() {
 
     let alias = valid_role_with("").replace(
         "  - execute_bash\n",
-        "  - execute_bash\n  - @builtin\n",
+        "  - execute_bash\n  - \"@builtin\"\n",
     );
     let error = compile_error(compile_pi_role(&alias)).to_string();
     assert!(
