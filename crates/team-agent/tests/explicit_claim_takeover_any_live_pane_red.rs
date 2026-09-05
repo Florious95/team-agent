@@ -433,6 +433,10 @@ fn shared_nonce_fake_tmux_bin(root: &Path) -> PathBuf {
     // wall-clock deadline, not sleep-based races.
     let script = r##"#!/bin/sh
 root=$(dirname "$FAKE_NONCE_FILE")
+# This pane exists only on the caller's absolute socket, not every discovery candidate.
+if [ "$1" != "-S" ] || [ "$2" != "$root/tmux-shared.sock" ]; then
+  exit 1
+fi
 observers="$root/empty-observers"
 arrivals="$root/set-option-arrivals"
 setlog="$root/set-option.log"
