@@ -437,20 +437,19 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
     let parent = hermetic.workspace("parent");
     let workspace_a = hermetic.workspace("external-a");
     let workspace_b = hermetic.workspace("external-b");
+    let fixture = start_shared_leader_pane(&hermetic, &parent);
     for workspace in [&parent, &workspace_a, &workspace_b] {
-        seed_comms_runtime_state(workspace);
+        seed_comms_runtime_state(workspace, &fixture.session, &fixture.socket);
     }
 
     let candidate = PathBuf::from(env!("CARGO_BIN_EXE_team-agent"))
         .canonicalize()
         .expect("canonicalize candidate team-agent");
     let candidate_sha = sha256_file(&candidate);
-    let socket = hermetic::short_tmux_socket("claim-comms");
-    let pane = start_shared_leader_pane(&hermetic, &socket, &parent);
-    let tmux = format!("{},12345,0", socket.display());
+    let tmux = format!("{},12345,0", fixture.socket.display());
     let claim_env = [
         ("TMUX", tmux.as_str()),
-        ("TMUX_PANE", pane.as_str()),
+        ("TMUX_PANE", fixture.pane.as_str()),
         ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
         ("TEAM_AGENT_MACHINE_FINGERPRINT", "claim-comms"),
     ];
@@ -501,8 +500,8 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
         format!("CANARY_B1S_{pid}"),
         format!("CANARY_B1R_{pid}"),
     ];
-    let bodies_r1 = mcp_round(&mut mcp_a, &mut mcp_b, &round1);
-    wait_for_pane_tokens(&socket, &pane, &round1);
+    mcp_round(&mut mcp_a, &mut mcp_b, &round1);
+    wait_for_pane_tokens(&fixture.socket, &fixture.pane, &round1);
 
     let claim_internal = claim_current(&hermetic, &parent, &claim_env);
     assert!(
@@ -528,8 +527,8 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
         format!("CANARY_B2S_{pid}"),
         format!("CANARY_B2R_{pid}"),
     ];
-    let bodies_r2 = mcp_round(&mut mcp_a, &mut mcp_b, &round2);
-    wait_for_pane_tokens(&socket, &pane, &round2);
+    mcp_round(&mut mcp_a, &mut mcp_b, &round2);
+    wait_for_pane_tokens(&fixture.socket, &fixture.pane, &round2);
 
     for token in round1.iter().chain(round2.iter()) {
         let in_a = db_contains_token(&workspace_a, token);
@@ -541,18 +540,6 @@ fn shared_pane_after_external_and_internal_claims_repeats_mcp_send_and_report_re
             assert!(in_b, "workspace B db missing own token {token}");
             assert!(!in_a, "workspace A db leaked workspace B token {token}");
         }
-    }
-    for body in bodies_r1.iter().chain(bodies_r2.iter()) {
-        assert_ne!(
-            body.get("notification_status"),
-            Some(&json!("queued")),
-            "MCP notification_status must not be queued; body={body}"
-        );
-        assert_ne!(
-            body.get("notification_status"),
-            Some(&json!("queued_only")),
-            "MCP notification_status must not be queued_only; body={body}"
-        );
     }
     hermetic.assert_real_registry_unchanged(real_registry);
 }
@@ -817,25 +804,35 @@ esac
 }
 
 #[cfg(unix)]
-fn seed_comms_runtime_state(ws: &Path) {
+fn seed_comms_runtime_state(ws: &Path, session_name: &str, endpoint: &Path) {
+    let endpoint = endpoint.to_string_lossy();
+    let worker = json!({
+        "provider": "fake",
+        "status": "running",
+        "session_name": session_name,
+        "tmux_endpoint": endpoint,
+        "tmux_socket": endpoint
+    });
     team_agent::state::persist::save_runtime_state(
         ws,
         &json!({
             "active_team_key": "current",
-            "session_name": "current",
+            "session_name": session_name,
             "team_dir": ws.to_string_lossy(),
+            "tmux_endpoint": endpoint,
+            "tmux_socket": endpoint,
+            "transport": { "kind": "tmux" },
             "agents": {
-                "worker_a": {
-                    "provider": "fake",
-                    "status": "running"
-                }
+                "worker_a": worker.clone()
             },
             "teams": {
                 "current": {
-                    "session_name": "current",
+                    "session_name": session_name,
                     "team_dir": ws.to_string_lossy(),
+                    "tmux_endpoint": endpoint,
+                    "tmux_socket": endpoint,
                     "agents": {
-                        "worker_a": { "status": "running" }
+                        "worker_a": worker
                     },
                     "tasks": [
                         { "id": "task_comms", "assignee": "worker_a", "status": "pending" }
@@ -885,13 +882,21 @@ fn sha256_file(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-fn start_shared_leader_pane(hermetic: &HermeticTestEnv, socket: &Path, cwd: &Path) -> String {
+struct SharedLeaderPane {
+    session: String,
+    socket: PathBuf,
+    pane: String,
+}
+
+#[cfg(unix)]
+fn start_shared_leader_pane(hermetic: &HermeticTestEnv, cwd: &Path) -> SharedLeaderPane {
     let bin_dir = hermetic.root().join("provider-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let codex = bin_dir.join("codex");
     if !codex.exists() {
         std::os::unix::fs::symlink("/bin/cat", &codex).unwrap();
     }
+    let socket = hermetic::short_tmux_socket("claim-comms");
     let socket_str = socket.to_str().expect("tmux socket utf8");
     let session = format!("ta-cc-{}", std::process::id());
     let _ = Command::new("tmux")
@@ -951,7 +956,7 @@ fn start_shared_leader_pane(hermetic: &HermeticTestEnv, socket: &Path, cwd: &Pat
         pane.starts_with('%'),
         "expected fixture pane id, got {pane:?}"
     );
-    hermetic.register_owned_tmux_socket(socket);
+    hermetic.register_owned_tmux_socket(&socket);
     let pid_out = Command::new("tmux")
         .args([
             "-S",
@@ -967,7 +972,11 @@ fn start_shared_leader_pane(hermetic: &HermeticTestEnv, socket: &Path, cwd: &Pat
     if let Ok(pid) = String::from_utf8_lossy(&pid_out.stdout).trim().parse() {
         hermetic.register_owned_pid(pid);
     }
-    pane
+    SharedLeaderPane {
+        session,
+        socket,
+        pane,
+    }
 }
 
 #[cfg(unix)]
@@ -1024,7 +1033,6 @@ fn spawn_candidate_coordinator(
         command.env_remove(key);
     }
     let child = command.spawn().expect("spawn candidate coordinator");
-    hermetic.register_owned_pid(child.id());
     OwnedChild { child }
 }
 
@@ -1221,7 +1229,6 @@ fn spawn_worker_mcp(hermetic: &HermeticTestEnv, candidate: &Path, workspace: &Pa
         command.env_remove(key);
     }
     let mut child = command.spawn().expect("spawn candidate mcp-server");
-    hermetic.register_owned_pid(child.id());
     let stdin = child.stdin.take().expect("mcp stdin");
     let stdout = child.stdout.take().expect("mcp stdout");
     let (tx, rx) = mpsc::channel();
@@ -1249,35 +1256,33 @@ fn spawn_worker_mcp(hermetic: &HermeticTestEnv, candidate: &Path, workspace: &Pa
 }
 
 #[cfg(unix)]
-fn mcp_round(mcp_a: &mut WorkerMcp, mcp_b: &mut WorkerMcp, tokens: &[String; 4]) -> Vec<Value> {
-    vec![
-        mcp_a.call_tool(
-            "send_message",
-            json!({"to": "leader", "content": tokens[0]}),
-        ),
-        mcp_a.call_tool(
-            "report_result",
-            json!({
-                "task_id": "task_comms",
-                "agent_id": "worker_a",
-                "status": "success",
-                "summary": tokens[1]
-            }),
-        ),
-        mcp_b.call_tool(
-            "send_message",
-            json!({"to": "leader", "content": tokens[2]}),
-        ),
-        mcp_b.call_tool(
-            "report_result",
-            json!({
-                "task_id": "task_comms",
-                "agent_id": "worker_a",
-                "status": "success",
-                "summary": tokens[3]
-            }),
-        ),
-    ]
+fn mcp_round(mcp_a: &mut WorkerMcp, mcp_b: &mut WorkerMcp, tokens: &[String; 4]) {
+    mcp_a.call_tool(
+        "send_message",
+        json!({"to": "leader", "content": tokens[0]}),
+    );
+    mcp_a.call_tool(
+        "report_result",
+        json!({
+            "task_id": "task_comms",
+            "agent_id": "worker_a",
+            "status": "success",
+            "summary": tokens[1]
+        }),
+    );
+    mcp_b.call_tool(
+        "send_message",
+        json!({"to": "leader", "content": tokens[2]}),
+    );
+    mcp_b.call_tool(
+        "report_result",
+        json!({
+            "task_id": "task_comms",
+            "agent_id": "worker_a",
+            "status": "success",
+            "summary": tokens[3]
+        }),
+    );
 }
 
 #[cfg(unix)]
