@@ -68,6 +68,13 @@
       "plan": "Execute in a hermetic leader fixture and bind assertions to owner/receiver persistence or a precise zero-write refusal."
     },
     {
+      "command": "team-agent claim-leader --detail",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:leader-channel",
+      "plan": "Execute the exact argv and bind assertions to detail-only topology_convergence, owner_epoch, and checked_paths fields."
+    },
+    {
       "command": "team-agent claude",
       "bucket": "declared_gap",
       "covered": false,
@@ -234,6 +241,13 @@
       }
     },
     {
+      "command": "team-agent quick-start --json --detail",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Execute the exact argv and bind assertions to detail-only receiver, topology, and coordinator diagnostics while keeping compact default JSON."
+    },
+    {
       "command": "team-agent quick-start <dir>",
       "bucket": "covered",
       "cases": ["lnch_001_quick_start_basic"],
@@ -307,6 +321,13 @@
       "covered": false,
       "owner": "runtime-owner:restart",
       "plan": "Execute a representative team selector and bind assertions to selected-team restart and sibling preservation."
+    },
+    {
+      "command": "team-agent restart --json --detail",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:restart",
+      "plan": "Execute the exact argv and bind assertions to detail-only coordinator diagnostics while keeping compact default JSON."
     },
     {
       "command": "team-agent send --task task_initial \"Start\"",

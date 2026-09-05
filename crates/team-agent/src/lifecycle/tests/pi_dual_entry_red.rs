@@ -532,6 +532,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
                         "status": "alive",
                         "team_dir": live,
                         "session_name": null,
+                        "tmux_endpoint": worker_socket,
+                        "tmux_socket": worker_socket,
                         "agents": {
                             "implementer": {
                                 "status": "running",

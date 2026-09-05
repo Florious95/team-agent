@@ -53,6 +53,7 @@ fn claim_uses_current_tmux_endpoint_as_observed_candidate() {
         TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "R1 claim-leader");
     let state = case.read_state();
