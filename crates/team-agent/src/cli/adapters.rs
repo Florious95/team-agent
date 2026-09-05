@@ -1377,10 +1377,12 @@ pub fn cmd_takeover(args: &TakeoverArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_claim_leader`(`commands.py:156`)。
 pub fn cmd_claim_leader(args: &ClaimLeaderArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?,
-        args.json,
-    ))
+    let mut value =
+        leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?;
+    if !args.detail {
+        leader_port::compact_lease_value(&mut value);
+    }
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_identity`(`commands.py:160`)。

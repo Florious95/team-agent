@@ -41,7 +41,13 @@ trait FreshQuickStartLeaderBindingOps {
     fn explicit_provider(&mut self) -> Option<String>;
     fn tmux_endpoint(&mut self) -> Option<String>;
     fn observe_command(&mut self, pane: &PaneId) -> Option<String>;
-    fn live_binding_elsewhere(&mut self, pane: &PaneId, workspace: &Path, team_key: &str) -> bool;
+    fn live_binding_elsewhere(
+        &mut self,
+        pane: &PaneId,
+        endpoint: Option<&str>,
+        workspace: &Path,
+        team_key: &str,
+    ) -> bool;
     fn attach(
         &mut self,
         workspace: &Path,
@@ -82,9 +88,16 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             .filter(|command| !command.trim().is_empty())
     }
 
-    fn live_binding_elsewhere(&mut self, pane: &PaneId, workspace: &Path, team_key: &str) -> bool {
+    fn live_binding_elsewhere(
+        &mut self,
+        pane: &PaneId,
+        endpoint: Option<&str>,
+        workspace: &Path,
+        team_key: &str,
+    ) -> bool {
         crate::leader::registry::live_same_pane_binding_elsewhere(
             pane.as_str(),
+            endpoint,
             workspace,
             team_key,
         )
@@ -271,16 +284,30 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     ) else {
         return false;
     };
-    if ops.live_binding_elsewhere(&pane, workspace, team_key) {
-        return false;
-    }
-    let endpoint = ops.tmux_endpoint();
-    // initial_runtime_state seeds the verified caller into the launched team's
-    // dual state before spawn. That is the transaction's candidate, not an
-    // already-owned-team refusal: it still needs the canonical registry commit.
+    // initial_runtime_state marks its pre-bind candidate with
+    // `claimed_via=quick-start`. Only that explicitly fresh-owned candidate is
+    // eligible for cleanup; an unrelated existing binding must remain intact.
+    let fresh_seeded_binding = state
+        .get("team_owner")
+        .and_then(|owner| owner.get("claimed_via"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|source| source == "quick-start");
     let has_persisted_binding = ["team_owner", "leader_receiver"]
         .iter()
         .any(|key| state.get(*key).is_some_and(|value| !value.is_null()));
+    let endpoint = ops.tmux_endpoint();
+    if ops.live_binding_elsewhere(&pane, endpoint.as_deref(), workspace, team_key) {
+        // initial_runtime_state may already have seeded the caller into this
+        // team's state. Remove that candidate before refusing so a later
+        // claim cannot misreport the failed fresh start as already_bound.
+        if fresh_seeded_binding {
+            clear_fresh_binding_on_refusal(workspace, &mut state, team_key);
+        }
+        return false;
+    }
+    // initial_runtime_state seeds the verified caller into the launched team's
+    // dual state before spawn. That is the transaction's candidate, not an
+    // already-owned-team refusal: it still needs the canonical registry commit.
     if has_persisted_binding
         && !persisted_binding_matches_verified_pane(
             &state,
@@ -290,18 +317,33 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             endpoint.as_deref(),
         )
     {
+        if fresh_seeded_binding {
+            clear_fresh_binding_on_refusal(workspace, &mut state, team_key);
+        }
         return false;
     }
-    // Registry publication is the commit point. Restore both persisted surfaces
-    // byte for byte when attach, publication, or canonical readback does not finish.
+    // Registry publication is the commit point. Restore persisted surfaces on
+    // failure, except for the caller-seeded owner that must be cleared.
     let snapshots = binding_snapshots(workspace, team_key);
     let attached = has_persisted_binding || ops.attach(workspace, &mut state, &pane, provider);
     let committed = attached
         && ops.register(workspace, team_key)
         && ops.canonical_readback(workspace, team_key);
     if !committed {
-        for snapshot in snapshots.iter().rev() {
-            snapshot.restore();
+        if fresh_seeded_binding {
+            // Restore only the registry surface. The initial runtime state may
+            // already contain a caller-seeded owner; restoring it after a failed
+            // commit would make a later claim falsely report already_bound.
+            for snapshot in snapshots.iter().skip(1).rev() {
+                snapshot.restore();
+            }
+            clear_fresh_binding_on_refusal(workspace, &mut state, team_key);
+        } else {
+            // No caller-seeded owner was ours to clean up, so restore all
+            // surfaces byte-for-byte after an attach/register/readback failure.
+            for snapshot in snapshots.iter().rev() {
+                snapshot.restore();
+            }
         }
     }
     committed
@@ -312,6 +354,58 @@ fn should_emit_workspace_socket_missing_hint(
     workspace_socket_missing: bool,
 ) -> bool {
     workspace_socket_missing && selected_source != Some("leader_env")
+}
+
+fn clear_fresh_binding_on_refusal(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+) {
+    // A projected team state carries the seeded owner both at the root and in
+    // `teams.<key>`. The repository deliberately preserves a newer owner from
+    // disk, so make the selected team tombstone newer before removing the
+    // candidate; otherwise a failed fresh bind can be resurrected by the
+    // lock-held merge and later look already_bound.
+    let current_epoch = [
+        state.get("owner_epoch"),
+        state
+            .get("team_owner")
+            .and_then(|owner| owner.get("owner_epoch")),
+        state
+            .get("leader_receiver")
+            .and_then(|receiver| receiver.get("owner_epoch")),
+        state
+            .get("teams")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|teams| teams.get(team_key))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|team| team.get("owner_epoch")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(serde_json::Value::as_u64)
+    .max()
+    .unwrap_or(0);
+    let next_epoch = current_epoch.saturating_add(1);
+    if let Some(obj) = state.as_object_mut() {
+        obj.remove("leader_receiver");
+        obj.remove("team_owner");
+        obj.remove("owner_epoch");
+    }
+    if let Some(team) = state
+        .get_mut("teams")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|teams| teams.get_mut(team_key))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        team.insert("leader_receiver".to_string(), serde_json::Value::Null);
+        team.insert("team_owner".to_string(), serde_json::Value::Null);
+        team.insert("owner_epoch".to_string(), serde_json::json!(next_epoch));
+    }
+    let _ = crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::ClaimLeader { team_key },
+        state,
+    );
 }
 
 fn bind_fresh_quick_start_leader(
@@ -937,6 +1031,7 @@ mod fresh_quick_start_leader_binding_tests {
         fn live_binding_elsewhere(
             &mut self,
             _pane: &PaneId,
+            _endpoint: Option<&str>,
             _workspace: &Path,
             _team_key: &str,
         ) -> bool {
@@ -1042,7 +1137,6 @@ mod fresh_quick_start_leader_binding_tests {
             "socket_mismatch",
             "workspace_mismatch",
             "dual_state_mismatch",
-            "live_other_scope",
         ] {
             let workspace = workspace(case);
             let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
@@ -1088,7 +1182,6 @@ mod fresh_quick_start_leader_binding_tests {
                         _ => unreachable!(),
                     }
                 }
-                "live_other_scope" => ops.live_elsewhere = true,
                 "team_mismatch" => {}
                 _ => unreachable!(),
             }
@@ -1201,6 +1294,7 @@ mod fresh_quick_start_leader_binding_tests {
         fn live_binding_elsewhere(
             &mut self,
             _pane: &PaneId,
+            _endpoint: Option<&str>,
             _workspace: &Path,
             _team_key: &str,
         ) -> bool {
@@ -1274,7 +1368,8 @@ mod fresh_quick_start_leader_binding_tests {
             "pane_id": "%42",
             "provider": "pi",
             "leader_session_uuid": "uuid-fresh",
-            "owner_epoch": 1
+            "owner_epoch": 1,
+            "claimed_via": "quick-start"
         });
         state["leader_receiver"] = json!({
             "mode": "direct_tmux",
@@ -1284,6 +1379,13 @@ mod fresh_quick_start_leader_binding_tests {
             "leader_session_uuid": "uuid-fresh",
             "owner_epoch": 1,
             "tmux_socket": endpoint
+        });
+        let seeded_owner = state["team_owner"].clone();
+        let seeded_receiver = state["leader_receiver"].clone();
+        state["teams"]["fresh"] = json!({
+            "team_owner": seeded_owner,
+            "leader_receiver": seeded_receiver,
+            "owner_epoch": 1
         });
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
         let mut ops = MockOps {
@@ -1300,6 +1402,11 @@ mod fresh_quick_start_leader_binding_tests {
         assert!(
             after.get("leader_receiver").is_none() && after.get("team_owner").is_none(),
             "refused fresh binding must not leave an already_bound owner behind: {after}"
+        );
+        assert!(
+            after["teams"]["fresh"]["leader_receiver"].is_null()
+                && after["teams"]["fresh"]["team_owner"].is_null(),
+            "refused fresh binding must clear the canonical seeded owner: {after}"
         );
     }
 

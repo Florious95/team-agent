@@ -5075,6 +5075,31 @@ pub mod leader_port {
         })
     }
 
+    pub(crate) fn compact_lease_value(value: &mut Value) {
+        let topology_status = value
+            .get("topology_convergence")
+            .and_then(|topology| topology.get("status"))
+            .cloned();
+        if value.get("reason").is_none() {
+            if let Some(status) = topology_status {
+                if status.as_str() != Some("converged") {
+                    value["reason"] = status;
+                }
+            }
+        }
+        if let Some(obj) = value.as_object_mut() {
+            for key in [
+                "owner_epoch",
+                "leader_receiver",
+                "team_owner",
+                "topology_convergence",
+                "leader_registry",
+            ] {
+                obj.remove(key);
+            }
+        }
+    }
+
     fn lease_value(result: crate::leader::LeaseResult) -> Value {
         let mut out = serde_json::Map::new();
         out.insert("ok".to_string(), json!(result.ok));

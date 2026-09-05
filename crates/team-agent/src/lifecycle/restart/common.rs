@@ -976,14 +976,6 @@ pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
             )));
         }
     }
-    if let Some((endpoint, source)) = crate::tmux_backend::owning_tmux_endpoint_from_state(state) {
-        let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
-        return Ok(crate::tmux_backend::RuntimeTmuxBackendSelection {
-            tmux_endpoint_used: backend.tmux_endpoint(),
-            backend,
-            tmux_endpoint_source: source,
-        });
-    }
     Ok(
         crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
             run_workspace,
@@ -1000,9 +992,6 @@ pub(super) fn lifecycle_worker_tmux_backend_for_state(
     run_workspace: &Path,
     state: &serde_json::Value,
 ) -> crate::tmux_backend::TmuxBackend {
-    if let Some((endpoint, _source)) = crate::tmux_backend::owning_tmux_endpoint_from_state(state) {
-        return crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
-    }
     crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(run_workspace, Some(state))
         .backend
 }

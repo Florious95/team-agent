@@ -284,8 +284,9 @@ pub fn register_binding_from_state_best_effort(
 /// Stored registry status after another workspace claimed the same pane.
 pub const REGISTRY_STATUS_UNBOUND: &str = "unbound";
 
-/// When workspace B claims a pane, every other attached registry row that
-/// still names that pane is no longer deliverable. Mark those rows unbound.
+/// When workspace B claims a pane on another tmux socket, an attached registry
+/// row naming that physical pane is no longer deliverable. Mark that row
+/// unbound, while allowing one pane on one socket to manage multiple Teams.
 /// Does not change pane-side authorization storage.
 pub fn mark_displaced_same_pane_entries_unbound(winner: &LeaderRegistryEntry) -> Vec<PathBuf> {
     let Some(winner_pane) = winner
@@ -331,7 +332,10 @@ pub fn mark_displaced_same_pane_entries_unbound(winner: &LeaderRegistryEntry) ->
         let Some(winner_socket) = winner_socket else {
             continue;
         };
-        if socket != winner_socket {
+        // A leader pane is a valid shared owner identity within one tmux
+        // server: one pane may launch independent Teams. Only a pane on a
+        // different socket can be a displaced physical binding.
+        if socket == winner_socket {
             continue;
         }
         entry.status = REGISTRY_STATUS_UNBOUND.to_string();
@@ -546,24 +550,43 @@ pub fn list_validated_with_gc() -> Vec<(LeaderRegistryEntry, &'static str, Optio
     out
 }
 
-/// Refuse a fresh quick-start binding when the caller pane already backs a
-/// canonically LIVE receiver for another workspace/team. This is read-only:
+/// Refuse a fresh quick-start binding when the caller pane is already a
+/// canonically LIVE receiver on another tmux socket. A pane may intentionally
+/// back multiple workspace/Team rows on the same socket; this is read-only:
 /// quick-start never displaces or takes over an existing binding.
 #[must_use]
 pub(crate) fn live_same_pane_binding_elsewhere(
     pane_id: &str,
+    endpoint: Option<&str>,
     workspace: &Path,
     team_key: &str,
 ) -> bool {
     let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     list_validated_no_gc().into_iter().any(|(entry, status, _)| {
-        status == "LIVE"
-            && entry
+        if status != "LIVE"
+            || entry
                 .channel
                 .get("pane_id")
                 .and_then(Value::as_str)
-                == Some(pane_id)
-            && (entry.workspace != workspace || entry.team_key != team_key)
+                != Some(pane_id)
+            || (entry.workspace == workspace && entry.team_key == team_key)
+        {
+            return false;
+        }
+        // A pane id is only comparable within its tmux server. Sharing the
+        // caller pane across Teams on that server is intentional; a matching
+        // pane id on another socket remains a distinct live binding.
+        match (
+            endpoint.filter(|value| !value.is_empty()),
+            entry
+                .channel
+                .get("tmux_socket")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty()),
+        ) {
+            (Some(caller), Some(recorded)) => caller != recorded,
+            _ => true,
+        }
     })
 }
 
