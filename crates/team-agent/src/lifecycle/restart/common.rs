@@ -402,6 +402,7 @@ pub(super) fn spawn_agent_window(
             tool_categories: &resolved_tool_refs,
             team_mcp_tools: &["send_message", "report_result"],
             mcp_config: &mcp_config,
+            session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
         };
         match resume_session_id {
             Some(session_id) => {

@@ -59,7 +59,9 @@ fn command(tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<St
         effort: Some(effort),
         system_prompt: "Pi worker contract.",
         tool_categories: tools,
-        session_dir: Path::new("/workspace/.team/runtime/pi/t1/pi-worker/sessions"),
+        session_dir: Some(Path::new(
+            "/workspace/.team/runtime/pi/t1/pi-worker/sessions",
+        )),
         session: PiSessionSelector::Fresh {
             session_id: "c5ddf218-24a5-4e74-960c-ab6606ea7e8c",
         },

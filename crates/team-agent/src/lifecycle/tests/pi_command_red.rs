@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::lifecycle::launch::pi_mcp::{pi_leader_session_scope, PiSessionScope};
 use crate::model::enums::ProviderEffort;
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 
@@ -11,7 +12,9 @@ fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
         effort: Some(ProviderEffort::High),
         system_prompt: "frozen worker prompt",
         tool_categories: &["mcp_team", "fs_read", "fs_write", "execute_bash"],
-        session_dir: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/sessions"),
+        session_dir: Some(Path::new(
+            "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
+        )),
         session,
         agent_id: "worker-a",
     }
@@ -28,6 +31,73 @@ fn pi_command_omits_unset_model_and_thinking_flags() {
 
     assert!(!argv.iter().any(|arg| arg == "--model"), "argv={argv:?}");
     assert!(!argv.iter().any(|arg| arg == "--thinking"), "argv={argv:?}");
+}
+
+fn leader_request() -> PiCommandRequest<'static> {
+    PiCommandRequest {
+        executable: Path::new("/verified/pi"),
+        extension: Path::new("/workspace/.team/runtime/pi/current/leader/team-mcp.ts"),
+        model: None,
+        effort: None,
+        system_prompt: "frozen leader prompt",
+        tool_categories: &["mcp_team", "fs_read", "fs_write", "execute_bash"],
+        session_dir: None,
+        session: PiSessionSelector::Fresh {
+            session_id: "da8c3622-2378-4d05-a26c-e826a6ef6d63",
+        },
+        agent_id: "leader",
+    }
+}
+
+#[test]
+fn pi_interactive_leader_argv_preserves_native_session_discovery() {
+    let argv = build_pi_command_argv(leader_request()).expect("native Pi leader command");
+
+    assert_eq!(
+        argv,
+        [
+            "/verified/pi",
+            "-e",
+            "/workspace/.team/runtime/pi/current/leader/team-mcp.ts",
+            "--append-system-prompt",
+            "frozen leader prompt",
+            "--session-id",
+            "da8c3622-2378-4d05-a26c-e826a6ef6d63",
+            "--name",
+            "leader",
+        ]
+        .map(str::to_string)
+    );
+    assert!(!argv.iter().any(|arg| arg == "--session-dir"));
+    for forbidden in ["--cwd", "--workspace", "--session"] {
+        assert!(!argv.iter().any(|arg| arg == forbidden), "argv={argv:?}");
+    }
+}
+
+#[test]
+fn pi_leader_session_scope_keeps_explicit_and_external_routes_isolated() {
+    assert_eq!(
+        pi_leader_session_scope(&[], false, false),
+        PiSessionScope::NativeDefault
+    );
+    for (args, external_path, allow_nested_attach) in [
+        (
+            vec![
+                "--model".to_string(),
+                "openai-codex/gpt-5.6-sol".to_string(),
+            ],
+            false,
+            false,
+        ),
+        (Vec::new(), true, false),
+        (Vec::new(), false, true),
+    ] {
+        assert_eq!(
+            pi_leader_session_scope(&args, external_path, allow_nested_attach),
+            PiSessionScope::Isolated,
+            "only the zero-argument managed route may use Pi's native root"
+        );
+    }
 }
 
 #[test]

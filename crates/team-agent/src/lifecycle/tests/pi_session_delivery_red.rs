@@ -60,7 +60,9 @@ fn resume_argv(path: &Path) -> Result<Vec<String>, ProviderError> {
         effort: Some(ProviderEffort::Medium),
         system_prompt: "worker contract",
         tool_categories: &["mcp_team"],
-        session_dir: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/sessions"),
+        session_dir: Some(Path::new(
+            "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
+        )),
         session: PiSessionSelector::Resume { path },
         agent_id: "worker-a",
     })
