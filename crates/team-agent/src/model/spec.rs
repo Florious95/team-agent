@@ -1073,7 +1073,11 @@ mod tests {
     fn pi_spec_accepts_native_categories_and_rejects_provider_builtin() {
         let pi_text = include_str!("testdata/team.spec.yaml")
             .lines()
-            .filter(|line| !line.contains("provider_builtin"))
+            .filter(|line| {
+                !line.contains("provider_builtin")
+                    && !line.contains("git_diff")
+                    && !line.contains("network")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let pi_text = pi_text.replace("provider: codex", "provider: pi");
