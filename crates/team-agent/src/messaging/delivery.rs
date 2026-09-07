@@ -2866,7 +2866,9 @@ fn project_state_for_owner_team(
             return Ok(OwnerTeamProjection::Refused(outcome));
         }
     };
-    if top_level_state_matches_owner_team(fallback, &canonical_team) {
+    if top_level_state_matches_owner_team(fallback, &canonical_team)
+        && state_has_no_team_entries(fallback)
+    {
         let mut state = fallback.clone();
         carry_top_level_leader_binding(&mut state, &raw);
         return Ok(OwnerTeamProjection::Projected {
@@ -2874,7 +2876,8 @@ fn project_state_for_owner_team(
             canonical_team,
         });
     }
-    if top_level_state_matches_owner_team(&raw, &canonical_team) {
+    if top_level_state_matches_owner_team(&raw, &canonical_team) && state_has_no_team_entries(&raw)
+    {
         return Ok(OwnerTeamProjection::Projected {
             state: raw,
             canonical_team,
@@ -2999,16 +3002,31 @@ fn project_state_for_owner_team_value(
     None
 }
 
-fn top_level_state_matches_owner_team(state: &serde_json::Value, team: &str) -> bool {
-    state
+pub(crate) fn top_level_state_matches_owner_team(state: &serde_json::Value, team: &str) -> bool {
+    if !state.is_object() {
+        return false;
+    }
+    if state
         .get("active_team_key")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|value| value == team)
-        || crate::state::projection::team_state_key(state) == team
-        || state
-            .get("session_name")
+    {
+        return true;
+    }
+    if state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
+    {
+        return true;
+    }
+    let has_explicit_key = ["team_key", "team_dir", "spec_path"].iter().any(|field| {
+        state
+            .get(*field)
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
+            .is_some_and(|value| !value.is_empty())
+    });
+    has_explicit_key && crate::state::projection::team_state_key(state) == team
 }
 
 /// `retry_injection_after_trust_auto_answer` (`trust_auto_answer.py`):leader 路径 trust 应答
