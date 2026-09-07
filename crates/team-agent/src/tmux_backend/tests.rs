@@ -21,8 +21,9 @@ use super::{
     RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
 };
 use crate::layout::worker_env::{
-    inject_current_caller_provider, worker_spawn_env, CALLER_ENDPOINT_ENV, CALLER_PANE_ENV,
-    CALLER_PROVIDER_ENV,
+    caller_provider_resolution_from_values, inject_current_caller_provider,
+    isolate_worker_spawn_env, worker_spawn_env, CallerProviderResolution, CALLER_ENDPOINT_ENV,
+    CALLER_PANE_ENV, CALLER_PROVIDER_ENV,
 };
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::transport::{
@@ -122,13 +123,16 @@ fn fail(code: i32, stderr: &str) -> CommandOutput {
     }
 }
 
-#[test]
-fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
+fn spawned_caller_env() -> (BTreeMap<String, String>, Vec<String>) {
     let mut env = worker_spawn_env(
         vec![
             (CALLER_PROVIDER_ENV.to_string(), "claude".to_string()),
             (CALLER_PANE_ENV.to_string(), "%old".to_string()),
             (CALLER_ENDPOINT_ENV.to_string(), "/tmp/old.sock".to_string()),
+            (
+                "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+                "claude".to_string(),
+            ),
             ("TMUX".to_string(), "/tmp/parent.sock,1,0".to_string()),
             ("TMUX_PANE".to_string(), "%parent".to_string()),
         ],
@@ -137,31 +141,191 @@ fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
         Some("team"),
         None,
     );
-    inject_current_caller_provider(&mut env, Provider::Pi);
-    let env_unset = [
-        CALLER_PROVIDER_ENV.to_string(),
-        CALLER_PANE_ENV.to_string(),
-        CALLER_ENDPOINT_ENV.to_string(),
-    ];
-    let command = worker_shell_wrapper_command(
-        &["pi".to_string(), "--help".to_string()],
-        Path::new("/tmp/worker"),
-        &env,
-        &env_unset,
-        "pi",
+    assert!(
+        !env.keys().any(|key| key.starts_with("TEAM_AGENT_CALLER_")),
+        "inherited caller namespace must be stripped before inject: {env:?}"
     );
+    assert!(!env.contains_key("TEAM_AGENT_LEADER_PROVIDER"));
+    let env_unset = isolate_worker_spawn_env(Provider::Pi, &mut env, Vec::<String>::new());
+    inject_current_caller_provider(&mut env, Provider::Pi);
+    (env, env_unset)
+}
+
+fn assert_caller_unset_and_assignment_once(command: &str) {
+    assert_eq!(command.matches("unset TEAM_AGENT_CALLER_PROVIDER").count(), 1);
+    assert_eq!(command.matches("unset TEAM_AGENT_CALLER_PANE_ID").count(), 1);
+    assert_eq!(
+        command
+            .matches("unset TEAM_AGENT_CALLER_TMUX_ENDPOINT")
+            .count(),
+        1
+    );
+    assert_eq!(command.matches("TEAM_AGENT_CALLER_PROVIDER=pi").count(), 1);
+    assert_eq!(command.matches("TEAM_AGENT_CALLER_PANE_ID=").count(), 1);
+    assert_eq!(
+        command.matches("TEAM_AGENT_CALLER_TMUX_ENDPOINT=").count(),
+        1
+    );
+    assert!(command.contains("TEAM_AGENT_CALLER_PANE_ID=\"${TMUX_PANE-}\""));
+    assert!(command.contains("TEAM_AGENT_CALLER_TMUX_ENDPOINT=\"${TMUX%%,*}\""));
+}
+
+fn assignment_token<'a>(command: &'a str, key: &str) -> &'a str {
+    let prefix = format!("{key}=");
+    command
+        .split_whitespace()
+        .find(|token| token.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("missing {key} assignment in {command}"))
+}
+
+fn expand_caller_allowlist(command: &str, tmux: &str, pane: &str) -> (String, String, String) {
+    let script = format!(
+        "{}; {}; {}; printf '%s\\n%s\\n%s\\n' \"${{{}}}\" \"${{{}}}\" \"${{{}}}\"",
+        assignment_token(command, CALLER_PROVIDER_ENV),
+        assignment_token(command, CALLER_PANE_ENV),
+        assignment_token(command, CALLER_ENDPOINT_ENV),
+        CALLER_PROVIDER_ENV,
+        CALLER_PANE_ENV,
+        CALLER_ENDPOINT_ENV,
+    );
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .env("TMUX", tmux)
+        .env("TMUX_PANE", pane)
+        .env_remove(CALLER_PROVIDER_ENV)
+        .env_remove(CALLER_PANE_ENV)
+        .env_remove(CALLER_ENDPOINT_ENV)
+        .output()
+        .expect("expand caller allowlist through sh");
+    assert!(
+        output.status.success(),
+        "sh expand failed: status={:?} stderr={} script={script}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("caller allowlist stdout utf8");
+    let mut lines = stdout.lines();
+    let provider = lines.next().unwrap_or("").to_string();
+    let pane = lines.next().unwrap_or("").to_string();
+    let endpoint = lines.next().unwrap_or("").to_string();
+    (provider, pane, endpoint)
+}
+
+fn resolve_expanded_caller(
+    command: &str,
+    tmux: &str,
+    pane: &str,
+    scoped: Option<&str>,
+) -> CallerProviderResolution {
+    let (provider, context_pane, context_endpoint) = expand_caller_allowlist(command, tmux, pane);
+    let current_endpoint = tmux.split(',').next().unwrap_or(tmux);
+    caller_provider_resolution_from_values(
+        Some(provider.as_str()),
+        Some(context_pane.as_str()),
+        Some(context_endpoint.as_str()),
+        None,
+        None,
+        Some(pane),
+        Some(current_endpoint),
+        scoped.or(Some(current_endpoint)),
+    )
+}
+
+#[test]
+fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
+    let (env, env_unset) = spawned_caller_env();
+    let argv = ["pi".to_string(), "--help".to_string()];
+    let cwd = Path::new("/tmp/worker");
+    let wrapper = worker_shell_wrapper_command(&argv, cwd, &env, &env_unset, "pi");
+    let cold_start = super::shell_command(&argv, cwd, &env, &env_unset);
     assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("pi"));
     assert!(!env.contains_key(CALLER_PANE_ENV));
     assert!(!env.contains_key(CALLER_ENDPOINT_ENV));
-    assert!(command.contains("unset TEAM_AGENT_CALLER_PROVIDER"));
-    assert!(command.contains("unset TEAM_AGENT_CALLER_PANE_ID"));
-    assert!(command.contains("unset TEAM_AGENT_CALLER_TMUX_ENDPOINT"));
-    assert!(command.contains("TEAM_AGENT_CALLER_PROVIDER=pi"));
-    assert!(command.contains("TEAM_AGENT_CALLER_PANE_ID=\"${TMUX_PANE-}\""));
-    assert!(command.contains("TEAM_AGENT_CALLER_TMUX_ENDPOINT=\"${TMUX%%,*}\""));
-    assert_eq!(command.matches("TEAM_AGENT_CALLER_PROVIDER").count(), 1);
-    let tail = command.split_once("; rc=$?").map(|(_, tail)| tail).unwrap_or("");
-    assert!(!tail.contains("TEAM_AGENT_CALLER_"));
+    assert_caller_unset_and_assignment_once(&wrapper);
+    assert_caller_unset_and_assignment_once(&cold_start);
+    assert!(
+        cold_start.contains("exec"),
+        "cold-start shell_command must exec the provider: {cold_start}"
+    );
+    let wrapper_tail = wrapper.split_once("; rc=$?").map(|(_, tail)| tail).unwrap_or("");
+    assert!(
+        !wrapper_tail.contains("TEAM_AGENT_CALLER_"),
+        "provider-exit tail must not retain caller context: {wrapper_tail}"
+    );
+    assert!(
+        !cold_start.contains("; rc=$?"),
+        "cold-start exec path has no inert tail: {cold_start}"
+    );
+    let tmux = "/tmp/tmux.sock,123,0";
+    let pane = "%1";
+    assert_eq!(
+        resolve_expanded_caller(&wrapper, tmux, pane, Some("/tmp/tmux.sock")),
+        CallerProviderResolution::Valid(Provider::Pi)
+    );
+    assert_eq!(
+        resolve_expanded_caller(&cold_start, tmux, pane, Some("/tmp/tmux.sock")),
+        CallerProviderResolution::Valid(Provider::Pi)
+    );
+    assert_eq!(
+        resolve_expanded_caller(&wrapper, tmux, "%2", Some("/tmp/tmux.sock")),
+        CallerProviderResolution::Invalid
+    );
+}
+
+#[test]
+fn worker_caller_context_is_rewritten_per_spawn_and_not_inherited() {
+    let (parent_env, parent_unset) = spawned_caller_env();
+    let parent_cmd = worker_shell_wrapper_command(
+        &["pi".to_string()],
+        Path::new("/tmp/parent-worker"),
+        &parent_env,
+        &parent_unset,
+        "pi",
+    );
+    assert_eq!(
+        resolve_expanded_caller(&parent_cmd, "/tmp/current.sock,1,0", "%4", None),
+        CallerProviderResolution::Valid(Provider::Pi)
+    );
+
+    let mut child_parent = parent_env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    child_parent.push((CALLER_PROVIDER_ENV.to_string(), "pi".to_string()));
+    child_parent.push((CALLER_PANE_ENV.to_string(), "%4".to_string()));
+    child_parent.push((
+        CALLER_ENDPOINT_ENV.to_string(),
+        "/tmp/current.sock".to_string(),
+    ));
+    let mut child_env = worker_spawn_env(
+        child_parent,
+        Path::new("/tmp/child-worker"),
+        "grandchild",
+        Some("child-team"),
+        None,
+    );
+    assert!(
+        !child_env
+            .keys()
+            .any(|key| key.starts_with("TEAM_AGENT_CALLER_")),
+        "child spawn must strip the current worker caller namespace: {child_env:?}"
+    );
+    let child_unset = isolate_worker_spawn_env(Provider::Codex, &mut child_env, Vec::<String>::new());
+    inject_current_caller_provider(&mut child_env, Provider::Codex);
+    let child_cmd = worker_shell_wrapper_command(
+        &["codex".to_string()],
+        Path::new("/tmp/child-worker"),
+        &child_env,
+        &child_unset,
+        "codex",
+    );
+    assert!(child_cmd.contains("TEAM_AGENT_CALLER_PROVIDER=codex"));
+    assert!(!child_cmd.contains("TEAM_AGENT_CALLER_PROVIDER=pi"));
+    assert_eq!(
+        resolve_expanded_caller(&child_cmd, "/tmp/child.sock,1,0", "%8", None),
+        CallerProviderResolution::Valid(Provider::Codex)
+    );
 }
 
 /// Build a backend over a mock runner: `default` answers every un-queued call; `queued` is drained

@@ -38,6 +38,9 @@ use super::*;
 
 trait FreshQuickStartLeaderBindingOps {
     fn caller_pane(&mut self) -> Option<String>;
+    fn caller_resolution(&mut self) -> crate::layout::worker_env::CallerProviderResolution {
+        crate::layout::worker_env::CallerProviderResolution::Absent
+    }
     fn explicit_provider(&mut self) -> Option<String>;
     fn tmux_endpoint(&mut self) -> Option<String>;
     fn observe_command(&mut self, pane: &PaneId) -> Option<String>;
@@ -73,27 +76,22 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             .filter(|pane| !pane.is_empty())
     }
 
-    fn explicit_provider(&mut self) -> Option<String> {
+    fn caller_resolution(&mut self) -> crate::layout::worker_env::CallerProviderResolution {
         let current_pane = std::env::var("TMUX_PANE")
             .ok()
             .filter(|pane| !pane.is_empty());
         let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
-        let scoped_endpoint = self.transport.tmux_endpoint();
-        match crate::layout::worker_env::caller_provider_resolution(
+        crate::layout::worker_env::caller_provider_resolution(
             current_pane.as_deref(),
             current_endpoint.as_deref(),
-            scoped_endpoint.as_deref(),
-        ) {
-            crate::layout::worker_env::CallerProviderResolution::Valid(provider) => {
-                Some(crate::provider::wire::provider_wire(provider).to_string())
-            }
-            crate::layout::worker_env::CallerProviderResolution::Invalid => None,
-            crate::layout::worker_env::CallerProviderResolution::Absent => {
-                std::env::var("TEAM_AGENT_LEADER_PROVIDER")
-                    .ok()
-                    .filter(|provider| !provider.is_empty())
-            }
-        }
+            self.transport.tmux_endpoint().as_deref(),
+        )
+    }
+
+    fn explicit_provider(&mut self) -> Option<String> {
+        std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+            .ok()
+            .filter(|provider| !provider.is_empty())
     }
 
     fn tmux_endpoint(&mut self) -> Option<String> {
@@ -372,17 +370,32 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             "command_unobservable",
         );
     };
-    let explicit_provider = ops.explicit_provider();
-    let Some(provider) = crate::leader::owner_bind::strict_owner_bind_provider(
-        explicit_provider.as_deref(),
-        &command,
-    ) else {
-        return refuse_fresh_bind(
-            workspace,
-            team_key,
-            "strict_provider",
-            "provider_unresolved",
-        );
+    let provider = match ops.caller_resolution() {
+        crate::layout::worker_env::CallerProviderResolution::Valid(provider) => provider,
+        crate::layout::worker_env::CallerProviderResolution::Invalid => {
+            return refuse_fresh_bind(
+                workspace,
+                team_key,
+                "strict_provider",
+                "provider_unresolved",
+            );
+        }
+        crate::layout::worker_env::CallerProviderResolution::Absent => {
+            match crate::leader::owner_bind::strict_owner_bind_provider(
+                ops.explicit_provider().as_deref(),
+                &command,
+            ) {
+                Some(provider) => provider,
+                None => {
+                    return refuse_fresh_bind(
+                        workspace,
+                        team_key,
+                        "strict_provider",
+                        "provider_unresolved",
+                    );
+                }
+            }
+        }
     };
     let endpoint = ops.tmux_endpoint();
     let has_persisted_binding = ["team_owner", "leader_receiver"]
@@ -940,12 +953,14 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
+    let scoped_endpoint = transport.tmux_endpoint();
     let mut state = initial_runtime_state(
         &spec,
         &resolved_spec_path,
         &workspace,
         agents_dir,
         &state_team_key,
+        scoped_endpoint.as_deref(),
     );
     // Keep this attempt-local seed separate from persisted `claimed_via`;
     // historical quick-start rows are never sufficient cleanup authority.
@@ -1081,8 +1096,14 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
 #[cfg(test)]
 mod fresh_quick_start_leader_binding_tests {
     use super::*;
+    use crate::layout::worker_env::{CALLER_ENDPOINT_ENV, CALLER_PANE_ENV, CALLER_PROVIDER_ENV};
+    use crate::transport::test_support::OfflineTransport;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[path = "../../../../tests/support/hermetic.rs"]
+    mod hermetic;
+    use hermetic::HermeticTestEnv;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1999,5 +2020,240 @@ mod fresh_quick_start_leader_binding_tests {
             .unwrap());
         assert_eq!(std::fs::read(state_path).unwrap(), before);
         assert!(!registry_path.exists(), "failed readback left registry bytes");
+    }
+
+    struct RecordingRuntimeOps<'a> {
+        inner: RuntimeFreshQuickStartLeaderBindingOps<'a>,
+        attached_provider: Option<crate::provider::Provider>,
+        attach_calls: usize,
+    }
+
+    impl<'a> RecordingRuntimeOps<'a> {
+        fn new(transport: &'a dyn Transport) -> Self {
+            Self {
+                inner: RuntimeFreshQuickStartLeaderBindingOps {
+                    transport,
+                    last_failure_reason: None,
+                },
+                attached_provider: None,
+                attach_calls: 0,
+            }
+        }
+    }
+
+    impl FreshQuickStartLeaderBindingOps for RecordingRuntimeOps<'_> {
+        fn caller_pane(&mut self) -> Option<String> {
+            self.inner.caller_pane()
+        }
+
+        fn caller_resolution(&mut self) -> crate::layout::worker_env::CallerProviderResolution {
+            self.inner.caller_resolution()
+        }
+
+        fn explicit_provider(&mut self) -> Option<String> {
+            self.inner.explicit_provider()
+        }
+
+        fn tmux_endpoint(&mut self) -> Option<String> {
+            self.inner.tmux_endpoint()
+        }
+
+        fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
+            self.inner.observe_command(pane)
+        }
+
+        fn attach(
+            &mut self,
+            workspace: &Path,
+            state: &mut serde_json::Value,
+            pane: &PaneId,
+            provider: crate::provider::Provider,
+        ) -> bool {
+            self.attach_calls += 1;
+            self.attached_provider = Some(provider);
+            let wire = crate::provider::wire::provider_wire(provider);
+            state["leader_receiver"] = json!({
+                "mode": "direct_tmux",
+                "pane_id": pane.as_str(),
+                "status": "attached",
+                "provider": wire,
+                "leader_session_uuid": "uuid-fresh",
+                "owner_epoch": 1,
+                "tmux_socket": self.inner.tmux_endpoint()
+            });
+            state["team_owner"] = json!({
+                "pane_id": pane.as_str(),
+                "provider": wire,
+                "leader_session_uuid": "uuid-fresh",
+                "owner_epoch": 1
+            });
+            crate::state::persist::save_runtime_state(workspace, state).is_ok()
+        }
+
+        fn register(&mut self, _workspace: &Path, _team_key: &str) -> bool {
+            true
+        }
+
+        fn canonical_readback(&mut self, _workspace: &Path, _team_key: &str) -> bool {
+            true
+        }
+    }
+
+    fn runtime_workspace(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+        let path = hermetic.workspace(tag);
+        crate::state::persist::save_runtime_state(
+            &path,
+            &json!({
+                "active_team_key": "fresh",
+                "team_key": "fresh",
+                "session_name": "team-fresh",
+                "agents": {"sol": {"status": "running", "provider": "pi"}}
+            }),
+        )
+        .unwrap();
+        path
+    }
+
+    fn refusal_reason(workspace: &Path) -> Option<(String, String)> {
+        let events = crate::event_log::EventLog::new(workspace).tail(0).unwrap();
+        let event = events.last()?;
+        Some((
+            event
+                .get("stage")
+                .and_then(serde_json::Value::as_str)?
+                .to_string(),
+            event
+                .get("reason")
+                .and_then(serde_json::Value::as_str)?
+                .to_string(),
+        ))
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_valid_caller_binds_typed_pi_through_bash() {
+        let hermetic = HermeticTestEnv::enter("runtime-valid-pi-bash");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attach_calls, 1);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_invalid_caller_refuses_even_when_command_is_pi() {
+        let hermetic = HermeticTestEnv::enter("runtime-invalid-command-pi");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%9");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "pi");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attach_calls, 0);
+        assert_eq!(ops.attached_provider, None);
+        assert_eq!(
+            refusal_reason(&workspace),
+            Some((
+                "strict_provider".to_string(),
+                "provider_unresolved".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_socket_and_explicit_conflicts_refuse_without_command_fallback() {
+        for (tag, endpoint, leader, scoped) in [
+            (
+                "socket",
+                "/tmp/other.sock",
+                None,
+                "/tmp/tmux.sock",
+            ),
+            (
+                "scoped",
+                "/tmp/tmux.sock",
+                None,
+                "/tmp/product.sock",
+            ),
+            (
+                "leader",
+                "/tmp/tmux.sock",
+                Some("codex"),
+                "/tmp/tmux.sock",
+            ),
+        ] {
+            let hermetic = HermeticTestEnv::enter(&format!("runtime-conflict-{tag}"));
+            let workspace = runtime_workspace(&hermetic, tag);
+            let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+            let _pane = hermetic.with_env("TMUX_PANE", "%1");
+            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+            let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+            let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, endpoint);
+            let _leader = leader.map(|value| hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", value));
+            let transport = OfflineTransport::new()
+                .with_tmux_endpoint(scoped)
+                .with_pane_current_command("%1", "pi");
+            let mut ops = RecordingRuntimeOps::new(&transport);
+            assert!(
+                !bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap(),
+                "{tag} must refuse"
+            );
+            assert_eq!(ops.attach_calls, 0, "{tag}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_absent_keeps_explicit_and_direct_paths() {
+        let hermetic = HermeticTestEnv::enter("runtime-absent-compat");
+        let workspace = runtime_workspace(&hermetic, "explicit");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _leader = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "pi");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+
+        let workspace = runtime_workspace(&hermetic, "direct");
+        drop(_leader);
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "pi");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+
+        let workspace = runtime_workspace(&hermetic, "unknown-shell");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attach_calls, 0);
+        assert_eq!(
+            refusal_reason(&workspace),
+            Some((
+                "strict_provider".to_string(),
+                "provider_unresolved".to_string()
+            ))
+        );
     }
 }
