@@ -63,12 +63,13 @@ use std::time::{Duration, Instant};
 use crate::model::enums::PaneLiveness;
 use crate::provider::wire::{parse_provider, provider_wire};
 use crate::transport::{
-    normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
-    tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv, tmux_spawn_argv, AttachOutcome,
-    BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage,
-    InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    command_basename, normalize_capture, tmux_capture_argv, tmux_empty_inject_argv,
+    tmux_inject_text_argv, tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv,
+    tmux_spawn_argv, AttachOutcome, BackendKind, CaptureRange, CaptureSampleOutcome, CapturedText,
+    InjectPayload, InjectReport, InjectStage, InjectVerification, InputSurfaceProbe, Key,
+    PaneField, PaneId, PaneInfo, PaneMode, QueryOutcome, SessionName, SetEnvOutcome, SpawnResult,
+    SubmitAttemptObservation, SubmitDiagnostics, SubmitObserver, SubmitVerification, Target,
+    Transport, TransportError, TurnVerification, WindowName,
 };
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
@@ -1447,6 +1448,107 @@ fn pane_from_target(target: &Target) -> PaneId {
     }
 }
 
+#[derive(Default)]
+struct CaptureTally {
+    ok: u32,
+    err: u32,
+    last: CaptureSampleOutcome,
+}
+
+impl CaptureTally {
+    fn record_ok(&mut self, text: &str, marker: Option<&str>) {
+        self.ok = self.ok.saturating_add(1);
+        self.last = if marker.is_some_and(|token| text.contains(token)) {
+            CaptureSampleOutcome::OkTokenSeen
+        } else {
+            CaptureSampleOutcome::OkTokenMissing
+        };
+    }
+
+    fn record_err(&mut self) {
+        self.err = self.err.saturating_add(1);
+        self.last = CaptureSampleOutcome::Failed;
+    }
+
+    fn seen_after_ok_samples(&self, visible: bool) -> Option<bool> {
+        if self.ok == 0 {
+            None
+        } else {
+            Some(visible)
+        }
+    }
+}
+
+struct InjectTargetSurface {
+    pane_command_basename: Option<String>,
+    pane_command_query: QueryOutcome,
+    input_surface: InputSurfaceProbe,
+    target_pane_id: String,
+    target_pane_query_matched: Option<bool>,
+}
+
+fn probe_inject_target_surface(backend: &TmuxBackend, target: &Target) -> InjectTargetSurface {
+    let pane = pane_from_target(target);
+    let (pane_command_basename, pane_command_query) =
+        match backend.query(target, PaneField::PaneCurrentCommand) {
+            Ok(Some(raw)) => match command_basename(&raw) {
+                Some(name) => (Some(name), QueryOutcome::Observed),
+                None => (None, QueryOutcome::Unavailable),
+            },
+            _ => (None, QueryOutcome::Unavailable),
+        };
+    let input_surface = match backend.query(target, PaneField::PaneMode) {
+        Ok(Some(raw)) => match pane_mode_from_raw(Some(raw)) {
+            None => InputSurfaceProbe::Input,
+            Some(PaneMode::Copy) => InputSurfaceProbe::Copy,
+            Some(PaneMode::Tree) => InputSurfaceProbe::Tree,
+            Some(PaneMode::View) => InputSurfaceProbe::View,
+            Some(PaneMode::Client) => InputSurfaceProbe::Client,
+            Some(PaneMode::Unknown) => InputSurfaceProbe::UnknownMode,
+        },
+        _ => InputSurfaceProbe::Unavailable,
+    };
+    let target_pane_query_matched = match backend.query(target, PaneField::PaneId) {
+        Ok(Some(id)) if !id.is_empty() => Some(id == pane.as_str()),
+        _ => None,
+    };
+    InjectTargetSurface {
+        pane_command_basename,
+        pane_command_query,
+        input_surface,
+        target_pane_id: pane.as_str().to_string(),
+        target_pane_query_matched,
+    }
+}
+
+fn submit_diagnostics_for_inject(
+    total_elapsed_ms: u64,
+    attempts_detail: Vec<SubmitAttemptObservation>,
+    tally: &CaptureTally,
+    token_seen_after_paste: Option<bool>,
+    token_seen_after_enter: Option<bool>,
+    surface: InjectTargetSurface,
+) -> SubmitDiagnostics {
+    SubmitDiagnostics {
+        appear_gate_elapsed_ms: 0,
+        appear_gate_matched: false,
+        total_elapsed_ms,
+        attempts_detail,
+        token_seen_before_paste: None,
+        token_seen_after_paste,
+        token_seen_after_enter,
+        capture_ok_count: tally.ok,
+        capture_err_count: tally.err,
+        capture_sample_count: tally.ok.saturating_add(tally.err),
+        last_capture_outcome: tally.last,
+        pane_command_basename: surface.pane_command_basename,
+        pane_command_query: surface.pane_command_query,
+        input_surface: surface.input_surface,
+        target_pane_id: Some(surface.target_pane_id),
+        target_pane_query_matched: surface.target_pane_query_matched,
+    }
+}
+
 fn target_name(target: &Target) -> String {
     match target {
         Target::Pane(pane) => pane.as_str().to_string(),
@@ -1648,13 +1750,23 @@ fn post_submit_token_visible(
     backend: &TmuxBackend,
     target: &Target,
     payload: &InjectPayload,
+    tally: &mut CaptureTally,
 ) -> Result<Option<bool>, TransportError> {
-    if payload_token_marker(payload).is_none() {
+    let Some(marker) = payload_token_marker(payload) else {
         return Ok(None);
-    }
+    };
     for attempt in 0..TOKEN_POST_SUBMIT_READBACK_POLLS {
-        if let Some(true) = token_visible_in_capture(backend, target, payload)? {
-            return Ok(Some(true));
+        match backend.capture(target, CaptureRange::Tail(80)) {
+            Ok(cap) => {
+                tally.record_ok(&cap.text, Some(marker));
+                if cap.text.contains(marker) {
+                    return Ok(Some(true));
+                }
+            }
+            Err(_) => {
+                tally.record_err();
+                return Ok(None);
+            }
         }
         if attempt + 1 < TOKEN_POST_SUBMIT_READBACK_POLLS {
             std::thread::sleep(Duration::from_millis(25));
@@ -3039,11 +3151,15 @@ impl Transport for TmuxBackend {
                 let poll_start = std::time::Instant::now();
                 let mut token_ever_visible = false;
                 let mut tracked_paste: Option<PasteLatch> = None;
+                let mut capture_tally = CaptureTally::default();
+                let mut token_seen_after_paste = None;
+                let mut token_seen_after_enter = None;
                 token_visible_for_report = if let Some(m) = payload_token_marker(payload) {
                     let mut visible = false;
                     while poll_start.elapsed().as_millis() < token_poll_timeout_ms as u128 {
                         match self.capture(target, CaptureRange::Tail(80)) {
                             Ok(cap) => {
+                                capture_tally.record_ok(&cap.text, Some(m));
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 if cap.text.contains(m) {
                                     visible = true;
@@ -3054,10 +3170,14 @@ impl Transport for TmuxBackend {
                                     break;
                                 }
                             }
-                            Err(_) => break, // tmux unavailable, skip poll
+                            Err(_) => {
+                                capture_tally.record_err();
+                                break; // tmux unavailable, skip poll
+                            }
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
+                    token_seen_after_paste = capture_tally.seen_after_ok_samples(visible);
                     Some(visible)
                 } else {
                     None
@@ -3079,6 +3199,7 @@ impl Transport for TmuxBackend {
                     self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
                     notify_submit_observer(observer);
                     let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
+                    let surface = probe_inject_target_surface(self, target);
                     return Ok(InjectReport {
                         stage_reached: InjectStage::Submit,
                         inject_verification: inject_verification_after_readback(
@@ -3088,12 +3209,14 @@ impl Transport for TmuxBackend {
                         submit_verification: submit_verification_for_key(submit),
                         turn_verification: TurnVerification::NotYetObserved,
                         attempts: 1,
-                        submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
-                            appear_gate_elapsed_ms: 0,
-                            appear_gate_matched: false,
+                        submit_diagnostics: Some(submit_diagnostics_for_inject(
                             total_elapsed_ms,
-                            attempts_detail: Vec::new(),
-                        }),
+                            Vec::new(),
+                            &capture_tally,
+                            token_seen_after_paste,
+                            None,
+                            surface,
+                        )),
                     });
                 }
 
@@ -3136,8 +3259,12 @@ impl Transport for TmuxBackend {
                     if attempt > 0 {
                         if let Some(m) = marker {
                             if let Ok(cap) = self.capture(target, CaptureRange::Tail(40)) {
+                                capture_tally.record_ok(&cap.text, Some(m));
                                 if cap.text.contains(m) {
                                     token_ever_visible = true;
+                                    token_seen_after_enter = Some(true);
+                                } else if token_seen_after_enter.is_none() {
+                                    token_seen_after_enter = Some(false);
                                 }
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 let obs = submit_attempt_observation(
@@ -3209,10 +3336,22 @@ impl Transport for TmuxBackend {
                     // Post-submit token readback (U1 #7 parity: check token
                     // visible after Enter for no-echo panes).
                     if attempt == 0 && matches!(token_visible_for_report, Some(false)) {
-                        token_visible_for_report =
-                            post_submit_token_visible(self, target, payload).unwrap_or(Some(false));
-                        if token_visible_for_report == Some(true) {
+                        let post = post_submit_token_visible(
+                            self,
+                            target,
+                            payload,
+                            &mut capture_tally,
+                        )
+                        .unwrap_or(None);
+                        if post == Some(true) {
+                            token_visible_for_report = Some(true);
                             token_ever_visible = true;
+                            token_seen_after_enter = Some(true);
+                        } else {
+                            token_visible_for_report = Some(false);
+                            if post == Some(false) {
+                                token_seen_after_enter = Some(false);
+                            }
                         }
                     }
 
@@ -3226,10 +3365,14 @@ impl Transport for TmuxBackend {
                             std::thread::sleep(Duration::from_millis(100));
                             match self.capture(target, CaptureRange::Tail(40)) {
                                 Ok(cap) => {
+                                    capture_tally.record_ok(&cap.text, Some(m));
                                     consecutive_capture_failures = 0;
                                     saw_capture = true;
                                     if cap.text.contains(m) {
                                         token_ever_visible = true;
+                                        token_seen_after_enter = Some(true);
+                                    } else if token_seen_after_enter.is_none() {
+                                        token_seen_after_enter = Some(false);
                                     }
                                     tracked_paste = latch_paste(&cap.text, tracked_paste);
                                     let obs = submit_attempt_observation(
@@ -3260,6 +3403,7 @@ impl Transport for TmuxBackend {
                                     }
                                 }
                                 Err(_) => {
+                                    capture_tally.record_err();
                                     capture_retries = capture_retries.saturating_add(1);
                                     consecutive_capture_failures =
                                         consecutive_capture_failures.saturating_add(1);
@@ -3359,8 +3503,12 @@ impl Transport for TmuxBackend {
                                 std::thread::sleep(Duration::from_millis(100));
                                 match self.capture(target, CaptureRange::Tail(40)) {
                                     Ok(cap) => {
+                                        capture_tally.record_ok(&cap.text, Some(m));
                                         if cap.text.contains(m) {
                                             token_ever_visible = true;
+                                            token_seen_after_enter = Some(true);
+                                        } else if token_seen_after_enter.is_none() {
+                                            token_seen_after_enter = Some(false);
                                         }
                                         tracked_paste = latch_paste(&cap.text, tracked_paste);
                                         let obs = submit_attempt_observation(
@@ -3398,7 +3546,10 @@ impl Transport for TmuxBackend {
                                             break;
                                         }
                                     }
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        capture_tally.record_err();
+                                        break;
+                                    }
                                 }
                             }
                             if found_consumed {
@@ -3410,6 +3561,7 @@ impl Transport for TmuxBackend {
                     }
                 }
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
+                let surface = probe_inject_target_surface(self, target);
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,
                     inject_verification: inject_verification_after_readback(
@@ -3422,12 +3574,14 @@ impl Transport for TmuxBackend {
                         last_turn_text.as_deref(),
                     ),
                     attempts: consumption_attempts.saturating_add(capture_retries),
-                    submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
-                        appear_gate_elapsed_ms: 0,
-                        appear_gate_matched: false,
+                    submit_diagnostics: Some(submit_diagnostics_for_inject(
                         total_elapsed_ms,
                         attempts_detail,
-                    }),
+                        &capture_tally,
+                        token_seen_after_paste,
+                        token_seen_after_enter,
+                        surface,
+                    )),
                 });
             }
         }

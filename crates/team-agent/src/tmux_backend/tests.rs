@@ -27,10 +27,11 @@ use crate::layout::worker_env::{
 };
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::transport::{
-    normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv,
-    tmux_submit_key_name, AttachOutcome, CaptureRange, InjectPayload, InjectStage,
-    InjectVerification, Key, PaneField, PaneId, SessionName, SetEnvOutcome, SubmitVerification,
-    Target, Transport, TransportError, TurnVerification, WindowName,
+    command_basename, normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv,
+    tmux_spawn_argv, tmux_submit_key_name, AttachOutcome, CaptureRange, CaptureSampleOutcome,
+    InjectPayload, InjectStage, InjectVerification, InputSurfaceProbe, Key, PaneField, PaneId,
+    QueryOutcome, SessionName, SetEnvOutcome, SubmitVerification, Target, Transport,
+    TransportError, TurnVerification, WindowName,
 };
 
 type RecordedArgv = Arc<Mutex<Vec<Vec<String>>>>;
@@ -1104,6 +1105,125 @@ fn inject_token_not_visible_in_pane_reports_capture_missing_token() {
         InjectVerification::CaptureMissingToken,
         "U1 #7: a token that never appeared in the pane must read back as \
 CaptureMissingToken, not the static CaptureContainsToken false-positive"
+    );
+    let diag = report
+        .submit_diagnostics
+        .as_ref()
+        .expect("token inject records readback diagnostics");
+    assert_eq!(diag.last_capture_outcome, CaptureSampleOutcome::OkTokenMissing);
+    assert_eq!(diag.token_seen_after_paste, Some(false));
+    assert!(diag.capture_ok_count >= 1);
+    assert_eq!(diag.capture_err_count, 0);
+}
+
+#[test]
+fn command_basename_drops_argv_and_path() {
+    assert_eq!(
+        command_basename("/usr/bin/grok --help --model x").as_deref(),
+        Some("grok")
+    );
+    assert_eq!(command_basename("node").as_deref(), Some("node"));
+    assert_eq!(command_basename("").as_deref(), None);
+    assert_eq!(command_basename("   ").as_deref(), None);
+}
+
+struct InjectProbeRunner {
+    recorded: RecordedArgv,
+    capture: MockResp,
+    command: String,
+}
+
+impl CommandRunner for InjectProbeRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        if argv.iter().any(|arg| arg.contains("#{pane_current_command}")) {
+            return Ok(ok(&format!("{}\n", self.command)));
+        }
+        if argv.iter().any(|arg| arg.contains("#{pane_id}")) {
+            return Ok(ok("%9\n"));
+        }
+        if argv.get(1).map(String::as_str) == Some("capture-pane") {
+            return match &self.capture {
+                MockResp::Out(output) => Ok(output.clone()),
+                MockResp::Io(kind) => Err(std::io::Error::new(*kind, "capture unavailable")),
+            };
+        }
+        Ok(ok(""))
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
+fn inject_probe_backend(
+    capture: MockResp,
+    command: &str,
+) -> (TmuxBackend, RecordedArgv) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = InjectProbeRunner {
+        recorded: Arc::clone(&recorded),
+        capture,
+        command: command.to_string(),
+    };
+    (TmuxBackend::with_runner(Box::new(runner)), recorded)
+}
+
+#[test]
+fn inject_capture_failure_is_distinct_from_token_missing_and_does_not_pass() {
+    let (be, _rec) = inject_probe_backend(MockResp::Io(std::io::ErrorKind::Other), "");
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%9")),
+            &InjectPayload::Text("hello [team-agent-token:zzz]".to_string()),
+            Key::Down,
+            true,
+        )
+        .expect("inject runs");
+    assert_eq!(
+        report.inject_verification,
+        InjectVerification::CaptureMissingToken,
+        "capture failure must not loosen CaptureMissingToken"
+    );
+    let diag = report.submit_diagnostics.as_ref().expect("diag");
+    assert_eq!(diag.last_capture_outcome, CaptureSampleOutcome::Failed);
+    assert_eq!(diag.token_seen_after_paste, None);
+    assert!(diag.capture_err_count >= 1);
+    assert_eq!(diag.capture_ok_count, 0);
+}
+
+#[test]
+fn inject_records_command_basename_without_argv() {
+    let (be, _rec) = inject_probe_backend(
+        MockResp::Out(ok("")),
+        "/usr/bin/grok --help --model grok-4.6",
+    );
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%9")),
+            &InjectPayload::Text("hello [team-agent-token:zzz]".to_string()),
+            Key::Down,
+            true,
+        )
+        .expect("inject runs");
+    let diag = report.submit_diagnostics.as_ref().expect("diag");
+    assert_eq!(diag.pane_command_basename.as_deref(), Some("grok"));
+    assert_eq!(diag.pane_command_query, QueryOutcome::Observed);
+    assert_eq!(diag.input_surface, InputSurfaceProbe::Input);
+    assert_eq!(diag.target_pane_id.as_deref(), Some("%9"));
+    assert_eq!(diag.target_pane_query_matched, Some(true));
+    let blob = format!("{diag:?}");
+    assert!(
+        !blob.contains("--help") && !blob.contains("grok-4.6"),
+        "argv must not leak into diagnostics: {blob}"
+    );
+    assert_eq!(
+        report.inject_verification,
+        InjectVerification::CaptureMissingToken
     );
 }
 
