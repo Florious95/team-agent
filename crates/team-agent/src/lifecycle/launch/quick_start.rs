@@ -74,9 +74,26 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 
     fn explicit_provider(&mut self) -> Option<String> {
-        std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+        let current_pane = std::env::var("TMUX_PANE")
             .ok()
-            .filter(|provider| !provider.is_empty())
+            .filter(|pane| !pane.is_empty());
+        let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
+        let scoped_endpoint = self.transport.tmux_endpoint();
+        match crate::layout::worker_env::caller_provider_resolution(
+            current_pane.as_deref(),
+            current_endpoint.as_deref(),
+            scoped_endpoint.as_deref(),
+        ) {
+            crate::layout::worker_env::CallerProviderResolution::Valid(provider) => {
+                Some(crate::provider::wire::provider_wire(provider).to_string())
+            }
+            crate::layout::worker_env::CallerProviderResolution::Invalid => None,
+            crate::layout::worker_env::CallerProviderResolution::Absent => {
+                std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+                    .ok()
+                    .filter(|provider| !provider.is_empty())
+            }
+        }
     }
 
     fn tmux_endpoint(&mut self) -> Option<String> {

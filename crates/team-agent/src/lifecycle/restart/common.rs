@@ -523,6 +523,9 @@ pub(super) fn spawn_agent_window(
             provider,
         ),
     );
+    // Keep the launcher-known typed provider independent from inherited
+    // LEADER_* identity. The tmux wrapper binds pane/socket at invocation time.
+    crate::layout::worker_env::inject_current_caller_provider(&mut env, provider);
 
     // 0.4.6 Stage 2: write actual spawn plan event BEFORE invoking the
     // transport spawn. Mirrors `launch.rs:359-380` (the reference impl)

@@ -66,10 +66,7 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 use super::identity::spec_display_backend;
-use super::leader_context::{
-    attributed_provider_for_pane_across_tmux_sockets, caller_provider_for_seed_with_lookup,
-    seed_unbound_launched_owner,
-};
+use super::leader_context::{caller_provider_for_seed_with_lookup, seed_unbound_launched_owner};
 use super::worker_env::spawn_timestamp;
 
 /// ---
@@ -159,7 +156,7 @@ pub(super) fn initial_runtime_state(
 /// ---
 pub(super) fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> bool {
     let team_id = crate::state::projection::team_state_key(state);
-    let Ok(caller) = crate::state::identity::caller_identity_from_env(
+    let Ok(mut caller) = crate::state::identity::caller_identity_from_env(
         Some(state),
         &crate::state::identity::SystemEnv,
         Some(&team_id),
@@ -167,11 +164,26 @@ pub(super) fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> boo
     ) else {
         return false;
     };
-    seed_launched_owner_from_caller_with_provider_lookup(
-        state,
-        caller,
-        attributed_provider_for_pane_across_tmux_sockets,
-    )
+    let current_pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.is_empty());
+    let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
+    match crate::layout::worker_env::caller_provider_resolution(
+        current_pane.as_deref(),
+        current_endpoint.as_deref(),
+        current_endpoint.as_deref(),
+    ) {
+        crate::layout::worker_env::CallerProviderResolution::Invalid => return false,
+        crate::layout::worker_env::CallerProviderResolution::Valid(provider) => {
+            caller.provider = crate::provider::wire::provider_wire(provider).to_string();
+        }
+        crate::layout::worker_env::CallerProviderResolution::Absent
+            if caller.provider.is_empty() => return false,
+        crate::layout::worker_env::CallerProviderResolution::Absent => {}
+    }
+    // With no launcher context, preserve only the supported explicit leader
+    // provider. Do not replace it with broad pane/process attribution.
+    seed_launched_owner_from_caller_with_provider_lookup(state, caller, |_| None)
 }
 
 /// ---

@@ -61,6 +61,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::model::enums::PaneLiveness;
+use crate::provider::wire::{parse_provider, provider_wire};
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
     tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv, tmux_spawn_argv, AttachOutcome,
@@ -2445,6 +2446,7 @@ fn shell_command(
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
+    let caller_provider = caller_provider_for_invocation(env);
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
@@ -2464,14 +2466,45 @@ fn shell_command(
     // contains the very keys we want to scrub (e.g. CLAUDE_EFFORT carried
     // forward from the launching shell into the env map).
     for (key, value) in env {
-        if unset_set.contains(key.as_str()) {
+        if unset_set.contains(key.as_str())
+            || key.starts_with(crate::layout::worker_env::CALLER_CONTEXT_PREFIX)
+        {
             continue;
         }
         parts.push(format!("{key}={}", shell_quote(value)));
     }
+    append_caller_context_assignments(&mut parts, caller_provider);
     parts.push("exec".to_string());
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.join(" ")
+}
+
+fn caller_provider_for_invocation(env: &BTreeMap<String, String>) -> Option<&'static str> {
+    env.get(crate::layout::worker_env::CALLER_PROVIDER_ENV)
+        .and_then(|value| parse_provider(value))
+        .map(provider_wire)
+}
+
+fn append_caller_context_assignments(parts: &mut Vec<String>, provider: Option<&str>) {
+    let Some(provider) = provider else {
+        return;
+    };
+    parts.push(format!(
+        "{}={}",
+        crate::layout::worker_env::CALLER_PROVIDER_ENV,
+        shell_quote(provider)
+    ));
+    // These are expanded by the shell created inside the target pane. They are
+    // assignments on the provider command only, so the exit marker/inert tail
+    // cannot retain a usable caller context.
+    parts.push(format!(
+        "{}=\"${{TMUX_PANE-}}\"",
+        crate::layout::worker_env::CALLER_PANE_ENV
+    ));
+    parts.push(format!(
+        "{}=\"${{TMUX%%,*}}\"",
+        crate::layout::worker_env::CALLER_ENDPOINT_ENV
+    ));
 }
 
 /// 0.4.x (CR R6): single-source marker prefix. The exit marker emitted by
@@ -2643,6 +2676,7 @@ pub fn worker_shell_wrapper_command(
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
+    let caller_provider = caller_provider_for_invocation(env);
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
@@ -2653,11 +2687,14 @@ pub fn worker_shell_wrapper_command(
         parts.push("&&".to_string());
     }
     for (key, value) in env {
-        if unset_set.contains(key.as_str()) {
+        if unset_set.contains(key.as_str())
+            || key.starts_with(crate::layout::worker_env::CALLER_CONTEXT_PREFIX)
+        {
             continue;
         }
         parts.push(format!("{key}={}", shell_quote(value)));
     }
+    append_caller_context_assignments(&mut parts, caller_provider);
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.push(";".to_string());
     parts.push("rc=$?;".to_string());

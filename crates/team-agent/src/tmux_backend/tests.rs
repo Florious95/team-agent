@@ -16,10 +16,15 @@ use std::time::{Duration, Instant};
 
 use super::{
     current_paste_to_submit_floor, observe_turn_from_capture,
-    sleep_remaining_paste_to_submit_floor, with_cursor_single_enter, with_paste_to_submit_floor,
-    CommandOutput, CommandRunner, RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
+    sleep_remaining_paste_to_submit_floor, worker_shell_wrapper_command,
+    with_cursor_single_enter, with_paste_to_submit_floor, CommandOutput, CommandRunner,
+    RealCommandRunner, TmuxBackend, PANE_BINDING_NONCE_METADATA_KEY,
 };
-use crate::model::enums::PaneLiveness;
+use crate::layout::worker_env::{
+    inject_current_caller_provider, worker_spawn_env, CALLER_ENDPOINT_ENV, CALLER_PANE_ENV,
+    CALLER_PROVIDER_ENV,
+};
+use crate::model::enums::{PaneLiveness, Provider};
 use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv,
     tmux_submit_key_name, AttachOutcome, CaptureRange, InjectPayload, InjectStage,
@@ -115,6 +120,48 @@ fn fail(code: i32, stderr: &str) -> CommandOutput {
         stdout: String::new(),
         stderr: stderr.to_string(),
     }
+}
+
+#[test]
+fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
+    let mut env = worker_spawn_env(
+        vec![
+            (CALLER_PROVIDER_ENV.to_string(), "claude".to_string()),
+            (CALLER_PANE_ENV.to_string(), "%old".to_string()),
+            (CALLER_ENDPOINT_ENV.to_string(), "/tmp/old.sock".to_string()),
+            ("TMUX".to_string(), "/tmp/parent.sock,1,0".to_string()),
+            ("TMUX_PANE".to_string(), "%parent".to_string()),
+        ],
+        Path::new("/tmp/worker"),
+        "child",
+        Some("team"),
+        None,
+    );
+    inject_current_caller_provider(&mut env, Provider::Pi);
+    let env_unset = [
+        CALLER_PROVIDER_ENV.to_string(),
+        CALLER_PANE_ENV.to_string(),
+        CALLER_ENDPOINT_ENV.to_string(),
+    ];
+    let command = worker_shell_wrapper_command(
+        &["pi".to_string(), "--help".to_string()],
+        Path::new("/tmp/worker"),
+        &env,
+        &env_unset,
+        "pi",
+    );
+    assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("pi"));
+    assert!(!env.contains_key(CALLER_PANE_ENV));
+    assert!(!env.contains_key(CALLER_ENDPOINT_ENV));
+    assert!(command.contains("unset TEAM_AGENT_CALLER_PROVIDER"));
+    assert!(command.contains("unset TEAM_AGENT_CALLER_PANE_ID"));
+    assert!(command.contains("unset TEAM_AGENT_CALLER_TMUX_ENDPOINT"));
+    assert!(command.contains("TEAM_AGENT_CALLER_PROVIDER=pi"));
+    assert!(command.contains("TEAM_AGENT_CALLER_PANE_ID=\"${TMUX_PANE-}\""));
+    assert!(command.contains("TEAM_AGENT_CALLER_TMUX_ENDPOINT=\"${TMUX%%,*}\""));
+    assert_eq!(command.matches("TEAM_AGENT_CALLER_PROVIDER").count(), 1);
+    let tail = command.split_once("; rc=$?").map(|(_, tail)| tail).unwrap_or("");
+    assert!(!tail.contains("TEAM_AGENT_CALLER_"));
 }
 
 /// Build a backend over a mock runner: `default` answers every un-queued call; `queued` is drained
