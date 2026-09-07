@@ -454,14 +454,13 @@ pub(crate) fn attach_leader_to_state(
     source: LeaseSource,
     require_current: bool,
 ) -> Result<(LeaderReceiver, Value), LeaderError> {
-    let _ = (source, require_current);
     let pane_id = pane
         .cloned()
         .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
     let non_empty_pane_id = NonEmptyPaneId::try_from_pane(&pane_id)?;
     let identity = leader_identity_context(workspace, None, Some(state))?;
     let epoch = current_owner_epoch(state);
-    let receiver = make_receiver(
+    let mut receiver = make_receiver(
         provider,
         &non_empty_pane_id,
         &identity.leader_session_uuid,
@@ -469,11 +468,18 @@ pub(crate) fn attach_leader_to_state(
         Discovery::EnvPane,
         None,
     );
+    authorize_fresh_caller_receiver(
+        workspace,
+        &mut receiver,
+        &non_empty_pane_id,
+        source,
+        require_current,
+    )?;
     if state.get("team_owner").is_some() {
         write_receiver_to_state(state, &receiver)?;
     } else {
         let next_epoch = OwnerEpoch(epoch.0.saturating_add(1));
-        let receiver = make_receiver(
+        let mut receiver = make_receiver(
             provider,
             &non_empty_pane_id,
             &identity.leader_session_uuid,
@@ -481,6 +487,13 @@ pub(crate) fn attach_leader_to_state(
             Discovery::EnvPane,
             None,
         );
+        authorize_fresh_caller_receiver(
+            workspace,
+            &mut receiver,
+            &non_empty_pane_id,
+            source,
+            require_current,
+        )?;
         let owner = make_owner(provider, &non_empty_pane_id, &identity, next_epoch);
         write_binding_to_state(state, &receiver, &owner)?;
         write_lease_dual_state(workspace, state)?;
@@ -1867,6 +1880,39 @@ fn emit_lease_refusal(
             "os_user": os_user,
         }),
     )?;
+    Ok(())
+}
+
+fn authorize_fresh_caller_receiver(
+    workspace: &Path,
+    receiver: &mut LeaderReceiver,
+    pane: &NonEmptyPaneId,
+    source: LeaseSource,
+    require_current: bool,
+) -> Result<(), LeaderError> {
+    if !matches!(source, LeaseSource::QuickStart) || !require_current {
+        return Ok(());
+    }
+    let Some(endpoint) = receiver
+        .tmux_socket
+        .as_deref()
+        .filter(|endpoint| !endpoint.is_empty())
+    else {
+        return Ok(());
+    };
+    if !Path::new(endpoint).is_absolute() {
+        return Ok(());
+    }
+    let pane_id = pane.as_pane_id();
+    let nonce = pane_binding_nonce_for_claim(workspace, endpoint, pane_id, None);
+    let live_nonce = tmux_backend_for_endpoint(endpoint)
+        .set_pane_binding_nonce_if_unset(pane_id, &nonce)
+        .map_err(|error| LeaderError::Tmux(error.to_string()))?;
+    receiver.scope_authority = Some(
+        crate::messaging::leader_channel::FRESH_CALLER_SCOPE_AUTHORITY.to_string(),
+    );
+    receiver.authorized_team_workspace = Some(canonical_workspace(workspace));
+    receiver.binding_nonce = Some(live_nonce);
     Ok(())
 }
 
