@@ -547,9 +547,9 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
     nonce_writer: Option<&dyn Fn(&str, &PaneId, &str) -> Result<String, LeaderError>>,
 ) -> Result<(LeaderReceiver, Value), AttachLeaderError> {
     if expected_owner.is_some() != expected_receiver.is_some() {
-        return Err(LeaderError::Validation(
+        return Err(AttachLeaderError::from(LeaderError::Validation(
             "fresh caller CAS requires both expected owner and receiver".to_string(),
-        ));
+        )));
     }
     let pane_id = pane
         .cloned()
@@ -580,7 +580,7 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
         caller_target,
         nonce_writer,
     )?;
-    let receiver_value = serde_json::to_value(&receiver)?;
+    let receiver_value = serde_json::to_value(&receiver).map_err(LeaderError::from)?;
     if has_owner {
         write_receiver_to_state(state, &receiver)?;
     } else {
