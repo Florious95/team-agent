@@ -1420,6 +1420,16 @@ mod fresh_quick_start_leader_binding_tests {
                 "leader_session_uuid": "uuid-fresh",
                 "owner_epoch": 1
             });
+            let team_key = state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("fresh")
+                .to_string();
+            let receiver = state["leader_receiver"].clone();
+            let owner = state["team_owner"].clone();
+            state["teams"][team_key.as_str()]["leader_receiver"] = receiver;
+            state["teams"][team_key.as_str()]["team_owner"] = owner;
+            state["teams"][team_key.as_str()]["owner_epoch"] = json!(1);
             crate::state::persist::save_runtime_state(workspace, state).is_ok()
         }
 
