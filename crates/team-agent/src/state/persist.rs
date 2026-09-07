@@ -208,13 +208,24 @@ impl Drop for RuntimeLock {
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], None, &[], None)
+    save_runtime_state_with_merge_options(
+        workspace,
+        state,
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        None,
+    )
 }
 
 pub(crate) fn save_runtime_state_with_receiver_authority(
     workspace: &Path,
     state: &Value,
     receiver_team_key: &str,
+    exact_owner_seed_to_clear: Option<&Value>,
 ) -> Result<(), StateError> {
     save_runtime_state_with_merge_options(
         workspace,
@@ -225,6 +236,7 @@ pub(crate) fn save_runtime_state_with_receiver_authority(
         None,
         &[],
         Some(receiver_team_key),
+        exact_owner_seed_to_clear,
     )
 }
 
@@ -262,6 +274,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
         Some(topology_team_key),
         agent_ids,
         None,
+        None,
     )
 }
 
@@ -281,6 +294,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority_and_capture_b
         Some(skip_capture_backfill_team_key),
         topology_agent_ids,
         None,
+        None,
     )
 }
 
@@ -297,6 +311,7 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
         &[],
         None,
         &[],
+        None,
         None,
     )
 }
@@ -316,6 +331,7 @@ pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
         None,
         &[],
         None,
+        None,
     )
 }
 
@@ -334,6 +350,7 @@ pub(crate) fn save_runtime_state_with_team_tombstone_lifecycle_topology_authorit
         Some(tombstoned_team_key),
         agent_ids,
         None,
+        None,
     )
 }
 
@@ -346,6 +363,7 @@ fn save_runtime_state_with_merge_options(
     topology_update_team_key: Option<&str>,
     topology_update_agent_ids: &[&str],
     receiver_update_team_key: Option<&str>,
+    exact_owner_seed_to_clear: Option<&Value>,
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
@@ -364,14 +382,18 @@ fn save_runtime_state_with_merge_options(
     // entirely. Moving migrate+strip ahead of every cache_equals makes
     // the canonical-only shape the cache invariant for new writes.
     crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut migrated);
-    if cache_equals(&path, &migrated) {
+    // Exact-seed cleanup must observe lock-held disk, not a pre-lock cache or
+    // byte-equality hit. A matching in-memory document would otherwise no-op
+    // and leave the seed, or skip copying a concurrent owner.
+    let skip_pre_lock_fast_path = exact_owner_seed_to_clear.is_some();
+    if !skip_pre_lock_fast_path && cache_equals(&path, &migrated) {
         return Ok(());
     }
     // 与磁盘已有内容「迁移后」相同 → 更新缓存返回(避免无谓重写)。字节对拍 Python:对 `existing` 先
     // `normalize_agent_session_state` + `_migrate_state_identity` 再比(读/迁移失败 try/except: pass →
     // 落写路径)。**修对抗 P1**:此前比较 raw `existing` 漏了这两步,会把「磁盘已是迁移等价形」的 legacy
     // 文件误判为不同而 spurious 重写,破坏 load+save 字节恒等。
-    if path.exists() {
+    if !skip_pre_lock_fast_path && path.exists() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(mut existing) = serde_json::from_str::<Value>(&text) {
                 normalize_agent_session_state(&mut existing);
@@ -432,6 +454,7 @@ fn save_runtime_state_with_merge_options(
             &skip_capture_backfill,
             &topology_updates,
             &receiver_updates,
+            receiver_update_team_key.zip(exact_owner_seed_to_clear),
         )?;
     }
     // Stage 3 save-output strip second pass (defence-in-depth): after the
@@ -499,6 +522,7 @@ fn apply_persist_merge_contract(
     skip_capture_backfill_agent_ids: &BTreeSet<String>,
     topology_updates: &BTreeSet<(String, String)>,
     receiver_updates: &BTreeSet<String>,
+    exact_owner_seed_to_clear: Option<(&str, &Value)>,
 ) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
@@ -616,6 +640,11 @@ fn apply_persist_merge_contract(
                 latest_entry,
                 receiver_update_authoritative,
             );
+            if let Some((clear_team, seed)) = exact_owner_seed_to_clear {
+                if team == clear_team {
+                    apply_lock_held_exact_owner_cleanup(incoming_entry, latest_entry, seed);
+                }
+            }
             preserve_latest_endpoint_convergence_fields(incoming_entry, latest_entry);
         }
     }
@@ -742,6 +771,38 @@ fn preserve_latest_ownership_fields(
     for key in ["leader_receiver", "team_owner", "owner_epoch"] {
         if let Some(value) = latest.get(key).filter(|value| json_truthy(value)) {
             incoming_obj.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn apply_lock_held_exact_owner_cleanup(incoming: &mut Value, latest: &Value, seed: &Value) {
+    // Compare the lock-held disk owner to the attempt-local seed. Equal-epoch
+    // concurrent owners must survive; only the exact seed is cleared, and the
+    // epoch is not bumped so a same-epoch takeover cannot be overwritten.
+    let latest_owner = latest.get("team_owner");
+    let Some(incoming_obj) = incoming.as_object_mut() else {
+        return;
+    };
+    if latest_owner == Some(seed) {
+        incoming_obj.insert("team_owner".to_string(), Value::Null);
+        incoming_obj.insert("leader_receiver".to_string(), Value::Null);
+        if let Some(epoch) = latest
+            .get("owner_epoch")
+            .cloned()
+            .or_else(|| latest_owner.and_then(|owner| owner.get("owner_epoch")).cloned())
+        {
+            incoming_obj.insert("owner_epoch".to_string(), epoch);
+        }
+        return;
+    }
+    for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+        match latest.get(key) {
+            Some(value) => {
+                incoming_obj.insert(key.to_string(), value.clone());
+            }
+            None => {
+                incoming_obj.remove(key);
+            }
         }
     }
 }
@@ -2923,6 +2984,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &BTreeSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2957,6 +3019,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &receiver_updates,
+            None,
         )
         .unwrap();
 
@@ -2977,6 +3040,212 @@ mod tests {
             incoming["teams"]["sibling"]["leader_receiver"]["session_name"],
             json!("stale-session"),
             "team-scoped receiver authority must not overwrite a sibling's latest tuple"
+        );
+    }
+
+    fn seed_owner(epoch: u64) -> Value {
+        json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-seed",
+            "owner_epoch": epoch,
+            "claimed_via": "quick-start"
+        })
+    }
+
+    fn seed_receiver(epoch: u64) -> Value {
+        json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-seed",
+            "owner_epoch": epoch
+        })
+    }
+
+    fn takeover_owner(epoch: u64) -> Value {
+        json!({
+            "pane_id": "%99",
+            "provider": "codex",
+            "leader_session_uuid": "uuid-other",
+            "owner_epoch": epoch,
+            "claimed_via": "claim-leader"
+        })
+    }
+
+    fn takeover_receiver(epoch: u64) -> Value {
+        json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": "%99",
+            "provider": "codex",
+            "leader_session_uuid": "uuid-other",
+            "owner_epoch": epoch,
+            "tmux_socket": "/tmp/other"
+        })
+    }
+
+    fn team_state_with_binding(ws: &Path, owner: Value, receiver: Value, epoch: u64) -> Value {
+        json!({
+            "workspace": ws.display().to_string(),
+            "active_team_key": "fresh",
+            "team_key": "fresh",
+            "session_name": "team-fresh",
+            "agents": {"sol": {"status": "running"}},
+            "teams": {
+                "fresh": {
+                    "team_key": "fresh",
+                    "session_name": "team-fresh",
+                    "agents": {"sol": {"status": "running"}},
+                    "team_owner": owner,
+                    "leader_receiver": receiver,
+                    "owner_epoch": epoch
+                }
+            }
+        })
+    }
+
+    fn tombstone_incoming(ws: &Path, epoch: u64) -> Value {
+        let mut incoming = team_state_with_binding(
+            ws,
+            seed_owner(epoch),
+            seed_receiver(epoch),
+            epoch,
+        );
+        incoming["teams"]["fresh"]["team_owner"] = Value::Null;
+        incoming["teams"]["fresh"]["leader_receiver"] = Value::Null;
+        incoming
+    }
+
+    fn assert_fresh_binding(persisted: &Value, owner: &Value, receiver: &Value, epoch: u64) {
+        assert_eq!(&persisted["teams"]["fresh"]["team_owner"], owner);
+        assert_eq!(&persisted["teams"]["fresh"]["leader_receiver"], receiver);
+        assert_eq!(persisted["teams"]["fresh"]["owner_epoch"], json!(epoch));
+    }
+
+    fn persisted_fresh_owner(ws: &Path) -> Value {
+        load_runtime_state(ws).unwrap()["teams"]["fresh"]["team_owner"].clone()
+    }
+
+    #[test]
+    fn exact_seed_cleanup_ignores_pre_lock_cache_and_equality_fast_path() {
+        let ws = temp_ws();
+        save_runtime_state(
+            &ws,
+            &team_state_with_binding(&ws, seed_owner(1), seed_receiver(1), 1),
+        )
+        .unwrap();
+        let incoming = load_runtime_state(&ws).unwrap();
+        let seed = persisted_fresh_owner(&ws);
+        save_runtime_state_with_receiver_authority(&ws, &incoming, "fresh", Some(&seed)).unwrap();
+        let persisted = load_runtime_state(&ws).unwrap();
+        assert!(
+            persisted
+                .pointer("/teams/fresh/team_owner")
+                .is_some_and(Value::is_null),
+            "cache/equality hit must not skip exact-seed cleanup; got {}",
+            persisted["teams"]["fresh"]["team_owner"]
+        );
+        assert_eq!(persisted["teams"]["fresh"]["owner_epoch"], json!(1));
+    }
+
+    #[test]
+    fn lock_held_exact_seed_cleanup_clears_matching_owner_without_epoch_bump() {
+        let ws = temp_ws();
+        save_runtime_state(
+            &ws,
+            &team_state_with_binding(&ws, seed_owner(1), seed_receiver(1), 1),
+        )
+        .unwrap();
+        let seed = persisted_fresh_owner(&ws);
+        save_runtime_state_with_receiver_authority(
+            &ws,
+            &tombstone_incoming(&ws, 1),
+            "fresh",
+            Some(&seed),
+        )
+        .unwrap();
+        let persisted = load_runtime_state(&ws).unwrap();
+        assert!(
+            persisted
+                .pointer("/teams/fresh/team_owner")
+                .is_some_and(Value::is_null),
+            "exact seed must be cleared; got {}",
+            persisted["teams"]["fresh"]["team_owner"]
+        );
+        assert!(
+            persisted
+                .pointer("/teams/fresh/leader_receiver")
+                .is_some_and(Value::is_null)
+        );
+        assert_eq!(
+            persisted["teams"]["fresh"]["owner_epoch"],
+            json!(1),
+            "cleanup must not bump epoch past a same-epoch concurrent owner"
+        );
+    }
+
+    #[test]
+    fn lock_held_exact_seed_cleanup_preserves_equal_epoch_concurrent_binding() {
+        let ws = temp_ws();
+        save_runtime_state(
+            &ws,
+            &team_state_with_binding(&ws, seed_owner(1), seed_receiver(1), 1),
+        )
+        .unwrap();
+        let seed = persisted_fresh_owner(&ws);
+        save_runtime_state_with_receiver_authority(
+            &ws,
+            &team_state_with_binding(&ws, takeover_owner(1), takeover_receiver(1), 1),
+            "fresh",
+            None,
+        )
+        .unwrap();
+        let expected = load_runtime_state(&ws).unwrap();
+        assert_fresh_binding(&expected, &takeover_owner(1), &takeover_receiver(1), 1);
+        save_runtime_state_with_receiver_authority(
+            &ws,
+            &tombstone_incoming(&ws, 1),
+            "fresh",
+            Some(&seed),
+        )
+        .unwrap();
+        assert_fresh_binding(
+            &load_runtime_state(&ws).unwrap(),
+            &expected["teams"]["fresh"]["team_owner"],
+            &expected["teams"]["fresh"]["leader_receiver"],
+            1,
+        );
+    }
+
+    #[test]
+    fn lock_held_exact_seed_cleanup_preserves_epoch2_takeover_binding() {
+        let ws = temp_ws();
+        save_runtime_state(
+            &ws,
+            &team_state_with_binding(&ws, seed_owner(1), seed_receiver(1), 1),
+        )
+        .unwrap();
+        let seed = persisted_fresh_owner(&ws);
+        save_runtime_state(
+            &ws,
+            &team_state_with_binding(&ws, takeover_owner(2), takeover_receiver(2), 2),
+        )
+        .unwrap();
+        let expected = load_runtime_state(&ws).unwrap();
+        save_runtime_state_with_receiver_authority(
+            &ws,
+            &tombstone_incoming(&ws, 1),
+            "fresh",
+            Some(&seed),
+        )
+        .unwrap();
+        assert_fresh_binding(
+            &load_runtime_state(&ws).unwrap(),
+            &expected["teams"]["fresh"]["team_owner"],
+            &expected["teams"]["fresh"]["leader_receiver"],
+            2,
         );
     }
 }

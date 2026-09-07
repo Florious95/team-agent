@@ -288,6 +288,23 @@ struct AttachLeaderTarget {
 
 fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTarget> {
     let mut targets = Vec::new();
+    // The caller's verified tmux server is authoritative for discovering its
+    // leader pane. Keep state-recorded worker endpoints as additional targets,
+    // but do not let a cross-socket pane-id collision hide the caller pane.
+    if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
+        let backend = tmux_backend_for_endpoint(&endpoint);
+        let resolved_endpoint = backend.tmux_endpoint();
+        targets.extend(
+            backend
+                .list_targets()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|info| AttachLeaderTarget {
+                    info,
+                    endpoint: resolved_endpoint.clone(),
+                }),
+        );
+    }
     for endpoint in state_recorded_tmux_endpoints(state) {
         let backend = tmux_backend_for_endpoint(&endpoint);
         let resolved_endpoint = backend.tmux_endpoint();

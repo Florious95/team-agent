@@ -74,6 +74,7 @@ fn b1_bare_claim_uses_active_fleet_not_stale_caller_env_and_reports_session_abse
         case.workspace_str(),
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "B1 bare claim-leader");
     assert_binding_ok(&claim, &claim_json, "B1 bare claim-leader");
@@ -130,6 +131,7 @@ fn b1_explicit_current_still_targets_current_not_active_fleet() {
         SIBLING_TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "B1 explicit current claim-leader");
     assert_binding_ok(&claim, &claim_json, "B1 explicit current claim-leader");

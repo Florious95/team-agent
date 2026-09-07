@@ -454,6 +454,7 @@ fn claim_old_endpoint_live_uses_current_tmux_observed_candidate_source() {
         TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "R4 claim-leader");
     let state = case.read_state();
