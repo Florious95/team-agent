@@ -1307,6 +1307,7 @@ mod fresh_quick_start_leader_binding_tests {
         register_calls: usize,
         readback_calls: usize,
         attached_provider: Option<crate::provider::Provider>,
+        applied_grant: Option<(serde_json::Value, serde_json::Value)>,
     }
 
     impl Default for MockOps {
@@ -1323,6 +1324,7 @@ mod fresh_quick_start_leader_binding_tests {
                 register_calls: 0,
                 readback_calls: 0,
                 attached_provider: None,
+                applied_grant: None,
             }
         }
     }
@@ -1398,6 +1400,7 @@ mod fresh_quick_start_leader_binding_tests {
             pane: &PaneId,
             provider: crate::provider::Provider,
         ) -> bool {
+            self.applied_grant = None;
             self.attach_calls += 1;
             self.attached_provider = Some(provider);
             if !self.attach_ok {
@@ -1405,40 +1408,79 @@ mod fresh_quick_start_leader_binding_tests {
                 let _ = crate::state::persist::save_runtime_state(workspace, state);
                 return false;
             }
-            state["leader_receiver"] = json!({
-                "mode": "direct_tmux",
-                "pane_id": pane.as_str(),
-                "status": "attached",
-                "provider": "pi",
-                "leader_session_uuid": "uuid-fresh",
-                "owner_epoch": 1,
-                "tmux_socket": self.endpoint
-            });
-            state["team_owner"] = json!({
-                "pane_id": pane.as_str(),
-                "provider": "pi",
-                "leader_session_uuid": "uuid-fresh",
-                "owner_epoch": 1
-            });
             let team_key = state
                 .get("active_team_key")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("fresh")
                 .to_string();
-            let receiver = state["leader_receiver"].clone();
-            let owner = state["team_owner"].clone();
-            state["teams"][team_key.as_str()]["leader_receiver"] = receiver;
-            state["teams"][team_key.as_str()]["team_owner"] = owner;
-            state["teams"][team_key.as_str()]["owner_epoch"] = json!(1);
-            crate::state::persist::save_runtime_state(workspace, state).is_ok()
+            let expected_owner = state.get("team_owner").cloned();
+            let expected_receiver = state.get("leader_receiver").cloned();
+            let owner = expected_owner.clone().unwrap_or_else(|| {
+                json!({
+                    "pane_id": pane.as_str(),
+                    "provider": "pi",
+                    "leader_session_uuid": "uuid-fresh",
+                    "owner_epoch": 1
+                })
+            });
+            let owner_epoch = owner
+                .get("owner_epoch")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1);
+            let receiver = json!({
+                "mode": "direct_tmux",
+                "pane_id": pane.as_str(),
+                "status": "attached",
+                "provider": "pi",
+                "leader_session_uuid": "uuid-fresh",
+                "owner_epoch": owner_epoch,
+                "tmux_socket": self.endpoint
+            });
+            state["leader_receiver"] = receiver.clone();
+            state["team_owner"] = owner.clone();
+            state["owner_epoch"] = json!(owner_epoch);
+            state["teams"][team_key.as_str()]["leader_receiver"] = receiver.clone();
+            state["teams"][team_key.as_str()]["team_owner"] = owner.clone();
+            state["teams"][team_key.as_str()]["owner_epoch"] = json!(owner_epoch);
+            let saved = match (expected_owner.as_ref(), expected_receiver.as_ref()) {
+                (Some(expected_owner), Some(expected_receiver)) => {
+                    crate::state::persist::save_runtime_state_with_receiver_authority_and_expected(
+                        workspace,
+                        state,
+                        &team_key,
+                        expected_owner,
+                        expected_receiver,
+                    )
+                }
+                _ => crate::state::persist::save_runtime_state_with_receiver_authority(
+                    workspace,
+                    state,
+                    &team_key,
+                    None,
+                ),
+            };
+            if saved.is_ok() {
+                self.applied_grant = Some((owner, receiver));
+                true
+            } else {
+                false
+            }
         }
 
-        fn register(&mut self, workspace: &Path, _team_key: &str) -> bool {
+        fn applied_grant(&self) -> Option<(serde_json::Value, serde_json::Value)> {
+            self.applied_grant.clone()
+        }
+
+        fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
             self.register_calls += 1;
             let mut persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
             assert_eq!(
                 persisted
-                    .pointer("/leader_receiver/pane_id")
+                    .get("teams")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|teams| teams.get(team_key))
+                    .and_then(|team| team.get("leader_receiver"))
+                    .and_then(|receiver| receiver.get("pane_id"))
                     .and_then(serde_json::Value::as_str),
                 Some("%42")
             );
@@ -1449,7 +1491,7 @@ mod fresh_quick_start_leader_binding_tests {
             self.register_ok
         }
 
-        fn canonical_readback(&mut self, workspace: &Path, _team_key: &str) -> bool {
+        fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool {
             self.readback_calls += 1;
             let mut persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
             if !self.readback_ok {
@@ -1458,7 +1500,10 @@ mod fresh_quick_start_leader_binding_tests {
             }
             self.readback_ok
                 && persisted
-                    .get("leader_receiver")
+                    .get("teams")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|teams| teams.get(team_key))
+                    .and_then(|team| team.get("leader_receiver"))
                     .is_some_and(|receiver| !receiver.is_null())
         }
     }
@@ -1476,7 +1521,11 @@ mod fresh_quick_start_leader_binding_tests {
         let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert_eq!(
             state
-                .pointer("/leader_receiver/pane_id")
+                .get("teams")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|teams| teams.get("fresh"))
+                .and_then(|team| team.get("leader_receiver"))
+                .and_then(|receiver| receiver.get("pane_id"))
                 .and_then(serde_json::Value::as_str),
             Some("%42")
         );
@@ -1959,6 +2008,10 @@ mod fresh_quick_start_leader_binding_tests {
             self.inner.attach(workspace, state, pane, provider)
         }
 
+        fn applied_grant(&self) -> Option<(serde_json::Value, serde_json::Value)> {
+            self.inner.applied_grant()
+        }
+
         fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
             self.inner.register_calls += 1;
             if let Some(takeover) = &self.takeover {
@@ -2034,6 +2087,15 @@ mod fresh_quick_start_leader_binding_tests {
             &mut ops
         )
         .unwrap());
+        assert_eq!(ops.inner.attach_calls, 1);
+        assert_eq!(ops.inner.register_calls, 1);
+        assert!(ops
+            .inner
+            .applied_grant
+            .as_ref()
+            .is_some_and(|(owner, receiver)| {
+                owner == &seed && receiver == &matching_receiver()
+            }));
         let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert!(
             persisted
@@ -2101,6 +2163,15 @@ mod fresh_quick_start_leader_binding_tests {
             &mut ops,
         )
         .expect_err("poisoned state.json must surface cleanup persist failure");
+        assert_eq!(ops.inner.attach_calls, 1);
+        assert_eq!(ops.inner.register_calls, 1);
+        assert!(ops
+            .inner
+            .applied_grant
+            .as_ref()
+            .is_some_and(|(owner, receiver)| {
+                owner == &seed && receiver == &matching_receiver()
+            }));
         match error {
             LifecycleError::StatePersist(text) => {
                 assert!(
