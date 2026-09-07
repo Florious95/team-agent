@@ -365,7 +365,7 @@ fn save_runtime_state_with_merge_options(
     receiver_update_team_key: Option<&str>,
     exact_owner_seed_to_clear: Option<&Value>,
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options_and_expected(
+    persist_runtime_state_with_merge_options_and_expected(
         workspace,
         state,
         deleted_agent_ids,
@@ -387,7 +387,7 @@ pub(crate) fn save_runtime_state_with_receiver_authority_and_expected(
     expected_owner: &Value,
     expected_receiver: &Value,
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options_and_expected(
+    persist_runtime_state_with_merge_options_and_expected(
         workspace,
         state,
         &[],
@@ -409,7 +409,7 @@ pub(crate) fn save_runtime_state_with_exact_owner_receiver_cleanup(
     expected_owner: &Value,
     expected_receiver: &Value,
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options_and_expected(
+    persist_runtime_state_with_merge_options_and_expected(
         workspace,
         state,
         &[],
@@ -424,7 +424,7 @@ pub(crate) fn save_runtime_state_with_exact_owner_receiver_cleanup(
     )
 }
 
-fn save_runtime_state_with_merge_options_and_expected(
+fn persist_runtime_state_with_merge_options_and_expected(
     workspace: &Path,
     state: &Value,
     deleted_agent_ids: &[&str],
