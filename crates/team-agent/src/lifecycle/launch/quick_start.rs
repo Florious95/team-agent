@@ -48,12 +48,22 @@ trait FreshQuickStartLeaderBindingOps {
         pane: &PaneId,
         provider: crate::provider::Provider,
     ) -> bool;
+    fn attach_failure_reason(&self) -> Option<&'static str> {
+        None
+    }
     fn register(&mut self, workspace: &Path, team_key: &str) -> bool;
+    fn register_failure_reason(&self) -> Option<&'static str> {
+        None
+    }
     fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool;
+    fn readback_failure_reason(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 struct RuntimeFreshQuickStartLeaderBindingOps<'a> {
     transport: &'a dyn Transport,
+    last_failure_reason: Option<&'static str>,
 }
 
 impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<'_> {
@@ -89,7 +99,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
         provider: crate::provider::Provider,
     ) -> bool {
         let event_log = crate::event_log::EventLog::new(workspace);
-        crate::leader::attach_leader_to_state(
+        match crate::leader::attach_leader_to_state(
             workspace,
             state,
             Some(pane),
@@ -97,22 +107,106 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             &event_log,
             crate::leader::LeaseSource::QuickStart,
             true,
-        )
-        .is_ok()
+        ) {
+            Ok(_) => {
+                self.last_failure_reason = None;
+                true
+            }
+            Err(error) => {
+                self.last_failure_reason = Some(match error {
+                    crate::leader::LeaderError::Validation(_) => "attach_validation_failed",
+                    crate::leader::LeaderError::Tmux(_) => "attach_transport_failed",
+                    crate::leader::LeaderError::State(_) => "attach_state_failed",
+                    crate::leader::LeaderError::Identity(_) => "attach_identity_failed",
+                    crate::leader::LeaderError::Io(_)
+                    | crate::leader::LeaderError::Json(_)
+                    | crate::leader::LeaderError::EventLog(_)
+                    | crate::leader::LeaderError::MessageStore(_)
+                    | crate::leader::LeaderError::Messaging(_)
+                    | crate::leader::LeaderError::Start(_) => "attach_failed",
+                });
+                false
+            }
+        }
+    }
+
+    fn attach_failure_reason(&self) -> Option<&'static str> {
+        self.last_failure_reason
     }
 
     fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
-        crate::leader::registry::register_binding_from_state_best_effort(
+        match crate::leader::registry::register_binding_from_state_best_effort(
             workspace,
             Some(team_key),
             "quick-start",
-        )
-        .is_some_and(|outcome| outcome.status == "registered" && outcome.path.is_some())
+        ) {
+            Some(outcome) if outcome.status == "registered" && outcome.path.is_some() => {
+                self.last_failure_reason = None;
+                true
+            }
+            Some(outcome) => {
+                self.last_failure_reason = Some(if outcome.status == "write_failed" {
+                    "registry_write_failed"
+                } else {
+                    "registry_registration_failed"
+                });
+                false
+            }
+            None => {
+                self.last_failure_reason = Some("registry_state_unavailable");
+                false
+            }
+        }
+    }
+
+    fn register_failure_reason(&self) -> Option<&'static str> {
+        self.last_failure_reason
     }
 
     fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool {
-        launched_team_receiver_is_attached(workspace, team_key)
+        let attached = launched_team_receiver_is_attached(workspace, team_key);
+        if attached {
+            self.last_failure_reason = None;
+        } else {
+            self.last_failure_reason = Some("registry_readback_unavailable");
+        }
+        attached
     }
+
+    fn readback_failure_reason(&self) -> Option<&'static str> {
+        self.last_failure_reason
+    }
+}
+
+const FRESH_BIND_REFUSAL_EVENT: &str = "quick_start.leader_bind_refused";
+
+// The event log is already scoped to `workspace`; `team_key` keeps a
+// multi-team log unambiguous without copying paths or caller details.
+fn record_fresh_bind_refusal(
+    workspace: &Path,
+    team_key: &str,
+    stage: &'static str,
+    reason: &'static str,
+) {
+    let _ = crate::event_log::EventLog::new(workspace).write(
+        FRESH_BIND_REFUSAL_EVENT,
+        serde_json::json!({
+            "operation": "fresh_quick_start_leader_bind",
+            "team_key": team_key,
+            "stage": stage,
+            "reason": reason,
+        }),
+    );
+}
+
+fn refuse_fresh_bind(
+    workspace: &Path,
+    team_key: &str,
+    stage: &'static str,
+    reason: &'static str,
+) -> Result<bool, LifecycleError> {
+    record_fresh_bind_refusal(workspace, team_key, stage, reason);
+    Ok(false)
 }
 
 struct BindingFileSnapshot {
@@ -240,28 +334,38 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
         workspace,
         Some(team_key),
     ) else {
-        return Ok(false);
+        return refuse_fresh_bind(workspace, team_key, "scope", "scope_unresolved");
     };
     if resolved.canonical_team_key != team_key {
-        return Ok(false);
+        return refuse_fresh_bind(workspace, team_key, "scope", "scope_key_mismatch");
     }
     let mut state = resolved.state;
     let Some(pane) = ops.caller_pane().filter(|pane| !pane.is_empty()) else {
-        return Ok(false);
+        return refuse_fresh_bind(workspace, team_key, "caller_pane", "caller_pane_missing");
     };
     let pane = PaneId::new(pane);
     let Some(command) = ops
         .observe_command(&pane)
         .filter(|command| !command.trim().is_empty())
     else {
-        return Ok(false);
+        return refuse_fresh_bind(
+            workspace,
+            team_key,
+            "command_observation",
+            "command_unobservable",
+        );
     };
     let explicit_provider = ops.explicit_provider();
     let Some(provider) = crate::leader::owner_bind::strict_owner_bind_provider(
         explicit_provider.as_deref(),
         &command,
     ) else {
-        return Ok(false);
+        return refuse_fresh_bind(
+            workspace,
+            team_key,
+            "strict_provider",
+            "provider_unresolved",
+        );
     };
     let endpoint = ops.tmux_endpoint();
     let has_persisted_binding = ["team_owner", "leader_receiver"]
@@ -288,15 +392,46 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             endpoint.as_deref(),
         )
     {
-        return Ok(false);
+        return refuse_fresh_bind(
+            workspace,
+            team_key,
+            "persisted_binding",
+            "persisted_binding_mismatch",
+        );
     }
     // Registry publication is the commit point. Restore persisted surfaces on
     // failure, except for the caller-seeded owner that must be cleared.
     let snapshots = binding_snapshots(workspace, team_key);
     let attached = has_persisted_binding || ops.attach(workspace, &mut state, &pane, provider);
-    let committed = attached
-        && ops.register(workspace, team_key)
-        && ops.canonical_readback(workspace, team_key);
+    let committed = if !attached {
+        record_fresh_bind_refusal(
+            workspace,
+            team_key,
+            "attach",
+            ops.attach_failure_reason().unwrap_or("attach_failed"),
+        );
+        false
+    } else if !ops.register(workspace, team_key) {
+        record_fresh_bind_refusal(
+            workspace,
+            team_key,
+            "registry_register",
+            ops.register_failure_reason()
+                .unwrap_or("registry_register_failed"),
+        );
+        false
+    } else if !ops.canonical_readback(workspace, team_key) {
+        record_fresh_bind_refusal(
+            workspace,
+            team_key,
+            "registry_readback",
+            ops.readback_failure_reason()
+                .unwrap_or("registry_readback_failed"),
+        );
+        false
+    } else {
+        true
+    };
     if !committed {
         if let Some(seed) = seeded_owner.filter(|seed| {
             fresh_seeded_binding
@@ -372,7 +507,10 @@ fn bind_fresh_quick_start_leader(
         workspace,
         team_key,
         seeded_owner,
-        &mut RuntimeFreshQuickStartLeaderBindingOps { transport },
+        &mut RuntimeFreshQuickStartLeaderBindingOps {
+            transport,
+            last_failure_reason: None,
+        },
     )
 }
 
@@ -1126,6 +1264,102 @@ mod fresh_quick_start_leader_binding_tests {
                 .and_then(serde_json::Value::as_str),
             Some("%42")
         );
+        assert!(
+            crate::event_log::EventLog::new(&workspace)
+                .tail(0)
+                .unwrap()
+                .is_empty(),
+            "successful bind must not emit a refusal event"
+        );
+    }
+
+    #[test]
+    fn fresh_bind_refusal_event_keeps_first_safe_stage_and_reason() {
+        for (case, expected_stage, expected_reason) in [
+            ("missing_pane", "caller_pane", "caller_pane_missing"),
+            ("empty_command", "command_observation", "command_unobservable"),
+            ("unknown_provider", "strict_provider", "provider_unresolved"),
+            (
+                "existing_owner",
+                "persisted_binding",
+                "persisted_binding_mismatch",
+            ),
+            ("attach_failure", "attach", "attach_failed"),
+            (
+                "registry_failure",
+                "registry_register",
+                "registry_register_failed",
+            ),
+            (
+                "readback_failure",
+                "registry_readback",
+                "registry_readback_failed",
+            ),
+        ] {
+            let workspace = workspace(case);
+            let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+            let mut ops = MockOps::default();
+            match case {
+                "missing_pane" => ops.pane = None,
+                "empty_command" => ops.command = Some("  ".to_string()),
+                "unknown_provider" => {
+                    ops.explicit_provider = None;
+                    ops.command = Some("node".to_string());
+                }
+                "existing_owner" => state["team_owner"] = json!({"pane_id": "%old"}),
+                "attach_failure" => ops.attach_ok = false,
+                "registry_failure" => ops.register_ok = false,
+                "readback_failure" => ops.readback_ok = false,
+                _ => unreachable!(),
+            }
+            crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+
+            assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
+                .unwrap());
+            let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+            assert_eq!(events.len(), 1, "{case} must emit one first-refusal event");
+            assert_eq!(events[0]["event"], json!(FRESH_BIND_REFUSAL_EVENT));
+            assert_eq!(events[0]["operation"], json!("fresh_quick_start_leader_bind"));
+            assert_eq!(events[0]["team_key"], json!("fresh"));
+            assert_eq!(events[0]["stage"], json!(expected_stage));
+            assert_eq!(events[0]["reason"], json!(expected_reason));
+            assert!(events[0].get("command").is_none());
+            assert!(events[0].get("pane_id").is_none());
+        }
+    }
+
+    #[test]
+    fn scope_refusal_event_is_safe_and_targeted() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-quick-start-bind-scope-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut ops = MockOps::default();
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
+            .unwrap());
+        let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["stage"], json!("scope"));
+        assert_eq!(events[0]["reason"], json!("scope_unresolved"));
+        assert_eq!(events[0]["team_key"], json!("fresh"));
+        assert!(events[0].get("error").is_none());
+        assert!(events[0].get("argv").is_none());
+        let _ = std::fs::remove_dir_all(workspace);
+
+        let workspace = workspace("scope-key-mismatch");
+        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        state["active_team_key"] = json!("fresh");
+        state["teams"] = json!({"fresh": {"team_key": "fresh", "agents": {}}});
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut ops = MockOps::default();
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "current", None, &mut ops)
+            .unwrap());
+        let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["stage"], json!("scope"));
+        assert_eq!(events[0]["reason"], json!("scope_key_mismatch"));
     }
 
     #[test]
