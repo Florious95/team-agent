@@ -48,6 +48,8 @@ use super::persist::{
     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip as helper_write_root_with_lifecycle_topology_authority_and_capture_backfill_skip,
     save_runtime_state_with_receiver_authority as helper_write_root_with_receiver_authority,
+    save_runtime_state_with_receiver_authority_and_expected
+        as helper_write_root_with_receiver_authority_and_expected,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority as helper_write_root_with_team_tombstone_lifecycle_topology_authority,
     save_runtime_state_with_team_tombstoned_agents as helper_write_root_with_team_tombstoned_agents,
     save_runtime_state_without_migrations as helper_write_root_without_migrations,
@@ -205,6 +207,11 @@ pub enum StateWriteIntent<'a> {
     },
     ClaimLeader {
         team_key: &'a str,
+    },
+    ClaimLeaderFreshCaller {
+        team_key: &'a str,
+        expected_owner: &'a Value,
+        expected_receiver: &'a Value,
     },
     ClearExactTeamOwner {
         team_key: &'a str,
@@ -389,6 +396,17 @@ fn route_direct(
         StateWriteIntent::ClaimLeader { team_key } => {
             helper_write_root_with_receiver_authority(workspace, state, team_key, None)
         }
+        StateWriteIntent::ClaimLeaderFreshCaller {
+            team_key,
+            expected_owner,
+            expected_receiver,
+        } => helper_write_root_with_receiver_authority_and_expected(
+            workspace,
+            state,
+            team_key,
+            expected_owner,
+            expected_receiver,
+        ),
         StateWriteIntent::ClearExactTeamOwner { team_key, seed } => {
             helper_write_root_with_receiver_authority(workspace, state, team_key, Some(seed))
         }

@@ -454,7 +454,7 @@ pub(crate) fn attach_leader_to_state(
     source: LeaseSource,
     require_current: bool,
 ) -> Result<(LeaderReceiver, Value), LeaderError> {
-    attach_leader_to_state_with_target(
+    attach_leader_to_state_with_target_and_controls(
         workspace,
         state,
         pane,
@@ -462,6 +462,9 @@ pub(crate) fn attach_leader_to_state(
         event_log,
         source,
         require_current,
+        None,
+        None,
+        None,
         None,
     )
 }
@@ -477,6 +480,40 @@ pub(crate) fn attach_leader_to_state_with_target(
     require_current: bool,
     caller_target: Option<&PaneInfo>,
 ) -> Result<(LeaderReceiver, Value), LeaderError> {
+    attach_leader_to_state_with_target_and_controls(
+        workspace,
+        state,
+        pane,
+        provider,
+        event_log,
+        source,
+        require_current,
+        caller_target,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attach_leader_to_state_with_target_and_controls(
+    workspace: &Path,
+    state: &mut Value,
+    pane: Option<&PaneId>,
+    provider: Provider,
+    event_log: &crate::event_log::EventLog,
+    source: LeaseSource,
+    require_current: bool,
+    caller_target: Option<&PaneInfo>,
+    expected_owner: Option<&Value>,
+    expected_receiver: Option<&Value>,
+    nonce_writer: Option<&dyn Fn(&str, &PaneId, &str) -> Result<String, LeaderError>>,
+) -> Result<(LeaderReceiver, Value), LeaderError> {
+    if expected_owner.is_some() != expected_receiver.is_some() {
+        return Err(LeaderError::Validation(
+            "fresh caller CAS requires both expected owner and receiver".to_string(),
+        ));
+    }
     let pane_id = pane
         .cloned()
         .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
@@ -504,31 +541,27 @@ pub(crate) fn attach_leader_to_state_with_target(
         source,
         require_current,
         caller_target,
+        nonce_writer,
     )?;
     if has_owner {
         write_receiver_to_state(state, &receiver)?;
     } else {
         let owner = make_owner(provider, &non_empty_pane_id, &identity, binding_epoch);
         write_binding_to_state(state, &receiver, &owner)?;
-        write_lease_dual_state(workspace, state)?;
-        event_log.write(
-            super::LeaderEvent::ReceiverAttached.name(),
-            json!({"pane_id": pane_id.as_str(), "owner_epoch": binding_epoch.0}),
-        )?;
-        let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
-        crate::messaging::watchers::recover_watchers_for_incident(
-            workspace,
-            event_log,
-            &team_id,
-            &pane_id,
-            LeaderIncident::LeaderAttached,
-        )?;
-        return Ok((receiver, json!({"ok": true})));
     }
-    write_lease_dual_state(workspace, state)?;
+    if let (Some(expected_owner), Some(expected_receiver)) = (expected_owner, expected_receiver) {
+        write_lease_dual_state_with_expected(
+            workspace,
+            state,
+            expected_owner,
+            expected_receiver,
+        )?;
+    } else {
+        write_lease_dual_state(workspace, state)?;
+    }
     event_log.write(
         super::LeaderEvent::ReceiverAttached.name(),
-        json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
+        json!({"pane_id": pane_id.as_str(), "owner_epoch": binding_epoch.0}),
     )?;
     let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
     crate::messaging::watchers::recover_watchers_for_incident(
@@ -1904,6 +1937,7 @@ fn authorize_fresh_caller_receiver(
     source: LeaseSource,
     require_current: bool,
     caller_target: Option<&PaneInfo>,
+    nonce_writer: Option<&dyn Fn(&str, &PaneId, &str) -> Result<String, LeaderError>>,
 ) -> Result<(), LeaderError> {
     if !matches!(source, LeaseSource::QuickStart) || !require_current {
         return Ok(());
@@ -1946,9 +1980,13 @@ fn authorize_fresh_caller_receiver(
         live_nonce
     } else {
         let nonce = pane_binding_nonce_for_claim(workspace, endpoint, pane_id, None);
-        tmux_backend_for_endpoint(endpoint)
-            .set_pane_binding_nonce_if_unset(pane_id, &nonce)
-            .map_err(|error| LeaderError::Tmux(error.to_string()))?
+        if let Some(writer) = nonce_writer {
+            writer(endpoint, pane_id, &nonce)?
+        } else {
+            tmux_backend_for_endpoint(endpoint)
+                .set_pane_binding_nonce_if_unset(pane_id, &nonce)
+                .map_err(|error| LeaderError::Tmux(error.to_string()))?
+        }
     };
     receiver.scope_authority = Some(
         crate::messaging::leader_channel::FRESH_CALLER_SCOPE_AUTHORITY.to_string(),
@@ -2325,6 +2363,24 @@ fn state_owner(state: &Value) -> Option<TeamOwner> {
 /// now persists ONLY the canonical root state; retaining the public
 /// name for 0.5.x call-site stability. The B0 legacy snapshot is
 /// diagnostic-only via `lifecycle::save_team_runtime_snapshot`.
+pub(crate) fn write_lease_dual_state_with_expected(
+    workspace: &Path,
+    state: &Value,
+    expected_owner: &Value,
+    expected_receiver: &Value,
+) -> Result<(), LeaderError> {
+    let team_key = canonical_owner_write_key(state);
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::ClaimLeaderFreshCaller {
+            team_key: team_key.as_str(),
+            expected_owner,
+            expected_receiver,
+        },
+        state,
+    )?;
+    Ok(())
+}
+
 pub fn write_lease_dual_state(workspace: &Path, state: &Value) -> Result<(), LeaderError> {
     // 0.5.42 S1b (s1b-writer-cluster-locate.md §4.4): terminal root
     // save routes through `StateRepository` with the `ClaimLeader`

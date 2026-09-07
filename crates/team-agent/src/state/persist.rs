@@ -365,6 +365,53 @@ fn save_runtime_state_with_merge_options(
     receiver_update_team_key: Option<&str>,
     exact_owner_seed_to_clear: Option<&Value>,
 ) -> Result<(), StateError> {
+    save_runtime_state_with_merge_options_and_expected(
+        workspace,
+        state,
+        deleted_agent_ids,
+        skip_capture_backfill_team_key,
+        skip_capture_backfill_agent_ids,
+        topology_update_team_key,
+        topology_update_agent_ids,
+        receiver_update_team_key,
+        exact_owner_seed_to_clear,
+        None,
+    )
+}
+
+pub(crate) fn save_runtime_state_with_receiver_authority_and_expected(
+    workspace: &Path,
+    state: &Value,
+    receiver_team_key: &str,
+    expected_owner: &Value,
+    expected_receiver: &Value,
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_options_and_expected(
+        workspace,
+        state,
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        Some(receiver_team_key),
+        None,
+        Some((expected_owner, expected_receiver)),
+    )
+}
+
+fn save_runtime_state_with_merge_options_and_expected(
+    workspace: &Path,
+    state: &Value,
+    deleted_agent_ids: &[&str],
+    skip_capture_backfill_team_key: Option<&str>,
+    skip_capture_backfill_agent_ids: &[&str],
+    topology_update_team_key: Option<&str>,
+    topology_update_agent_ids: &[&str],
+    receiver_update_team_key: Option<&str>,
+    exact_owner_seed_to_clear: Option<&Value>,
+    expected_owner_receiver: Option<(&Value, &Value)>,
+) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
     // 我们 `&Value` 不可变 → 克隆后迁移,后续比较/写入/缓存/self-heal 全走 `migrated`。
@@ -385,7 +432,8 @@ fn save_runtime_state_with_merge_options(
     // Exact-seed cleanup must observe lock-held disk, not a pre-lock cache or
     // byte-equality hit. A matching in-memory document would otherwise no-op
     // and leave the seed, or skip copying a concurrent owner.
-    let skip_pre_lock_fast_path = exact_owner_seed_to_clear.is_some();
+    let skip_pre_lock_fast_path =
+        exact_owner_seed_to_clear.is_some() || expected_owner_receiver.is_some();
     if !skip_pre_lock_fast_path && cache_equals(&path, &migrated) {
         return Ok(());
     }
@@ -418,7 +466,21 @@ fn save_runtime_state_with_merge_options(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if let Some(latest) = read_latest_state_under_lock(workspace, &path) {
+    let latest = read_latest_state_under_lock(workspace, &path);
+    if let Some((expected_owner, expected_receiver)) = expected_owner_receiver {
+        let expected_matches = latest.as_ref().is_some_and(|latest| {
+            latest_team_owner_receiver(latest, receiver_update_team_key)
+                .is_some_and(|(owner, receiver)| {
+                    owner == expected_owner && receiver == expected_receiver
+                })
+        });
+        if !expected_matches {
+            return Err(StateError::SaveConflict(
+                "fresh caller owner/receiver changed before commit".to_string(),
+            ));
+        }
+    }
+    if let Some(latest) = latest {
         let deleted = deleted_agent_ids
             .iter()
             .copied()
@@ -871,6 +933,21 @@ fn latest_has_preferable_ownership(
     latest_epoch == incoming_epoch
         && !receiver_update_authoritative
         && (ownership_attached(latest) || !ownership_attached(incoming))
+}
+
+fn latest_team_owner_receiver<'a>(
+    latest: &'a Value,
+    team_key: Option<&str>,
+) -> Option<(&'a Value, &'a Value)> {
+    let entry = if let Some(team_key) = team_key {
+        latest
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.get(team_key))?
+    } else {
+        latest
+    };
+    Some((entry.get("team_owner")?, entry.get("leader_receiver")?))
 }
 
 fn ownership_epoch(state: &Value) -> u64 {
