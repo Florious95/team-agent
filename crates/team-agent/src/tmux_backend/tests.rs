@@ -267,8 +267,20 @@ fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
         resolve_expanded_caller(&cold_start, tmux, pane, Some("/tmp/tmux.sock")),
         CallerProviderResolution::Valid(Provider::Pi)
     );
+    // Preserve the context generated in pane %1; only the caller moves to %2.
+    let (provider, context_pane, context_endpoint) = expand_caller_allowlist(&wrapper, tmux, pane);
+    assert_eq!(context_pane, "%1");
     assert_eq!(
-        resolve_expanded_caller(&wrapper, tmux, "%2", Some("/tmp/tmux.sock")),
+        caller_provider_resolution_from_values(
+            Some(&provider),
+            Some(&context_pane),
+            Some(&context_endpoint),
+            None,
+            None,
+            Some("%2"),
+            Some("/tmp/tmux.sock"),
+            Some("/tmp/tmux.sock"),
+        ),
         CallerProviderResolution::Invalid
     );
 }
