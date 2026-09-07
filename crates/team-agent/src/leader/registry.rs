@@ -21,6 +21,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -101,9 +102,16 @@ pub const AMBIGUOUS_NAMES_FIELD: &str = "ambiguous_names";
 pub const REASON_AMBIGUOUS: &str = "name_ambiguous";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryWriteReceipt {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryWriteOutcome {
     pub status: &'static str,
     pub path: Option<PathBuf>,
+    pub receipt: Option<RegistryWriteReceipt>,
     pub team_key: String,
     pub workspace_hash: String,
     pub source: String,
@@ -242,7 +250,8 @@ pub fn register_binding_from_state_best_effort(
         chrono::Utc::now().to_rfc3339(),
     );
     let event_log = crate::event_log::EventLog::new(workspace);
-    let write_result = write_entry_best_effort(&entry);
+    let write_receipt = write_entry_best_effort_with_receipt(&entry);
+    let write_result = write_receipt.as_ref().map(|receipt| receipt.path.clone());
     let status = if let Some(path) = &write_result {
         let _ = event_log.write(
             EVENT_REGISTERED,
@@ -268,6 +277,7 @@ pub fn register_binding_from_state_best_effort(
     Some(RegistryWriteOutcome {
         status,
         path: write_result,
+        receipt: write_receipt,
         team_key,
         workspace_hash: entry.workspace_hash,
         source: source.to_string(),
@@ -281,13 +291,19 @@ fn entry_filename(entry: &LeaderRegistryEntry) -> String {
 
 /// Registry write is best-effort. Writes to `.<file>.tmp-<pid>-<counter>`
 /// first, then atomically renames to `<workspace_hash>__<team_key>.json`.
-/// Returns the final path when the write succeeded, `None` otherwise —
-/// the binding command must never fail on registry errors.
+/// Every writer uses the registry lock so conditional rollback can compare
+/// and restore without racing a concurrent publish.
 pub fn write_entry_best_effort(entry: &LeaderRegistryEntry) -> Option<PathBuf> {
-    let dir = registry_dir()?;
-    if let Err(_error) = std::fs::create_dir_all(&dir) {
-        return None;
-    }
+    write_entry_best_effort_with_receipt(entry).map(|receipt| receipt.path)
+}
+
+fn write_entry_best_effort_with_receipt(
+    entry: &LeaderRegistryEntry,
+) -> Option<RegistryWriteReceipt> {
+    with_registry_lock(|dir| write_entry_locked(dir, entry)).flatten()
+}
+
+fn write_entry_locked(dir: &Path, entry: &LeaderRegistryEntry) -> Option<RegistryWriteReceipt> {
     let final_path = dir.join(entry_filename(entry));
     let tmp_name = format!(
         ".{}.tmp-{}-{}",
@@ -296,8 +312,8 @@ pub fn write_entry_best_effort(entry: &LeaderRegistryEntry) -> Option<PathBuf> {
         rand_suffix()
     );
     let tmp_path = dir.join(tmp_name);
-    let serialized = serde_json::to_string_pretty(entry).ok()?;
-    if std::fs::write(&tmp_path, serialized).is_err() {
+    let serialized = serde_json::to_vec_pretty(entry).ok()?;
+    if std::fs::write(&tmp_path, &serialized).is_err() {
         let _ = std::fs::remove_file(&tmp_path);
         return None;
     }
@@ -305,7 +321,102 @@ pub fn write_entry_best_effort(entry: &LeaderRegistryEntry) -> Option<PathBuf> {
         let _ = std::fs::remove_file(&tmp_path);
         return None;
     }
-    Some(final_path)
+    Some(RegistryWriteReceipt {
+        path: final_path,
+        bytes: serialized,
+    })
+}
+
+/// Restore one registry path only when it still contains this writer's exact
+/// receipt. The comparison and restore/delete are held under the same lock as
+/// ordinary registry writers, so a winner cannot slip in between them.
+pub fn restore_entry_if_current_matches(
+    receipt: &RegistryWriteReceipt,
+    previous: Option<&[u8]>,
+) -> bool {
+    with_registry_lock(|dir| {
+        if receipt.path.parent() != Some(dir) {
+            return false;
+        }
+        if std::fs::read(&receipt.path).ok().as_deref() != Some(receipt.bytes.as_slice()) {
+            return false;
+        }
+        match previous {
+            Some(bytes) => replace_entry_bytes_locked(&receipt.path, bytes),
+            None => std::fs::remove_file(&receipt.path).is_ok(),
+        }
+    })
+    .unwrap_or(false)
+}
+
+fn remove_entry_if_matches(path: &Path, expected: &LeaderRegistryEntry) -> bool {
+    with_registry_lock(|_| {
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let Ok(current) = serde_json::from_slice::<LeaderRegistryEntry>(&bytes) else {
+            return false;
+        };
+        current == *expected && std::fs::remove_file(path).is_ok()
+    })
+    .unwrap_or(false)
+}
+
+fn replace_entry_bytes_locked(path: &Path, bytes: &[u8]) -> bool {
+    let tmp = path.with_extension(format!(
+        "rollback-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
+    if std::fs::write(&tmp, bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    true
+}
+
+struct RegistryLock {
+    file: std::fs::File,
+}
+
+impl RegistryLock {
+    fn acquire(dir: &Path) -> Option<Self> {
+        let path = dir.join(".registry.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .ok()?;
+        let started = Instant::now();
+        loop {
+            match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
+                Ok(true) => return Some(Self { file }),
+                Ok(false) if started.elapsed() < Duration::from_secs(2) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(false) | Err(_) => return None,
+            }
+        }
+    }
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = crate::platform::file_lock::unlock(&self.file);
+    }
+}
+
+fn with_registry_lock<T>(f: impl FnOnce(&Path) -> T) -> Option<T> {
+    let dir = registry_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let _lock = RegistryLock::acquire(&dir)?;
+    Some(f(&dir))
 }
 
 fn rand_suffix() -> String {
@@ -324,14 +435,16 @@ fn rand_suffix() -> String {
 /// success — the invariant is "no registry entry after unbind", not
 /// "must have found something to delete".
 pub fn unregister_entry(workspace: &Path, team_key: &str) -> Option<PathBuf> {
-    let dir = registry_dir()?;
-    let hash = workspace_hash(workspace);
-    let path = dir.join(format!("{hash}__{team_key}.json"));
-    if path.exists() {
-        std::fs::remove_file(&path).ok()?;
-        return Some(path);
-    }
-    None
+    with_registry_lock(|dir| {
+        let hash = workspace_hash(workspace);
+        let path = dir.join(format!("{hash}__{team_key}.json"));
+        if path.exists() {
+            std::fs::remove_file(&path).ok()?;
+            return Some(path);
+        }
+        None
+    })
+    .flatten()
 }
 
 /// Read and deserialize every `*.json` file under the registry directory.
@@ -470,7 +583,7 @@ pub fn list_validated_with_gc() -> Vec<(LeaderRegistryEntry, &'static str, Optio
                     || r == "team_not_alive"
             })
         {
-            let _ = std::fs::remove_file(&path);
+            let _ = remove_entry_if_matches(&path, &entry);
             continue;
         }
         out.push((entry, status, reason));

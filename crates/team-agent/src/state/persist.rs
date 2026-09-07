@@ -741,7 +741,7 @@ fn apply_persist_merge_contract(
                         incoming_entry,
                         latest_entry,
                         seed,
-                        expected_receiver,
+                        Some(expected_receiver),
                     );
                 }
             }
