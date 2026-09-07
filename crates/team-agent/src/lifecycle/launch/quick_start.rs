@@ -1330,23 +1330,23 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     fn scope_refusal_event_is_safe_and_targeted() {
-        let workspace = std::env::temp_dir().join(format!(
+        let empty_workspace = std::env::temp_dir().join(format!(
             "ta-quick-start-bind-scope-{}-{}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&empty_workspace).unwrap();
         let mut ops = MockOps::default();
-        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
+        assert!(!bind_fresh_quick_start_leader_with(&empty_workspace, "fresh", None, &mut ops)
             .unwrap());
-        let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+        let events = crate::event_log::EventLog::new(&empty_workspace).tail(0).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["stage"], json!("scope"));
         assert_eq!(events[0]["reason"], json!("scope_unresolved"));
         assert_eq!(events[0]["team_key"], json!("fresh"));
         assert!(events[0].get("error").is_none());
         assert!(events[0].get("argv").is_none());
-        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(empty_workspace);
 
         let workspace = workspace("scope-key-mismatch");
         let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
