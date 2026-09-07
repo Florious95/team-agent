@@ -20,6 +20,10 @@
 //!   - 团队嵌套超过两层直接拒绝
 //! maturity: wired
 //! ---
+#[cfg(test)]
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1101,9 +1105,7 @@ mod fresh_quick_start_leader_binding_tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[path = "../../../../../tests/support/hermetic.rs"]
-    mod hermetic;
-    use hermetic::HermeticTestEnv;
+    use super::hermetic::HermeticTestEnv;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

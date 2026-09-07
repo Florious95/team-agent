@@ -51,6 +51,10 @@
 //! sites can reference the phases by name. The phase fns themselves
 //! remain in launch.rs until the next batch of relocations.
 
+#[cfg(test)]
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -643,9 +647,7 @@ mod tests {
     use crate::model::enums::Provider;
     use serde_json::json;
 
-    #[path = "../../../../tests/support/hermetic.rs"]
-    mod hermetic;
-    use hermetic::HermeticTestEnv;
+    use super::hermetic::HermeticTestEnv;
 
     fn yaml_agent(bypass: bool) -> Value {
         crate::model::yaml::loads(&format!(
