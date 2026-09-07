@@ -454,17 +454,46 @@ pub(crate) fn attach_leader_to_state(
     source: LeaseSource,
     require_current: bool,
 ) -> Result<(LeaderReceiver, Value), LeaderError> {
+    attach_leader_to_state_with_target(
+        workspace,
+        state,
+        pane,
+        provider,
+        event_log,
+        source,
+        require_current,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attach_leader_to_state_with_target(
+    workspace: &Path,
+    state: &mut Value,
+    pane: Option<&PaneId>,
+    provider: Provider,
+    event_log: &crate::event_log::EventLog,
+    source: LeaseSource,
+    require_current: bool,
+    caller_target: Option<&PaneInfo>,
+) -> Result<(LeaderReceiver, Value), LeaderError> {
     let pane_id = pane
         .cloned()
         .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
     let non_empty_pane_id = NonEmptyPaneId::try_from_pane(&pane_id)?;
     let identity = leader_identity_context(workspace, None, Some(state))?;
     let epoch = current_owner_epoch(state);
+    let has_owner = state.get("team_owner").is_some();
+    let binding_epoch = if has_owner {
+        epoch
+    } else {
+        OwnerEpoch(epoch.0.saturating_add(1))
+    };
     let mut receiver = make_receiver(
         provider,
         &non_empty_pane_id,
         &identity.leader_session_uuid,
-        epoch,
+        binding_epoch,
         Discovery::EnvPane,
         None,
     );
@@ -474,32 +503,17 @@ pub(crate) fn attach_leader_to_state(
         &non_empty_pane_id,
         source,
         require_current,
+        caller_target,
     )?;
-    if state.get("team_owner").is_some() {
+    if has_owner {
         write_receiver_to_state(state, &receiver)?;
     } else {
-        let next_epoch = OwnerEpoch(epoch.0.saturating_add(1));
-        let mut receiver = make_receiver(
-            provider,
-            &non_empty_pane_id,
-            &identity.leader_session_uuid,
-            next_epoch,
-            Discovery::EnvPane,
-            None,
-        );
-        authorize_fresh_caller_receiver(
-            workspace,
-            &mut receiver,
-            &non_empty_pane_id,
-            source,
-            require_current,
-        )?;
-        let owner = make_owner(provider, &non_empty_pane_id, &identity, next_epoch);
+        let owner = make_owner(provider, &non_empty_pane_id, &identity, binding_epoch);
         write_binding_to_state(state, &receiver, &owner)?;
         write_lease_dual_state(workspace, state)?;
         event_log.write(
             super::LeaderEvent::ReceiverAttached.name(),
-            json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
+            json!({"pane_id": pane_id.as_str(), "owner_epoch": binding_epoch.0}),
         )?;
         let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
         crate::messaging::watchers::recover_watchers_for_incident(
@@ -1889,8 +1903,23 @@ fn authorize_fresh_caller_receiver(
     pane: &NonEmptyPaneId,
     source: LeaseSource,
     require_current: bool,
+    caller_target: Option<&PaneInfo>,
 ) -> Result<(), LeaderError> {
     if !matches!(source, LeaseSource::QuickStart) || !require_current {
+        return Ok(());
+    }
+    let Some(target) = caller_target else {
+        return Ok(());
+    };
+    if target.pane_id.as_str() != pane.as_pane_id().as_str() || !target.active {
+        return Err(LeaderError::Validation(
+            "fresh caller pane observation does not match the bound pane".to_string(),
+        ));
+    }
+    let Some(current_path) = target.current_path.as_deref() else {
+        return Ok(());
+    };
+    if crate::messaging::leader_channel::path_is_in_workspace(current_path, workspace) {
         return Ok(());
     }
     let Some(endpoint) = receiver
@@ -1898,16 +1927,29 @@ fn authorize_fresh_caller_receiver(
         .as_deref()
         .filter(|endpoint| !endpoint.is_empty())
     else {
-        return Ok(());
+        return Err(LeaderError::Validation(
+            "fresh cross-workspace caller requires a tmux endpoint".to_string(),
+        ));
     };
     if !Path::new(endpoint).is_absolute() {
-        return Ok(());
+        return Err(LeaderError::Validation(
+            "fresh cross-workspace caller requires an absolute tmux endpoint".to_string(),
+        ));
     }
     let pane_id = pane.as_pane_id();
-    let nonce = pane_binding_nonce_for_claim(workspace, endpoint, pane_id, None);
-    let live_nonce = tmux_backend_for_endpoint(endpoint)
-        .set_pane_binding_nonce_if_unset(pane_id, &nonce)
-        .map_err(|error| LeaderError::Tmux(error.to_string()))?;
+    let live_nonce = if let Some(live_nonce) = target
+        .leader_env
+        .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+        .filter(|nonce| !nonce.is_empty())
+        .cloned()
+    {
+        live_nonce
+    } else {
+        let nonce = pane_binding_nonce_for_claim(workspace, endpoint, pane_id, None);
+        tmux_backend_for_endpoint(endpoint)
+            .set_pane_binding_nonce_if_unset(pane_id, &nonce)
+            .map_err(|error| LeaderError::Tmux(error.to_string()))?
+    };
     receiver.scope_authority = Some(
         crate::messaging::leader_channel::FRESH_CALLER_SCOPE_AUTHORITY.to_string(),
     );

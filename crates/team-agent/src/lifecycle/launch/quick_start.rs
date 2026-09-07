@@ -118,7 +118,16 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
         provider: crate::provider::Provider,
     ) -> bool {
         let event_log = crate::event_log::EventLog::new(workspace);
-        match crate::leader::attach_leader_to_state(
+        let caller_target = self
+            .transport
+            .list_targets()
+            .ok()
+            .and_then(|targets| {
+                targets
+                    .into_iter()
+                    .find(|target| target.pane_id.as_str() == pane.as_str())
+            });
+        match crate::leader::attach_leader_to_state_with_target(
             workspace,
             state,
             Some(pane),
@@ -126,6 +135,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             &event_log,
             crate::leader::LeaseSource::QuickStart,
             true,
+            caller_target.as_ref(),
         ) {
             Ok(_) => {
                 self.last_failure_reason = None;
@@ -436,7 +446,11 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     // Registry publication is the commit point. Restore persisted surfaces on
     // failure, except for the caller-seeded owner that must be cleared.
     let snapshots = binding_snapshots(workspace, team_key);
-    let attached = has_persisted_binding || ops.attach(workspace, &mut state, &pane, provider);
+    let attached = if fresh_seeded_binding {
+        ops.attach(workspace, &mut state, &pane, provider)
+    } else {
+        has_persisted_binding || ops.attach(workspace, &mut state, &pane, provider)
+    };
     let committed = if !attached {
         record_fresh_bind_refusal(
             workspace,
@@ -1102,7 +1116,9 @@ mod fresh_quick_start_leader_binding_tests {
     use super::*;
     use crate::layout::worker_env::{CALLER_ENDPOINT_ENV, CALLER_PANE_ENV, CALLER_PROVIDER_ENV};
     use crate::transport::test_support::OfflineTransport;
+    use crate::transport::{PaneInfo, SessionName, WindowName};
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::hermetic::HermeticTestEnv;
@@ -2131,6 +2147,43 @@ mod fresh_quick_start_leader_binding_tests {
         ))
     }
 
+    fn seeded_runtime_owner(workspace: &Path) -> serde_json::Value {
+        let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+        assert!(super::spec_state::seed_launched_owner_from_env(
+            &mut state,
+            Some("/tmp/tmux.sock")
+        ));
+        crate::state::persist::save_runtime_state(workspace, &state).unwrap();
+        crate::state::persist::load_runtime_state(workspace)
+            .unwrap()
+            .pointer("/teams/fresh/team_owner")
+            .cloned()
+            .expect("seeded team owner")
+    }
+
+    fn caller_target(path: PathBuf, nonce: Option<&str>) -> PaneInfo {
+        let mut leader_env = BTreeMap::new();
+        if let Some(nonce) = nonce {
+            leader_env.insert(
+                crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.to_string(),
+                nonce.to_string(),
+            );
+        }
+        PaneInfo {
+            pane_id: PaneId::new("%1"),
+            session: SessionName::new("parent"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("caller")),
+            pane_index: Some(0),
+            tty: Some("/dev/pts/1".to_string()),
+            current_command: Some("bash".to_string()),
+            current_path: Some(path),
+            active: true,
+            pane_pid: Some(101),
+            leader_env,
+        }
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn runtime_valid_caller_binds_typed_pi_through_bash() {
@@ -2148,6 +2201,285 @@ mod fresh_quick_start_leader_binding_tests {
         assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
         assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
         assert_eq!(ops.attach_calls, 1);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_bind_publishes_fresh_caller_authority_for_live_parent_pane() {
+        let hermetic = HermeticTestEnv::enter("runtime-seeded-fresh-authority");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let parent = hermetic.root().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let seed = seeded_runtime_owner(&workspace);
+        let target = caller_target(parent, Some("shared-live-nonce"));
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash")
+            .with_targets(vec![target.clone()]);
+        let mut ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+        };
+        assert!(bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops
+        )
+        .unwrap());
+        let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        let receiver = persisted
+            .pointer("/teams/fresh/leader_receiver")
+            .cloned()
+            .expect("published receiver");
+        assert_eq!(receiver["scope_authority"], json!("fresh_caller"));
+        assert_eq!(receiver["binding_nonce"], json!("shared-live-nonce"));
+        assert_eq!(
+            receiver["authorized_team_workspace"],
+            json!(workspace.to_string_lossy().to_string())
+        );
+        assert_eq!(receiver["owner_epoch"], json!(1));
+        let registry_path = crate::leader::registry::registry_dir()
+            .unwrap()
+            .join(format!(
+                "{}__fresh.json",
+                crate::leader::registry::workspace_hash(&workspace)
+            ));
+        let registry: crate::leader::registry::LeaderRegistryEntry =
+            serde_json::from_slice(&std::fs::read(registry_path).unwrap()).unwrap();
+        assert_eq!(registry.channel["scope_authority"], json!("fresh_caller"));
+        assert!(matches!(
+            crate::messaging::resolve_live_leader_channel(&workspace, &receiver, &transport),
+            crate::messaging::LeaderChannelResolution::Live(_)
+        ));
+
+        let mut stale_target = target.clone();
+        stale_target.leader_env.insert(
+            crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.to_string(),
+            "stale-live-nonce".to_string(),
+        );
+        let stale_transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_targets(vec![stale_target]);
+        assert!(matches!(
+            crate::messaging::resolve_live_leader_channel(
+                &workspace,
+                &receiver,
+                &stale_transport
+            ),
+            crate::messaging::LeaderChannelResolution::Unbound(
+                crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
+            )
+        ));
+
+        let missing_target = caller_target(hermetic.root().join("parent"), None);
+        let missing_transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_targets(vec![missing_target]);
+        assert!(matches!(
+            crate::messaging::resolve_live_leader_channel(
+                &workspace,
+                &receiver,
+                &missing_transport
+            ),
+            crate::messaging::LeaderChannelResolution::Unbound(
+                crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
+            )
+        ));
+
+        let mut missing_authority_receiver = receiver.clone();
+        missing_authority_receiver
+            .as_object_mut()
+            .unwrap()
+            .remove("scope_authority");
+        assert!(matches!(
+            crate::messaging::resolve_live_leader_channel(
+                &workspace,
+                &missing_authority_receiver,
+                &transport
+            ),
+            crate::messaging::LeaderChannelResolution::Unbound(
+                crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
+            )
+        ));
+
+        let mut foreign_receiver = receiver.clone();
+        foreign_receiver["authorized_team_workspace"] =
+            json!(hermetic.root().join("foreign").to_string_lossy().to_string());
+        assert!(matches!(
+            crate::messaging::resolve_live_leader_channel(&workspace, &foreign_receiver, &transport),
+            crate::messaging::LeaderChannelResolution::Unbound(
+                crate::messaging::LeaderChannelUnbound::PaneWorkspaceMismatch(_)
+            )
+        ));
+
+        let wrong_socket_transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/other.sock")
+            .with_targets(vec![target]);
+        assert_eq!(
+            crate::messaging::resolve_live_leader_channel(
+                &workspace,
+                &receiver,
+                &wrong_socket_transport
+            ),
+            crate::messaging::LeaderChannelResolution::Unbound(
+                crate::messaging::LeaderChannelUnbound::EndpointMismatch
+            )
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_children_reuse_live_pane_nonce_without_overwrite() {
+        let hermetic = HermeticTestEnv::enter("runtime-seeded-shared-nonce");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let target = caller_target(hermetic.root().join("parent"), Some("winner-nonce"));
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash")
+            .with_targets(vec![target]);
+        let first_workspace = runtime_workspace(&hermetic, "child-a");
+        let second_workspace = runtime_workspace(&hermetic, "child-b");
+        std::fs::create_dir_all(hermetic.root().join("parent")).unwrap();
+        let first_seed = seeded_runtime_owner(&first_workspace);
+        let second_seed = seeded_runtime_owner(&second_workspace);
+        let mut first_ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+        };
+        assert!(bind_fresh_quick_start_leader_with(
+            &first_workspace,
+            "fresh",
+            Some(&first_seed),
+            &mut first_ops
+        )
+        .unwrap());
+        let mut second_ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+        };
+        assert!(bind_fresh_quick_start_leader_with(
+            &second_workspace,
+            "fresh",
+            Some(&second_seed),
+            &mut second_ops
+        )
+        .unwrap());
+        let first_receiver = crate::state::persist::load_runtime_state(&first_workspace).unwrap();
+        let second_receiver = crate::state::persist::load_runtime_state(&second_workspace).unwrap();
+        assert_eq!(
+            first_receiver
+                .pointer("/teams/fresh/leader_receiver/binding_nonce")
+                .and_then(serde_json::Value::as_str),
+            Some("winner-nonce")
+        );
+        assert_eq!(
+            second_receiver
+                .pointer("/teams/fresh/leader_receiver/binding_nonce")
+                .and_then(serde_json::Value::as_str),
+            Some("winner-nonce")
+        );
+    }
+
+    struct FailingRegisterRuntimeOps<'a> {
+        inner: RuntimeFreshQuickStartLeaderBindingOps<'a>,
+    }
+
+    impl FreshQuickStartLeaderBindingOps for FailingRegisterRuntimeOps<'_> {
+        fn caller_pane(&mut self) -> Option<String> {
+            self.inner.caller_pane()
+        }
+
+        fn caller_resolution(&mut self) -> crate::layout::worker_env::CallerProviderResolution {
+            self.inner.caller_resolution()
+        }
+
+        fn explicit_provider(&mut self) -> Option<String> {
+            self.inner.explicit_provider()
+        }
+
+        fn tmux_endpoint(&mut self) -> Option<String> {
+            self.inner.tmux_endpoint()
+        }
+
+        fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
+            self.inner.observe_command(pane)
+        }
+
+        fn attach(
+            &mut self,
+            workspace: &Path,
+            state: &mut serde_json::Value,
+            pane: &PaneId,
+            provider: crate::provider::Provider,
+        ) -> bool {
+            self.inner.attach(workspace, state, pane, provider)
+        }
+
+        fn register(&mut self, _workspace: &Path, _team_key: &str) -> bool {
+            false
+        }
+
+        fn canonical_readback(&mut self, _workspace: &Path, _team_key: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_register_failure_rolls_back_child_authority() {
+        let hermetic = HermeticTestEnv::enter("runtime-seeded-rollback");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let parent = hermetic.root().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let seed = seeded_runtime_owner(&workspace);
+        let target = caller_target(parent, Some("rollback-nonce"));
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash")
+            .with_targets(vec![target]);
+        let mut ops = FailingRegisterRuntimeOps {
+            inner: RuntimeFreshQuickStartLeaderBindingOps {
+                transport: &transport,
+                last_failure_reason: None,
+            },
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops
+        )
+        .unwrap());
+        let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert!(persisted
+            .pointer("/teams/fresh/team_owner")
+            .is_some_and(serde_json::Value::is_null));
+        assert!(persisted
+            .pointer("/teams/fresh/leader_receiver")
+            .is_some_and(serde_json::Value::is_null));
+        assert!(!persisted.to_string().contains("fresh_caller"));
+        let registry_path = crate::leader::registry::registry_dir()
+            .unwrap()
+            .join(format!(
+                "{}__fresh.json",
+                crate::leader::registry::workspace_hash(&workspace)
+            ));
+        assert!(!registry_path.exists(), "failed child grant left registry row");
     }
 
     #[test]
