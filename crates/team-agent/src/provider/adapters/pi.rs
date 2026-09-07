@@ -37,6 +37,20 @@ pub(crate) fn pi_tool_mapping(category: &str) -> PiToolMapping {
     }
 }
 
+/// Return the first canonical category that Pi cannot map. Callers own alias
+/// expansion and generic unknown-category validation; this keeps the provider
+/// mapping itself as the only Pi capability contract.
+pub(crate) fn first_unsupported_pi_tool_category<'a, I>(
+    categories: I,
+) -> Option<&'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    categories
+        .into_iter()
+        .find(|category| matches!(pi_tool_mapping(category), PiToolMapping::Unsupported))
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PiSessionSelector<'a> {
     Fresh { session_id: &'a str },
