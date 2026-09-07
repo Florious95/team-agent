@@ -1101,7 +1101,7 @@ mod fresh_quick_start_leader_binding_tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[path = "../../../../tests/support/hermetic.rs"]
+    #[path = "../../../../../tests/support/hermetic.rs"]
     mod hermetic;
     use hermetic::HermeticTestEnv;
 
