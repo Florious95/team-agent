@@ -26,6 +26,41 @@ use super::{
 
 // ── leader::lease — attach / claim / takeover / autobind / readopt 统一 CAS 路径 ──
 
+#[derive(Debug, Clone)]
+pub(crate) struct AppliedLeaderGrant {
+    pub(crate) owner: Value,
+    pub(crate) receiver: Value,
+}
+
+#[derive(Debug)]
+pub(crate) struct AttachLeaderError {
+    source: LeaderError,
+    applied_grant: Option<AppliedLeaderGrant>,
+}
+
+impl AttachLeaderError {
+    fn with_applied(source: LeaderError, applied_grant: Option<AppliedLeaderGrant>) -> Self {
+        Self {
+            source,
+            applied_grant,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (LeaderError, Option<AppliedLeaderGrant>) {
+        (self.source, self.applied_grant)
+    }
+
+    fn into_error(self) -> LeaderError {
+        self.source
+    }
+}
+
+impl From<LeaderError> for AttachLeaderError {
+    fn from(source: LeaderError) -> Self {
+        Self::with_applied(source, None)
+    }
+}
+
 /// `attach_leader`(card §42;`__init__.py:19`)。手动 CLI attach;持 `LEADER_OWNERSHIP_LOCK`
 /// 整段临界区做 state 变更 + 事件 + 双写 + requeue exhausted watchers。
 pub fn attach_leader(
@@ -467,6 +502,7 @@ pub(crate) fn attach_leader_to_state(
         None,
         None,
     )
+    .map_err(AttachLeaderError::into_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -493,6 +529,7 @@ pub(crate) fn attach_leader_to_state_with_target(
         None,
         None,
     )
+    .map_err(AttachLeaderError::into_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -508,7 +545,7 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
     expected_owner: Option<&Value>,
     expected_receiver: Option<&Value>,
     nonce_writer: Option<&dyn Fn(&str, &PaneId, &str) -> Result<String, LeaderError>>,
-) -> Result<(LeaderReceiver, Value), LeaderError> {
+) -> Result<(LeaderReceiver, Value), AttachLeaderError> {
     if expected_owner.is_some() != expected_receiver.is_some() {
         return Err(LeaderError::Validation(
             "fresh caller CAS requires both expected owner and receiver".to_string(),
@@ -543,6 +580,7 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
         caller_target,
         nonce_writer,
     )?;
+    let receiver_value = serde_json::to_value(&receiver)?;
     if has_owner {
         write_receiver_to_state(state, &receiver)?;
     } else {
@@ -559,18 +597,32 @@ pub(crate) fn attach_leader_to_state_with_target_and_controls(
     } else {
         write_lease_dual_state(workspace, state)?;
     }
-    event_log.write(
+    let applied_grant = state
+        .get("team_owner")
+        .cloned()
+        .map(|owner| AppliedLeaderGrant {
+            owner,
+            receiver: receiver_value,
+        });
+    if let Err(error) = event_log.write(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": binding_epoch.0}),
-    )?;
+    ) {
+        return Err(AttachLeaderError::with_applied(
+            error.into(),
+            applied_grant.clone(),
+        ));
+    }
     let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
-    crate::messaging::watchers::recover_watchers_for_incident(
+    if let Err(error) = crate::messaging::watchers::recover_watchers_for_incident(
         workspace,
         event_log,
         &team_id,
         &pane_id,
         LeaderIncident::LeaderAttached,
-    )?;
+    ) {
+        return Err(AttachLeaderError::with_applied(error.into(), applied_grant));
+    }
     Ok((receiver, json!({"ok": true})))
 }
 

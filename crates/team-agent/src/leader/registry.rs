@@ -20,6 +20,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -100,6 +101,34 @@ pub const AMBIGUOUS_NAMES_FIELD: &str = "ambiguous_names";
 /// `workspace_hash` + `stable_qualified_name` so the caller can retry with
 /// a fully-qualified form.
 pub const REASON_AMBIGUOUS: &str = "name_ambiguous";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRollback {
+    Restored,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRollbackError {
+    InvalidReceipt,
+    LockUnavailable,
+    ReadFailed,
+    RestoreFailed,
+    DeleteFailed,
+}
+
+impl fmt::Display for RegistryRollbackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self {
+            Self::InvalidReceipt => "invalid receipt",
+            Self::LockUnavailable => "registry lock unavailable",
+            Self::ReadFailed => "registry receipt read failed",
+            Self::RestoreFailed => "registry restore failed",
+            Self::DeleteFailed => "registry delete failed",
+        };
+        f.write_str(reason)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryWriteReceipt {
@@ -333,20 +362,27 @@ fn write_entry_locked(dir: &Path, entry: &LeaderRegistryEntry) -> Option<Registr
 pub fn restore_entry_if_current_matches(
     receipt: &RegistryWriteReceipt,
     previous: Option<&[u8]>,
-) -> bool {
-    with_registry_lock(|dir| {
+) -> Result<RegistryRollback, RegistryRollbackError> {
+    with_registry_lock_result(|dir| {
         if receipt.path.parent() != Some(dir) {
-            return false;
+            return Err(RegistryRollbackError::InvalidReceipt);
         }
-        if std::fs::read(&receipt.path).ok().as_deref() != Some(receipt.bytes.as_slice()) {
-            return false;
+        let current = std::fs::read(&receipt.path)
+            .map_err(|_| RegistryRollbackError::ReadFailed)?;
+        if current != receipt.bytes {
+            return Ok(RegistryRollback::Superseded);
         }
         match previous {
-            Some(bytes) => replace_entry_bytes_locked(&receipt.path, bytes),
-            None => std::fs::remove_file(&receipt.path).is_ok(),
+            Some(bytes) if replace_entry_bytes_locked(&receipt.path, bytes) => {
+                Ok(RegistryRollback::Restored)
+            }
+            Some(_) => Err(RegistryRollbackError::RestoreFailed),
+            None if std::fs::remove_file(&receipt.path).is_ok() => {
+                Ok(RegistryRollback::Restored)
+            }
+            None => Err(RegistryRollbackError::DeleteFailed),
         }
     })
-    .unwrap_or(false)
 }
 
 fn remove_entry_if_matches(path: &Path, expected: &LeaderRegistryEntry) -> bool {
@@ -417,6 +453,15 @@ fn with_registry_lock<T>(f: impl FnOnce(&Path) -> T) -> Option<T> {
     std::fs::create_dir_all(&dir).ok()?;
     let _lock = RegistryLock::acquire(&dir)?;
     Some(f(&dir))
+}
+
+fn with_registry_lock_result<T>(
+    f: impl FnOnce(&Path) -> Result<T, RegistryRollbackError>,
+) -> Result<T, RegistryRollbackError> {
+    let dir = registry_dir().ok_or(RegistryRollbackError::LockUnavailable)?;
+    std::fs::create_dir_all(&dir).map_err(|_| RegistryRollbackError::LockUnavailable)?;
+    let _lock = RegistryLock::acquire(&dir).ok_or(RegistryRollbackError::LockUnavailable)?;
+    f(&dir)
 }
 
 fn rand_suffix() -> String {

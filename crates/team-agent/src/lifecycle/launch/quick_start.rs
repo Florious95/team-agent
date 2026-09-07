@@ -181,6 +181,8 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
                 true
             }
             Err(error) => {
+                let (error, applied_grant) = error.into_parts();
+                self.applied_grant = applied_grant.map(|grant| (grant.owner, grant.receiver));
                 self.cas_conflict = match &error {
                     crate::leader::LeaderError::State(crate::state::StateError::SaveConflict(_)) => true,
                     _ => false,
@@ -195,10 +197,10 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
                         crate::leader::LeaderError::Identity(_) => "attach_identity_failed",
                         crate::leader::LeaderError::Io(_)
                         | crate::leader::LeaderError::Json(_)
-                        | crate::leader::LeaderError::EventLog(_)
                         | crate::leader::LeaderError::MessageStore(_)
-                        | crate::leader::LeaderError::Messaging(_)
                         | crate::leader::LeaderError::Start(_) => "attach_failed",
+                        crate::leader::LeaderError::EventLog(_) => "attach_event_log_failed",
+                        crate::leader::LeaderError::Messaging(_) => "attach_watcher_failed",
                     }
                 });
                 false
@@ -538,19 +540,7 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     } else {
         has_persisted_binding || ops.attach(workspace, &mut state, &pane, provider)
     };
-    let cleanup_grant = if attached {
-        ops.applied_grant().or_else(|| {
-            seeded_owner
-                .filter(|seed| {
-                    fresh_seeded_binding
-                        && state
-                            .get("team_owner")
-                            .is_some_and(|current| current == *seed)
-                })
-                .zip(seeded_receiver.clone())
-                .map(|(owner, receiver)| (owner.clone(), receiver))
-        })
-    } else {
+    let cleanup_grant = ops.applied_grant().or_else(|| {
         seeded_owner
             .filter(|seed| {
                 fresh_seeded_binding
@@ -560,7 +550,7 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             })
             .zip(seeded_receiver.clone())
             .map(|(owner, receiver)| (owner.clone(), receiver))
-    };
+    });
     let committed = if !attached {
         record_fresh_bind_refusal(
             workspace,
@@ -598,9 +588,9 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             // The registry receipt is the exact bytes this writer published;
             // conditional restore compares and mutates under the registry
             // owner's lock, so a concurrent winner is never rolled back.
-            if let Some(receipt) = ops.registry_receipt() {
-                restore_registry_receipt(&snapshots, &receipt);
-            }
+            let registry_rollback_error = ops
+                .registry_receipt()
+                .and_then(|receipt| restore_registry_receipt(&snapshots, &receipt).err());
             if let Some((expected_owner, expected_receiver)) = cleanup_grant.as_ref() {
                 clear_fresh_binding_on_refusal(
                     workspace,
@@ -616,15 +606,21 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             }) {
                 clear_fresh_binding_on_refusal(workspace, &mut state, team_key, seed, None)?;
             }
+            if let Some(error) = registry_rollback_error {
+                return Err(error);
+            }
         } else {
             // No caller-seeded owner was ours to clean up. Restore only the
             // runtime snapshot; a registry write is reverted only with its
             // exact receipt under the registry owner's lock.
-            if let Some(receipt) = ops.registry_receipt() {
-                restore_registry_receipt(&snapshots, &receipt);
-            }
+            let registry_rollback_error = ops
+                .registry_receipt()
+                .and_then(|receipt| restore_registry_receipt(&snapshots, &receipt).err());
             if let Some(snapshot) = snapshots.first() {
                 snapshot.restore();
+            }
+            if let Some(error) = registry_rollback_error {
+                return Err(error);
             }
         }
     }
@@ -634,12 +630,18 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
 fn restore_registry_receipt(
     snapshots: &[BindingFileSnapshot],
     receipt: &crate::leader::registry::RegistryWriteReceipt,
-) {
+) -> Result<(), LifecycleError> {
     let previous = snapshots
         .iter()
         .find(|snapshot| snapshot.path == receipt.path)
         .and_then(|snapshot| snapshot.bytes.as_deref());
-    let _ = crate::leader::registry::restore_entry_if_current_matches(receipt, previous);
+    match crate::leader::registry::restore_entry_if_current_matches(receipt, previous) {
+        Ok(crate::leader::registry::RegistryRollback::Restored)
+        | Ok(crate::leader::registry::RegistryRollback::Superseded) => Ok(()),
+        Err(error) => Err(LifecycleError::StatePersist(format!(
+            "quick-start registry rollback failed: {error}"
+        ))),
+    }
 }
 
 fn should_emit_workspace_socket_missing_hint(
@@ -2599,6 +2601,9 @@ mod fresh_quick_start_leader_binding_tests {
         register_ok: bool,
         readback_ok: bool,
         publish_winner_after_register: bool,
+        break_event_log: bool,
+        break_registry_lock: bool,
+        break_registry_read: bool,
     }
 
     impl FreshQuickStartLeaderBindingOps for RuntimeCommitFailureOps<'_> {
@@ -2629,6 +2634,11 @@ mod fresh_quick_start_leader_binding_tests {
             pane: &PaneId,
             provider: crate::provider::Provider,
         ) -> bool {
+            if self.break_event_log {
+                let event_path = crate::model::paths::logs_dir(workspace).join("events.jsonl");
+                let _ = std::fs::remove_file(&event_path);
+                std::fs::create_dir_all(&event_path).unwrap();
+            }
             self.inner.attach(workspace, state, pane, provider)
         }
 
@@ -2648,6 +2658,19 @@ mod fresh_quick_start_leader_binding_tests {
             let registered = self.inner.register(workspace, team_key);
             if !self.register_ok {
                 return false;
+            }
+            if self.break_registry_lock {
+                let lock_path = crate::leader::registry::registry_dir()
+                    .expect("registry dir")
+                    .join(".registry.lock");
+                let _ = std::fs::remove_file(&lock_path);
+                std::fs::create_dir_all(&lock_path).unwrap();
+            }
+            if self.break_registry_read {
+                if let Some(receipt) = self.inner.registry_receipt() {
+                    let _ = std::fs::remove_file(&receipt.path);
+                    std::fs::create_dir_all(&receipt.path).unwrap();
+                }
             }
             if registered && self.publish_winner_after_register {
                 let mut winner = crate::state::persist::load_runtime_state(workspace).unwrap();
@@ -2708,6 +2731,9 @@ mod fresh_quick_start_leader_binding_tests {
             register_ok: false,
             readback_ok: true,
             publish_winner_after_register: false,
+            break_event_log: false,
+            break_registry_lock: false,
+            break_registry_read: false,
         };
         assert!(!bind_fresh_quick_start_leader_with(
             &workspace,
@@ -2740,6 +2766,65 @@ mod fresh_quick_start_leader_binding_tests {
             Some("writer-winner"),
             "failed child bind must not remove the shared first-writer marker"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_post_save_event_error_rolls_back_applied_grant() {
+        let hermetic = HermeticTestEnv::enter("runtime-seeded-post-save-event-error");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let parent = hermetic.root().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let seed = seeded_runtime_owner(&workspace);
+        let target = caller_target(parent, Some("post-save-event-nonce"));
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash")
+            .with_targets(vec![target]);
+        let mut ops = RuntimeCommitFailureOps {
+            inner: RuntimeFreshQuickStartLeaderBindingOps {
+                transport: &transport,
+                last_failure_reason: None,
+                cas_conflict: false,
+                applied_grant: None,
+                registry_receipt: None,
+                nonce_writer: None,
+            },
+            register_ok: true,
+            readback_ok: true,
+            publish_winner_after_register: false,
+            break_event_log: true,
+            break_registry_lock: false,
+            break_registry_read: false,
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops,
+        )
+        .unwrap());
+        assert_eq!(ops.inner.last_failure_reason, Some("attach_event_log_failed"));
+        let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert!(persisted
+            .pointer("/teams/fresh/team_owner")
+            .is_some_and(serde_json::Value::is_null));
+        assert!(persisted
+            .pointer("/teams/fresh/leader_receiver")
+            .is_some_and(serde_json::Value::is_null));
+        assert!(!persisted.to_string().contains("fresh_caller"));
+        let registry_path = crate::leader::registry::registry_dir()
+            .unwrap()
+            .join(format!(
+                "{}__fresh.json",
+                crate::leader::registry::workspace_hash(&workspace)
+            ));
+        assert!(!registry_path.exists());
     }
 
     #[test]
@@ -2827,6 +2912,9 @@ mod fresh_quick_start_leader_binding_tests {
             register_ok: true,
             readback_ok: false,
             publish_winner_after_register: false,
+            break_event_log: false,
+            break_registry_lock: false,
+            break_registry_read: false,
         };
         assert!(!bind_fresh_quick_start_leader_with(
             &workspace,
@@ -2881,6 +2969,9 @@ mod fresh_quick_start_leader_binding_tests {
             register_ok: true,
             readback_ok: false,
             publish_winner_after_register: true,
+            break_event_log: false,
+            break_registry_lock: false,
+            break_registry_read: false,
         };
         assert!(!bind_fresh_quick_start_leader_with(
             &workspace,
@@ -2921,6 +3012,67 @@ mod fresh_quick_start_leader_binding_tests {
             serde_json::from_slice(&std::fs::read(registry_path).unwrap()).unwrap();
         assert_eq!(winner.channel["pane_id"], json!("%winner"));
         assert_eq!(winner.source, "concurrent");
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_registry_rollback_errors_are_visible_after_state_cleanup() {
+        for (tag, break_registry_lock, break_registry_read) in [
+            ("lock", true, false),
+            ("read", false, true),
+        ] {
+            let hermetic = HermeticTestEnv::enter(&format!(
+                "runtime-seeded-registry-rollback-{tag}"
+            ));
+            let workspace = runtime_workspace(&hermetic, "fresh");
+            let parent = hermetic.root().join("parent");
+            std::fs::create_dir_all(&parent).unwrap();
+            let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+            let _pane = hermetic.with_env("TMUX_PANE", "%1");
+            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+            let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+            let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+            let seed = seeded_runtime_owner(&workspace);
+            let target = caller_target(parent, Some("rollback-error-nonce"));
+            let transport = OfflineTransport::new()
+                .with_tmux_endpoint("/tmp/tmux.sock")
+                .with_pane_current_command("%1", "bash")
+                .with_targets(vec![target]);
+            let mut ops = RuntimeCommitFailureOps {
+                inner: RuntimeFreshQuickStartLeaderBindingOps {
+                    transport: &transport,
+                    last_failure_reason: None,
+                    cas_conflict: false,
+                    applied_grant: None,
+                    registry_receipt: None,
+                    nonce_writer: None,
+                },
+                register_ok: true,
+                readback_ok: false,
+                publish_winner_after_register: false,
+                break_event_log: false,
+                break_registry_lock,
+                break_registry_read,
+            };
+            let error = bind_fresh_quick_start_leader_with(
+                &workspace,
+                "fresh",
+                Some(&seed),
+                &mut ops,
+            )
+            .expect_err("registry rollback failure must be visible");
+            assert!(error
+                .to_string()
+                .contains("quick-start registry rollback failed"));
+            let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+            assert!(persisted
+                .pointer("/teams/fresh/team_owner")
+                .is_some_and(serde_json::Value::is_null));
+            assert!(persisted
+                .pointer("/teams/fresh/leader_receiver")
+                .is_some_and(serde_json::Value::is_null));
+            assert!(!persisted.to_string().contains("fresh_caller"));
+        }
     }
 
     fn nonce_writer_winner(
