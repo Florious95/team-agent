@@ -127,7 +127,15 @@ fn seed_two_team_spec_state(root: &Path) {
     let team_a = write_team_dir(root, "teamA", "worker_a");
     let team_b = write_team_dir(root, "teamB", "worker_b");
     let _ = MessageStore::open(root).unwrap();
-    let team_a_state = team_state("teamA", &team_a, "worker_a", "old teamA note");
+    let existing = load_runtime_state(root).unwrap();
+    let existing_worker = &existing["teams"]["teamA"]["agents"]["worker_a"];
+    let mut team_a_state = team_state("teamA", &team_a, "worker_a", "old teamA note");
+    for field in ["pane_id", "window"] {
+        team_a_state["agents"]["worker_a"][field] = existing_worker
+            .get(field)
+            .expect("MCP fixture worker_a must retain its live binding")
+            .clone();
+    }
     let team_b_state = team_state("teamB", &team_b, "worker_b", "old teamB note");
     save_runtime_state(
         root,
