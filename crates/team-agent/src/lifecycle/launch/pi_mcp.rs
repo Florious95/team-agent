@@ -602,7 +602,18 @@ pub(crate) fn run_pi_catalog(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| "Pi executable is unavailable on PATH".to_string())?;
+        .map_err(|error| {
+            #[cfg(test)]
+            {
+                eprintln!(
+                    "run_pi_catalog spawn failed kind={:?} raw_os_error={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
+            }
+            let _ = error;
+            "Pi executable is unavailable on PATH".to_string()
+        })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
