@@ -329,6 +329,69 @@ fn cmd_status_human_and_json_fail_on_selector_errors() {
 
 #[cfg(unix)]
 #[test]
+fn cmd_status_does_not_spawn_unbound_or_mismatched_nodeprobe() {
+    let cases = [
+        ("missing-receipt", None, None),
+        ("wrong-hash", Some(("binary_sha256", json!("0".repeat(64)))), None),
+        ("wrong-source", Some(("source_commit", json!("0".repeat(40)))), None),
+        ("wrong-target", Some(("target", json!("unknown-target"))), None),
+        (
+            "wrong-capability",
+            Some(("capabilities", json!(["tmux.capture-pane"]))),
+            None,
+        ),
+        ("replaced-binary", None, Some("replace")),
+    ];
+    for (tag, mutation, replacement) in cases {
+        let ws = brief_workspace(tag);
+        write_state(
+            &ws,
+            &production_state(json!({ "worker": production_agent("worker", "%7") })),
+        );
+        let scratch = ws.join("probe");
+        let log = scratch.join("spawned.log");
+        let bin = write_nodeprobe(
+            &scratch,
+            &format!("printf spawned >> '{}'\n", log.display()),
+        );
+        let run = || {
+            let nodes = json_nodes(
+                cmd_status(&status_args(&ws, true, None, None)).expect("status"),
+            );
+            assert_eq!(nodes[0]["runtime_status"], "unknown", "{tag}");
+            assert!(!log.exists(), "{tag} must not spawn an unbound probe");
+        };
+        if mutation.is_none() && replacement.is_none() {
+            status_port::with_test_nodeprobe_unbound(bin, run);
+        } else {
+            status_port::with_test_nodeprobe(bin.clone(), || {
+                if let Some((field, value)) = mutation {
+                    let receipt = scratch.join("nodeprobe.capability.json");
+                    let mut body: Value = serde_json::from_slice(
+                        &std::fs::read(&receipt).unwrap(),
+                    )
+                    .unwrap();
+                    body[field] = value;
+                    std::fs::write(&receipt, serde_json::to_vec(&body).unwrap()).unwrap();
+                }
+                if replacement.is_some() {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&bin)
+                        .unwrap()
+                        .write_all(b"# replaced\n")
+                        .unwrap();
+                }
+                run();
+            });
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn cmd_status_rejects_producer_error_and_wrong_socket_as_unknown() {
     let cases = [
         (

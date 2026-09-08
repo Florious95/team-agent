@@ -4,7 +4,9 @@
 //! coordinator/db/history and carries diagnostic fields that are outside the
 //! status brief contract.
 
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,21 @@ use std::time::{Duration, Instant};
 const NODEPROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const NODEPROBE_OUTPUT_LIMIT: u64 = 1024 * 1024;
 const NODEPROBE_KILL_GRACE: Duration = Duration::from_millis(100);
+const NODEPROBE_NAME: &str = "nodeprobe";
+const NODEPROBE_RECEIPT_SUFFIX: &str = ".capability.json";
+const NODEPROBE_RECEIPT_SCHEMA: &str = "nodeprobe-capability-v1";
+const NODEPROBE_SOURCE_REPO: &str = "Florious95/team-agent-scratch/nodeprobe";
+const NODEPROBE_SOURCE_COMMIT: &str = "ff316dc0afe8ab280e61d30934e7624579be6224";
+const NODEPROBE_SOURCE_TREE: &str = "5217a41aa914ddcb72c27f39f1b4af9ead68b1b6";
+const NODEPROBE_REPORT_SCHEMA: u64 = 1;
+const NODEPROBE_CAPABILITIES: &[&str] = &["tmux.list-panes", "ps.pid_ppid_stat_comm"];
+const NODEPROBE_FORBIDDEN: &[&str] = &[
+    "tmux.capture-pane",
+    "tmux.attach",
+    "tmux.send-keys",
+    "process.argv",
+    "pane_body",
+];
 
 #[cfg(test)]
 thread_local! {
@@ -60,6 +77,20 @@ struct BriefNode {
 #[derive(Debug)]
 struct ProbeResult {
     nodes: Vec<ProbeNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NodeprobeCapabilityReceipt {
+    schema: String,
+    binary: String,
+    binary_sha256: String,
+    source_repo: String,
+    source_commit: String,
+    source_tree: String,
+    target: String,
+    report_schema: u64,
+    capabilities: Vec<String>,
+    forbidden: Vec<String>,
 }
 
 enum MatchResult<'a> {
@@ -113,6 +144,17 @@ pub(crate) fn registered_agent_exists(state: &Value, agent: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) fn with_test_nodeprobe<R>(path: PathBuf, func: impl FnOnce() -> R) -> R {
+    write_test_capability_receipt(&path);
+    with_test_nodeprobe_candidate(path, func)
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_nodeprobe_unbound<R>(path: PathBuf, func: impl FnOnce() -> R) -> R {
+    with_test_nodeprobe_candidate(path, func)
+}
+
+#[cfg(test)]
+fn with_test_nodeprobe_candidate<R>(path: PathBuf, func: impl FnOnce() -> R) -> R {
     struct Guard(Option<PathBuf>);
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -122,6 +164,25 @@ pub(crate) fn with_test_nodeprobe<R>(path: PathBuf, func: impl FnOnce() -> R) ->
     let previous = TEST_NODEPROBE.with(|slot| slot.replace(Some(path)));
     let _guard = Guard(previous);
     func()
+}
+
+#[cfg(test)]
+fn write_test_capability_receipt(path: &Path) {
+    let binary_sha256 = sha256_file(path).expect("test nodeprobe fixture hash");
+    let receipt = json!({
+        "schema": NODEPROBE_RECEIPT_SCHEMA,
+        "binary": NODEPROBE_NAME,
+        "binary_sha256": binary_sha256,
+        "source_repo": NODEPROBE_SOURCE_REPO,
+        "source_commit": NODEPROBE_SOURCE_COMMIT,
+        "source_tree": NODEPROBE_SOURCE_TREE,
+        "target": current_nodeprobe_target().expect("test target"),
+        "report_schema": NODEPROBE_REPORT_SCHEMA,
+        "capabilities": NODEPROBE_CAPABILITIES,
+        "forbidden": NODEPROBE_FORBIDDEN,
+    });
+    std::fs::write(nodeprobe_receipt_path(path), serde_json::to_vec(&receipt).unwrap())
+        .expect("write test nodeprobe capability receipt");
 }
 
 fn format_brief_node(value: &Value) -> Option<String> {
@@ -353,6 +414,13 @@ fn spawn_nodeprobe(endpoint: &str) -> Option<Child> {
 }
 
 fn nodeprobe_binaries() -> Vec<PathBuf> {
+    nodeprobe_candidates()
+        .into_iter()
+        .filter_map(|candidate| validate_nodeprobe_candidate(&candidate))
+        .collect()
+}
+
+fn nodeprobe_candidates() -> Vec<PathBuf> {
     #[cfg(test)]
     {
         let override_bin = TEST_NODEPROBE.with(|slot| slot.borrow().clone());
@@ -360,9 +428,107 @@ fn nodeprobe_binaries() -> Vec<PathBuf> {
             return vec![path];
         }
     }
-    // No trusted receipt binds the installed binary to the accepted producer
-    // capability; fail closed until an authorized rollout supplies one.
-    Vec::new()
+    let mut candidates = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|entry| entry.join(NODEPROBE_NAME))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/bin").join(NODEPROBE_NAME));
+    }
+    candidates
+}
+
+fn validate_nodeprobe_candidate(path: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || !is_executable(&metadata) {
+        return None;
+    }
+    let canonical_binary = std::fs::canonicalize(path).ok()?;
+    let canonical_dir = std::fs::canonicalize(
+        path.parent().unwrap_or_else(|| Path::new(".")),
+    )
+    .ok()?;
+    let receipt_path = nodeprobe_receipt_path(path);
+    let canonical_receipt = std::fs::canonicalize(&receipt_path).ok()?;
+    if Some(canonical_dir.as_path()) != canonical_receipt.parent() {
+        return None;
+    }
+    let receipt: NodeprobeCapabilityReceipt =
+        serde_json::from_slice(&std::fs::read(&receipt_path).ok()?).ok()?;
+    if !valid_nodeprobe_receipt(&receipt, path) {
+        return None;
+    }
+    let digest = sha256_file(&canonical_binary)?;
+    (digest == receipt.binary_sha256).then_some(canonical_binary)
+}
+
+fn valid_nodeprobe_receipt(receipt: &NodeprobeCapabilityReceipt, binary: &Path) -> bool {
+    receipt.schema == NODEPROBE_RECEIPT_SCHEMA
+        && binary.file_name().and_then(|name| name.to_str()) == Some(NODEPROBE_NAME)
+        && receipt.binary == NODEPROBE_NAME
+        && valid_sha256(&receipt.binary_sha256)
+        && receipt.source_repo == NODEPROBE_SOURCE_REPO
+        && receipt.source_commit == NODEPROBE_SOURCE_COMMIT
+        && receipt.source_tree == NODEPROBE_SOURCE_TREE
+        && current_nodeprobe_target().is_some_and(|target| receipt.target == target)
+        && receipt.report_schema == NODEPROBE_REPORT_SCHEMA
+        && same_string_set(&receipt.capabilities, NODEPROBE_CAPABILITIES)
+        && same_string_set(&receipt.forbidden, NODEPROBE_FORBIDDEN)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn same_string_set(actual: &[String], expected: &[&str]) -> bool {
+    let mut actual = actual.to_vec();
+    actual.sort_unstable();
+    let mut expected = expected
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    actual == expected
+}
+
+fn nodeprobe_receipt_path(binary: &Path) -> PathBuf {
+    let name = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(NODEPROBE_NAME);
+    binary.with_file_name(format!("{name}{NODEPROBE_RECEIPT_SUFFIX}"))
+}
+
+fn sha256_file(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
+fn current_nodeprobe_target() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
+        _ => None,
+    }
 }
 
 fn configure_nodeprobe_command(command: &mut Command) {

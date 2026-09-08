@@ -87,7 +87,9 @@ Subagents are one-shot, fire-and-forget, and can't talk to each other. Team Agen
 `--json` exposes the same projection as structured JSON. Missing or conflicting evidence is
 reported as `unknown`; a non-null `tmux_command` is safe to copy for the observed socket,
 session, window, and pane. `--summary` and `--detail` remain accepted for compatibility and
-do not add diagnostic or history fields.
+do not add diagnostic or history fields. The accepted nodeprobe pairing and
+operator-trusted capability receipt are documented in
+[`docs/status-nodeprobe.md`](docs/status-nodeprobe.md).
 
 **Beta.** Used daily in real projects. Rough edges possible in uncommon configurations. Issues and PRs welcome.
 
