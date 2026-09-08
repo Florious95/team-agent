@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,7 +42,10 @@ const NODEPROBE_FORBIDDEN: &[&str] = &[
 #[cfg(test)]
 thread_local! {
     static TEST_NODEPROBE: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+    static TEST_RESOLVER_DELAY: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
 }
+
+static NODEPROBE_RESOLVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RegisteredNode {
@@ -165,6 +169,22 @@ pub(crate) fn with_test_nodeprobe_candidates<R>(
         write_test_capability_receipt(path);
     }
     with_test_nodeprobe_candidate(paths, func)
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_nodeprobe_resolver_delay<R>(
+    delay: Duration,
+    func: impl FnOnce() -> R,
+) -> R {
+    struct Guard(Option<Duration>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_RESOLVER_DELAY.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let previous = TEST_RESOLVER_DELAY.with(|slot| slot.replace(Some(delay)));
+    let _guard = Guard(previous);
+    func()
 }
 
 #[cfg(test)]
@@ -299,6 +319,8 @@ fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
 
 fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Option<ProbeResult>> {
     let deadline = Instant::now() + NODEPROBE_TIMEOUT;
+    let candidates = nodeprobe_candidates();
+    let resolver_options = resolver_options();
     let mut endpoints = BTreeMap::new();
     let mut selected_binary = None;
     let mut resolved = false;
@@ -307,7 +329,11 @@ fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Opti
             continue;
         }
         if !resolved {
-            selected_binary = select_nodeprobe_binary(deadline);
+            selected_binary = resolve_nodeprobe_binary(
+                candidates.clone(),
+                deadline,
+                resolver_options,
+            );
             resolved = true;
         }
         let sampled = selected_binary.as_deref().and_then(|binary| {
@@ -430,8 +456,80 @@ fn spawn_nodeprobe(binary: &Path, endpoint: &str) -> Option<Child> {
     command.spawn().ok()
 }
 
-fn select_nodeprobe_binary(deadline: Instant) -> Option<PathBuf> {
-    for candidate in nodeprobe_candidates() {
+#[derive(Clone, Copy, Default)]
+struct ResolverOptions {
+    #[cfg(test)]
+    delay_after_selection: Option<Duration>,
+}
+
+fn resolver_options() -> ResolverOptions {
+    #[cfg(test)]
+    {
+        return ResolverOptions {
+            delay_after_selection: TEST_RESOLVER_DELAY.with(|slot| *slot.borrow()),
+        };
+    }
+    #[cfg(not(test))]
+    {
+        ResolverOptions::default()
+    }
+}
+
+// A resolver that is stuck in an uninterruptible filesystem syscall may outlive
+// the caller deadline. It owns only its candidate work; the active gate prevents
+// repeated status calls from accumulating more detached resolver threads.
+struct ResolverActiveGuard;
+
+impl Drop for ResolverActiveGuard {
+    fn drop(&mut self) {
+        NODEPROBE_RESOLVER_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+fn resolve_nodeprobe_binary(
+    candidates: Vec<PathBuf>,
+    deadline: Instant,
+    options: ResolverOptions,
+) -> Option<PathBuf> {
+    #[cfg(not(test))]
+    let _ = options;
+    if Instant::now() >= deadline
+        || NODEPROBE_RESOLVER_ACTIVE.swap(true, Ordering::AcqRel)
+    {
+        return None;
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    let worker = thread::Builder::new()
+        .name("team-agent-nodeprobe-resolver".to_string())
+        .spawn(move || {
+            let _guard = ResolverActiveGuard;
+            let result = select_nodeprobe_binary(candidates, deadline);
+            if result.is_some() {
+                #[cfg(test)]
+                if let Some(delay) = options.delay_after_selection {
+                    thread::sleep(delay);
+                }
+            }
+            let _ = tx.send(result);
+        });
+    if worker.is_err() {
+        NODEPROBE_RESOLVER_ACTIVE.store(false, Ordering::Release);
+        return None;
+    }
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    // Only the caller may turn a timely result into a child process. A late
+    // resolver result is dropped with the receiver and can never spawn probe.
+    match rx.recv_timeout(timeout) {
+        Ok(Some(binary)) if Instant::now() < deadline => Some(binary),
+        Ok(_) | Err(_) => None,
+    }
+}
+
+fn select_nodeprobe_binary(
+    candidates: Vec<PathBuf>,
+    deadline: Instant,
+) -> Option<PathBuf> {
+    for candidate in candidates {
         if Instant::now() >= deadline {
             return None;
         }

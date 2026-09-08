@@ -472,6 +472,37 @@ fn cmd_status_resolver_rejects_fifo_and_oversized_receipts_without_spawn() {
 
 #[cfg(unix)]
 #[test]
+fn cmd_status_resolver_late_result_cannot_spawn_after_deadline() {
+    let ws = brief_workspace("resolver-late-result");
+    write_state(
+        &ws,
+        &production_state(json!({ "worker": production_agent("worker", "%7") })),
+    );
+    let scratch = ws.join("probe");
+    let log = scratch.join("spawned.log");
+    let bin = write_nodeprobe(
+        &scratch,
+        &format!("printf spawned >> '{}'\n", log.display()),
+    );
+    let started = Instant::now();
+    status_port::with_test_nodeprobe(bin, || {
+        status_port::with_test_nodeprobe_resolver_delay(Duration::from_millis(2500), || {
+            let nodes = json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"));
+            assert_eq!(nodes[0]["runtime_status"], "unknown");
+        });
+    });
+    assert!(
+        started.elapsed() < Duration::from_millis(2400),
+        "resolver delay blocked status caller: {:?}",
+        started.elapsed()
+    );
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(!log.exists(), "late resolver result must not spawn probe");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[cfg(unix)]
+#[test]
 fn cmd_status_rejects_producer_error_and_wrong_socket_as_unknown() {
     let cases = [
         (
