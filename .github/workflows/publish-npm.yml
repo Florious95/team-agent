@@ -53,7 +53,7 @@ jobs:
           const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
           const cargo = fs.readFileSync("Cargo.toml", "utf8");
           const expected = {
-            version: "0.5.76",
+            version: "0.5.77",
             license: "AGPL-3.0",
             platforms: [
               ["cli-darwin-arm64", "@team-agent/cli-darwin-arm64", "darwin", "arm64"],
@@ -260,7 +260,7 @@ jobs:
 
       - name: Verify binary architecture, version, and hash
         env:
-          EXPECTED_VERSION: "0.5.76"
+          EXPECTED_VERSION: "0.5.77"
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
@@ -340,7 +340,7 @@ jobs:
           export NODE_PATH="${RUNNER_TEMP}/team-agent-installer-node-modules"
           export PATH="${prefix}/bin:${PATH}"
           node npm/install.mjs install --prefix "${prefix}" --runtime-dir "${runtime}"
-          installed="${runtime}/0.5.76/bin/team-agent"
+          installed="${runtime}/0.5.77/bin/team-agent"
           test -x "${installed}"
           TEAM_AGENT_BINARY="${installed}" \
             RELEASE_ACCEPTANCE_ROOT="${RUNNER_TEMP}/team-agent-status-acceptance" \
