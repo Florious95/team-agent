@@ -35,7 +35,9 @@ mod compact;
 pub(super) use compact::*;
 
 mod brief;
-pub(crate) use brief::{format_status_brief, status_brief_scoped};
+pub(crate) use brief::{format_status_brief, registered_agent_exists, status_brief_scoped};
+#[cfg(test)]
+pub(crate) use brief::with_test_nodeprobe;
 
 mod runtime;
 pub(super) use runtime::*;

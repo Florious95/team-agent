@@ -300,41 +300,29 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
     }
     // S4QR-001 (0.4.8): selected-team ambiguity gate. status is a selected-team
     // command: when the workspace has 2+ alive teams and no --team was passed,
-    // refuse instead of silently defaulting to the active team. Uses the same
-    // CommandScope::resolve helper as refuse_if_multi_alive_team_missing_scope
-    // (cli/emit.rs:964-979) so the destructive-command ambiguity gate and the
-    // selected-team-read ambiguity gate share a single source of truth.
+    // refuse instead of silently defaulting to the active team. Uses the
+    // read-only CommandScope helper so the gate cannot migrate/write state.
     if team.is_none() {
-        let scope = crate::state::paths::CommandScope::resolve(&args.workspace, None);
+        let scope = crate::state::paths::CommandScope::resolve_readonly(&args.workspace, None);
         if scope.is_ambiguous() {
             let candidates: Vec<String> = scope.candidates().to_vec();
             let message = format!(
                 "status: workspace has multiple alive teams ({}); pass `--team <key>` to choose one",
                 candidates.join(", ")
             );
-            if args.json {
-                // The brief contract has no diagnostic/error fields. An
-                // ambiguous selection therefore emits the same empty node
-                // projection as any other unavailable status sample.
-                return Ok(CmdResult::from_json(json!({"nodes": []}), true));
-            }
             return Err(CliError::Usage(message));
         }
     }
-    let selected = match crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
         team,
         crate::state::selector::SelectorMode::RuntimeOnly,
-    ) {
-        Ok(selected) => selected,
-        Err(_) => {
-            let value = json!({"nodes": []});
-            if args.json {
-                return Ok(CmdResult::from_json(value, true));
-            }
-            return Ok(CmdResult::human(String::new()));
+    )?;
+    if let Some(agent) = args.agent.as_deref() {
+        if !status_port::registered_agent_exists(&selected.state, agent) {
+            return Err(CliError::Runtime(format!("unknown agent id: {agent}")));
         }
-    };
+    }
     // Status brief is deliberately independent of the legacy RuntimeSnapshot:
     // it performs one bounded nodeprobe sample and exposes exactly seven
     // fields. `--summary` and `--detail` remain parser-compatible but do not
@@ -354,26 +342,6 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         &selected.state,
         args.agent.as_deref(),
     )))
-}
-
-fn status_selector_error_payload(error: &str, workspace: &Path) -> Value {
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%.6f");
-    let log_path = std::env::temp_dir()
-        .join("team-agent")
-        .join("cli-errors")
-        .join(format!("status-{stamp}.log"));
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&log_path, format!("{error}\n"));
-    json!({
-        "ok": false,
-        "error": error,
-        "action": "run `team-agent doctor` or inspect the log path shown here",
-        "log": log_path.to_string_lossy().to_string(),
-        "workspace": workspace.to_string_lossy().to_string(),
-        "reminder": crate::cli::STATUS_REMINDER,
-    })
 }
 
 /// `cmd_watch`(`commands.py:103`)。委派 `coordinator::run_watch`;KeyboardInterrupt/正常 → `SystemExit(0)`。
