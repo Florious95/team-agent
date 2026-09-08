@@ -61,10 +61,10 @@ arbitrary binary, source commit, or hand-written hash.
 ## Reproducible operator conversion
 
 An authorized installer converts a downloaded, verified CI pair—not an
-unknown local binary—using the following bounded Python procedure. It refuses
-if the real build receipt is absent, the source identity differs, the receipt's
-binary path is absent, or the downloaded bytes do not equal the receipt hash.
-The output must be installed atomically beside that same binary.
+unknown local binary—using the following bounded Python procedure. It refuses if the real build receipt is absent, the source identity differs,
+the receipt `binary` field is not `nodeprobe`, the actual `BINARY` input is
+absent, or the downloaded bytes do not equal the receipt hash. The output must
+be installed atomically beside that same actual binary.
 
 ```sh
 BUILD_RECEIPT=/path/from/verified-ci/nodeprobe-build-receipt.txt \
@@ -90,6 +90,8 @@ with open(receipt_path, encoding="utf-8") as stream:
 for key, value in expected.items():
     if fields.get(key) != value:
         raise SystemExit(f"unexpected verified producer field: {key}")
+if os.path.basename(fields.get("binary", "")) != "nodeprobe":
+    raise SystemExit("CI receipt binary field is not nodeprobe")
 if not os.path.isfile(binary_path) or os.path.basename(binary_path) != "nodeprobe":
     raise SystemExit("verified CI binary is missing or is not nodeprobe")
 actual = hashlib.sha256(open(binary_path, "rb").read()).hexdigest()
@@ -126,9 +128,20 @@ who can write both the executable and its receipt.
 
 ## Corpus and fail-closed behavior
 
-The producer also needs its canonical title/provider corpus. CI checkout paths
-are not runtime defaults. An installation must provide the already accepted
-canonical corpus mechanism (or explicit readable corpus environment) without
-inventing a path in status. If corpus data is unavailable, the producer's
-structured error and the status projection remain unknown; status never
-executes an unbound binary merely to discover that fact.
+The accepted `ff316dc` producer also needs its canonical `titles.tsv` and
+`providers.tsv` corpus. The CI checkout path (`/Users/runner/work/...`) is not a
+runtime default and must never be guessed. The operator must obtain the corpus
+from the accepted producer release/checkout, verify both files are readable,
+and substitute their real absolute paths below:
+
+```sh
+export NODEPROBE_FIXTURES=/absolute/operator-verified/path/to/titles.tsv
+export NODEPROBE_PROVIDERS=/absolute/operator-verified/path/to/providers.tsv
+team-agent status --workspace /absolute/operator-verified/team-workspace --json
+```
+
+`team-agent status` inherits these two variables when it starts the validated
+nodeprobe child; status does not invent or rewrite them. If corpus data is
+missing or unreadable, the producer's structured error and the status
+projection remain unknown. Pi's optional lifecycle channel may still be
+missing and then remains unknown; no new live-Pi setup is implied here.

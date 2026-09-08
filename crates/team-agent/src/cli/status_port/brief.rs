@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -18,6 +19,9 @@ use std::time::{Duration, Instant};
 const NODEPROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const NODEPROBE_OUTPUT_LIMIT: u64 = 1024 * 1024;
 const NODEPROBE_KILL_GRACE: Duration = Duration::from_millis(100);
+const NODEPROBE_RECEIPT_LIMIT: u64 = 64 * 1024;
+const NODEPROBE_BINARY_LIMIT: u64 = 64 * 1024 * 1024;
+const NODEPROBE_READ_CHUNK: usize = 64 * 1024;
 const NODEPROBE_NAME: &str = "nodeprobe";
 const NODEPROBE_RECEIPT_SUFFIX: &str = ".capability.json";
 const NODEPROBE_RECEIPT_SCHEMA: &str = "nodeprobe-capability-v1";
@@ -36,7 +40,7 @@ const NODEPROBE_FORBIDDEN: &[&str] = &[
 
 #[cfg(test)]
 thread_local! {
-    static TEST_NODEPROBE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_NODEPROBE: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,24 +148,37 @@ pub(crate) fn registered_agent_exists(state: &Value, agent: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) fn with_test_nodeprobe<R>(path: PathBuf, func: impl FnOnce() -> R) -> R {
-    write_test_capability_receipt(&path);
-    with_test_nodeprobe_candidate(path, func)
+    with_test_nodeprobe_candidates(vec![path], func)
 }
 
 #[cfg(test)]
 pub(crate) fn with_test_nodeprobe_unbound<R>(path: PathBuf, func: impl FnOnce() -> R) -> R {
-    with_test_nodeprobe_candidate(path, func)
+    with_test_nodeprobe_candidate(vec![path], func)
 }
 
 #[cfg(test)]
-fn with_test_nodeprobe_candidate<R>(path: PathBuf, func: impl FnOnce() -> R) -> R {
-    struct Guard(Option<PathBuf>);
+pub(crate) fn with_test_nodeprobe_candidates<R>(
+    paths: Vec<PathBuf>,
+    func: impl FnOnce() -> R,
+) -> R {
+    for path in &paths {
+        write_test_capability_receipt(path);
+    }
+    with_test_nodeprobe_candidate(paths, func)
+}
+
+#[cfg(test)]
+fn with_test_nodeprobe_candidate<R>(
+    paths: Vec<PathBuf>,
+    func: impl FnOnce() -> R,
+) -> R {
+    struct Guard(Option<Vec<PathBuf>>);
     impl Drop for Guard {
         fn drop(&mut self) {
             TEST_NODEPROBE.with(|slot| *slot.borrow_mut() = self.0.take());
         }
     }
-    let previous = TEST_NODEPROBE.with(|slot| slot.replace(Some(path)));
+    let previous = TEST_NODEPROBE.with(|slot| slot.replace(Some(paths)));
     let _guard = Guard(previous);
     func()
 }
@@ -282,26 +299,30 @@ fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
 fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Option<ProbeResult>> {
     let deadline = Instant::now() + NODEPROBE_TIMEOUT;
     let mut endpoints = BTreeMap::new();
+    let mut selected_binary = None;
+    let mut resolved = false;
     for endpoint in nodes.iter().filter_map(|node| node.endpoint.as_deref()) {
         if endpoints.contains_key(endpoint) {
             continue;
         }
-        let sampled = if Instant::now() >= deadline {
-            None
-        } else {
-            run_nodeprobe(endpoint, deadline)
+        if !resolved {
+            selected_binary = select_nodeprobe_binary(deadline);
+            resolved = true;
+        }
+        let sampled = selected_binary.as_deref().and_then(|binary| {
+            run_nodeprobe(binary, endpoint, deadline)
                 .and_then(|bytes| parse_probe(&bytes, endpoint).ok())
-        };
+        });
         endpoints.insert(endpoint.to_string(), sampled);
     }
     endpoints
 }
 
-fn run_nodeprobe(endpoint: &str, deadline: Instant) -> Option<Vec<u8>> {
+fn run_nodeprobe(binary: &Path, endpoint: &str, deadline: Instant) -> Option<Vec<u8>> {
     if Instant::now() >= deadline {
         return None;
     }
-    let mut child = spawn_nodeprobe(endpoint)?;
+    let mut child = spawn_nodeprobe(binary, endpoint)?;
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
@@ -396,36 +417,36 @@ fn terminate_nodeprobe(child: &mut Child) {
     }
 }
 
-fn spawn_nodeprobe(endpoint: &str) -> Option<Child> {
+fn spawn_nodeprobe(binary: &Path, endpoint: &str) -> Option<Child> {
     let flag = if Path::new(endpoint).is_absolute() {
         "-S"
     } else {
         "-L"
     };
-    for binary in nodeprobe_binaries() {
-        let mut command = Command::new(binary);
-        command.arg(flag).arg(endpoint);
-        configure_nodeprobe_command(&mut command);
-        if let Ok(child) = command.spawn() {
-            return Some(child);
+    let mut command = Command::new(binary);
+    command.arg(flag).arg(endpoint);
+    configure_nodeprobe_command(&mut command);
+    command.spawn().ok()
+}
+
+fn select_nodeprobe_binary(deadline: Instant) -> Option<PathBuf> {
+    for candidate in nodeprobe_candidates() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        if let Some(binary) = validate_nodeprobe_candidate(&candidate, deadline) {
+            return Some(binary);
         }
     }
     None
 }
 
-fn nodeprobe_binaries() -> Vec<PathBuf> {
-    nodeprobe_candidates()
-        .into_iter()
-        .filter_map(|candidate| validate_nodeprobe_candidate(&candidate))
-        .collect()
-}
-
 fn nodeprobe_candidates() -> Vec<PathBuf> {
     #[cfg(test)]
     {
-        let override_bin = TEST_NODEPROBE.with(|slot| slot.borrow().clone());
-        if let Some(path) = override_bin {
-            return vec![path];
+        let override_bins = TEST_NODEPROBE.with(|slot| slot.borrow().clone());
+        if let Some(paths) = override_bins {
+            return paths;
         }
     }
     let mut candidates = std::env::var_os("PATH")
@@ -441,28 +462,31 @@ fn nodeprobe_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn validate_nodeprobe_candidate(path: &Path) -> Option<PathBuf> {
+fn validate_nodeprobe_candidate(path: &Path, deadline: Instant) -> Option<PathBuf> {
+    if Instant::now() >= deadline {
+        return None;
+    }
     let metadata = std::fs::metadata(path).ok()?;
     if !metadata.is_file() || !is_executable(&metadata) {
         return None;
     }
-    let canonical_binary = std::fs::canonicalize(path).ok()?;
-    let canonical_dir = std::fs::canonicalize(
-        path.parent().unwrap_or_else(|| Path::new(".")),
-    )
-    .ok()?;
     let receipt_path = nodeprobe_receipt_path(path);
-    let canonical_receipt = std::fs::canonicalize(&receipt_path).ok()?;
-    if Some(canonical_dir.as_path()) != canonical_receipt.parent() {
+    let receipt_metadata = std::fs::metadata(&receipt_path).ok()?;
+    if !receipt_metadata.is_file() || receipt_metadata.len() > NODEPROBE_RECEIPT_LIMIT {
         return None;
     }
     let receipt: NodeprobeCapabilityReceipt =
-        serde_json::from_slice(&std::fs::read(&receipt_path).ok()?).ok()?;
-    if !valid_nodeprobe_receipt(&receipt, path) {
+        serde_json::from_slice(&read_bounded_file(
+            &receipt_path,
+            NODEPROBE_RECEIPT_LIMIT,
+            deadline,
+        )?)
+        .ok()?;
+    if !valid_nodeprobe_receipt(&receipt, path) || Instant::now() >= deadline {
         return None;
     }
-    let digest = sha256_file(&canonical_binary)?;
-    (digest == receipt.binary_sha256).then_some(canonical_binary)
+    let digest = sha256_file(path, deadline)?;
+    (digest == receipt.binary_sha256).then_some(path.to_path_buf())
 }
 
 fn valid_nodeprobe_receipt(receipt: &NodeprobeCapabilityReceipt, binary: &Path) -> bool {
@@ -502,9 +526,63 @@ fn nodeprobe_receipt_path(binary: &Path) -> PathBuf {
     binary.with_file_name(format!("{name}{NODEPROBE_RECEIPT_SUFFIX}"))
 }
 
-fn sha256_file(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(format!("{:x}", Sha256::digest(bytes)))
+fn read_bounded_file(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return None;
+    }
+    let mut file = open_readonly_nonblocking(path)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let mut chunk = [0u8; NODEPROBE_READ_CHUNK];
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let read = file.read(&mut chunk).ok()?;
+        if read == 0 {
+            return Some(bytes);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if bytes.len() as u64 > limit {
+            return None;
+        }
+    }
+}
+
+fn sha256_file(path: &Path, deadline: Instant) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > NODEPROBE_BINARY_LIMIT {
+        return None;
+    }
+    let mut file = open_readonly_nonblocking(path)?;
+    let mut hasher = Sha256::new();
+    let mut chunk = [0u8; NODEPROBE_READ_CHUNK];
+    let mut total = 0u64;
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let read = file.read(&mut chunk).ok()?;
+        if read == 0 {
+            return Some(format!("{:x}", hasher.finalize()));
+        }
+        total = total.saturating_add(read as u64);
+        if total > NODEPROBE_BINARY_LIMIT {
+            return None;
+        }
+        hasher.update(&chunk[..read]);
+    }
+}
+
+fn open_readonly_nonblocking(path: &Path) -> Option<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path).ok()
 }
 
 fn is_executable(metadata: &std::fs::Metadata) -> bool {

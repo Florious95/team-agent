@@ -120,6 +120,15 @@ fn write_nodeprobe(dir: &Path, body: &str) -> PathBuf {
     path
 }
 
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let raw = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let result = unsafe { libc::mkfifo(raw.as_ptr(), 0o600) };
+    assert_eq!(result, 0, "mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
+}
+
 fn status_run(ws: &Path, extra: &[&str]) -> ExitCode {
     let mut argv = vec![
         "status".to_string(),
@@ -388,6 +397,77 @@ fn cmd_status_does_not_spawn_unbound_or_mismatched_nodeprobe() {
         }
         let _ = std::fs::remove_dir_all(&ws);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_status_resolver_rejects_fifo_and_oversized_receipts_without_spawn() {
+    let cases = ["fifo-receipt", "oversized-receipt"];
+    for tag in cases {
+        let ws = brief_workspace(tag);
+        write_state(
+            &ws,
+            &production_state(json!({ "worker": production_agent("worker", "%7") })),
+        );
+        let scratch = ws.join("probe");
+        let log = scratch.join("spawned.log");
+        let bin = write_nodeprobe(
+            &scratch.join("candidate"),
+            &format!("printf spawned >> '{}'\n", log.display()),
+        );
+        let started = Instant::now();
+        status_port::with_test_nodeprobe(bin.clone(), || {
+            let receipt = scratch.join("candidate/nodeprobe.capability.json");
+            if tag == "fifo-receipt" {
+                std::fs::remove_file(&receipt).unwrap();
+                make_fifo(&receipt);
+            } else {
+                std::fs::write(&receipt, vec![b'x'; 65 * 1024]).unwrap();
+            }
+            let nodes = json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"));
+            assert_eq!(nodes[0]["runtime_status"], "unknown", "{tag}");
+        });
+        assert!(!log.exists(), "{tag} must not spawn the candidate");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{tag} resolver exceeded bounded wall clock: {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    let ws = brief_workspace("lazy-candidate");
+    write_state(
+        &ws,
+        &production_state(json!({ "worker": production_agent("worker", "%7") })),
+    );
+    let scratch = ws.join("probe");
+    let first_log = scratch.join("first.log");
+    let second_log = scratch.join("second.log");
+    let first = write_nodeprobe(
+        &scratch.join("first"),
+        &format!("printf first >> '{}'\n", first_log.display()),
+    );
+    let second = write_nodeprobe(
+        &scratch.join("second"),
+        &format!("printf second >> '{}'\n", second_log.display()),
+    );
+    let started = Instant::now();
+    status_port::with_test_nodeprobe_candidates(vec![first, second.clone()], || {
+        let second_receipt = scratch.join("second/nodeprobe.capability.json");
+        std::fs::remove_file(&second_receipt).unwrap();
+        make_fifo(&second_receipt);
+        let nodes = json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"));
+        assert_eq!(nodes[0]["runtime_status"], "unknown");
+    });
+    assert!(first_log.exists(), "valid first candidate must be spawned");
+    assert!(!second_log.exists(), "later blocking candidate must not be scanned");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "lazy resolver exceeded bounded wall clock: {:?}",
+        started.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&ws);
 }
 
 #[cfg(unix)]
