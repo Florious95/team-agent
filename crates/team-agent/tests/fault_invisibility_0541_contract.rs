@@ -249,11 +249,10 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
         "RED4: provider exit marker means provider_process_dead even though pane remains alive; watch={watch}"
     );
 
-    let _no_probe_path = case.env.with_env(
-        "PATH",
-        case.fake_bin.to_str().expect("fake bin path utf8"),
-    );
-    let status = case.status_json();
+    let no_probe_dir = case.env.root().join("no-probe");
+    fs::create_dir_all(&no_probe_dir).expect("create no-probe PATH");
+    let no_probe_path = no_probe_dir.to_str().expect("no-probe path utf8");
+    let status = case.status_brief_json(no_probe_path);
     let worker = brief_node(&status, WORKER)
         .unwrap_or_else(|| panic!("RED4 setup: brief status missing helper; status={status}"));
     assert_eq!(
@@ -271,13 +270,13 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
         Some("unknown"),
         "RED4: provider-exited wrapper without an accepted probe must expose unknown health; worker={worker}; status={status}"
     );
-    let human = case.run_ta(
-        &["status", "--workspace", case.workspace_str(), "--team", TEAM],
-        &[],
-    );
-    let human_text = String::from_utf8_lossy(&human.stdout);
+    let human_text = case.status_brief_human(no_probe_path);
     assert!(
-        human_text.contains("name: helper") && !human_text.contains("activity: working"),
+        human_text.contains("name: helper")
+            && human_text.contains("runtime_status: unknown")
+            && human_text.contains("activity: unknown")
+            && human_text.contains("health: unknown")
+            && !human_text.contains("activity: working"),
         "RED4: human brief must not render provider-exited wrapper as working; output={human_text}; status={status}"
     );
 
@@ -285,7 +284,7 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
     live.seed_state(live_provider_worker());
     live.seed_agent_health("WORKING");
     let probe = brief_probe::install_trusted_nodeprobe_with_activity(
-        &live.workspace.join("probe"),
+        &live.env.root().join("probe-bin"),
         TMUX_ENDPOINT,
         TEAM_SESSION,
         WORKER,
@@ -294,11 +293,8 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
         "working",
         "normal",
     );
-    let _probe_path = live.env.with_env(
-        "PATH",
-        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
-    );
-    let live_status = live.status_json();
+    let probe_path = brief_probe::path_with_probe(&probe, None);
+    let live_status = live.status_brief_json(&probe_path);
     let live_node = brief_node(&live_status, WORKER).expect("live status brief worker");
     assert_eq!(live_node.get("name").and_then(Value::as_str), Some(WORKER));
     assert_eq!(live_node.get("provider").and_then(Value::as_str), Some("codex"));
@@ -312,6 +308,16 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
             .and_then(Value::as_str)
             .is_some_and(|command| command.contains(TMUX_ENDPOINT) && command.contains("team-current:helper.%541")),
         "RED4 guard: trusted live probe must retain the exact endpoint/session/pane proof; status={live_status}"
+    );
+    let live_human = live.status_brief_human(&probe_path);
+    assert!(
+        live_human.contains("name: helper")
+            && live_human.contains("runtime_status: running")
+            && live_human.contains("activity: working")
+            && live_human.contains("health: normal")
+            && live_human.contains("tmux_command:")
+            && live_human.contains(TMUX_ENDPOINT),
+        "RED4 guard: human status must consume the same accepted live seven-field projection; output={live_human}"
     );
 }
 
@@ -733,6 +739,50 @@ impl WatchCase {
             true,
         )
         .expect("status_scoped")
+    }
+
+    fn status_brief_json(&self, path: &str) -> Value {
+        let output = self.env.run_cli_env(
+            &self.workspace,
+            &[
+                "status",
+                "--workspace",
+                self.workspace.to_str().expect("workspace utf8"),
+                "--team",
+                TEAM,
+                "--json",
+                "--detail",
+            ],
+            &[("PATH", path)],
+        );
+        assert!(
+            output.status.success(),
+            "status brief must exit 0; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse_json_output(&output, "watch status --json --detail")
+    }
+
+    fn status_brief_human(&self, path: &str) -> String {
+        let output = self.env.run_cli_env(
+            &self.workspace,
+            &[
+                "status",
+                "--workspace",
+                self.workspace.to_str().expect("workspace utf8"),
+                "--team",
+                TEAM,
+            ],
+            &[("PATH", path)],
+        );
+        assert!(
+            output.status.success(),
+            "human status must exit 0; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("human status UTF-8")
     }
 }
 

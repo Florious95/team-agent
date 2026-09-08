@@ -49,7 +49,7 @@ fn legacy_05_workspace_loads_without_b1_destructive_conversion() {
         "%new",
         "fake",
     );
-    let _path = case.env.with_env(
+    let _path = case._env.with_env(
         "PATH",
         &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
     );
@@ -122,7 +122,7 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
         "%new",
         "fake",
     );
-    let _path = case.env.with_env(
+    let _path = case._env.with_env(
         "PATH",
         &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
     );

@@ -83,37 +83,52 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
         "--detail must remain the same seven-field projection: status={status} detail={detail}"
     );
 
-    // Keep these non-brief consumers on the production status read model. The
-    // brief deliberately omits diagnostics; status_scoped remains the typed
-    // owner-team boundary for the task/state and DB-backed projections.
-    let state = load_runtime_state(&fixture.root).expect("load scoped state");
+    // Resolve the selected state through the production team selector before
+    // assembling the full scoped read model. Passing the raw active-team root
+    // here would make the root `tasks` assertion a fixture self-check.
+    let selected = team_agent::state::projection::select_runtime_state(
+        &fixture.root,
+        Some("teamA"),
+    )
+    .expect("select teamA runtime state");
     let scoped = team_agent::cli::status_port::status_scoped(
         &fixture.root,
-        &state,
+        &selected,
         Some("teamA"),
         false,
         true,
     )
     .expect("assemble teamA scoped status");
-    let team_tasks = scoped
-        .pointer("/teams/teamA/tasks")
+    let root_tasks = scoped
+        .get("tasks")
         .and_then(Value::as_array)
-        .expect("teamA tasks from scoped status");
-    assert_eq!(task_ids_from(team_tasks), vec!["task_a".to_string()]);
+        .expect("selected teamA root tasks");
+    assert_eq!(task_ids_from(root_tasks), vec!["task_a".to_string()]);
     assert!(
-        !task_ids_from(team_tasks).contains(&"task_b".to_string()),
-        "teamA scoped task projection must not contain sibling tasks: {scoped}"
+        !task_ids_from(root_tasks).contains(&"task_b".to_string()),
+        "selected teamA root task projection must exclude sibling task_b: {scoped}"
     );
     let messages = scoped
         .get("messages")
         .and_then(Value::as_object)
         .expect("scoped messages projection");
     assert_eq!(status_count_total(messages), 1);
+    assert_eq!(messages.get("delivered").and_then(Value::as_i64), Some(1));
+    assert!(messages.get("accepted").is_none());
     let results = scoped
         .get("results")
         .and_then(Value::as_object)
         .expect("scoped results projection");
     assert_eq!(results.get("total").and_then(Value::as_i64), Some(1));
+    let latest = scoped
+        .get("latest_results")
+        .and_then(Value::as_array)
+        .expect("scoped latest result projection");
+    assert_eq!(latest_result_ids(latest), vec!["res_team_a".to_string()]);
+    assert!(
+        !latest_result_ids(latest).contains(&"res_team_b".to_string()),
+        "teamA scoped latest results must exclude sibling res_team_b: {scoped}"
+    );
     let health = scoped
         .get("agent_health")
         .and_then(Value::as_object)
@@ -369,6 +384,13 @@ fn task_ids_from(tasks: &[Value]) -> Vec<String> {
         .collect()
 }
 
+fn latest_result_ids(results: &[Value]) -> Vec<String> {
+    results
+        .iter()
+        .filter_map(|result| result.get("result_id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
 fn status_count_total(counts: &serde_json::Map<String, Value>) -> i64 {
     counts.values().filter_map(Value::as_i64).sum()
 }
@@ -530,7 +552,7 @@ fn write_team_dir(root: &Path, team: &str, agent: &str) -> PathBuf {
 
 fn seed_db(root: &Path) {
     let store = MessageStore::open(root).expect("open team.db");
-    store
+    let message_a = store
         .create_message(
             Some("task_a"),
             "leader",
@@ -541,6 +563,7 @@ fn seed_db(root: &Path) {
             Some("teamA"),
         )
         .unwrap();
+    store.mark(&message_a, "delivered", None).unwrap();
     store
         .create_message(
             Some("task_b"),
