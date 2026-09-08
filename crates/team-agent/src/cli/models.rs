@@ -1,6 +1,8 @@
 //! Read-only Pi model catalog discovery for `team-agent models`.
 use super::{CliError, CmdOutput, CmdResult, ExitCode, ModelsArgs};
 use serde_json::{json, Value};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -280,6 +282,42 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn native_timeout_receipt() -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::path::PathBuf::from("/tmp").join(format!(
+            "team-agent-models-timeout-{}-{stamp}.receipt",
+            std::process::id()
+        ))
+    }
+
+    #[cfg(unix)]
+    fn read_native_timeout_receipt(path: &Path) -> BTreeMap<String, String> {
+        let mut fields = BTreeMap::new();
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let (key, value) = line.split_once('=').expect("receipt key/value");
+            assert!(fields.insert(key.to_string(), value.to_string()).is_none());
+        }
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "child_argv_exact",
+                "child_pid",
+                "child_spawn_attempts",
+                "descendant_pid",
+                "descendant_started",
+                "descendant_stdout_inherited",
+                "parent_argv_exact",
+                "parent_pid",
+                "parent_started_once",
+            ]
+        );
+        fields
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_invokes_exact_argv_once_and_drains() {
         let path = fixture(
@@ -299,10 +337,36 @@ mod tests {
     #[test]
     fn runner_timeout_is_bounded_when_descendant_keeps_stdout() {
         let path = native_timeout_fixture();
+        let receipt = native_timeout_receipt();
+        assert!(!receipt.exists());
         let started = Instant::now();
-        let result = run_catalog(&path, Duration::from_millis(40), 1024);
+        let (result, observation) =
+            crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
+                &receipt,
+                || run_catalog(&path, Duration::from_millis(40), 1024),
+            );
         assert!(started.elapsed() < Duration::from_millis(500));
         assert!(result.unwrap_err().contains("timed out"));
+        assert_eq!(observation.spawn_count, 1);
+        assert_eq!(observation.argv, vec!["--list-models"]);
+        assert_eq!(observation.parent_exit_success, Some(true));
+        assert_eq!(observation.parent_exit_code, Some(0));
+        assert!(observation.reader_timeout);
+
+        let fields = read_native_timeout_receipt(&receipt);
+        assert_eq!(fields["parent_started_once"], "1");
+        assert_eq!(fields["parent_argv_exact"], "1");
+        assert_eq!(fields["child_spawn_attempts"], "1");
+        assert_eq!(fields["child_argv_exact"], "1");
+        assert_eq!(fields["descendant_started"], "1");
+        assert_eq!(fields["descendant_stdout_inherited"], "1");
+        assert_eq!(
+            fields["parent_pid"],
+            observation.parent_pid.unwrap().to_string()
+        );
+        assert_eq!(fields["child_pid"], fields["descendant_pid"]);
+        let _ = std::fs::remove_file(&receipt);
+        let _ = std::fs::remove_file(format!("{}.sock", receipt.display()));
     }
 
     #[cfg(unix)]
