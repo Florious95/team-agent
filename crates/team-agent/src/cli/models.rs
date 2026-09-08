@@ -273,6 +273,13 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn native_timeout_fixture() -> std::path::PathBuf {
+        let path = std::path::PathBuf::from(env!("TEAM_AGENT_MODELS_TIMEOUT_FIXTURE"));
+        assert!(path.is_file(), "prebuilt models timeout fixture is missing");
+        path
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_invokes_exact_argv_once_and_drains() {
         let path = fixture(
@@ -291,12 +298,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runner_timeout_is_bounded_when_descendant_keeps_stdout() {
-        let path = fixture("sleep 2 & exit 0");
+        let path = native_timeout_fixture();
         let started = Instant::now();
         let result = run_catalog(&path, Duration::from_millis(40), 1024);
         assert!(started.elapsed() < Duration::from_millis(500));
         assert!(result.unwrap_err().contains("timed out"));
-        cleanup_fixture(&path);
     }
 
     #[cfg(unix)]
