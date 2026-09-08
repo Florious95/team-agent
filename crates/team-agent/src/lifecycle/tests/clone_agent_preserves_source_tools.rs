@@ -234,6 +234,7 @@ fn clone_ok(case: &Case, source: &str, dest: &str) {
 
 /// clone 后分身 role + spec tools 必须等于源席；三件套源不得被扩成六件。
 #[test]
+#[serial_test::serial(env)]
 fn clone_agent_preserves_source_tools() {
     let case = Case::start();
     let qs = case.run(&[
