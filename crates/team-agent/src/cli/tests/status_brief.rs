@@ -492,14 +492,19 @@ fn cmd_status_resolver_late_result_cannot_spawn_after_deadline() {
         &scratch,
         &format!("printf spawned >> '{}'\n", log.display()),
     );
-    let started = Instant::now();
     status_port::with_test_nodeprobe(bin, || {
+        let caller_started = Instant::now();
         let signal = status_port::with_test_nodeprobe_resolver_delay(
             Duration::from_millis(2500),
             |signal| {
-                let nodes = json_nodes(
-                    cmd_status(&status_args(&ws, true, None, None)).expect("status"),
+                let result = cmd_status(&status_args(&ws, true, None, None)).expect("status");
+                let caller_elapsed = caller_started.elapsed();
+                assert!(
+                    caller_elapsed < Duration::from_millis(2400),
+                    "resolver delay blocked status caller: {:?}",
+                    caller_elapsed
                 );
+                let nodes = json_nodes(result);
                 assert_eq!(nodes[0]["runtime_status"], "unknown");
                 signal.clone()
             },
@@ -513,24 +518,16 @@ fn cmd_status_resolver_late_result_cannot_spawn_after_deadline() {
         while !signal.finished() && Instant::now() < finished_deadline {
             std::thread::yield_now();
         }
-        assert!(signal.finished(), "resolver worker did not finish");
+        assert!(signal.finished(), "resolver worker did not release the gate");
         assert!(!log.exists(), "late resolver result must not spawn probe");
 
-        let release_deadline = Instant::now() + Duration::from_secs(3);
-        while !log.exists() && Instant::now() < release_deadline {
-            let nodes = json_nodes(
-                cmd_status(&status_args(&ws, true, None, None)).expect("status"),
-            );
-            assert_eq!(nodes[0]["runtime_status"], "unknown");
-            std::thread::yield_now();
-        }
-        assert!(log.exists(), "normal selection must prove resolver gate release");
+        let nodes = json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"));
+        assert_eq!(nodes[0]["runtime_status"], "unknown");
+        assert!(
+            log.exists(),
+            "one normal selection must prove resolver gate release"
+        );
     });
-    assert!(
-        started.elapsed() < Duration::from_millis(2400),
-        "resolver delay blocked status caller: {:?}",
-        started.elapsed()
-    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

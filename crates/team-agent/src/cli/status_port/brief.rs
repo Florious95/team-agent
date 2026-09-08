@@ -235,16 +235,22 @@ fn with_test_nodeprobe_candidate<R>(
     }
     let previous = TEST_NODEPROBE.with(|slot| slot.replace(Some(paths)));
     let _guard = Guard(previous);
-    let result = func();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(func));
     let deadline = Instant::now() + NODEPROBE_TIMEOUT;
     while NODEPROBE_RESOLVER_ACTIVE.load(Ordering::Acquire) && Instant::now() < deadline {
         thread::yield_now();
     }
-    assert!(
-        !NODEPROBE_RESOLVER_ACTIVE.load(Ordering::Acquire),
-        "test nodeprobe fixture ended while resolver worker was still active"
-    );
-    result
+    let resolver_idle = !NODEPROBE_RESOLVER_ACTIVE.load(Ordering::Acquire);
+    match outcome {
+        Ok(result) => {
+            assert!(
+                resolver_idle,
+                "test nodeprobe fixture ended while resolver worker was still active"
+            );
+            result
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 #[cfg(test)]
@@ -376,7 +382,7 @@ fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Opti
             selected_binary = resolve_nodeprobe_binary(
                 candidates.clone(),
                 deadline,
-                resolver_options,
+                resolver_options.clone(),
             );
             resolved = true;
         }
@@ -522,11 +528,18 @@ fn resolver_options() -> ResolverOptions {
 // A resolver that is stuck in an uninterruptible filesystem syscall may outlive
 // the caller deadline. It owns only its candidate work; the active gate prevents
 // repeated status calls from accumulating more detached resolver threads.
-struct ResolverActiveGuard;
+struct ResolverActiveGuard {
+    #[cfg(test)]
+    finished_signal: Option<ResolverDelaySignal>,
+}
 
 impl Drop for ResolverActiveGuard {
     fn drop(&mut self) {
         NODEPROBE_RESOLVER_ACTIVE.store(false, Ordering::Release);
+        #[cfg(test)]
+        if let Some(signal) = self.finished_signal.take() {
+            signal.finished.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -546,12 +559,15 @@ fn resolve_nodeprobe_binary(
     let worker = thread::Builder::new()
         .name("team-agent-nodeprobe-resolver".to_string())
         .spawn(move || {
-            let _guard = ResolverActiveGuard;
             #[cfg(test)]
             let delay_signal = options
                 .delay_after_selection
                 .as_ref()
                 .map(|config| config.signal.clone());
+            let _guard = ResolverActiveGuard {
+                #[cfg(test)]
+                finished_signal: delay_signal,
+            };
             let result = select_nodeprobe_binary(candidates, deadline);
             if result.is_some() {
                 #[cfg(test)]
@@ -561,10 +577,6 @@ fn resolve_nodeprobe_binary(
                 }
             }
             let _ = tx.send(result);
-            #[cfg(test)]
-            if let Some(signal) = delay_signal {
-                signal.finished.store(true, Ordering::Release);
-            }
         });
     if worker.is_err() {
         NODEPROBE_RESOLVER_ACTIVE.store(false, Ordering::Release);
