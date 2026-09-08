@@ -604,6 +604,7 @@ pub(crate) struct PiCatalogTestObservation {
 #[cfg(test)]
 struct PiCatalogTestContext {
     receipt: PathBuf,
+    helper_mode: Option<String>,
     observation: PiCatalogTestObservation,
 }
 
@@ -615,12 +616,14 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn with_pi_catalog_test_observation<T>(
     receipt: &Path,
+    helper_mode: Option<&str>,
     action: impl FnOnce() -> T,
 ) -> (T, PiCatalogTestObservation) {
     PI_CATALOG_TEST_CONTEXT.with(|slot| {
         assert!(slot
             .replace(Some(PiCatalogTestContext {
                 receipt: receipt.to_path_buf(),
+                helper_mode: helper_mode.map(str::to_owned),
                 observation: PiCatalogTestObservation::default(),
             }))
             .is_none());
@@ -654,6 +657,9 @@ pub(crate) fn run_pi_catalog(
         context.observation.spawn_count += 1;
         context.observation.argv.push("--list-models".to_string());
         command.env("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT", &context.receipt);
+        if let Some(mode) = context.helper_mode.as_deref() {
+            command.env("TEAM_AGENT_MODELS_TIMEOUT_MODE", mode);
+        }
     });
     let mut child = command
         .stdin(Stdio::null())

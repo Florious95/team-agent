@@ -318,6 +318,23 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn with_native_mode<T>(
+        mode: &str,
+        action: impl FnOnce() -> T,
+    ) -> (T, crate::lifecycle::launch::pi_mcp::PiCatalogTestObservation) {
+        let receipt = native_timeout_receipt();
+        assert!(!receipt.exists());
+        let result = crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
+            &receipt,
+            Some(mode),
+            action,
+        );
+        assert!(!receipt.exists());
+        let _ = std::fs::remove_file(format!("{}.sock", receipt.display()));
+        result
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_invokes_exact_argv_once_and_drains() {
         let path = fixture(
@@ -343,6 +360,7 @@ mod tests {
         let (result, observation) =
             crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
                 &receipt,
+                Some("descendant"),
                 || run_catalog(&path, Duration::from_millis(40), 1024),
             );
         assert!(started.elapsed() < Duration::from_millis(500));
@@ -422,35 +440,61 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runner_fails_closed_for_nonzero_oversize_timeout_and_unavailable() {
-        let fail = fixture("echo sensitive-token >&2; exit 7");
+        let fail = native_timeout_fixture();
+        let (failed_result, fail_observation) = with_native_mode("exit7", || {
+            run_catalog(&fail, Duration::from_secs(1), 1024)
+        });
         assert_eq!(
-            run_catalog(&fail, Duration::from_secs(1), 1024).unwrap_err(),
+            failed_result.unwrap_err(),
             "Pi model catalog command failed"
         );
-        let failed = cmd_models_with(
-            &ModelsArgs {
-                provider: "pi".into(),
-                search: None,
-                json: false,
-            },
-            &fail,
-            Duration::from_secs(1),
-            1024,
-        )
-        .unwrap();
+        assert_eq!(fail_observation.spawn_count, 1);
+        assert_eq!(fail_observation.argv, vec!["--list-models"]);
+        assert_eq!(fail_observation.parent_exit_success, Some(false));
+        assert_eq!(fail_observation.parent_exit_code, Some(7));
+        assert!(!fail_observation.reader_timeout);
+        let (failed, failed_observation) = with_native_mode("exit7", || {
+            cmd_models_with(
+                &ModelsArgs {
+                    provider: "pi".into(),
+                    search: None,
+                    json: false,
+                },
+                &fail,
+                Duration::from_secs(1),
+                1024,
+            )
+        });
+        let failed = failed.unwrap();
+        assert_eq!(failed_observation.spawn_count, 1);
+        assert_eq!(failed_observation.argv, vec!["--list-models"]);
+        assert_eq!(failed_observation.parent_exit_success, Some(false));
+        assert_eq!(failed_observation.parent_exit_code, Some(7));
+        assert!(!failed_observation.reader_timeout);
         let CmdOutput::Human(text) = failed.output else {
             panic!("expected failure projection")
         };
         assert_eq!(failed.exit, ExitCode::Error);
         assert!(!text.contains("sensitive-token"));
-        let big = fixture("head -c 64 /dev/zero");
-        assert!(run_catalog(&big, Duration::from_secs(1), 8)
-            .unwrap_err()
-            .contains("bounded output"));
-        let slow = fixture("sleep 2");
-        assert!(run_catalog(&slow, Duration::from_millis(20), 1024)
-            .unwrap_err()
-            .contains("timed out"));
+        let big = native_timeout_fixture();
+        let (big_result, big_observation) = with_native_mode("oversize", || {
+            run_catalog(&big, Duration::from_secs(1), 8)
+        });
+        assert!(big_result.unwrap_err().contains("bounded output"));
+        assert_eq!(big_observation.spawn_count, 1);
+        assert_eq!(big_observation.argv, vec!["--list-models"]);
+        assert_eq!(big_observation.parent_exit_success, Some(true));
+        assert_eq!(big_observation.parent_exit_code, Some(0));
+        assert!(!big_observation.reader_timeout);
+        let slow = native_timeout_fixture();
+        let (slow_result, slow_observation) = with_native_mode("sleep", || {
+            run_catalog(&slow, Duration::from_millis(20), 1024)
+        });
+        assert!(slow_result.unwrap_err().contains("timed out"));
+        assert_eq!(slow_observation.spawn_count, 1);
+        assert_eq!(slow_observation.argv, vec!["--list-models"]);
+        assert_eq!(slow_observation.parent_exit_success, None);
+        assert!(!slow_observation.reader_timeout);
         assert!(run_catalog(
             std::path::Path::new("/does/not/exist"),
             Duration::from_secs(1),
@@ -458,9 +502,6 @@ mod tests {
         )
         .unwrap_err()
         .contains("unavailable"));
-        for path in [fail, big, slow] {
-            cleanup_fixture(&path);
-        }
     }
 
     #[test]
