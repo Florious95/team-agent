@@ -181,6 +181,10 @@ impl SeatCase {
                 Some(&self.team),
             )
             .expect("select canonical team state");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for canonical terminal registration of {agent}"
+            );
             let worker = state
                 .pointer(&format!("/agents/{agent}"))
                 .expect("selected canonical worker");
@@ -191,10 +195,6 @@ impl SeatCase {
             {
                 return state;
             }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for canonical terminal registration of {agent}"
-            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -402,14 +402,27 @@ fn z2_dead_pane_projection_pins_all_death_fields() {
         Some("stopped"),
         "Z2: a dead pane must project the exact status=stopped (not merely non-running); agent={agent}"
     );
-    let canonical_after_full = case.wait_for_terminal_registration("w1");
+    let canonical_after_full = team_agent::state::projection::select_runtime_state(
+        &case.workspace,
+        Some(&case.team),
+    )
+    .expect("select canonical team state");
     assert_eq!(
         terminal_worker_signature(&canonical_before_full, "w1"),
         terminal_worker_signature(&canonical_after_full, "w1"),
         "Z2: full status enrichment must not alter canonical terminal registration"
     );
 
-    let canonical_before_public = case.wait_for_terminal_registration("w1");
+    let canonical_before_public = team_agent::state::projection::select_runtime_state(
+        &case.workspace,
+        Some(&case.team),
+    )
+    .expect("select canonical team state");
+    assert_eq!(
+        terminal_worker_signature(&canonical_after_full, "w1"),
+        terminal_worker_signature(&canonical_before_public, "w1"),
+        "Z2: public status prerequisite must retain canonical terminal registration"
+    );
     let public = case.run_cli(&[
         "status",
         "--workspace",
@@ -449,7 +462,11 @@ fn z2_dead_pane_projection_pins_all_death_fields() {
         Some("stopped"),
         "Z2: canonical terminal registration must produce a strict stopped public brief node; node={node}"
     );
-    let canonical_after_public = case.wait_for_terminal_registration("w1");
+    let canonical_after_public = team_agent::state::projection::select_runtime_state(
+        &case.workspace,
+        Some(&case.team),
+    )
+    .expect("select canonical team state");
     assert_eq!(
         terminal_worker_signature(&canonical_before_public, "w1"),
         terminal_worker_signature(&canonical_after_public, "w1"),
