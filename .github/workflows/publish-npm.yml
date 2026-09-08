@@ -187,10 +187,14 @@ jobs:
             exit 1
           fi
           printf 'native_host=%s\n' "${host}"
-          printf 'tmux_version=%s\n' "$(tmux -V)"
-          printf 'node_version=%s\n' "$(node --version)"
-          printf 'npm_version=%s\n' "$(npm --version)"
-          printf 'file_version=%s\n' "$(file --version | head -n 1)"
+          tmux_version="$(tmux -V)"
+          printf 'tmux_version=%s\n' "${tmux_version}"
+          node_version="$(node --version)"
+          printf 'node_version=%s\n' "${node_version}"
+          npm_version="$(npm --version)"
+          printf 'npm_version=%s\n' "${npm_version}"
+          file_version="$(file --version)"
+          printf 'file_version=%s\n' "${file_version%%$'\n'*}"
           printf 'hash_tool=%s\n' "${hash_tool}"
 
       - name: Run full native workspace tests
