@@ -145,23 +145,53 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Install tmux on macOS native runners
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          if ! command -v brew >/dev/null 2>&1; then
+            echo '::error::missing required tool: brew'
+            exit 1
+          fi
+          if ! command -v tmux >/dev/null 2>&1; then
+            brew install tmux
+          fi
+
       - name: Verify native runner identity and required tools
         env:
           EXPECTED_HOST: ${{ matrix.expected_host }}
         run: |
           set -euo pipefail
           host="$(rustc -vV | awk '/^host:/{print $2}')"
-          test "${host}" = "${EXPECTED_HOST}"
-          command -v tmux
-          tmux -V
-          command -v node
-          command -v npm
-          command -v file
-          command -v shasum || command -v sha256sum
+          if [ "${host}" != "${EXPECTED_HOST}" ]; then
+            echo "::error::native host mismatch: expected=${EXPECTED_HOST} actual=${host}"
+            exit 1
+          fi
+          require_tool() {
+            local name="$1"
+            if ! command -v "${name}" >/dev/null 2>&1; then
+              echo "::error::missing required tool: ${name}"
+              exit 1
+            fi
+          }
+          require_tool tmux
+          require_tool node
+          require_tool npm
+          require_tool file
+          if command -v shasum >/dev/null 2>&1; then
+            hash_tool=shasum
+          elif command -v sha256sum >/dev/null 2>&1; then
+            hash_tool=sha256sum
+          else
+            echo '::error::missing required tool: shasum or sha256sum'
+            exit 1
+          fi
           printf 'native_host=%s\n' "${host}"
-          uname -s -m
-          node --version
-          npm --version
+          printf 'tmux_version=%s\n' "$(tmux -V)"
+          printf 'node_version=%s\n' "$(node --version)"
+          printf 'npm_version=%s\n' "$(npm --version)"
+          printf 'file_version=%s\n' "$(file --version | head -n 1)"
+          printf 'hash_tool=%s\n' "${hash_tool}"
 
       - name: Run full native workspace tests
         run: cargo test --workspace --locked --no-fail-fast
