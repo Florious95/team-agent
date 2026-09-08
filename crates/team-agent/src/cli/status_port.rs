@@ -34,6 +34,9 @@ use store::{
 mod compact;
 pub(super) use compact::*;
 
+mod brief;
+pub(crate) use brief::{format_status_brief, status_brief_scoped};
+
 mod runtime;
 pub(super) use runtime::*;
 
