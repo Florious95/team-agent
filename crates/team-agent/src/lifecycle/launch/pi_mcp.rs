@@ -16,6 +16,8 @@
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -588,6 +590,55 @@ fn executable_file_type(path: &Path) -> Result<PiExecutableFileType, ProviderErr
     }
 }
 
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct PiCatalogTestObservation {
+    pub(crate) spawn_count: usize,
+    pub(crate) argv: Vec<String>,
+    pub(crate) parent_pid: Option<u32>,
+    pub(crate) parent_exit_success: Option<bool>,
+    pub(crate) parent_exit_code: Option<i32>,
+    pub(crate) reader_timeout: bool,
+}
+
+#[cfg(test)]
+struct PiCatalogTestContext {
+    receipt: PathBuf,
+    observation: PiCatalogTestObservation,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PI_CATALOG_TEST_CONTEXT: RefCell<Option<PiCatalogTestContext>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn with_pi_catalog_test_observation<T>(
+    receipt: &Path,
+    action: impl FnOnce() -> T,
+) -> (T, PiCatalogTestObservation) {
+    PI_CATALOG_TEST_CONTEXT.with(|slot| {
+        assert!(slot
+            .replace(Some(PiCatalogTestContext {
+                receipt: receipt.to_path_buf(),
+                observation: PiCatalogTestObservation::default(),
+            }))
+            .is_none());
+        let result = action();
+        let context = slot.take().expect("Pi catalog test context");
+        (result, context.observation)
+    })
+}
+
+#[cfg(test)]
+fn observe_pi_catalog_test(f: impl FnOnce(&mut PiCatalogTestContext)) {
+    PI_CATALOG_TEST_CONTEXT.with(|slot| {
+        if let Some(context) = slot.borrow_mut().as_mut() {
+            f(context);
+        }
+    });
+}
+
 /// Discover candidates with one PATH-first catalog observation. This deliberately
 /// does not resolve adapters or scan wrapper chains; callers use it only for
 /// rejecting an unqualified role model before lifecycle mutation.
@@ -596,8 +647,15 @@ pub(crate) fn run_pi_catalog(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
-    let mut child = Command::new(executable)
-        .arg("--list-models")
+    let mut command = Command::new(executable);
+    command.arg("--list-models");
+    #[cfg(test)]
+    observe_pi_catalog_test(|context| {
+        context.observation.spawn_count += 1;
+        context.observation.argv.push("--list-models".to_string());
+        command.env("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT", &context.receipt);
+    });
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -614,6 +672,8 @@ pub(crate) fn run_pi_catalog(
             let _ = error;
             "Pi executable is unavailable on PATH".to_string()
         })?;
+    #[cfg(test)]
+    observe_pi_catalog_test(|context| context.observation.parent_pid = Some(child.id()));
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
@@ -629,8 +689,19 @@ pub(crate) fn run_pi_catalog(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let (result, bytes) = receiver.recv_timeout(timeout.saturating_sub(start.elapsed()))
-                    .map_err(|_| "Pi model catalog command timed out".to_string())?;
+                #[cfg(test)]
+                observe_pi_catalog_test(|context| {
+                    context.observation.parent_exit_success = Some(status.success());
+                    context.observation.parent_exit_code = status.code();
+                });
+                let (result, bytes) = match receiver.recv_timeout(timeout.saturating_sub(start.elapsed())) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        #[cfg(test)]
+                        observe_pi_catalog_test(|context| context.observation.reader_timeout = true);
+                        return Err("Pi model catalog command timed out".to_string());
+                    }
+                };
                 if !status.success() { return Err("Pi model catalog command failed".into()); }
                 result.map_err(|_| "Pi model catalog could not be read".to_string())?;
                 if bytes.len() as u64 > max_bytes { return Err("Pi model catalog exceeds the bounded output limit".into()); }
