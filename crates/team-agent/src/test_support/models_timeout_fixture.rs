@@ -8,6 +8,7 @@ use std::time::Duration;
 const CHILD_FLAG: &str = "--team-agent-models-timeout-child";
 const LIST_MODELS_FLAG: &str = "--list-models";
 const RECEIPT_ENV: &str = "TEAM_AGENT_MODELS_TIMEOUT_RECEIPT";
+const MODE_ENV: &str = "TEAM_AGENT_MODELS_TIMEOUT_MODE";
 const READY_SOCKET_ENV: &str = "TEAM_AGENT_MODELS_TIMEOUT_READY_SOCKET";
 const STDOUT_MARKER: &[u8] = b"__team_agent_models_timeout_descendant_stdout_v1__\n";
 
@@ -64,6 +65,27 @@ fn main() {
         std::process::exit(2);
     }
 
+    match std::env::var(MODE_ENV) {
+        Ok(mode) if mode == "exit7" => {
+            eprintln!("sensitive-token");
+            std::process::exit(7);
+        }
+        Ok(mode) if mode == "oversize" => {
+            let mut stdout = std::io::stdout();
+            let bytes = [b'x'; 64];
+            let _ = stdout.write_all(&bytes);
+            let _ = stdout.flush();
+            return;
+        }
+        Ok(mode) if mode == "sleep" => {
+            std::thread::sleep(Duration::from_secs(2));
+            return;
+        }
+        Ok(mode) if mode == "descendant" => {}
+        Err(std::env::VarError::NotPresent) => {}
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => std::process::exit(2),
+    }
+
     let receipt = receipt_path();
     let socket = PathBuf::from(format!("{}.sock", receipt.display()));
     let _ = std::fs::remove_file(&socket);
@@ -86,13 +108,12 @@ fn main() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap_or_else(|_| std::process::exit(4));
-    if append_receipt(&receipt, "child_pid", child.id()).is_err() {
-        std::process::exit(4);
-    }
-
     let (mut ready, _) = listener.accept().unwrap_or_else(|_| std::process::exit(4));
     let mut byte = [0_u8; 1];
     if ready.read_exact(&mut byte).is_err() || byte != [b'1'] {
+        std::process::exit(4);
+    }
+    if append_receipt(&receipt, "child_pid", child.id()).is_err() {
         std::process::exit(4);
     }
     let _ = std::fs::remove_file(&socket);
