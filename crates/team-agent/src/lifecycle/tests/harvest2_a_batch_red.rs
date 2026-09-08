@@ -425,7 +425,7 @@ check behind it = false green); it must reflect an actual doctor result"
 /// Mutates the process-global PATH/HOME — must not race host_cotenant's ps/tmux
 /// shims (P0 pid-probe isolation), hence `#[serial(pid_probe)]`.
 #[test]
-#[serial(pid_probe)]
+#[serial(env, pid_probe)]
 fn t3_claude_auth_hint_parse_failure_is_not_present() {
     let home = tmp_ws("t3-auth-home");
     let shim_dir = home.join("bin");
