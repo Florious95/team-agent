@@ -268,7 +268,7 @@ fn json_stdout(output: &Output, context: &str) -> Value {
     })
 }
 
-fn brief_node_for(value: &Value, name: &str) -> Option<&Value> {
+fn brief_node_for<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
     let node = value
         .get("nodes")
         .and_then(Value::as_array)?

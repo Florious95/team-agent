@@ -1303,7 +1303,7 @@ fn restart_with_selected_team_and_transport(
         )?;
         // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
         // come up still need a leader_receiver pane to deliver report_result.
-        try_autobind_leader_after_restart(
+        let attach_window_failures = try_autobind_leader_after_restart(
             &selected.run_workspace,
             Some(selected.team_key.as_str()),
             &state,
@@ -1316,6 +1316,7 @@ fn restart_with_selected_team_and_transport(
             coordinator,
             next_actions,
             attach_commands,
+            attach_window_failures,
         });
     }
     phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
@@ -1331,7 +1332,8 @@ fn restart_with_selected_team_and_transport(
     // invoked from a tmux pane should bind that pane as leader_receiver,
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
-    try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+    let attach_window_failures =
+        try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
     if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
     {
         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
@@ -1352,6 +1354,7 @@ fn restart_with_selected_team_and_transport(
         coordinator,
         next_actions,
         attach_commands,
+        attach_window_failures,
     })
 }
 
@@ -1825,9 +1828,9 @@ fn try_autobind_leader_after_restart(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
-) {
+) -> Option<serde_json::Value> {
     if std::env::var_os("TMUX_PANE").is_none() {
-        return;
+        return None;
     }
     // Provider: prefer the existing team_owner.provider (if rebind),
     // else leader_receiver.provider (stale, but still informative),
@@ -1854,6 +1857,7 @@ fn try_autobind_leader_after_restart(
     let team_str = team;
     match crate::leader::attach_leader(workspace, team_str, None, provider) {
         Ok(result) if result.ok => {
+            let debt = result.attach_window_failures.clone();
             let _ = crate::leader::registry::register_binding_from_state_best_effort(
                 workspace,
                 team_str,
@@ -1864,18 +1868,21 @@ fn try_autobind_leader_after_restart(
                 result.bound_pane_id.as_ref().map(|p| p.as_str()),
                 team_str,
             );
+            debt
         }
         Ok(result) => {
             eprintln!(
                 "team_agent::restart auto_attach_leader skipped reason={:?} team={:?}",
                 result.reason, team_str,
             );
+            None
         }
         Err(error) => {
             eprintln!(
                 "team_agent::restart auto_attach_leader failed error={error} team={team_str:?} \
                  (run `team-agent attach-leader` from your tmux pane to bind manually)",
             );
+            None
         }
     }
 }

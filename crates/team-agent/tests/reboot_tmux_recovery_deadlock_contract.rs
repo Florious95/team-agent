@@ -285,10 +285,15 @@ fn status_session_missing_downgrades_running_agents() {
         Some("unknown"),
         "RED7: missing session with cached pane facts must be brief-unknown, not running/stopped by inference; worker={worker} json={status_json}"
     );
-    assert_ne!(
+    assert_eq!(
         worker.get("activity").and_then(Value::as_str),
-        Some("working"),
-        "RED7: missing session must not preserve cached working activity; worker={worker}"
+        Some("unknown"),
+        "RED7: missing session without live probe must expose unknown activity; worker={worker}"
+    );
+    assert_eq!(
+        worker.get("health").and_then(Value::as_str),
+        Some("unknown"),
+        "RED7: missing session without live probe must expose unknown health; worker={worker}"
     );
 }
 

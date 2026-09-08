@@ -3633,17 +3633,24 @@ pub mod lifecycle_port {
                 coordinator,
                 next_actions,
                 attach_commands,
-            } => json!({
-                "ok": true,
-                "status": "restarted",
-                "session_name": session_name.as_str(),
-                "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
-                "coordinator_started": coordinator_started,
-                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
-                "next_actions": next_actions,
-                "attach_commands": attach_commands,
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+                attach_window_failures,
+            } => {
+                let mut value = json!({
+                    "ok": true,
+                    "status": "restarted",
+                    "session_name": session_name.as_str(),
+                    "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
+                    "coordinator_started": coordinator_started,
+                    "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
+                    "next_actions": next_actions,
+                    "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                });
+                if let Some(debt) = attach_window_failures {
+                    value["attach_window_failures"] = debt;
+                }
+                value
+            },
             crate::lifecycle::RestartReport::Partial {
                 session_name,
                 agents,
@@ -3652,35 +3659,42 @@ pub mod lifecycle_port {
                 coordinator,
                 next_actions,
                 attach_commands,
-            } => json!({
-                "ok": false,
-                "status": "partial",
-                "reason": "restart_agent_failed",
-                "session_name": session_name.as_str(),
-                "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
-                "failed_agents": failed_agents.iter().map(|failure| json!({
-                    "agent_id": failure.agent_id.as_str(),
-                    "restart_mode": failure.restart_mode,
-                    "decision": failure.decision,
-                    "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
-                    "phase": failure.phase,
-                    "error": failure.error,
-                    "action": crate::lifecycle::restart_failure_action(
-                        &failure.agent_id,
-                        &failure.phase,
-                        failure.session_id.as_ref(),
-                    ),
-                    "log": format!(
-                        ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
-                        failure.agent_id
-                    ),
-                })).collect::<Vec<_>>(),
-                "coordinator_started": coordinator_started,
-                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
-                "next_actions": next_actions,
-                "attach_commands": attach_commands,
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+                attach_window_failures,
+            } => {
+                let mut value = json!({
+                    "ok": false,
+                    "status": "partial",
+                    "reason": "restart_agent_failed",
+                    "session_name": session_name.as_str(),
+                    "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
+                    "failed_agents": failed_agents.iter().map(|failure| json!({
+                        "agent_id": failure.agent_id.as_str(),
+                        "restart_mode": failure.restart_mode,
+                        "decision": failure.decision,
+                        "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
+                        "phase": failure.phase,
+                        "error": failure.error,
+                        "action": crate::lifecycle::restart_failure_action(
+                            &failure.agent_id,
+                            &failure.phase,
+                            failure.session_id.as_ref(),
+                        ),
+                        "log": format!(
+                            ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
+                            failure.agent_id
+                        ),
+                    })).collect::<Vec<_>>(),
+                    "coordinator_started": coordinator_started,
+                    "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
+                    "next_actions": next_actions,
+                    "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                });
+                if let Some(debt) = attach_window_failures {
+                    value["attach_window_failures"] = debt;
+                }
+                value
+            },
             crate::lifecycle::RestartReport::Failed {
                 session_name,
                 failed_agents,

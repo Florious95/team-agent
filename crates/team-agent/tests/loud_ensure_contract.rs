@@ -205,9 +205,10 @@ fn r3_read_only_commands_report_dead_coordinator_without_spawning() {
         node.is_some(),
         "R3 guard: status brief must retain the registered worker without asserting coordinator diagnostics; json={status}"
     );
-    assert!(
-        node.and_then(|node| node.get("runtime_status").and_then(Value::as_str)) != Some("running"),
-        "R3 guard: status brief must not claim a running worker from stale coordinator state; json={status}"
+    assert_eq!(
+        node.and_then(|node| node.get("runtime_status").and_then(Value::as_str)),
+        Some("unknown"),
+        "R3 guard: stale coordinator state must produce an explicit unknown runtime status; json={status}"
     );
     let _doctor = fixture.doctor_json();
 

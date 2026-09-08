@@ -26,6 +26,8 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/brief_probe.rs"]
+mod brief_probe;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
@@ -103,6 +105,16 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         case.tmux_log()
     );
 
+    let _probe = brief_probe::install_trusted_nodeprobe_with_activity(
+        &case.fake_bin,
+        &case.new_socket(),
+        TEAM_SESSION,
+        WORKER,
+        WORKER_PANE,
+        "fake",
+        "working",
+        "normal",
+    );
     let status = case.run_ta(&[
         "status",
         "--workspace",
@@ -140,10 +152,10 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         Some(OLD_MESSAGE_ID),
         "R1: fresh restart must clear stale current_turn_message_id/current task identity; worker={worker}; state={state}"
     );
-    assert_ne!(
+    assert_eq!(
         status_node.get("activity").and_then(Value::as_str),
         Some("working"),
-        "R1: brief must not expose stale working activity; status_node={status_node}"
+        "R1: only the accepted current probe may provide working activity after restart; status_node={status_node}"
     );
 
     let health = case.agent_health_row();
@@ -164,6 +176,16 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         Some("running"),
         "R1: clearing stale activity must not make the freshly restarted fake worker stopped; status_node={status_node}; restart={restart_json}"
     );
+    assert_eq!(
+        status_node.get("activity").and_then(Value::as_str),
+        Some("working"),
+        "R1: accepted post-restart probe must provide a current activity value; status_node={status_node}"
+    );
+    assert_eq!(
+        status_node.get("health").and_then(Value::as_str),
+        Some("normal"),
+        "R1: accepted post-restart probe must provide a current health value; status_node={status_node}"
+    );
 
     let human = case.run_ta(&[
         "status",
@@ -175,8 +197,10 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
     ]);
     let human_text = output_text(&human);
     assert!(
-        !human_text.contains("空闲"),
-        "R1: human status must not render fake READY as idle after restart; output={human_text}; status_json={status_json}"
+        human_text.contains("runtime_status: running")
+            && human_text.contains("activity: working")
+            && !human_text.contains("activity: idle"),
+        "R1: human status must render the same accepted English seven-field projection after restart; output={human_text}; status_json={status_json}"
     );
 }
 

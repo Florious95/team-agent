@@ -47,6 +47,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use serial_test::serial;
+use team_agent::coordinator::{coordinator_health, WorkspacePath};
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
@@ -103,6 +104,11 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         ],
     );
     let status_json = json_output(&status, "status after quick-start");
+    let health = coordinator_health(&WorkspacePath::new(case.target_workspace().to_path_buf()));
+    assert!(
+        health.service_available,
+        "E6 e2e setup: typed coordinator_health.service_available must be true before send; health={health:?}"
+    );
     let nodes = status_json
         .get("nodes")
         .and_then(Value::as_array)

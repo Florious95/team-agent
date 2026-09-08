@@ -83,26 +83,44 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
         "--detail must remain the same seven-field projection: status={status} detail={detail}"
     );
 
-    // Tasks/messages/results/agent_health remain scoped data consumers, but
-    // are no longer embedded in the status brief. Assert their owner_team_id
-    // isolation against the canonical state/database instead of restoring
-    // diagnostics to status.
+    // Keep these non-brief consumers on the production status read model. The
+    // brief deliberately omits diagnostics; status_scoped remains the typed
+    // owner-team boundary for the task/state and DB-backed projections.
     let state = load_runtime_state(&fixture.root).expect("load scoped state");
-    assert_eq!(task_status(&state, "teamA", "task_a").as_deref(), Some("running"));
-    assert_eq!(task_status(&state, "teamB", "task_b").as_deref(), Some("running"));
-    let conn = db_conn(&fixture.root);
-    let message_count: i64 = conn
-        .query_row("select count(*) from messages where owner_team_id = 'teamA'", [], |row| row.get(0))
-        .expect("teamA messages count");
-    let result_count: i64 = conn
-        .query_row("select count(*) from results where owner_team_id = 'teamA'", [], |row| row.get(0))
-        .expect("teamA results count");
-    let health_count: i64 = conn
-        .query_row("select count(*) from agent_health where owner_team_id = 'teamA'", [], |row| row.get(0))
-        .expect("teamA health count");
-    assert_eq!(message_count, 1);
-    assert_eq!(result_count, 1);
-    assert_eq!(health_count, 1);
+    let scoped = team_agent::cli::status_port::status_scoped(
+        &fixture.root,
+        &state,
+        Some("teamA"),
+        false,
+        true,
+    )
+    .expect("assemble teamA scoped status");
+    let team_tasks = scoped
+        .pointer("/teams/teamA/tasks")
+        .and_then(Value::as_array)
+        .expect("teamA tasks from scoped status");
+    assert_eq!(task_ids_from(team_tasks), vec!["task_a".to_string()]);
+    assert!(
+        !task_ids_from(team_tasks).contains(&"task_b".to_string()),
+        "teamA scoped task projection must not contain sibling tasks: {scoped}"
+    );
+    let messages = scoped
+        .get("messages")
+        .and_then(Value::as_object)
+        .expect("scoped messages projection");
+    assert_eq!(status_count_total(messages), 1);
+    let results = scoped
+        .get("results")
+        .and_then(Value::as_object)
+        .expect("scoped results projection");
+    assert_eq!(results.get("total").and_then(Value::as_i64), Some(1));
+    let health = scoped
+        .get("agent_health")
+        .and_then(Value::as_object)
+        .expect("scoped health projection");
+    assert_eq!(health.len(), 1);
+    assert!(health.contains_key("worker_a"));
+    assert!(!health.contains_key("worker_b"));
 }
 
 #[test]
@@ -344,14 +362,15 @@ fn assert_brief_nodes(value: &Value, expected_names: &[&str]) {
     }
 }
 
-fn task_ids(status: &Value) -> Vec<String> {
-    status
-        .get("tasks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+fn task_ids_from(tasks: &[Value]) -> Vec<String> {
+    tasks
+        .iter()
         .filter_map(|task| task.get("id").and_then(Value::as_str).map(str::to_string))
         .collect()
+}
+
+fn status_count_total(counts: &serde_json::Map<String, Value>) -> i64 {
+    counts.values().filter_map(Value::as_i64).sum()
 }
 
 fn collected_result_ids(value: &Value) -> Vec<String> {

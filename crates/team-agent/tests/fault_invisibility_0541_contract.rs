@@ -8,6 +8,8 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
+#[path = "support/brief_probe.rs"]
+mod brief_probe;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
@@ -76,15 +78,20 @@ fn cross_boot_stale_bindings_are_visible_in_status_and_diagnose_without_mutation
     let diagnose = case.diagnose_json_with_host_boot("new-boot");
     let worker = brief_node(&status, WORKER)
         .unwrap_or_else(|| panic!("RED1 setup: brief status missing helper; status={status}"));
-    assert_ne!(
+    assert_eq!(
         worker.get("runtime_status").and_then(Value::as_str),
-        Some("running"),
-        "RED1: cross-boot stale worker must not keep cached running state; worker={worker}"
+        Some("unknown"),
+        "RED1: cross-boot stale worker without an accepted probe must expose unknown runtime; worker={worker}"
     );
     assert_eq!(
         worker.get("activity").and_then(Value::as_str),
         Some("unknown"),
         "RED1: without a valid probe, stale activity must remain unknown; worker={worker}"
+    );
+    assert_eq!(
+        worker.get("health").and_then(Value::as_str),
+        Some("unknown"),
+        "RED1: without a valid probe, stale health must remain unknown; worker={worker}"
     );
     let human = case.run_ta(
         &["status", "--workspace", case.workspace_str(), "--team", TEAM],
@@ -242,13 +249,27 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
         "RED4: provider exit marker means provider_process_dead even though pane remains alive; watch={watch}"
     );
 
+    let _no_probe_path = case.env.with_env(
+        "PATH",
+        case.fake_bin.to_str().expect("fake bin path utf8"),
+    );
     let status = case.status_json();
     let worker = brief_node(&status, WORKER)
         .unwrap_or_else(|| panic!("RED4 setup: brief status missing helper; status={status}"));
-    assert_ne!(
+    assert_eq!(
+        worker.get("runtime_status").and_then(Value::as_str),
+        Some("unknown"),
+        "RED4: provider-exited wrapper without an accepted probe must expose unknown runtime; worker={worker}; status={status}"
+    );
+    assert_eq!(
         worker.get("activity").and_then(Value::as_str),
-        Some("working"),
-        "RED4: provider-exited wrapper pane must not remain working from cached state; worker={worker}; status={status}"
+        Some("unknown"),
+        "RED4: provider-exited wrapper must not remain working from cached state; worker={worker}; status={status}"
+    );
+    assert_eq!(
+        worker.get("health").and_then(Value::as_str),
+        Some("unknown"),
+        "RED4: provider-exited wrapper without an accepted probe must expose unknown health; worker={worker}; status={status}"
     );
     let human = case.run_ta(
         &["status", "--workspace", case.workspace_str(), "--team", TEAM],
@@ -263,12 +284,34 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
     let live = WatchCase::new("red4-live-provider-guard");
     live.seed_state(live_provider_worker());
     live.seed_agent_health("WORKING");
+    let probe = brief_probe::install_trusted_nodeprobe_with_activity(
+        &live.workspace.join("probe"),
+        TMUX_ENDPOINT,
+        TEAM_SESSION,
+        WORKER,
+        WORKER_PANE,
+        "codex",
+        "working",
+        "normal",
+    );
+    let _probe_path = live.env.with_env(
+        "PATH",
+        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
+    );
     let live_status = live.status_json();
     let live_node = brief_node(&live_status, WORKER).expect("live status brief worker");
-    assert_eq!(
-        live_node.get("name").and_then(Value::as_str),
-        Some(WORKER),
-        "RED4 guard: a live provider current-command must remain addressable in the brief; status={live_status}"
+    assert_eq!(live_node.get("name").and_then(Value::as_str), Some(WORKER));
+    assert_eq!(live_node.get("provider").and_then(Value::as_str), Some("codex"));
+    assert_eq!(live_node.get("runtime_status").and_then(Value::as_str), Some("running"));
+    assert_eq!(live_node.get("activity").and_then(Value::as_str), Some("working"));
+    assert_eq!(live_node.get("health").and_then(Value::as_str), Some("normal"));
+    assert_eq!(live_node.get("session_name").and_then(Value::as_str), Some(TEAM_SESSION));
+    assert!(
+        live_node
+            .get("tmux_command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains(TMUX_ENDPOINT) && command.contains("team-current:helper.%541")),
+        "RED4 guard: trusted live probe must retain the exact endpoint/session/pane proof; status={live_status}"
     );
 }
 

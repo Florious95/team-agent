@@ -18,6 +18,8 @@ mod hermetic_guard;
 
 #[path = "../../../tests/support/composite_source.rs"]
 mod composite_source;
+#[path = "../../../tests/support/brief_probe.rs"]
+mod brief_probe;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -97,6 +99,18 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
     let case = B0HideOneCase::new("status-diagnose-hide-one");
     let root = case.current_state();
     save_runtime_state(&case.workspace, &root).expect("seed current root state");
+    let probe = brief_probe::install_trusted_nodeprobe(
+        &case.workspace.join("probe"),
+        NEW_ENDPOINT,
+        SESSION,
+        WORKER,
+        "%new",
+        "fake",
+    );
+    let _path = case.env.with_env(
+        "PATH",
+        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
+    );
 
     let status_before = case.run_json(&[
         "status",
@@ -140,9 +154,16 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
         panic!("F0-3 RED3: status must retain the worker in the seven-field projection; before={status_before} after={status_after}")
     });
     assert_eq!(node.get("name").and_then(Value::as_str), Some(WORKER));
+    assert_eq!(node.get("provider").and_then(Value::as_str), Some("fake"));
+    assert_eq!(node.get("runtime_status").and_then(Value::as_str), Some("running"));
+    assert_eq!(node.get("activity").and_then(Value::as_str), Some("idle"));
+    assert_eq!(node.get("health").and_then(Value::as_str), Some("normal"));
+    assert_eq!(node.get("session_name").and_then(Value::as_str), Some(SESSION));
     assert!(
-        node.get("runtime_status").and_then(Value::as_str) != Some("running"),
-        "F0-3 RED3: stale snapshot must not make the brief claim a running worker; node={node}"
+        node.get("tmux_command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains(NEW_ENDPOINT) && command.contains("team-b0-hideone:worker.%new")),
+        "F0-3 RED3: trusted root probe must produce a non-empty exact endpoint command; node={node}"
     );
     assert_eq!(
         worker_status_tuple(&status_before),

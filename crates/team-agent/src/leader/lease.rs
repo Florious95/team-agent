@@ -133,6 +133,9 @@ pub fn attach_leader(
             }
             let recovery =
                 requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
+            let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
+            let attach_window_failures =
+                attach_window_failure_value(recovery.blocked_counts, &team_id, &pane_id);
             return Ok(LeaseResult {
                 ok: true,
                 status: LeaseStatus::Claimed,
@@ -146,11 +149,7 @@ pub fn attach_leader(
                     .map(str::to_string),
                 bound_pane_id: Some(pane_id),
                 topology_convergence: None,
-                attach_window_failures: attach_window_failure_value(
-                    recovery.blocked_counts,
-                    &TeamKey::new(crate::state::projection::team_state_key(&state)),
-                    &pane_id,
-                ),
+                attach_window_failures,
             });
         }
         event_log.write(
@@ -176,6 +175,9 @@ pub fn attach_leader(
             quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
         }
         let recovery = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
+        let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
+        let attach_window_failures =
+            attach_window_failure_value(recovery.blocked_counts, &team_id, &pane_id);
         return Ok(LeaseResult {
             ok: true,
             status: LeaseStatus::AlreadyBound,
@@ -186,11 +188,7 @@ pub fn attach_leader(
             action: None,
             bound_pane_id: Some(pane_id),
             topology_convergence: None,
-            attach_window_failures: attach_window_failure_value(
-                recovery.blocked_counts,
-                &TeamKey::new(crate::state::projection::team_state_key(&state)),
-                &pane_id,
-            ),
+            attach_window_failures,
         });
     }
     let identity = leader_identity_context(workspace, None, Some(&state))?;
@@ -208,6 +206,9 @@ pub fn attach_leader(
         quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
     }
     let recovery = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
+    let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
+    let attach_window_failures =
+        attach_window_failure_value(recovery.blocked_counts, &team_id, &pane_id);
     Ok(LeaseResult {
         ok: true,
         status: LeaseStatus::Claimed,
@@ -218,11 +219,7 @@ pub fn attach_leader(
         action: None,
         bound_pane_id: Some(pane_id),
         topology_convergence: None,
-        attach_window_failures: attach_window_failure_value(
-            recovery.blocked_counts,
-            &TeamKey::new(crate::state::projection::team_state_key(&state)),
-            &pane_id,
-        ),
+        attach_window_failures,
     })
 }
 
