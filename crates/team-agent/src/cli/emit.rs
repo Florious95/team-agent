@@ -85,8 +85,29 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     }
     match dispatch(command, &argv[1..], cwd) {
         Ok(exit) => exit,
-        Err(error) => emit_cli_error(command, &argv[1..], cwd, &error),
+        Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
     }
+}
+
+fn emit_cli_error_for_command(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    error: &CliError,
+) -> ExitCode {
+    if command == "status" {
+        emit_status_cli_error(error)
+    } else {
+        emit_cli_error(command, args, cwd, error)
+    }
+}
+
+fn emit_status_cli_error(error: &CliError) -> ExitCode {
+    let normalized = normalize_cli_error(error);
+    let payload_error = normalized.as_ref().unwrap_or(error);
+    let safe_error = crate::redaction::redact_external_text(&payload_error.to_string());
+    eprintln!("error: {safe_error}");
+    ExitCode::Error
 }
 
 /// Print a handler's CmdResult to stdout (emit formats json/human), then surface its exit code.
@@ -387,7 +408,7 @@ fn command_help(command: Option<&str>) -> String {
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或 nodeprobe 证据时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]\n\nPrints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
@@ -2184,11 +2205,18 @@ mod tests {
     }
 
     #[test]
-    fn status_help_mentions_summary_for_error_details() {
-        assert!(
-            command_help(Some("status")).contains("错误细分走 status --summary"),
-            "status help must tell users where detailed error classes live"
-        );
+    fn status_help_describes_brief_projection_and_unknown_boundary() {
+        let help = command_help(Some("status"));
+        for marker in [
+            "name/provider/runtime_status/activity/health/session_name/tmux_command",
+            "人读与 --json 使用同一投影",
+            "显示 unknown",
+            "tmux_command",
+            "不增加诊断字段",
+        ] {
+            assert!(help.contains(marker), "status help missing {marker}: {help}");
+        }
+        assert!(!help.contains("错误细分走 status --summary"));
     }
 
     #[test]

@@ -295,8 +295,11 @@ fn cmd_status_human_and_json_fail_on_selector_errors() {
     for json_out in [false, true] {
         assert!(cmd_status(&status_args(&bad, json_out, None, None)).is_err());
     }
+    let before_bad = snapshot_tree(&bad);
     assert_ne!(status_run(&bad, &[]), ExitCode::Ok);
+    assert_eq!(before_bad, snapshot_tree(&bad));
     assert_ne!(status_run(&bad, &["--json"]), ExitCode::Ok);
+    assert_eq!(before_bad, snapshot_tree(&bad));
 
     let missing = std::env::temp_dir()
         .join(format!(
@@ -315,6 +318,9 @@ fn cmd_status_human_and_json_fail_on_selector_errors() {
             "{err}"
         );
     }
+    assert_ne!(status_run(&missing, &[]), ExitCode::Ok);
+    assert_ne!(status_run(&missing, &["--json"]), ExitCode::Ok);
+    assert!(!missing.exists(), "status errors must not create workspace paths");
 
     let _ = std::fs::remove_dir_all(&multi);
     let _ = std::fs::remove_dir_all(&one);

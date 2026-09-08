@@ -62,6 +62,12 @@ struct ProbeResult {
     nodes: Vec<ProbeNode>,
 }
 
+enum MatchResult<'a> {
+    Missing,
+    Unique(&'a ProbeNode),
+    Ambiguous,
+}
+
 /// The CLI's concise JSON projection. `agent` filters the registered list but
 /// never synthesizes an unregistered node.
 pub(crate) fn status_brief_scoped(
@@ -354,11 +360,9 @@ fn nodeprobe_binaries() -> Vec<PathBuf> {
             return vec![path];
         }
     }
-    let mut binaries = vec![PathBuf::from("nodeprobe")];
-    if let Some(home) = std::env::var_os("HOME") {
-        binaries.push(PathBuf::from(home).join(".local/bin/nodeprobe"));
-    }
-    binaries
+    // No trusted receipt binds the installed binary to the accepted producer
+    // capability; fail closed until an authorized rollout supplies one.
+    Vec::new()
 }
 
 fn configure_nodeprobe_command(command: &mut Command) {
@@ -439,22 +443,22 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
         node.lifecycle.as_deref(),
         Some("stopped" | "done" | "failed" | "error" | "terminated")
     );
-    let matched = unique_match(node, probe);
-    if stopped && matched.is_some() {
-        return BriefNode::unknown(node);
-    }
+    let matched = match_result(node, probe);
     if stopped {
-        return BriefNode {
-            name: node.name.clone(),
-            provider: node.provider.clone(),
-            runtime_status: "stopped".to_string(),
-            activity: "unknown".to_string(),
-            health: "unknown".to_string(),
-            session_name: None,
-            tmux_command: None,
+        return match matched {
+            MatchResult::Missing => BriefNode {
+                name: node.name.clone(),
+                provider: node.provider.clone(),
+                runtime_status: "stopped".to_string(),
+                activity: "unknown".to_string(),
+                health: "unknown".to_string(),
+                session_name: None,
+                tmux_command: None,
+            },
+            MatchResult::Unique(_) | MatchResult::Ambiguous => BriefNode::unknown(node),
         };
     }
-    let Some(observed) = matched else {
+    let MatchResult::Unique(observed) = matched else {
         return BriefNode::unknown(node);
     };
     if !node.provider.eq_ignore_ascii_case("unknown")
@@ -489,18 +493,24 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
     }
 }
 
-fn unique_match<'a>(
+fn match_result<'a>(
     node: &RegisteredNode,
     probe: Option<&'a Option<ProbeResult>>,
-) -> Option<&'a ProbeNode> {
-    let probe = probe.and_then(|probe| probe.as_ref())?;
+) -> MatchResult<'a> {
+    let Some(probe) = probe.and_then(|probe| probe.as_ref()) else {
+        return MatchResult::Missing;
+    };
     let mut matches = probe
         .nodes
         .iter()
         .filter(|observed| matches_registered(node, observed));
-    match (matches.next(), matches.next()) {
-        (Some(observed), None) => Some(observed),
-        _ => None,
+    let Some(first) = matches.next() else {
+        return MatchResult::Missing;
+    };
+    if matches.next().is_some() {
+        MatchResult::Ambiguous
+    } else {
+        MatchResult::Unique(first)
     }
 }
 
@@ -649,6 +659,20 @@ mod tests {
         node.lifecycle = Some("stopped".to_string());
         let observed = probe("pi_activity_channel");
         let projected = project_node(&node, Some(&Some(ProbeResult { nodes: vec![observed] })));
+        assert_eq!(projected.runtime_status, "unknown");
+        assert!(projected.tmux_command.is_none());
+    }
+
+    #[test]
+    fn stopped_with_duplicate_live_samples_is_unknown_conflict() {
+        let mut node = registered();
+        node.lifecycle = Some("stopped".to_string());
+        let projected = project_node(
+            &node,
+            Some(&Some(ProbeResult {
+                nodes: vec![probe("pi_activity_channel"), probe("pi_activity_channel")],
+            })),
+        );
         assert_eq!(projected.runtime_status, "unknown");
         assert!(projected.tmux_command.is_none());
     }
