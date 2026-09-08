@@ -185,7 +185,8 @@ fn with_test_nodeprobe_candidate<R>(
 
 #[cfg(test)]
 fn write_test_capability_receipt(path: &Path) {
-    let binary_sha256 = sha256_file(path).expect("test nodeprobe fixture hash");
+    let binary_sha256 =
+        sha256_file(path, Instant::now() + NODEPROBE_TIMEOUT).expect("test nodeprobe fixture hash");
     let receipt = json!({
         "schema": NODEPROBE_RECEIPT_SCHEMA,
         "binary": NODEPROBE_NAME,
