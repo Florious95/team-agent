@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{json, Value};
+use serial_test::serial;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -141,6 +142,7 @@ fn status_run(ws: &Path, extra: &[&str]) -> ExitCode {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_from_production_registration_and_report() {
     let ws = brief_workspace("prod");
     write_state(
@@ -181,6 +183,7 @@ fn cmd_status_from_production_registration_and_report() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_dedupes_same_endpoint_across_agents() {
     let ws = brief_workspace("dedupe");
     write_state(
@@ -210,6 +213,7 @@ fn cmd_status_dedupes_same_endpoint_across_agents() {
 }
 
 #[test]
+#[serial(status_brief)]
 fn cmd_status_is_readonly_on_legacy_and_multi_team_state() {
     let ws = brief_workspace("readonly");
     let legacy = json!({
@@ -260,6 +264,7 @@ fn cmd_status_is_readonly_on_legacy_and_multi_team_state() {
 }
 
 #[test]
+#[serial(status_brief)]
 fn cmd_status_human_and_json_fail_on_selector_errors() {
     let multi = brief_workspace("ambiguous");
     write_state(
@@ -338,6 +343,7 @@ fn cmd_status_human_and_json_fail_on_selector_errors() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_does_not_spawn_unbound_or_mismatched_nodeprobe() {
     let cases = [
         ("missing-receipt", None, None),
@@ -401,6 +407,7 @@ fn cmd_status_does_not_spawn_unbound_or_mismatched_nodeprobe() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_resolver_rejects_fifo_and_oversized_receipts_without_spawn() {
     let cases = ["fifo-receipt", "oversized-receipt"];
     for tag in cases {
@@ -472,6 +479,7 @@ fn cmd_status_resolver_rejects_fifo_and_oversized_receipts_without_spawn() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_resolver_late_result_cannot_spawn_after_deadline() {
     let ws = brief_workspace("resolver-late-result");
     write_state(
@@ -486,23 +494,49 @@ fn cmd_status_resolver_late_result_cannot_spawn_after_deadline() {
     );
     let started = Instant::now();
     status_port::with_test_nodeprobe(bin, || {
-        status_port::with_test_nodeprobe_resolver_delay(Duration::from_millis(2500), || {
-            let nodes = json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"));
+        let signal = status_port::with_test_nodeprobe_resolver_delay(
+            Duration::from_millis(2500),
+            |signal| {
+                let nodes = json_nodes(
+                    cmd_status(&status_args(&ws, true, None, None)).expect("status"),
+                );
+                assert_eq!(nodes[0]["runtime_status"], "unknown");
+                signal.clone()
+            },
+        );
+        let entered_deadline = Instant::now() + Duration::from_secs(1);
+        while !signal.entered() && Instant::now() < entered_deadline {
+            std::thread::yield_now();
+        }
+        assert!(signal.entered(), "resolver delay seam was not entered");
+        let finished_deadline = Instant::now() + Duration::from_secs(3);
+        while !signal.finished() && Instant::now() < finished_deadline {
+            std::thread::yield_now();
+        }
+        assert!(signal.finished(), "resolver worker did not finish");
+        assert!(!log.exists(), "late resolver result must not spawn probe");
+
+        let release_deadline = Instant::now() + Duration::from_secs(3);
+        while !log.exists() && Instant::now() < release_deadline {
+            let nodes = json_nodes(
+                cmd_status(&status_args(&ws, true, None, None)).expect("status"),
+            );
             assert_eq!(nodes[0]["runtime_status"], "unknown");
-        });
+            std::thread::yield_now();
+        }
+        assert!(log.exists(), "normal selection must prove resolver gate release");
     });
     assert!(
         started.elapsed() < Duration::from_millis(2400),
         "resolver delay blocked status caller: {:?}",
         started.elapsed()
     );
-    std::thread::sleep(Duration::from_millis(700));
-    assert!(!log.exists(), "late resolver result must not spawn probe");
     let _ = std::fs::remove_dir_all(&ws);
 }
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_rejects_producer_error_and_wrong_socket_as_unknown() {
     let cases = [
         (
@@ -549,6 +583,7 @@ fn cmd_status_rejects_producer_error_and_wrong_socket_as_unknown() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_zero_match_and_stopped_conflict_stay_unknown() {
     let ws = brief_workspace("zero-match");
     write_state(
@@ -583,6 +618,7 @@ fn cmd_status_zero_match_and_stopped_conflict_stay_unknown() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_shared_deadline_reaps_inherited_stdout_child() {
     let ws = brief_workspace("hang");
     write_state(
@@ -622,6 +658,7 @@ fn cmd_status_shared_deadline_reaps_inherited_stdout_child() {
 
 #[cfg(unix)]
 #[test]
+#[serial(status_brief)]
 fn cmd_status_multi_endpoint_uses_total_budget() {
     let ws = brief_workspace("budget");
     let mut beta = production_agent("beta", "%8");

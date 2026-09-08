@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+#[cfg(test)]
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,7 +44,7 @@ const NODEPROBE_FORBIDDEN: &[&str] = &[
 #[cfg(test)]
 thread_local! {
     static TEST_NODEPROBE: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
-    static TEST_RESOLVER_DELAY: std::cell::RefCell<Option<Duration>> = const { std::cell::RefCell::new(None) };
+    static TEST_RESOLVER_DELAY: std::cell::RefCell<Option<TestResolverDelay>> = const { std::cell::RefCell::new(None) };
 }
 
 static NODEPROBE_RESOLVER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -172,19 +174,52 @@ pub(crate) fn with_test_nodeprobe_candidates<R>(
 }
 
 #[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ResolverDelaySignal {
+    entered: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+impl ResolverDelaySignal {
+    pub(crate) fn entered(&self) -> bool {
+        self.entered.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TestResolverDelay {
+    delay: Duration,
+    signal: ResolverDelaySignal,
+}
+
+#[cfg(test)]
 pub(crate) fn with_test_nodeprobe_resolver_delay<R>(
     delay: Duration,
-    func: impl FnOnce() -> R,
+    func: impl FnOnce(&ResolverDelaySignal) -> R,
 ) -> R {
-    struct Guard(Option<Duration>);
+    struct Guard(Option<TestResolverDelay>);
     impl Drop for Guard {
         fn drop(&mut self) {
             TEST_RESOLVER_DELAY.with(|slot| *slot.borrow_mut() = self.0.take());
         }
     }
-    let previous = TEST_RESOLVER_DELAY.with(|slot| slot.replace(Some(delay)));
+    let config = TestResolverDelay {
+        delay,
+        signal: ResolverDelaySignal {
+            entered: Arc::new(AtomicBool::new(false)),
+            finished: Arc::new(AtomicBool::new(false)),
+        },
+    };
+    let signal = config.signal.clone();
+    let previous = TEST_RESOLVER_DELAY.with(|slot| slot.replace(Some(config)));
     let _guard = Guard(previous);
-    func()
+    func(&signal)
 }
 
 #[cfg(test)]
@@ -200,7 +235,16 @@ fn with_test_nodeprobe_candidate<R>(
     }
     let previous = TEST_NODEPROBE.with(|slot| slot.replace(Some(paths)));
     let _guard = Guard(previous);
-    func()
+    let result = func();
+    let deadline = Instant::now() + NODEPROBE_TIMEOUT;
+    while NODEPROBE_RESOLVER_ACTIVE.load(Ordering::Acquire) && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    assert!(
+        !NODEPROBE_RESOLVER_ACTIVE.load(Ordering::Acquire),
+        "test nodeprobe fixture ended while resolver worker was still active"
+    );
+    result
 }
 
 #[cfg(test)]
@@ -456,17 +500,17 @@ fn spawn_nodeprobe(binary: &Path, endpoint: &str) -> Option<Child> {
     command.spawn().ok()
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct ResolverOptions {
     #[cfg(test)]
-    delay_after_selection: Option<Duration>,
+    delay_after_selection: Option<TestResolverDelay>,
 }
 
 fn resolver_options() -> ResolverOptions {
     #[cfg(test)]
     {
         return ResolverOptions {
-            delay_after_selection: TEST_RESOLVER_DELAY.with(|slot| *slot.borrow()),
+            delay_after_selection: TEST_RESOLVER_DELAY.with(|slot| slot.borrow().clone()),
         };
     }
     #[cfg(not(test))]
@@ -503,14 +547,24 @@ fn resolve_nodeprobe_binary(
         .name("team-agent-nodeprobe-resolver".to_string())
         .spawn(move || {
             let _guard = ResolverActiveGuard;
+            #[cfg(test)]
+            let delay_signal = options
+                .delay_after_selection
+                .as_ref()
+                .map(|config| config.signal.clone());
             let result = select_nodeprobe_binary(candidates, deadline);
             if result.is_some() {
                 #[cfg(test)]
-                if let Some(delay) = options.delay_after_selection {
-                    thread::sleep(delay);
+                if let Some(config) = options.delay_after_selection {
+                    config.signal.entered.store(true, Ordering::Release);
+                    thread::sleep(config.delay);
                 }
             }
             let _ = tx.send(result);
+            #[cfg(test)]
+            if let Some(signal) = delay_signal {
+                signal.finished.store(true, Ordering::Release);
+            }
         });
     if worker.is_err() {
         NODEPROBE_RESOLVER_ACTIVE.store(false, Ordering::Release);
