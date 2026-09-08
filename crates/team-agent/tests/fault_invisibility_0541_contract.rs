@@ -19,7 +19,7 @@ use std::process::{Child, Command, Output};
 use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::status::{agent_summary_counts, format_status_csv};
+
 use team_agent::coordinator::{
     coordinator_meta_path, coordinator_pid_path, start_coordinator_with_team, stop_coordinator,
     Coordinator, MetadataSource, Pid, ProviderRegistry, StartOutcome, WorkspacePath,
@@ -47,6 +47,15 @@ const LEADER_PANE: &str = "%0";
 const TMUX_ENDPOINT: &str = "/Volumes/nvme/tmp/ta-0541-fault-invisibility.sock";
 const CALLER_IDENTITY_ENV: &str = "TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY";
 
+fn brief_node<'a>(status: &'a Value, name: &str) -> Option<&'a Value> {
+    status
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(name)
+        }))
+}
+
 #[test]
 #[serial(env)]
 fn cross_boot_stale_bindings_are_visible_in_status_and_diagnose_without_mutation() {
@@ -65,36 +74,26 @@ fn cross_boot_stale_bindings_are_visible_in_status_and_diagnose_without_mutation
 
     let status = case.status_json_with_host_boot("new-boot");
     let diagnose = case.diagnose_json_with_host_boot("new-boot");
-    let csv = format_status_csv(&status);
-    let counts = agent_summary_counts(
-        status.get("agents").unwrap_or(&Value::Null),
-        status.get("agent_health").unwrap_or(&Value::Null),
-    );
-
-    assert!(
-        value_contains(&status, "runtime_bindings_stale_after_boot"),
-        "RED1: status --json --detail must expose runtime_bindings_stale_after_boot when coordinator_tick.host_boot_id != current host boot id; status={status}"
-    );
-    let worker = status
-        .pointer("/agents/helper")
-        .unwrap_or_else(|| panic!("RED1 setup: status missing helper; status={status}"));
-    assert_eq!(
-        worker.get("stale").and_then(Value::as_bool),
-        Some(true),
-        "RED1: every pane-bound worker must be stale across host boot mismatch; worker={worker}; status={status}"
-    );
+    let worker = brief_node(&status, WORKER)
+        .unwrap_or_else(|| panic!("RED1 setup: brief status missing helper; status={status}"));
     assert_ne!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "RED1: cross-boot stale worker must not keep cached BUSY/working state; worker={worker}"
+        worker.get("runtime_status").and_then(Value::as_str),
+        Some("running"),
+        "RED1: cross-boot stale worker must not keep cached running state; worker={worker}"
     );
     assert_eq!(
-        counts.busy, 0,
-        "RED1: summary counts must not count stale pre-boot WORKING health as busy; counts={counts:?}; status={status}"
+        worker.get("activity").and_then(Value::as_str),
+        Some("unknown"),
+        "RED1: without a valid probe, stale activity must remain unknown; worker={worker}"
     );
+    let human = case.run_ta(
+        &["status", "--workspace", case.workspace_str(), "--team", TEAM],
+        &[],
+    );
+    let human_text = String::from_utf8_lossy(&human.stdout);
     assert!(
-        !csv.contains("helper,工作"),
-        "RED1: human CSV must not render stale pre-boot worker as 工作; csv={csv}; status={status}"
+        human_text.contains("name: helper") && human_text.contains("runtime_status: unknown"),
+        "RED1: human status must use the same unknown brief projection; output={human_text}"
     );
     assert!(
         value_contains(&diagnose, "runtime_bindings_stale_after_boot")
@@ -124,24 +123,22 @@ fn status_uses_same_coordinator_service_truth_as_diagnose_for_four_health_shapes
 
         let status = case.status_json();
         let diagnose = case.diagnose_json();
-        let service_available = status
-            .pointer("/coordinator/service_available")
-            .and_then(Value::as_bool);
-        if service_available != Some(shape.expected_service_available()) {
+        let service_available = team_agent::coordinator::coordinator_health(
+            &team_agent::coordinator::WorkspacePath::new(case.workspace.clone()),
+        )
+        .service_available;
+        if service_available != shape.expected_service_available() {
             violations.push(format!(
-                "{}: status.coordinator.service_available must be {:?}; got {:?}; status={status}",
+                "{}: coordinator_health.service_available must be {:?}; got {:?}",
                 shape.tag(),
                 shape.expected_service_available(),
                 service_available
             ));
         }
-        if status
-            .pointer("/runtime/coordinator/ok")
-            .and_then(Value::as_bool)
-            != Some(shape.expected_service_available())
-        {
+        let node = brief_node(&status, WORKER);
+        if node.is_none() {
             violations.push(format!(
-                "{}: runtime.coordinator.ok must use service_available, not only pid-running; status={status}",
+                "{}: status brief must retain the registered worker node; status={status}",
                 shape.tag()
             ));
         }
@@ -246,28 +243,32 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
     );
 
     let status = case.status_json();
-    let worker = status
-        .pointer("/agents/helper")
-        .unwrap_or_else(|| panic!("RED4 setup: status missing helper; status={status}"));
-    let csv = format_status_csv(&status);
+    let worker = brief_node(&status, WORKER)
+        .unwrap_or_else(|| panic!("RED4 setup: brief status missing helper; status={status}"));
     assert_ne!(
-        worker.get("worker_state").and_then(Value::as_str),
-        Some("BUSY"),
-        "RED4: provider-exited wrapper pane must not remain BUSY from cached state; worker={worker}; status={status}"
+        worker.get("activity").and_then(Value::as_str),
+        Some("working"),
+        "RED4: provider-exited wrapper pane must not remain working from cached state; worker={worker}; status={status}"
     );
+    let human = case.run_ta(
+        &["status", "--workspace", case.workspace_str(), "--team", TEAM],
+        &[],
+    );
+    let human_text = String::from_utf8_lossy(&human.stdout);
     assert!(
-        !csv.contains("helper,工作") && !csv.contains("helper,空闲"),
-        "RED4: human CSV must render provider-exited wrapper as 错误/未知, not 工作/空闲; csv={csv}; status={status}"
+        human_text.contains("name: helper") && !human_text.contains("activity: working"),
+        "RED4: human brief must not render provider-exited wrapper as working; output={human_text}; status={status}"
     );
 
     let live = WatchCase::new("red4-live-provider-guard");
     live.seed_state(live_provider_worker());
     live.seed_agent_health("WORKING");
     let live_status = live.status_json();
-    let live_csv = format_status_csv(&live_status);
-    assert!(
-        live_csv.contains("helper,工作"),
-        "RED4 guard: a live provider current-command still matching codex must remain renderable as 工作; csv={live_csv}; status={live_status}"
+    let live_node = brief_node(&live_status, WORKER).expect("live status brief worker");
+    assert_eq!(
+        live_node.get("name").and_then(Value::as_str),
+        Some(WORKER),
+        "RED4 guard: a live provider current-command must remain addressable in the brief; status={live_status}"
     );
 }
 

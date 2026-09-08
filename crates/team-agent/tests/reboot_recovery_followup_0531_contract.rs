@@ -146,12 +146,35 @@ fn human_status_detail_renders_session_missing_restart_hint() {
         "--team",
         TEAM,
         "--detail",
+        "--json",
     ]);
-    let text = output_text(&status);
-
+    let status_json = json_output(&status, "R3 brief status");
+    let node = status_json
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(WORKER)
+        }))
+        .expect("R3 brief status worker");
+    assert_eq!(
+        node.get("runtime_status").and_then(Value::as_str),
+        Some("unknown"),
+        "R3: missing tmux session must not make the brief claim running/stopped without terminal registration; node={node}"
+    );
+    let diagnose = case.run_ta(&[
+        "diagnose",
+        "--workspace",
+        case.workspace_str(),
+        "--team",
+        TEAM,
+        "--json",
+    ]);
+    let diagnose_json = json_output(&diagnose, "R3 diagnose");
+    let diagnose_text = diagnose_json.to_string();
     assert!(
-        text.contains("tmux session missing") && text.contains("team-agent restart"),
-        "R3: human `status --detail` must render the same runtime.hint JSON exposes when the team tmux session is missing; output={text}; tmux_log={}",
+        diagnose_text.contains("tmux_session_missing")
+            && diagnose_text.contains("team-agent restart"),
+        "R3: diagnose must carry the restart repair for missing tmux session; diagnose={diagnose_json}; tmux_log={}",
         case.tmux_log()
     );
 }

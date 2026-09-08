@@ -136,10 +136,13 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
         "--json",
     ]);
 
-    assert_eq!(
-        status_after.pointer("/agents/worker/pane_id").and_then(Value::as_str),
-        Some("%new"),
-        "F0-3 RED3: status must not display the stale snapshot pane as the worker authority; before={status_before} after={status_after}"
+    let node = brief_node(&status_after).unwrap_or_else(|| {
+        panic!("F0-3 RED3: status must retain the worker in the seven-field projection; before={status_before} after={status_after}")
+    });
+    assert_eq!(node.get("name").and_then(Value::as_str), Some(WORKER));
+    assert!(
+        node.get("runtime_status").and_then(Value::as_str) != Some("running"),
+        "F0-3 RED3: stale snapshot must not make the brief claim a running worker; node={node}"
     );
     assert_eq!(
         worker_status_tuple(&status_before),
@@ -333,18 +336,25 @@ impl B0HideOneCase {
     }
 }
 
+fn brief_node(status: &Value) -> Option<&Value> {
+    status
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(WORKER)
+        }))
+}
+
 fn worker_status_tuple(status: &Value) -> Value {
-    let worker = status
-        .get("agents")
-        .and_then(Value::as_object)
-        .and_then(|agents| agents.get(WORKER))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let worker = brief_node(status).cloned().unwrap_or(Value::Null);
     json!({
-        "ok": status.get("ok").cloned().unwrap_or(Value::Null),
-        "pane_id": worker.get("pane_id").cloned().unwrap_or(Value::Null),
-        "status": worker.get("status").cloned().unwrap_or(Value::Null),
-        "readiness": status.get("readiness").cloned().unwrap_or(Value::Null),
+        "name": worker.get("name").cloned().unwrap_or(Value::Null),
+        "provider": worker.get("provider").cloned().unwrap_or(Value::Null),
+        "runtime_status": worker.get("runtime_status").cloned().unwrap_or(Value::Null),
+        "activity": worker.get("activity").cloned().unwrap_or(Value::Null),
+        "health": worker.get("health").cloned().unwrap_or(Value::Null),
+        "session_name": worker.get("session_name").cloned().unwrap_or(Value::Null),
+        "tmux_command": worker.get("tmux_command").cloned().unwrap_or(Value::Null),
     })
 }
 

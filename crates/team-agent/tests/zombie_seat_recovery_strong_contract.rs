@@ -153,14 +153,19 @@ impl SeatCase {
     }
 
     fn status_agent(&self, agent: &str) -> Option<Value> {
-        let (_, value) = self.cli_json(&[
-            "status",
-            "--workspace",
-            self.workspace_str(),
-            "--team",
-            &self.team,
-            "--json",
-        ]);
+        // Death classification remains an internal full-API contract; the
+        // public status command intentionally exposes only the seven-field
+        // brief projection.
+        let state = team_agent::state::persist::load_runtime_state(&self.workspace)
+            .expect("load canonical state");
+        let value = team_agent::cli::status_port::status_scoped(
+            &self.workspace,
+            &state,
+            Some(&self.team),
+            false,
+            true,
+        )
+        .expect("assemble full diagnostic status API");
         value
             .get("agents")
             .and_then(|agents| agents.get(agent))

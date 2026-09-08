@@ -195,13 +195,19 @@ fn r3_read_only_commands_report_dead_coordinator_without_spawning() {
         "R3 guard: diagnose must report stale coordinator_unavailable; json={diagnose}"
     );
     let status = fixture.status_json();
+    let node = status
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some("worker-1")
+        }));
     assert!(
-        status
-            .pointer("/coordinator/status")
-            .and_then(Value::as_str)
-            == Some("stale")
-            || status_reason(&status, "coordinator_not_running"),
-        "R3 guard: status must report stale/dead coordinator without spawning; json={status}"
+        node.is_some(),
+        "R3 guard: status brief must retain the registered worker without asserting coordinator diagnostics; json={status}"
+    );
+    assert!(
+        node.and_then(|node| node.get("runtime_status").and_then(Value::as_str)) != Some("running"),
+        "R3 guard: status brief must not claim a running worker from stale coordinator state; json={status}"
     );
     let _doctor = fixture.doctor_json();
 

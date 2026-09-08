@@ -5260,11 +5260,14 @@ pub mod leader_port {
         if let Some(topology_convergence) = result.topology_convergence {
             out.insert("topology_convergence".to_string(), topology_convergence);
         }
+        if let Some(attach_window_failures) = result.attach_window_failures {
+            out.insert("attach_window_failures".to_string(), attach_window_failures);
+        }
         Value::Object(out)
     }
 
     fn attach_lease_value(result: crate::leader::LeaseResult, requeued: Value) -> Value {
-        json!({
+        let mut value = json!({
             "ok": result.ok,
             "leader_receiver": result
                 .receiver
@@ -5277,7 +5280,11 @@ pub mod leader_port {
                 "action": result.action,
             },
             "requeued_exhausted_watchers": requeued,
-        })
+        });
+        if let Some(attach_window_failures) = result.attach_window_failures {
+            value["attach_window_failures"] = attach_window_failures;
+        }
+        value
     }
 
     fn attach_requeued_exhausted_watchers(

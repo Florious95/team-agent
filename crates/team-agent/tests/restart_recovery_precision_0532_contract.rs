@@ -38,7 +38,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::status::agent_summary_counts;
 use team_agent::coordinator::{Coordinator, ProviderRegistry, WorkspacePath};
 use team_agent::db::schema::open_db;
 use team_agent::message_store::MessageStore;
@@ -114,27 +113,37 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         "--detail",
     ]);
     let status_json = json_output(&status, "R1 status");
-    let worker = status_json
+    let status_node = status_json
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(WORKER)
+        }))
+        .unwrap_or_else(|| panic!("R1 setup: status brief must include helper; json={status_json}"));
+    let state = case.read_state();
+    let worker = state
         .pointer("/agents/helper")
-        .unwrap_or_else(|| panic!("R1 setup: status must include helper; json={status_json}"));
+        .unwrap_or_else(|| panic!("R1 setup: canonical state must include helper; state={state}"));
 
     assert_ne!(
         worker.pointer("/activity/status").and_then(Value::as_str),
         Some("working"),
-        "R1: fresh restart must not surface pre-shutdown activity.status=working; worker={worker}; state={}",
-        case.read_state()
+        "R1: fresh restart must not surface pre-shutdown activity.status=working; worker={worker}; state={state}"
     );
     assert_ne!(
         worker.get("worker_state").and_then(Value::as_str),
         Some("BUSY"),
-        "R1: fresh restart must clear pre-shutdown worker_state=BUSY; worker={worker}; state={}",
-        case.read_state()
+        "R1: fresh restart must clear pre-shutdown worker_state=BUSY; worker={worker}; state={state}"
     );
     assert_ne!(
         worker.get("current_turn_message_id").and_then(Value::as_str),
         Some(OLD_MESSAGE_ID),
-        "R1: fresh restart must clear stale current_turn_message_id/current task identity; worker={worker}; state={}",
-        case.read_state()
+        "R1: fresh restart must clear stale current_turn_message_id/current task identity; worker={worker}; state={state}"
+    );
+    assert_ne!(
+        status_node.get("activity").and_then(Value::as_str),
+        Some("working"),
+        "R1: brief must not expose stale working activity; status_node={status_node}"
     );
 
     let health = case.agent_health_row();
@@ -150,18 +159,10 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         "R1 CLI restart",
         &case.read_state(),
     );
-    let counts = agent_summary_counts(
-        status_json.get("agents").unwrap_or(&Value::Null),
-        status_json.get("agent_health").unwrap_or(&Value::Null),
-    );
     assert_eq!(
-        counts.busy, 0,
-        "R1: five-line status summary must not count stale WORKING health as busy after restart; counts={counts:?}; status_json={status_json}"
-    );
-    assert_eq!(
-        worker.get("status").and_then(Value::as_str),
+        status_node.get("runtime_status").and_then(Value::as_str),
         Some("running"),
-        "R1: clearing stale activity must not make the freshly restarted fake worker stopped; worker={worker}; restart={restart_json}"
+        "R1: clearing stale activity must not make the freshly restarted fake worker stopped; status_node={status_node}; restart={restart_json}"
     );
 
     let human = case.run_ta(&[

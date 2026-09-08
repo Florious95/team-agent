@@ -32,6 +32,11 @@ pub(crate) struct AppliedLeaderGrant {
     pub(crate) receiver: Value,
 }
 
+#[derive(Debug, Default)]
+struct AttachRecovery {
+    blocked_counts: crate::message_store::BlockedLeaderRequeueCounts,
+}
+
 #[derive(Debug)]
 pub(crate) struct AttachLeaderError {
     source: LeaderError,
@@ -126,7 +131,7 @@ pub fn attach_leader(
             if let Some(endpoint) = target.endpoint.as_deref() {
                 quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
             }
-            let _ =
+            let recovery =
                 requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
             return Ok(LeaseResult {
                 ok: true,
@@ -141,6 +146,11 @@ pub fn attach_leader(
                     .map(str::to_string),
                 bound_pane_id: Some(pane_id),
                 topology_convergence: None,
+                attach_window_failures: attach_window_failure_value(
+                    recovery.blocked_counts,
+                    &TeamKey::new(crate::state::projection::team_state_key(&state)),
+                    &pane_id,
+                ),
             });
         }
         event_log.write(
@@ -165,7 +175,7 @@ pub fn attach_leader(
         if let Some(endpoint) = target.endpoint.as_deref() {
             quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
         }
-        let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
+        let recovery = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
         return Ok(LeaseResult {
             ok: true,
             status: LeaseStatus::AlreadyBound,
@@ -176,6 +186,11 @@ pub fn attach_leader(
             action: None,
             bound_pane_id: Some(pane_id),
             topology_convergence: None,
+            attach_window_failures: attach_window_failure_value(
+                recovery.blocked_counts,
+                &TeamKey::new(crate::state::projection::team_state_key(&state)),
+                &pane_id,
+            ),
         });
     }
     let identity = leader_identity_context(workspace, None, Some(&state))?;
@@ -192,7 +207,7 @@ pub fn attach_leader(
     if let Some(endpoint) = target.endpoint.as_deref() {
         quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
     }
-    let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
+    let recovery = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
     Ok(LeaseResult {
         ok: true,
         status: LeaseStatus::Claimed,
@@ -203,6 +218,11 @@ pub fn attach_leader(
         action: None,
         bound_pane_id: Some(pane_id),
         topology_convergence: None,
+        attach_window_failures: attach_window_failure_value(
+            recovery.blocked_counts,
+            &TeamKey::new(crate::state::projection::team_state_key(&state)),
+            &pane_id,
+        ),
     })
 }
 
@@ -441,17 +461,34 @@ fn requeue_exhausted_watchers_after_attach(
     state: &Value,
     event_log: &crate::event_log::EventLog,
     pane_id: &PaneId,
-) -> Result<Vec<crate::messaging::WatcherNotice>, LeaderError> {
+) -> Result<AttachRecovery, LeaderError> {
     let store = MessageStore::open(workspace)?;
     let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
-    let notices = crate::messaging::requeue_delivery_exhausted_watchers(
-        workspace, &store, event_log, &team_id, pane_id,
-    )?;
+    let (notices, blocked_counts) =
+        crate::messaging::watchers::requeue_delivery_exhausted_watchers_with_counts(
+            workspace, &store, event_log, &team_id, pane_id,
+        )?;
     event_log.write(
         super::LeaderEvent::ReceiverRequeuedExhaustedWatchers.name(),
         requeued_exhausted_watchers_event_payload(pane_id, &team_id, &notices),
     )?;
-    Ok(notices)
+    Ok(AttachRecovery { blocked_counts })
+}
+
+fn attach_window_failure_value(
+    counts: crate::message_store::BlockedLeaderRequeueCounts,
+    team_id: &TeamKey,
+    pane_id: &PaneId,
+) -> Option<Value> {
+    (counts.blocked_leader_unbound > 0).then(|| {
+        json!({
+            "team_id": team_id.as_str(),
+            "pane_id": pane_id.as_str(),
+            "reason": "leader_not_attached",
+            "count": counts.blocked_leader_unbound,
+            "status": "requeued_pending_physical_retry",
+        })
+    })
 }
 
 /// R8 D4 (decoupled for offline byte-lock — c-lite): build the `leader_receiver.requeued_exhausted_watchers`
@@ -949,6 +986,7 @@ fn claim_lease_no_incident_with_target(
             action: None,
             bound_pane_id: Some(caller_pane.clone()),
             topology_convergence,
+            attach_window_failures: None,
         });
     }
     let owner_live = bound_pane_id.as_deref().is_some_and(|pane| {
@@ -1194,6 +1232,7 @@ fn claim_lease_no_incident_with_target(
         action: None,
         bound_pane_id: Some(caller_pane.clone()),
         topology_convergence,
+        attach_window_failures: None,
     })
 }
 
@@ -1452,6 +1491,7 @@ fn convergence_persistence_refusal(
         ),
         bound_pane_id,
         topology_convergence,
+        attach_window_failures: None,
     }
 }
 
@@ -1475,6 +1515,7 @@ fn refused(
         },
         bound_pane_id,
         topology_convergence: None,
+        attach_window_failures: None,
     }
 }
 

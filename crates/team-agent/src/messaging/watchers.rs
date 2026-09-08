@@ -702,12 +702,33 @@ pub(crate) fn requeue_blocked_leader_messages(
 /// `deliver_pending_messages` never re-picks — the new leader would never see the
 /// pending notification.
 pub fn requeue_delivery_exhausted_watchers(
-    _workspace: &Path,
+    workspace: &Path,
     store: &MessageStore,
     event_log: &EventLog,
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
+    requeue_delivery_exhausted_watchers_with_counts(
+        workspace,
+        store,
+        event_log,
+        owner_team_id,
+        claimed_pane_id,
+    )
+    .map(|(notices, _)| notices)
+}
+
+/// Attach-leader's typed recovery result. The counts come from the same
+/// owner-team scoped transaction as the watcher requeue, so an attach caller
+/// can expose only the debt created by this operation rather than scanning
+/// arbitrary historical events.
+pub(crate) fn requeue_delivery_exhausted_watchers_with_counts(
+    _workspace: &Path,
+    store: &MessageStore,
+    event_log: &EventLog,
+    owner_team_id: &TeamKey,
+    claimed_pane_id: &PaneId,
+) -> Result<(Vec<WatcherNotice>, crate::message_store::BlockedLeaderRequeueCounts), MessagingError> {
     let conn = crate::db::schema::open_db(store.db_path())?;
     let mut stmt = conn.prepare(
         "select watcher_id, result_id, status from result_watchers
@@ -748,8 +769,8 @@ pub fn requeue_delivery_exhausted_watchers(
         )?;
     }
     drop(stmt);
-    let _ = requeue_blocked_leader_messages(store, event_log, owner_team_id, claimed_pane_id)?;
-    Ok(out)
+    let counts = requeue_blocked_leader_messages(store, event_log, owner_team_id, claimed_pane_id)?;
+    Ok((out, counts))
 }
 
 /// `delivered_result_message` (`result_delivery.py:394`):内容级去重 —— 查某 result_id 是否已有

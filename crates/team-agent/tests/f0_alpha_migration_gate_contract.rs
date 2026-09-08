@@ -50,9 +50,9 @@ fn legacy_05_workspace_loads_without_b1_destructive_conversion() {
         "--json",
     ]);
     assert_eq!(
-        status.pointer("/agents/worker/pane_id").and_then(Value::as_str),
-        Some("%new"),
-        "F0-4 RED1 setup: alpha status must load the 0.5.x root/projection fixture and display the current root worker; status={status}"
+        status_node(&status).and_then(|node| node.get("name")).and_then(Value::as_str),
+        Some(WORKER),
+        "F0-4 RED1 setup: alpha status must load the 0.5.x root/projection fixture into the seven-field nodes projection; status={status}"
     );
 
     let after = read_json(&runtime_state_path(&case.workspace));
@@ -110,9 +110,9 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
     ]);
 
     assert_eq!(
-        status.pointer("/agents/worker/pane_id").and_then(Value::as_str),
-        Some("%new"),
-        "F0-4 RED2: stale legacy snapshot pane must be ignored by status/readiness authority; status={status}"
+        status_node(&status).and_then(|node| node.get("name")).and_then(Value::as_str),
+        Some(WORKER),
+        "F0-4 RED2: stale legacy snapshot must be ignored by the seven-field status authority; status={status}"
     );
     assert!(
         issue_ids(&diagnose)
@@ -365,6 +365,15 @@ impl AlphaCase {
             panic!("command did not emit JSON: args={args:?} stdout={stdout} stderr={stderr}")
         })
     }
+}
+
+fn status_node(value: &Value) -> Option<&Value> {
+    value
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(WORKER)
+        }))
 }
 
 fn issue_ids(value: &Value) -> Vec<String> {

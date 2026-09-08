@@ -49,7 +49,23 @@ fn dirty_005_cross_team_binding_pollution_keeps_explicit_team_scope() {
     );
     assert!(out.is_success(), "status --team stderr={}", out.stderr);
     let j = out.json();
-    assert_json_field_eq_str(&j, "/session_name", &worker_session_name(team_id));
+    let nodes = j
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .expect("status brief nodes");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].get("name").and_then(|v| v.as_str()), Some("a"));
+    let mut keys = nodes[0]
+        .as_object()
+        .expect("status brief node")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"]
+    );
     let dump = serde_json::to_string(&j).unwrap();
     assert!(
         !dump.contains("team-dirty005b") && !dump.contains("%polluted"),
