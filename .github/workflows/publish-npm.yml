@@ -25,6 +25,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Assert checked-out source
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -86,9 +93,6 @@ jobs:
             exit 1
           fi
 
-      - name: Run Rust tests
-        run: cargo test --workspace --locked --no-fail-fast
-
       - name: Build Rust CLI
         run: cargo build --release --bin team-agent --locked
 
@@ -102,9 +106,69 @@ jobs:
             (cd "$package_dir" && npm pack --dry-run)
           done
 
+  test-native:
+    name: Full workspace tests (${{ matrix.runner }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            expected_host: aarch64-apple-darwin
+          - runner: macos-15-intel
+            expected_host: x86_64-apple-darwin
+          - runner: ubuntu-latest
+            expected_host: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Assert checked-out source
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
+          cargo --version
+
+      - name: Verify native runner identity and required tools
+        env:
+          EXPECTED_HOST: ${{ matrix.expected_host }}
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | awk '/^host:/{print $2}')"
+          test "${host}" = "${EXPECTED_HOST}"
+          command -v tmux
+          tmux -V
+          command -v node
+          command -v npm
+          command -v file
+          command -v shasum || command -v sha256sum
+          printf 'native_host=%s\n' "${host}"
+          uname -s -m
+          node --version
+          npm --version
+
+      - name: Run full native workspace tests
+        run: cargo test --workspace --locked --no-fail-fast
+
   build-platform:
     name: Build ${{ matrix.package_name }}
-    needs: verify
+    needs: [verify, test-native]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -126,6 +190,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Assert checked-out source
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -152,6 +223,37 @@ jobs:
 
       - name: Build binary
         run: cargo build --release --bin team-agent --target "${{ matrix.target }}" --locked
+
+      - name: Verify binary architecture, version, and hash
+        env:
+          EXPECTED_VERSION: "0.5.76"
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binary="target/${EXPECTED_TARGET}/release/team-agent"
+          test -x "${binary}"
+          version_output="$("${binary}" --version)"
+          test "${version_output}" = "team-agent ${EXPECTED_VERSION}"
+          file_info="$(file "${binary}")"
+          case "${EXPECTED_TARGET}" in
+            aarch64-apple-darwin) echo "${file_info}" | grep -Eq 'Mach-O.*arm64' ;;
+            x86_64-apple-darwin) echo "${file_info}" | grep -Eq 'Mach-O.*x86_64' ;;
+            x86_64-unknown-linux-musl) echo "${file_info}" | grep -Eq 'ELF.*x86-64' ;;
+            *) echo "unsupported target ${EXPECTED_TARGET}" >&2; exit 1 ;;
+          esac
+          if command -v shasum >/dev/null 2>&1; then
+            digest="$(shasum -a 256 "${binary}" | awk '{print $1}')"
+          else
+            digest="$(sha256sum "${binary}" | awk '{print $1}')"
+          fi
+          echo "${digest}" | grep -Eq '^[0-9a-f]{64}$'
+          {
+            printf 'source_sha=%s\n' "${GITHUB_SHA}"
+            printf 'target=%s\n' "${EXPECTED_TARGET}"
+            printf 'version=%s\n' "${EXPECTED_VERSION}"
+            printf 'architecture=%s\n' "${file_info}"
+            printf 'sha256=%s\n' "${digest}"
+          } > "${RUNNER_TEMP}/team-agent-${{ matrix.package_dir }}-provenance.txt"
 
       # C-3 cr verdict — 静态断言发布前置门。Linux 包必须:
       #   ① `file` 报告 statically linked(musl 产物;接受 "statically linked"
@@ -190,11 +292,38 @@ jobs:
           "$package_bin" --help >/tmp/team-agent-help.txt
           (cd "npm/platform-packages/${{ matrix.package_dir }}" && npm pack --dry-run)
 
+      - name: Verify installer and status projection against built artifact
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/team-agent-installer-node-modules/@team-agent"
+          home="${RUNNER_TEMP}/team-agent-installer-home"
+          prefix="${RUNNER_TEMP}/team-agent-installer-prefix"
+          runtime="${RUNNER_TEMP}/team-agent-installer-runtime"
+          mkdir -p "${stage}" "${home}" "${prefix}" "${runtime}"
+          ln -s "${GITHUB_WORKSPACE}/npm/platform-packages/${{ matrix.package_dir }}" \
+            "${stage}/${{ matrix.package_dir }}"
+          export HOME="${home}"
+          export NODE_PATH="${RUNNER_TEMP}/team-agent-installer-node-modules"
+          export PATH="${prefix}/bin:${PATH}"
+          node npm/install.mjs install --prefix "${prefix}" --runtime-dir "${runtime}"
+          installed="${runtime}/0.5.76/bin/team-agent"
+          test -x "${installed}"
+          TEAM_AGENT_BINARY="${installed}" \
+            RELEASE_ACCEPTANCE_ROOT="${RUNNER_TEMP}/team-agent-status-acceptance" \
+            node scripts/release-install-acceptance.mjs
+
       - name: Upload platform package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package_dir }}
           path: npm/platform-packages/${{ matrix.package_dir }}
+          if-no-files-found: error
+
+      - name: Upload binary provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_dir }}-provenance
+          path: ${{ runner.temp }}/team-agent-${{ matrix.package_dir }}-provenance.txt
           if-no-files-found: error
 
   publish-platform:
@@ -242,6 +371,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Assert checked-out source
+        run: |
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain)"
 
       - name: Set up Node
         uses: actions/setup-node@v6
