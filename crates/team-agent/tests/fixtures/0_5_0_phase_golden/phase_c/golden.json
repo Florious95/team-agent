@@ -397,7 +397,7 @@
             {
               "name": "w1",
               "provider": "codex",
-              "runtime_status": "stopped",
+              "runtime_status": "unknown",
               "activity": "unknown",
               "health": "unknown",
               "session_name": null,
@@ -406,7 +406,7 @@
             {
               "name": "w2",
               "provider": "codex",
-              "runtime_status": "stopped",
+              "runtime_status": "unknown",
               "activity": "unknown",
               "health": "unknown",
               "session_name": null,
@@ -425,7 +425,7 @@
             {
               "name": "w1",
               "provider": "codex",
-              "runtime_status": "stopped",
+              "runtime_status": "unknown",
               "activity": "unknown",
               "health": "unknown",
               "session_name": null,
@@ -434,7 +434,7 @@
             {
               "name": "w2",
               "provider": "codex",
-              "runtime_status": "stopped",
+              "runtime_status": "unknown",
               "activity": "unknown",
               "health": "unknown",
               "session_name": null,
