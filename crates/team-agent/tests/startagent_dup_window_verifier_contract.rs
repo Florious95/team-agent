@@ -86,8 +86,8 @@ impl DupWindowCase {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        // The team's own workspace-hash socket (from `leader_attach_command`)
-        // fails `register_owned_tmux_socket` fixture-provenance naming, so
+        // The team's own registered endpoint fails
+        // `register_owned_tmux_socket` fixture-provenance naming, so
         // cleanup is done explicitly by `shutdown()` + `kill-server` instead.
         let socket = discover_socket(&env, &workspace);
         Self {
@@ -231,34 +231,20 @@ fn write_team_docs(workspace: &Path, workers: &[&str]) {
     }
 }
 
-fn discover_socket(env: &HermeticTestEnv, workspace: &Path) -> PathBuf {
-    let output = env.run_cli(
-        workspace,
-        &[
-            "status",
-            "--workspace",
-            workspace.to_str().expect("workspace utf8"),
-            "--json",
-        ],
+fn discover_socket(_env: &HermeticTestEnv, workspace: &Path) -> PathBuf {
+    let state_path = workspace
+        .join(".team")
+        .join("runtime")
+        .join("state.json");
+    let raw = std::fs::read_to_string(state_path).expect("quick-start registration state");
+    let state: Value = serde_json::from_str(&raw).expect("parse registration state");
+    let (endpoint, source) = team_agent::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(&state))
+        .expect("quick-start must persist a tmux registration endpoint");
+    assert!(
+        source.starts_with("state."),
+        "endpoint must come from persisted registration, not fallback: source={source}"
     );
-    let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
-        panic!(
-            "status --json must emit JSON; stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    let attach = value
-        .get("leader_attach_command")
-        .and_then(Value::as_str)
-        .expect("status --json must expose leader_attach_command");
-    // shape: `tmux -S <socket> attach -t <target>`
-    let socket = attach
-        .split_whitespace()
-        .skip_while(|token| *token != "-S")
-        .nth(1)
-        .expect("leader_attach_command must carry -S <socket>");
-    PathBuf::from(socket)
+    PathBuf::from(endpoint)
 }
 
 fn command_reported_ok(value: Option<&Value>) -> bool {

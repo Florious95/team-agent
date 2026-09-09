@@ -16,7 +16,8 @@ use serde_json::{json, Map, Value};
 
 use super::StateError;
 use crate::state::persist::{
-    load_runtime_state, save_runtime_state_with_deleted_agents,
+    load_runtime_state, load_runtime_state_without_migrations,
+    save_runtime_state_with_deleted_agents,
     save_runtime_state_with_lifecycle_topology_authority,
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority,
@@ -504,7 +505,22 @@ pub fn resolve_runtime_team_scope(
     workspace: &Path,
     team: Option<&str>,
 ) -> Result<TeamScopeResolution, StateError> {
-    let state = load_runtime_state(workspace)?;
+    resolve_runtime_team_scope_loaded(load_runtime_state(workspace)?, team)
+}
+
+/// Same team selection as [`resolve_runtime_team_scope`], but never migrates or
+/// writes runtime state. Status and other read-only CLI surfaces must use this.
+pub fn resolve_runtime_team_scope_readonly(
+    workspace: &Path,
+    team: Option<&str>,
+) -> Result<TeamScopeResolution, StateError> {
+    resolve_runtime_team_scope_loaded(load_runtime_state_without_migrations(workspace)?, team)
+}
+
+fn resolve_runtime_team_scope_loaded(
+    state: Value,
+    team: Option<&str>,
+) -> Result<TeamScopeResolution, StateError> {
     let alive = team_state_candidates(&state);
     // Python `if team:` —— 空串 falsy,等同无 team(对抗 P1:此前 Some("") 误入 team 分支,空
     // team_dir 匹配致歧义/未找到错误串漂移)。

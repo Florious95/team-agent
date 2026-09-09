@@ -235,14 +235,14 @@ fn status_human_and_summary_render_canonical_unknown_over_legacy_working_health(
     );
     let human_stdout = String::from_utf8_lossy(&human.stdout);
     let mut failures = Vec::new();
-    if !human_stdout.contains("helper,未知") {
+    if !human_stdout.contains("name: helper") || !human_stdout.contains("runtime_status: unknown") {
         failures.push(format!(
-            "human status must render helper,未知 when canonical worker_state=UNKNOWN/activity=uncertain; output={human_text}"
+            "human status must render the canonical helper unknown projection; output={human_text}"
         ));
     }
-    if human_stdout.contains("helper,工作") || human_stdout.contains("helper,空闲") {
+    if human_stdout.contains("activity: working") || human_stdout.contains("activity: idle") {
         failures.push(format!(
-            "human status must not render helper,工作 or helper,空闲 from legacy agent_health=WORKING; output={human_text}"
+            "human status must not render helper activity from legacy agent_health=WORKING; output={human_text}"
         ));
     }
 
@@ -264,11 +264,10 @@ fn status_human_and_summary_render_canonical_unknown_over_legacy_working_health(
         "R4 setup: status --summary must render the fixture; output={summary_text}; state={}",
         case.read_state()
     );
-    if !String::from_utf8_lossy(&summary.stdout)
-        .contains("agents: 1 — running=0 busy=0 idle=0 stopped=0 failed=0 unknown=1")
-    {
+    let summary_stdout = String::from_utf8_lossy(&summary.stdout);
+    if !summary_stdout.contains("name: helper") || !summary_stdout.contains("runtime_status: unknown") {
         failures.push(format!(
-            "summary must count the conflict fixture as unknown=1 busy=0 idle=0; output={summary_text}"
+            "summary compatibility flag must preserve the same seven-field unknown projection; output={summary_text}"
         ));
     }
     assert!(

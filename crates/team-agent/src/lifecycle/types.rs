@@ -536,6 +536,8 @@ pub struct LaunchReport {
     pub permissions: Vec<PermissionSummary>,
     /// leader receiver(attach 成功时;经 step10 leader::attach_leader_to_state)。
     pub leader_receiver_attached: bool,
+    pub leader_bind_stage: Option<String>,
+    pub leader_bind_reason: Option<String>,
     pub session_capture_incomplete_agents: Vec<String>,
 }
 
@@ -611,6 +613,7 @@ pub enum QuickStartReport {
         /// [`QuickStartReadiness::PendingToolLoad`] (or `Degraded` if any agent
         /// failed to spawn) so the CLI surface cannot lie about availability.
         worker_readiness: QuickStartReadiness,
+        team: String,
     },
     /// 已有 runtime state → quick-start 拒绝并引导用 restart。
     ExistingRuntime {
@@ -619,6 +622,7 @@ pub enum QuickStartReport {
         state_path: Option<PathBuf>,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
+        agent_ids: Vec<String>,
     },
     /// preflight 阻塞(`quick_start.py:59`)。
     PreflightBlocked {
@@ -789,6 +793,10 @@ pub enum RestartReport {
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
+        /// Debt returned by this restart's best-effort auto-attach, if any.
+        attach_window_failures: Option<serde_json::Value>,
+        leader_bind_ok: bool,
+        leader_bind_reason: Option<String>,
     },
     /// At least one worker failed during live spawn, but other workers were isolated
     /// and restarted. The CLI reports `status=partial` and exits non-zero.
@@ -803,6 +811,10 @@ pub enum RestartReport {
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
+        /// Debt returned by this restart's best-effort auto-attach, if any.
+        attach_window_failures: Option<serde_json::Value>,
+        leader_bind_ok: bool,
+        leader_bind_reason: Option<String>,
     },
     /// All workers failed during live spawn. No worker is reported as restarted.
     Failed {
