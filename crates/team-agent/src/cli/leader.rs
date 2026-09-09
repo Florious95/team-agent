@@ -130,6 +130,7 @@ pub(crate) fn leader_passthrough_provider(
         "copilot" => Some(Provider::Copilot),
         "grok" => Some(Provider::Grok),
         "cursor" => Some(Provider::CursorAgent),
+        "pi" => Some(Provider::Pi),
         _ => None,
     }
 }
