@@ -140,17 +140,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         }
     }
 
-    if !leader_receiver_attached(state) {
-        issues.push(json!("leader_not_attached"));
-        repairs.push(recovery_hint(
-            state
-                .get("session_name")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown"),
-            "leader_not_attached",
-            "team-agent attach-leader",
-        ));
-    } else {
+    if leader_receiver_attached(state) {
         // 0.4.x (CR R2 P0): leader provider health reconciliation. The
         // leader_receiver may be marked `attached` (pane addressable) but the
         // provider process has exited — pane fell back to shell with the exit
@@ -186,7 +176,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                             .and_then(Value::as_str)
                             .unwrap_or("unknown"),
                         "leader_provider_unreachable",
-                        "team-agent claim-leader",
+                        "leader pane provider is unreachable; restart the provider in the bound pane",
                     ));
                 }
                 crate::leader::LeaderProviderHealth::Alive => {}
@@ -267,6 +257,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
     workspace: &std::path::Path,
     state: &Value,
     backend: &dyn Transport,
+    selected_team_key: Option<&str>,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
     append_live_leader_workspace_mismatch_issue(
@@ -276,43 +267,92 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut issues,
         &mut repairs,
     );
-    append_registry_channel_unbound_issue(workspace, state, &mut issues, &mut repairs);
+    append_registry_channel_unbound_issue(
+        workspace,
+        state,
+        selected_team_key,
+        &mut issues,
+        &mut repairs,
+    );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
 }
 
-fn append_registry_channel_unbound_issue(
-    workspace: &std::path::Path,
-    state: &Value,
+const TEAM_SPEC_OR_RUNTIME_MISSING: &str = "team_spec_or_runtime_missing";
+const TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR: &str = concat!(
+    "no team spec or runtime was found in this workspace. ",
+    "Run `team-agent quick-start <workspace>` for first launch, ",
+    "or restart from a workspace that already contains `.team`.",
+);
+
+fn workspace_has_existing_team_runtime(workspace: &std::path::Path, team_key: &str) -> bool {
+    workspace.join("team.spec.yaml").is_file()
+        || crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
+        || crate::state::persist::runtime_state_path(workspace).is_file()
+}
+
+fn push_issue_repair(
     issues: &mut Value,
     repairs: &mut Value,
+    team: &str,
+    issue_id: &str,
+    repair: &str,
 ) {
-    let team_key = crate::state::projection::team_state_key(state);
-    if team_key.is_empty()
-        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
-    {
-        return;
-    }
     if let Some(items) = issues.as_array_mut() {
         if !items.iter().any(|item| {
-            item.as_str() == Some("leader_not_attached")
-                || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
+            item.as_str() == Some(issue_id)
+                || item.get("id").and_then(Value::as_str) == Some(issue_id)
         }) {
-            items.push(json!("leader_not_attached"));
+            items.push(json!(issue_id));
         }
     }
     if let Some(items) = repairs.as_array_mut() {
-        items.push(recovery_hint(
-            state
-                .get("session_name")
-                .and_then(Value::as_str)
-                .unwrap_or(team_key.as_str()),
-            "leader_not_attached",
-            "team-agent claim-leader",
-        ));
+        items.push(recovery_hint(team, issue_id, repair));
     }
+}
+
+fn append_registry_channel_unbound_issue(
+    workspace: &std::path::Path,
+    state: &Value,
+    selected_team_key: Option<&str>,
+    issues: &mut Value,
+    repairs: &mut Value,
+) {
+    let team_key = selected_team_key
+        .filter(|team| !team.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::state::projection::team_state_key(state));
+    if team_key.is_empty() {
+        return;
+    }
+    // RuntimeOnly diagnose synthesizes team_key=current from empty default
+    // state. That is not an existing unbound team; do not emit claim.
+    if !workspace_has_existing_team_runtime(workspace, &team_key) {
+        push_issue_repair(
+            issues,
+            repairs,
+            &team_key,
+            TEAM_SPEC_OR_RUNTIME_MISSING,
+            TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
+        );
+        return;
+    }
+    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
+    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
+        return;
+    }
+    push_issue_repair(
+        issues,
+        repairs,
+        state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .unwrap_or(team_key.as_str()),
+        class.issue_id(),
+        class.repair(),
+    );
 }
 
 fn append_live_leader_workspace_mismatch_issue(
@@ -353,8 +393,7 @@ fn live_leader_workspace_mismatch(
     let provider = receiver
         .get("provider")
         .and_then(Value::as_str)
-        .filter(|provider| !provider.is_empty())
-        .unwrap_or("claude");
+        .filter(|provider| !provider.is_empty());
     let refusal =
         PaneAuthorityRefusal::new(PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts));
     let PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts) = &refusal.facts else {
@@ -413,7 +452,9 @@ fn live_leader_workspace_mismatch(
             HINT_ACTION_FIELD.to_string(),
             Value::String(
                 match refusal.recovery.hint_action {
-                    PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+                    PaneAuthorityRecoveryHint::AttachLeader => {
+                        "open a matching workspace pane bound for this workspace"
+                    }
                 }
                 .to_string(),
             ),
@@ -424,15 +465,19 @@ fn live_leader_workspace_mismatch(
         );
         object.insert(
             ACTION_FIELD.to_string(),
-            Value::String(match refusal.recovery.action {
-                PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
-                    format!(
-                        "open a new terminal window outside the current tmux/pane, change \
-                         directory to the requested workspace, then run \
-                         `team-agent attach-leader --team {team} --provider {provider} \
-                         --confirm --json`; then rerun \
-                         `team-agent diagnose --team {team} --json`"
-                    )
+            Value::String(match (refusal.recovery.action, provider) {
+                (
+                    PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane,
+                    Some(provider),
+                ) => format!(
+                    "open a matching workspace pane already bound as {provider}"
+                ),
+                (
+                    PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane,
+                    None,
+                ) => {
+                    "open a matching workspace pane with the recorded leader provider; do not default claude"
+                        .to_string()
                 }
             }),
         );
@@ -454,9 +499,7 @@ pub(crate) fn append_registry_channel_unbound_to_report(
                 .map(|state| crate::state::projection::team_state_key(&state))
         })
         .unwrap_or_default();
-    if team_key.is_empty()
-        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
-    {
+    if team_key.is_empty() {
         return;
     }
     let Some(object) = report.as_object_mut() else {
@@ -467,23 +510,35 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !issues.iter().any(|item| {
-        item.as_str() == Some("leader_not_attached")
-            || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
-    }) {
-        issues.push(json!("leader_not_attached"));
-    }
-    object.insert("issues".to_string(), Value::Array(issues));
     let mut repairs = object
         .get("suggested_repairs")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    repairs.push(recovery_hint(
-        &team_key,
-        "leader_not_attached",
-        "team-agent claim-leader",
-    ));
+    if !workspace_has_existing_team_runtime(workspace, &team_key) {
+        let mut issues_value = Value::Array(issues);
+        let mut repairs_value = Value::Array(repairs);
+        push_issue_repair(
+            &mut issues_value,
+            &mut repairs_value,
+            &team_key,
+            TEAM_SPEC_OR_RUNTIME_MISSING,
+            TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
+        );
+        object.insert("issues".to_string(), issues_value);
+        object.insert("suggested_repairs".to_string(), repairs_value);
+        object.insert("ok".to_string(), Value::Bool(false));
+        return;
+    }
+    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
+    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
+        return;
+    }
+    if !issues.iter().any(|item| item.as_str() == Some(class.issue_id())) {
+        issues.push(json!(class.issue_id()));
+    }
+    repairs.push(recovery_hint(&team_key, class.issue_id(), class.repair()));
+    object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }
 
@@ -798,15 +853,147 @@ fn recovery_hint(team: &str, broken_class: &str, hint_action: &str) -> Value {
         "broken_class": broken_class,
         "hint_action": hint_action,
         "dedupe_key": format!("{team}:{broken_class}"),
-        "action": format!(
-            "{hint_action} # alternatives: team-agent restart; team-agent claim-leader; team-agent takeover; team-agent quick-start; team-agent attach-leader"
-        ),
+        "action": hint_action,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_action_does_not_emit_attach_leader() {
+        let workspace = std::path::PathBuf::from("/tmp/ta-hint-ws");
+        let endpoint = "/tmp/ta-hint.sock";
+        let state = json!({
+            "team_key": "alpha",
+            "leader_receiver": {
+                "status": "attached",
+                "pane_id": "%1",
+                "provider": "codex",
+                "tmux_socket": endpoint
+            }
+        });
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![crate::transport::PaneInfo {
+                pane_id: crate::transport::PaneId::new("%1"),
+                session: crate::transport::SessionName::new("s"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: Some(std::path::PathBuf::from("/tmp/other-ws")),
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        let Some((_, repair)) =
+            live_leader_workspace_mismatch(&workspace, &state, &transport)
+        else {
+            panic!("workspace mismatch repair required");
+        };
+        let hint = repair
+            .get(HINT_ACTION_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let action = repair
+            .get(ACTION_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        for field in [hint, action] {
+            assert!(
+                !field.contains("attach-leader"),
+                "mismatch repair must not emit attach-leader; got {field}"
+            );
+            assert!(
+                !field.contains("claim-leader"),
+                "mismatch repair must not emit claim-leader; got {field}"
+            );
+            assert!(
+                !field.contains("takeover"),
+                "mismatch repair must not emit takeover; got {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_hint_does_not_bundle_unrelated_bind_commands() {
+        let hint = recovery_hint("alpha", "tmux_session_missing", "team-agent restart");
+        let action = hint.get("action").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(action, "team-agent restart");
+        assert!(
+            !action.contains("claim-leader"),
+            "shotgun alternatives must not appear; action={action}"
+        );
+        assert!(
+            !action.contains("takeover"),
+            "shotgun alternatives must not appear; action={action}"
+        );
+    }
+
+    #[test]
+    fn missing_workspace_does_not_classify_as_unbound_claim() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-diagnose-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null});
+        let mut issues = json!([]);
+        let mut repairs = json!([]);
+        append_registry_channel_unbound_issue(
+            &workspace,
+            &state,
+            Some("current"),
+            &mut issues,
+            &mut repairs,
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+        let issues_text = issues.to_string();
+        let repairs_text = repairs.to_string();
+        assert!(
+            issues_text.contains(TEAM_SPEC_OR_RUNTIME_MISSING),
+            "issues={issues_text}"
+        );
+        assert!(
+            !issues_text.contains("leader_receiver_unbound"),
+            "missing team must not be unbound; issues={issues_text}"
+        );
+        assert!(
+            repairs_text.contains("quick-start"),
+            "repairs={repairs_text}"
+        );
+        assert!(
+            !repairs_text.contains("claim-leader"),
+            "missing team must not induce claim; repairs={repairs_text}"
+        );
+    }
+
+    #[test]
+    fn diagnose_runtime_does_not_emit_not_committed_parallel() {
+        let state = json!({
+            "leader_receiver": {"status": "pending", "pane_id": "%1"}
+        });
+        let transport = crate::transport::test_support::OfflineTransport::default();
+        let (issues, repairs) = diagnose_runtime(&state, &transport);
+        let issues_text = issues.to_string();
+        let repairs_text = repairs.to_string();
+        assert!(
+            !issues_text.contains("leader_receiver_not_committed"),
+            "issues={issues_text}"
+        );
+        assert!(
+            !repairs_text.contains("leader_receiver_not_committed"),
+            "repairs={repairs_text}"
+        );
+    }
+
 
     fn write_codex_identity_rollout(
         workspace: &std::path::Path,

@@ -7,6 +7,11 @@ use crate::codex_app_server::AppServerBinding;
 use crate::model::pane_authority_refusal::PaneWorkspaceMismatchFacts;
 use crate::transport::{PaneInfo, Transport};
 
+/// Scope authority written by a fresh quick-start caller binding. It is distinct
+/// from an operator-initiated explicit claim, but uses the same pane-instance
+/// nonce and exact workspace checks at delivery.
+pub(crate) const FRESH_CALLER_SCOPE_AUTHORITY: &str = "fresh_caller";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveLeaderChannel {
     DirectTmux(DirectTmuxLeaderChannel),
@@ -117,7 +122,7 @@ pub fn resolve_live_leader_channel(
     };
     if let Some(observed_pane_workspace) = observed.current_path.clone() {
         if !path_is_in_workspace(&observed_pane_workspace, workspace)
-            && !explicit_claim_authority_matches(workspace, receiver, &observed)
+            && !scoped_authority_matches(workspace, receiver, &observed)
         {
             return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch(
                 PaneWorkspaceMismatchFacts {
@@ -138,12 +143,16 @@ pub fn resolve_live_leader_channel(
     }))
 }
 
-fn explicit_claim_authority_matches(
+fn scoped_authority_matches(
     workspace: &Path,
     receiver: &Value,
     observed: &PaneInfo,
 ) -> bool {
-    if string_field(receiver, "scope_authority") != Some("explicit_claim") {
+    let authority = string_field(receiver, "scope_authority");
+    if !matches!(
+        authority,
+        Some("explicit_claim") | Some(FRESH_CALLER_SCOPE_AUTHORITY)
+    ) {
         return false;
     }
     let Some(authorized_workspace) = string_field(receiver, "authorized_team_workspace") else {
@@ -219,4 +228,60 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod claim_rework_live_tests {
+    use super::*;
+    use crate::transport::test_support::OfflineTransport;
+    use crate::transport::{PaneId, PaneInfo, SessionName};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn pending_receiver_is_not_a_live_channel() {
+        let workspace = PathBuf::from("/tmp/claim-rework-a3-pending");
+        let receiver = json!({
+            "mode": "direct_tmux",
+            "status": "pending",
+            "pane_id": "%1",
+            "tmux_socket": "/tmp/ta-offline.sock"
+        });
+        let transport = OfflineTransport::default().with_tmux_endpoint("/tmp/ta-offline.sock");
+        match resolve_live_leader_channel(&workspace, &receiver, &transport) {
+            LeaderChannelResolution::Unbound(LeaderChannelUnbound::ReceiverNotAttached) => {}
+            other => panic!("pending seed must not be live; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dead_pane_with_matching_endpoint_is_pane_not_live() {
+        let workspace = PathBuf::from("/tmp/claim-rework-a3-dead");
+        let endpoint = "/tmp/ta-claim-rework-a3.sock";
+        let receiver = json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": "%missing",
+            "tmux_socket": endpoint
+        });
+        let transport = OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![PaneInfo {
+                pane_id: PaneId::new("%other"),
+                session: SessionName::new("team"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        match resolve_live_leader_channel(&workspace, &receiver, &transport) {
+            LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneNotLive) => {}
+            other => panic!("matching endpoint + missing pane must be PaneNotLive; got {other:?}"),
+        }
+    }
 }
