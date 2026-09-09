@@ -365,78 +365,6 @@ fn save_runtime_state_with_merge_options(
     receiver_update_team_key: Option<&str>,
     exact_owner_seed_to_clear: Option<&Value>,
 ) -> Result<(), StateError> {
-    persist_runtime_state_with_merge_options_and_expected(
-        workspace,
-        state,
-        deleted_agent_ids,
-        skip_capture_backfill_team_key,
-        skip_capture_backfill_agent_ids,
-        topology_update_team_key,
-        topology_update_agent_ids,
-        receiver_update_team_key,
-        exact_owner_seed_to_clear,
-        None,
-        None,
-    )
-}
-
-pub(crate) fn save_runtime_state_with_receiver_authority_and_expected(
-    workspace: &Path,
-    state: &Value,
-    receiver_team_key: &str,
-    expected_owner: &Value,
-    expected_receiver: &Value,
-) -> Result<(), StateError> {
-    persist_runtime_state_with_merge_options_and_expected(
-        workspace,
-        state,
-        &[],
-        None,
-        &[],
-        None,
-        &[],
-        Some(receiver_team_key),
-        None,
-        Some((expected_owner, expected_receiver)),
-        None,
-    )
-}
-
-pub(crate) fn save_runtime_state_with_exact_owner_receiver_cleanup(
-    workspace: &Path,
-    state: &Value,
-    team_key: &str,
-    expected_owner: &Value,
-    expected_receiver: &Value,
-) -> Result<(), StateError> {
-    persist_runtime_state_with_merge_options_and_expected(
-        workspace,
-        state,
-        &[],
-        None,
-        &[],
-        None,
-        &[],
-        Some(team_key),
-        None,
-        None,
-        Some((team_key, expected_owner, expected_receiver)),
-    )
-}
-
-fn persist_runtime_state_with_merge_options_and_expected(
-    workspace: &Path,
-    state: &Value,
-    deleted_agent_ids: &[&str],
-    skip_capture_backfill_team_key: Option<&str>,
-    skip_capture_backfill_agent_ids: &[&str],
-    topology_update_team_key: Option<&str>,
-    topology_update_agent_ids: &[&str],
-    receiver_update_team_key: Option<&str>,
-    exact_owner_seed_to_clear: Option<&Value>,
-    expected_owner_receiver: Option<(&Value, &Value)>,
-    exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
-) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
     // 我们 `&Value` 不可变 → 克隆后迁移,后续比较/写入/缓存/self-heal 全走 `migrated`。
@@ -457,9 +385,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
     // Exact-seed cleanup must observe lock-held disk, not a pre-lock cache or
     // byte-equality hit. A matching in-memory document would otherwise no-op
     // and leave the seed, or skip copying a concurrent owner.
-    let skip_pre_lock_fast_path = exact_owner_seed_to_clear.is_some()
-        || expected_owner_receiver.is_some()
-        || exact_owner_receiver_to_clear.is_some();
+    let skip_pre_lock_fast_path = exact_owner_seed_to_clear.is_some();
     if !skip_pre_lock_fast_path && cache_equals(&path, &migrated) {
         return Ok(());
     }
@@ -492,21 +418,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let latest = read_latest_state_under_lock(workspace, &path);
-    if let Some((expected_owner, expected_receiver)) = expected_owner_receiver {
-        let expected_matches = latest.as_ref().is_some_and(|latest| {
-            latest_team_owner_receiver(latest, receiver_update_team_key)
-                .is_some_and(|(owner, receiver)| {
-                    owner == expected_owner && receiver == expected_receiver
-                })
-        });
-        if !expected_matches {
-            return Err(StateError::SaveConflict(
-                "fresh caller owner/receiver changed before commit".to_string(),
-            ));
-        }
-    }
-    if let Some(latest) = latest {
+    if let Some(latest) = read_latest_state_under_lock(workspace, &path) {
         let deleted = deleted_agent_ids
             .iter()
             .copied()
@@ -543,7 +455,6 @@ fn persist_runtime_state_with_merge_options_and_expected(
             &topology_updates,
             &receiver_updates,
             receiver_update_team_key.zip(exact_owner_seed_to_clear),
-            exact_owner_receiver_to_clear,
         )?;
     }
     // Stage 3 save-output strip second pass (defence-in-depth): after the
@@ -612,7 +523,6 @@ fn apply_persist_merge_contract(
     topology_updates: &BTreeSet<(String, String)>,
     receiver_updates: &BTreeSet<String>,
     exact_owner_seed_to_clear: Option<(&str, &Value)>,
-    exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
 ) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
@@ -733,16 +643,6 @@ fn apply_persist_merge_contract(
             if let Some((clear_team, seed)) = exact_owner_seed_to_clear {
                 if team == clear_team {
                     apply_lock_held_exact_owner_cleanup(incoming_entry, latest_entry, seed);
-                }
-            }
-            if let Some((clear_team, seed, expected_receiver)) = exact_owner_receiver_to_clear {
-                if team == clear_team {
-                    apply_lock_held_exact_owner_receiver_cleanup(
-                        incoming_entry,
-                        latest_entry,
-                        seed,
-                        Some(expected_receiver),
-                    );
                 }
             }
             preserve_latest_endpoint_convergence_fields(incoming_entry, latest_entry);
@@ -876,26 +776,14 @@ fn preserve_latest_ownership_fields(
 }
 
 fn apply_lock_held_exact_owner_cleanup(incoming: &mut Value, latest: &Value, seed: &Value) {
-    apply_lock_held_exact_owner_receiver_cleanup(incoming, latest, seed, None);
-}
-
-fn apply_lock_held_exact_owner_receiver_cleanup(
-    incoming: &mut Value,
-    latest: &Value,
-    seed: &Value,
-    expected_receiver: Option<&Value>,
-) {
-    // Compare the lock-held disk owner and, when supplied, receiver to the
-    // attempt-local grant. A same-owner receiver update is a concurrent
-    // winner and must survive cleanup just like a different owner/epoch.
+    // Compare the lock-held disk owner to the attempt-local seed. Equal-epoch
+    // concurrent owners must survive; only the exact seed is cleared, and the
+    // epoch is not bumped so a same-epoch takeover cannot be overwritten.
     let latest_owner = latest.get("team_owner");
-    let receiver_matches = expected_receiver.is_none_or(|expected| {
-        latest.get("leader_receiver") == Some(expected)
-    });
     let Some(incoming_obj) = incoming.as_object_mut() else {
         return;
     };
-    if latest_owner == Some(seed) && receiver_matches {
+    if latest_owner == Some(seed) {
         incoming_obj.insert("team_owner".to_string(), Value::Null);
         incoming_obj.insert("leader_receiver".to_string(), Value::Null);
         if let Some(epoch) = latest
@@ -983,21 +871,6 @@ fn latest_has_preferable_ownership(
     latest_epoch == incoming_epoch
         && !receiver_update_authoritative
         && (ownership_attached(latest) || !ownership_attached(incoming))
-}
-
-fn latest_team_owner_receiver<'a>(
-    latest: &'a Value,
-    team_key: Option<&str>,
-) -> Option<(&'a Value, &'a Value)> {
-    let entry = if let Some(team_key) = team_key {
-        latest
-            .get("teams")
-            .and_then(Value::as_object)
-            .and_then(|teams| teams.get(team_key))?
-    } else {
-        latest
-    };
-    Some((entry.get("team_owner")?, entry.get("leader_receiver")?))
 }
 
 fn ownership_epoch(state: &Value) -> u64 {
@@ -3112,7 +2985,6 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
             None,
-            None,
         )
         .unwrap();
 
@@ -3147,7 +3019,6 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &receiver_updates,
-            None,
             None,
         )
         .unwrap();
@@ -3344,37 +3215,6 @@ mod tests {
             &load_runtime_state(&ws).unwrap(),
             &expected["teams"]["fresh"]["team_owner"],
             &expected["teams"]["fresh"]["leader_receiver"],
-            1,
-        );
-    }
-
-    #[test]
-    fn lock_held_exact_seed_receiver_cleanup_preserves_same_owner_receiver_update() {
-        let ws = temp_ws();
-        save_runtime_state(
-            &ws,
-            &team_state_with_binding(&ws, seed_owner(1), seed_receiver(1), 1),
-        )
-        .unwrap();
-        let seed = persisted_fresh_owner(&ws);
-        let seeded_receiver = load_runtime_state(&ws).unwrap()["teams"]["fresh"]
-            ["leader_receiver"]
-            .clone();
-        let mut winner = team_state_with_binding(&ws, seed_owner(1), takeover_receiver(1), 1);
-        winner["teams"]["fresh"]["team_owner"] = seed.clone();
-        save_runtime_state_with_receiver_authority(&ws, &winner, "fresh", None).unwrap();
-        save_runtime_state_with_exact_owner_receiver_cleanup(
-            &ws,
-            &tombstone_incoming(&ws, 1),
-            "fresh",
-            &seed,
-            &seeded_receiver,
-        )
-        .unwrap();
-        assert_fresh_binding(
-            &load_runtime_state(&ws).unwrap(),
-            &seed,
-            &takeover_receiver(1),
             1,
         );
     }

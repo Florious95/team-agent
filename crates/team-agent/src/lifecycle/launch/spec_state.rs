@@ -51,10 +51,6 @@
 //! sites can reference the phases by name. The phase fns themselves
 //! remain in launch.rs until the next batch of relocations.
 
-#[cfg(test)]
-#[path = "../../../tests/support/hermetic.rs"]
-mod hermetic;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,14 +66,16 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 use super::identity::spec_display_backend;
-use super::leader_context::{caller_provider_for_seed_with_lookup, seed_unbound_launched_owner};
+use super::leader_context::{
+    attributed_provider_for_pane_across_tmux_sockets, caller_provider_for_seed_with_lookup,
+    seed_unbound_launched_owner,
+};
 use super::worker_env::spawn_timestamp;
 
 /// ---
 /// purpose: 由 spec 生成首份 runtime state 树
 /// params:
 ///   team_key: 本团队的 runtime 键
-///   scoped_endpoint: 本次起队已选中的 transport tmux endpoint，与 fresh bind 同源
 /// returns: 含 spec_path、workspace、team_dir、session_name、leader、agents、tasks 与 display_backend 的 state；随后按环境种入 launched owner，种不到则种一份 unbound owner
 /// ---
 pub(super) fn initial_runtime_state(
@@ -86,7 +84,6 @@ pub(super) fn initial_runtime_state(
     workspace: &Path,
     team_dir: &Path,
     team_key: &str,
-    scoped_endpoint: Option<&str>,
 ) -> serde_json::Value {
     let mut agents = serde_json::Map::new();
     for agent in spec_agent_values(spec) {
@@ -147,7 +144,7 @@ pub(super) fn initial_runtime_state(
     );
     state.insert("is_external_leader".to_string(), serde_json::json!(false));
     let mut state = serde_json::Value::Object(state);
-    if !seed_launched_owner_from_env(&mut state, scoped_endpoint) {
+    if !seed_launched_owner_from_env(&mut state) {
         let team_id = crate::state::projection::team_state_key(&state);
         seed_unbound_launched_owner(&mut state, &team_id);
     }
@@ -160,12 +157,9 @@ pub(super) fn initial_runtime_state(
 ///   state: 待改写的 state，成功时写入 owner 与 leader receiver
 /// returns: true 表示已种入，取不到 caller 身份或无 pane 时为 false
 /// ---
-pub(super) fn seed_launched_owner_from_env(
-    state: &mut serde_json::Value,
-    scoped_endpoint: Option<&str>,
-) -> bool {
+pub(super) fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> bool {
     let team_id = crate::state::projection::team_state_key(state);
-    let Ok(mut caller) = crate::state::identity::caller_identity_from_env(
+    let Ok(caller) = crate::state::identity::caller_identity_from_env(
         Some(state),
         &crate::state::identity::SystemEnv,
         Some(&team_id),
@@ -173,27 +167,11 @@ pub(super) fn seed_launched_owner_from_env(
     ) else {
         return false;
     };
-    let current_pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|pane| !pane.is_empty());
-    let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
-    match crate::layout::worker_env::caller_provider_resolution(
-        current_pane.as_deref(),
-        current_endpoint.as_deref(),
-        scoped_endpoint,
-    ) {
-        crate::layout::worker_env::CallerProviderResolution::Invalid => return false,
-        crate::layout::worker_env::CallerProviderResolution::Valid(provider) => {
-            caller.provider = crate::provider::wire::provider_wire(provider).to_string();
-        }
-        crate::layout::worker_env::CallerProviderResolution::Absent => {}
-    }
-    // Absent keeps the existing explicit/direct pane path. Do not unbind a
-    // caller TMUX_PANE just because launcher context and LEADER_PROVIDER are
-    // both missing; that is the external-leader same-id-across-sockets case.
-    // Invalid already returned. Do not replace a missing provider with broad
-    // pane/process attribution.
-    seed_launched_owner_from_caller_with_provider_lookup(state, caller, |_| None)
+    seed_launched_owner_from_caller_with_provider_lookup(
+        state,
+        caller,
+        attributed_provider_for_pane_across_tmux_sockets,
+    )
 }
 
 /// ---
@@ -641,13 +619,9 @@ pub(super) fn team_workspace(team_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
     use super::*;
-    use crate::layout::worker_env::{CALLER_ENDPOINT_ENV, CALLER_PANE_ENV, CALLER_PROVIDER_ENV};
     use crate::model::enums::Provider;
-    use serde_json::json;
-
-    use super::hermetic::HermeticTestEnv;
 
     fn yaml_agent(bypass: bool) -> Value {
         crate::model::yaml::loads(&format!(
@@ -676,104 +650,5 @@ mod tests {
             effective_runtime_config_for_worker_spawn(&yaml_agent(false), Provider::Codex).unwrap();
         assert!(!safety.enabled);
         assert_eq!(safety.source, DangerousApprovalSource::Disabled);
-    }
-
-    fn seed_state() -> serde_json::Value {
-        json!({
-            "team_key": "verify031",
-            "workspace": "/tmp/ws",
-            "session_name": "team-verify031",
-            "agents": {}
-        })
-    }
-
-    fn owner_pane(state: &serde_json::Value) -> Option<&str> {
-        state
-            .pointer("/teams/verify031/team_owner/pane_id")
-            .and_then(serde_json::Value::as_str)
-    }
-
-    fn owner_provider(state: &serde_json::Value) -> Option<&str> {
-        state
-            .pointer("/teams/verify031/team_owner/provider")
-            .and_then(serde_json::Value::as_str)
-    }
-
-    fn receiver_pane(state: &serde_json::Value) -> Option<&str> {
-        state
-            .pointer("/teams/verify031/leader_receiver/pane_id")
-            .and_then(serde_json::Value::as_str)
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn seed_absent_caller_keeps_direct_tmux_pane_without_unbinding() {
-        let hermetic = HermeticTestEnv::enter("seed-absent-direct-pane");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/default-tmux-socket,123,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%0");
-        let mut state = seed_state();
-        assert!(
-            seed_launched_owner_from_env(&mut state, Some("/tmp/product-team.sock")),
-            "Absent caller context must still seed the caller's TMUX_PANE; state={state}"
-        );
-        assert_eq!(owner_pane(&state), Some("%0"));
-        assert_eq!(receiver_pane(&state), Some("%0"));
-        assert!(
-            owner_provider(&state).is_none(),
-            "direct pane seed must not invent a provider; state={state}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn seed_valid_caller_uses_typed_provider_and_same_scoped_endpoint() {
-        let hermetic = HermeticTestEnv::enter("seed-valid-scoped");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
-        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
-        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
-        let mut state = seed_state();
-        assert!(seed_launched_owner_from_env(
-            &mut state,
-            Some("/tmp/tmux.sock")
-        ));
-        assert_eq!(owner_pane(&state), Some("%1"));
-        assert_eq!(owner_provider(&state), Some("pi"));
-        assert_eq!(receiver_pane(&state), Some("%1"));
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn seed_invalid_caller_does_not_fall_back_to_direct_pane() {
-        let hermetic = HermeticTestEnv::enter("seed-invalid-scoped");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
-        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
-        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
-        let mut state = seed_state();
-        assert!(
-            !seed_launched_owner_from_env(&mut state, Some("/tmp/product.sock")),
-            "scoped endpoint mismatch must fail closed; state={state}"
-        );
-        assert!(owner_pane(&state).is_none(), "state={state}");
-        assert!(receiver_pane(&state).is_none(), "state={state}");
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
-    fn seed_absent_keeps_explicit_leader_provider() {
-        let hermetic = HermeticTestEnv::enter("seed-absent-explicit");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%3");
-        let _leader = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "pi");
-        let mut state = seed_state();
-        assert!(seed_launched_owner_from_env(
-            &mut state,
-            Some("/tmp/tmux.sock")
-        ));
-        assert_eq!(owner_pane(&state), Some("%3"));
-        assert_eq!(owner_provider(&state), Some("pi"));
     }
 }

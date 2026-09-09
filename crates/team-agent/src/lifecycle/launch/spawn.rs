@@ -277,10 +277,6 @@ pub(super) fn spawn_agents(
                 provider,
             ),
         );
-        // The provider is the final typed value after profile overlays. Keep it
-        // separate from inherited LEADER_* identity and let the tmux invocation
-        // boundary add the actual pane/socket only for the provider process.
-        crate::layout::worker_env::inject_current_caller_provider(&mut env, provider);
         // BUG / C-1-2 / C-6-1 cr verdict — Copilot system_prompt 走 spawn env overlay +
         // per-worker AGENTS.md(B2 灵魂件降级):写
         //   <workspace>/.team/runtime/copilot-instructions/<agent_id>/AGENTS.md

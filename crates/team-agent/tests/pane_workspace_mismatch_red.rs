@@ -309,38 +309,6 @@ fn is_live(res: &LeaderChannelResolution) -> bool {
     matches!(res, LeaderChannelResolution::Live(_))
 }
 
-/// A fresh quick-start caller gets a distinct authority source from an operator
-/// explicit claim, but the delivery predicate still requires the same exact child
-/// workspace and live pane-instance nonce.
-#[test]
-fn fresh_caller_sibling_with_matching_live_nonce_delivers() {
-    let workspace = PathBuf::from("/private/tmp/pwm-workspace-a");
-    let sibling_cwd = PathBuf::from("/private/tmp/pwm-workspace-b");
-    let transport = PaneTransport::new(&sibling_cwd).with_live_nonce("nonce-fresh-abc");
-    let receiver = claimed_receiver("fresh_caller", Some("nonce-fresh-abc"));
-
-    assert!(
-        is_live(&resolve_live_leader_channel(&workspace, &receiver, &transport)),
-        "a fresh caller authority with a matching live pane nonce must resolve Live"
-    );
-}
-
-#[test]
-fn fresh_caller_sibling_with_stale_live_nonce_stays_refused() {
-    let workspace = PathBuf::from("/private/tmp/pwm-workspace-a");
-    let sibling_cwd = PathBuf::from("/private/tmp/pwm-workspace-b");
-    let transport = PaneTransport::new(&sibling_cwd).with_live_nonce("nonce-recycled");
-    let receiver = claimed_receiver("fresh_caller", Some("nonce-fresh-abc"));
-
-    let resolution = resolve_live_leader_channel(&workspace, &receiver, &transport);
-    assert_mismatch_payload(
-        &resolution,
-        &workspace,
-        &sibling_cwd,
-        "fresh caller stale live nonce",
-    );
-}
-
 /// FORM 1 — an explicitly-claimed sibling-workspace pane with a MATCHING binding
 /// nonce must resolve Live (both directions deliver). Baseline red: resolve has no
 /// explicit-claim + nonce branch; the sibling cwd is refused PaneWorkspaceMismatch

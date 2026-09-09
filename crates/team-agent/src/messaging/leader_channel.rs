@@ -7,11 +7,6 @@ use crate::codex_app_server::AppServerBinding;
 use crate::model::pane_authority_refusal::PaneWorkspaceMismatchFacts;
 use crate::transport::{PaneInfo, Transport};
 
-/// Scope authority written by a fresh quick-start caller binding. It is distinct
-/// from an operator-initiated explicit claim, but uses the same pane-instance
-/// nonce and exact workspace checks at delivery.
-pub(crate) const FRESH_CALLER_SCOPE_AUTHORITY: &str = "fresh_caller";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveLeaderChannel {
     DirectTmux(DirectTmuxLeaderChannel),
@@ -122,7 +117,7 @@ pub fn resolve_live_leader_channel(
     };
     if let Some(observed_pane_workspace) = observed.current_path.clone() {
         if !path_is_in_workspace(&observed_pane_workspace, workspace)
-            && !scoped_authority_matches(workspace, receiver, &observed)
+            && !explicit_claim_authority_matches(workspace, receiver, &observed)
         {
             return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch(
                 PaneWorkspaceMismatchFacts {
@@ -143,16 +138,12 @@ pub fn resolve_live_leader_channel(
     }))
 }
 
-fn scoped_authority_matches(
+fn explicit_claim_authority_matches(
     workspace: &Path,
     receiver: &Value,
     observed: &PaneInfo,
 ) -> bool {
-    let authority = string_field(receiver, "scope_authority");
-    if !matches!(
-        authority,
-        Some("explicit_claim") | Some(FRESH_CALLER_SCOPE_AUTHORITY)
-    ) {
+    if string_field(receiver, "scope_authority") != Some("explicit_claim") {
         return false;
     }
     let Some(authorized_workspace) = string_field(receiver, "authorized_team_workspace") else {

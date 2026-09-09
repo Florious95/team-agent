@@ -139,14 +139,6 @@
       "ts": "<TS>"
     },
     {
-      "event": "quick_start.leader_bind_refused",
-      "operation": "fresh_quick_start_leader_bind",
-      "reason": "caller_pane_missing",
-      "stage": "caller_pane",
-      "team_key": "teamdir",
-      "ts": "<TS>"
-    },
-    {
       "elapsed_ms": 0,
       "event": "launch.phase",
       "phase": "coordinator_start",
@@ -722,14 +714,6 @@
               "startup_prompt_handler_ms": 0,
               "tmux_start_mode": "new-window",
               "transport_spawn_ms": 0,
-              "ts": "<TS>"
-            },
-            {
-              "event": "quick_start.leader_bind_refused",
-              "operation": "fresh_quick_start_leader_bind",
-              "reason": "caller_pane_missing",
-              "stage": "caller_pane",
-              "team_key": "teamdir",
               "ts": "<TS>"
             },
             {
