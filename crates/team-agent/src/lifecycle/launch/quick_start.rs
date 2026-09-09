@@ -1193,6 +1193,31 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     transport: &dyn Transport,
     open_display: bool,
 ) -> Result<QuickStartReport, LifecycleError> {
+    let mut discover = |requested: &str| {
+        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    };
+    quick_start_with_transport_in_workspace_with_display_pi_preflight(
+        workspace,
+        agents_dir,
+        name,
+        yes,
+        team_id,
+        transport,
+        open_display,
+        &mut discover,
+    )
+}
+
+pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    team_id: Option<&str>,
+    transport: &dyn Transport,
+    open_display: bool,
+    discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
+) -> Result<QuickStartReport, LifecycleError> {
     // B-7 / 036b N38 三行 fail-fast — TEAM_AGENT_LEADER_PANE_ID 主动路径在 quick-start
     // 入口验活;死/缺(Dead)的 pane 必须明确报错,不可 silent bind 到 spawner /
     // owner_bind / lease / display 任一消费点。被动路径(display/seed 等)各自走
@@ -1207,6 +1232,14 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
             agents_dir.display()
         )));
     }
+    crate::compiler::preflight_pi_models_in_team_with(agents_dir, discover).map_err(|error| {
+        LifecycleError::PiModelPreflight {
+            requested: error.requested,
+            candidates: error.candidates,
+            action: error.action,
+            not_ready: error.not_ready,
+        }
+    })?;
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
