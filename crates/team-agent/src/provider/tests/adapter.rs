@@ -565,3 +565,83 @@ fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
         "known tools must stay mapped"
     );
 }
+
+#[test]
+fn pi_wire_roundtrip_requires_backing_and_has_no_builtin_model() {
+    use crate::provider::wire::{
+        aliases, builtin_provider_model, command_name, parse_canonical_provider, parse_provider,
+        provider_wire, requires_resume_backing,
+    };
+
+    let provider = Provider::Pi;
+    assert_eq!(provider_wire(provider), "pi");
+    assert_eq!(parse_provider("pi"), Some(provider));
+    assert_eq!(parse_canonical_provider("pi"), Some(provider));
+    assert_eq!(aliases(provider), &["pi"]);
+    assert_eq!(command_name(provider), "pi");
+    assert!(requires_resume_backing(provider));
+    assert_eq!(builtin_provider_model(provider), None);
+}
+
+#[test]
+fn pi_caps_resume_true_fork_false_native_mcp_false_auth_unknown() {
+    let adapter = get_adapter(Provider::Pi);
+    assert_eq!(
+        adapter.caps(),
+        ProviderCaps {
+            resume: true,
+            fork: false,
+            native_mcp_config: false,
+            writes_global_settings: false,
+        }
+    );
+    assert_eq!(
+        adapter.auth_hint(AuthMode::Subscription),
+        AuthHintStatus::Unknown
+    );
+}
+
+#[test]
+fn pi_fork_is_typed_capability_unsupported() {
+    let adapter = get_adapter(Provider::Pi);
+    let source = SessionId::new("7dcfed9a-88ce-45bf-b1e3-161696acfe89");
+    let result = adapter.fork(Some(&source), AuthMode::Subscription, None);
+    assert!(
+        matches!(result, Err(ProviderError::CapabilityUnsupported(_))),
+        "Pi fork must be a typed capability refusal, got {result:?}"
+    );
+    if let Err(error) = result {
+        let text = error.to_string();
+        assert!(text.contains("pi") && text.contains("fork"), "got {text}");
+        assert!(!text.to_ascii_lowercase().contains("clone"), "got {text}");
+    }
+}
+
+#[test]
+fn pi_classify_has_no_lifecycle_facts() {
+    let transcript = concat!(
+        r#"{"type":"turn_started","turn_id":"turn-1"}"#,
+        "\n",
+        r#"{"type":"turn_completed","turn_id":"turn-1"}"#,
+    );
+    let classified = crate::provider::classify::classify(
+        Provider::Pi,
+        transcript,
+        ProcessLiveness::Alive,
+        60.0,
+    )
+    .expect("Pi classification must preserve unknown without a turn reader");
+    assert_eq!(classified.state, TurnState::Unknown);
+    assert_eq!(classified.reason, "no_turn_lifecycle_fact");
+
+    let records = [serde_json::json!({
+        "type": "system",
+        "subtype": "api_error",
+        "level": "error",
+        "sessionId": "pi-session"
+    })];
+    assert!(
+        crate::provider::faults::read_fault_facts(&records, Provider::Pi).is_empty(),
+        "Pi has no JSONL lifecycle/fault reader"
+    );
+}

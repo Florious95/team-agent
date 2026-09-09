@@ -427,7 +427,7 @@ pub(super) fn spawn_agent_window(
             &system_prompt,
         )?;
         crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace)?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, None)?;
         crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
         crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
     }
@@ -1095,6 +1095,13 @@ pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
         .get("session_name")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            state
+                .get("leader_receiver")
+                .and_then(|receiver| receiver.get("session_name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .map(SessionName::new)
         .unwrap_or_else(|| SessionName::new("team-agent"))
 }
