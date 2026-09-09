@@ -190,16 +190,30 @@ impl DiagnoseFixture {
         let _ = load_runtime_state(&root).expect("apply runtime state migrations before snapshot");
         let state = load_runtime_state(&root).expect("load canonical fixture state");
         let team_key = team_agent::state::projection::team_state_key(&state);
+        let owner_epoch = state
+            .pointer(&format!("/teams/{team_key}/team_owner/owner_epoch"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                state
+                    .pointer("/team_owner/owner_epoch")
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(1);
+        let pane_id = state
+            .pointer(&format!("/teams/{team_key}/leader_receiver/pane_id"))
+            .and_then(Value::as_str)
+            .or_else(|| state.pointer("/leader_receiver/pane_id").and_then(Value::as_str))
+            .unwrap_or("%1");
         let entry = team_agent::leader::registry::build_entry(
             &root,
             &team_key,
             "direct_tmux",
             json!({
                 "status": "attached",
-                "pane_id": "%1",
+                "pane_id": pane_id,
                 "authorized_team_workspace": root.to_string_lossy()
             }),
-            0,
+            owner_epoch,
             "diagnose-coordinator-health-fixture",
             "2026-08-25T00:00:00Z".to_string(),
         );
@@ -303,26 +317,47 @@ fn active_runtime_state(root: &Path) -> Value {
                 "status": "alive",
                 "team_dir": team_dir,
                 "session_name": "diagnose-coordinator-health",
-                "leader_receiver": attached_leader_receiver(),
+                "leader_receiver": attached_leader_receiver("/tmp/ta-diag-active.sock"),
                 "agents": {}
             }
         }
     })
 }
 
-fn quiet_runtime_state(_root: &Path) -> Value {
+fn quiet_runtime_state(root: &Path) -> Value {
+    let socket = format!("/tmp/ta-diag-quiet-{}.sock", std::process::id());
     json!({
+        "active_team_key": "current",
+        "team_key": "current",
+        "session_name": "diagnose-quiet",
         "leader": {"id": "leader"},
-        "leader_receiver": attached_leader_receiver()
+        "team_owner": {
+            "pane_id": "%1",
+            "owner_epoch": 1,
+            "provider": "codex"
+        },
+        "leader_receiver": attached_leader_receiver(&socket),
+        "teams": {
+            "current": {
+                "team_owner": {
+                    "pane_id": "%1",
+                    "owner_epoch": 1,
+                    "provider": "codex"
+                },
+                "leader_receiver": attached_leader_receiver(&socket)
+            }
+        }
     })
 }
 
-fn attached_leader_receiver() -> Value {
+fn attached_leader_receiver(socket: &str) -> Value {
     json!({
         "mode": "direct_tmux",
         "status": "attached",
         "pane_id": "%1",
-        "provider": "codex"
+        "owner_epoch": 1,
+        "provider": "codex",
+        "tmux_socket": socket
     })
 }
 

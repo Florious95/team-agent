@@ -10,7 +10,7 @@ fn dirty_005_cross_team_binding_pollution_keeps_explicit_team_scope() {
     let team_id = "dirty005a";
     let ws = TestWorkspace::new("dirty005").with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     ws.mutate_state(|state| {
         let active = state

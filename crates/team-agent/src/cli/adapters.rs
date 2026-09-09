@@ -561,6 +561,42 @@ pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliErr
 
 /// `cmd_diagnose`(`parser.py:298`)。
 pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
+    let team_hint = args
+        .team
+        .as_deref()
+        .filter(|team| !team.is_empty())
+        .unwrap_or("current");
+    // Check the caller-supplied workspace before RuntimeOnly synthesis or
+    // transport setup, which can create `.team` paths and make an empty
+    // directory look like an unbound team.
+    if !crate::cli::diagnose::workspace_has_existing_team_runtime(&args.workspace, team_hint) {
+        let (issues, suggested_repairs) =
+            crate::cli::diagnose::missing_team_runtime_issues_and_repairs(team_hint);
+        let event_log = args
+            .workspace
+            .join(".team")
+            .join("logs")
+            .join("events.jsonl");
+        return Ok(CmdResult::from_json(
+            json!({
+                "event_log": event_log.to_string_lossy().to_string(),
+                "issues": issues,
+                "ok": false,
+                "providers": provider_doctor_checks(),
+                "runtime": {
+                    "workspace": args.workspace.to_string_lossy().to_string(),
+                    "team_key": team_hint,
+                    "session_name": Value::Null,
+                    "leader_receiver": Value::Null,
+                    "agent_count": 0,
+                    "message_count": 0,
+                    "result_count": 0,
+                },
+                "suggested_repairs": suggested_repairs,
+            }),
+            args.json,
+        ));
+    }
     let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
         args.team.as_deref(),

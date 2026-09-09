@@ -287,10 +287,26 @@ const TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR: &str = concat!(
     "or restart from a workspace that already contains `.team`.",
 );
 
-fn workspace_has_existing_team_runtime(workspace: &std::path::Path, team_key: &str) -> bool {
+pub(crate) fn workspace_has_existing_team_runtime(
+    workspace: &std::path::Path,
+    team_key: &str,
+) -> bool {
     workspace.join("team.spec.yaml").is_file()
         || crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
         || crate::state::persist::runtime_state_path(workspace).is_file()
+}
+
+pub(crate) fn missing_team_runtime_issues_and_repairs(team_key: &str) -> (Value, Value) {
+    let mut issues = json!([]);
+    let mut repairs = json!([]);
+    push_issue_repair(
+        &mut issues,
+        &mut repairs,
+        team_key,
+        TEAM_SPEC_OR_RUNTIME_MISSING,
+        TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
+    );
+    (issues, repairs)
 }
 
 fn push_issue_repair(

@@ -726,9 +726,14 @@ fn restore_this_attempt_state(
     };
     strip_this_attempt_extra_keys(&mut current, extra_keys);
     let Some((expected_owner, expected_receiver)) = this_grant else {
-        return crate::state::persist::save_runtime_state(workspace, &current).map_err(|error| {
-            LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
-        });
+        return crate::state::repository::StateRepository::new(workspace)
+            .save(
+                crate::state::repository::StateWriteIntent::QuickStartBindingCleanup { team_key },
+                &current,
+            )
+            .map_err(|error| {
+                LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+            });
     };
     let previous = match snapshot.map(|snapshot| snapshot.bytes.as_deref()) {
         Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {

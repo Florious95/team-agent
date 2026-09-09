@@ -1638,12 +1638,9 @@ fn write_delivery_timeout_snapshot(snapshot: &Value) -> PathBuf {
 // 8. Convenience: build a runtime workspace with a single fake-spec quick-start
 // ----------------------------------------------------------------------------
 
-/// Convenience: was the quick-start good enough for E2E to continue? Returns
-/// true if the JSON shows the team was launched, even when the leader receiver
-/// is unbound (which is normal under `cargo test` where no $TMUX is exported
-/// — the framework strips TMUX to keep test isolation, so leader pane binding
-/// fails by design). Tests that specifically need a bound leader_receiver
-/// should attach manually or assert on `qs.json()["status"]` themselves.
+/// True only for a successful bind/launch, or the legacy degraded statuses
+/// that still mean workers spawned. This is **not** a leader-binding success
+/// predicate for `leader_binding_incomplete`.
 pub fn quick_start_launched(result: &TaResult) -> bool {
     let j = result.json();
     let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1653,9 +1650,6 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
         .unwrap_or("")
         .to_string();
     let all_workers_spawned = json_all_workers_spawned(&j);
-    // ok==true is the happy path; ok==false but `leader_receiver_unbound` /
-    // `pending_tool_load` is acceptable for E2E (workers spawned, only the
-    // leader binding gate failed because cargo test runs outside tmux).
     if ok {
         return true;
     }
@@ -1668,6 +1662,36 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
         return true;
     }
     false
+}
+
+/// Restricted no-caller worker-only fixture: workers exist, but this pane is
+/// not a lawful leader bind. All four conditions are required.
+pub fn no_caller_worker_only_fixture_started(result: &TaResult) -> bool {
+    let j = result.json();
+    if j.pointer("/ok").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
+    let spawned = json_all_workers_spawned(&j);
+    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = j
+        .pointer("/reason")
+        .and_then(|v| v.as_str())
+        .or_else(|| j.pointer("/readiness/reason").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let session = j
+        .pointer("/session_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    spawned
+        && status == "leader_binding_incomplete"
+        && reason == "caller_pane_missing"
+        && !session.is_empty()
+}
+
+/// Worker-operation tests may continue when either a real launch succeeded or
+/// the exact no-caller worker-only fixture started. This is not a bind pass.
+pub fn quick_start_workers_available(result: &TaResult) -> bool {
+    quick_start_launched(result) || no_caller_worker_only_fixture_started(result)
 }
 
 /// Some tests want a workspace that has gone through quick-start so state.json

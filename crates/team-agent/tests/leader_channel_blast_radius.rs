@@ -29,6 +29,9 @@ use team_agent::leader::registry::{
 };
 use team_agent::lifecycle::launch::launched_team_receiver_is_attached;
 use team_agent::state::persist::save_runtime_state;
+use team_agent::transport::test_support::OfflineTransport;
+use team_agent::transport::{PaneId, PaneInfo, SessionName};
+use team_agent::transport_factory::with_leader_endpoint_transport;
 
 fn mailbox_source() -> String {
     fs::read_to_string(concat!(
@@ -45,9 +48,16 @@ fn seed_attached_state(workspace: &std::path::Path, team: &str, pane: &str, sock
             "active_team_key": team,
             "teams": {
                 team: {
+                    "team_owner": {
+                        "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": "codex"
+                    },
                     "leader_receiver": {
                         "status": "attached",
                         "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": "codex",
                         "tmux_socket": socket,
                         "authorized_team_workspace": workspace.display().to_string(),
                     },
@@ -58,6 +68,36 @@ fn seed_attached_state(workspace: &std::path::Path, team: &str, pane: &str, sock
         }),
     )
     .expect("seed state");
+}
+
+fn live_pane(workspace: &std::path::Path, pane: &str) -> PaneInfo {
+    PaneInfo {
+        pane_id: PaneId::new(pane),
+        session: SessionName::new("s"),
+        window_index: None,
+        window_name: None,
+        pane_index: None,
+        tty: None,
+        current_command: Some("codex".to_string()),
+        current_path: Some(workspace.to_path_buf()),
+        active: true,
+        pane_pid: None,
+        leader_env: Default::default(),
+    }
+}
+
+fn assert_attached_with_live(workspace: &std::path::Path, team: &str, pane: &str, socket: &str) {
+    let transport = OfflineTransport::default()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![live_pane(workspace, pane)]);
+    let attached = with_leader_endpoint_transport(socket, transport, || {
+        launched_team_receiver_is_attached(workspace, team)
+    });
+    assert!(
+        attached,
+        "canonical attached requires registry identity and a live owner pane; workspace={}",
+        workspace.display()
+    );
 }
 
 #[test]
@@ -90,10 +130,7 @@ fn single_workspace_register_stays_attached() {
         register_binding_from_state_best_effort(&workspace, Some("teamdir"), "claim-leader")
             .expect("register");
     assert_eq!(outcome.status, "registered");
-    assert!(
-        launched_team_receiver_is_attached(&workspace, "teamdir"),
-        "a single workspace claim must remain attached"
-    );
+    assert_attached_with_live(&workspace, "teamdir", "%1", "/tmp/lc4-only");
     env.assert_real_registry_unchanged(before);
 }
 
@@ -129,14 +166,8 @@ fn different_pane_entries_do_not_unbind_each_other() {
     assert!(write_entry_best_effort(&b).is_some());
     register_binding_from_state_best_effort(&ws_b, Some("teamb"), "claim-leader")
         .expect("register b");
-    assert!(
-        launched_team_receiver_is_attached(&ws_a, "teama"),
-        "claiming a different pane must not unbind another workspace"
-    );
-    assert!(
-        launched_team_receiver_is_attached(&ws_b, "teamb"),
-        "the claiming workspace must stay attached"
-    );
+    assert_attached_with_live(&ws_a, "teama", "%1", "/tmp/lc4-a");
+    assert_attached_with_live(&ws_b, "teamb", "%2", "/tmp/lc4-b");
     env.assert_real_registry_unchanged(before);
 }
 

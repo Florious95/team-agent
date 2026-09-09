@@ -100,8 +100,14 @@ fn diagnose_selected_team_without_registry_is_unbound() {
     assert!(
         out["issues"].as_array().is_some_and(|issues| issues
             .iter()
-            .any(|issue| issue.as_str() == Some("leader_not_attached"))),
-        "state-only attached fixture must remain unbound without a registry row; out={out}"
+            .any(|issue| issue.as_str() == Some("leader_registry_index_missing"))),
+        "state-only attached fixture must stay undeliverable as index_missing without a registry row; out={out}"
+    );
+    assert_ne!(out["ok"], json!(true));
+    let repairs = out["suggested_repairs"].to_string();
+    assert!(
+        !repairs.contains("claim-leader"),
+        "index-missing must not induce claim; repairs={repairs}"
     );
 }
 
@@ -135,8 +141,14 @@ fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
     assert!(
         out["issues"].as_array().is_some_and(|issues| issues
             .iter()
-            .any(|issue| issue.as_str() == Some("leader_not_attached"))),
-        "attached state with a foreign-workspace registry row must remain unbound; out={out}"
+            .any(|issue| issue.as_str() == Some("leader_registry_index_missing"))),
+        "foreign-workspace registry row must stay undeliverable as index_missing; out={out}"
+    );
+    assert_ne!(out["ok"], json!(true));
+    let repairs = out["suggested_repairs"].to_string();
+    assert!(
+        !repairs.contains("claim-leader"),
+        "index-missing must not induce claim; repairs={repairs}"
     );
 }
 

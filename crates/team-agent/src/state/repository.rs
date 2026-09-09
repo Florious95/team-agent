@@ -236,6 +236,10 @@ pub enum StateWriteIntent<'a> {
     LeaderBindingRestoreNonTargetTeams {
         target_team_key: &'a str,
     },
+    /// Strip extra keys written by a failed or degraded quick-start bind attempt.
+    QuickStartBindingCleanup {
+        team_key: &'a str,
+    },
     LeaderStartBinding {
         team_key: &'a str,
         transport_kind: &'a str,
@@ -452,6 +456,7 @@ fn route_direct(
             previous_owner,
             previous_receiver,
         ),
+        StateWriteIntent::QuickStartBindingCleanup { .. } => helper_write_root(workspace, state),
         StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
             helper_write_root_without_migrations(workspace, state)
         }

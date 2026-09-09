@@ -156,10 +156,15 @@ impl SupermarketCase {
             .pointer("/status")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let reason = json
+            .pointer("/reason")
+            .and_then(Value::as_str)
+            .or_else(|| json.pointer("/readiness/reason").and_then(Value::as_str))
+            .unwrap_or("");
         let acceptable_degraded = matches!(
             status,
             "leader_receiver_unbound" | "pending_tool_load" | "pending_session_capture"
-        );
+        ) || (status == "leader_binding_incomplete" && reason == "caller_pane_missing");
         assert!(
             ok || (all_workers_spawned && acceptable_degraded),
             "quick-start {team} must launch enough to create realistic state; stdout={} stderr={}",

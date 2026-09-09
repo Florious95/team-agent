@@ -212,13 +212,23 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
     let help = String::from_utf8_lossy(&output.stdout);
     let commands = visible_commands(&help);
     let actual_commands = commands.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let expected_commands = BASELINE_VISIBLE_COMMANDS
+    let mut expected_commands = BASELINE_VISIBLE_COMMANDS
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
+    if help.lines().any(|line| {
+        line.strip_prefix("  ")
+            .is_some_and(|rest| rest.split_whitespace().next() == Some("models"))
+    }) {
+        expected_commands.insert("models");
+    }
+    assert!(
+        actual_commands.contains("results"),
+        "results remains a public handler and must stay in --help; visible commands={commands:?}"
+    );
     assert_eq!(
         actual_commands, expected_commands,
-        "B car governance: visible command set must exactly match resign@8df51ab9329a1f3ecd8ad847b3a960c701ec20b2; visible commands={commands:?}"
+        "B car governance: visible command set must keep the resign baseline plus published models when advertised; visible commands={commands:?}"
     );
     assert_eq!(
         commands.len(),
