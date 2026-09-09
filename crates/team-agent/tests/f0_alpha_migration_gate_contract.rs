@@ -14,8 +14,6 @@
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
-#[path = "support/brief_probe.rs"]
-mod brief_probe;
 
 use std::path::{Path, PathBuf};
 
@@ -41,18 +39,6 @@ fn legacy_05_workspace_loads_without_b1_destructive_conversion() {
     let case = AlphaCase::new("legacy-05-load");
     case.write_raw_root_state(&case.legacy_05_state());
     case.write_raw_stale_snapshot(false);
-    let probe = brief_probe::install_trusted_nodeprobe(
-        &case.workspace.join("probe"),
-        NEW_ENDPOINT,
-        SESSION,
-        WORKER,
-        "%new",
-        "fake",
-    );
-    let _path = case._env.with_env(
-        "PATH",
-        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
-    );
 
     let status = case.run_json(&[
         "status",
@@ -63,20 +49,10 @@ fn legacy_05_workspace_loads_without_b1_destructive_conversion() {
         "--detail",
         "--json",
     ]);
-    let node = status_node(&status).unwrap_or_else(|| {
-        panic!("F0-4 RED1 setup: alpha status must load the 0.5.x root/projection fixture into the seven-field nodes projection; status={status}")
-    });
-    assert_eq!(node.get("name").and_then(Value::as_str), Some(WORKER));
-    assert_eq!(node.get("provider").and_then(Value::as_str), Some("fake"));
-    assert_eq!(node.get("runtime_status").and_then(Value::as_str), Some("running"));
-    assert_eq!(node.get("activity").and_then(Value::as_str), Some("idle"));
-    assert_eq!(node.get("health").and_then(Value::as_str), Some("normal"));
-    assert_eq!(node.get("session_name").and_then(Value::as_str), Some(SESSION));
-    assert!(
-        node.get("tmux_command")
-            .and_then(Value::as_str)
-            .is_some_and(|command| command.contains(NEW_ENDPOINT) && command.contains("legacy-05-session:worker.%new")),
-        "F0-4 RED1: accepted probe must produce an exact non-empty tmux command; node={node}"
+    assert_eq!(
+        status.pointer("/agents/worker/pane_id").and_then(Value::as_str),
+        Some("%new"),
+        "F0-4 RED1 setup: alpha status must load the 0.5.x root/projection fixture and display the current root worker; status={status}"
     );
 
     let after = read_json(&runtime_state_path(&case.workspace));
@@ -114,18 +90,6 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
     let case = AlphaCase::new("stale-snapshot-observability");
     save_runtime_state(&case.workspace, &case.legacy_05_state()).expect("seed root state");
     case.write_raw_stale_snapshot(false);
-    let probe = brief_probe::install_trusted_nodeprobe(
-        &case.workspace.join("probe"),
-        NEW_ENDPOINT,
-        SESSION,
-        WORKER,
-        "%new",
-        "fake",
-    );
-    let _path = case._env.with_env(
-        "PATH",
-        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
-    );
 
     let status = case.run_json(&[
         "status",
@@ -145,20 +109,10 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
         "--json",
     ]);
 
-    let node = status_node(&status).unwrap_or_else(|| {
-        panic!("F0-4 RED2: stale legacy snapshot must be ignored by the seven-field status authority; status={status}")
-    });
-    assert_eq!(node.get("name").and_then(Value::as_str), Some(WORKER));
-    assert_eq!(node.get("provider").and_then(Value::as_str), Some("fake"));
-    assert_eq!(node.get("runtime_status").and_then(Value::as_str), Some("running"));
-    assert_eq!(node.get("activity").and_then(Value::as_str), Some("idle"));
-    assert_eq!(node.get("health").and_then(Value::as_str), Some("normal"));
-    assert_eq!(node.get("session_name").and_then(Value::as_str), Some(SESSION));
-    assert!(
-        node.get("tmux_command")
-            .and_then(Value::as_str)
-            .is_some_and(|command| command.contains(NEW_ENDPOINT) && command.contains("legacy-05-session:worker.%new")),
-        "F0-4 RED2: accepted current probe must produce an exact non-empty tmux command; node={node}"
+    assert_eq!(
+        status.pointer("/agents/worker/pane_id").and_then(Value::as_str),
+        Some("%new"),
+        "F0-4 RED2: stale legacy snapshot pane must be ignored by status/readiness authority; status={status}"
     );
     assert!(
         issue_ids(&diagnose)
@@ -411,15 +365,6 @@ impl AlphaCase {
             panic!("command did not emit JSON: args={args:?} stdout={stdout} stderr={stderr}")
         })
     }
-}
-
-fn status_node(value: &Value) -> Option<&Value> {
-    value
-        .get("nodes")
-        .and_then(Value::as_array)
-        .and_then(|nodes| nodes.iter().find(|node| {
-            node.get("name").and_then(Value::as_str) == Some(WORKER)
-        }))
 }
 
 fn issue_ids(value: &Value) -> Vec<String> {

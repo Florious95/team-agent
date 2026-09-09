@@ -21,6 +21,8 @@ fn stat_002_status_stopped_team() {
     );
     assert!(shut.is_success(), "shutdown stderr={}", shut.stderr);
 
+    // 0.4.x compact slim: default `--json` keeps agent status; diagnostic
+    // top-level fields (tmux_session_present, coordinator) moved to --detail.
     let out = run_ta(
         &ws,
         &[
@@ -32,7 +34,7 @@ fn stat_002_status_stopped_team() {
     );
     assert!(out.is_success(), "status stderr={}", out.stderr);
     let j = out.json();
-    assert_stopped_brief(&j);
+    assert_json_field_eq_str(&j, "/agents/a/status", "stopped");
 
     let detail = run_ta(
         &ws,
@@ -50,18 +52,7 @@ fn stat_002_status_stopped_team() {
         detail.stderr
     );
     let d = detail.json();
-    assert_stopped_brief(&d);
-    assert_eq!(j.get("nodes"), d.get("nodes"), "detail must preserve brief projection");
-}
-
-fn assert_stopped_brief(value: &serde_json::Value) {
-    let node = value
-        .get("nodes")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|nodes| nodes.iter().find(|node| node.get("name").and_then(|v| v.as_str()) == Some("a")))
-        .expect("stopped status must include node a");
-    assert_eq!(node.get("runtime_status").and_then(|v| v.as_str()), Some("stopped"));
-    let mut keys = node.as_object().expect("status node object").keys().cloned().collect::<Vec<_>>();
-    keys.sort();
-    assert_eq!(keys, vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"]);
+    assert_json_field_eq_bool(&d, "/tmux_session_present", false);
+    assert_json_field_eq_str(&d, "/coordinator/status", "missing");
+    assert_json_field_eq_str(&d, "/agents/a/status", "stopped");
 }

@@ -653,30 +653,12 @@ pub fn recover_watchers_for_incident(
 /// row for watcher-backed messages. A `submitted_pending_acceptance` row has
 /// already crossed the transport boundary and is claim-immutable. Any future
 /// retry belongs to a separate typed recovery arm, not attach/claim convergence.
-/// Compatibility helper retained for callers that only need the total.
-/// The typed recovery path below is the single writer; this wrapper performs
-/// no second requeue and only maps the first result to `total()`.
 pub(crate) fn requeue_blocked_leader_messages(
     store: &MessageStore,
     event_log: &EventLog,
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
 ) -> Result<usize, MessagingError> {
-    requeue_blocked_leader_messages_with_counts(
-        store,
-        event_log,
-        owner_team_id,
-        claimed_pane_id,
-    )
-    .map(crate::message_store::BlockedLeaderRequeueCounts::total)
-}
-
-pub(crate) fn requeue_blocked_leader_messages_with_counts(
-    store: &MessageStore,
-    event_log: &EventLog,
-    owner_team_id: &TeamKey,
-    claimed_pane_id: &PaneId,
-) -> Result<crate::message_store::BlockedLeaderRequeueCounts, MessagingError> {
     // E6 (0.5.9 offline-mailbox §6.5): also requeue rows that a third-party
     // sender left in `queued_until_leader_attach` via the leader mailbox.
     // Same idempotent requeue funnel (row/message_id/leader_notification_log
@@ -708,7 +690,7 @@ pub(crate) fn requeue_blocked_leader_messages_with_counts(
             }),
         )?;
     }
-    Ok(counts)
+    Ok(requeued)
 }
 
 /// `requeue_delivery_exhausted_watchers`: attach-leader 成功后把已经耗尽投递
@@ -720,33 +702,12 @@ pub(crate) fn requeue_blocked_leader_messages_with_counts(
 /// `deliver_pending_messages` never re-picks — the new leader would never see the
 /// pending notification.
 pub fn requeue_delivery_exhausted_watchers(
-    workspace: &Path,
-    store: &MessageStore,
-    event_log: &EventLog,
-    owner_team_id: &TeamKey,
-    claimed_pane_id: &PaneId,
-) -> Result<Vec<WatcherNotice>, MessagingError> {
-    requeue_delivery_exhausted_watchers_with_counts(
-        workspace,
-        store,
-        event_log,
-        owner_team_id,
-        claimed_pane_id,
-    )
-    .map(|(notices, _)| notices)
-}
-
-/// Attach-leader's typed recovery result. The counts come from the same
-/// owner-team scoped attach-recovery call (the watcher and message updates
-/// remain their existing transactions), so an attach caller can expose only
-/// this operation's debt rather than scanning arbitrary historical events.
-pub(crate) fn requeue_delivery_exhausted_watchers_with_counts(
     _workspace: &Path,
     store: &MessageStore,
     event_log: &EventLog,
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
-) -> Result<(Vec<WatcherNotice>, crate::message_store::BlockedLeaderRequeueCounts), MessagingError> {
+) -> Result<Vec<WatcherNotice>, MessagingError> {
     let conn = crate::db::schema::open_db(store.db_path())?;
     let mut stmt = conn.prepare(
         "select watcher_id, result_id, status from result_watchers
@@ -787,13 +748,8 @@ pub(crate) fn requeue_delivery_exhausted_watchers_with_counts(
         )?;
     }
     drop(stmt);
-    let counts = requeue_blocked_leader_messages_with_counts(
-        store,
-        event_log,
-        owner_team_id,
-        claimed_pane_id,
-    )?;
-    Ok((out, counts))
+    let _ = requeue_blocked_leader_messages(store, event_log, owner_team_id, claimed_pane_id)?;
+    Ok(out)
 }
 
 /// `delivered_result_message` (`result_delivery.py:394`):内容级去重 —— 查某 result_id 是否已有

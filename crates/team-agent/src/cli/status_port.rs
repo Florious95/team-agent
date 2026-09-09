@@ -34,14 +34,6 @@ use store::{
 mod compact;
 pub(super) use compact::*;
 
-mod brief;
-pub(crate) use brief::{format_status_brief, registered_agent_exists, status_brief_scoped};
-#[cfg(test)]
-pub(crate) use brief::{
-    with_test_nodeprobe, with_test_nodeprobe_candidates, with_test_nodeprobe_resolver_delay,
-    with_test_nodeprobe_unbound, ResolverDelaySignal,
-};
-
 mod runtime;
 pub(super) use runtime::*;
 

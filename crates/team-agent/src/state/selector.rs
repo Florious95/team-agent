@@ -7,9 +7,7 @@ use serde_json::Value;
 
 use crate::model::paths::{canonical_run_workspace, runtime_spec_path, team_workspace};
 use crate::state::persist::runtime_state_path;
-use crate::state::projection::{
-    resolve_runtime_team_scope, resolve_runtime_team_scope_readonly, TeamScopeResolution,
-};
+use crate::state::projection::resolve_runtime_team_scope;
 use crate::state::StateError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,24 +36,6 @@ pub fn resolve_active_team(
     team: Option<&str>,
     mode: SelectorMode,
 ) -> Result<SelectedTeam, StateError> {
-    resolve_active_team_with(input, team, mode, resolve_runtime_team_scope)
-}
-
-/// Status-path selector: in-memory projection only, no runtime-state writeback.
-pub fn resolve_active_team_readonly(
-    input: &Path,
-    team: Option<&str>,
-    mode: SelectorMode,
-) -> Result<SelectedTeam, StateError> {
-    resolve_active_team_with(input, team, mode, resolve_runtime_team_scope_readonly)
-}
-
-fn resolve_active_team_with(
-    input: &Path,
-    team: Option<&str>,
-    mode: SelectorMode,
-    resolve_scope: fn(&Path, Option<&str>) -> Result<TeamScopeResolution, StateError>,
-) -> Result<SelectedTeam, StateError> {
     let explicit_spec = input.join("team.spec.yaml");
     let (run_workspace, resolved) = if explicit_spec.exists() {
         let team_run = team_workspace(input).map_err(|e| StateError::TeamSelect(e.to_string()))?;
@@ -64,7 +44,7 @@ fn resolve_active_team_with(
         } else {
             team_run
         };
-        let resolved = resolve_scope(&run, team)?;
+        let resolved = resolve_runtime_team_scope(&run, team)?;
         (run, resolved)
     } else {
         let run =
@@ -79,7 +59,7 @@ fn resolve_active_team_with(
                 input.display()
             )));
         }
-        let resolved = resolve_scope(&run, team)?;
+        let resolved = resolve_runtime_team_scope(&run, team)?;
         (run, resolved)
     };
     let state = resolved.state;

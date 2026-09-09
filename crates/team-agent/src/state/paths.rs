@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::model::paths::{runtime_dir, runtime_spec_path};
-use crate::state::persist::{load_runtime_state, load_runtime_state_without_migrations};
+use crate::state::persist::load_runtime_state;
 use crate::state::projection::team_state_candidates;
 
 /// The identity of a team within a workspace. Carries the *workspace root*
@@ -193,25 +193,10 @@ impl CommandScope {
     /// On any I/O error the empty case is returned — destructive commands
     /// will run their own selector and surface the real error.
     pub fn resolve(workspace: &Path, requested_team: Option<&str>) -> Self {
-        Self::resolve_from_state(requested_team, load_runtime_state(workspace))
-    }
-
-    /// Ambiguity gate for read-only commands. Must not migrate or persist state.
-    pub fn resolve_readonly(workspace: &Path, requested_team: Option<&str>) -> Self {
-        Self::resolve_from_state(
-            requested_team,
-            load_runtime_state_without_migrations(workspace),
-        )
-    }
-
-    fn resolve_from_state(
-        requested_team: Option<&str>,
-        loaded: Result<serde_json::Value, crate::state::StateError>,
-    ) -> Self {
         if let Some(team) = requested_team.filter(|t| !t.is_empty()) {
             return Self::Resolved(team.to_string());
         }
-        let Ok(state) = loaded else {
+        let Ok(state) = load_runtime_state(workspace) else {
             return Self::EmptyWorkspace;
         };
         let alive = team_state_candidates(&state);

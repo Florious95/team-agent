@@ -274,26 +274,33 @@ fn status_session_missing_downgrades_running_agents() {
     ]);
     let status_json = json_output(&status, "RED7 status --json --detail");
     let worker = status_json
-        .get("nodes")
-        .and_then(Value::as_array)
-        .and_then(|nodes| nodes.iter().find(|node| {
-            node.get("name").and_then(Value::as_str) == Some(WORKER)
-        }))
-        .unwrap_or_else(|| panic!("RED7 setup: status brief must include worker; json={status_json}"));
+        .pointer("/agents/worker")
+        .unwrap_or_else(|| panic!("RED7 setup: status must include worker; json={status_json}"));
+
     assert_eq!(
-        worker.get("runtime_status").and_then(Value::as_str),
-        Some("unknown"),
-        "RED7: missing session with cached pane facts must be brief-unknown, not running/stopped by inference; worker={worker} json={status_json}"
+        status_json
+            .get("tmux_session_present")
+            .and_then(Value::as_bool),
+        Some(false),
+        "RED7 setup: fake transport must model a missing tmux session; json={status_json} log={}",
+        case.tmux_log()
     );
     assert_eq!(
-        worker.get("activity").and_then(Value::as_str),
-        Some("unknown"),
-        "RED7: missing session without live probe must expose unknown activity; worker={worker}"
+        worker.get("stale").and_then(Value::as_bool),
+        Some(true),
+        "RED7 setup: stale marker should still be present; worker={worker}"
     );
-    assert_eq!(
-        worker.get("health").and_then(Value::as_str),
-        Some("unknown"),
-        "RED7: missing session without live probe must expose unknown health; worker={worker}"
+    assert_ne!(
+        worker.get("status").and_then(Value::as_str),
+        Some("running"),
+        "RED7: session-missing worker with cached pane/process facts must be product-visible non-running, not raw running plus a diagnostic footnote. worker={worker} json={status_json}"
+    );
+    assert!(
+        !matches!(
+            worker.get("worker_state").and_then(Value::as_str),
+            Some("RUNNING" | "BUSY" | "PROBABLY_IDLE" | "running" | "busy")
+        ),
+        "RED7: worker_state must also degrade when the tmux session is missing; worker={worker}"
     );
 }
 

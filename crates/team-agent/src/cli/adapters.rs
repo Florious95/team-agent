@@ -280,8 +280,8 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
     }
 }
 
-/// `cmd_status`(`commands.py:90`)。CLI status 统一为只读七字段 brief；
-/// `--json` 与人读路径共享 nodeprobe-backed projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
+/// `cmd_status`(`commands.py:90`)。三态:`--summary`(xor json,xor agent)→五行文本;
+/// `--json`→`status_port::status(compact=!detail)`;else→`status_port::format_status(agent)`。
 #[cfg(test)]
 pub(crate) fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
     cmd_status_for_team(args, args.team.as_deref())
@@ -300,48 +300,121 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
     }
     // S4QR-001 (0.4.8): selected-team ambiguity gate. status is a selected-team
     // command: when the workspace has 2+ alive teams and no --team was passed,
-    // refuse instead of silently defaulting to the active team. Uses the
-    // read-only CommandScope helper so the gate cannot migrate/write state.
+    // refuse instead of silently defaulting to the active team. Uses the same
+    // CommandScope::resolve helper as refuse_if_multi_alive_team_missing_scope
+    // (cli/emit.rs:964-979) so the destructive-command ambiguity gate and the
+    // selected-team-read ambiguity gate share a single source of truth.
     if team.is_none() {
-        let scope = crate::state::paths::CommandScope::resolve_readonly(&args.workspace, None);
+        let scope = crate::state::paths::CommandScope::resolve(&args.workspace, None);
         if scope.is_ambiguous() {
             let candidates: Vec<String> = scope.candidates().to_vec();
             let message = format!(
                 "status: workspace has multiple alive teams ({}); pass `--team <key>` to choose one",
                 candidates.join(", ")
             );
+            if args.json {
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "status": "refused",
+                    "reason": "team_target_ambiguous",
+                    "candidates": candidates,
+                    "message": message,
+                });
+                return Ok(CmdResult::from_json(payload, args.json));
+            }
             return Err(CliError::Usage(message));
         }
     }
-    let selected = crate::state::selector::resolve_active_team_readonly(
+    let selected = match crate::state::selector::resolve_active_team(
         &args.workspace,
         team,
         crate::state::selector::SelectorMode::RuntimeOnly,
-    )?;
-    if let Some(agent) = args.agent.as_deref() {
-        if !status_port::registered_agent_exists(&selected.state, agent) {
-            return Err(CliError::Runtime(format!("unknown agent id: {agent}")));
+    ) {
+        Ok(selected) => selected,
+        Err(error) => {
+            return Ok(CmdResult::from_json(
+                status_selector_error_payload(&error.to_string(), &args.workspace),
+                args.json,
+            ));
         }
+    };
+    if args.summary {
+        // 0.4.x compact slimming: `--summary` renders the five-line triage
+        // text via `format_status_summary`, which needs the full payload
+        // fields (coordinator, leader_receiver, agent_health, queued_messages,
+        // latest_results). The slim compact projection drops those, so the
+        // summary path must request the full payload (compact=false).
+        let value = status_port::status_scoped(
+            &selected.run_workspace,
+            &selected.state,
+            Some(&selected.team_key),
+            false,
+            false,
+        )?;
+        return Ok(CmdResult::human(append_reminder(
+            format_status_summary(&value),
+            crate::cli::STATUS_REMINDER,
+        )));
     }
-    // Status brief is deliberately independent of the legacy RuntimeSnapshot:
-    // it performs one bounded nodeprobe sample and exposes exactly seven
-    // fields. `--summary` and `--detail` remain parser-compatible but do not
-    // re-enable history, runtime diagnostics, or reminder text.
     if args.json {
-        return Ok(CmdResult::from_json(
-            status_port::status_brief_scoped(
-                &selected.run_workspace,
-                &selected.state,
-                args.agent.as_deref(),
-            ),
-            true,
-        ));
+        let value = status_port::status_scoped(
+            &selected.run_workspace,
+            &selected.state,
+            Some(&selected.team_key),
+            status_compact_flag(args.detail),
+            args.detail,
+        )?;
+        return Ok(CmdResult::from_json(value, true));
     }
-    Ok(CmdResult::human(status_port::format_status_brief(
+    let mut text = status_port::format_status_scoped(
         &selected.run_workspace,
         &selected.state,
+        Some(&selected.team_key),
         args.agent.as_deref(),
+    )?;
+    if args.detail {
+        let value = status_port::status_scoped(
+            &selected.run_workspace,
+            &selected.state,
+            Some(&selected.team_key),
+            false,
+            true,
+        )?;
+        if let Some(hint) = value
+            .pointer("/runtime/hint")
+            .and_then(serde_json::Value::as_str)
+            .filter(|hint| !hint.is_empty())
+        {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(hint);
+        }
+    }
+    Ok(CmdResult::human(append_reminder(
+        text,
+        crate::cli::STATUS_REMINDER,
     )))
+}
+
+fn status_selector_error_payload(error: &str, workspace: &Path) -> Value {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%.6f");
+    let log_path = std::env::temp_dir()
+        .join("team-agent")
+        .join("cli-errors")
+        .join(format!("status-{stamp}.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&log_path, format!("{error}\n"));
+    json!({
+        "ok": false,
+        "error": error,
+        "action": "run `team-agent doctor` or inspect the log path shown here",
+        "log": log_path.to_string_lossy().to_string(),
+        "workspace": workspace.to_string_lossy().to_string(),
+        "reminder": crate::cli::STATUS_REMINDER,
+    })
 }
 
 /// `cmd_watch`(`commands.py:103`)。委派 `coordinator::run_watch`;KeyboardInterrupt/正常 → `SystemExit(0)`。

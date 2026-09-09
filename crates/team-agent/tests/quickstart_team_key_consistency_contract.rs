@@ -124,14 +124,18 @@ impl ConsistencyCase {
     }
 
     fn discover_socket(&self) -> PathBuf {
-        let state = self.state();
-        let (endpoint, source) = team_agent::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(&state))
-            .expect("quick-start must persist a tmux registration endpoint");
-        assert!(
-            source.starts_with("state."),
-            "endpoint must come from selected-team registration, not fallback: source={source}"
-        );
-        PathBuf::from(endpoint)
+        let output = self.run_cli(&["status", "--workspace", self.workspace_str(), "--json"]);
+        let value = json_stdout(&output, "status (socket discovery)");
+        let attach = value
+            .get("leader_attach_command")
+            .and_then(Value::as_str)
+            .expect("status must expose leader_attach_command");
+        let socket = attach
+            .split_whitespace()
+            .skip_while(|token| *token != "-S")
+            .nth(1)
+            .expect("leader_attach_command must carry -S <socket>");
+        PathBuf::from(socket)
     }
 
     fn state_path(&self) -> PathBuf {
@@ -156,7 +160,11 @@ impl ConsistencyCase {
             "--json",
         ]);
         let value = json_stdout(&output, "status --team");
-        let accepted = brief_node_for(&value, WORKER).is_some();
+        let accepted = value.get("ok").and_then(Value::as_bool) == Some(true)
+            && value
+                .get("agents")
+                .and_then(Value::as_object)
+                .is_some_and(|agents| agents.contains_key(WORKER));
         (accepted, value)
     }
 
@@ -266,26 +274,6 @@ fn json_stdout(output: &Output, context: &str) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
-}
-
-fn brief_node_for<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
-    let node = value
-        .get("nodes")
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|node| node.get("name").and_then(Value::as_str) == Some(name))?;
-    let mut keys = node.as_object()?.keys().cloned().collect::<Vec<_>>();
-    keys.sort();
-    let expected = vec![
-        "activity",
-        "health",
-        "name",
-        "provider",
-        "runtime_status",
-        "session_name",
-        "tmux_command",
-    ];
-    (keys == expected).then_some(node)
 }
 
 /// Lock 1 — a fresh quick-start (no `--team-id`, display name != dir

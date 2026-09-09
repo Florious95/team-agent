@@ -27,27 +27,6 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
 }
 
-fn assert_brief_shape(value: &Value, context: &str) {
-    let nodes = value
-        .get("nodes")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("{context}: status must return nodes: {value}"));
-    for node in nodes {
-        let mut keys = node
-            .as_object()
-            .expect("brief node object")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        assert_eq!(
-            keys,
-            vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-            "{context}: exact seven-field status projection: {node}"
-        );
-    }
-}
-
 #[test]
 #[serial(env)]
 fn cli_claude_json_does_not_report_success_without_starting_provider_or_tmux() {
@@ -200,6 +179,8 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
             !tmux_log.contains(":leader"),
             "{command} --external-leader must not create or attach the managed :leader window; tmux_log={tmux_log:?}"
         );
+        // 0.4.x compact slim: is_external_leader / leader_topology moved to
+        // --detail; default `--json` doesn't carry them anymore.
         let status = Command::new(bin())
             .args([
                 "status",
@@ -214,11 +195,11 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
         let status_json: Value = serde_json::from_slice(&status.stdout).unwrap_or_else(|err| {
             panic!("status json parse failed: {err}; stdout={status_stdout:?}")
         });
-        assert_brief_shape(&status_json, &format!("{command} status"));
-        assert!(
-            status_json.get("is_external_leader").is_none()
-                && status_json.get("leader_topology").is_none(),
-            "{command}: brief status must not restore launcher diagnostics: {status_json}"
+        assert_eq!(status_json["is_external_leader"], json!(true), "{command}");
+        assert_eq!(
+            status_json["leader_topology"],
+            json!("external"),
+            "{command}"
         );
     }
 }

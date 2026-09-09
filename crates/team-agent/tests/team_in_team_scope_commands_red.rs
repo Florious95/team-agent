@@ -53,6 +53,10 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("status-scope");
 
+    // 0.4.x compact slim: default `--json` keeps the agents map (which the
+    // slim payload uses to enforce team scoping). Diagnostic fields
+    // (tasks/messages/results/agent_health) moved to --detail; team
+    // scoping for them is asserted against `--json --detail`.
     let output = run_cli([
         "status",
         "--workspace",
@@ -63,7 +67,15 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
     ]);
     assert_success(&output, "status --team teamA --json");
     let status = stdout_json(&output);
-    assert_brief_nodes(&status, &["worker_a"]);
+
+    assert!(
+        status.pointer("/agents/worker_a").is_some(),
+        "status --team teamA must show teamA's worker; status={status}"
+    );
+    assert!(
+        status.pointer("/agents/worker_b").is_none(),
+        "status --team teamA must not leak teamB's worker; status={status}"
+    );
 
     let detail_output = run_cli([
         "status",
@@ -76,66 +88,30 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
     ]);
     assert_success(&detail_output, "status --team teamA --json --detail");
     let detail = stdout_json(&detail_output);
-    assert_brief_nodes(&detail, &["worker_a"]);
-    assert_eq!(
-        status.get("nodes"),
-        detail.get("nodes"),
-        "--detail must remain the same seven-field projection: status={status} detail={detail}"
-    );
 
-    // Resolve the selected state through the production team selector before
-    // assembling the full scoped read model. Passing the raw active-team root
-    // here would make the root `tasks` assertion a fixture self-check.
-    let selected = team_agent::state::projection::select_runtime_state(
-        &fixture.root,
-        Some("teamA"),
-    )
-    .expect("select teamA runtime state");
-    let scoped = team_agent::cli::status_port::status_scoped(
-        &fixture.root,
-        &selected,
-        Some("teamA"),
-        false,
-        true,
-    )
-    .expect("assemble teamA scoped status");
-    let root_tasks = scoped
-        .get("tasks")
-        .and_then(Value::as_array)
-        .expect("selected teamA root tasks");
-    assert_eq!(task_ids_from(root_tasks), vec!["task_a".to_string()]);
     assert!(
-        !task_ids_from(root_tasks).contains(&"task_b".to_string()),
-        "selected teamA root task projection must exclude sibling task_b: {scoped}"
+        task_ids(&detail).contains(&"task_a".to_string()),
+        "status --team teamA --detail must show teamA tasks; detail={detail}"
     );
-    let messages = scoped
-        .get("messages")
-        .and_then(Value::as_object)
-        .expect("scoped messages projection");
-    assert_eq!(status_count_total(messages), 1);
-    assert_eq!(messages.get("delivered").and_then(Value::as_i64), Some(1));
-    assert!(messages.get("accepted").is_none());
-    let results = scoped
-        .get("results")
-        .and_then(Value::as_object)
-        .expect("scoped results projection");
-    assert_eq!(results.get("total").and_then(Value::as_i64), Some(1));
-    let latest = scoped
-        .get("latest_results")
-        .and_then(Value::as_array)
-        .expect("scoped latest result projection");
-    assert_eq!(latest_result_ids(latest), vec!["res_team_a".to_string()]);
     assert!(
-        !latest_result_ids(latest).contains(&"res_team_b".to_string()),
-        "teamA scoped latest results must exclude sibling res_team_b: {scoped}"
+        !task_ids(&detail).contains(&"task_b".to_string()),
+        "status --team teamA --detail must not collapse to active teamB tasks; detail={detail}"
     );
-    let health = scoped
-        .get("agent_health")
-        .and_then(Value::as_object)
-        .expect("scoped health projection");
-    assert_eq!(health.len(), 1);
-    assert!(health.contains_key("worker_a"));
-    assert!(!health.contains_key("worker_b"));
+    assert_eq!(
+        detail.pointer("/messages/accepted").and_then(Value::as_i64),
+        Some(1),
+        "status --team teamA --detail message counts must filter owner_team_id=teamA; detail={detail}"
+    );
+    assert_eq!(
+        detail.pointer("/results/total").and_then(Value::as_i64),
+        Some(1),
+        "status --team teamA --detail result counts must filter owner_team_id=teamA; detail={detail}"
+    );
+    assert!(
+        detail.pointer("/agent_health/worker_a").is_some()
+            && detail.pointer("/agent_health/worker_b").is_none(),
+        "status --team teamA --detail agent_health must be owner_team_id scoped; detail={detail}"
+    );
 }
 
 #[test]
@@ -150,19 +126,30 @@ fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguo
     let fixture = MultiTeamFixture::new("status-ambiguous");
 
     let output = run_cli(["status", "--workspace", fixture.root_str(), "--json"]);
-    assert!(
-        !output.status.success(),
-        "S4QR-001: status without --team must refuse in a multi-alive workspace"
+    let body = stdout_json(&output);
+    assert_eq!(
+        body.pointer("/ok").and_then(Value::as_bool),
+        Some(false),
+        "S4QR-001: status --json without --team in multi-alive workspace must be ok=false; body={body}"
     );
-    assert!(
-        output.stdout.is_empty(),
-        "S4QR-001: refused status must not emit a JSON diagnostic payload; stdout={:?}",
-        String::from_utf8_lossy(&output.stdout)
+    assert_eq!(
+        body.pointer("/status").and_then(Value::as_str),
+        Some("refused"),
+        "S4QR-001: status must be refused with status=refused; body={body}"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        body.pointer("/reason").and_then(Value::as_str),
+        Some("team_target_ambiguous"),
+        "S4QR-001: reason must be team_target_ambiguous; body={body}"
+    );
+    let candidates = body
+        .pointer("/candidates")
+        .and_then(Value::as_array)
+        .expect("candidates array present");
+    let names: Vec<&str> = candidates.iter().filter_map(Value::as_str).collect();
     assert!(
-        stderr.contains("teamA") && stderr.contains("teamB") && stderr.contains("--team"),
-        "S4QR-001: refusal must name candidates and explicit --team recovery; stderr={stderr:?}"
+        names.contains(&"teamA") && names.contains(&"teamB"),
+        "S4QR-001: candidates must list both alive teams; got {names:?}"
     );
 
     // Sanity: explicit --team teamA still works and returns teamA scope.
@@ -176,7 +163,14 @@ fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguo
     ]);
     assert_success(&scoped, "status --team teamA --json");
     let scoped_body = stdout_json(&scoped);
-    assert_brief_nodes(&scoped_body, &["worker_a"]);
+    assert!(
+        scoped_body.pointer("/agents/worker_a").is_some(),
+        "explicit --team teamA must succeed; body={scoped_body}"
+    );
+    assert!(
+        scoped_body.pointer("/agents/worker_b").is_none(),
+        "explicit --team teamA must not leak teamB; body={scoped_body}"
+    );
 }
 
 #[test]
@@ -351,48 +345,14 @@ fn stdout_json(output: &Output) -> Value {
     })
 }
 
-fn assert_brief_nodes(value: &Value, expected_names: &[&str]) {
-    let nodes = value
-        .get("nodes")
+fn task_ids(status: &Value) -> Vec<String> {
+    status
+        .get("tasks")
         .and_then(Value::as_array)
-        .expect("status brief nodes");
-    let names = nodes
-        .iter()
-        .filter_map(|node| node.get("name").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    assert_eq!(names, expected_names, "status team scope names: {value}");
-    for node in nodes {
-        let mut keys = node
-            .as_object()
-            .expect("status brief node object")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        assert_eq!(
-            keys,
-            vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-            "status brief node shape: {node}"
-        );
-    }
-}
-
-fn task_ids_from(tasks: &[Value]) -> Vec<String> {
-    tasks
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(|task| task.get("id").and_then(Value::as_str).map(str::to_string))
         .collect()
-}
-
-fn latest_result_ids(results: &[Value]) -> Vec<String> {
-    results
-        .iter()
-        .filter_map(|result| result.get("result_id").and_then(Value::as_str).map(str::to_string))
-        .collect()
-}
-
-fn status_count_total(counts: &serde_json::Map<String, Value>) -> i64 {
-    counts.values().filter_map(Value::as_i64).sum()
 }
 
 fn collected_result_ids(value: &Value) -> Vec<String> {
@@ -552,7 +512,7 @@ fn write_team_dir(root: &Path, team: &str, agent: &str) -> PathBuf {
 
 fn seed_db(root: &Path) {
     let store = MessageStore::open(root).expect("open team.db");
-    let message_a = store
+    store
         .create_message(
             Some("task_a"),
             "leader",
@@ -563,7 +523,6 @@ fn seed_db(root: &Path) {
             Some("teamA"),
         )
         .unwrap();
-    store.mark(&message_a, "delivered", None).unwrap();
     store
         .create_message(
             Some("task_b"),

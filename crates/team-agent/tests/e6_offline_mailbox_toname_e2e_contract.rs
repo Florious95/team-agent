@@ -47,7 +47,6 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{coordinator_health, WorkspacePath};
 
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
@@ -104,34 +103,28 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         ],
     );
     let status_json = json_output(&status, "status after quick-start");
-    let health = coordinator_health(&WorkspacePath::new(case.target_workspace().to_path_buf()));
-    assert!(
-        health.service_available,
-        "E6 e2e setup: typed coordinator_health.service_available must be true before send; health={health:?}"
+    assert_eq!(
+        status_json
+            .pointer("/coordinator/ok")
+            .and_then(Value::as_bool),
+        Some(true),
+        "E6 e2e RED setup: coordinator must be running for the target team; status={status_json}"
     );
-    let nodes = status_json
-        .get("nodes")
-        .and_then(Value::as_array)
-        .expect("status brief nodes after quick-start");
-    assert!(
-        !nodes.is_empty(),
-        "E6 e2e RED setup: target team must retain registered nodes; status={status_json}"
+    assert_eq!(
+        status_json
+            .get("tmux_session_present")
+            .and_then(Value::as_bool),
+        Some(true),
+        "E6 e2e RED setup: target tmux session must be live; status={status_json}"
     );
-    let diagnose = case.run_cli(
-        case.target_workspace(),
-        vec![
-            "diagnose".into(),
-            "--workspace".into(),
-            case.target_workspace_arg(),
-            "--team".into(),
-            case.team_key.clone(),
-            "--json".into(),
-        ],
-    );
-    let diagnose_json = json_output(&diagnose, "diagnose after quick-start");
     assert!(
-        !diagnose_json.to_string().contains("coordinator_unavailable"),
-        "E6 e2e RED setup: diagnose must not report coordinator unavailable; diagnose={diagnose_json}"
+        status_json.get("leader_receiver").is_none()
+            || status_json.get("leader_receiver").is_some_and(|v| {
+                v.as_object()
+                    .map(|object| object.is_empty())
+                    .unwrap_or(false)
+            }),
+        "E6 e2e RED setup: leader must never have been attached before mailbox send; status={status_json}"
     );
 
     let token = unique_token("E6_REAL_CLI_MAILBOX");

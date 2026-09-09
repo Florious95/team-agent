@@ -140,20 +140,24 @@ impl CloneScopeCase {
     }
 
     fn discover_socket(&self) -> PathBuf {
-        let state_path = self
-            .workspace
-            .join(".team")
-            .join("runtime")
-            .join("state.json");
-        let raw = std::fs::read_to_string(state_path).expect("quick-start registration state");
-        let state: Value = serde_json::from_str(&raw).expect("parse registration state");
-        let (endpoint, source) = team_agent::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(&state))
-            .expect("quick-start must persist a tmux registration endpoint");
-        assert!(
-            source.starts_with("state."),
-            "endpoint must come from the selected team's persisted registration, not fallback: source={source}"
-        );
-        PathBuf::from(endpoint)
+        let output = self.run_cli(&["status", "--workspace", self.workspace_str(), "--json"]);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+            panic!(
+                "status --json must emit JSON; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        let attach = value
+            .get("leader_attach_command")
+            .and_then(Value::as_str)
+            .expect("status must expose leader_attach_command");
+        let socket = attach
+            .split_whitespace()
+            .skip_while(|token| *token != "-S")
+            .nth(1)
+            .expect("leader_attach_command must carry -S <socket>");
+        PathBuf::from(socket)
     }
 
     fn clone_seat(&self) -> Value {
@@ -361,24 +365,19 @@ fn clone_ok_new_seat_is_visible_in_team_status() {
         "--json",
     ]);
     let value = json_stdout(&output, "RED3 status");
-    let node = value
-        .get("nodes")
-        .and_then(Value::as_array)
-        .and_then(|nodes| nodes.iter().find(|node| node.get("name").and_then(Value::as_str) == Some(CLONE)))
-        .unwrap_or_else(|| panic!("RED3: clone must be listed in the seven-field nodes projection; value={value}"));
-    let mut keys = node
-        .as_object()
-        .expect("status node object")
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    keys.sort();
-    assert_eq!(
-        keys,
-        vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-        "RED3: status must expose the exact seven-field projection; node={node}"
+    let listed = value
+        .get("agents")
+        .and_then(Value::as_object)
+        .is_some_and(|agents| agents.contains_key(CLONE));
+    assert!(
+        listed,
+        "RED3: clone reported ok, so `status --team {TEAM_NAME}` must list the \
+         clone; agents={:?}",
+        value
+            .get("agents")
+            .and_then(Value::as_object)
+            .map(|a| a.keys().cloned().collect::<Vec<_>>())
     );
-    assert_eq!(node.get("name").and_then(Value::as_str), Some(CLONE));
     case.shutdown();
 }
 

@@ -797,8 +797,6 @@ pub enum RestartReport {
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
-        /// Debt returned by this restart's best-effort auto-attach, if any.
-        attach_window_failures: Option<serde_json::Value>,
     },
     /// At least one worker failed during live spawn, but other workers were isolated
     /// and restarted. The CLI reports `status=partial` and exits non-zero.
@@ -813,8 +811,6 @@ pub enum RestartReport {
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
-        /// Debt returned by this restart's best-effort auto-attach, if any.
-        attach_window_failures: Option<serde_json::Value>,
     },
     /// All workers failed during live spawn. No worker is reported as restarted.
     Failed {
