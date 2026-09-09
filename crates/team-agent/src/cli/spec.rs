@@ -159,6 +159,11 @@ pub(crate) struct CommandSpec {
     pub(crate) governance: Option<GovernanceNote>,
 }
 
+/// Visible default-help contract:
+/// - d40 / v0.5.77 published 15 names including `models` and excluding `results`.
+/// - `results` remains a public handler and must stay discoverable.
+/// - Exact composed set is d40 ∪ {results}. This is a frozen name set, not a
+///   numeric slack threshold.
 #[rustfmt::skip]
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec { name: "quick-start", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::QuickStart), summary: "start or attach a team from TEAM.md", usage: "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, alias_of: None, sunset: None, action: None, governance: None },
