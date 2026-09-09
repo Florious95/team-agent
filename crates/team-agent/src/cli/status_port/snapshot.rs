@@ -102,7 +102,6 @@ impl RuntimeSnapshot {
                 object.insert("all_attached_receiver".to_string(), json!(false));
                 object.insert("ready".to_string(), json!(false));
                 object.insert("state".to_string(), json!("leader_receiver_unbound"));
-                object.insert("next_action".to_string(), json!("claim-leader"));
                 object.insert(
                     "reason".to_string(),
                     json!("leader registry does not authorize this workspace"),

@@ -183,13 +183,23 @@ pub(crate) fn annotate_runtime_tmux_endpoint(
     transport: &dyn Transport,
     workspace: &Path,
 ) {
-    let transport_endpoint = transport.tmux_endpoint();
-    let endpoint = crate::tmux_backend::owning_tmux_endpoint_from_state(state)
-        .map(|(endpoint, _source)| endpoint.to_string())
-        .or_else(|| transport_endpoint.clone());
-    let Some(endpoint) = endpoint else {
+    let Some(transport_endpoint) = transport.tmux_endpoint() else {
         return;
     };
+    let persisted_endpoint = ["tmux_endpoint", "tmux_socket"]
+        .into_iter()
+        .find_map(|key| {
+            state
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .filter(|endpoint| !endpoint.is_empty())
+        });
+    // The worker endpoint is its own authority. A restart/add-agent spawn
+    // must not let an independently-bound leader receiver rewrite it.
+    if persisted_endpoint.is_some_and(|endpoint| endpoint != transport_endpoint.as_str()) {
+        return;
+    }
+    let endpoint = transport_endpoint.clone();
     let endpoint_for_state = if Path::new(&endpoint).is_absolute() || endpoint == "default" {
         endpoint.clone()
     } else if endpoint == crate::tmux_backend::socket_name_for_workspace(workspace) {
@@ -212,7 +222,7 @@ pub(crate) fn annotate_runtime_tmux_endpoint(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         );
-        if transport_endpoint.as_deref() == Some(endpoint.as_str()) {
+        if transport_endpoint == endpoint {
             if let Some(source) = selected_tmux_socket_source(transport, workspace) {
                 obj.insert("tmux_socket_source".to_string(), serde_json::json!(source));
             }

@@ -18,6 +18,8 @@ mod hermetic_guard;
 
 #[path = "../../../tests/support/composite_source.rs"]
 mod composite_source;
+#[path = "../../../tests/support/brief_probe.rs"]
+mod brief_probe;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -97,6 +99,18 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
     let case = B0HideOneCase::new("status-diagnose-hide-one");
     let root = case.current_state();
     save_runtime_state(&case.workspace, &root).expect("seed current root state");
+    let probe = brief_probe::install_trusted_nodeprobe(
+        &case.workspace.join("probe"),
+        NEW_ENDPOINT,
+        SESSION,
+        WORKER,
+        "%new",
+        "fake",
+    );
+    let _path = case.env.with_env(
+        "PATH",
+        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
+    );
 
     let status_before = case.run_json(&[
         "status",
@@ -136,10 +150,20 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
         "--json",
     ]);
 
-    assert_eq!(
-        status_after.pointer("/agents/worker/pane_id").and_then(Value::as_str),
-        Some("%new"),
-        "F0-3 RED3: status must not display the stale snapshot pane as the worker authority; before={status_before} after={status_after}"
+    let node = brief_node(&status_after).unwrap_or_else(|| {
+        panic!("F0-3 RED3: status must retain the worker in the seven-field projection; before={status_before} after={status_after}")
+    });
+    assert_eq!(node.get("name").and_then(Value::as_str), Some(WORKER));
+    assert_eq!(node.get("provider").and_then(Value::as_str), Some("fake"));
+    assert_eq!(node.get("runtime_status").and_then(Value::as_str), Some("running"));
+    assert_eq!(node.get("activity").and_then(Value::as_str), Some("idle"));
+    assert_eq!(node.get("health").and_then(Value::as_str), Some("normal"));
+    assert_eq!(node.get("session_name").and_then(Value::as_str), Some(SESSION));
+    assert!(
+        node.get("tmux_command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains(NEW_ENDPOINT) && command.contains("team-b0-hideone:worker.%new")),
+        "F0-3 RED3: trusted root probe must produce a non-empty exact endpoint command; node={node}"
     );
     assert_eq!(
         worker_status_tuple(&status_before),
@@ -333,18 +357,25 @@ impl B0HideOneCase {
     }
 }
 
+fn brief_node(status: &Value) -> Option<&Value> {
+    status
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(WORKER)
+        }))
+}
+
 fn worker_status_tuple(status: &Value) -> Value {
-    let worker = status
-        .get("agents")
-        .and_then(Value::as_object)
-        .and_then(|agents| agents.get(WORKER))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let worker = brief_node(status).cloned().unwrap_or(Value::Null);
     json!({
-        "ok": status.get("ok").cloned().unwrap_or(Value::Null),
-        "pane_id": worker.get("pane_id").cloned().unwrap_or(Value::Null),
-        "status": worker.get("status").cloned().unwrap_or(Value::Null),
-        "readiness": status.get("readiness").cloned().unwrap_or(Value::Null),
+        "name": worker.get("name").cloned().unwrap_or(Value::Null),
+        "provider": worker.get("provider").cloned().unwrap_or(Value::Null),
+        "runtime_status": worker.get("runtime_status").cloned().unwrap_or(Value::Null),
+        "activity": worker.get("activity").cloned().unwrap_or(Value::Null),
+        "health": worker.get("health").cloned().unwrap_or(Value::Null),
+        "session_name": worker.get("session_name").cloned().unwrap_or(Value::Null),
+        "tmux_command": worker.get("tmux_command").cloned().unwrap_or(Value::Null),
     })
 }
 

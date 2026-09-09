@@ -121,7 +121,23 @@ pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> b
         RegistryDeliverability::Attached => {}
         RegistryDeliverability::Unbound | RegistryDeliverability::Undecidable => return false,
     }
-    load_runtime_state(workspace).is_ok()
+    let Ok(state) = load_runtime_state(workspace) else {
+        return false;
+    };
+    let receiver = state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .and_then(|team| team.get("leader_receiver"))
+        .or_else(|| {
+            let active = state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str);
+            (active == Some(team_key)).then(|| state.get("leader_receiver")).flatten()
+        });
+    receiver
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("attached")
 }
 
 enum RegistryDeliverability {

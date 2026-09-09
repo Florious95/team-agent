@@ -1,8 +1,8 @@
 use super::launch_spawn::seed_healthy_coordinator;
 use super::*;
 use crate::cli::{
-    cmd_collect, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult, CollectArgs, SendArgs,
-    StatusArgs,
+    cmd_collect, cmd_diagnose, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult,
+    CollectArgs, DiagnoseArgs, SendArgs, StatusArgs,
 };
 use crate::transport::test_support::OfflineTransport;
 use crate::transport::WindowName;
@@ -176,29 +176,33 @@ fn phase_f_golden_events_state_status_zero_drift() {
 #[test]
 #[serial_test::serial(env)]
 fn phase_golden_unbound_not_ready_requires_claim_leader() {
-    // 已废除的行为：旧实现只说不 ready、不说怎么恢复，把人晾在原地。此断言证明它确实没了。
-    // Independent of golden.json so a later regenerate cannot erase it.
-    // Companion status keys grok_slot ← 77bddb95 / 0c319cca; next_action ← 080903a2.
-    let compact = run_compact_status_after_quick_start();
-    let not_ready = compact
-        .get("not_ready")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("compact must carry not_ready; got {compact}"));
-    let reasons = not_ready
-        .get("reasons")
+    // Unbound recovery guidance belongs to the diagnose/quick-start refusal
+    // surface, not to the seven-field status brief.
+    let diagnose = run_diagnose_after_quick_start();
+    let issues = diagnose
+        .get("issues")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     assert!(
-        reasons
-            .iter()
-            .any(|reason| reason.as_str() == Some("leader_receiver_unbound")),
-        "tombstone fixture must still produce leader_receiver_unbound; not_ready={not_ready:?}"
+        issues.iter().any(|issue| {
+            issue.as_str() == Some("leader_not_attached")
+                || issue.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
+        }),
+        "tombstone fixture must still diagnose leader_receiver_unbound; diagnose={diagnose}"
     );
-    assert_eq!(
-        not_ready.get("next_action").and_then(Value::as_str),
-        Some("claim-leader"),
-        "when not_ready.reasons contains leader_receiver_unbound, next_action must be claim-leader; not_ready={not_ready:?}"
+    let repairs = diagnose
+        .get("suggested_repairs")
+        .map(Value::to_string)
+        .unwrap_or_default();
+    assert!(
+        !repairs.contains("claim-leader")
+            || issues.iter().any(|issue| issue.as_str() == Some("leader_not_attached")
+                && diagnose
+                    .pointer("/binding/kind")
+                    .and_then(Value::as_str)
+                    == Some("unbound")),
+        "claim-leader is only legal for proven missing ownership; diagnose={diagnose}"
     );
 }
 
@@ -474,7 +478,7 @@ fn strip_full_line_json_comments(text: &str) -> String {
         .join("\n")
 }
 
-fn run_compact_status_after_quick_start() -> Value {
+fn run_diagnose_after_quick_start() -> Value {
     let hermetic = HermeticTestEnv::enter("tombstone-claim-leader");
     let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
     let team = two_worker_team_dir(&hermetic);
@@ -491,20 +495,17 @@ fn run_compact_status_after_quick_start() -> Value {
         false,
     )
     .expect("tombstone fixture must quick-start");
-    let status = cmd_status(&StatusArgs {
-        agent: None,
+    let diagnose = cmd_diagnose(&DiagnoseArgs {
         workspace,
-        detail: false,
-        summary: false,
         json: true,
         team: Some("teamdir".to_string()),
     });
-    match cmd_value(status) {
+    match cmd_value(diagnose) {
         Value::Object(map) => map
             .get("output")
             .cloned()
-            .unwrap_or_else(|| panic!("compact status missing output")),
-        other => panic!("compact status must be a JSON object, got {other}"),
+            .unwrap_or_else(|| panic!("diagnose missing output")),
+        other => panic!("diagnose must be a JSON object, got {other}"),
     }
 }
 

@@ -210,6 +210,8 @@ pub fn launch_with_transport_in_workspace(
         routes,
         permissions,
         leader_receiver_attached: false,
+        leader_bind_stage: None,
+        leader_bind_reason: None,
         session_capture_incomplete_agents: Vec::new(),
     })
 }

@@ -85,8 +85,29 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     }
     match dispatch(command, &argv[1..], cwd) {
         Ok(exit) => exit,
-        Err(error) => emit_cli_error(command, &argv[1..], cwd, &error),
+        Err(error) => emit_cli_error_for_command(command, &argv[1..], cwd, &error),
     }
+}
+
+fn emit_cli_error_for_command(
+    command: &str,
+    args: &[String],
+    cwd: &Path,
+    error: &CliError,
+) -> ExitCode {
+    if command == "status" {
+        emit_status_cli_error(error)
+    } else {
+        emit_cli_error(command, args, cwd, error)
+    }
+}
+
+fn emit_status_cli_error(error: &CliError) -> ExitCode {
+    let normalized = normalize_cli_error(error);
+    let payload_error = normalized.as_ref().unwrap_or(error);
+    let safe_error = crate::redaction::redact_external_text(&payload_error.to_string());
+    eprintln!("error: {safe_error}");
+    ExitCode::Error
 }
 
 /// Print a handler's CmdResult to stdout (emit formats json/human), then surface its exit code.
@@ -302,7 +323,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Core",
-        &["quick-start", "send", "status", "collect", "models"],
+        &["quick-start", "send", "status", "collect", "results", "models"],
     );
     append_help_section(
         &mut out,
@@ -322,7 +343,8 @@ pub(crate) fn default_help() -> String {
         "Guided recovery",
         &["claim-leader", "takeover", "attach-leader"],
     );
-    out.push_str("\nProvider launchers:\n  team-agent codex|claude|copilot|grok|cursor|pi ...\n");
+    out.push_str("\nWorkflow: `team-agent models --provider pi`, then quick-start/add-agent/start-agent, then `team-agent send AGENT MESSAGE`.\n");
+    out.push_str("Provider launchers:\n  team-agent codex|claude|copilot|grok|cursor|pi ...\n");
     out.push_str("\nRun `team-agent <command> --help` for command flags.");
     out
 }
@@ -373,7 +395,7 @@ fn command_help(command: Option<&str>) -> String {
     match command {
         None => default_help(),
         Some("init") => compat_hidden_help("init", "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]"),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json] [--detail]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).\n\n--detail includes internal receiver/topology diagnostics in JSON output.\n\nAfter a successful start, use the returned `send_commands` (or choose an agent explicitly) with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => concat!(
@@ -386,16 +408,16 @@ fn command_help(command: Option<&str>) -> String {
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或 nodeprobe 证据时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]\n\nPrints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
-        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]".to_string(),
+        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
         Some("restart-agent") => compat_hidden_help("restart-agent", "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]"),
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
-        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]".to_string(),
+        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]\n\nAfter a successful start, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
+        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]\n\nAfter a successful add, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
@@ -404,7 +426,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("stuck-cancel") => "usage: team-agent stuck-cancel AGENT [--workspace WORKSPACE] [--alert-type stuck|idle_fallback|cross_worker_deadlock|all] [--json]".to_string(),
         Some("acknowledge-idle") => "usage: team-agent acknowledge-idle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("takeover") => "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
-        Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
+        Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json] [--detail]".to_string(),
         Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--pane PANE] [--provider PROVIDER] [--confirm] [--json]".to_string(),
         Some("attach-app-server-leader") => "usage: team-agent attach-app-server-leader [--workspace WORKSPACE] [--team TEAM] --socket unix:///path.sock --thread-id THREAD_ID [--json]".to_string(),
         Some("identity") => "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
@@ -1062,6 +1084,7 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         yes: parsed.yes,
         no_display: parsed.no_display,
         json: parsed.json,
+        detail: parsed.detail,
         backend: parsed.backend,
     })
 }
@@ -1403,6 +1426,7 @@ fn claim_leader_args(args: &[String], cwd: &Path) -> ClaimLeaderArgs {
         team: parsed.team,
         confirm: parsed.confirm,
         json: parsed.json,
+        detail: parsed.detail,
     }
 }
 
@@ -1476,6 +1500,7 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
         allow_fresh: parsed.allow_fresh,
         session_converge_deadline_ms: parsed.session_converge_deadline_ms,
         json: parsed.json,
+        detail: parsed.detail,
     })
 }
 
@@ -2180,11 +2205,18 @@ mod tests {
     }
 
     #[test]
-    fn status_help_mentions_summary_for_error_details() {
-        assert!(
-            command_help(Some("status")).contains("错误细分走 status --summary"),
-            "status help must tell users where detailed error classes live"
-        );
+    fn status_help_describes_brief_projection_and_unknown_boundary() {
+        let help = command_help(Some("status"));
+        for marker in [
+            "name/provider/runtime_status/activity/health/session_name/tmux_command",
+            "人读与 --json 使用同一投影",
+            "显示 unknown",
+            "tmux_command",
+            "不增加诊断字段",
+        ] {
+            assert!(help.contains(marker), "status help missing {marker}: {help}");
+        }
+        assert!(!help.contains("错误细分走 status --summary"));
     }
 
     #[test]

@@ -1303,9 +1303,14 @@ fn restart_with_selected_team_and_transport(
         )?;
         // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
         // come up still need a leader_receiver pane to deliver report_result.
-        try_autobind_leader_after_restart(
+        let attach_window_failures = try_autobind_leader_after_restart(
             &selected.run_workspace,
             Some(selected.team_key.as_str()),
+            &state,
+        );
+        let (leader_bind_ok, leader_bind_reason) = restart_bind_status(
+            &selected.run_workspace,
+            selected.team_key.as_str(),
             &state,
         );
         return Ok(RestartReport::Partial {
@@ -1316,6 +1321,9 @@ fn restart_with_selected_team_and_transport(
             coordinator,
             next_actions,
             attach_commands,
+            attach_window_failures,
+            leader_bind_ok,
+            leader_bind_reason,
         });
     }
     phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
@@ -1331,7 +1339,8 @@ fn restart_with_selected_team_and_transport(
     // invoked from a tmux pane should bind that pane as leader_receiver,
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
-    try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+    let attach_window_failures =
+        try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
     if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
     {
         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
@@ -1345,6 +1354,11 @@ fn restart_with_selected_team_and_transport(
     // never panics. Hard error path is deferred to Step 10.
     let violations = crate::layout::sessions::assert_topology_invariants(&state, &spec);
     crate::layout::sessions::log_topology_violations(&violations);
+    let (leader_bind_ok, leader_bind_reason) = restart_bind_status(
+        &selected.run_workspace,
+        selected.team_key.as_str(),
+        &state,
+    );
     Ok(RestartReport::Restarted {
         session_name,
         agents: successful_agents,
@@ -1352,6 +1366,9 @@ fn restart_with_selected_team_and_transport(
         coordinator,
         next_actions,
         attach_commands,
+        attach_window_failures,
+        leader_bind_ok,
+        leader_bind_reason,
     })
 }
 
@@ -1821,61 +1838,129 @@ fn verify_spawned_agent_live(
 /// E51 guard). In that case the user must still run `attach-leader` manually,
 /// matching pre-fix behaviour. We log to stderr so the operator sees why
 /// auto-attach didn't take.
+fn selected_team_receiver<'a>(
+    state: &'a serde_json::Value,
+    team_key: &str,
+) -> Option<&'a serde_json::Value> {
+    state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .and_then(|team| team.get("leader_receiver"))
+        .or_else(|| {
+            let active = state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str);
+            if active == Some(team_key) {
+                state.get("leader_receiver")
+            } else {
+                None
+            }
+        })
+}
+
+fn restart_bind_status(
+    workspace: &std::path::Path,
+    team_key: &str,
+    state: &serde_json::Value,
+) -> (bool, Option<String>) {
+    let Some(receiver) = selected_team_receiver(state, team_key) else {
+        return (false, Some("selected_team_receiver_missing".to_string()));
+    };
+    let transport = crate::transport_factory::tmux_workspace_transport(workspace);
+    match crate::messaging::leader_channel::resolve_live_leader_channel(
+        workspace, receiver, &transport,
+    ) {
+        crate::messaging::leader_channel::LeaderChannelResolution::Live(_) => (true, None),
+        crate::messaging::leader_channel::LeaderChannelResolution::Unbound(reason) => {
+            (false, Some(reason.reason_code().to_string()))
+        }
+        crate::messaging::leader_channel::LeaderChannelResolution::ProbeFailed(error) => {
+            (false, Some(format!("probe_failed:{error}")))
+        }
+    }
+}
+
+fn owner_conflicts_with_caller(state: &serde_json::Value, team_key: &str) -> bool {
+    let Some(owner_pane) = state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .and_then(|team| team.pointer("/team_owner/pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| state.pointer("/team_owner/pane_id").and_then(serde_json::Value::as_str))
+    else {
+        return false;
+    };
+    let Some(caller) = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.is_empty())
+    else {
+        return false;
+    };
+    owner_pane != caller
+}
+
 fn try_autobind_leader_after_restart(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
-) {
-    if std::env::var_os("TMUX_PANE").is_none() {
-        return;
+) -> Option<serde_json::Value> {
+    let team_key = team.unwrap_or("");
+    if restart_bind_status(workspace, team_key, state).0 {
+        return None;
     }
-    // Provider: prefer the existing team_owner.provider (if rebind),
-    // else leader_receiver.provider (stale, but still informative),
-    // else default to ClaudeCode (matches the most common deployment).
-    let provider = state
-        .pointer("/team_owner/provider")
+    if owner_conflicts_with_caller(state, team_key) {
+        eprintln!(
+            "team_agent::restart auto_attach_leader skipped reason=owner_conflict team={team:?}"
+        );
+        return None;
+    }
+    if std::env::var_os("TMUX_PANE").is_none() {
+        return None;
+    }
+    let Some(provider) = state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .and_then(|team| team.pointer("/team_owner/provider"))
         .and_then(serde_json::Value::as_str)
         .or_else(|| {
             state
-                .pointer("/leader_receiver/provider")
+                .pointer("/team_owner/provider")
                 .and_then(serde_json::Value::as_str)
         })
-        .and_then(|s| {
-            // Legacy auto-attach: collapse any claude variant to ClaudeCode
-            // (this site historically treated `Claude` and `ClaudeCode` as
-            // the same attach target). Wire-format `parse_provider` keeps
-            // them distinct everywhere else.
-            crate::provider::wire::parse_provider(s).map(|p| match p {
-                crate::model::enums::Provider::Claude => crate::model::enums::Provider::ClaudeCode,
-                other => other,
-            })
+        .or_else(|| {
+            selected_team_receiver(state, team_key)
+                .and_then(|receiver| receiver.get("provider"))
+                .and_then(serde_json::Value::as_str)
         })
-        .unwrap_or(crate::model::enums::Provider::ClaudeCode);
-    let team_str = team;
-    match crate::leader::attach_leader(workspace, team_str, None, provider) {
+        .and_then(crate::provider::wire::parse_provider)
+    else {
+        eprintln!(
+            "team_agent::restart auto_attach_leader skipped reason=provider_unresolved team={team:?}"
+        );
+        return None;
+    };
+    match crate::leader::attach_leader(workspace, team, None, provider) {
         Ok(result) if result.ok => {
+            let debt = result.attach_window_failures.clone();
             let _ = crate::leader::registry::register_binding_from_state_best_effort(
                 workspace,
-                team_str,
+                team,
                 "restart-auto-attach",
             );
-            eprintln!(
-                "team_agent::restart auto_attach_leader ok pane={:?} team={:?}",
-                result.bound_pane_id.as_ref().map(|p| p.as_str()),
-                team_str,
-            );
+            debt
         }
         Ok(result) => {
             eprintln!(
-                "team_agent::restart auto_attach_leader skipped reason={:?} team={:?}",
-                result.reason, team_str,
+                "team_agent::restart auto_attach_leader skipped reason={:?} team={team:?}",
+                result.reason,
             );
+            None
         }
         Err(error) => {
             eprintln!(
-                "team_agent::restart auto_attach_leader failed error={error} team={team_str:?} \
-                 (run `team-agent attach-leader` from your tmux pane to bind manually)",
+                "team_agent::restart auto_attach_leader failed error={error} team={team:?}"
             );
+            None
         }
     }
 }

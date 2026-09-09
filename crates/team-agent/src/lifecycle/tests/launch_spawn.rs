@@ -3496,6 +3496,66 @@ fn add_agent_resolves_to_persisted_endpoint_socket_not_workspace_hash() {
     );
 }
 
+/// **Regression guard**: lifecycle worker resolution must ignore the leader
+/// receiver endpoint. The receiver may live on the caller's default socket
+/// while workers/coordinator remain on their persisted private socket.
+#[test]
+fn lifecycle_worker_resolver_prefers_persisted_worker_over_leader_receiver() {
+    let team = temp_ws().join("addteam-split-leader-worker-endpoints");
+    std::fs::create_dir_all(&team).unwrap();
+    let worker_endpoint = "/private/tmp/tmux-501/ta-worker";
+    let leader_endpoint = "/private/tmp/tmux-501/default";
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-split",
+            "tmux_endpoint": worker_endpoint,
+            "tmux_socket": worker_endpoint,
+            "leader_receiver": {
+                "pane_id": "%169",
+                "tmux_socket": leader_endpoint,
+                "status": "attached"
+            },
+            "agents": {}
+        }),
+    )
+    .unwrap();
+
+    let resolved = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &team, None,
+    )
+    .expect("resolver must succeed when state has worker and receiver endpoints");
+    let endpoint = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(
+        &resolved,
+    );
+    assert_eq!(
+        endpoint.as_deref(),
+        Some(worker_endpoint),
+        "worker lifecycle operations must stay on persisted worker endpoint, not leader receiver"
+    );
+}
+
+/// **Regression guard**: annotating a worker spawn must not overwrite a
+/// persisted worker endpoint with the independent leader receiver endpoint.
+#[test]
+fn annotate_runtime_tmux_endpoint_does_not_follow_leader_receiver() {
+    let worker_endpoint = "/private/tmp/tmux-501/ta-worker";
+    let leader_endpoint = "/private/tmp/tmux-501/default";
+    let mut state = json!({
+        "tmux_endpoint": worker_endpoint,
+        "tmux_socket": worker_endpoint,
+        "leader_receiver": {"tmux_socket": leader_endpoint}
+    });
+    let transport = OfflineTransport::new().with_tmux_endpoint(worker_endpoint);
+    crate::lifecycle::launch::annotate_runtime_tmux_endpoint(
+        &mut state,
+        &transport,
+        std::path::Path::new("/tmp/annotate-split"),
+    );
+    assert_eq!(state["tmux_endpoint"], json!(worker_endpoint));
+    assert_eq!(state["tmux_socket"], json!(worker_endpoint));
+}
+
 /// **Regression guard**: cold workspace (no persisted endpoint) must safely
 /// fall back to `TmuxBackend::for_workspace(workspace)`. Encodes the
 /// first-agent / fresh-launch path so a future refactor doesn't accidentally

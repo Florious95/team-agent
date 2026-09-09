@@ -141,14 +141,14 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
     }
 
     if !leader_receiver_attached(state) {
-        issues.push(json!("leader_not_attached"));
+        issues.push(json!("leader_receiver_not_committed"));
         repairs.push(recovery_hint(
             state
                 .get("session_name")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
-            "leader_not_attached",
-            "team-agent attach-leader",
+            "leader_receiver_not_committed",
+            "inspect leader_receiver.status and registry; do not claim-leader without missing ownership",
         ));
     } else {
         // 0.4.x (CR R2 P0): leader provider health reconciliation. The
@@ -186,7 +186,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                             .and_then(Value::as_str)
                             .unwrap_or("unknown"),
                         "leader_provider_unreachable",
-                        "team-agent claim-leader",
+                        "team-agent diagnose --json",
                     ));
                 }
                 crate::leader::LeaderProviderHealth::Alive => {}
@@ -310,7 +310,7 @@ fn append_registry_channel_unbound_issue(
                 .and_then(Value::as_str)
                 .unwrap_or(team_key.as_str()),
             "leader_not_attached",
-            "team-agent claim-leader",
+            "inspect selected-team registry and live channel; claim-leader only if ownership is missing",
         ));
     }
 }
@@ -482,7 +482,7 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     repairs.push(recovery_hint(
         &team_key,
         "leader_not_attached",
-        "team-agent claim-leader",
+        "inspect selected-team registry and live channel; claim-leader only if ownership is missing",
     ));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }
@@ -798,15 +798,29 @@ fn recovery_hint(team: &str, broken_class: &str, hint_action: &str) -> Value {
         "broken_class": broken_class,
         "hint_action": hint_action,
         "dedupe_key": format!("{team}:{broken_class}"),
-        "action": format!(
-            "{hint_action} # alternatives: team-agent restart; team-agent claim-leader; team-agent takeover; team-agent quick-start; team-agent attach-leader"
-        ),
+        "action": hint_action,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_hint_does_not_bundle_unrelated_bind_commands() {
+        let hint = recovery_hint("alpha", "tmux_session_missing", "team-agent restart");
+        let action = hint.get("action").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(action, "team-agent restart");
+        assert!(
+            !action.contains("claim-leader"),
+            "shotgun alternatives must not appear; action={action}"
+        );
+        assert!(
+            !action.contains("takeover"),
+            "shotgun alternatives must not appear; action={action}"
+        );
+    }
+
 
     fn write_codex_identity_rollout(
         workspace: &std::path::Path,
