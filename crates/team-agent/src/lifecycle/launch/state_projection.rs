@@ -577,15 +577,17 @@ pub(super) fn seeded_pane_looks_like_worker(pane: &str, started: &[StartedAgent]
 }
 
 /// ---
-/// purpose: 给出 worker 侧使用的 tmux socket 名
-/// returns: transport 是 tmux 后端时按 workspace 推出 socket 名，否则 None
+/// purpose: 给出 worker 侧实际使用的 tmux endpoint
+/// returns: transport 是 tmux 后端时优先返回 transport endpoint；缺失时按 workspace 推出 socket 名，否则 None
 /// ---
 pub(super) fn launched_worker_tmux_socket(
     transport: &dyn Transport,
     workspace: &Path,
 ) -> Option<String> {
     if matches!(transport.kind(), crate::transport::BackendKind::Tmux) {
-        Some(crate::tmux_backend::socket_name_for_workspace(workspace))
+        transport
+            .tmux_endpoint()
+            .or_else(|| Some(crate::tmux_backend::socket_name_for_workspace(workspace)))
     } else {
         None
     }

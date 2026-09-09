@@ -419,6 +419,10 @@ pub struct LeaseResult {
     /// paths so existing lease JSON stays stable unless a convergence decision
     /// was actually evaluated.
     pub topology_convergence: Option<Value>,
+    /// Counts returned by the same attach operation when blocked leader
+    /// messages were requeued. Kept typed and team/pane-bound; omitted when
+    /// no attach-window debt was observed.
+    pub attach_window_failures: Option<Value>,
 }
 
 /// Family A 正源 owner 绑定结果(`bind_owner_from_caller_pane` 返回 dict 的 typed 版)。

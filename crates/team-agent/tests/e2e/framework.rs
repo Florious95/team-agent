@@ -747,14 +747,21 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     result
 }
 
+fn json_all_workers_spawned(value: &Value) -> bool {
+    value
+        .pointer("/readiness/all_workers_spawned")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || value
+            .pointer("/worker_readiness/all_workers_spawned")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
 fn quick_start_spawned_workers(result: &TaResult) -> bool {
     serde_json::from_str::<Value>(&result.stdout)
         .ok()
-        .and_then(|value| {
-            value
-                .pointer("/readiness/all_workers_spawned")
-                .and_then(Value::as_bool)
-        })
+        .map(|value| json_all_workers_spawned(&value))
         .unwrap_or_else(|| result.stdout.contains("\"all_workers_spawned\": true"))
 }
 
@@ -1645,10 +1652,7 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let all_workers_spawned = j
-        .pointer("/readiness/all_workers_spawned")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let all_workers_spawned = json_all_workers_spawned(&j);
     // ok==true is the happy path; ok==false but `leader_receiver_unbound` /
     // `pending_tool_load` is acceptable for E2E (workers spawned, only the
     // leader binding gate failed because cargo test runs outside tmux).
