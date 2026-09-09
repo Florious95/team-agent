@@ -24,6 +24,7 @@ use hermetic_guard::HermeticTestEnv;
 
 use std::path::PathBuf;
 use std::process::Output;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -153,18 +154,49 @@ impl SeatCase {
     }
 
     fn status_agent(&self, agent: &str) -> Option<Value> {
-        let (_, value) = self.cli_json(&[
-            "status",
-            "--workspace",
-            self.workspace_str(),
-            "--team",
-            &self.team,
-            "--json",
-        ]);
+        // Death classification remains an internal full-API contract; the
+        // public status command intentionally exposes only the seven-field
+        // brief projection.
+        let state = team_agent::state::persist::load_runtime_state(&self.workspace)
+            .expect("load canonical state");
+        let value = team_agent::cli::status_port::status_scoped(
+            &self.workspace,
+            &state,
+            Some(&self.team),
+            false,
+            true,
+        )
+        .expect("assemble full diagnostic status API");
         value
             .get("agents")
             .and_then(|agents| agents.get(agent))
             .cloned()
+    }
+
+    fn wait_for_terminal_registration(&self, agent: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = team_agent::state::projection::select_runtime_state(
+                &self.workspace,
+                Some(&self.team),
+            )
+            .expect("select canonical team state");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for canonical terminal registration of {agent}"
+            );
+            let worker = state
+                .pointer(&format!("/agents/{agent}"))
+                .expect("selected canonical worker");
+            if worker.get("status").and_then(Value::as_str) == Some("stopped")
+                && worker.get("worker_state").and_then(Value::as_str) == Some("DEAD")
+                && worker.get("stale") == Some(&json!(true))
+                && worker.get("stale_reason").and_then(Value::as_str) == Some("pane_dead")
+            {
+                return state;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Quick-start a SECOND team in the SAME workspace (shares the tmux
@@ -342,6 +374,11 @@ fn z1_dead_seat_force_remove_is_idempotent_with_exit_ok_pinned() {
 fn z2_dead_pane_projection_pins_all_death_fields() {
     let case = SeatCase::start("zsr2-z2", "zsr", &["w1", "w2"]);
     case.kill_pane("w1");
+    assert!(
+        case.pane_live("w2").is_some(),
+        "Z2 setup: live peer w2 must remain on the shared team session"
+    );
+    let canonical_before_full = case.wait_for_terminal_registration("w1");
     let agent = case
         .status_agent("w1")
         .expect("w1 present in status projection");
@@ -365,7 +402,89 @@ fn z2_dead_pane_projection_pins_all_death_fields() {
         Some("stopped"),
         "Z2: a dead pane must project the exact status=stopped (not merely non-running); agent={agent}"
     );
+    let canonical_after_full = team_agent::state::projection::select_runtime_state(
+        &case.workspace,
+        Some(&case.team),
+    )
+    .expect("select canonical team state");
+    assert_eq!(
+        terminal_worker_signature(&canonical_before_full, "w1"),
+        terminal_worker_signature(&canonical_after_full, "w1"),
+        "Z2: full status enrichment must not alter canonical terminal registration"
+    );
+
+    let canonical_before_public = team_agent::state::projection::select_runtime_state(
+        &case.workspace,
+        Some(&case.team),
+    )
+    .expect("select canonical team state");
+    assert_eq!(
+        terminal_worker_signature(&canonical_after_full, "w1"),
+        terminal_worker_signature(&canonical_before_public, "w1"),
+        "Z2: public status prerequisite must retain canonical terminal registration"
+    );
+    let public = case.run_cli(&[
+        "status",
+        "--workspace",
+        case.workspace_str(),
+        "--team",
+        "zsr",
+        "--json",
+    ]);
+    assert!(
+        public.status.success(),
+        "Z2: public status must remain readable after pane death; stdout={} stderr={}",
+        String::from_utf8_lossy(&public.stdout),
+        String::from_utf8_lossy(&public.stderr)
+    );
+    let public_json = json_stdout(&public, "Z2 public status");
+    let node = public_json
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some("w1")
+        }))
+        .expect("Z2 public status w1 node");
+    let mut keys = node
+        .as_object()
+        .expect("Z2 public status node object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
+        "Z2: public status must expose exactly the seven-field node projection; node={node}"
+    );
+    assert_eq!(
+        node.get("runtime_status").and_then(Value::as_str),
+        Some("stopped"),
+        "Z2: canonical terminal registration must produce a strict stopped public brief node; node={node}"
+    );
+    let canonical_after_public = team_agent::state::projection::select_runtime_state(
+        &case.workspace,
+        Some(&case.team),
+    )
+    .expect("select canonical team state");
+    assert_eq!(
+        terminal_worker_signature(&canonical_before_public, "w1"),
+        terminal_worker_signature(&canonical_after_public, "w1"),
+        "Z2: public brief read must not alter canonical terminal registration"
+    );
     case.shutdown();
+}
+
+fn terminal_worker_signature(state: &Value, agent: &str) -> Value {
+    let worker = state
+        .pointer(&format!("/agents/{agent}"))
+        .expect("terminal worker registration");
+    json!({
+        "status": worker.get("status"),
+        "worker_state": worker.get("worker_state"),
+        "stale": worker.get("stale"),
+        "stale_reason": worker.get("stale_reason"),
+    })
 }
 
 /// Z3 — deletion scope: outside role files survive every remove form.

@@ -410,7 +410,9 @@ fn command_help(command: Option<&str>) -> String {
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或 nodeprobe 证据时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
-        Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]\n\nPrints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
+        Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]
+
+Prints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),

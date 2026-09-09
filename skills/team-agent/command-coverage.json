@@ -67,6 +67,7 @@
       "owner": "runtime-owner:leader-channel",
       "plan": "Execute in a hermetic leader fixture and bind assertions to owner/receiver persistence or a precise zero-write refusal."
     },
+
     {
       "command": "team-agent claude",
       "bucket": "declared_gap",
@@ -233,6 +234,7 @@
         }
       }
     },
+
     {
       "command": "team-agent quick-start <dir>",
       "bucket": "covered",
@@ -308,6 +310,7 @@
       "owner": "runtime-owner:restart",
       "plan": "Execute a representative team selector and bind assertions to selected-team restart and sibling preservation."
     },
+
     {
       "command": "team-agent send --task task_initial \"Start\"",
       "bucket": "declared_gap",
