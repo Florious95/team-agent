@@ -1,7 +1,7 @@
 //! 测试默认零真-spawn、零真-tmux:lifecycle/CLI spawn 路径必经 *_with_transport 注入离线
 //! mock;确需真 tmux 者必须 provider:fake + RAII kill_server 守卫 + #[ignore=real-machine].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +26,7 @@ struct OfflineState {
     session_present: bool,
     session_absent_after_spawn_first: bool,
     targets: Vec<PaneInfo>,
+    target_snapshots: VecDeque<Vec<PaneInfo>>,
     windows: Vec<WindowName>,
     pane_presence: BTreeMap<String, bool>,
     spawn_failures: BTreeMap<String, String>,
@@ -62,6 +63,7 @@ impl Default for OfflineState {
             session_present: false,
             session_absent_after_spawn_first: false,
             targets: Vec::new(),
+            target_snapshots: VecDeque::new(),
             windows: Vec::new(),
             pane_presence: BTreeMap::new(),
             spawn_failures: BTreeMap::new(),
@@ -104,7 +106,15 @@ impl OfflineTransport {
     }
 
     pub fn with_targets(self, targets: Vec<PaneInfo>) -> Self {
-        self.with_state(|state| state.targets = targets);
+        self.with_state(|state| {
+            state.targets = targets;
+            state.target_snapshots.clear();
+        });
+        self
+    }
+
+    pub fn with_target_snapshots(self, snapshots: Vec<Vec<PaneInfo>>) -> Self {
+        self.with_state(|state| state.target_snapshots = snapshots.into());
         self
     }
 
@@ -507,7 +517,12 @@ impl Transport for OfflineTransport {
                 detail,
             });
         }
-        Ok(self.with_state(|state| state.targets.clone()))
+        Ok(self.with_state(|state| {
+            state
+                .target_snapshots
+                .pop_front()
+                .unwrap_or_else(|| state.targets.clone())
+        }))
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {

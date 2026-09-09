@@ -21,7 +21,7 @@ fn rest_001_refuses_leader_prefixed_worker_session() {
     // poison session_name.
     let qs = quick_start_fake(&ws, team_id);
     assert!(
-        quick_start_launched(&qs),
+        quick_start_workers_available(&qs),
         "quick-start did not launch: {}",
         qs.stdout
     );

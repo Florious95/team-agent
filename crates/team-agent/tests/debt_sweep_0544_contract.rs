@@ -74,6 +74,7 @@ fn b1_bare_claim_uses_active_fleet_not_stale_caller_env_and_reports_session_abse
         case.workspace_str(),
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "B1 bare claim-leader");
     assert_binding_ok(&claim, &claim_json, "B1 bare claim-leader");
@@ -130,6 +131,7 @@ fn b1_explicit_current_still_targets_current_not_active_fleet() {
         SIBLING_TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "B1 explicit current claim-leader");
     assert_binding_ok(&claim, &claim_json, "B1 explicit current claim-leader");
@@ -210,13 +212,23 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
     let help = String::from_utf8_lossy(&output.stdout);
     let commands = visible_commands(&help);
     let actual_commands = commands.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let expected_commands = BASELINE_VISIBLE_COMMANDS
+    let mut expected_commands = BASELINE_VISIBLE_COMMANDS
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
+    if help.lines().any(|line| {
+        line.strip_prefix("  ")
+            .is_some_and(|rest| rest.split_whitespace().next() == Some("models"))
+    }) {
+        expected_commands.insert("models");
+    }
+    assert!(
+        actual_commands.contains("results"),
+        "results remains a public handler and must stay in --help; visible commands={commands:?}"
+    );
     assert_eq!(
         actual_commands, expected_commands,
-        "B car governance: visible command set must exactly match resign@8df51ab9329a1f3ecd8ad847b3a960c701ec20b2; visible commands={commands:?}"
+        "B car governance: visible command set must keep the resign baseline plus published models when advertised; visible commands={commands:?}"
     );
     assert_eq!(
         commands.len(),

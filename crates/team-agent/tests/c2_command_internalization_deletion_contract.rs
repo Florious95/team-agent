@@ -166,12 +166,32 @@ fn red3_normal_send_and_report_paths_replace_fallback_commands() {
     let diagnose = case.run_ta(&["diagnose", "--workspace", case.workspace_str(), "--json"]);
     let diagnose_text = output_text(&diagnose);
     let diagnose_lower = diagnose_text.to_lowercase();
-    for required in ["claim-leader", "takeover", "attach-leader"] {
-        if !diagnose_lower.contains(required) {
-            failures.push(format!(
-                "diagnose rebind_required output must guide to `{required}`; text={diagnose_text}"
-            ));
-        }
+    if !diagnose_lower.contains("action_required") && !diagnose_lower.contains("broken_class") {
+        failures.push(format!(
+            "diagnose missing-leader output must expose a structured broken class; text={diagnose_text}"
+        ));
+    }
+    let has_applicable = [
+        "claim-leader",
+        "quick-start",
+        "inspect the selected-team registry",
+        "do not claim-leader",
+    ]
+    .iter()
+    .any(|needle| diagnose_lower.contains(needle));
+    if !has_applicable {
+        failures.push(format!(
+            "diagnose missing-leader output must name one applicable next step; text={diagnose_text}"
+        ));
+    }
+    let shotgun = ["claim-leader", "takeover", "attach-leader"]
+        .iter()
+        .filter(|needle| diagnose_lower.contains(*needle))
+        .count();
+    if shotgun == 3 {
+        failures.push(format!(
+            "diagnose must not shotgun claim/takeover/attach together; text={diagnose_text}"
+        ));
     }
     assert_no_fallback_command_text(
         "diagnose rebind_required output",

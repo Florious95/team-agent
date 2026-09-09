@@ -28,7 +28,7 @@ fn rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     let _ = run_ta(
         &ws,

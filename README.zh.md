@@ -82,6 +82,14 @@ subagent 是一次性的、干完即焚、彼此不通信。Team Agent 的队友
 
 ## 状态
 
+`team-agent status` 为每个已登记节点输出七个简要字段：
+`name`、`provider`、`runtime_status`、`activity`、`health`、`session_name`、`tmux_command`。
+`--json` 与人读输出使用同一信息投影。证据缺失或冲突时显示 `unknown`；非空
+`tmux_command` 可复制到已观测的 socket、session、window 和 pane。`--summary` 与
+`--detail` 保留兼容性，但不会增加诊断或历史字段。已验收 nodeprobe 的配对方式、
+operator-trusted 能力 receipt 与 fail-closed 边界见
+[`docs/status-nodeprobe.md`](docs/status-nodeprobe.md)。
+
 **Beta。** 已在真实项目里日常使用,小众配置下可能有毛边。欢迎 issue 和 PR。
 
 ## License

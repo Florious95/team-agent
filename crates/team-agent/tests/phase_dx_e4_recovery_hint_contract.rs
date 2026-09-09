@@ -33,9 +33,9 @@ fn e4_all_gone_status_diagnose_outputs_structured_advisory_hint() {
         "\"broken_class\"",
         "\"hint_action\"",
         "team-agent restart",
-        "team-agent claim-leader",
         "team-agent quick-start",
-        "team-agent attach-leader",
+        "do not claim-leader",
+        "TEAM_SPEC_OR_RUNTIME_MISSING",
     ] {
         if !combined.contains(required) {
             missing.push(required);
