@@ -456,6 +456,7 @@ pub(crate) fn start_agent_at_paths(
     } else {
         Vec::new()
     };
+    persist_selected_receiver_session_name(&mut state, &session_name);
     save_restart_projected_state_with_capture_backfill_skip(
         workspace,
         &mut state,

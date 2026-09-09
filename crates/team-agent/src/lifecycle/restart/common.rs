@@ -1118,6 +1118,35 @@ pub(super) fn session_name_present(state: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Persist the session actually used for spawn when the selected team only
+/// had it on `leader_receiver`. Send/status route on `session_name`; an
+/// explicit null must stay a miss and must not rewrite a sibling team.
+pub(super) fn persist_selected_receiver_session_name(
+    state: &mut serde_json::Value,
+    session: &SessionName,
+) {
+    if session_name_present(state) {
+        return;
+    }
+    let Some(from_receiver) = state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get("session_name"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+    else {
+        return;
+    };
+    if from_receiver != session.as_str() {
+        return;
+    }
+    if let Some(object) = state.as_object_mut() {
+        object.insert(
+            "session_name".to_string(),
+            serde_json::json!(session.as_str()),
+        );
+    }
+}
+
 /// ---
 /// purpose: 探测 session 是否存活
 /// params:
