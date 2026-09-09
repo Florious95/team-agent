@@ -127,13 +127,7 @@ fn seed_two_team_spec_state(root: &Path) {
     let team_a = write_team_dir(root, "teamA", "worker_a");
     let team_b = write_team_dir(root, "teamB", "worker_b");
     let _ = MessageStore::open(root).unwrap();
-    let existing = load_runtime_state(root).unwrap();
-    let existing_agents = existing["teams"]["teamA"]["agents"]
-        .as_object()
-        .expect("MCP fixture must retain its live teamA agents");
-    let mut team_a_state = team_state("teamA", &team_a, "worker_a", "old teamA note");
-    // Preparing notes and specs must not discard any live fixture peer.
-    team_a_state["agents"] = Value::Object(existing_agents.clone());
+    let team_a_state = team_state("teamA", &team_a, "worker_a", "old teamA note");
     let team_b_state = team_state("teamB", &team_b, "worker_b", "old teamB note");
     save_runtime_state(
         root,
