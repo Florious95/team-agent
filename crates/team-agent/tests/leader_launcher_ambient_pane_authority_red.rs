@@ -1207,6 +1207,34 @@ fn c_attach_window_failures_are_retried_or_remain_user_visible() {
         &[&attach_value, &status_value, &diagnose_value],
         &message_ids,
     );
+    if !physically_retried {
+        let debt = attach_value
+            .get("attach_window_failures")
+            .expect("attach must return typed attach-window debt when physical retry did not happen");
+        assert_eq!(
+            debt.get("team_id").and_then(Value::as_str),
+            Some(TEAM),
+            "attach-window debt must bind the current team operation; debt={debt}"
+        );
+        assert_eq!(
+            debt.get("pane_id").and_then(Value::as_str),
+            Some(GOOD_PANE),
+            "attach-window debt must bind the attached pane; debt={debt}"
+        );
+        assert_eq!(
+            debt.get("reason").and_then(Value::as_str),
+            Some("leader_not_attached")
+        );
+        assert_eq!(
+            debt.get("status").and_then(Value::as_str),
+            Some("requeued_pending_physical_retry")
+        );
+        assert_eq!(
+            debt.get("count").and_then(Value::as_u64),
+            Some(message_ids.len() as u64),
+            "typed debt count must come from the owner-team requeue result; debt={debt}"
+        );
+    }
 
     assert!(
         physically_retried || visible_debt,
