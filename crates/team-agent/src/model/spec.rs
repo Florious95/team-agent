@@ -13,12 +13,13 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::model::enums::TaskStatus;
+use crate::model::enums::{Provider, TaskStatus};
 use crate::model::errors::ModelError;
 use crate::model::ids::TaskId;
 use crate::model::task_graph::{find_dependency_cycle, TaskNode};
 use crate::model::yaml::Value as Yaml;
 use crate::model::{permissions, yaml};
+use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
 use crate::provider::wire::{is_claude_family, parse_canonical_provider};
 
 /// result_envelope_v1 顶层 required(= allowed)。
@@ -793,11 +794,26 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
             .iter()
             .filter_map(Yaml::as_str)
             .collect();
-        for tool in permissions::expand_tool_strings(tools) {
-            if !permissions::is_canonical_tool(&tool) {
+        let expanded_tools = permissions::expand_tool_strings(tools);
+        for tool in &expanded_tools {
+            if !permissions::is_canonical_tool(tool) {
                 e.push(format!(
                     "/agents/{idx}/tools: unknown tool {}",
-                    py_repr_str(&tool)
+                    py_repr_str(tool)
+                ));
+            }
+        }
+        if parse_canonical_provider(provider.and_then(Yaml::as_str).unwrap_or(""))
+            == Some(Provider::Pi)
+        {
+            if let Some(category) = first_unsupported_pi_tool_category(
+                expanded_tools
+                    .iter()
+                    .filter(|tool| permissions::is_canonical_tool(tool))
+                    .map(String::as_str),
+            ) {
+                e.push(format!(
+                    "/agents/{idx}/tools: Pi does not support Team Agent tool category {category:?}; remove it from this agent's tools"
                 ));
             }
         }
@@ -810,11 +826,26 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
         .iter()
         .filter_map(Yaml::as_str)
         .collect();
-    for tool in permissions::expand_tool_strings(leader_tools) {
-        if !permissions::is_canonical_tool(&tool) {
+    let expanded_leader_tools = permissions::expand_tool_strings(leader_tools);
+    for tool in &expanded_leader_tools {
+        if !permissions::is_canonical_tool(tool) {
             e.push(format!(
                 "/leader/tools: unknown tool {}",
-                py_repr_str(&tool)
+                py_repr_str(tool)
+            ));
+        }
+    }
+    if parse_canonical_provider(leader_provider.and_then(Yaml::as_str).unwrap_or(""))
+        == Some(Provider::Pi)
+    {
+        if let Some(category) = first_unsupported_pi_tool_category(
+            expanded_leader_tools
+                .iter()
+                .filter(|tool| permissions::is_canonical_tool(tool))
+                .map(String::as_str),
+        ) {
+            e.push(format!(
+                "/leader/tools: Pi does not support Team Agent tool category {category:?}; remove it from the leader's tools"
             ));
         }
     }
@@ -1036,6 +1067,49 @@ mod tests {
         let spec = yaml::loads(include_str!("testdata/team.spec.yaml")).unwrap();
         let r = validate_spec(&spec, Path::new(TD));
         assert!(r.is_ok(), "expected valid, got: {r:?}");
+    }
+
+    #[test]
+    fn pi_spec_accepts_native_categories_and_rejects_provider_builtin() {
+        let pi_text = include_str!("testdata/team.spec.yaml")
+            .lines()
+            .filter(|line| {
+                !line.contains("provider_builtin")
+                    && !line.contains("git_diff")
+                    && !line.contains("network")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pi_text = pi_text.replace("provider: codex", "provider: pi");
+        let pi_spec = yaml::loads(&pi_text).unwrap();
+        assert!(
+            validate_spec(&pi_spec, Path::new(TD)).is_ok(),
+            "Pi must accept the native Team Agent categories"
+        );
+
+        let bad_agent_text = pi_text.replacen(
+            "      - mcp_team\n",
+            "      - mcp_team\n      - provider_builtin\n",
+            1,
+        );
+        let bad_agent = yaml::loads(&bad_agent_text).unwrap();
+        let error = validate_spec(&bad_agent, Path::new(TD)).unwrap_err().to_string();
+        assert!(
+            error.contains("/agents/0/tools: Pi does not support Team Agent tool category \"provider_builtin\""),
+            "spec validation must reject the Pi agent category: {error}"
+        );
+
+        let bad_leader_text = pi_text.replacen(
+            "    - mcp_team\n",
+            "    - mcp_team\n    - provider_builtin\n",
+            1,
+        );
+        let bad_leader = yaml::loads(&bad_leader_text).unwrap();
+        let error = validate_spec(&bad_leader, Path::new(TD)).unwrap_err().to_string();
+        assert!(
+            error.contains("/leader/tools: Pi does not support Team Agent tool category \"provider_builtin\""),
+            "spec validation must reject the Pi leader category: {error}"
+        );
     }
 
     #[test]
