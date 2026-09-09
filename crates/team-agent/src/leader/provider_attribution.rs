@@ -96,12 +96,27 @@ fn provider_from_pid_env(pid: u32) -> Option<Provider> {
 
 fn provider_from_command_text(text: &str) -> Option<Provider> {
     let lower = text.to_ascii_lowercase();
+    if pi_command_text(&lower) {
+        return Some(Provider::Pi);
+    }
     if cursor_agent_command_text(&lower) {
         return Some(Provider::CursorAgent);
     }
     COMMAND_GRAMMAR_PROVIDER_COMMANDS
         .iter()
         .find_map(|(needle, provider)| lower.contains(needle).then_some(*provider))
+}
+
+fn pi_command_text(lower: &str) -> bool {
+    lower
+        .split_whitespace()
+        .next()
+        .is_some_and(|token| {
+            token == "pi"
+                || token == "pi.exe"
+                || token.ends_with("/pi")
+                || token.ends_with("\\pi.exe")
+        })
 }
 
 /// Cursor 二进制名为 `agent`，不能做 substring contains（会误伤 `team-agent`）。
@@ -192,6 +207,16 @@ mod tests {
             pane_pid: pid,
             leader_env: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn exact_pi_command_is_attributed_without_substring_guessing() {
+        assert_eq!(attribute_command_provider("pi"), Some(Provider::Pi));
+        assert_eq!(
+            attribute_command_provider("/opt/homebrew/bin/pi --model openai/gpt-5"),
+            Some(Provider::Pi)
+        );
+        assert_eq!(attribute_command_provider("pilot"), None);
     }
 
     #[test]
