@@ -9,6 +9,74 @@ use crate::model::pane_authority_refusal::{
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PiBackingStatus {
+    Pending,
+    Captured,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PiMcpStatus {
+    Unavailable,
+    ConfiguredLazy,
+    RoundtripVerified,
+}
+
+pub(crate) struct PiDoctorInput {
+    pub executable_chain_verified: bool,
+    pub pi_version: Option<String>,
+    pub adapter_version: Option<String>,
+    pub catalog_sha256: Option<String>,
+    pub selected_model: Option<String>,
+    pub candidate_executable: Option<std::path::PathBuf>,
+    pub wrapper: Option<std::path::PathBuf>,
+    pub mcp_roundtrip_at: Option<String>,
+    pub backing: PiBackingStatus,
+    pub activity: crate::provider::TurnState,
+    pub activity_source: crate::provider::ClassifySource,
+    pub env_key_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PiDoctorFacts {
+    pub mcp: PiMcpStatus,
+    pub mcp_connected: bool,
+    pub backing: PiBackingStatus,
+    pub activity: crate::provider::TurnState,
+    pub activity_source: crate::provider::ClassifySource,
+    pub auth_hint: crate::provider::AuthHintStatus,
+}
+
+pub(crate) fn pi_doctor_facts(input: PiDoctorInput) -> PiDoctorFacts {
+    let mcp = if input.mcp_roundtrip_at.is_some() {
+        PiMcpStatus::RoundtripVerified
+    } else if input.wrapper.is_some() {
+        PiMcpStatus::ConfiguredLazy
+    } else {
+        PiMcpStatus::Unavailable
+    };
+    let _ = (
+        input.executable_chain_verified,
+        input.pi_version,
+        input.adapter_version,
+        input.catalog_sha256,
+        input.selected_model,
+        input.candidate_executable,
+        input.env_key_names,
+    );
+    PiDoctorFacts {
+        mcp,
+        mcp_connected: mcp == PiMcpStatus::RoundtripVerified,
+        backing: input.backing,
+        activity: input.activity,
+        activity_source: input.activity_source,
+        auth_hint: crate::provider::AuthHintStatus::Unknown,
+    }
+}
+
 /// 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): classify a tmux
 /// transport error string into a diagnose issue id. When the underlying
 /// tmux subprocess stderr contains `server exited unexpectedly`, the
@@ -212,6 +280,39 @@ pub(crate) fn diagnose_runtime_for_workspace(
     (issues, repairs)
 }
 
+const TEAM_SPEC_OR_RUNTIME_MISSING: &str = "team_spec_or_runtime_missing";
+const TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR: &str = concat!(
+    "no team spec or runtime was found in this workspace. ",
+    "Run `team-agent quick-start <workspace>` for first launch, ",
+    "or restart from a workspace that already contains `.team`.",
+);
+
+fn workspace_has_existing_team_runtime(workspace: &std::path::Path, team_key: &str) -> bool {
+    workspace.join("team.spec.yaml").is_file()
+        || crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
+        || crate::state::persist::runtime_state_path(workspace).is_file()
+}
+
+fn push_issue_repair(
+    issues: &mut Value,
+    repairs: &mut Value,
+    team: &str,
+    issue_id: &str,
+    repair: &str,
+) {
+    if let Some(items) = issues.as_array_mut() {
+        if !items.iter().any(|item| {
+            item.as_str() == Some(issue_id)
+                || item.get("id").and_then(Value::as_str) == Some(issue_id)
+        }) {
+            items.push(json!(issue_id));
+        }
+    }
+    if let Some(items) = repairs.as_array_mut() {
+        items.push(recovery_hint(team, issue_id, repair));
+    }
+}
+
 fn append_registry_channel_unbound_issue(
     workspace: &std::path::Path,
     state: &Value,
@@ -226,28 +327,32 @@ fn append_registry_channel_unbound_issue(
     if team_key.is_empty() {
         return;
     }
+    // RuntimeOnly diagnose synthesizes team_key=current from empty default
+    // state. That is not an existing unbound team; do not emit claim.
+    if !workspace_has_existing_team_runtime(workspace, &team_key) {
+        push_issue_repair(
+            issues,
+            repairs,
+            &team_key,
+            TEAM_SPEC_OR_RUNTIME_MISSING,
+            TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
+        );
+        return;
+    }
     let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
     if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
         return;
     }
-    if let Some(items) = issues.as_array_mut() {
-        if !items.iter().any(|item| {
-            item.as_str() == Some(class.issue_id())
-                || item.get("id").and_then(Value::as_str) == Some(class.issue_id())
-        }) {
-            items.push(json!(class.issue_id()));
-        }
-    }
-    if let Some(items) = repairs.as_array_mut() {
-        items.push(recovery_hint(
-            state
-                .get("session_name")
-                .and_then(Value::as_str)
-                .unwrap_or(team_key.as_str()),
-            class.issue_id(),
-            class.repair(),
-        ));
-    }
+    push_issue_repair(
+        issues,
+        repairs,
+        state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .unwrap_or(team_key.as_str()),
+        class.issue_id(),
+        class.repair(),
+    );
 }
 
 fn append_live_leader_workspace_mismatch_issue(
@@ -397,10 +502,6 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     if team_key.is_empty() {
         return;
     }
-    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
-    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
-        return;
-    }
     let Some(object) = report.as_object_mut() else {
         return;
     };
@@ -409,16 +510,35 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !issues.iter().any(|item| item.as_str() == Some(class.issue_id())) {
-        issues.push(json!(class.issue_id()));
-    }
-    object.insert("issues".to_string(), Value::Array(issues));
     let mut repairs = object
         .get("suggested_repairs")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if !workspace_has_existing_team_runtime(workspace, &team_key) {
+        let mut issues_value = Value::Array(issues);
+        let mut repairs_value = Value::Array(repairs);
+        push_issue_repair(
+            &mut issues_value,
+            &mut repairs_value,
+            &team_key,
+            TEAM_SPEC_OR_RUNTIME_MISSING,
+            TEAM_SPEC_OR_RUNTIME_MISSING_REPAIR,
+        );
+        object.insert("issues".to_string(), issues_value);
+        object.insert("suggested_repairs".to_string(), repairs_value);
+        object.insert("ok".to_string(), Value::Bool(false));
+        return;
+    }
+    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
+    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
+        return;
+    }
+    if !issues.iter().any(|item| item.as_str() == Some(class.issue_id())) {
+        issues.push(json!(class.issue_id()));
+    }
     repairs.push(recovery_hint(&team_key, class.issue_id(), class.repair()));
+    object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }
 
@@ -810,6 +930,48 @@ mod tests {
         assert!(
             !action.contains("takeover"),
             "shotgun alternatives must not appear; action={action}"
+        );
+    }
+
+    #[test]
+    fn missing_workspace_does_not_classify_as_unbound_claim() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-diagnose-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null});
+        let mut issues = json!([]);
+        let mut repairs = json!([]);
+        append_registry_channel_unbound_issue(
+            &workspace,
+            &state,
+            Some("current"),
+            &mut issues,
+            &mut repairs,
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+        let issues_text = issues.to_string();
+        let repairs_text = repairs.to_string();
+        assert!(
+            issues_text.contains(TEAM_SPEC_OR_RUNTIME_MISSING),
+            "issues={issues_text}"
+        );
+        assert!(
+            !issues_text.contains("leader_receiver_unbound"),
+            "missing team must not be unbound; issues={issues_text}"
+        );
+        assert!(
+            repairs_text.contains("quick-start"),
+            "repairs={repairs_text}"
+        );
+        assert!(
+            !repairs_text.contains("claim-leader"),
+            "missing team must not induce claim; repairs={repairs_text}"
         );
     }
 

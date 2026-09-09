@@ -54,10 +54,14 @@ fn unique_socket() -> PathBuf {
 }
 
 fn diagnose_json(workspace: &Path, team: &str) -> Value {
+    diagnose_json_team(workspace, Some(team))
+}
+
+fn diagnose_json_team(workspace: &Path, team: Option<&str>) -> Value {
     let result = cmd_diagnose(&DiagnoseArgs {
         workspace: workspace.to_path_buf(),
         json: true,
-        team: Some(team.to_string()),
+        team: team.map(str::to_string),
     })
     .expect("cmd_diagnose");
     match result.output {
@@ -94,6 +98,68 @@ fn isolated_empty_team_is_unbound() {
     assert_eq!(
         classify_leader_binding(&workspace, "alpha"),
         LeaderBindingClass::Unbound
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn missing_workspace_diagnose_does_not_claim() {
+    let _home = IsolatedHome::enter();
+    let workspace = unique_workspace();
+    let diagnose = diagnose_json_team(&workspace, None);
+    let ids = issue_ids(&diagnose);
+    let repairs = diagnose
+        .get("suggested_repairs")
+        .cloned()
+        .unwrap_or(json!([]));
+    let repairs_text = repairs.to_string();
+    assert!(
+        ids.iter().any(|id| id == "team_spec_or_runtime_missing"),
+        "missing workspace must surface missing-runtime, issues={ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "leader_receiver_unbound"),
+        "synthetic current is not an unbound team; issues={ids:?}"
+    );
+    assert!(
+        repairs_text.contains("quick-start"),
+        "repairs={repairs_text}"
+    );
+    assert!(
+        !repairs_text.contains("claim-leader"),
+        "must not induce claim on a workspace with no team; repairs={repairs_text}"
+    );
+    assert_ne!(diagnose.get("ok").and_then(Value::as_bool), Some(true));
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn existing_empty_team_diagnose_still_claims() {
+    let _home = IsolatedHome::enter();
+    let workspace = unique_workspace();
+    team_agent::state::persist::save_runtime_state(
+        &workspace,
+        &json!({"teams": {"alpha": {}}}),
+    )
+    .expect("save empty team");
+    let diagnose = diagnose_json(&workspace, "alpha");
+    let ids = issue_ids(&diagnose);
+    let repairs_text = diagnose
+        .get("suggested_repairs")
+        .cloned()
+        .unwrap_or(json!([]))
+        .to_string();
+    assert!(
+        ids.iter().any(|id| id == "leader_receiver_unbound"),
+        "existing empty team stays unbound; issues={ids:?}"
+    );
+    assert!(
+        repairs_text.contains("claim-leader"),
+        "existing unbound team keeps claim repair; repairs={repairs_text}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "team_spec_or_runtime_missing"),
+        "existing team must not be classified missing; issues={ids:?}"
     );
 }
 
