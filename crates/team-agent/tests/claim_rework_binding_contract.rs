@@ -1,4 +1,4 @@
-//! Claim rework A5 contract tests. Isolated HOME/workspace.
+//! Claim rework A6 contract tests. Isolated HOME/workspace.
 //! Cargo: `--test claim_rework_binding_contract`.
 
 use serde_json::{json, Value};
@@ -11,7 +11,7 @@ use team_agent::lifecycle::launch::{
     classify_leader_binding, launched_team_receiver_is_attached,
     seed_launched_owner_from_caller_with_provider_lookup, LeaderBindingClass,
 };
-use team_agent::lifecycle::restart_bind_status;
+use team_agent::lifecycle::{restart_leader_public_bind, CoordinatorStartSummary, RestartReport};
 use team_agent::state::owner_gate::CallerIdentity;
 use team_agent::transport::PaneId;
 
@@ -243,6 +243,7 @@ fn start_owned_tmux(workspace: &Path) -> (OwnedTmux, String) {
         "tmux start failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let owned = OwnedTmux { socket: socket.clone() };
     let list = Command::new("tmux")
         .args([
             "-S",
@@ -258,7 +259,19 @@ fn start_owned_tmux(workspace: &Path) -> (OwnedTmux, String) {
     assert!(list.status.success(), "pane lookup failed");
     let pane = String::from_utf8_lossy(&list.stdout).trim().to_string();
     assert!(!pane.is_empty(), "tmux pane id required");
-    (OwnedTmux { socket }, pane)
+    (owned, pane)
+}
+
+fn dummy_coordinator() -> CoordinatorStartSummary {
+    CoordinatorStartSummary {
+        ok: true,
+        status: "started".to_string(),
+        pid: None,
+        binary_path: None,
+        binary_version: None,
+        rotation_reason: None,
+        binary_identity_relation: "same".to_string(),
+    }
 }
 
 #[test]
@@ -297,6 +310,7 @@ fn isolated_production_seed_attach_register_restart_ok() {
         Some("pending")
     );
     team_agent::state::persist::save_runtime_state(&workspace, &state).expect("persist seed");
+    let pending_state = state.clone();
 
     let attached = team_agent::leader::attach_leader(
         &workspace,
@@ -321,18 +335,31 @@ fn isolated_production_seed_attach_register_restart_ok() {
         classify_leader_binding(&workspace, "alpha"),
         LeaderBindingClass::Attached
     );
-    let persisted = team_agent::state::persist::load_runtime_state(&workspace).expect("load");
+    let (failures, ok, reason) =
+        restart_leader_public_bind(&workspace, Some("alpha"), &pending_state);
     assert_eq!(
-        restart_bind_status(&workspace, "alpha", &persisted),
-        (true, None)
+        (ok, reason.as_deref()),
+        (true, None),
+        "load_restart_bind_state must read attached disk over in-memory pending"
     );
-
-    let mut stale = persisted.clone();
-    stale["teams"]["alpha"]["leader_receiver"] = pending;
-    let (stale_ok, _) = restart_bind_status(&workspace, "alpha", &stale);
+    let public = team_agent::cli::lifecycle_port::restart_value(
+        RestartReport::Restarted {
+            session_name: team_agent::transport::SessionName::new("team-alpha"),
+            agents: Vec::new(),
+            coordinator_started: true,
+            coordinator: dummy_coordinator(),
+            next_actions: Vec::new(),
+            attach_commands: Vec::new(),
+            attach_window_failures: failures,
+            leader_bind_ok: ok,
+            leader_bind_reason: reason,
+        },
+        Some("alpha"),
+    );
+    assert_eq!(public.get("ok").and_then(Value::as_bool), Some(true));
     assert!(
-        !stale_ok,
-        "old pending snapshot must not report restart success"
+        public.get("reason").is_none() || public.get("reason") == Some(&Value::Null),
+        "successful Restarted must not carry a bind failure reason; got {public}"
     );
 
     let diagnose = diagnose_json(&workspace, "alpha");

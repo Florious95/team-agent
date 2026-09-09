@@ -1303,22 +1303,12 @@ fn restart_with_selected_team_and_transport(
         )?;
         // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
         // come up still need a leader_receiver pane to deliver report_result.
-        let attach_window_failures = try_autobind_leader_after_restart(
-            &selected.run_workspace,
-            Some(selected.team_key.as_str()),
-            &state,
-        );
-        let persisted = load_restart_bind_state(
-            &selected.run_workspace,
-            selected.team_key.as_str(),
-        );
-        let (class_ok, class_reason) = restart_bind_status(
-            &selected.run_workspace,
-            selected.team_key.as_str(),
-            persisted.as_ref().unwrap_or(&state),
-        );
-        let (leader_bind_ok, leader_bind_reason) =
-            apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
+        let (attach_window_failures, leader_bind_ok, leader_bind_reason) =
+            restart_leader_public_bind(
+                &selected.run_workspace,
+                Some(selected.team_key.as_str()),
+                &state,
+            );
         return Ok(RestartReport::Partial {
             session_name,
             agents: successful_agents,
@@ -1345,9 +1335,12 @@ fn restart_with_selected_team_and_transport(
     // invoked from a tmux pane should bind that pane as leader_receiver,
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
-    let attach_window_failures =
-        try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
-    let persisted = load_restart_bind_state(&selected.run_workspace, selected.team_key.as_str());
+    let (attach_window_failures, leader_bind_ok, leader_bind_reason) =
+        restart_leader_public_bind(
+            &selected.run_workspace,
+            Some(selected.team_key.as_str()),
+            &state,
+        );
     if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
     {
         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
@@ -1361,13 +1354,6 @@ fn restart_with_selected_team_and_transport(
     // never panics. Hard error path is deferred to Step 10.
     let violations = crate::layout::sessions::assert_topology_invariants(&state, &spec);
     crate::layout::sessions::log_topology_violations(&violations);
-    let (class_ok, class_reason) = restart_bind_status(
-        &selected.run_workspace,
-        selected.team_key.as_str(),
-        persisted.as_ref().unwrap_or(&state),
-    );
-    let (leader_bind_ok, leader_bind_reason) =
-        apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
     Ok(RestartReport::Restarted {
         session_name,
         agents: successful_agents,
@@ -1960,12 +1946,34 @@ fn apply_binding_maintain_failures(
         .is_some_and(binding_maintain_failed)
     {
         (
-            ok,
+            false,
             reason.or_else(|| Some("leader_registry_maintain_failed".to_string())),
         )
     } else {
         (ok, reason)
     }
+}
+
+/// Unique production constructor for Restarted/Partial `leader_bind_*`
+/// and `attach_window_failures`. `restart_with_selected_team` is the only
+/// product caller; IsolatedHome reuses this instead of a test success path.
+pub fn restart_leader_public_bind(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    in_memory_state: &serde_json::Value,
+) -> (Option<serde_json::Value>, bool, Option<String>) {
+    let team_key = team.unwrap_or("");
+    let attach_window_failures =
+        try_autobind_leader_after_restart(workspace, team, in_memory_state);
+    let persisted = load_restart_bind_state(workspace, team_key);
+    let (class_ok, class_reason) = restart_bind_status(
+        workspace,
+        team_key,
+        persisted.as_ref().unwrap_or(in_memory_state),
+    );
+    let (ok, reason) =
+        apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
+    (attach_window_failures, ok, reason)
 }
 
 fn maintain_live_binding_index(
@@ -4427,6 +4435,49 @@ tasks:
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
         let debt = maintain_live_binding_index(&workspace, Some("alpha"), &state);
         let (ok, reason) = apply_binding_maintain_failures(&debt, true, None);
+        let (keep_ok, keep_reason) = apply_binding_maintain_failures(
+            &debt,
+            false,
+            Some("leader_registry_index_missing".to_string()),
+        );
+        let coordinator = crate::lifecycle::CoordinatorStartSummary {
+            ok: true,
+            status: "started".to_string(),
+            pid: None,
+            binary_path: None,
+            binary_version: None,
+            rotation_reason: None,
+            binary_identity_relation: "same".to_string(),
+        };
+        let restarted = crate::cli::lifecycle_port::restart_value(
+            crate::lifecycle::RestartReport::Restarted {
+                session_name: crate::transport::SessionName::new("s"),
+                agents: Vec::new(),
+                coordinator_started: true,
+                coordinator: coordinator.clone(),
+                next_actions: Vec::new(),
+                attach_commands: Vec::new(),
+                attach_window_failures: debt.clone(),
+                leader_bind_ok: ok,
+                leader_bind_reason: reason.clone(),
+            },
+            Some("alpha"),
+        );
+        let partial = crate::cli::lifecycle_port::restart_value(
+            crate::lifecycle::RestartReport::Partial {
+                session_name: crate::transport::SessionName::new("s"),
+                agents: Vec::new(),
+                failed_agents: Vec::new(),
+                coordinator_started: true,
+                coordinator,
+                next_actions: Vec::new(),
+                attach_commands: Vec::new(),
+                attach_window_failures: debt.clone(),
+                leader_bind_ok: ok,
+                leader_bind_reason: reason.clone(),
+            },
+            Some("alpha"),
+        );
         match previous {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
@@ -4438,7 +4489,28 @@ tasks:
                 .and_then(serde_json::Value::as_bool),
             Some(true)
         );
-        assert!(ok);
+        assert!(!ok);
         assert_eq!(reason.as_deref(), Some("leader_registry_maintain_failed"));
+        assert!(!keep_ok);
+        assert_eq!(
+            keep_reason.as_deref(),
+            Some("leader_registry_index_missing"),
+            "earlier bind reason must not be overwritten by maintain failure"
+        );
+        assert_eq!(restarted.get("ok").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            restarted.get("reason").and_then(serde_json::Value::as_str),
+            Some("leader_registry_maintain_failed")
+        );
+        assert_eq!(
+            partial.get("leader_bind_ok").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial
+                .get("leader_bind_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("leader_registry_maintain_failed")
+        );
     }
 }

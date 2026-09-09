@@ -3936,7 +3936,7 @@ pub mod lifecycle_port {
         }
     }
 
-    fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
+    pub fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
         match report {
             crate::lifecycle::RestartReport::Restarted {
                 session_name,

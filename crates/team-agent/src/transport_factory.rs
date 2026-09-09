@@ -78,19 +78,30 @@ pub fn leader_endpoint_transport(endpoint: &str) -> Box<dyn Transport> {
 }
 
 #[cfg(test)]
+struct LeaderEndpointTransportGuard {
+    previous: Option<(String, crate::transport::test_support::OfflineTransport)>,
+}
+
+#[cfg(test)]
+impl Drop for LeaderEndpointTransportGuard {
+    fn drop(&mut self) {
+        LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
+            *slot.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
 pub fn with_leader_endpoint_transport<T>(
     endpoint: &str,
     transport: crate::transport::test_support::OfflineTransport,
     f: impl FnOnce() -> T,
 ) -> T {
-    LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
-        *slot.borrow_mut() = Some((endpoint.to_string(), transport));
+    let previous = LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
+        slot.replace(Some((endpoint.to_string(), transport)))
     });
-    let result = f();
-    LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-    result
+    let _guard = LeaderEndpointTransportGuard { previous };
+    f()
 }
 
 /// User-visible backend selector on the CLI (`--backend tmux|conpty`).

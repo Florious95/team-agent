@@ -212,6 +212,7 @@ pub(crate) fn append_send_guidance(value: &mut Value, workspace: &Path, team: Op
     }
 }
 
+#[cfg(test)]
 pub(crate) fn split_shell_argv(command: &str) -> Vec<String> {
     let mut argv = Vec::new();
     let mut current = String::new();
