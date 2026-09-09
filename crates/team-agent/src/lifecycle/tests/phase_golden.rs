@@ -176,52 +176,41 @@ fn phase_f_golden_events_state_status_zero_drift() {
 #[test]
 #[serial_test::serial(env)]
 fn phase_golden_unbound_not_ready_requires_claim_leader() {
-    // Unbound recovery guidance belongs to the diagnose/quick-start refusal
-    // surface, not to the seven-field status brief.
     let diagnose = run_diagnose_after_quick_start();
     let issues = diagnose
         .get("issues")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let issue_ids: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue.as_str())
+        .collect();
+    assert_eq!(
+        issue_ids
+            .iter()
+            .copied()
+            .filter(|id| *id == "leader_registry_index_missing")
+            .count(),
+        1,
+        "tombstone after seeded owner without registry must be exactly index-missing; diagnose={diagnose}"
+    );
     assert!(
-        issues.iter().any(|issue| {
-            issue.as_str() == Some("leader_not_attached")
-                || issue.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
-        }),
-        "tombstone fixture must still diagnose leader_receiver_unbound; diagnose={diagnose}"
+        !issue_ids.contains(&"leader_receiver_not_committed"),
+        "parallel not_committed bool must not appear; diagnose={diagnose}"
     );
     let repairs = diagnose
         .get("suggested_repairs")
         .map(Value::to_string)
         .unwrap_or_default();
-    let issue_ids: Vec<&str> = issues
-        .iter()
-        .filter_map(|issue| issue.as_str())
-        .collect();
     assert!(
-        issue_ids.iter().any(|id| {
-            matches!(
-                *id,
-                "leader_receiver_unbound"
-                    | "leader_registry_index_missing"
-                    | "leader_binding_unknown"
-                    | "leader_receiver_not_committed"
-            )
-        }),
-        "diagnose must classify missing index/unknown/unbound; diagnose={diagnose}"
+        repairs.contains("publish the leader registry index"),
+        "index-missing repair must publish the index; diagnose={diagnose}"
     );
-    if issue_ids.contains(&"leader_receiver_unbound") {
-        assert!(
-            repairs.contains("claim-leader"),
-            "proven unbound may recommend claim-leader; diagnose={diagnose}"
-        );
-    } else {
-        assert!(
-            !repairs.contains("team-agent claim-leader --confirm"),
-            "unknown/index-missing must not force claim-leader; diagnose={diagnose}"
-        );
-    }
+    assert!(
+        !repairs.contains("team-agent claim-leader --confirm"),
+        "index-missing must not recommend claim-leader --confirm; diagnose={diagnose}"
+    );
 }
 
 #[derive(Clone, Copy)]

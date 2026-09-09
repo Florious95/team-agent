@@ -1,6 +1,7 @@
-//! Claim rework A3 contract tests. Isolated HOME/workspace.
+//! Claim rework A4 contract tests. Isolated HOME/workspace.
 //! Cargo: `--test claim_rework_binding_contract`.
 
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use team_agent::lifecycle::launch::{
@@ -18,7 +19,7 @@ impl IsolatedHome {
     fn enter() -> Self {
         let n = ISOLATION.fetch_add(1, Ordering::Relaxed);
         let home = std::env::temp_dir().join(format!(
-            "claim-rework-a3-home-{}-{}",
+            "claim-rework-a4-home-{}-{}",
             std::process::id(),
             n
         ));
@@ -45,7 +46,7 @@ impl Drop for IsolatedHome {
 fn unique_workspace() -> PathBuf {
     let n = ISOLATION.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "claim-rework-a3-ws-{}-{}",
+        "claim-rework-a4-ws-{}-{}",
         std::process::id(),
         n
     ));
@@ -55,17 +56,17 @@ fn unique_workspace() -> PathBuf {
 
 #[test]
 #[serial_test::serial(env)]
-fn isolated_missing_registry_is_not_attached() {
+fn isolated_empty_team_is_unbound() {
     let _home = IsolatedHome::enter();
     let workspace = unique_workspace();
+    team_agent::state::persist::save_runtime_state(
+        &workspace,
+        &json!({"teams": {"alpha": {}}}),
+    )
+    .expect("save empty team");
     assert!(!launched_team_receiver_is_attached(&workspace, "alpha"));
-    let class = classify_leader_binding(&workspace, "alpha");
-    assert_ne!(class, LeaderBindingClass::Attached);
-    assert!(
-        matches!(
-            class,
-            LeaderBindingClass::Unbound | LeaderBindingClass::Unknown
-        ),
-        "isolated empty workspace must be unbound or unknown; class={class:?}"
+    assert_eq!(
+        classify_leader_binding(&workspace, "alpha"),
+        LeaderBindingClass::Unbound
     );
 }

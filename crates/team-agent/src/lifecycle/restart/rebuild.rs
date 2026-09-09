@@ -1858,48 +1858,32 @@ fn selected_team_receiver<'a>(
 }
 
 fn transport_for_receiver(
-    workspace: &std::path::Path,
+    _workspace: &std::path::Path,
     receiver: &serde_json::Value,
-) -> Box<dyn crate::transport::Transport> {
-    if let Some(endpoint) = receiver
+) -> Option<Box<dyn crate::transport::Transport>> {
+    let endpoint = receiver
         .get("tmux_socket")
         .and_then(serde_json::Value::as_str)
-        .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")
-    {
-        Box::new(crate::transport_factory::tmux_endpoint_transport(endpoint))
-    } else {
-        Box::new(crate::transport_factory::tmux_workspace_transport(workspace))
-    }
+        .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")?;
+    Some(Box::new(crate::transport_factory::tmux_endpoint_transport(
+        endpoint,
+    )))
 }
 
-fn restart_bind_status(
+pub(crate) fn restart_bind_status(
     workspace: &std::path::Path,
     team_key: &str,
     state: &serde_json::Value,
 ) -> (bool, Option<String>) {
-    let Some(receiver) = selected_team_receiver(state, team_key) else {
-        return (false, Some("selected_team_receiver_missing".to_string()));
-    };
-    let transport = transport_for_receiver(workspace, receiver);
-    let live = match crate::messaging::leader_channel::resolve_live_leader_channel(
-        workspace, receiver, transport.as_ref(),
+    let receiver = selected_team_receiver(state, team_key);
+    let transport = receiver.and_then(|receiver| transport_for_receiver(workspace, receiver));
+    match crate::lifecycle::launch::classify_leader_binding_at(
+        workspace,
+        team_key,
+        state,
+        transport.as_deref(),
     ) {
-        crate::messaging::leader_channel::LeaderChannelResolution::Live(_) => true,
-        crate::messaging::leader_channel::LeaderChannelResolution::Unbound(reason) => {
-            return (false, Some(reason.reason_code().to_string()));
-        }
-        crate::messaging::leader_channel::LeaderChannelResolution::ProbeFailed(error) => {
-            return (false, Some(format!("probe_failed:{error}")));
-        }
-    };
-    match crate::lifecycle::launch::classify_leader_binding(workspace, team_key) {
-        crate::lifecycle::launch::LeaderBindingClass::Attached => (live, None),
-        crate::lifecycle::launch::LeaderBindingClass::IndexMissing if live => {
-            (true, Some("registry_index_missing".to_string()))
-        }
-        crate::lifecycle::launch::LeaderBindingClass::Unknown if live => {
-            (true, Some("leader_binding_unknown".to_string()))
-        }
+        crate::lifecycle::launch::LeaderBindingClass::Attached => (true, None),
         other => (false, Some(other.issue_id().to_string())),
     }
 }
@@ -1933,12 +1917,14 @@ fn owner_conflicts_with_caller(
     let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
     let same_socket = match (owner_socket, caller_socket.as_deref()) {
         (Some(owner), Some(caller)) => owner == caller,
-        _ => true,
+        _ => false,
     };
     if owner_pane == caller && same_socket {
         return false;
     }
-    let transport = transport_for_receiver(workspace, receiver);
+    let Some(transport) = transport_for_receiver(workspace, receiver) else {
+        return false;
+    };
     matches!(
         crate::messaging::leader_channel::resolve_live_leader_channel(
             workspace,
@@ -1990,6 +1976,8 @@ fn try_autobind_leader_after_restart(
     state: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let team_key = team.unwrap_or("");
+    let persisted = load_restart_bind_state(workspace, team_key);
+    let state = persisted.as_ref().unwrap_or(state);
     if restart_bind_status(workspace, team_key, state).0 {
         return maintain_live_binding_index(workspace, team, state);
     }
@@ -4164,5 +4152,83 @@ tasks:
                 "{pointer} must not retain the old startup probe epoch"
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_bind_status_live_index_missing_is_not_ok() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-n1-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = workspace.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let state = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": "/tmp/leader-not-workspace.sock"
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let (ok, reason) = restart_bind_status(&workspace, "alpha", &state);
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(!ok, "Live/index-missing must not report bind success");
+        assert_eq!(reason.as_deref(), Some("leader_registry_index_missing"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn restart_bind_status_uses_persisted_receiver_endpoint() {
+        let state = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "leader_receiver": {
+                        "status": "pending",
+                        "pane_id": "%old"
+                    }
+                }
+            }
+        });
+        let persisted = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%2", "owner_epoch": 2, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%2",
+                        "owner_epoch": 2,
+                        "tmux_socket": "/tmp/caller-socket.sock"
+                    }
+                }
+            }
+        });
+        let workspace = std::path::Path::new("/tmp/ta-n1-persisted");
+        let (ok_stale, reason_stale) = restart_bind_status(workspace, "alpha", &state);
+        let (ok_new, reason_new) = restart_bind_status(workspace, "alpha", &persisted);
+        assert!(!ok_stale);
+        assert_eq!(reason_stale.as_deref(), Some("leader_receiver_unbound"));
+        assert!(!ok_new);
+        assert_eq!(
+            reason_new.as_deref(),
+            Some("leader_registry_index_missing"),
+            "persisted attached+owner without registry is index-missing, not the stale pending class"
+        );
     }
 }

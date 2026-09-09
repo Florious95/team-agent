@@ -114,16 +114,15 @@ pub fn attach_leader(
         provider,
         target.endpoint.as_deref(),
     );
-    if validation.is_ok()
-        && grant_allows_attach_target(
+    if validation.is_ok() {
+        copy_verified_grant_from_state(
             workspace,
             &state,
             &target.info,
             provider,
             target.endpoint.as_deref(),
-        )
-    {
-        copy_verified_grant_from_state(&state, &target.info, target.endpoint.as_deref(), &mut receiver);
+            &mut receiver,
+        );
     }
     if validation.is_err() {
         let pane_info = pane_info_value(&target.info);
@@ -391,14 +390,16 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
     // Phase 1d Batch 6: factory tmux workspace helper for
     // grep-visibility. Semantics unchanged; leader lease discovery is
     // tmux-only (caller pane = tmux pane, MUST-12 anchor).
+    let workspace_backend = crate::transport_factory::tmux_workspace_transport(workspace);
+    let workspace_endpoint = workspace_backend.tmux_endpoint();
     targets.extend(
-        crate::transport_factory::tmux_workspace_transport(workspace)
+        workspace_backend
             .list_targets()
             .unwrap_or_default()
             .into_iter()
             .map(|info| AttachLeaderTarget {
                 info,
-                endpoint: None,
+                endpoint: workspace_endpoint.clone(),
             }),
     );
     targets
@@ -1905,15 +1906,10 @@ fn receiver_for_attach_target(
 
 fn selected_grant_receiver<'a>(state: &'a Value) -> Option<&'a Value> {
     let key = crate::state::projection::team_state_key(state);
-    if let Some(teams) = state.get("teams").and_then(Value::as_object) {
-        if let Some(team) = teams.get(&key) {
-            return team.get("leader_receiver");
-        }
-    }
-    state.get("leader_receiver")
+    crate::lifecycle::launch::selected_team_leader_receiver(state, &key)
 }
 
-fn grant_allows_attach_target(
+pub(crate) fn grant_allows_attach_target(
     workspace: &Path,
     state: &Value,
     target: &PaneInfo,
@@ -1965,24 +1961,26 @@ fn grant_allows_attach_target(
         .or_else(|| get_path_u64(state, &["leader_receiver", "owner_epoch"]));
     let receiver_epoch = receiver.get("owner_epoch").and_then(Value::as_u64);
     let epoch_ok = match (owner_epoch, receiver_epoch) {
-        (Some(owner), Some(recv)) => owner == recv,
-        _ => true,
+        (Some(owner), Some(recv)) => owner == recv && owner > 0,
+        _ => false,
     };
     pane_ok && socket_ok && live_nonce == Some(recorded_nonce) && provider_ok && epoch_ok
 }
 
 fn copy_verified_grant_from_state(
+    workspace: &Path,
     state: &Value,
     target: &PaneInfo,
-    _endpoint: Option<&str>,
+    provider: Provider,
+    endpoint: Option<&str>,
     receiver: &mut LeaderReceiver,
 ) {
+    if !grant_allows_attach_target(workspace, state, target, provider, endpoint) {
+        return;
+    }
     let Some(existing) = selected_grant_receiver(state) else {
         return;
     };
-    if existing.get("pane_id").and_then(Value::as_str) != Some(target.pane_id.as_str()) {
-        return;
-    }
     let authority = existing
         .get("scope_authority")
         .and_then(Value::as_str)
@@ -3031,5 +3029,114 @@ mod tests {
             authoritative_observed_endpoint(workspace, &state, &targets, &targets[0]).as_deref(),
             Some(absolute)
         );
+    }
+
+    fn grant_state(endpoint: &str, nonce: &str, epoch: u64, provider: &str) -> Value {
+        json!({
+            "team_owner": {
+                "pane_id": "%1",
+                "provider": provider,
+                "owner_epoch": epoch
+            },
+            "leader_receiver": {
+                "status": "attached",
+                "pane_id": "%1",
+                "provider": provider,
+                "owner_epoch": epoch,
+                "tmux_socket": endpoint,
+                "scope_authority": "fresh_caller",
+                "authorized_team_workspace": "/tmp/grant-ws",
+                "binding_nonce": nonce
+            }
+        })
+    }
+
+    fn grant_pane(nonce: &str) -> PaneInfo {
+        let mut leader_env = std::collections::BTreeMap::new();
+        leader_env.insert(
+            crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.to_string(),
+            nonce.to_string(),
+        );
+        PaneInfo {
+            pane_id: PaneId::new("%1"),
+            session: crate::transport::SessionName::new("s"),
+            window_index: None,
+            window_name: None,
+            pane_index: None,
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: Some(PathBuf::from("/tmp/grant-ws")),
+            active: true,
+            pane_pid: None,
+            leader_env,
+        }
+    }
+
+    #[test]
+    fn grant_reuses_verified_endpoint() {
+        let workspace = PathBuf::from("/tmp/grant-ws");
+        let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
+        let pane = grant_pane("n1");
+        assert!(grant_allows_attach_target(
+            &workspace,
+            &state,
+            &pane,
+            crate::provider::Provider::Codex,
+            Some("/tmp/leader.sock"),
+        ));
+    }
+
+    #[test]
+    fn grant_rejects_wrong_socket_same_pane() {
+        let workspace = PathBuf::from("/tmp/grant-ws");
+        let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
+        let pane = grant_pane("n1");
+        assert!(!grant_allows_attach_target(
+            &workspace,
+            &state,
+            &pane,
+            crate::provider::Provider::Codex,
+            Some("/tmp/other.sock"),
+        ));
+    }
+
+    #[test]
+    fn grant_rejects_missing_epoch() {
+        let workspace = PathBuf::from("/tmp/grant-ws");
+        let mut state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
+        state["leader_receiver"]
+            .as_object_mut()
+            .unwrap()
+            .remove("owner_epoch");
+        let pane = grant_pane("n1");
+        assert!(!grant_allows_attach_target(
+            &workspace,
+            &state,
+            &pane,
+            crate::provider::Provider::Codex,
+            Some("/tmp/leader.sock"),
+        ));
+    }
+
+    #[test]
+    fn grant_rejects_wrong_nonce_and_provider() {
+        let workspace = PathBuf::from("/tmp/grant-ws");
+        let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
+        let pane = grant_pane("other-nonce");
+        assert!(!grant_allows_attach_target(
+            &workspace,
+            &state,
+            &pane,
+            crate::provider::Provider::Codex,
+            Some("/tmp/leader.sock"),
+        ));
+        let pane = grant_pane("n1");
+        assert!(!grant_allows_attach_target(
+            &workspace,
+            &state,
+            &pane,
+            crate::provider::Provider::Pi,
+            Some("/tmp/leader.sock"),
+        ));
     }
 }

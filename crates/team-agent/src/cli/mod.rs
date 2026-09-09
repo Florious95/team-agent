@@ -3263,7 +3263,7 @@ pub mod lifecycle_port {
     fn public_leader_bind_failure(
         stage: Option<&str>,
         reason: Option<&str>,
-        workers_spawned: bool,
+        _workers_spawned: bool,
     ) -> (&'static str, String, Option<String>) {
         match reason {
             Some("invalid_caller_tuple") => (
@@ -3281,14 +3281,6 @@ pub mod lifecycle_port {
                         .to_string(),
                 ),
             ),
-            Some(reason) if workers_spawned => (
-                "leader_binding_incomplete",
-                format!("{}:{}", stage.unwrap_or("bind"), reason),
-                Some(
-                    "inspect the reported bind stage; do not run claim-leader unless ownership is missing"
-                        .to_string(),
-                ),
-            ),
             Some("caller_pane_missing") => (
                 "leader_binding_incomplete",
                 "caller_pane_missing".to_string(),
@@ -3296,20 +3288,35 @@ pub mod lifecycle_port {
             ),
             Some("registry_readback_unavailable")
             | Some("receiver_scope_unavailable")
-            | Some("receiver_live_channel_unavailable") => (
+            | Some("receiver_live_channel_unavailable")
+            | Some("registry_identity_mismatch") => (
                 "leader_binding_unknown",
-                reason.unwrap_or("unknown").to_string(),
-                Some("team-agent diagnose --json".to_string()),
+                format!("{}:{}", stage.unwrap_or("bind"), reason.unwrap_or("unknown")),
+                Some(
+                    "inspect the selected-team registry file and live leader channel; do not claim-leader"
+                        .to_string(),
+                ),
             ),
             Some("no_attached_owner") => (
                 "leader_receiver_unbound",
                 "no_attached_owner".to_string(),
                 Some("team-agent claim-leader --confirm --json".to_string()),
             ),
-            _ => (
+            Some(reason) => (
                 "leader_binding_unknown",
-                reason.unwrap_or("unclassified_bind_failure").to_string(),
-                Some("team-agent diagnose --json".to_string()),
+                format!("{}:{reason}", stage.unwrap_or("bind")),
+                Some(
+                    "inspect the selected-team registry file and live leader channel; do not claim-leader"
+                        .to_string(),
+                ),
+            ),
+            None => (
+                "leader_binding_unknown",
+                "unclassified_bind_failure".to_string(),
+                Some(
+                    "inspect the selected-team registry file and live leader channel; do not claim-leader"
+                        .to_string(),
+                ),
             ),
         }
     }
@@ -3621,6 +3628,67 @@ pub mod lifecycle_port {
             assert_eq!(default["next_actions"], json!(["restart-agent worker"]));
             assert!(default.get("coordinator").is_none());
             assert!(detail.get("coordinator").is_some());
+        }
+
+        #[test]
+        #[serial_test::serial(env)]
+        fn existing_runtime_producer_scopes_send_team() {
+            let root = std::env::temp_dir().join(format!(
+                "ta-n5-prod-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let team_dir = root.join("teamdir");
+            std::fs::create_dir_all(team_dir.join("agents")).unwrap();
+            std::fs::write(
+                team_dir.join("TEAM.md"),
+                "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                team_dir.join("agents").join("implementer.md"),
+                "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
+            )
+            .unwrap();
+            let transport = crate::transport::test_support::OfflineTransport::new();
+            crate::lifecycle::quick_start_with_transport(
+                &team_dir,
+                Some("from-name"),
+                true,
+                None,
+                &transport,
+            )
+            .expect("first quick-start");
+            let report = crate::lifecycle::quick_start_with_transport(
+                &team_dir,
+                Some("from-name"),
+                true,
+                None,
+                &transport,
+            )
+            .expect("second quick-start");
+            let crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: canonical,
+                agent_ids,
+                ..
+            } = &report
+            else {
+                panic!("producer must return ExistingRuntime; got {report:?}");
+            };
+            assert_eq!(canonical.as_deref(), Some("from-name"));
+            assert!(agent_ids.iter().any(|id| id == "implementer"));
+            let mut value = quick_start_value(report);
+            crate::cli::adapters::append_send_guidance(&mut value, &root, None);
+            let command = value
+                .pointer("/send_commands/0")
+                .and_then(Value::as_str)
+                .expect("producer send_commands");
+            assert!(command.contains("--team from-name"), "command={command}");
+            assert!(command.contains("send implementer"), "command={command}");
+            let _ = std::fs::remove_dir_all(&root);
         }
 
         #[test]

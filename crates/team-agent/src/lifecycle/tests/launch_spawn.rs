@@ -216,6 +216,37 @@ fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
 }
 
 #[test]
+#[serial(env)]
+fn existing_runtime_producer_scopes_canonical_team() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    let transport = OfflineTransport::new();
+    let first = quick_start_with_transport(&team, Some("from-name"), true, None, &transport)
+        .expect("first quick-start");
+    match &first {
+        QuickStartReport::Ready { team: canonical, .. } => {
+            assert!(!canonical.is_empty(), "Ready producer must emit canonical team");
+        }
+        other => panic!("first quick-start must be Ready; got {other:?}"),
+    }
+    let second = quick_start_with_transport(&team, Some("from-name"), true, None, &transport)
+        .expect("second quick-start");
+    match second {
+        QuickStartReport::ExistingRuntime {
+            team: canonical,
+            agent_ids,
+            ..
+        } => {
+            assert_eq!(canonical.as_deref(), Some("from-name"));
+            assert!(
+                agent_ids.iter().any(|id| id == "implementer"),
+                "ExistingRuntime producer agent_ids={agent_ids:?}"
+            );
+        }
+        other => panic!("duplicate quick-start must be ExistingRuntime; got {other:?}"),
+    }
+}
+
+#[test]
 fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
     let workspace = temp_ws();
     let team = workspace.join(".team").join("current");

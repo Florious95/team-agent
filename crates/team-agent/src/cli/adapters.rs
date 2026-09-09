@@ -183,7 +183,7 @@ fn quickstart_human(value: &Value) -> String {
     append_reminder(out, crate::cli::QUICK_START_REMINDER)
 }
 
-fn append_send_guidance(value: &mut Value, workspace: &Path, team: Option<&str>) {
+pub(crate) fn append_send_guidance(value: &mut Value, workspace: &Path, team: Option<&str>) {
     let existing = value.get("summary").and_then(Value::as_str) == Some("existing runtime");
     if value.get("ok").and_then(Value::as_bool) != Some(true) && !existing {
         return;

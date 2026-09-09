@@ -140,17 +140,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         }
     }
 
-    if !leader_receiver_attached(state) {
-        issues.push(json!("leader_receiver_not_committed"));
-        repairs.push(recovery_hint(
-            state
-                .get("session_name")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown"),
-            "leader_receiver_not_committed",
-            "inspect leader_receiver.status and registry; do not claim-leader without missing ownership",
-        ));
-    } else {
+    if leader_receiver_attached(state) {
         // 0.4.x (CR R2 P0): leader provider health reconciliation. The
         // leader_receiver may be marked `attached` (pane addressable) but the
         // provider process has exited — pane fell back to shell with the exit
@@ -355,8 +345,7 @@ fn live_leader_workspace_mismatch(
     let provider = receiver
         .get("provider")
         .and_then(Value::as_str)
-        .filter(|provider| !provider.is_empty())
-        .unwrap_or("claude");
+        .filter(|provider| !provider.is_empty());
     let refusal =
         PaneAuthorityRefusal::new(PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts));
     let PaneAuthorityRefusalFacts::PaneWorkspaceMismatch(facts) = &refusal.facts else {
@@ -426,15 +415,19 @@ fn live_leader_workspace_mismatch(
         );
         object.insert(
             ACTION_FIELD.to_string(),
-            Value::String(match refusal.recovery.action {
-                PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
-                    format!(
-                        "open a new terminal window outside the current tmux/pane, change \
-                         directory to the requested workspace, then run \
-                         `team-agent attach-leader --team {team} --provider {provider} \
-                         --confirm --json`; then rerun \
-                         `team-agent diagnose --team {team} --json`"
-                    )
+            Value::String(match (refusal.recovery.action, provider) {
+                (
+                    PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane,
+                    Some(provider),
+                ) => format!(
+                    "open a matching workspace pane already bound as {provider}; do not invent attach-leader or claim-leader"
+                ),
+                (
+                    PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane,
+                    None,
+                ) => {
+                    "open a matching workspace pane with the recorded leader provider; do not default claude or claim-leader"
+                        .to_string()
                 }
             }),
         );
@@ -815,6 +808,25 @@ mod tests {
         assert!(
             !action.contains("takeover"),
             "shotgun alternatives must not appear; action={action}"
+        );
+    }
+
+    #[test]
+    fn diagnose_runtime_does_not_emit_not_committed_parallel() {
+        let state = json!({
+            "leader_receiver": {"status": "pending", "pane_id": "%1"}
+        });
+        let transport = crate::transport::test_support::OfflineTransport::default();
+        let (issues, repairs) = diagnose_runtime(&state, &transport);
+        let issues_text = issues.to_string();
+        let repairs_text = repairs.to_string();
+        assert!(
+            !issues_text.contains("leader_receiver_not_committed"),
+            "issues={issues_text}"
+        );
+        assert!(
+            !repairs_text.contains("leader_receiver_not_committed"),
+            "repairs={repairs_text}"
         );
     }
 

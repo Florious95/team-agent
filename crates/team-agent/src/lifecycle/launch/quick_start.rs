@@ -75,6 +75,9 @@ trait FreshQuickStartLeaderBindingOps {
     fn readback_failure_reason(&self) -> Option<&'static str> {
         None
     }
+    fn frozen_seed_receipt(&self) -> Option<(serde_json::Value, serde_json::Value)> {
+        None
+    }
 }
 
 struct RuntimeFreshQuickStartLeaderBindingOps<'a> {
@@ -83,6 +86,8 @@ struct RuntimeFreshQuickStartLeaderBindingOps<'a> {
     cas_conflict: bool,
     applied_grant: Option<(serde_json::Value, serde_json::Value)>,
     registry_receipt: Option<crate::leader::registry::RegistryWriteReceipt>,
+    frozen_owner: Option<serde_json::Value>,
+    frozen_receiver: Option<serde_json::Value>,
     nonce_writer:
         Option<&'a dyn Fn(&str, &PaneId, &str) -> Result<String, crate::leader::LeaderError>>,
 }
@@ -158,8 +163,14 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             self.last_failure_reason = Some("caller_cwd_unobservable");
             return false;
         }
-        let expected_owner = state.get("team_owner").cloned();
-        let expected_receiver = state.get("leader_receiver").cloned();
+        let expected_owner = self
+            .frozen_owner
+            .clone()
+            .or_else(|| state.get("team_owner").cloned());
+        let expected_receiver = self
+            .frozen_receiver
+            .clone()
+            .or_else(|| state.get("leader_receiver").cloned());
         match crate::leader::attach_leader_to_state_with_target_and_controls(
             workspace,
             state,
@@ -295,6 +306,12 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
 
     fn readback_failure_reason(&self) -> Option<&'static str> {
         self.last_failure_reason
+    }
+
+    fn frozen_seed_receipt(&self) -> Option<(serde_json::Value, serde_json::Value)> {
+        self.frozen_owner
+            .clone()
+            .zip(self.frozen_receiver.clone())
     }
 }
 
@@ -527,24 +544,38 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     // in-memory seed created immediately before this bind attempt and the
     // projected state still contains that seed.
     let current_receiver = state.get("leader_receiver");
-    let pending_seed_receiver = current_receiver.is_some_and(|receiver| {
-        receiver.get("status").and_then(serde_json::Value::as_str) == Some("pending")
-            && receiver
-                .get("discovery")
-                .and_then(serde_json::Value::as_str)
-                == Some("quick_start_seed")
-    });
-    let fresh_seeded_binding = seeded_owner.is_some_and(|seed| {
+    let frozen_receipt = ops.frozen_seed_receipt();
+    let fresh_seeded_binding = if let Some((frozen_owner, frozen_receiver)) = frozen_receipt.as_ref()
+    {
         state
             .get("team_owner")
-            .is_some_and(|current| current == seed)
-            && pending_seed_receiver
-    });
-    let seeded_receiver = if fresh_seeded_binding {
-        current_receiver.cloned()
+            .is_some_and(|current| current == frozen_owner)
+            && current_receiver.is_some_and(|current| current == frozen_receiver)
     } else {
-        None
+        let pending_seed_receiver = current_receiver.is_some_and(|receiver| {
+            receiver.get("status").and_then(serde_json::Value::as_str) == Some("pending")
+                && receiver
+                    .get("discovery")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("quick_start_seed")
+        });
+        seeded_owner.is_some_and(|seed| {
+            state
+                .get("team_owner")
+                .is_some_and(|current| current == seed)
+                && pending_seed_receiver
+        })
     };
+    let seeded_receiver = frozen_receipt
+        .as_ref()
+        .map(|(_, receiver)| receiver.clone())
+        .or_else(|| {
+            if fresh_seeded_binding {
+                current_receiver.cloned()
+            } else {
+                None
+            }
+        });
     // Same-Team owner collision remains fail-closed. Cross-Team registry rows
     // are intentionally irrelevant: pane ids are scoped to their tmux server,
     // and independent endpoints may reuse the same numeric id.
@@ -794,6 +825,7 @@ fn bind_fresh_quick_start_leader(
     workspace: &Path,
     team_key: &str,
     seeded_owner: Option<&serde_json::Value>,
+    seeded_receiver: Option<&serde_json::Value>,
     transport: &dyn Transport,
 ) -> Result<bool, LifecycleError> {
     bind_fresh_quick_start_leader_with(
@@ -806,6 +838,8 @@ fn bind_fresh_quick_start_leader(
             cas_conflict: false,
             applied_grant: None,
             registry_receipt: None,
+            frozen_owner: seeded_owner.cloned(),
+            frozen_receiver: seeded_receiver.cloned(),
             nonce_writer: None,
         },
     )
@@ -1266,6 +1300,13 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
                 == Some("quick-start")
         })
         .cloned();
+    let seeded_receiver = state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(&state_team_key))
+        .and_then(|team| team.get("leader_receiver"))
+        .cloned()
+        .or_else(|| state.get("leader_receiver").cloned());
     // 0.5.x Phase 1d hot-path 接线(裁决1 msg_76e1d98202b8): use the
     // generic annotator that writes `state.transport = { kind, source }`
     // for every backend AND (for tmux) preserves the existing
@@ -1307,6 +1348,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         &workspace,
         &state_team_key,
         seeded_owner.as_ref(),
+        seeded_receiver.as_ref(),
         transport,
     )?;
     if !launch.leader_receiver_attached {
@@ -1438,6 +1480,9 @@ mod fresh_quick_start_leader_binding_tests {
         readback_calls: usize,
         attached_provider: Option<crate::provider::Provider>,
         applied_grant: Option<(serde_json::Value, serde_json::Value)>,
+        frozen_owner: Option<serde_json::Value>,
+        frozen_receiver: Option<serde_json::Value>,
+        last_expected_receiver: Option<serde_json::Value>,
     }
 
     impl Default for MockOps {
@@ -1455,6 +1500,9 @@ mod fresh_quick_start_leader_binding_tests {
                 readback_calls: 0,
                 attached_provider: None,
                 applied_grant: None,
+                frozen_owner: None,
+                frozen_receiver: None,
+                last_expected_receiver: None,
             }
         }
     }
@@ -1543,8 +1591,15 @@ mod fresh_quick_start_leader_binding_tests {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("fresh")
                 .to_string();
-            let expected_owner = state.get("team_owner").cloned();
-            let expected_receiver = state.get("leader_receiver").cloned();
+            let expected_owner = self
+                .frozen_owner
+                .clone()
+                .or_else(|| state.get("team_owner").cloned());
+            let expected_receiver = self
+                .frozen_receiver
+                .clone()
+                .or_else(|| state.get("leader_receiver").cloned());
+            self.last_expected_receiver = expected_receiver.clone();
             let owner = expected_owner.clone().unwrap_or_else(|| {
                 json!({
                     "pane_id": pane.as_str(),
@@ -1599,6 +1654,12 @@ mod fresh_quick_start_leader_binding_tests {
 
         fn applied_grant(&self) -> Option<(serde_json::Value, serde_json::Value)> {
             self.applied_grant.clone()
+        }
+
+        fn frozen_seed_receipt(&self) -> Option<(serde_json::Value, serde_json::Value)> {
+            self.frozen_owner
+                .clone()
+                .zip(self.frozen_receiver.clone())
         }
 
         fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
@@ -1666,6 +1727,107 @@ mod fresh_quick_start_leader_binding_tests {
                 .is_empty(),
             "successful bind must not emit a refusal event"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn fresh_seed_exemption_requires_frozen_receiver_receipt() {
+        let workspace = workspace("frozen-seed");
+        let owner = json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1,
+            "claimed_via": "quick-start"
+        });
+        let frozen_receiver = json!({
+            "status": "pending",
+            "discovery": "quick_start_seed",
+            "pane_id": "%42",
+            "owner_epoch": 1
+        });
+        let mut state = json!({
+            "active_team_key": "fresh",
+            "team_owner": owner,
+            "leader_receiver": frozen_receiver,
+            "teams": {
+                "fresh": {
+                    "team_owner": owner,
+                    "leader_receiver": frozen_receiver
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut ops = MockOps {
+            frozen_owner: Some(owner.clone()),
+            frozen_receiver: Some(frozen_receiver.clone()),
+            ..MockOps::default()
+        };
+        assert!(bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&owner),
+            &mut ops
+        )
+        .unwrap());
+        assert_eq!(ops.attach_calls, 1);
+        assert_eq!(ops.last_expected_receiver, Some(frozen_receiver.clone()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = state;
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn newer_pending_receiver_is_not_cas_expected() {
+        let workspace = workspace("newer-pending");
+        let owner = json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1,
+            "claimed_via": "quick-start"
+        });
+        let frozen_receiver = json!({
+            "status": "pending",
+            "discovery": "quick_start_seed",
+            "pane_id": "%42",
+            "owner_epoch": 1,
+            "nonce": "original"
+        });
+        let newer = json!({
+            "status": "pending",
+            "discovery": "quick_start_seed",
+            "pane_id": "%99",
+            "owner_epoch": 1,
+            "nonce": "winner"
+        });
+        let state = json!({
+            "active_team_key": "fresh",
+            "team_owner": owner,
+            "leader_receiver": newer,
+            "teams": {
+                "fresh": {
+                    "team_owner": owner,
+                    "leader_receiver": newer
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut ops = MockOps {
+            frozen_owner: Some(owner.clone()),
+            frozen_receiver: Some(frozen_receiver.clone()),
+            ..MockOps::default()
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&owner),
+            &mut ops
+        )
+        .unwrap());
+        assert_eq!(ops.attach_calls, 0);
+        assert_ne!(ops.last_expected_receiver.as_ref(), Some(&newer));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
@@ -2426,6 +2588,8 @@ mod fresh_quick_start_leader_binding_tests {
                     cas_conflict: false,
                     applied_grant: None,
                     registry_receipt: None,
+                    frozen_owner: None,
+                    frozen_receiver: None,
                     nonce_writer: None,
                 },
                 attached_provider: None,
@@ -2602,6 +2766,8 @@ mod fresh_quick_start_leader_binding_tests {
             cas_conflict: false,
             applied_grant: None,
             registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
             nonce_writer: None,
         };
         assert!(bind_fresh_quick_start_leader_with(
@@ -2745,6 +2911,8 @@ mod fresh_quick_start_leader_binding_tests {
             cas_conflict: false,
             applied_grant: None,
             registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
             nonce_writer: Some(&nonce_writer_winner),
         };
         assert!(bind_fresh_quick_start_leader_with(
@@ -2760,6 +2928,8 @@ mod fresh_quick_start_leader_binding_tests {
             cas_conflict: false,
             applied_grant: None,
             registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
             nonce_writer: Some(&nonce_writer_winner),
         };
         assert!(bind_fresh_quick_start_leader_with(
@@ -2937,6 +3107,8 @@ mod fresh_quick_start_leader_binding_tests {
                 cas_conflict: false,
                 applied_grant: None,
                 registry_receipt: None,
+                frozen_owner: None,
+                frozen_receiver: None,
                 nonce_writer: Some(&nonce_writer_winner),
             },
             register_ok: false,
@@ -3004,6 +3176,8 @@ mod fresh_quick_start_leader_binding_tests {
                 cas_conflict: false,
                 applied_grant: None,
                 registry_receipt: None,
+                frozen_owner: None,
+                frozen_receiver: None,
                 nonce_writer: None,
             },
             register_ok: true,
@@ -3067,6 +3241,8 @@ mod fresh_quick_start_leader_binding_tests {
             cas_conflict: false,
             applied_grant: None,
             registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
             nonce_writer: None,
         };
         assert!(!bind_fresh_quick_start_leader_with(
@@ -3118,6 +3294,8 @@ mod fresh_quick_start_leader_binding_tests {
                 cas_conflict: false,
                 applied_grant: None,
                 registry_receipt: None,
+                frozen_owner: None,
+                frozen_receiver: None,
                 nonce_writer: None,
             },
             register_ok: true,
@@ -3175,6 +3353,8 @@ mod fresh_quick_start_leader_binding_tests {
                 cas_conflict: false,
                 applied_grant: None,
                 registry_receipt: None,
+                frozen_owner: None,
+                frozen_receiver: None,
                 nonce_writer: None,
             },
             register_ok: true,
@@ -3256,6 +3436,8 @@ mod fresh_quick_start_leader_binding_tests {
                     cas_conflict: false,
                     applied_grant: None,
                     registry_receipt: None,
+                    frozen_owner: None,
+                    frozen_receiver: None,
                     nonce_writer: None,
                 },
                 register_ok: true,
@@ -3343,6 +3525,8 @@ mod fresh_quick_start_leader_binding_tests {
                 cas_conflict: false,
                 applied_grant: None,
                 registry_receipt: None,
+                frozen_owner: None,
+                frozen_receiver: None,
                 nonce_writer: None,
             };
             assert!(!bind_fresh_quick_start_leader_with(
@@ -3491,6 +3675,8 @@ mod fresh_quick_start_leader_binding_tests {
             cas_conflict: false,
             applied_grant: None,
             registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
             nonce_writer: Some(&concurrent_writer),
         };
         assert!(!bind_fresh_quick_start_leader_with(
