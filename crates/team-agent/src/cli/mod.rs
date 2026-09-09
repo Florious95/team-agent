@@ -3026,9 +3026,23 @@ pub mod lifecycle_port {
     /// 匹配 [`LifecycleError`] 的人读消息子串(`agent {id} not found` /
     /// `agent id already exists` / `unknown worker agent id`),给出下一步命令。
     fn error_next_action(message: &str) -> Option<&'static str> {
-        // start-agent 撞"agent ... not found":start-agent 语义=启动 state 已有 agent;
-        // 想新增角色应走 add-agent。
-        if message.contains("not found") && message.contains("agent") {
+        // Missing spec/runtime is not an agent-id miss. Workspace paths often
+        // contain "team-agent", so "not found"+"agent" must not win here.
+        if message.contains("active team spec not found")
+            || message.contains("missing spec for restart")
+        {
+            return Some(
+                "no team spec or runtime was found in this workspace. \
+                 Run `team-agent quick-start <workspace>` for first launch, \
+                 or restart from a workspace that already contains `.team`.",
+            );
+        }
+        // start-agent 撞"agent {id} not found":start-agent 语义=启动 state 已有 agent;
+        // 想新增角色应走 add-agent。要求 agent-id 形态，避免匹配路径里的 team-agent。
+        if message.contains("agent ")
+            && message.contains(" not found")
+            && !message.contains("spec not found")
+        {
             return Some(
                 "start-agent only starts an agent that already exists in state. \
                  To add a NEW role at runtime use: team-agent add-agent <id> --role-file <path>",
