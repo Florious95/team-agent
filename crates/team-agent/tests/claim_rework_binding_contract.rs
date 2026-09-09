@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+#[path = "support/hermetic.rs"]
+mod hermetic;
+
+use hermetic::HermeticTestEnv;
 use team_agent::cli::{cmd_diagnose, CmdOutput, DiagnoseArgs};
 use team_agent::lifecycle::launch::{
     classify_leader_binding, launched_team_receiver_is_attached,
@@ -18,49 +22,14 @@ use team_agent::transport::PaneId;
 static ISOLATION: AtomicU64 = AtomicU64::new(0);
 
 struct IsolatedHome {
-    home: PathBuf,
-    previous_home: Option<std::ffi::OsString>,
-    previous_tmux: Option<std::ffi::OsString>,
-    previous_pane: Option<std::ffi::OsString>,
+    _env: HermeticTestEnv,
 }
 
 impl IsolatedHome {
     fn enter() -> Self {
-        let n = ISOLATION.fetch_add(1, Ordering::Relaxed);
-        let home = std::env::temp_dir().join(format!(
-            "claim-rework-a5-home-{}-{}",
-            std::process::id(),
-            n
-        ));
-        let _ = std::fs::create_dir_all(&home);
-        let previous_home = std::env::var_os("HOME");
-        let previous_tmux = std::env::var_os("TMUX");
-        let previous_pane = std::env::var_os("TMUX_PANE");
-        std::env::set_var("HOME", &home);
         Self {
-            home,
-            previous_home,
-            previous_tmux,
-            previous_pane,
+            _env: HermeticTestEnv::enter("claim-rework-a9"),
         }
-    }
-}
-
-impl Drop for IsolatedHome {
-    fn drop(&mut self) {
-        match &self.previous_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
-        }
-        match &self.previous_tmux {
-            Some(value) => std::env::set_var("TMUX", value),
-            None => std::env::remove_var("TMUX"),
-        }
-        match &self.previous_pane {
-            Some(value) => std::env::set_var("TMUX_PANE", value),
-            None => std::env::remove_var("TMUX_PANE"),
-        }
-        let _ = std::fs::remove_dir_all(&self.home);
     }
 }
 
@@ -157,9 +126,16 @@ fn isolated_missing_registry_is_index_missing() {
     );
     let diagnose = diagnose_json(&workspace, "alpha");
     let ids = issue_ids(&diagnose);
-    assert!(
-        ids.iter().any(|id| id == "leader_registry_index_missing"),
+    assert_eq!(
+        ids.iter()
+            .filter(|id| *id == "leader_registry_index_missing")
+            .count(),
+        1,
         "diagnose issues={ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "leader_receiver_unbound"),
+        "canonical diagnose must not remap index-missing to unbound; issues={ids:?}"
     );
     assert_ne!(diagnose.get("ok").and_then(Value::as_bool), Some(true));
 }
@@ -194,9 +170,16 @@ fn isolated_bad_registry_is_unknown() {
     );
     let diagnose = diagnose_json(&workspace, "alpha");
     let ids = issue_ids(&diagnose);
-    assert!(
-        ids.iter().any(|id| id == "leader_binding_unknown"),
+    assert_eq!(
+        ids.iter()
+            .filter(|id| *id == "leader_binding_unknown")
+            .count(),
+        1,
         "diagnose issues={ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "leader_receiver_unbound"),
+        "canonical diagnose must not remap unknown to unbound; issues={ids:?}"
     );
 }
 

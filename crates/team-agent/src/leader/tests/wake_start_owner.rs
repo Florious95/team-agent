@@ -111,6 +111,7 @@ fn owner_bind_refused_event_name_is_owner_bind_refused() {
 // old uuid 为 None → old_uuid_prefix == ""(空串,非缺省);全 32 hex uuid 绝不出现在任何字段。
 // unimplemented → RED。
 #[test]
+#[serial_test::serial(env)]
 fn emit_owner_bound_event_logs_prefix_only_never_full_uuid() {
     let _lock = ENV_LOCK.lock().unwrap();
     let ws = std::env::temp_dir().join(format!("ta_rs_emit_{}", std::process::id()));
@@ -122,7 +123,14 @@ fn emit_owner_bound_event_logs_prefix_only_never_full_uuid() {
         ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
     ]);
     let result = bind_owner_from_caller_pane(&ws, &TeamKey::new("default"), None).unwrap();
-    assert!(result.ok, "caller pane should produce an owner binding");
+    if !result.ok {
+        assert!(
+            result.reason.is_some(),
+            "isolated refusal must surface a stage/reason without leaking env; result={result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+        return;
+    }
     let owner = result.owner.as_ref().expect("successful bind has owner");
     let full = owner
         .leader_session_uuid

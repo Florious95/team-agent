@@ -266,8 +266,14 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 
     fn canonical_readback(&mut self, workspace: &Path, team_key: &str) -> bool {
-        if !launched_team_receiver_is_attached(workspace, team_key) {
-            self.last_failure_reason = Some("registry_readback_unavailable");
+        let class = crate::lifecycle::launch::classify_leader_binding(workspace, team_key);
+        if class != super::LeaderBindingClass::Attached {
+            self.last_failure_reason = Some(match class {
+                super::LeaderBindingClass::IndexMissing => "registry_readback_unavailable",
+                super::LeaderBindingClass::Unknown => "receiver_live_channel_unavailable",
+                super::LeaderBindingClass::Unbound => "receiver_missing",
+                super::LeaderBindingClass::Attached => "registry_identity_mismatch",
+            });
             return false;
         }
         let Ok(resolved) = crate::state::projection::resolve_runtime_team_scope(
@@ -283,12 +289,6 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             self.last_failure_reason = Some("receiver_missing");
             return false;
         };
-        if crate::lifecycle::launch::classify_leader_binding(workspace, team_key)
-            != super::LeaderBindingClass::Attached
-        {
-            self.last_failure_reason = Some("registry_identity_mismatch");
-            return false;
-        }
         if !matches!(
             crate::messaging::resolve_live_leader_channel(
                 workspace,
@@ -370,25 +370,6 @@ impl BindingFileSnapshot {
     fn capture(path: PathBuf) -> Self {
         let bytes = std::fs::read(&path).ok();
         Self { path, bytes }
-    }
-
-    fn restore(&self) {
-        match &self.bytes {
-            Some(bytes) => {
-                let tmp = self.path.with_extension(format!(
-                    "rollback-{}",
-                    std::process::id()
-                ));
-                if std::fs::write(&tmp, bytes).is_ok()
-                    && std::fs::rename(&tmp, &self.path).is_err()
-                {
-                    let _ = std::fs::remove_file(tmp);
-                }
-            }
-            None => {
-                let _ = std::fs::remove_file(&self.path);
-            }
-        }
     }
 
 }
@@ -674,14 +655,21 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
                 return Err(error);
             }
         } else {
-            // No caller-seeded owner was ours to clean up. Restore only the
-            // runtime snapshot; a registry write is reverted only with its
-            // exact receipt under the registry owner's lock.
+            // Existing bindings are not this attempt's to rewrite. Only
+            // roll back this attempt's exact grant under the persist lock;
+            // never restore a lock-free whole-file snapshot (that would
+            // clobber a concurrent winner). No this-attempt write → leave disk.
             let registry_rollback_error = ops
                 .registry_receipt()
                 .and_then(|receipt| restore_registry_receipt(&snapshots, &receipt).err());
-            if let Some(snapshot) = snapshots.first() {
-                snapshot.restore();
+            if let Some((expected_owner, expected_receiver)) = ops.applied_grant().as_ref() {
+                restore_this_attempt_state(
+                    workspace,
+                    team_key,
+                    snapshots.first(),
+                    expected_owner,
+                    expected_receiver,
+                )?;
             }
             if let Some(error) = registry_rollback_error {
                 return Err(error);
@@ -689,6 +677,48 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
         }
     }
     Ok(committed)
+}
+
+fn restore_this_attempt_state(
+    workspace: &Path,
+    team_key: &str,
+    snapshot: Option<&BindingFileSnapshot>,
+    expected_owner: &serde_json::Value,
+    expected_receiver: &serde_json::Value,
+) -> Result<(), LifecycleError> {
+    let current = match crate::state::persist::load_runtime_state(workspace) {
+        Ok(state) => state,
+        Err(error) => {
+            return Err(LifecycleError::StatePersist(format!(
+                "quick-start binding cleanup failed: {error}"
+            )));
+        }
+    };
+    let current_owner = current
+        .pointer(&format!("/teams/{team_key}/team_owner"))
+        .or_else(|| current.get("team_owner"));
+    let current_receiver = current
+        .pointer(&format!("/teams/{team_key}/leader_receiver"))
+        .or_else(|| current.get("leader_receiver"));
+    if current_owner != Some(expected_owner) || current_receiver != Some(expected_receiver) {
+        return Ok(());
+    }
+    let Some(bytes) = snapshot.and_then(|snapshot| snapshot.bytes.as_deref()) else {
+        return Ok(());
+    };
+    let previous: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+    })?;
+    crate::state::persist::save_runtime_state_with_receiver_authority_and_expected(
+        workspace,
+        &previous,
+        team_key,
+        expected_owner,
+        expected_receiver,
+    )
+    .map_err(|error| {
+        LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+    })
 }
 
 fn restore_registry_receipt(
@@ -1438,7 +1468,7 @@ mod fresh_quick_start_leader_binding_tests {
     use super::*;
     use crate::layout::worker_env::{CALLER_ENDPOINT_ENV, CALLER_PANE_ENV, CALLER_PROVIDER_ENV};
     use crate::transport::test_support::OfflineTransport;
-    use crate::transport::{PaneInfo, SessionName, WindowName};
+    use crate::transport::{PaneId, PaneInfo, SessionName, WindowName};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1792,8 +1822,23 @@ mod fresh_quick_start_leader_binding_tests {
         newer["pane_id"] = json!("%99");
         newer["nonce"] = json!("winner");
         state["leader_receiver"] = newer.clone();
-        state["teams"]["fresh"]["leader_receiver"] = newer;
-        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        state["teams"]["fresh"]["leader_receiver"] = newer.clone();
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            &workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        let on_disk = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(
+            on_disk
+                .pointer("/teams/fresh/leader_receiver")
+                .cloned()
+                .as_ref(),
+            Some(&newer),
+            "pending winner must be on disk before bind"
+        );
         let mut ops = MockOps {
             frozen_owner: Some(owner.clone()),
             frozen_receiver: Some(frozen_receiver),
@@ -1820,8 +1865,23 @@ mod fresh_quick_start_leader_binding_tests {
         winner["status"] = json!("attached");
         winner["pane_id"] = json!("%99");
         state["leader_receiver"] = winner.clone();
-        state["teams"]["fresh"]["leader_receiver"] = winner;
-        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        state["teams"]["fresh"]["leader_receiver"] = winner.clone();
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            &workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        let on_disk = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(
+            on_disk
+                .pointer("/teams/fresh/leader_receiver")
+                .cloned()
+                .as_ref(),
+            Some(&winner),
+            "attached winner must be on disk before bind"
+        );
         let mut ops = MockOps {
             frozen_owner: Some(owner.clone()),
             frozen_receiver: Some(frozen_receiver),
@@ -2146,8 +2206,28 @@ mod fresh_quick_start_leader_binding_tests {
             attach_calls: 0,
             registry_receipt: None,
         };
-        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
-            .unwrap());
+        let endpoint = "/private/tmp/tmux-test/default";
+        let transport = OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![PaneInfo {
+                pane_id: PaneId::new("%1"),
+                session: SessionName::new("s"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: Some(workspace.clone()),
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        assert!(crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport,
+            || bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
+        )
+        .unwrap());
         assert_eq!(ops.attach_calls, 0, "preseeded dual state must not reattach");
         let path = crate::leader::registry::registry_dir().unwrap().join(format!(
             "{}__fresh.json",
@@ -2215,6 +2295,52 @@ mod fresh_quick_start_leader_binding_tests {
             "owner_epoch": 1,
             "tmux_socket": "/private/tmp/tmux-test/default"
         })
+    }
+
+    fn matching_pending_receiver() -> serde_json::Value {
+        json!({
+            "mode": "direct_tmux",
+            "status": "pending",
+            "discovery": "quick_start_seed",
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1,
+            "tmux_socket": "/private/tmp/tmux-test/default"
+        })
+    }
+
+    fn workspace_with_fresh_seed(tag: &str) -> (PathBuf, serde_json::Value) {
+        let workspace = workspace(tag);
+        let seed = matching_seed();
+        crate::state::persist::save_runtime_state(
+            &workspace,
+            &json!({
+                "workspace": workspace,
+                "active_team_key": "fresh",
+                "team_key": "fresh",
+                "session_name": "team-fresh",
+                "agents": {"sol": {"status": "running", "provider": "pi"}},
+                "team_owner": seed,
+                "leader_receiver": matching_pending_receiver(),
+                "teams": {
+                    "fresh": {
+                        "workspace": workspace,
+                        "team_key": "fresh",
+                        "session_name": "team-fresh",
+                        "agents": {"sol": {"status": "running", "provider": "pi"}},
+                        "team_owner": seed,
+                        "leader_receiver": matching_pending_receiver(),
+                        "owner_epoch": 1
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let seed = crate::state::persist::load_runtime_state(&workspace).unwrap()["teams"]["fresh"]
+            ["team_owner"]
+            .clone();
+        (workspace, seed)
     }
 
     fn workspace_with_matching_seed(tag: &str) -> (PathBuf, serde_json::Value) {
@@ -2379,7 +2505,7 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     fn seeded_cleanup_clears_exact_seed_through_bind_repository_entry() {
-        let (workspace, seed) = workspace_with_matching_seed("seed-cleanup-success");
+        let (workspace, seed) = workspace_with_fresh_seed("seed-cleanup-success");
         let mut ops = failed_register_ops(None, false);
         assert!(!bind_fresh_quick_start_leader_with(
             &workspace,
@@ -2395,7 +2521,8 @@ mod fresh_quick_start_leader_binding_tests {
             .applied_grant
             .as_ref()
             .is_some_and(|(owner, receiver)| {
-                owner == &seed && receiver == &matching_receiver()
+                owner == &seed
+                    && receiver.get("pane_id").and_then(serde_json::Value::as_str) == Some("%42")
             }));
         let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert!(
@@ -2455,7 +2582,7 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     fn seeded_cleanup_propagates_persist_error() {
-        let (workspace, seed) = workspace_with_matching_seed("seed-cleanup-persist-err");
+        let (workspace, seed) = workspace_with_fresh_seed("seed-cleanup-persist-err");
         let mut ops = failed_register_ops(None, true);
         let error = bind_fresh_quick_start_leader_with(
             &workspace,
@@ -2471,7 +2598,8 @@ mod fresh_quick_start_leader_binding_tests {
             .applied_grant
             .as_ref()
             .is_some_and(|(owner, receiver)| {
-                owner == &seed && receiver == &matching_receiver()
+                owner == &seed
+                    && receiver.get("pane_id").and_then(serde_json::Value::as_str) == Some("%42")
             }));
         match error {
             LifecycleError::StatePersist(text) => {
@@ -2779,11 +2907,10 @@ mod fresh_quick_start_leader_binding_tests {
             frozen_receiver: None,
             nonce_writer: None,
         };
-        assert!(bind_fresh_quick_start_leader_with(
-            &workspace,
-            "fresh",
-            Some(&seed),
-            &mut ops
+        assert!(crate::transport_factory::with_leader_endpoint_transport(
+            "/tmp/tmux.sock",
+            transport.clone(),
+            || bind_fresh_quick_start_leader_with(&workspace, "fresh", Some(&seed), &mut ops)
         )
         .unwrap());
         let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
@@ -2924,11 +3051,15 @@ mod fresh_quick_start_leader_binding_tests {
             frozen_receiver: None,
             nonce_writer: Some(&nonce_writer_winner),
         };
-        assert!(bind_fresh_quick_start_leader_with(
-            &first_workspace,
-            "fresh",
-            Some(&first_seed),
-            &mut first_ops
+        assert!(crate::transport_factory::with_leader_endpoint_transport(
+            "/tmp/tmux.sock",
+            transport.clone(),
+            || bind_fresh_quick_start_leader_with(
+                &first_workspace,
+                "fresh",
+                Some(&first_seed),
+                &mut first_ops
+            )
         )
         .unwrap());
         let mut second_ops = RuntimeFreshQuickStartLeaderBindingOps {
@@ -2941,11 +3072,15 @@ mod fresh_quick_start_leader_binding_tests {
             frozen_receiver: None,
             nonce_writer: Some(&nonce_writer_winner),
         };
-        assert!(bind_fresh_quick_start_leader_with(
-            &second_workspace,
-            "fresh",
-            Some(&second_seed),
-            &mut second_ops
+        assert!(crate::transport_factory::with_leader_endpoint_transport(
+            "/tmp/tmux.sock",
+            transport.clone(),
+            || bind_fresh_quick_start_leader_with(
+                &second_workspace,
+                "fresh",
+                Some(&second_seed),
+                &mut second_ops
+            )
         )
         .unwrap());
         let first_receiver = crate::state::persist::load_runtime_state(&first_workspace).unwrap();
@@ -3254,11 +3389,10 @@ mod fresh_quick_start_leader_binding_tests {
             frozen_receiver: None,
             nonce_writer: None,
         };
-        assert!(!bind_fresh_quick_start_leader_with(
-            &workspace,
-            "fresh",
-            Some(&seed),
-            &mut ops
+        assert!(!crate::transport_factory::with_leader_endpoint_transport(
+            "/tmp/tmux.sock",
+            transport.clone(),
+            || bind_fresh_quick_start_leader_with(&workspace, "fresh", Some(&seed), &mut ops)
         )
         .unwrap());
         assert_eq!(ops.last_failure_reason, Some("receiver_live_channel_unavailable"));
@@ -3747,7 +3881,7 @@ mod fresh_quick_start_leader_binding_tests {
             refusal_reason(&workspace),
             Some((
                 "strict_provider".to_string(),
-                "provider_unresolved".to_string()
+                "invalid_caller_tuple".to_string()
             ))
         );
     }

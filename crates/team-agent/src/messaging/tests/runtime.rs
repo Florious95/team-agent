@@ -3376,10 +3376,18 @@ fn gate054_status_surfaces_pending_leader_notifications() {
         entry.get("channel").and_then(serde_json::Value::as_str),
         Some("rebind_required")
     );
-    assert!(entry
+    let action = entry
         .get("action")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|action| action.contains("attach-leader") || action.contains("takeover")));
+        .unwrap_or("");
+    assert!(
+        action.contains("historical leader mailbox debt"),
+        "historical debt action must stay debt-scoped; action={action}"
+    );
+    assert!(
+        !action.contains("attach-leader") && !action.contains("takeover") && !action.contains("claim-leader"),
+        "historical debt must not authorize bind commands; action={action}"
+    );
 }
 
 #[test]

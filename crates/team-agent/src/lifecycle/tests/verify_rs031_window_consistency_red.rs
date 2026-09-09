@@ -875,8 +875,18 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
-        Ok(None)
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
+        match field {
+            PaneField::PaneCurrentCommand => Ok(Some("codex".to_string())),
+            PaneField::PaneCurrentPath => Ok(self.with_state(|state| {
+                state
+                    .targets
+                    .first()
+                    .and_then(|target| target.current_path.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+            })),
+            _ => Ok(None),
+        }
     }
 
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {

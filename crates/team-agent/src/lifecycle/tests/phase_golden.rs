@@ -502,6 +502,36 @@ fn run_diagnose_after_quick_start() -> Value {
         false,
     )
     .expect("tombstone fixture must quick-start");
+    let mut state = crate::state::persist::load_runtime_state(&workspace)
+        .expect("tombstone fixture must persist runtime state");
+    crate::lifecycle::launch::seed_launched_owner_from_caller_with_provider_lookup(
+        &mut state,
+        crate::state::owner_gate::CallerIdentity {
+            pane_id: "%1".to_string(),
+            provider: "codex".to_string(),
+            machine_fingerprint: "fp".to_string(),
+            leader_session_uuid: "uuid-tombstone".to_string(),
+            leader_session_uuid_source: "env".to_string(),
+        },
+        |_| None,
+    );
+    crate::state::persist::save_runtime_state(&workspace, &state)
+        .expect("persist seeded owner without registry");
+    if let Some(dir) = crate::leader::registry::registry_dir() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    assert!(
+        state
+            .pointer("/teams/teamdir/team_owner/pane_id")
+            .or_else(|| state.pointer("/team_owner/pane_id"))
+            .and_then(Value::as_str)
+            .is_some(),
+        "index-missing diagnose requires a persisted seeded owner"
+    );
     let diagnose = cmd_diagnose(&DiagnoseArgs {
         workspace,
         json: true,

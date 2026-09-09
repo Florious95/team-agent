@@ -257,6 +257,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
     workspace: &std::path::Path,
     state: &Value,
     backend: &dyn Transport,
+    selected_team_key: Option<&str>,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
     append_live_leader_workspace_mismatch_issue(
@@ -266,7 +267,13 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut issues,
         &mut repairs,
     );
-    append_registry_channel_unbound_issue(workspace, state, &mut issues, &mut repairs);
+    append_registry_channel_unbound_issue(
+        workspace,
+        state,
+        selected_team_key,
+        &mut issues,
+        &mut repairs,
+    );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
@@ -276,10 +283,14 @@ pub(crate) fn diagnose_runtime_for_workspace(
 fn append_registry_channel_unbound_issue(
     workspace: &std::path::Path,
     state: &Value,
+    selected_team_key: Option<&str>,
     issues: &mut Value,
     repairs: &mut Value,
 ) {
-    let team_key = crate::state::projection::team_state_key(state);
+    let team_key = selected_team_key
+        .filter(|team| !team.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::state::projection::team_state_key(state));
     if team_key.is_empty() {
         return;
     }
@@ -405,7 +416,7 @@ fn live_leader_workspace_mismatch(
             Value::String(
                 match refusal.recovery.hint_action {
                     PaneAuthorityRecoveryHint::AttachLeader => {
-                        "open a matching workspace pane; do not invent attach-leader or claim-leader"
+                        "open a matching workspace pane bound for this workspace"
                     }
                 }
                 .to_string(),
@@ -422,13 +433,13 @@ fn live_leader_workspace_mismatch(
                     PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane,
                     Some(provider),
                 ) => format!(
-                    "open a matching workspace pane already bound as {provider}; do not invent attach-leader or claim-leader"
+                    "open a matching workspace pane already bound as {provider}"
                 ),
                 (
                     PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane,
                     None,
                 ) => {
-                    "open a matching workspace pane with the recorded leader provider; do not default claude or claim-leader"
+                    "open a matching workspace pane with the recorded leader provider; do not default claude"
                         .to_string()
                 }
             }),
@@ -835,14 +846,24 @@ mod tests {
             .get(HINT_ACTION_FIELD)
             .and_then(Value::as_str)
             .unwrap_or("");
-        assert!(
-            !hint.contains("attach-leader"),
-            "hint_action must not emit attach-leader; got {hint}"
-        );
-        assert!(
-            !hint.contains("claim-leader"),
-            "hint_action must not emit claim-leader; got {hint}"
-        );
+        let action = repair
+            .get(ACTION_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        for field in [hint, action] {
+            assert!(
+                !field.contains("attach-leader"),
+                "mismatch repair must not emit attach-leader; got {field}"
+            );
+            assert!(
+                !field.contains("claim-leader"),
+                "mismatch repair must not emit claim-leader; got {field}"
+            );
+            assert!(
+                !field.contains("takeover"),
+                "mismatch repair must not emit takeover; got {field}"
+            );
+        }
     }
 
     #[test]
