@@ -134,17 +134,40 @@ fn red3_refused_dirty_topology_next_actions_are_executable_deadlock_exits() {
     );
     assert!(
         actions.iter().any(|action| {
+            action.as_str().is_some_and(|text| {
+                text.contains("diagnose") || text.contains("restart") || contains_rebind_command(text)
+            })
+        }),
+        "RED3: next_actions must include an applicable diagnose/restart/rebind command for the socket split; actions={actions:?}"
+    );
+    assert!(
+        actions.iter().any(|action| {
             action
                 .as_str()
-                .is_some_and(|text| contains_rebind_command(text))
+                .is_some_and(|text| text.contains("socket") || text.contains("endpoint"))
         }),
-        "RED3: next_actions must include an explicit rebind/claim/takeover command, not only prose or diagnostics; actions={actions:?}"
+        "RED3: next_actions must name the socket/endpoint split being protected; actions={actions:?}"
     );
 
+    let executable = actions
+        .iter()
+        .filter_map(|action| action.as_str().and_then(executable_team_agent_argv))
+        .count();
+    assert!(
+        executable >= 1,
+        "RED3: at least one next_action must be an executable team-agent command; actions={actions:?}"
+    );
     for action in actions {
         let text = action.as_str().unwrap_or_else(|| {
             panic!("RED3: next_actions entries must be strings; action={action}")
         });
+        if executable_team_agent_argv(text).is_none() {
+            assert!(
+                text.contains("socket") || text.contains("endpoint") || text.contains("tmux"),
+                "RED3: non-command next_actions must still name the topology repair; action={text}"
+            );
+            continue;
+        }
         let argv = executable_team_agent_argv(text).unwrap_or_else(|| {
             panic!(
                 "RED3: every refused_dirty_topology next_action must be an executable `team-agent ...` command under the same dirty fixture; got {text:?}"

@@ -8,7 +8,7 @@ fn stat_003_status_dirty_state_reporting() {
     let team_id = "stat003";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     ws.inject_state(
         "leader_receiver",

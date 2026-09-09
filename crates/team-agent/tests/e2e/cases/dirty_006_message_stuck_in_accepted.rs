@@ -7,7 +7,7 @@ fn dirty_006_message_stuck_in_accepted_is_not_false_delivered() {
     let team_id = "dirty006";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     let stopped = run_ta(
         &ws,

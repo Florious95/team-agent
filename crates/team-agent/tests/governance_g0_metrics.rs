@@ -9,11 +9,40 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const VISIBLE_COMMAND_TARGET: usize = 15;
+const RESIGN_PLUS_RESULTS: &[&str] = &[
+    "quick-start",
+    "send",
+    "status",
+    "collect",
+    "results",
+    "restart",
+    "shutdown",
+    "add-agent",
+    "start-agent",
+    "stop-agent",
+    "reset-agent",
+    "diagnose",
+    "claim-leader",
+    "takeover",
+    "attach-leader",
+];
+
+fn exact_visible_contract(help: &str) -> BTreeSet<String> {
+    let parsed = parse_visible_commands(help);
+    let mut expected: BTreeSet<String> = RESIGN_PLUS_RESULTS
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect();
+    if parsed.iter().any(|command| command == "models") {
+        expected.insert("models".to_string());
+    }
+    expected
+}
 
 #[test]
 fn visible_command_count_stays_within_g0_limit() {
@@ -29,19 +58,19 @@ fn visible_command_count_stays_within_g0_limit() {
     );
 
     let help = String::from_utf8_lossy(&output.stdout);
-    let commands = parse_visible_commands(&help);
+    let commands = parse_visible_commands(&help)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let expected = exact_visible_contract(&help);
     println!(
-        "G0_METRIC visible_command_count current={} target_threshold={} status=ok",
+        "G0_METRIC visible_command_count current={} exact_set={} status=ok",
         commands.len(),
-        VISIBLE_COMMAND_TARGET
+        expected.len()
     );
-    println!("G0_VISIBLE_COMMANDS {}", commands.join(","));
-    assert!(
-        commands.len() <= VISIBLE_COMMAND_TARGET,
-        "G0 visible command count exceeded target: current={} target={} commands={:?}",
-        commands.len(),
-        VISIBLE_COMMAND_TARGET,
-        commands
+    println!("G0_VISIBLE_COMMANDS {}", commands.iter().cloned().collect::<Vec<_>>().join(","));
+    assert_eq!(
+        commands, expected,
+        "G0 visible commands must equal the exact published set (d40 ∪ results; models only when advertised), not a slack threshold; commands={commands:?} expected={expected:?}"
     );
 }
 
