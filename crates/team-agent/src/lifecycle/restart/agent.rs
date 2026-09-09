@@ -333,7 +333,7 @@ pub(crate) fn start_agent_at_paths(
         )));
     }
     let spawn_session_id = if matches!(start_mode, StartMode::Resumed) {
-        session_id.as_ref()
+        session_id.clone()
     } else {
         None
     };
@@ -375,7 +375,7 @@ pub(crate) fn start_agent_at_paths(
         &session_name,
         agent_id,
         &agent,
-        spawn_session_id,
+        spawn_session_id.as_ref(),
         into_existing_session,
         transport,
         Some(&safety),
@@ -471,7 +471,7 @@ pub(crate) fn start_agent_at_paths(
         start_mode,
         &session_name,
         &actual_spawn_window,
-        spawn_session_id,
+        spawn_session_id.as_ref(),
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
