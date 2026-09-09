@@ -97,6 +97,23 @@ pub fn attach_leader(
             "tmux pane not found: {pane_id}"
         )));
     };
+    if let Some(bound) = live_bound_pane_blocking_other_attach(&state, &pane_id, &targets) {
+        let team_id = TeamKey::new(crate::state::projection::team_state_key(&state));
+        emit_lease_refusal(
+            &event_log,
+            LeaseReason::PreviousOwnerAliveRefused,
+            &state,
+            Some(bound.as_str()),
+            Some(pane_id.as_str()),
+            &team_id,
+        )?;
+        return Ok(refused(
+            LeaseReason::PreviousOwnerAliveRefused,
+            "team already has a live owner pane; do not attach-leader from another pane",
+            Some(current_owner_epoch(&state)),
+            Some(bound),
+        ));
+    }
     let mut receiver = receiver_for_attach_target(
         workspace,
         &state,
@@ -1541,6 +1558,22 @@ fn bound_pane(state: &Value) -> Option<String> {
     get_path_str(state, &["leader_receiver", "pane_id"])
         .filter(|v| !v.is_empty())
         .or_else(|| get_path_str(state, &["team_owner", "pane_id"]).filter(|v| !v.is_empty()))
+}
+
+/// Live owner on this socket, different caller pane → ownership conflict,
+/// not "caller pane failed validation". Presence in list-panes is enough;
+/// do not require the owner pane to be the session's active pane.
+fn live_bound_pane_blocking_other_attach(
+    state: &Value,
+    caller: &PaneId,
+    targets: &[AttachLeaderTarget],
+) -> Option<PaneId> {
+    let bound = bound_pane(state)?;
+    if bound == caller.as_str() {
+        return None;
+    }
+    let live = targets.iter().any(|target| target.info.pane_id.as_str() == bound);
+    live.then(|| PaneId::new(bound))
 }
 
 fn bound_endpoint_matches_current_process(state: &Value) -> bool {
@@ -3185,5 +3218,66 @@ mod tests {
             crate::provider::Provider::Pi,
             Some("/tmp/leader.sock"),
         ));
+    }
+
+    fn listed(pane: &str) -> AttachLeaderTarget {
+        AttachLeaderTarget {
+            info: PaneInfo {
+                pane_id: PaneId::new(pane),
+                session: crate::transport::SessionName::new("leader"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: pane == "%6",
+                pane_pid: None,
+                leader_env: std::collections::BTreeMap::new(),
+            },
+            endpoint: Some("/tmp/ta.sock".to_string()),
+        }
+    }
+
+    #[test]
+    fn live_owner_blocks_other_pane_even_if_owner_is_not_active() {
+        // R3 same-socket: owner %0 exists (pane_dead=0) but is not the
+        // session's active pane; caller %6 must not skip to pane validation.
+        let state = serde_json::json!({
+            "leader_receiver": {"pane_id": "%0", "owner_epoch": 1},
+            "team_owner": {"pane_id": "%0", "owner_epoch": 1},
+        });
+        let targets = vec![listed("%0"), listed("%6")];
+        let blocked =
+            live_bound_pane_blocking_other_attach(&state, &PaneId::new("%6"), &targets);
+        assert_eq!(blocked, Some(PaneId::new("%0")));
+    }
+
+    #[test]
+    fn live_owner_does_not_block_attach_from_bound_pane() {
+        let state = serde_json::json!({
+            "leader_receiver": {"pane_id": "%0"},
+        });
+        let targets = vec![listed("%0"), listed("%6")];
+        assert!(live_bound_pane_blocking_other_attach(
+            &state,
+            &PaneId::new("%0"),
+            &targets,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn missing_owner_pane_is_not_treated_as_live_conflict() {
+        let state = serde_json::json!({
+            "leader_receiver": {"pane_id": "%0"},
+        });
+        let targets = vec![listed("%6")];
+        assert!(live_bound_pane_blocking_other_attach(
+            &state,
+            &PaneId::new("%6"),
+            &targets,
+        )
+        .is_none());
     }
 }
