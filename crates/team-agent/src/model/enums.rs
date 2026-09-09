@@ -27,6 +27,8 @@ pub enum Provider {
     /// Cursor `agent` CLI (0.5.67 provider-adapter). Append system prompt via
     /// workspace `.cursor/rules/*.mdc` (方案 1 变体), bypass `--force`.
     CursorAgent,
+    /// Pi coding agent CLI. Models are selected from its live catalog.
+    Pi,
     Fake,
 }
 
@@ -89,7 +91,7 @@ impl ProviderEffort {
     /// Copilot/Gemini/CursorAgent/Fake ignore the field (warning at runtime).
     pub fn is_supported_by(self, provider: Provider) -> bool {
         match provider {
-            Provider::Claude | Provider::ClaudeCode => true,
+            Provider::Claude | Provider::ClaudeCode | Provider::Pi => true,
             Provider::Codex | Provider::Grok => !self.is_claude_only(),
             Provider::Copilot | Provider::GeminiCli | Provider::CursorAgent | Provider::Fake => {
                 false
