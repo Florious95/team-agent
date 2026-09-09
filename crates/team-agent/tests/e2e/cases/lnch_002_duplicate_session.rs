@@ -16,7 +16,7 @@ fn lnch_002_duplicate_quick_start_is_refused() {
 
     let first = quick_start_fake(&ws, team_id);
     assert!(
-        quick_start_launched(&first),
+        quick_start_workers_available(&first),
         "1st quick-start: {}",
         first.stdout
     );

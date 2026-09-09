@@ -50,6 +50,7 @@ fn red1_claim_convergence_is_persisted_before_converged_response() {
         TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "RED1 claim-leader");
     assert_binding_ok(&claim, &claim_json, "RED1 claim-leader");
@@ -90,6 +91,7 @@ fn red2_coordinator_stale_save_cannot_rollback_claim_endpoint_convergence() {
         TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "RED2 claim-leader");
     assert_binding_ok(&claim, &claim_json, "RED2 claim-leader");

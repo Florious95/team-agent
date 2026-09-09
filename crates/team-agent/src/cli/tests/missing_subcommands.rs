@@ -90,6 +90,44 @@ fn seed_self_signed_attached_leader(ws: &std::path::Path) {
     .unwrap();
 }
 
+fn seed_canonical_healthy_leader(ws: &std::path::Path, endpoint: &str) {
+    crate::state::persist::save_runtime_state(
+        ws,
+        &json!({
+            "team_key": "current",
+            "workspace": ws,
+            "teams": {
+                "current": {
+                    "team_owner": {
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "provider": "codex"
+                    },
+                    "leader_receiver": {
+                        "mode": "direct_tmux",
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "provider": "codex",
+                        "tmux_socket": endpoint
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::leader::registry::register_binding_from_state_best_effort(
+            ws,
+            Some("current"),
+            "diagnose-healthy-fixture",
+        )
+        .as_ref()
+        .map(|outcome| outcome.status),
+        Some("registered")
+    );
+}
+
 fn seed_leader_registry_entry(ws: &std::path::Path) {
     let entry = crate::leader::registry::build_entry(
         ws,
@@ -345,17 +383,33 @@ fn dispatch_routes_diagnose_healthy_leader() {
     ]);
     let _home = IsolatedHome::enter("diagnose-healthy");
     let ws = tmp_workspace();
-    seed_self_signed_attached_leader(&ws);
-    seed_leader_registry_entry(&ws);
-    let code = run(
-        &cli_argv(&["diagnose", "--workspace", &ws.to_string_lossy(), "--json"]),
-        &ws,
-    );
+    let endpoint = "/tmp/ta-diagnose-healthy.sock";
+    seed_canonical_healthy_leader(&ws, endpoint);
+    let transport = crate::transport::test_support::OfflineTransport::default()
+        .with_tmux_endpoint(endpoint)
+        .with_targets(vec![crate::transport::PaneInfo {
+            pane_id: crate::transport::PaneId::new("%1"),
+            session: crate::transport::SessionName::new("s"),
+            window_index: None,
+            window_name: None,
+            pane_index: None,
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: Some(ws.clone()),
+            active: true,
+            pane_pid: None,
+            leader_env: Default::default(),
+        }]);
+    let code = crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+        run(
+            &cli_argv(&["diagnose", "--workspace", &ws.to_string_lossy(), "--json"]),
+            &ws,
+        )
+    });
     assert_eq!(
         code,
         ExitCode::Ok,
-        "`diagnose` must be Ok when state.json looks attached AND ~/.team-agent/leaders/ \
-         has a matching attached row; got {code:?}"
+        "`diagnose` must be Ok when canonical owner/receiver, production registry, and live align; got {code:?}"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

@@ -15,7 +15,7 @@ fn lnch_004_display_backend_none_topology() {
     let ws_path = ws.path().to_str().unwrap();
 
     let out = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&out), "quick-start: {}", out.stdout);
+    assert!(quick_start_workers_available(&out), "quick-start: {}", out.stdout);
 
     let j = out.json();
     assert_json_field_eq_str(&j, "/display_backend", "none");

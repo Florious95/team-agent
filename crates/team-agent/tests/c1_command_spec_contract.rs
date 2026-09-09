@@ -24,6 +24,7 @@ const DEFAULT_COMMANDS: &[&str] = &[
     "send",
     "status",
     "collect",
+    "results",
     "restart",
     "shutdown",
     "add-agent",
@@ -93,21 +94,26 @@ fn red1_default_help_contracts_to_core_guided_surface() {
     );
 
     let visible = visible_default_commands(&help);
-    let expected: BTreeSet<String> = DEFAULT_COMMANDS.iter().map(|s| (*s).to_string()).collect();
+    let mut expected: BTreeSet<String> = DEFAULT_COMMANDS.iter().map(|s| (*s).to_string()).collect();
+    if visible.iter().any(|command| command == "models") {
+        expected.insert("models".to_string());
+    }
     let hidden: BTreeSet<String> = HIDDEN_FROM_DEFAULT_HELP
         .iter()
         .map(|s| (*s).to_string())
         .collect();
     let missing: Vec<_> = expected.difference(&visible).cloned().collect();
     let leaked: Vec<_> = hidden.intersection(&visible).cloned().collect();
+    let extra: Vec<_> = visible.difference(&expected).cloned().collect();
 
     assert!(
-        visible.len() <= 15 && missing.is_empty() && leaked.is_empty(),
-        "RED1: default help must show only the C1 core/guided surface (<=15 names, including the 14 design names) and hide secondary/dev/compat commands.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nhelp=\n{}",
+        missing.is_empty() && leaked.is_empty() && extra.is_empty() && visible == expected,
+        "RED1: default help must match the exact published set (d40 ∪ results; models only when the binary advertises it), not a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
         visible.len(),
         visible,
         missing,
         leaked,
+        extra,
         help
     );
     let lower = help.to_lowercase();

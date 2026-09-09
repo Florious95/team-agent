@@ -48,6 +48,12 @@ use super::persist::{
     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip as helper_write_root_with_lifecycle_topology_authority_and_capture_backfill_skip,
     save_runtime_state_with_receiver_authority as helper_write_root_with_receiver_authority,
+    save_runtime_state_with_receiver_authority_and_expected
+        as helper_write_root_with_receiver_authority_and_expected,
+    save_runtime_state_with_exact_owner_receiver_cleanup
+        as helper_write_root_with_exact_owner_receiver_cleanup,
+    save_runtime_state_with_exact_owner_receiver_restore
+        as helper_write_root_with_exact_owner_receiver_restore,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority as helper_write_root_with_team_tombstone_lifecycle_topology_authority,
     save_runtime_state_with_team_tombstoned_agents as helper_write_root_with_team_tombstoned_agents,
     save_runtime_state_without_migrations as helper_write_root_without_migrations,
@@ -206,8 +212,33 @@ pub enum StateWriteIntent<'a> {
     ClaimLeader {
         team_key: &'a str,
     },
+    ClaimLeaderFreshCaller {
+        team_key: &'a str,
+        expected_owner: &'a Value,
+        expected_receiver: &'a Value,
+    },
+    ClearExactTeamOwner {
+        team_key: &'a str,
+        seed: &'a Value,
+    },
+    ClearExactTeamOwnerAndReceiver {
+        team_key: &'a str,
+        seed: &'a Value,
+        expected_receiver: &'a Value,
+    },
+    RestoreExactTeamOwnerAndReceiver {
+        team_key: &'a str,
+        expected_owner: &'a Value,
+        expected_receiver: &'a Value,
+        previous_owner: &'a Value,
+        previous_receiver: &'a Value,
+    },
     LeaderBindingRestoreNonTargetTeams {
         target_team_key: &'a str,
+    },
+    /// Strip extra keys written by a failed or degraded quick-start bind attempt.
+    QuickStartBindingCleanup {
+        team_key: &'a str,
     },
     LeaderStartBinding {
         team_key: &'a str,
@@ -383,15 +414,56 @@ fn route_direct(
         // scoped preserve-claim-fields variant at :1702 uses the team-tombstoned
         // agents helper.
         StateWriteIntent::ClaimLeader { team_key } => {
-            helper_write_root_with_receiver_authority(workspace, state, team_key)
+            helper_write_root_with_receiver_authority(workspace, state, team_key, None)
         }
+        StateWriteIntent::ClaimLeaderFreshCaller {
+            team_key,
+            expected_owner,
+            expected_receiver,
+        } => helper_write_root_with_receiver_authority_and_expected(
+            workspace,
+            state,
+            team_key,
+            expected_owner,
+            expected_receiver,
+        ),
+        StateWriteIntent::ClearExactTeamOwner { team_key, seed } => {
+            helper_write_root_with_receiver_authority(workspace, state, team_key, Some(seed))
+        }
+        StateWriteIntent::ClearExactTeamOwnerAndReceiver {
+            team_key,
+            seed,
+            expected_receiver,
+        } => helper_write_root_with_exact_owner_receiver_cleanup(
+            workspace,
+            state,
+            team_key,
+            seed,
+            expected_receiver,
+        ),
+        StateWriteIntent::RestoreExactTeamOwnerAndReceiver {
+            team_key,
+            expected_owner,
+            expected_receiver,
+            previous_owner,
+            previous_receiver,
+        } => helper_write_root_with_exact_owner_receiver_restore(
+            workspace,
+            state,
+            team_key,
+            expected_owner,
+            expected_receiver,
+            previous_owner,
+            previous_receiver,
+        ),
+        StateWriteIntent::QuickStartBindingCleanup { .. } => helper_write_root(workspace, state),
         StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
             helper_write_root_without_migrations(workspace, state)
         }
         // LeaderStartBinding -> managed/exec/external all root-save at
         // leader/start.rs:795/903/946.
         StateWriteIntent::LeaderStartBinding { team_key, .. } => {
-            helper_write_root_with_receiver_authority(workspace, state, team_key)
+            helper_write_root_with_receiver_authority(workspace, state, team_key, None)
         }
         // CoordinatorTick dispatches to the existing scoped helper
         // (`save_team_scoped_state`) preserving coordinator/tick.rs:427.
