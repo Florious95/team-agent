@@ -1312,11 +1312,13 @@ fn restart_with_selected_team_and_transport(
             &selected.run_workspace,
             selected.team_key.as_str(),
         );
-        let (leader_bind_ok, leader_bind_reason) = restart_bind_status(
+        let (class_ok, class_reason) = restart_bind_status(
             &selected.run_workspace,
             selected.team_key.as_str(),
             persisted.as_ref().unwrap_or(&state),
         );
+        let (leader_bind_ok, leader_bind_reason) =
+            apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
         return Ok(RestartReport::Partial {
             session_name,
             agents: successful_agents,
@@ -1359,11 +1361,13 @@ fn restart_with_selected_team_and_transport(
     // never panics. Hard error path is deferred to Step 10.
     let violations = crate::layout::sessions::assert_topology_invariants(&state, &spec);
     crate::layout::sessions::log_topology_violations(&violations);
-    let (leader_bind_ok, leader_bind_reason) = restart_bind_status(
+    let (class_ok, class_reason) = restart_bind_status(
         &selected.run_workspace,
         selected.team_key.as_str(),
         persisted.as_ref().unwrap_or(&state),
     );
+    let (leader_bind_ok, leader_bind_reason) =
+        apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
     Ok(RestartReport::Restarted {
         session_name,
         agents: successful_agents,
@@ -1865,12 +1869,12 @@ fn transport_for_receiver(
         .get("tmux_socket")
         .and_then(serde_json::Value::as_str)
         .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")?;
-    Some(Box::new(crate::transport_factory::tmux_endpoint_transport(
+    Some(crate::transport_factory::leader_endpoint_transport(
         endpoint,
-    )))
+    ))
 }
 
-pub(crate) fn restart_bind_status(
+pub fn restart_bind_status(
     workspace: &std::path::Path,
     team_key: &str,
     state: &serde_json::Value,
@@ -1935,39 +1939,89 @@ fn owner_conflicts_with_caller(
     )
 }
 
+fn binding_maintain_failed(value: &serde_json::Value) -> bool {
+    value
+        .get("registry_maintain_failed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || value
+            .get("debt_maintain_failed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+fn apply_binding_maintain_failures(
+    attach_window_failures: &Option<serde_json::Value>,
+    ok: bool,
+    reason: Option<String>,
+) -> (bool, Option<String>) {
+    if attach_window_failures
+        .as_ref()
+        .is_some_and(binding_maintain_failed)
+    {
+        (
+            ok,
+            reason.or_else(|| Some("leader_registry_maintain_failed".to_string())),
+        )
+    } else {
+        (ok, reason)
+    }
+}
+
 fn maintain_live_binding_index(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let team_key = team.unwrap_or("");
-    let _ = crate::leader::registry::register_binding_from_state_best_effort(
+    let register = crate::leader::registry::register_binding_from_state_best_effort(
         workspace,
         team,
         "restart-live-index",
     );
-    let receiver = selected_team_receiver(state, team_key)?;
-    let pane = receiver
+    let mut report = serde_json::Map::new();
+    if !register
+        .as_ref()
+        .is_some_and(|outcome| outcome.status == "registered")
+    {
+        report.insert("registry_maintain_failed".to_string(), serde_json::json!(true));
+    }
+    let Some(receiver) = selected_team_receiver(state, team_key) else {
+        return Some(serde_json::Value::Object(report));
+    };
+    let Some(pane) = receiver
         .get("pane_id")
         .and_then(serde_json::Value::as_str)
-        .filter(|pane| !pane.is_empty())?;
-    let store = crate::message_store::MessageStore::open(workspace).ok()?;
+        .filter(|pane| !pane.is_empty())
+    else {
+        report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
+        return Some(serde_json::Value::Object(report));
+    };
+    let store = match crate::message_store::MessageStore::open(workspace) {
+        Ok(store) => store,
+        Err(_) => {
+            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
+            return Some(serde_json::Value::Object(report));
+        }
+    };
     let event_log = crate::event_log::EventLog::new(workspace);
     let team_id = crate::model::ids::TeamKey::new(team_key.to_string());
     let pane_id = crate::transport::PaneId::new(pane);
-    crate::messaging::watchers::requeue_delivery_exhausted_watchers(
+    match crate::messaging::watchers::requeue_delivery_exhausted_watchers(
         workspace,
         &store,
         &event_log,
         &team_id,
         &pane_id,
-    )
-    .ok()
-    .map(|notices| {
-        serde_json::json!({
-            "notices": notices.len(),
-        })
-    })
+    ) {
+        Ok(notices) => {
+            report.insert("notices".to_string(), serde_json::json!(notices.len()));
+        }
+        Err(_) => {
+            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
+        }
+    }
+    Some(serde_json::Value::Object(report))
 }
 
 fn try_autobind_leader_after_restart(
@@ -2009,13 +2063,27 @@ fn try_autobind_leader_after_restart(
     };
     match crate::leader::attach_leader(workspace, team, None, provider) {
         Ok(result) if result.ok => {
-            let debt = result.attach_window_failures.clone();
-            let _ = crate::leader::registry::register_binding_from_state_best_effort(
+            let mut debt = result
+                .attach_window_failures
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let register = crate::leader::registry::register_binding_from_state_best_effort(
                 workspace,
                 team,
                 "restart-auto-attach",
             );
-            debt
+            if !register
+                .as_ref()
+                .is_some_and(|outcome| outcome.status == "registered")
+            {
+                if let Some(object) = debt.as_object_mut() {
+                    object.insert(
+                        "registry_maintain_failed".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+            }
+            Some(debt)
         }
         Ok(result) => {
             eprintln!(
@@ -4230,5 +4298,147 @@ tasks:
             Some("leader_registry_index_missing"),
             "persisted attached+owner without registry is index-missing, not the stale pending class"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_bind_status_attached_live_is_ok() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-n1-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let endpoint = "/tmp/ta-n1-leader-not-workspace.sock";
+        let pending = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "pending",
+                        "discovery": "quick_start_seed",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": endpoint
+                    }
+                }
+            }
+        });
+        let attached = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": endpoint
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &attached).unwrap();
+        assert_eq!(
+            crate::leader::registry::register_binding_from_state_best_effort(
+                &workspace,
+                Some("alpha"),
+                "restart-ok",
+            )
+            .as_ref()
+            .map(|outcome| outcome.status),
+            Some("registered")
+        );
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![crate::transport::PaneInfo {
+                pane_id: crate::transport::PaneId::new("%1"),
+                session: crate::transport::SessionName::new("s"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: Some(workspace.clone()),
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        let (ok, reason) = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport.clone(),
+            || restart_bind_status(&workspace, "alpha", &attached),
+        );
+        let (ok_pending, _) = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport,
+            || restart_bind_status(&workspace, "alpha", &pending),
+        );
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!((ok, reason.as_deref()), (true, None));
+        assert!(
+            !ok_pending,
+            "in-memory pending snapshot must not flip restart success"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn maintain_live_binding_index_register_failure_is_public() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-n1-debt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(home.join(".team-agent"), b"not-a-directory").unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let state = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": "/tmp/ta-n1-debt.sock"
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let debt = maintain_live_binding_index(&workspace, Some("alpha"), &state);
+        let (ok, reason) = apply_binding_maintain_failures(&debt, true, None);
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            debt.as_ref()
+                .and_then(|value| value.get("registry_maintain_failed"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(ok);
+        assert_eq!(reason.as_deref(), Some("leader_registry_maintain_failed"));
     }
 }

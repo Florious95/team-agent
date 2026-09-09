@@ -393,14 +393,15 @@ pub(super) use ownership::*;
 pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};
 
 pub mod spec_state;
-pub use spec_state::worker_session_name_pub;
+pub use spec_state::{
+    seed_launched_owner_from_caller_with_provider_lookup, worker_session_name_pub,
+};
 pub(crate) use spec_state::{
     effective_runtime_config_for_worker_spawn, effective_runtime_config_for_worker_spawn_json,
 };
 use spec_state::{
     env_nonempty, has_positive_caller_leader_env, initial_runtime_state,
-    override_spec_display_backend, override_spec_runtime_str,
-    seed_launched_owner_from_caller_with_provider_lookup, seed_launched_owner_from_env,
+    override_spec_display_backend, override_spec_runtime_str, seed_launched_owner_from_env,
     spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
     spec_tasks_json, team_workspace, yaml_value_to_json,
 };

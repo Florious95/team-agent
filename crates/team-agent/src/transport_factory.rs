@@ -51,6 +51,48 @@ use crate::conpty::ConPtyBackend;
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::{BackendKind, Transport};
 
+#[cfg(test)]
+thread_local! {
+    static LEADER_ENDPOINT_TRANSPORT_OVERRIDE: std::cell::RefCell<
+        Option<(String, crate::transport::test_support::OfflineTransport)>,
+    > = std::cell::RefCell::new(None);
+}
+
+/// Production live-probe transport for a recorded leader endpoint.
+/// `classify_leader_binding`, restart `transport_for_receiver`, and
+/// `attach_leader_targets` all go through this function.
+pub fn leader_endpoint_transport(endpoint: &str) -> Box<dyn Transport> {
+    #[cfg(test)]
+    if let Some(injected) = LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
+        slot.borrow().as_ref().and_then(|(expected, transport)| {
+            (expected == endpoint).then(|| Box::new(transport.clone()) as Box<dyn Transport>)
+        })
+    }) {
+        return injected;
+    }
+    if endpoint.is_empty() || endpoint == "default" {
+        Box::new(tmux_default_transport())
+    } else {
+        Box::new(tmux_endpoint_transport(endpoint))
+    }
+}
+
+#[cfg(test)]
+pub fn with_leader_endpoint_transport<T>(
+    endpoint: &str,
+    transport: crate::transport::test_support::OfflineTransport,
+    f: impl FnOnce() -> T,
+) -> T {
+    LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some((endpoint.to_string(), transport));
+    });
+    let result = f();
+    LEADER_ENDPOINT_TRANSPORT_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    result
+}
+
 /// User-visible backend selector on the CLI (`--backend tmux|conpty`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestedTransportBackend {

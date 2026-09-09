@@ -360,31 +360,15 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
     // leader pane. Keep state-recorded worker endpoints as additional targets,
     // but do not let a cross-socket pane-id collision hide the caller pane.
     if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
-        let backend = tmux_backend_for_endpoint(&endpoint);
-        let resolved_endpoint = backend.tmux_endpoint();
-        targets.extend(
-            backend
-                .list_targets()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|info| AttachLeaderTarget {
-                    info,
-                    endpoint: resolved_endpoint.clone(),
-                }),
+        extend_attach_leader_targets(
+            &mut targets,
+            crate::transport_factory::leader_endpoint_transport(&endpoint).as_ref(),
         );
     }
     for endpoint in state_recorded_tmux_endpoints(state) {
-        let backend = tmux_backend_for_endpoint(&endpoint);
-        let resolved_endpoint = backend.tmux_endpoint();
-        targets.extend(
-            backend
-                .list_targets()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|info| AttachLeaderTarget {
-                    info,
-                    endpoint: resolved_endpoint.clone(),
-                }),
+        extend_attach_leader_targets(
+            &mut targets,
+            crate::transport_factory::leader_endpoint_transport(&endpoint).as_ref(),
         );
     }
     // Phase 1d Batch 6: factory tmux workspace helper for
@@ -392,17 +376,29 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
     // tmux-only (caller pane = tmux pane, MUST-12 anchor).
     let workspace_backend = crate::transport_factory::tmux_workspace_transport(workspace);
     let workspace_endpoint = workspace_backend.tmux_endpoint();
+    let workspace_transport: Box<dyn Transport> = match workspace_endpoint
+        .as_deref()
+        .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")
+    {
+        Some(endpoint) => crate::transport_factory::leader_endpoint_transport(endpoint),
+        None => Box::new(workspace_backend),
+    };
+    extend_attach_leader_targets(&mut targets, workspace_transport.as_ref());
+    targets
+}
+
+fn extend_attach_leader_targets(targets: &mut Vec<AttachLeaderTarget>, transport: &dyn Transport) {
+    let resolved_endpoint = transport.tmux_endpoint();
     targets.extend(
-        workspace_backend
+        transport
             .list_targets()
             .unwrap_or_default()
             .into_iter()
             .map(|info| AttachLeaderTarget {
                 info,
-                endpoint: workspace_endpoint.clone(),
+                endpoint: resolved_endpoint.clone(),
             }),
     );
-    targets
 }
 
 fn tmux_backend_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
@@ -3073,17 +3069,68 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn grant_reuses_verified_endpoint() {
         let workspace = PathBuf::from("/tmp/grant-ws");
         let state = grant_state("/tmp/leader.sock", "n1", 2, "codex");
         let pane = grant_pane("n1");
-        assert!(grant_allows_attach_target(
-            &workspace,
-            &state,
-            &pane,
-            crate::provider::Provider::Codex,
-            Some("/tmp/leader.sock"),
-        ));
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint("/tmp/leader.sock")
+            .with_targets(vec![pane.clone()]);
+        crate::transport_factory::with_leader_endpoint_transport(
+            "/tmp/leader.sock",
+            transport,
+            || {
+                let targets = attach_leader_targets(&workspace, &state);
+                let target = targets
+                    .iter()
+                    .find(|target| {
+                        target.info.pane_id.as_str() == "%1"
+                            && target.endpoint.as_deref() == Some("/tmp/leader.sock")
+                    })
+                    .expect("attach_leader_targets must discover the recorded endpoint");
+                assert!(grant_allows_attach_target(
+                    &workspace,
+                    &state,
+                    &target.info,
+                    crate::provider::Provider::Codex,
+                    target.endpoint.as_deref(),
+                ));
+                let mut receiver = crate::leader::LeaderReceiver {
+                    mode: crate::leader::ReceiverMode::DirectTmux,
+                    status: crate::leader::ReceiverStatus::Attached,
+                    provider: crate::provider::Provider::Codex,
+                    pane_id: PaneId::new("%1"),
+                    session_name: None,
+                    window_index: None,
+                    window_name: None,
+                    pane_index: None,
+                    pane_tty: None,
+                    pane_current_command: None,
+                    tmux_socket: None,
+                    scope_authority: None,
+                    authorized_team_workspace: None,
+                    binding_nonce: None,
+                    fingerprint: None,
+                    leader_session_uuid: None,
+                    owner_epoch: None,
+                    attached_at: None,
+                    discovery: None,
+                    requested_provider: None,
+                    warning: None,
+                };
+                copy_verified_grant_from_state(
+                    &workspace,
+                    &state,
+                    &target.info,
+                    crate::provider::Provider::Codex,
+                    target.endpoint.as_deref(),
+                    &mut receiver,
+                );
+                assert_eq!(receiver.binding_nonce.as_deref(), Some("n1"));
+                assert_eq!(receiver.scope_authority.as_deref(), Some("fresh_caller"));
+            },
+        );
     }
 
     #[test]

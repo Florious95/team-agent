@@ -203,6 +203,16 @@ fn canonical_identity_aligned(
         && owner_epoch == Some(entry.owner_epoch)
         && channel_pane.is_none_or(|pane| Some(pane) == owner_pane)
         && crate::leader::registry::workspace_hash(workspace) == entry.workspace_hash
+        && {
+            let receiver_socket = receiver
+                .get("tmux_socket")
+                .and_then(serde_json::Value::as_str);
+            let channel_socket = entry
+                .channel
+                .get("tmux_socket")
+                .and_then(serde_json::Value::as_str);
+            channel_socket.is_none_or(|socket| Some(socket) == receiver_socket)
+        }
 }
 
 pub fn classify_leader_binding(workspace: &Path, team_key: &str) -> LeaderBindingClass {
@@ -216,7 +226,7 @@ pub fn classify_leader_binding(workspace: &Path, team_key: &str) -> LeaderBindin
         .and_then(serde_json::Value::as_str)
         .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")
     {
-        Some(endpoint) => Box::new(crate::transport_factory::tmux_endpoint_transport(endpoint)),
+        Some(endpoint) => crate::transport_factory::leader_endpoint_transport(endpoint),
         None => return classify_leader_binding_at(workspace, team_key, &state, None),
     };
     classify_leader_binding_at(workspace, team_key, &state, Some(transport.as_ref()))
@@ -351,6 +361,22 @@ mod claim_rework_class_tests {
         assert_eq!(class, LeaderBindingClass::Unbound);
     }
 
+    fn live_pane(workspace: &Path, pane: &str) -> PaneInfo {
+        PaneInfo {
+            pane_id: PaneId::new(pane),
+            session: SessionName::new("s"),
+            window_index: None,
+            window_name: None,
+            pane_index: None,
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: Some(workspace.to_path_buf()),
+            active: true,
+            pane_pid: None,
+            leader_env: Default::default(),
+        }
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn classify_attached_requires_identity_and_live() {
@@ -370,15 +396,59 @@ mod claim_rework_class_tests {
             }
         });
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
-        let entry = crate::leader::registry::build_entry(
+        let outcome = crate::leader::registry::register_binding_from_state_best_effort(
+            &workspace,
+            Some("alpha"),
+            "classify-attached",
+        );
+        assert_eq!(
+            outcome.as_ref().map(|value| value.status),
+            Some("registered")
+        );
+        let transport = OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![live_pane(&workspace, "%1")]);
+        let class = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport,
+            || classify_leader_binding(&workspace, "alpha"),
+        );
+        restore_home(previous, &root);
+        assert_eq!(class, LeaderBindingClass::Attached);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn classify_registry_socket_mismatch_is_unknown() {
+        let (root, workspace, previous) = isolated();
+        let endpoint = "/tmp/ta-class-live.sock";
+        let state = json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 3, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 3,
+                        "tmux_socket": endpoint
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut entry = crate::leader::registry::build_entry(
             &workspace,
             "alpha",
             "direct_tmux",
-            json!({"pane_id": "%1"}),
+            json!({
+                "pane_id": "%1",
+                "tmux_socket": "/tmp/other-leader.sock"
+            }),
             3,
-            "test",
+            "mismatch",
             "2026-01-01T00:00:00Z".to_string(),
         );
+        entry.status = "attached".to_string();
         let dir = crate::leader::registry::registry_dir().unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!(
@@ -388,27 +458,14 @@ mod claim_rework_class_tests {
         std::fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
         let transport = OfflineTransport::default()
             .with_tmux_endpoint(endpoint)
-            .with_targets(vec![PaneInfo {
-                pane_id: PaneId::new("%1"),
-                session: SessionName::new("s"),
-                window_index: None,
-                window_name: None,
-                pane_index: None,
-                tty: None,
-                current_command: Some("codex".to_string()),
-                current_path: Some(workspace.clone()),
-                active: true,
-                pane_pid: None,
-                leader_env: Default::default(),
-            }]);
-        let class = classify_leader_binding_at(
-            &workspace,
-            "alpha",
-            &state,
-            Some(&transport),
+            .with_targets(vec![live_pane(&workspace, "%1")]);
+        let class = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport,
+            || classify_leader_binding(&workspace, "alpha"),
         );
         restore_home(previous, &root);
-        assert_eq!(class, LeaderBindingClass::Attached);
+        assert_eq!(class, LeaderBindingClass::Unknown);
     }
 }
 

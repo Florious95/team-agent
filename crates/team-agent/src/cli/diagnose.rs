@@ -404,7 +404,9 @@ fn live_leader_workspace_mismatch(
             HINT_ACTION_FIELD.to_string(),
             Value::String(
                 match refusal.recovery.hint_action {
-                    PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+                    PaneAuthorityRecoveryHint::AttachLeader => {
+                        "open a matching workspace pane; do not invent attach-leader or claim-leader"
+                    }
                 }
                 .to_string(),
             ),
@@ -795,6 +797,53 @@ fn recovery_hint(team: &str, broken_class: &str, hint_action: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_action_does_not_emit_attach_leader() {
+        let workspace = std::path::PathBuf::from("/tmp/ta-hint-ws");
+        let endpoint = "/tmp/ta-hint.sock";
+        let state = json!({
+            "team_key": "alpha",
+            "leader_receiver": {
+                "status": "attached",
+                "pane_id": "%1",
+                "provider": "codex",
+                "tmux_socket": endpoint
+            }
+        });
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![crate::transport::PaneInfo {
+                pane_id: crate::transport::PaneId::new("%1"),
+                session: crate::transport::SessionName::new("s"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: Some(std::path::PathBuf::from("/tmp/other-ws")),
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        let Some((_, repair)) =
+            live_leader_workspace_mismatch(&workspace, &state, &transport)
+        else {
+            panic!("workspace mismatch repair required");
+        };
+        let hint = repair
+            .get(HINT_ACTION_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            !hint.contains("attach-leader"),
+            "hint_action must not emit attach-leader; got {hint}"
+        );
+        assert!(
+            !hint.contains("claim-leader"),
+            "hint_action must not emit claim-leader; got {hint}"
+        );
+    }
 
     #[test]
     fn recovery_hint_does_not_bundle_unrelated_bind_commands() {

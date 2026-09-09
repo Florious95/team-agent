@@ -3611,6 +3611,94 @@ pub mod lifecycle_port {
         }
 
         #[test]
+        fn restarted_json_ok_follows_bind_status() {
+            let coordinator = crate::lifecycle::CoordinatorStartSummary {
+                ok: true,
+                status: "started".to_string(),
+                pid: None,
+                binary_path: None,
+                binary_version: None,
+                rotation_reason: None,
+                binary_identity_relation: "same".to_string(),
+            };
+            let value = restart_value(
+                crate::lifecycle::RestartReport::Restarted {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: Vec::new(),
+                    coordinator_started: true,
+                    coordinator: coordinator.clone(),
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                    attach_window_failures: None,
+                    leader_bind_ok: true,
+                    leader_bind_reason: None,
+                },
+                None,
+            );
+            assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true));
+            let incomplete = restart_value(
+                crate::lifecycle::RestartReport::Restarted {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: Vec::new(),
+                    coordinator_started: true,
+                    coordinator,
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                    attach_window_failures: None,
+                    leader_bind_ok: false,
+                    leader_bind_reason: Some("leader_registry_index_missing".to_string()),
+                },
+                None,
+            );
+            assert_eq!(incomplete.get("ok").and_then(Value::as_bool), Some(false));
+            assert_eq!(
+                incomplete.get("reason").and_then(Value::as_str),
+                Some("leader_registry_index_missing")
+            );
+        }
+
+        #[test]
+        fn partial_json_exposes_leader_bind_ok() {
+            let value = restart_value(
+                crate::lifecycle::RestartReport::Partial {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: Vec::new(),
+                    failed_agents: Vec::new(),
+                    coordinator_started: true,
+                    coordinator: crate::lifecycle::CoordinatorStartSummary {
+                        ok: true,
+                        status: "started".to_string(),
+                        pid: None,
+                        binary_path: None,
+                        binary_version: None,
+                        rotation_reason: None,
+                        binary_identity_relation: "same".to_string(),
+                    },
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                    attach_window_failures: Some(json!({"registry_maintain_failed": true})),
+                    leader_bind_ok: false,
+                    leader_bind_reason: Some("leader_registry_maintain_failed".to_string()),
+                },
+                None,
+            );
+            assert_eq!(value.get("ok").and_then(Value::as_bool), Some(false));
+            assert_eq!(
+                value.get("leader_bind_ok").and_then(Value::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                value.get("leader_bind_reason").and_then(Value::as_str),
+                Some("leader_registry_maintain_failed")
+            );
+            assert_eq!(
+                value
+                    .pointer("/attach_window_failures/registry_maintain_failed")
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
+        }
+
         fn restart_default_receipt_is_compact_but_detail_preserves_coordinator() {
             let detail = json!({
                 "ok": false,
@@ -3654,7 +3742,7 @@ pub mod lifecycle_port {
             )
             .unwrap();
             let transport = crate::transport::test_support::OfflineTransport::new();
-            crate::lifecycle::quick_start_with_transport(
+            let first = crate::lifecycle::quick_start_with_transport(
                 &team_dir,
                 Some("from-name"),
                 true,
@@ -3662,6 +3750,30 @@ pub mod lifecycle_port {
                 &transport,
             )
             .expect("first quick-start");
+            let crate::lifecycle::QuickStartReport::Ready { team: ready_team, .. } = &first
+            else {
+                panic!("first producer must return Ready; got {first:?}");
+            };
+            assert_eq!(ready_team, "from-name");
+            let ready_command = crate::cli::adapters::send_command(
+                "implementer",
+                &team_dir,
+                Some(ready_team.as_str()),
+            )
+            .expect("Ready send_command");
+            assert_eq!(
+                crate::cli::adapters::split_shell_argv(&ready_command),
+                vec![
+                    "team-agent".to_string(),
+                    "send".to_string(),
+                    "implementer".to_string(),
+                    "MESSAGE".to_string(),
+                    "--workspace".to_string(),
+                    team_dir.to_string_lossy().into_owned(),
+                    "--team".to_string(),
+                    "from-name".to_string(),
+                ]
+            );
             let report = crate::lifecycle::quick_start_with_transport(
                 &team_dir,
                 Some("from-name"),
@@ -3681,13 +3793,24 @@ pub mod lifecycle_port {
             assert_eq!(canonical.as_deref(), Some("from-name"));
             assert!(agent_ids.iter().any(|id| id == "implementer"));
             let mut value = quick_start_value(report);
-            crate::cli::adapters::append_send_guidance(&mut value, &root, None);
+            crate::cli::adapters::append_send_guidance(&mut value, &team_dir, None);
             let command = value
                 .pointer("/send_commands/0")
                 .and_then(Value::as_str)
                 .expect("producer send_commands");
-            assert!(command.contains("--team from-name"), "command={command}");
-            assert!(command.contains("send implementer"), "command={command}");
+            assert_eq!(
+                crate::cli::adapters::split_shell_argv(command),
+                vec![
+                    "team-agent".to_string(),
+                    "send".to_string(),
+                    "implementer".to_string(),
+                    "MESSAGE".to_string(),
+                    "--workspace".to_string(),
+                    team_dir.to_string_lossy().into_owned(),
+                    "--team".to_string(),
+                    "from-name".to_string(),
+                ]
+            );
             let _ = std::fs::remove_dir_all(&root);
         }
 
@@ -3861,6 +3984,7 @@ pub mod lifecycle_port {
                     "ok": false,
                     "status": "partial",
                     "reason": "restart_agent_failed",
+                    "leader_bind_ok": leader_bind_ok,
                     "session_name": session_name.as_str(),
                     "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
                     "failed_agents": failed_agents.iter().map(|failure| json!({

@@ -203,7 +203,7 @@ pub(super) fn seed_launched_owner_from_env(
 ///   lookup_pane_provider: 由 pane 反查 provider 的函数，便于测试替换
 /// returns: true 表示已写入 owner 记录
 /// ---
-pub(super) fn seed_launched_owner_from_caller_with_provider_lookup(
+pub fn seed_launched_owner_from_caller_with_provider_lookup(
     state: &mut serde_json::Value,
     caller: crate::state::owner_gate::CallerIdentity,
     lookup_pane_provider: impl Fn(&PaneId) -> Option<Provider>,

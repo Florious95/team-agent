@@ -1729,35 +1729,43 @@ mod fresh_quick_start_leader_binding_tests {
         );
     }
 
+    fn seed_fresh_receipts(
+        workspace: &std::path::Path,
+    ) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+        let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+        let caller = crate::state::owner_gate::CallerIdentity {
+            pane_id: "%42".to_string(),
+            provider: "pi".to_string(),
+            machine_fingerprint: "fp".to_string(),
+            leader_session_uuid: "uuid-fresh".to_string(),
+            leader_session_uuid_source: "env".to_string(),
+        };
+        assert!(super::spec_state::seed_launched_owner_from_caller_with_provider_lookup(
+            &mut state,
+            caller,
+            |_| None
+        ));
+        let owner = state
+            .pointer("/teams/fresh/team_owner")
+            .cloned()
+            .expect("seed owner");
+        let receiver = state
+            .pointer("/teams/fresh/leader_receiver")
+            .cloned()
+            .expect("seed receiver");
+        assert_eq!(
+            receiver.get("status").and_then(serde_json::Value::as_str),
+            Some("pending")
+        );
+        crate::state::persist::save_runtime_state(workspace, &state).unwrap();
+        (state, owner, receiver)
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn fresh_seed_exemption_requires_frozen_receiver_receipt() {
         let workspace = workspace("frozen-seed");
-        let owner = json!({
-            "pane_id": "%42",
-            "provider": "pi",
-            "leader_session_uuid": "uuid-fresh",
-            "owner_epoch": 1,
-            "claimed_via": "quick-start"
-        });
-        let frozen_receiver = json!({
-            "status": "pending",
-            "discovery": "quick_start_seed",
-            "pane_id": "%42",
-            "owner_epoch": 1
-        });
-        let mut state = json!({
-            "active_team_key": "fresh",
-            "team_owner": owner,
-            "leader_receiver": frozen_receiver,
-            "teams": {
-                "fresh": {
-                    "team_owner": owner,
-                    "leader_receiver": frozen_receiver
-                }
-            }
-        });
-        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let (_state, owner, frozen_receiver) = seed_fresh_receipts(&workspace);
         let mut ops = MockOps {
             frozen_owner: Some(owner.clone()),
             frozen_receiver: Some(frozen_receiver.clone()),
@@ -1771,51 +1779,24 @@ mod fresh_quick_start_leader_binding_tests {
         )
         .unwrap());
         assert_eq!(ops.attach_calls, 1);
-        assert_eq!(ops.last_expected_receiver, Some(frozen_receiver.clone()));
+        assert_eq!(ops.last_expected_receiver, Some(frozen_receiver));
         let _ = std::fs::remove_dir_all(&workspace);
-        let _ = state;
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn newer_pending_receiver_is_not_cas_expected() {
         let workspace = workspace("newer-pending");
-        let owner = json!({
-            "pane_id": "%42",
-            "provider": "pi",
-            "leader_session_uuid": "uuid-fresh",
-            "owner_epoch": 1,
-            "claimed_via": "quick-start"
-        });
-        let frozen_receiver = json!({
-            "status": "pending",
-            "discovery": "quick_start_seed",
-            "pane_id": "%42",
-            "owner_epoch": 1,
-            "nonce": "original"
-        });
-        let newer = json!({
-            "status": "pending",
-            "discovery": "quick_start_seed",
-            "pane_id": "%99",
-            "owner_epoch": 1,
-            "nonce": "winner"
-        });
-        let state = json!({
-            "active_team_key": "fresh",
-            "team_owner": owner,
-            "leader_receiver": newer,
-            "teams": {
-                "fresh": {
-                    "team_owner": owner,
-                    "leader_receiver": newer
-                }
-            }
-        });
+        let (mut state, owner, frozen_receiver) = seed_fresh_receipts(&workspace);
+        let mut newer = frozen_receiver.clone();
+        newer["pane_id"] = json!("%99");
+        newer["nonce"] = json!("winner");
+        state["leader_receiver"] = newer.clone();
+        state["teams"]["fresh"]["leader_receiver"] = newer;
         crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
         let mut ops = MockOps {
             frozen_owner: Some(owner.clone()),
-            frozen_receiver: Some(frozen_receiver.clone()),
+            frozen_receiver: Some(frozen_receiver),
             ..MockOps::default()
         };
         assert!(!bind_fresh_quick_start_leader_with(
@@ -1826,7 +1807,35 @@ mod fresh_quick_start_leader_binding_tests {
         )
         .unwrap());
         assert_eq!(ops.attach_calls, 0);
-        assert_ne!(ops.last_expected_receiver.as_ref(), Some(&newer));
+        assert_eq!(ops.last_expected_receiver, None);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn newer_attached_receiver_is_kept() {
+        let workspace = workspace("newer-attached");
+        let (mut state, owner, frozen_receiver) = seed_fresh_receipts(&workspace);
+        let mut winner = frozen_receiver.clone();
+        winner["status"] = json!("attached");
+        winner["pane_id"] = json!("%99");
+        state["leader_receiver"] = winner.clone();
+        state["teams"]["fresh"]["leader_receiver"] = winner;
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut ops = MockOps {
+            frozen_owner: Some(owner.clone()),
+            frozen_receiver: Some(frozen_receiver),
+            ..MockOps::default()
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&owner),
+            &mut ops
+        )
+        .unwrap());
+        assert_eq!(ops.attach_calls, 0);
+        assert_eq!(ops.last_expected_receiver, None);
         let _ = std::fs::remove_dir_all(&workspace);
     }
 

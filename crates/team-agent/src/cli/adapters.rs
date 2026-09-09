@@ -212,6 +212,29 @@ pub(crate) fn append_send_guidance(value: &mut Value, workspace: &Path, team: Op
     }
 }
 
+pub(crate) fn split_shell_argv(command: &str) -> Vec<String> {
+    let mut argv = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\'') | (None, '"') => quote = Some(ch),
+            (Some(q), c) if c == q => quote = None,
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    argv.push(std::mem::take(&mut current));
+                }
+            }
+            (_, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        argv.push(current);
+    }
+    argv
+}
+
 pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) -> Option<String> {
     let workspace = workspace.to_str()?;
     let mut command = format!(
@@ -1563,7 +1586,9 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{agent_pane_id, append_send_guidance, quickstart_human, send_command};
+    use super::{
+        agent_pane_id, append_send_guidance, quickstart_human, send_command, split_shell_argv,
+    };
     use serde_json::json;
     use std::path::{Path, PathBuf};
 
@@ -1606,29 +1631,6 @@ mod tests {
             quickstart_human(&value2),
             format!("s\n{}", crate::cli::QUICK_START_REMINDER)
         );
-    }
-
-    fn split_shell_argv(command: &str) -> Vec<String> {
-        let mut argv = Vec::new();
-        let mut current = String::new();
-        let mut chars = command.chars().peekable();
-        let mut quote: Option<char> = None;
-        while let Some(ch) = chars.next() {
-            match (quote, ch) {
-                (None, '\'') | (None, '"') => quote = Some(ch),
-                (Some(q), c) if c == q => quote = None,
-                (None, c) if c.is_whitespace() => {
-                    if !current.is_empty() {
-                        argv.push(std::mem::take(&mut current));
-                    }
-                }
-                (_, c) => current.push(c),
-            }
-        }
-        if !current.is_empty() {
-            argv.push(current);
-        }
-        argv
     }
 
     #[test]

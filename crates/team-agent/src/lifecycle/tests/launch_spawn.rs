@@ -224,7 +224,7 @@ fn existing_runtime_producer_scopes_canonical_team() {
         .expect("first quick-start");
     match &first {
         QuickStartReport::Ready { team: canonical, .. } => {
-            assert!(!canonical.is_empty(), "Ready producer must emit canonical team");
+            assert_eq!(canonical, "from-name", "Ready producer must emit canonical team");
         }
         other => panic!("first quick-start must be Ready; got {other:?}"),
     }
