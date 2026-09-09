@@ -34,15 +34,9 @@ fn rest_012_restart_mixed_never_captured_auto_fresh_partial_resume() {
         out.stderr
     );
 
-    let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
     assert!(
-        ok,
+        restart_rebuild_completed(&j),
         "0.4.7 partial-resume: multi-worker never-captured team must auto-fresh; got {j}"
-    );
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
-    assert_eq!(
-        status, "restarted",
-        "0.4.7: all workers never-captured → status=restarted; got {status:?}; json={j}"
     );
 
     let dump = serde_json::to_string(&j).unwrap();

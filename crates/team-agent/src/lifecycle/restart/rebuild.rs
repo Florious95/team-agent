@@ -2043,14 +2043,14 @@ fn try_autobind_leader_after_restart(
     if restart_bind_status(workspace, team_key, state).0 {
         return maintain_live_binding_index(workspace, team, state);
     }
+    if std::env::var_os("TMUX_PANE").is_none() {
+        return None;
+    }
     if owner_conflicts_with_caller(workspace, state, team_key) {
         eprintln!(
             "team_agent::restart auto_attach_leader skipped reason=owner_conflict team={team:?}"
         );
         return None;
-    }
-    if std::env::var_os("TMUX_PANE").is_none() {
-        return maintain_live_binding_index(workspace, team, state);
     }
     let Some(provider) = state
         .get("teams")
@@ -4255,7 +4255,21 @@ tasks:
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn restart_bind_status_uses_persisted_receiver_endpoint() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-n1-persisted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = workspace.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
         let state = serde_json::json!({
             "teams": {
                 "alpha": {
@@ -4279,11 +4293,19 @@ tasks:
                 }
             }
         });
-        let workspace = std::path::Path::new("/tmp/ta-n1-persisted");
-        let (ok_stale, reason_stale) = restart_bind_status(workspace, "alpha", &state);
-        let (ok_new, reason_new) = restart_bind_status(workspace, "alpha", &persisted);
-        assert!(!ok_stale);
-        assert_eq!(reason_stale.as_deref(), Some("leader_receiver_unbound"));
+        let (ok_stale, reason_stale) = restart_bind_status(&workspace, "alpha", &state);
+        let (ok_new, reason_new) = restart_bind_status(&workspace, "alpha", &persisted);
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&workspace);
+        assert!(!ok_stale, "pending without owner/registry is not bind success");
+        assert_eq!(
+            reason_stale.as_deref(),
+            Some("leader_receiver_unbound"),
+            "hermetic empty registry + pending receiver is Unbound, not Unknown"
+        );
         assert!(!ok_new);
         assert_eq!(
             reason_new.as_deref(),

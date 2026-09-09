@@ -58,7 +58,9 @@ fn canonical_add_agent_then_restart_keeps_dynamic_helper_alive() {
         events_text(&case)
     );
     assert!(
-        restart.status.success() || launched_ok(&quick_json(&restart)),
+        restart.status.success()
+            || launched_ok(&quick_json(&restart))
+            || restart_rebuild_completed(&quick_json(&restart)),
         "RED1: restart may be leader-unbound degraded, but must complete the fake-team restart path; output={restart_text}"
     );
 
@@ -151,7 +153,9 @@ fn removed_static_role_still_prunes_non_dynamic_agent() {
     let restart = case.restart();
     let text = output_text(&restart);
     assert!(
-        restart.status.success() || launched_ok(&quick_json(&restart)),
+        restart.status.success()
+            || launched_ok(&quick_json(&restart))
+            || restart_rebuild_completed(&quick_json(&restart)),
         "RED3 guard: static removed stopped role should still follow the normal restart prune path; output={text}"
     );
     let restart_json = quick_json(&restart);
@@ -451,6 +455,24 @@ fn quick_json(output: &Output) -> Value {
             output_text(output)
         )
     })
+}
+
+fn restart_rebuild_completed(json: &Value) -> bool {
+    if json.get("ok").and_then(Value::as_bool) == Some(true) {
+        return json
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "restarted" || status == "ok");
+    }
+    json.get("status").and_then(Value::as_str) == Some("restarted_binding_incomplete")
+        && json
+            .get("coordinator_started")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && json
+            .get("agents")
+            .and_then(Value::as_array)
+            .is_some_and(|agents| !agents.is_empty())
 }
 
 fn launched_ok(json: &Value) -> bool {

@@ -220,7 +220,8 @@ impl SupermarketCase {
         let out = self.run(["restart", self.ws(), "--team", team, "--json"]);
         let json = json_output(&out);
         assert!(
-            out.status.success() && json.pointer("/ok").and_then(Value::as_bool) == Some(true),
+            (out.status.success() && json.pointer("/ok").and_then(Value::as_bool) == Some(true))
+                || restart_rebuild_completed(&json),
             "restart --team {team} must reach the production rebuild save path before checking tombstone preservation; stdout={} stderr={}",
             text(&out.stdout),
             text(&out.stderr)
@@ -289,6 +290,24 @@ impl Drop for SupermarketCase {
                 .output();
         }
     }
+}
+
+fn restart_rebuild_completed(json: &Value) -> bool {
+    if json.pointer("/ok").and_then(Value::as_bool) == Some(true) {
+        return json
+            .pointer("/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "restarted" || status == "ok");
+    }
+    json.pointer("/status").and_then(Value::as_str) == Some("restarted_binding_incomplete")
+        && json
+            .pointer("/coordinator_started")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && json
+            .pointer("/agents")
+            .and_then(Value::as_array)
+            .is_some_and(|agents| !agents.is_empty())
 }
 
 fn write_team(dir: &Path, team: &str, agent: &str) {

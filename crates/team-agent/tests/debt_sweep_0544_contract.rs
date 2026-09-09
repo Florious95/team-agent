@@ -232,8 +232,8 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
     );
     assert_eq!(
         commands.len(),
-        BASELINE_VISIBLE_COMMANDS.len(),
-        "B car governance: visible command list must not contain duplicates relative to resign@8df51ab9329a1f3ecd8ad847b3a960c701ec20b2; visible commands={commands:?}"
+        expected_commands.len(),
+        "B car governance: visible command list must equal the exact published set with no duplicates; visible commands={commands:?}"
     );
     for forbidden in [
         "repair-provider",

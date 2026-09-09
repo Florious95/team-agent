@@ -14,6 +14,7 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -175,7 +176,35 @@ impl DiagnoseFixture {
     }
 
     fn quiet(tag: &str) -> Self {
-        Self::with_state(tag, quiet_runtime_state, true)
+        let fixture = Self::with_state(tag, quiet_runtime_state, true);
+        let (socket, pane) = start_live_owner_tmux(&fixture._env, &fixture.root, tag);
+        let mut state = load_runtime_state(&fixture.root).expect("reload quiet state");
+        overlay_live_receiver(&mut state, &pane, &socket.to_string_lossy());
+        save_runtime_state(&fixture.root, &state).expect("save live quiet state");
+        let team_key = team_agent::state::projection::team_state_key(&state);
+        let owner_epoch = state
+            .pointer(&format!("/teams/{team_key}/team_owner/owner_epoch"))
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        let entry = team_agent::leader::registry::build_entry(
+            &fixture.root,
+            &team_key,
+            "direct_tmux",
+            json!({
+                "status": "attached",
+                "pane_id": pane,
+                "tmux_socket": socket.to_string_lossy(),
+                "authorized_team_workspace": fixture.root.to_string_lossy()
+            }),
+            owner_epoch,
+            "diagnose-coordinator-health-fixture",
+            "2026-08-25T00:00:00Z".to_string(),
+        );
+        assert!(
+            team_agent::leader::registry::write_entry_best_effort(&entry).is_some(),
+            "live quiet fixture must rewrite the leaders/ registry to the live pane"
+        );
+        fixture
     }
 
     fn with_state(tag: &str, state: fn(&Path) -> Value, create_schema: bool) -> Self {
@@ -348,6 +377,80 @@ fn quiet_runtime_state(root: &Path) -> Value {
             }
         }
     })
+}
+
+fn overlay_live_receiver(state: &mut Value, pane: &str, socket: &str) {
+    let receiver = json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "pane_id": pane,
+        "owner_epoch": 1,
+        "provider": "codex",
+        "tmux_socket": socket
+    });
+    if let Some(object) = state.as_object_mut() {
+        object.insert("leader_receiver".to_string(), receiver.clone());
+        if let Some(owner) = object.get_mut("team_owner").and_then(Value::as_object_mut) {
+            owner.insert("pane_id".to_string(), json!(pane));
+        }
+        if let Some(teams) = object.get_mut("teams").and_then(Value::as_object_mut) {
+            for team in teams.values_mut() {
+                if let Some(team) = team.as_object_mut() {
+                    team.insert("leader_receiver".to_string(), receiver.clone());
+                    if let Some(owner) = team.get_mut("team_owner").and_then(Value::as_object_mut) {
+                        owner.insert("pane_id".to_string(), json!(pane));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn start_live_owner_tmux(
+    env: &hermetic_guard::HermeticTestEnv,
+    workspace: &Path,
+    tag: &str,
+) -> (PathBuf, String) {
+    let socket = hermetic_guard::short_tmux_socket(tag);
+    let _ = fs::remove_file(&socket);
+    let output = Command::new("tmux")
+        .args([
+            "-S",
+            &socket.to_string_lossy(),
+            "new-session",
+            "-d",
+            "-s",
+            tag,
+            "-n",
+            "leader",
+            "-c",
+            &workspace.to_string_lossy(),
+            "/bin/cat",
+        ])
+        .output()
+        .expect("start fixture tmux");
+    assert!(
+        output.status.success(),
+        "tmux start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    env.register_owned_tmux_socket(&socket);
+    let list = Command::new("tmux")
+        .args([
+            "-S",
+            &socket.to_string_lossy(),
+            "list-panes",
+            "-t",
+            &format!("{tag}:leader"),
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .expect("list fixture pane");
+    assert!(list.status.success(), "pane lookup failed");
+    let pane = String::from_utf8_lossy(&list.stdout).trim().to_string();
+    assert!(!pane.is_empty(), "tmux pane id required");
+    (socket, pane)
 }
 
 fn attached_leader_receiver(socket: &str) -> Value {

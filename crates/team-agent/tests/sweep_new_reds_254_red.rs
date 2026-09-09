@@ -104,10 +104,14 @@ fn diagnose_selected_team_without_registry_is_unbound() {
         "state-only attached fixture must stay undeliverable as index_missing without a registry row; out={out}"
     );
     assert_ne!(out["ok"], json!(true));
-    let repairs = out["suggested_repairs"].to_string();
+    let repairs = out["suggested_repairs"].clone();
     assert!(
-        !repairs.contains("claim-leader"),
-        "index-missing must not induce claim; repairs={repairs}"
+        repairs.to_string().contains("do not claim-leader"),
+        "index-missing copy must forbid claim; repairs={repairs}"
+    );
+    assert!(
+        !repairs_induce_claim_command(&repairs),
+        "index-missing must not induce an executable claim command; repairs={repairs}"
     );
 }
 
@@ -145,10 +149,14 @@ fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
         "foreign-workspace registry row must stay undeliverable as index_missing; out={out}"
     );
     assert_ne!(out["ok"], json!(true));
-    let repairs = out["suggested_repairs"].to_string();
+    let repairs = out["suggested_repairs"].clone();
     assert!(
-        !repairs.contains("claim-leader"),
-        "index-missing must not induce claim; repairs={repairs}"
+        repairs.to_string().contains("do not claim-leader"),
+        "index-missing copy must forbid claim; repairs={repairs}"
+    );
+    assert!(
+        !repairs_induce_claim_command(&repairs),
+        "index-missing must not induce an executable claim command; repairs={repairs}"
     );
 }
 
@@ -592,6 +600,24 @@ fn mcp_send_same_team_owner_still_creates_team_scoped_message() {
         }),
         "same-team worker MCP send must create a message row scoped to teamA for worker_b; rows={rows:?}"
     );
+}
+
+fn repairs_induce_claim_command(repairs: &Value) -> bool {
+    let Some(items) = repairs.as_array() else {
+        return false;
+    };
+    items.iter().any(|repair| {
+        ["hint_action", "action"].iter().any(|field| {
+            repair
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    let trimmed = text.trim();
+                    trimmed.starts_with("team-agent claim-leader")
+                        || trimmed == "claim-leader"
+                })
+        })
+    })
 }
 
 fn json_result(result: team_agent::cli::CmdResult) -> Value {

@@ -62,7 +62,10 @@ fn rest_014_restart_team_selector_targets_named_team() {
         ],
     );
     let j = out.json();
-    assert_json_field_eq_bool(&j, "/ok", true);
+    assert!(
+        restart_rebuild_completed(&j),
+        "restart --team must complete rebuild facts; json={j}"
+    );
     let session_name = j
         .pointer("/session_name")
         .and_then(|v| v.as_str())

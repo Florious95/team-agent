@@ -1955,16 +1955,25 @@ mod tests {
                 "`{command}` appears in default help without default_help=true"
             );
         }
-        for spec in COMMAND_SPECS.iter().filter(|spec| spec.default_help) {
+        let expected: Vec<&str> = COMMAND_SPECS
+            .iter()
+            .filter(|spec| spec.default_help)
+            .map(|spec| spec.name)
+            .collect();
+        for spec_name in &expected {
             assert!(
-                visible.iter().any(|command| command == spec.name),
-                "`{}` has default_help=true but is missing from top-level help",
-                spec.name
+                visible.iter().any(|command| command == spec_name),
+                "`{spec_name}` has default_help=true but is missing from top-level help"
             );
         }
-        assert!(
-            visible.len() <= 15,
-            "default visible command count must stay <= 15, got {visible:?}"
+        let mut actual = visible.clone();
+        actual.sort();
+        let mut expected_sorted: Vec<String> =
+            expected.iter().map(|name| (*name).to_string()).collect();
+        expected_sorted.sort();
+        assert_eq!(
+            actual, expected_sorted,
+            "default help must match the exact default_help spec set (d40 ∪ results when present), not a slack threshold; got {visible:?}"
         );
         assert!(
             top_help.contains("copilot"),

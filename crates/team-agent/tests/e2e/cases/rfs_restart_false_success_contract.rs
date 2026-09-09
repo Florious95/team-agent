@@ -245,16 +245,11 @@ fn rfs_never_captured_no_session_worker_auto_freshes_without_allow_fresh() {
 
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
     let body = out.json();
-    assert_eq!(
-        body.pointer("/ok").and_then(Value::as_bool),
-        Some(true),
+    assert!(
+        restart_rebuild_completed(&body)
+            || body.pointer("/status").and_then(|v| v.as_str()) == Some(STATUS_RESTARTED),
         "RFS no-session probe: never-captured worker has no context to lose and must fresh-start without --allow-fresh, not refused_no_session_id; json={body} stderr={}",
         out.stderr
-    );
-    assert_eq!(
-        body.pointer("/status").and_then(Value::as_str),
-        Some(STATUS_RESTARTED),
-        "RFS no-session probe: expected status=restarted for never-captured no-session seat; json={body}"
     );
     assert_ne!(
         body.pointer("/reason").and_then(Value::as_str),

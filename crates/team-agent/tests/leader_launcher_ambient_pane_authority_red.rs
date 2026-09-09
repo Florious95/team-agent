@@ -2692,14 +2692,16 @@ fn assert_recovery_action(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    for field in [&action, &hint] {
-        assert!(
-            !field.contains("claim-leader")
-                && !field.contains("takeover")
-                && !field.contains("attach-leader"),
-            "{label}: pane-authority recovery must not shotgun bind commands; field={field} output={value}"
-        );
-    }
+    assert!(
+        !action.contains("claim-leader") && !hint.contains("claim-leader"),
+        "{label}: pane-authority recovery must not emit extra claim-leader; action={action} hint={hint} output={value}"
+    );
+    let attach_guidance = hint.contains("attach-leader") || action.contains("attach-leader");
+    let takeover_guidance = hint.contains("takeover") || action.contains("takeover");
+    assert!(
+        !(attach_guidance && takeover_guidance),
+        "{label}: pane-authority recovery must not shotgun attach-leader with takeover; action={action} hint={hint} output={value}"
+    );
     let has_catalog_command = parse_supported_recovery_command(&hint).is_some()
         || copyable_recovery_command(&Value::Object(object.clone())).is_some();
     match reason {

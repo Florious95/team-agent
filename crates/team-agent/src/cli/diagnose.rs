@@ -103,6 +103,21 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         issues.push(issue);
     }
 
+    if state
+        .get("leader_receiver")
+        .is_some_and(receiver_has_empty_attached_pane)
+    {
+        issues.push(json!(LEADER_NOT_ATTACHED));
+        repairs.push(recovery_hint(
+            state
+                .get("session_name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            LEADER_NOT_ATTACHED,
+            LEADER_NOT_ATTACHED_REPAIR,
+        ));
+    }
+
     if let Some(session_name) = state
         .get("session_name")
         .and_then(Value::as_str)
@@ -359,6 +374,7 @@ fn append_registry_channel_unbound_issue(
     if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
         return;
     }
+    let (issue_id, repair) = existing_team_binding_issue(state, &team_key, class);
     push_issue_repair(
         issues,
         repairs,
@@ -366,9 +382,59 @@ fn append_registry_channel_unbound_issue(
             .get("session_name")
             .and_then(Value::as_str)
             .unwrap_or(team_key.as_str()),
-        class.issue_id(),
-        class.repair(),
+        issue_id,
+        repair,
     );
+}
+
+const LEADER_NOT_ATTACHED: &str = "leader_not_attached";
+const LEADER_NOT_ATTACHED_REPAIR: &str =
+    "run from the intended leader tmux pane; do not run claim-leader";
+
+fn receiver_has_empty_attached_pane(receiver: &Value) -> bool {
+    receiver.get("status").and_then(Value::as_str) == Some("attached")
+        && receiver
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .is_none_or(|pane| pane.is_empty())
+}
+
+fn selected_or_top_receiver<'a>(state: &'a Value, team_key: &str) -> Option<&'a Value> {
+    crate::lifecycle::launch::selected_team_leader_receiver(state, team_key)
+        .or_else(|| state.get("leader_receiver"))
+}
+
+fn team_has_initialized_runtime(state: &Value, team_key: &str) -> bool {
+    let team = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(team_key))
+        .unwrap_or(state);
+    let has_agents = team
+        .get("agents")
+        .and_then(Value::as_object)
+        .is_some_and(|agents| !agents.is_empty())
+        || state
+            .get("agents")
+            .and_then(Value::as_object)
+            .is_some_and(|agents| !agents.is_empty());
+    let has_owner = team.get("team_owner").is_some() || state.get("team_owner").is_some();
+    let has_receiver = selected_or_top_receiver(state, team_key).is_some();
+    has_agents || has_owner || has_receiver
+}
+
+fn existing_team_binding_issue(
+    state: &Value,
+    team_key: &str,
+    class: crate::lifecycle::launch::LeaderBindingClass,
+) -> (&'static str, &'static str) {
+    if selected_or_top_receiver(state, team_key).is_some_and(receiver_has_empty_attached_pane)
+        || (class == crate::lifecycle::launch::LeaderBindingClass::Unbound
+            && team_has_initialized_runtime(state, team_key))
+    {
+        return (LEADER_NOT_ATTACHED, LEADER_NOT_ATTACHED_REPAIR);
+    }
+    (class.issue_id(), class.repair())
 }
 
 fn append_live_leader_workspace_mismatch_issue(
@@ -468,9 +534,7 @@ fn live_leader_workspace_mismatch(
             HINT_ACTION_FIELD.to_string(),
             Value::String(
                 match refusal.recovery.hint_action {
-                    PaneAuthorityRecoveryHint::AttachLeader => {
-                        "open a matching workspace pane bound for this workspace"
-                    }
+                    PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
                 }
                 .to_string(),
             ),
@@ -550,10 +614,12 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
         return;
     }
-    if !issues.iter().any(|item| item.as_str() == Some(class.issue_id())) {
-        issues.push(json!(class.issue_id()));
+    let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(json!({}));
+    let (issue_id, repair) = existing_team_binding_issue(&state, &team_key, class);
+    if !issues.iter().any(|item| item.as_str() == Some(issue_id)) {
+        issues.push(json!(issue_id));
     }
-    repairs.push(recovery_hint(&team_key, class.issue_id(), class.repair()));
+    repairs.push(recovery_hint(&team_key, issue_id, repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }

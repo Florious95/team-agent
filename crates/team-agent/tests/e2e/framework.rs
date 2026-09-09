@@ -1694,6 +1694,37 @@ pub fn quick_start_workers_available(result: &TaResult) -> bool {
     quick_start_launched(result) || no_caller_worker_only_fixture_started(result)
 }
 
+/// Restart completed worker rebuild facts. Bind success requires evidence
+/// (`ok=true` + `restarted`). No-caller worker-only must stay exact incomplete.
+pub fn restart_rebuild_completed(json: &Value) -> bool {
+    if json.get("ok").and_then(Value::as_bool) == Some(true) {
+        return json
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "restarted" || status == "ok");
+    }
+    let status = json.get("status").and_then(Value::as_str).unwrap_or("");
+    let reason = json.get("reason").and_then(Value::as_str).unwrap_or("");
+    let coordinator = json
+        .get("coordinator_started")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let agents = json
+        .get("agents")
+        .and_then(Value::as_array)
+        .is_some_and(|agents| !agents.is_empty());
+    status == "restarted_binding_incomplete"
+        && coordinator
+        && agents
+        && matches!(
+            reason,
+            "leader_receiver_unbound"
+                | "leader_binding_unknown"
+                | "leader_registry_index_missing"
+                | "leader_not_attached"
+        )
+}
+
 /// Some tests want a workspace that has gone through quick-start so state.json
 /// + events.jsonl exist with realistic shape. This helper does that and
 /// returns the result for further inspection.

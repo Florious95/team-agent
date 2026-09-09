@@ -25,7 +25,9 @@ fn e4_all_gone_status_diagnose_outputs_structured_advisory_hint() {
     let diagnose = source("src/cli/diagnose.rs");
     let status = source("src/cli/status_port.rs");
     let coordinator = source("src/coordinator/types.rs");
-    let combined = format!("{diagnose}\n{status}\n{coordinator}");
+    let readiness = source("src/lifecycle/launch/readiness.rs");
+    let cli_mod = source("src/cli/mod.rs");
+    let combined = format!("{diagnose}\n{status}\n{coordinator}\n{readiness}\n{cli_mod}");
     let mut missing = Vec::new();
     for required in [
         "\"action_required\"",
