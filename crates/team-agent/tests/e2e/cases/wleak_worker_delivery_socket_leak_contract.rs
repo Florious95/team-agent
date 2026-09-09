@@ -45,7 +45,7 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let session = worker_session_name(team_id);
@@ -180,7 +180,7 @@ fn wleak_wrong_cached_pane_and_missing_intended_window_blocks_not_delivers() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let session = worker_session_name(team_id);
@@ -213,7 +213,7 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let socket = state_socket(&ws);
@@ -319,7 +319,7 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
     let session = worker_session_name(team_id);
     let pane_a = pane_for_window(&ws, &session, "a");
@@ -402,7 +402,7 @@ fn wleak_unvalidated_cached_pane_never_marks_delivered() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let session = worker_session_name(team_id);
@@ -454,7 +454,7 @@ fn wleak_cross_session_multi_pane_window_missing_fails_closed() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let socket = state_socket(&ws);
@@ -488,7 +488,7 @@ fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
     let target_ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let target_ws_path = target_ws.path().to_str().unwrap();
     let qs = quick_start_fake(&target_ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&target_ws);
 
     let foreign_ws = TestWorkspace::new("wleak008-foreign").with_fake_spec(&["worker"]);
@@ -553,7 +553,7 @@ fn wleak_start_agent_noop_refreshes_stale_cached_pane_tuple() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let session = worker_session_name(team_id);
@@ -602,7 +602,7 @@ fn wleak_diagnose_exposes_stale_worker_pane_binding() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let session = worker_session_name(team_id);

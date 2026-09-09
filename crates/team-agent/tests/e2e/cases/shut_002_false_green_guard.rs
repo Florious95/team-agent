@@ -22,7 +22,7 @@ fn shut_002_false_green_guard() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
     assert!(
-        quick_start_launched(&qs),
+        quick_start_workers_available(&qs),
         "quick-start did not launch: {}",
         qs.stdout
     );

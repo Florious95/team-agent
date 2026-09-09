@@ -1,8 +1,8 @@
 use super::launch_spawn::seed_healthy_coordinator;
 use super::*;
 use crate::cli::{
-    cmd_collect, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult, CollectArgs, SendArgs,
-    StatusArgs,
+    cmd_collect, cmd_diagnose, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult,
+    CollectArgs, DiagnoseArgs, SendArgs, StatusArgs,
 };
 use crate::transport::test_support::OfflineTransport;
 use crate::transport::WindowName;
@@ -176,29 +176,40 @@ fn phase_f_golden_events_state_status_zero_drift() {
 #[test]
 #[serial_test::serial(env)]
 fn phase_golden_unbound_not_ready_requires_claim_leader() {
-    // 已废除的行为：旧实现只说不 ready、不说怎么恢复，把人晾在原地。此断言证明它确实没了。
-    // Independent of golden.json so a later regenerate cannot erase it.
-    // Companion status keys grok_slot ← 77bddb95 / 0c319cca; next_action ← 080903a2.
-    let compact = run_compact_status_after_quick_start();
-    let not_ready = compact
-        .get("not_ready")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("compact must carry not_ready; got {compact}"));
-    let reasons = not_ready
-        .get("reasons")
+    let diagnose = run_diagnose_after_quick_start();
+    let issues = diagnose
+        .get("issues")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    assert!(
-        reasons
-            .iter()
-            .any(|reason| reason.as_str() == Some("leader_receiver_unbound")),
-        "tombstone fixture must still produce leader_receiver_unbound; not_ready={not_ready:?}"
-    );
+    let issue_ids: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue.as_str())
+        .collect();
     assert_eq!(
-        not_ready.get("next_action").and_then(Value::as_str),
-        Some("claim-leader"),
-        "when not_ready.reasons contains leader_receiver_unbound, next_action must be claim-leader; not_ready={not_ready:?}"
+        issue_ids
+            .iter()
+            .copied()
+            .filter(|id| *id == "leader_registry_index_missing")
+            .count(),
+        1,
+        "tombstone after seeded owner without registry must be exactly index-missing; diagnose={diagnose}"
+    );
+    assert!(
+        !issue_ids.contains(&"leader_receiver_not_committed"),
+        "parallel not_committed bool must not appear; diagnose={diagnose}"
+    );
+    let repairs = diagnose
+        .get("suggested_repairs")
+        .map(Value::to_string)
+        .unwrap_or_default();
+    assert!(
+        repairs.contains("publish the leader registry index"),
+        "index-missing repair must publish the index; diagnose={diagnose}"
+    );
+    assert!(
+        !repairs.contains("team-agent claim-leader --confirm"),
+        "index-missing must not recommend claim-leader --confirm; diagnose={diagnose}"
     );
 }
 
@@ -474,7 +485,7 @@ fn strip_full_line_json_comments(text: &str) -> String {
         .join("\n")
 }
 
-fn run_compact_status_after_quick_start() -> Value {
+fn run_diagnose_after_quick_start() -> Value {
     let hermetic = HermeticTestEnv::enter("tombstone-claim-leader");
     let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
     let team = two_worker_team_dir(&hermetic);
@@ -491,20 +502,47 @@ fn run_compact_status_after_quick_start() -> Value {
         false,
     )
     .expect("tombstone fixture must quick-start");
-    let status = cmd_status(&StatusArgs {
-        agent: None,
+    let mut state = crate::state::persist::load_runtime_state(&workspace)
+        .expect("tombstone fixture must persist runtime state");
+    crate::lifecycle::launch::seed_launched_owner_from_caller_with_provider_lookup(
+        &mut state,
+        crate::state::owner_gate::CallerIdentity {
+            pane_id: "%1".to_string(),
+            provider: "codex".to_string(),
+            machine_fingerprint: "fp".to_string(),
+            leader_session_uuid: "uuid-tombstone".to_string(),
+            leader_session_uuid_source: "env".to_string(),
+        },
+        |_| None,
+    );
+    crate::state::persist::save_runtime_state(&workspace, &state)
+        .expect("persist seeded owner without registry");
+    if let Some(dir) = crate::leader::registry::registry_dir() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    assert!(
+        state
+            .pointer("/teams/teamdir/team_owner/pane_id")
+            .or_else(|| state.pointer("/team_owner/pane_id"))
+            .and_then(Value::as_str)
+            .is_some(),
+        "index-missing diagnose requires a persisted seeded owner"
+    );
+    let diagnose = cmd_diagnose(&DiagnoseArgs {
         workspace,
-        detail: false,
-        summary: false,
         json: true,
         team: Some("teamdir".to_string()),
     });
-    match cmd_value(status) {
+    match cmd_value(diagnose) {
         Value::Object(map) => map
             .get("output")
             .cloned()
-            .unwrap_or_else(|| panic!("compact status missing output")),
-        other => panic!("compact status must be a JSON object, got {other}"),
+            .unwrap_or_else(|| panic!("diagnose missing output")),
+        other => panic!("diagnose must be a JSON object, got {other}"),
     }
 }
 

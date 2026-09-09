@@ -8,7 +8,7 @@ fn dirty_001_stale_pane_id_is_not_reported_delivered() {
     let team_id = "dirty001";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     ws.mutate_agent_everywhere("a", |agent| {
         agent.insert("pane_id".to_string(), json!("%99999"));
