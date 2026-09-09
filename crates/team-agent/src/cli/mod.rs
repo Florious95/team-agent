@@ -3247,7 +3247,9 @@ pub mod lifecycle_port {
                                     "reason": "provider session capture is incomplete; restart is not yet resume-safe",
                                 }),
                             )
-                        } else if launch.leader_receiver_attached {
+                        } else if launch.leader_binding.is_deliverable()
+                            || launch.leader_receiver_attached
+                        {
                             (
                                 format!(
                                     "quick-start launched (worker tool load unverified): {}",
@@ -3269,32 +3271,41 @@ pub mod lifecycle_port {
                                     "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
                                     "pending_session_agent_ids": incomplete_session_capture_agents,
                                     "reason": "worker MCP tool set load not yet confirmed; run `team-agent doctor` or wait for first worker turn",
+                                    "binding": launch.leader_binding.to_json(),
                                 }),
                             )
                         } else {
+                            let fact = &launch.leader_binding;
+                            let mut readiness = json!({
+                                "all_spawned": all_spawned,
+                                "all_workers_spawned": all_workers_spawned,
+                                "all_attached_receiver": all_attached_receiver,
+                                "attached_receiver": attached_receiver,
+                                "leader_receiver_attached": leader_receiver_attached,
+                                "all_resumable_have_session": all_resumable_have_session,
+                                "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
+                                "ready": false,
+                                "state": fact.public_status(),
+                                "session_capture_complete": all_resumable_have_session,
+                                "session_capture_incomplete": !all_resumable_have_session,
+                                "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
+                                "pending_session_agent_ids": incomplete_session_capture_agents,
+                                "reason": fact.reason,
+                                "binding": fact.to_json(),
+                            });
+                            if let Some(next) = fact.next_action_value() {
+                                if let Some(object) = readiness.as_object_mut() {
+                                    object.insert("next_action".to_string(), json!(next));
+                                }
+                            }
                             (
                                 format!(
-                                    "quick-start degraded: {}; leader receiver unbound",
-                                    session_name.as_str()
+                                    "quick-start degraded: {}; {}",
+                                    session_name.as_str(),
+                                    fact.reason
                                 ),
                                 false,
-                                json!({
-                                    "all_spawned": all_spawned,
-                                    "all_workers_spawned": all_workers_spawned,
-                                    "all_attached_receiver": all_attached_receiver,
-                                    "attached_receiver": attached_receiver,
-                                    "leader_receiver_attached": leader_receiver_attached,
-                                    "all_resumable_have_session": all_resumable_have_session,
-                                    "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
-                                    "ready": all_spawned && all_attached_receiver && all_resumable_have_session,
-                                    "state": "leader_receiver_unbound",
-                                    "session_capture_complete": all_resumable_have_session,
-                                    "session_capture_incomplete": !all_resumable_have_session,
-                                    "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
-                                    "pending_session_agent_ids": incomplete_session_capture_agents,
-                                    "reason": "launched team has no attached leader receiver",
-                                    "next_action": "claim-leader",
-                                }),
+                                readiness,
                             )
                         }
                     }
@@ -3308,11 +3319,13 @@ pub mod lifecycle_port {
                     "session_name": session_name.as_str(),
                     "dry_run": launch.dry_run,
                     "display_backend": display_backend,
+                    "agent_ids": launch.started.iter().map(|agent| agent.agent_id.as_str().to_string()).collect::<Vec<_>>(),
                     "next_actions": next_actions,
                     "attach_commands": attach_commands,
                     "reminder": crate::cli::QUICK_START_REMINDER,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
+                    "binding": launch.leader_binding.to_json(),
                 })
             }
             crate::lifecycle::QuickStartReport::ExistingRuntime {
@@ -3336,14 +3349,24 @@ pub mod lifecycle_port {
                 blockers,
                 next_actions,
                 attach_commands,
-            } => json!({
-                "ok": false,
-                "summary": summary,
-                "blockers": blockers,
-                "next_actions": next_actions,
-                "attach_commands": attach_commands,
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+            } => {
+                let mut value = json!({
+                    "ok": false,
+                    "summary": summary,
+                    "blockers": blockers,
+                    "next_actions": next_actions,
+                    "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                });
+                if let Some(fact) = crate::leader::preflight_fact(&crate::leader::preflight_caller())
+                {
+                    crate::leader::apply_binding_fields(&mut value, &fact);
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("status".to_string(), json!(fact.public_status()));
+                    }
+                }
+                value
+            }
         }
     }
 
@@ -3449,17 +3472,36 @@ pub mod lifecycle_port {
                 coordinator,
                 next_actions,
                 attach_commands,
-            } => json!({
-                "ok": true,
-                "status": "restarted",
-                "session_name": session_name.as_str(),
-                "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
-                "coordinator_started": coordinator_started,
-                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
-                "next_actions": next_actions,
-                "attach_commands": attach_commands,
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+                leader_binding,
+            } => {
+                let mut value = json!({
+                    "ok": true,
+                    "status": "restarted",
+                    "session_name": session_name.as_str(),
+                    "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
+                    "coordinator_started": coordinator_started,
+                    "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
+                    "next_actions": next_actions,
+                    "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                });
+                crate::leader::apply_binding_fields(&mut value, &leader_binding);
+                if !leader_binding.is_deliverable()
+                    && !matches!(
+                        leader_binding.kind,
+                        crate::leader::BindingKind::ExistingBound | crate::leader::BindingKind::Bound
+                    )
+                {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("ok".to_string(), json!(false));
+                        object.insert(
+                            "status".to_string(),
+                            json!(leader_binding.public_status()),
+                        );
+                    }
+                }
+                value
+            }
             crate::lifecycle::RestartReport::Partial {
                 session_name,
                 agents,
@@ -3468,6 +3510,7 @@ pub mod lifecycle_port {
                 coordinator,
                 next_actions,
                 attach_commands,
+                leader_binding,
             } => json!({
                 "ok": false,
                 "status": "partial",
@@ -3495,6 +3538,7 @@ pub mod lifecycle_port {
                 "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
+                "binding": leader_binding.to_json(),
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::RestartReport::Failed {
@@ -3869,9 +3913,6 @@ pub mod lifecycle_port {
                 let repair_team = team
                     .filter(|team| !team.is_empty())
                     .unwrap_or(session_name.as_str());
-                let claim =
-                    format!("team-agent claim-leader --team {repair_team} --confirm --json");
-                let takeover = format!("team-agent takeover --team {repair_team} --confirm --json");
                 json!({
                     "ok": false,
                     "status": "refused_dirty_topology",
@@ -3882,11 +3923,11 @@ pub mod lifecycle_port {
                         .iter()
                         .map(|id| json!({"id": id}))
                         .collect::<Vec<_>>(),
-                    "next_actions": [
-                        "team-agent diagnose --json",
-                        claim,
-                        takeover
-                    ],
+                    "next_actions": crate::leader::dirty_topology_actions(
+                        &reason,
+                        &issue_ids,
+                        repair_team,
+                    ),
                     "reminder": crate::cli::QUICK_START_REMINDER,
                 })
             }

@@ -77,6 +77,7 @@ use crate::state::StateError;
 
 // ── submodules(by responsibility) ──────────────────────────────────────────
 mod helpers;
+pub mod binding_fact;
 pub mod incident;
 pub mod lease;
 pub mod owner_bind;
@@ -88,6 +89,10 @@ pub mod takeover;
 pub mod types;
 
 // ── RE-EXPORT INVARIANT:每个先前 root-visible 项原路径不变 ────────────────────
+pub use binding_fact::{
+    apply_binding_fields, dirty_topology_actions, grant_authorizes_workspace, observe_leader_binding,
+    preflight_caller, preflight_fact, BindingAction, BindingFact, BindingKind, CallerPreflight,
+};
 pub use incident::*;
 pub use lease::*;
 pub use owner_bind::*;

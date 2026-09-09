@@ -141,14 +141,14 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
     }
 
     if !leader_receiver_attached(state) {
-        issues.push(json!("leader_not_attached"));
+        issues.push(json!("leader_receiver_not_committed"));
         repairs.push(recovery_hint(
             state
                 .get("session_name")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
-            "leader_not_attached",
-            "team-agent attach-leader",
+            "leader_receiver_not_committed",
+            "team-agent diagnose --json",
         ));
     } else {
         // 0.4.x (CR R2 P0): leader provider health reconciliation. The
@@ -186,7 +186,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                             .and_then(Value::as_str)
                             .unwrap_or("unknown"),
                         "leader_provider_unreachable",
-                        "team-agent claim-leader",
+                        "team-agent diagnose --json",
                     ));
                 }
                 crate::leader::LeaderProviderHealth::Alive => {}
@@ -290,27 +290,38 @@ fn append_registry_channel_unbound_issue(
     repairs: &mut Value,
 ) {
     let team_key = crate::state::projection::team_state_key(state);
-    if team_key.is_empty()
-        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
+    if team_key.is_empty() {
+        return;
+    }
+    let fact = crate::leader::observe_leader_binding(workspace, &team_key);
+    if fact.is_deliverable()
+        || matches!(
+            fact.kind,
+            crate::leader::BindingKind::ExistingBound | crate::leader::BindingKind::Bound
+        )
     {
         return;
     }
     if let Some(items) = issues.as_array_mut() {
         if !items.iter().any(|item| {
             item.as_str() == Some("leader_not_attached")
+                || item.as_str() == Some(fact.public_status())
                 || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
         }) {
-            items.push(json!("leader_not_attached"));
+            items.push(json!(fact.public_status()));
         }
     }
     if let Some(items) = repairs.as_array_mut() {
+        let hint = fact
+            .next_action_value()
+            .unwrap_or_else(|| "team-agent diagnose --json".to_string());
         items.push(recovery_hint(
             state
                 .get("session_name")
                 .and_then(Value::as_str)
                 .unwrap_or(team_key.as_str()),
-            "leader_not_attached",
-            "team-agent claim-leader",
+            fact.public_status(),
+            &hint,
         ));
     }
 }
@@ -454,8 +465,15 @@ pub(crate) fn append_registry_channel_unbound_to_report(
                 .map(|state| crate::state::projection::team_state_key(&state))
         })
         .unwrap_or_default();
-    if team_key.is_empty()
-        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
+    if team_key.is_empty() {
+        return;
+    }
+    let fact = crate::leader::observe_leader_binding(workspace, &team_key);
+    if fact.is_deliverable()
+        || matches!(
+            fact.kind,
+            crate::leader::BindingKind::ExistingBound | crate::leader::BindingKind::Bound
+        )
     {
         return;
     }
@@ -469,9 +487,10 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         .unwrap_or_default();
     if !issues.iter().any(|item| {
         item.as_str() == Some("leader_not_attached")
+            || item.as_str() == Some(fact.public_status())
             || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
     }) {
-        issues.push(json!("leader_not_attached"));
+        issues.push(json!(fact.public_status()));
     }
     object.insert("issues".to_string(), Value::Array(issues));
     let mut repairs = object
@@ -479,11 +498,10 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    repairs.push(recovery_hint(
-        &team_key,
-        "leader_not_attached",
-        "team-agent claim-leader",
-    ));
+    let hint = fact
+        .next_action_value()
+        .unwrap_or_else(|| "team-agent diagnose --json".to_string());
+    repairs.push(recovery_hint(&team_key, fact.public_status(), &hint));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }
 
@@ -798,9 +816,7 @@ fn recovery_hint(team: &str, broken_class: &str, hint_action: &str) -> Value {
         "broken_class": broken_class,
         "hint_action": hint_action,
         "dedupe_key": format!("{team}:{broken_class}"),
-        "action": format!(
-            "{hint_action} # alternatives: team-agent restart; team-agent claim-leader; team-agent takeover; team-agent quick-start; team-agent attach-leader"
-        ),
+        "action": hint_action,
     })
 }
 

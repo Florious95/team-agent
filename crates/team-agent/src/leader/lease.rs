@@ -1533,8 +1533,13 @@ fn workspace_claim_target_from_pane_info(
     workspace: &Path,
     target: &PaneInfo,
 ) -> Option<LeaderClaimTarget> {
-    let current_path = target.current_path.as_deref()?;
-    if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
+    let cwd_ok = target
+        .current_path
+        .as_deref()
+        .is_some_and(|current_path| {
+            crate::state::owner_gate::workspace_paths_match(current_path, workspace)
+        });
+    if !cwd_ok {
         return None;
     }
     claim_target_from_pane_info(target)
@@ -1614,8 +1619,15 @@ fn validate_attach_target(
     // a real Codex/Claude/Copilot binary. This is a targeted escape
     // hatch — `Provider::Fake` is not selectable from the user-facing
     // provider list, only wired in test/fixture flows.
+    let nonce = target
+        .leader_env
+        .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
+        .map(String::as_str);
     let claim_target = match workspace_claim_target_from_pane_info(workspace, target) {
         Some(target) => Some(target),
+        None if crate::leader::grant_authorizes_workspace(workspace, state, nonce) => {
+            claim_target_from_pane_info(target)
+        }
         None if matches!(requested_provider, Provider::Fake) => None,
         None => return Err("leader_pane_validation_failed"),
     };

@@ -544,6 +544,7 @@ pub struct LaunchReport {
     pub permissions: Vec<PermissionSummary>,
     /// leader receiver(attach 成功时;经 step10 leader::attach_leader_to_state)。
     pub leader_receiver_attached: bool,
+    pub leader_binding: crate::leader::BindingFact,
     pub session_capture_incomplete_agents: Vec<String>,
 }
 
@@ -797,6 +798,7 @@ pub enum RestartReport {
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
+        leader_binding: crate::leader::BindingFact,
     },
     /// At least one worker failed during live spawn, but other workers were isolated
     /// and restarted. The CLI reports `status=partial` and exits non-zero.
@@ -811,6 +813,7 @@ pub enum RestartReport {
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
+        leader_binding: crate::leader::BindingFact,
     },
     /// All workers failed during live spawn. No worker is reported as restarted.
     Failed {
