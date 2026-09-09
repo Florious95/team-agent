@@ -792,18 +792,6 @@ fn strip_this_attempt_extra_keys(state: &mut serde_json::Value, extra_keys: &[&s
             root.remove(*key);
         }
     }
-    if let Some(teams) = state
-        .get_mut("teams")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        for team in teams.values_mut() {
-            if let Some(object) = team.as_object_mut() {
-                for key in extra_keys {
-                    object.remove(*key);
-                }
-            }
-        }
-    }
 }
 
 fn restore_registry_receipt(
@@ -2707,10 +2695,64 @@ mod fresh_quick_start_leader_binding_tests {
         let _ = std::fs::remove_dir_all(crate::state::persist::runtime_state_path(&workspace));
     }
 
-    fn normalized_state_bytes(workspace: &Path) -> Vec<u8> {
-        let state = crate::state::persist::load_runtime_state(workspace).unwrap();
-        crate::state::persist::save_runtime_state(workspace, &state).unwrap();
-        std::fs::read(crate::state::persist::runtime_state_path(workspace)).unwrap()
+    fn complete_normalized_state() -> serde_json::Value {
+        json!({
+            "active_team_key": "fresh",
+            "team_key": "fresh",
+            "session_name": "team-fresh",
+            "agents": {
+                "sol": {
+                    "status": "running",
+                    "provider": "pi",
+                    "session_id": null,
+                    "rollout_path": null,
+                    "captured_at": null,
+                    "captured_via": null,
+                    "attribution_confidence": null,
+                    "spawn_cwd": null
+                }
+            }
+        })
+    }
+
+    fn persist_complete_normalized_baseline(workspace: &Path) -> (Vec<u8>, serde_json::Value) {
+        let state = complete_normalized_state();
+        let path = crate::state::persist::runtime_state_path(workspace);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        let _ = crate::state::persist::load_runtime_state(workspace).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let on_disk: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        for field in [
+            "session_id",
+            "rollout_path",
+            "captured_at",
+            "captured_via",
+            "attribution_confidence",
+            "spawn_cwd",
+        ] {
+            assert_eq!(
+                on_disk.pointer(&format!("/agents/sol/{field}")),
+                Some(&json!(null)),
+                "normalized baseline missing {field}"
+            );
+        }
+        assert_eq!(on_disk.get("team_key"), Some(&json!("fresh")));
+        (raw, on_disk)
+    }
+
+    fn clear_exact_expected_bytes(baseline: &serde_json::Value) -> Vec<u8> {
+        let mut expected = baseline.clone();
+        expected["teams"] = json!({
+            "fresh": {
+                "leader_receiver": null,
+                "team_owner": null,
+                "owner_epoch": 1
+            }
+        });
+        serde_json::to_string_pretty(&expected).unwrap().into_bytes()
     }
 
     fn assert_failure_rolls_back_this_attempt(
@@ -2719,14 +2761,23 @@ mod fresh_quick_start_leader_binding_tests {
         attach_calls: usize,
         register_calls: usize,
         readback_calls: usize,
+        clear_exact: bool,
     ) {
         let workspace = workspace(case);
         let state_path = crate::state::persist::runtime_state_path(&workspace);
-        let before = normalized_state_bytes(&workspace);
+        let (before, baseline) = persist_complete_normalized_baseline(&workspace);
+        let expected = if clear_exact {
+            clear_exact_expected_bytes(&baseline)
+        } else {
+            before
+        };
         assert!(
             !bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap(),
             "{case} must refuse"
         );
+        assert_eq!(ops.attach_calls, attach_calls, "{case} attach_calls");
+        assert_eq!(ops.register_calls, register_calls, "{case} register_calls");
+        assert_eq!(ops.readback_calls, readback_calls, "{case} readback_calls");
         let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert!(
             after.get("failed_attach_mutation").is_none(),
@@ -2740,14 +2791,23 @@ mod fresh_quick_start_leader_binding_tests {
             after.get("failed_readback_mutation").is_none(),
             "{case} left failed_readback_mutation"
         );
+        assert!(
+            after
+                .pointer("/teams/fresh/leader_receiver")
+                .is_none_or(serde_json::Value::is_null),
+            "{case} left a live leader_receiver"
+        );
+        assert!(
+            after
+                .pointer("/teams/fresh/team_owner")
+                .is_none_or(serde_json::Value::is_null),
+            "{case} left a live team_owner"
+        );
         assert_eq!(
             std::fs::read(&state_path).unwrap(),
-            before,
+            expected,
             "{case} left partial state bytes"
         );
-        assert_eq!(ops.attach_calls, attach_calls, "{case} attach_calls");
-        assert_eq!(ops.register_calls, register_calls, "{case} register_calls");
-        assert_eq!(ops.readback_calls, readback_calls, "{case} readback_calls");
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -2762,6 +2822,7 @@ mod fresh_quick_start_leader_binding_tests {
             1,
             0,
             0,
+            false,
         );
         assert_failure_rolls_back_this_attempt(
             "registry-failure",
@@ -2772,6 +2833,7 @@ mod fresh_quick_start_leader_binding_tests {
             1,
             1,
             0,
+            true,
         );
         assert_failure_rolls_back_this_attempt(
             "readback-failure",
@@ -2782,6 +2844,7 @@ mod fresh_quick_start_leader_binding_tests {
             1,
             1,
             1,
+            true,
         );
     }
 
@@ -2796,6 +2859,7 @@ mod fresh_quick_start_leader_binding_tests {
             1,
             0,
             0,
+            false,
         );
     }
 
@@ -2810,6 +2874,7 @@ mod fresh_quick_start_leader_binding_tests {
             1,
             1,
             0,
+            true,
         );
     }
 
@@ -2832,6 +2897,151 @@ mod fresh_quick_start_leader_binding_tests {
     }
 
     #[test]
+    fn restore_exact_restores_previous_owner_receiver() {
+        let workspace = workspace("restore-exact-prev");
+        let _ = persist_complete_normalized_baseline(&workspace);
+        let previous_owner = json!({
+            "pane_id": "%99",
+            "provider": "codex",
+            "leader_session_uuid": "uuid-prev",
+            "owner_epoch": 1
+        });
+        let previous_receiver = json!({
+            "status": "attached",
+            "pane_id": "%99",
+            "provider": "codex",
+            "owner_epoch": 1,
+            "tmux_socket": "/tmp/prev.sock"
+        });
+        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        state["teams"]["fresh"]["team_owner"] = previous_owner.clone();
+        state["teams"]["fresh"]["leader_receiver"] = previous_receiver.clone();
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            &workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        let snapshot = super::BindingFileSnapshot::capture(
+            crate::state::persist::runtime_state_path(&workspace),
+        );
+        let this_owner = json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1
+        });
+        let this_receiver = json!({
+            "status": "attached",
+            "pane_id": "%42",
+            "provider": "pi",
+            "owner_epoch": 1,
+            "tmux_socket": "/private/tmp/tmux-test/default"
+        });
+        state["teams"]["fresh"]["team_owner"] = this_owner.clone();
+        state["teams"]["fresh"]["leader_receiver"] = this_receiver.clone();
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            &workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        super::restore_this_attempt_state(
+            &workspace,
+            "fresh",
+            Some(&snapshot),
+            Some(&(this_owner, this_receiver)),
+            &[],
+        )
+        .unwrap();
+        let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(after["teams"]["fresh"]["team_owner"], previous_owner);
+        assert_eq!(after["teams"]["fresh"]["leader_receiver"], previous_receiver);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn restore_exact_keeps_unmatched_winner() {
+        let workspace = workspace("restore-exact-winner");
+        let _ = persist_complete_normalized_baseline(&workspace);
+        let previous_owner = json!({
+            "pane_id": "%99",
+            "provider": "codex",
+            "leader_session_uuid": "uuid-prev",
+            "owner_epoch": 1
+        });
+        let previous_receiver = json!({
+            "status": "attached",
+            "pane_id": "%99",
+            "provider": "codex",
+            "owner_epoch": 1,
+            "tmux_socket": "/tmp/prev.sock"
+        });
+        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        state["teams"]["fresh"]["team_owner"] = previous_owner.clone();
+        state["teams"]["fresh"]["leader_receiver"] = previous_receiver.clone();
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            &workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        let snapshot = super::BindingFileSnapshot::capture(
+            crate::state::persist::runtime_state_path(&workspace),
+        );
+        let this_owner = json!({
+            "pane_id": "%42",
+            "provider": "pi",
+            "leader_session_uuid": "uuid-fresh",
+            "owner_epoch": 1
+        });
+        let this_receiver = json!({
+            "status": "attached",
+            "pane_id": "%42",
+            "provider": "pi",
+            "owner_epoch": 1,
+            "tmux_socket": "/private/tmp/tmux-test/default"
+        });
+        let winner_owner = json!({
+            "pane_id": "%7",
+            "provider": "codex",
+            "leader_session_uuid": "uuid-win",
+            "owner_epoch": 2
+        });
+        let winner_receiver = json!({
+            "status": "attached",
+            "pane_id": "%7",
+            "provider": "codex",
+            "owner_epoch": 2,
+            "tmux_socket": "/tmp/win.sock"
+        });
+        state["teams"]["fresh"]["team_owner"] = winner_owner.clone();
+        state["teams"]["fresh"]["leader_receiver"] = winner_receiver.clone();
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            &workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        super::restore_this_attempt_state(
+            &workspace,
+            "fresh",
+            Some(&snapshot),
+            Some(&(this_owner, this_receiver)),
+            &[],
+        )
+        .unwrap();
+        let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(after["teams"]["fresh"]["team_owner"], winner_owner);
+        assert_eq!(after["teams"]["fresh"]["leader_receiver"], winner_receiver);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
     fn readback_failure_rolls_back_exact_state_bytes() {
         assert_failure_rolls_back_this_attempt(
             "readback-failure-only",
@@ -2842,6 +3052,7 @@ mod fresh_quick_start_leader_binding_tests {
             1,
             1,
             1,
+            true,
         );
     }
 
