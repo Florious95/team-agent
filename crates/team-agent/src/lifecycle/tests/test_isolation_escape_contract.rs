@@ -131,18 +131,46 @@ fn r5_restart_auto_attach_registers_isolated_live_leader_entry() {
     case.seed_restartable_workspace();
     seed_healthy_coordinator(&case.workspace);
 
-    let report = restart_with_transport_with_readiness_deadline(
-        &case.workspace,
-        true,
-        Some(TEAM_KEY),
-        &RestartAutoAttachTransport::new(),
-        Some(1_000),
+    let live = crate::transport::test_support::OfflineTransport::default()
+        .with_tmux_endpoint(TMUX_SOCKET)
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new(CALLER_PANE),
+            session: SessionName::new("team-agent-leader-0515"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("leader")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: Some(case.workspace.clone()),
+            active: true,
+            pane_pid: None,
+            leader_env: Default::default(),
+        }]);
+    let report = crate::transport_factory::with_leader_endpoint_transport(
+        TMUX_SOCKET,
+        live,
+        || {
+            restart_with_transport_with_readiness_deadline(
+                &case.workspace,
+                true,
+                Some(TEAM_KEY),
+                &RestartAutoAttachTransport::new(),
+                Some(1_000),
+            )
+        },
     )
     .expect("R5 setup: restart should complete against fake transport");
-    assert!(
-        matches!(report, RestartReport::Restarted { .. }),
-        "R5 setup: restart must succeed before checking registry side effects; report={report:?}"
-    );
+    match &report {
+        RestartReport::Restarted {
+            leader_bind_ok, ..
+        } => {
+            assert!(
+                *leader_bind_ok,
+                "R5: public restart bind must be ok; report={report:?}"
+            );
+        }
+        other => panic!("R5 setup: restart must succeed before checking registry side effects; report={other:?}"),
+    }
     let state = load_runtime_state(&case.workspace).expect("read state after restart");
     assert_eq!(
         canonical_leader_receiver(&state)
@@ -527,6 +555,19 @@ impl RestartAutoAttachCase {
                         "session_name": "team-ctxteam",
                         "tmux_endpoint": TMUX_SOCKET,
                         "tmux_socket": TMUX_SOCKET,
+                        "team_owner": {
+                            "pane_id": CALLER_PANE,
+                            "owner_epoch": 1,
+                            "provider": "codex"
+                        },
+                        "leader_receiver": {
+                            "mode": "direct_tmux",
+                            "status": "attached",
+                            "pane_id": CALLER_PANE,
+                            "owner_epoch": 1,
+                            "provider": "codex",
+                            "tmux_socket": TMUX_SOCKET
+                        },
                         "agents": { WORKER: worker }
                     }
                 }
