@@ -24,14 +24,13 @@ use hermetic_guard::HermeticTestEnv;
 use serde_json::json;
 use serial_test::serial;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use team_agent::leader::registry::{
     build_entry, register_binding_from_state_best_effort, write_entry_best_effort,
 };
 use team_agent::lifecycle::launch::launched_team_receiver_is_attached;
 use team_agent::state::persist::save_runtime_state;
-use team_agent::transport::test_support::OfflineTransport;
-use team_agent::transport::{PaneId, PaneInfo, SessionName};
-use team_agent::transport_factory::with_leader_endpoint_transport;
 
 fn mailbox_source() -> String {
     fs::read_to_string(concat!(
@@ -70,31 +69,61 @@ fn seed_attached_state(workspace: &std::path::Path, team: &str, pane: &str, sock
     .expect("seed state");
 }
 
-fn live_pane(workspace: &std::path::Path, pane: &str) -> PaneInfo {
-    PaneInfo {
-        pane_id: PaneId::new(pane),
-        session: SessionName::new("s"),
-        window_index: None,
-        window_name: None,
-        pane_index: None,
-        tty: None,
-        current_command: Some("codex".to_string()),
-        current_path: Some(workspace.to_path_buf()),
-        active: true,
-        pane_pid: None,
-        leader_env: Default::default(),
-    }
+fn start_live_owner_tmux(env: &HermeticTestEnv, workspace: &Path, tag: &str) -> (PathBuf, String) {
+    let socket = hermetic_guard::short_tmux_socket(tag);
+    let _ = fs::remove_file(&socket);
+    let output = Command::new("tmux")
+        .args([
+            "-S",
+            &socket.to_string_lossy(),
+            "new-session",
+            "-d",
+            "-s",
+            tag,
+            "-n",
+            "leader",
+            "-c",
+            &workspace.to_string_lossy(),
+            "/bin/cat",
+        ])
+        .output()
+        .expect("start fixture tmux");
+    assert!(
+        output.status.success(),
+        "tmux start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    env.register_owned_tmux_socket(&socket);
+    let list = Command::new("tmux")
+        .args([
+            "-S",
+            &socket.to_string_lossy(),
+            "list-panes",
+            "-t",
+            &format!("{tag}:leader"),
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .expect("list fixture pane");
+    assert!(list.status.success(), "pane lookup failed");
+    let pane = String::from_utf8_lossy(&list.stdout).trim().to_string();
+    assert!(!pane.is_empty(), "tmux pane id required");
+    (socket, pane)
 }
 
-fn assert_attached_with_live(workspace: &std::path::Path, team: &str, pane: &str, socket: &str) {
-    let transport = OfflineTransport::default()
-        .with_tmux_endpoint(socket)
-        .with_targets(vec![live_pane(workspace, pane)]);
-    let attached = with_leader_endpoint_transport(socket, transport, || {
-        launched_team_receiver_is_attached(workspace, team)
-    });
+fn seed_and_register_live_owner(env: &HermeticTestEnv, workspace: &Path, team: &str, tag: &str) {
+    let (socket, pane) = start_live_owner_tmux(env, workspace, tag);
+    seed_attached_state(workspace, team, &pane, &socket.to_string_lossy());
+    let outcome =
+        register_binding_from_state_best_effort(workspace, Some(team), "claim-leader")
+            .expect("register live owner");
+    assert_eq!(outcome.status, "registered");
+}
+
+fn assert_receiver_attached(workspace: &Path, team: &str) {
     assert!(
-        attached,
+        launched_team_receiver_is_attached(workspace, team),
         "canonical attached requires registry identity and a live owner pane; workspace={}",
         workspace.display()
     );
@@ -125,13 +154,26 @@ fn single_workspace_register_stays_attached() {
     let env = HermeticTestEnv::enter("lc4-single");
     env.scrub_tmux();
     let workspace = env.workspace("only");
-    seed_attached_state(&workspace, "teamdir", "%1", "/tmp/lc4-only");
+    seed_and_register_live_owner(&env, &workspace, "teamdir", "lc4-single");
+    assert_receiver_attached(&workspace, "teamdir");
+    env.assert_real_registry_unchanged(before);
+}
+
+#[test]
+#[serial(env)]
+fn register_without_live_pane_is_not_attached() {
+    let env = HermeticTestEnv::enter("lc4-no-live");
+    env.scrub_tmux();
+    let workspace = env.workspace("only");
+    seed_attached_state(&workspace, "teamdir", "%1", "/tmp/lc4-missing-live");
     let outcome =
         register_binding_from_state_best_effort(&workspace, Some("teamdir"), "claim-leader")
             .expect("register");
     assert_eq!(outcome.status, "registered");
-    assert_attached_with_live(&workspace, "teamdir", "%1", "/tmp/lc4-only");
-    env.assert_real_registry_unchanged(before);
+    assert!(
+        !launched_team_receiver_is_attached(&workspace, "teamdir"),
+        "registry alone must not classify Attached without a live owner pane"
+    );
 }
 
 #[test]
@@ -142,32 +184,12 @@ fn different_pane_entries_do_not_unbind_each_other() {
     env.scrub_tmux();
     let ws_a = env.workspace("a");
     let ws_b = env.workspace("b");
-    seed_attached_state(&ws_a, "teama", "%1", "/tmp/lc4-a");
-    seed_attached_state(&ws_b, "teamb", "%2", "/tmp/lc4-b");
-    let a = build_entry(
-        &ws_a,
-        "teama",
-        "direct_tmux",
-        json!({"status":"attached","pane_id":"%1","tmux_socket":"/tmp/lc4-a"}),
-        1,
-        "claim-leader",
-        "2026-08-18T00:00:00Z".to_string(),
-    );
-    let b = build_entry(
-        &ws_b,
-        "teamb",
-        "direct_tmux",
-        json!({"status":"attached","pane_id":"%2","tmux_socket":"/tmp/lc4-b"}),
-        1,
-        "claim-leader",
-        "2026-08-18T00:00:00Z".to_string(),
-    );
-    assert!(write_entry_best_effort(&a).is_some());
-    assert!(write_entry_best_effort(&b).is_some());
+    seed_and_register_live_owner(&env, &ws_a, "teama", "lc4-a");
+    seed_and_register_live_owner(&env, &ws_b, "teamb", "lc4-b");
     register_binding_from_state_best_effort(&ws_b, Some("teamb"), "claim-leader")
         .expect("register b");
-    assert_attached_with_live(&ws_a, "teama", "%1", "/tmp/lc4-a");
-    assert_attached_with_live(&ws_b, "teamb", "%2", "/tmp/lc4-b");
+    assert_receiver_attached(&ws_a, "teama");
+    assert_receiver_attached(&ws_b, "teamb");
     env.assert_real_registry_unchanged(before);
 }
 
