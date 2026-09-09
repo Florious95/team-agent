@@ -34,6 +34,7 @@ The current user-facing agent is the leader (orchestrate only). Workers call `re
 ## Provider Capability Matrix
 
 Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md`. These two are in the runtime but were missing from that table:
+`quick-start` / `restart` / `claim-leader` JSON is compact by default (`ok`, `status`/`reason`, next action, attach/send, and `readiness.all_workers_spawned`); pass `--detail` only for internal diagnostics.
 
 | Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
 |---|---|---|---|---|
