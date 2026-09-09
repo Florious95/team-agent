@@ -217,18 +217,18 @@ pub fn add_agent(
     ) {
         Ok(selected) => selected,
         Err(_) if workspace.join("TEAM.md").exists() => {
-            // **0.3.24 add-agent socket drift fix**: even on the TEAM.md fallback
-            // path (no spec yet), prefer the state-aware resolver. It reads the
-            // team's persisted `tmux_endpoint` (set at `team-agent launch` time)
-            // and routes the new agent's spawn to the SAME tmux socket the live
-            // team uses. Cold workspaces / first-agent paths safely fall back to
-            // `TmuxBackend::for_workspace(team_workspace)` inside the resolver.
-            let team_ws = team_workspace(workspace);
+            // TEAM.md lives in the run workspace. `team_workspace()` always walks
+            // to the parent and would spawn on a hash socket of the scratch parent.
+            // Use the idempotent run-workspace so persisted `tmux_endpoint` wins.
+            let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
+                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
             let transport =
                 crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-                    &team_ws, team,
+                    &run_workspace, team,
                 )
-                .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&team_ws));
+                .unwrap_or_else(|_| {
+                    crate::tmux_backend::TmuxBackend::for_workspace(&run_workspace)
+                });
             return add_agent_with_transport(
                 workspace,
                 agent_id,
