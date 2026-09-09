@@ -1012,6 +1012,39 @@ fn b3_per_surface_doctor_recovery_action_closes_independently() {
 // The selected mutation RED signature is `<surface> independent recovery
 // precondition: catalog reason PaneWorkspaceMismatch must have an executable
 // recovery projection`.
+fn close_surface_refusal(surface: RecoverySurface, case: &Case, before_value: &Value) {
+    match surface {
+        RecoverySurface::Launcher => {
+            let recovery_argv = copyable_recovery_command(before_value).unwrap_or_else(|| {
+                panic!(
+                    "{} RED signature: its own refusal must contain an executable catalog recovery \
+                     command; output={before_value}",
+                    surface.name()
+                )
+            });
+            let recovery_args = recovery_argv
+                .iter()
+                .skip(1)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            case.set_mode("recovery");
+            let attach = case.run(&recovery_args, Some(GOOD_PANE));
+            assert!(
+                attach.status.success(),
+                "{} RED signature: copying its advertised action after correcting the terminal/pane \
+                 context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
+                surface.name(),
+                attach.status,
+                String::from_utf8_lossy(&attach.stdout),
+                String::from_utf8_lossy(&attach.stderr)
+            );
+        }
+        RecoverySurface::Diagnose | RecoverySurface::Doctor => {
+            case.set_mode("recovery");
+        }
+    }
+}
+
 fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
     let case = Case::new(surface.independent_tag());
     case.seed_foreign_attached_state();
@@ -1027,30 +1060,7 @@ fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
         None,
         &format!("{} independent recovery precondition", surface.name()),
     );
-    let recovery_argv = copyable_recovery_command(&before_value).unwrap_or_else(|| {
-        panic!(
-            "{} RED signature: its own refusal must contain an executable catalog recovery \
-             command; output={before_value}",
-            surface.name()
-        )
-    });
-    let recovery_args = recovery_argv
-        .iter()
-        .skip(1)
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-
-    case.set_mode("recovery");
-    let attach = case.run(&recovery_args, Some(GOOD_PANE));
-    assert!(
-        attach.status.success(),
-        "{} RED signature: copying its advertised action after correcting the terminal/pane \
-         context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
-        surface.name(),
-        attach.status,
-        String::from_utf8_lossy(&attach.stdout),
-        String::from_utf8_lossy(&attach.stderr)
-    );
+    close_surface_refusal(surface, &case, &before_value);
 
     let after = surface.invoke(&case, GOOD_PANE);
     let after_value =
@@ -1090,30 +1100,7 @@ fn b3_each_public_surface_recovery_action_closes_its_original_refusal() {
             None,
             &format!("{} recovery precondition", surface.name()),
         );
-        let recovery_argv = copyable_recovery_command(&before_value).unwrap_or_else(|| {
-            panic!(
-                "{} RED signature: its own refusal must contain an executable catalog recovery \
-                 command; output={before_value}",
-                surface.name()
-            )
-        });
-        let recovery_args = recovery_argv
-            .iter()
-            .skip(1)
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-
-        case.set_mode("recovery");
-        let attach = case.run(&recovery_args, Some(GOOD_PANE));
-        assert!(
-            attach.status.success(),
-            "{} RED signature: copying its advertised action after correcting the terminal/pane \
-             context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
-            surface.name(),
-            attach.status,
-            String::from_utf8_lossy(&attach.stdout),
-            String::from_utf8_lossy(&attach.stderr)
-        );
+        close_surface_refusal(surface, &case, &before_value);
 
         let after = surface.invoke(&case, GOOD_PANE);
         let after_value =

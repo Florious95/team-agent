@@ -534,7 +534,9 @@ fn live_leader_workspace_mismatch(
             HINT_ACTION_FIELD.to_string(),
             Value::String(
                 match refusal.recovery.hint_action {
-                    PaneAuthorityRecoveryHint::AttachLeader => "team-agent attach-leader",
+                    PaneAuthorityRecoveryHint::AttachLeader => {
+                        "open a matching workspace pane bound for this workspace"
+                    }
                 }
                 .to_string(),
             ),

@@ -716,7 +716,19 @@ fn add_agent_with_transport_at_paths_reserved(
         StartAgentOutcome::Running {
             env, start_mode, ..
         } => (env, start_mode),
-        StartAgentOutcome::Noop { env, .. } => (env, StartMode::Noop),
+        StartAgentOutcome::Noop { .. } => {
+            rollback_add_agent_atomic(
+                run_workspace,
+                &spec_path,
+                pre_spec_text.as_deref(),
+                None,
+                agent_id,
+                "start_agent_noop",
+            );
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "start_agent.noop: newly added agent {agent_id} must spawn, not reuse a live window"
+            )));
+        }
         StartAgentOutcome::Paused { .. } => {
             rollback_add_agent_atomic(
                 run_workspace,
