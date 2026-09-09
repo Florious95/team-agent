@@ -427,7 +427,7 @@ pub(super) fn spawn_agent_window(
             &system_prompt,
         )?;
         crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace)?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, None)?;
         crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
         crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
     }
