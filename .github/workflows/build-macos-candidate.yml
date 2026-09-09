@@ -105,8 +105,8 @@ jobs:
 
           rustc_version="$(rustc --version)"
           cargo_version="$(cargo --version)"
-          rustc_host="$(rustc -vV | awk '$1 == "host:" { print $2; exit }')"
-          active_toolchain="$(rustup show active-toolchain | awk '{ print $1; exit }')"
+          rustc_host="$(rustc -vV | awk '$1 == "host:" { value=$2 } END { if (value != "") print value }')"
+          active_toolchain="$(rustup show active-toolchain | awk 'NR == 1 { value=$1 } END { if (value != "") print value }')"
 
           if [[ "$rustc_version" != "rustc ${RUST_TOOLCHAIN}"* ]]; then
             echo "::error::unexpected rustc version: ${rustc_version}"
@@ -228,7 +228,7 @@ jobs:
           EOF
 
           tar -czf "$archive" -C "$dist" "$binary_name" SOURCE.txt BUILD.txt CLI-VERSION.txt
-          archive_mode="$(tar -tvf "$archive" | awk -v name="$binary_name" '$NF == name { print $1; exit }')"
+          archive_mode="$(tar -tvf "$archive" | awk -v name="$binary_name" '$NF == name { value=$1 } END { if (value != "") print value }')"
           if [[ "$archive_mode" != -rwx* ]]; then
             echo "::error::tar archive did not preserve executable mode: ${archive_mode}"
             exit 1
