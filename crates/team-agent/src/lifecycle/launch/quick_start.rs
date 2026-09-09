@@ -2896,69 +2896,110 @@ mod fresh_quick_start_leader_binding_tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
+    fn complete_owner(pane: &str, provider: &str, uuid: &str, epoch: u64) -> serde_json::Value {
+        json!({
+            "pane_id": pane,
+            "provider": provider,
+            "leader_session_uuid": uuid,
+            "owner_epoch": epoch
+        })
+    }
+
+    fn complete_receiver(
+        pane: &str,
+        provider: &str,
+        uuid: &str,
+        epoch: u64,
+        socket: &str,
+    ) -> serde_json::Value {
+        json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": pane,
+            "provider": provider,
+            "leader_session_uuid": uuid,
+            "owner_epoch": epoch,
+            "tmux_socket": socket
+        })
+    }
+
+    fn commit_fresh_binding(
+        workspace: &Path,
+        owner: &serde_json::Value,
+        receiver: &serde_json::Value,
+        epoch: u64,
+    ) {
+        let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+        state["teams"]["fresh"]["team_owner"] = owner.clone();
+        state["teams"]["fresh"]["leader_receiver"] = receiver.clone();
+        state["teams"]["fresh"]["owner_epoch"] = json!(epoch);
+        crate::state::persist::save_runtime_state_with_receiver_authority(
+            workspace,
+            &state,
+            "fresh",
+            None,
+        )
+        .unwrap();
+        let raw = std::fs::read(crate::state::persist::runtime_state_path(workspace)).unwrap();
+        let on_disk: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            on_disk.pointer("/teams/fresh/team_owner"),
+            Some(owner),
+            "committed owner must equal predetermined pair"
+        );
+        assert_eq!(
+            on_disk.pointer("/teams/fresh/leader_receiver"),
+            Some(receiver),
+            "committed receiver must equal predetermined pair"
+        );
+        assert_eq!(
+            on_disk.pointer("/teams/fresh/owner_epoch"),
+            Some(&json!(epoch)),
+            "canonical epoch must match the pair"
+        );
+    }
+
     #[test]
     fn restore_exact_restores_previous_owner_receiver() {
         let workspace = workspace("restore-exact-prev");
         let _ = persist_complete_normalized_baseline(&workspace);
-        let previous_owner = json!({
-            "pane_id": "%99",
-            "provider": "codex",
-            "leader_session_uuid": "uuid-prev",
-            "owner_epoch": 1
-        });
-        let previous_receiver = json!({
-            "status": "attached",
-            "pane_id": "%99",
-            "provider": "codex",
-            "owner_epoch": 1,
-            "tmux_socket": "/tmp/prev.sock"
-        });
         let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
-        state["teams"]["fresh"]["team_owner"] = previous_owner.clone();
-        state["teams"]["fresh"]["leader_receiver"] = previous_receiver.clone();
-        crate::state::persist::save_runtime_state_with_receiver_authority(
-            &workspace,
-            &state,
-            "fresh",
-            None,
-        )
-        .unwrap();
+        state["tasks"] = json!({"keep": true});
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let previous_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let previous_owner = complete_owner("%99", "codex", previous_uuid, 1);
+        let previous_receiver =
+            complete_receiver("%99", "codex", previous_uuid, 1, "/tmp/prev.sock");
+        commit_fresh_binding(&workspace, &previous_owner, &previous_receiver, 1);
         let snapshot = super::BindingFileSnapshot::capture(
             crate::state::persist::runtime_state_path(&workspace),
         );
-        let this_owner = json!({
-            "pane_id": "%42",
-            "provider": "pi",
-            "leader_session_uuid": "uuid-fresh",
-            "owner_epoch": 1
-        });
-        let this_receiver = json!({
-            "status": "attached",
-            "pane_id": "%42",
-            "provider": "pi",
-            "owner_epoch": 1,
-            "tmux_socket": "/private/tmp/tmux-test/default"
-        });
-        state["teams"]["fresh"]["team_owner"] = this_owner.clone();
-        state["teams"]["fresh"]["leader_receiver"] = this_receiver.clone();
-        crate::state::persist::save_runtime_state_with_receiver_authority(
-            &workspace,
-            &state,
-            "fresh",
-            None,
-        )
-        .unwrap();
+        let this_uuid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let this_owner = complete_owner("%42", "pi", this_uuid, 1);
+        let this_receiver = complete_receiver(
+            "%42",
+            "pi",
+            this_uuid,
+            1,
+            "/private/tmp/tmux-test/default",
+        );
+        commit_fresh_binding(&workspace, &this_owner, &this_receiver, 1);
+        let this_receipt = (this_owner.clone(), this_receiver.clone());
+        assert_ne!(this_owner, previous_owner);
+        assert_ne!(this_receiver, previous_receiver);
         super::restore_this_attempt_state(
             &workspace,
             "fresh",
             Some(&snapshot),
-            Some(&(this_owner, this_receiver)),
+            Some(&this_receipt),
             &[],
         )
         .unwrap();
         let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert_eq!(after["teams"]["fresh"]["team_owner"], previous_owner);
         assert_eq!(after["teams"]["fresh"]["leader_receiver"], previous_receiver);
+        assert_eq!(after["teams"]["fresh"]["owner_epoch"], json!(1));
+        assert_eq!(after.get("tasks"), Some(&json!({"keep": true})));
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
@@ -2966,78 +3007,47 @@ mod fresh_quick_start_leader_binding_tests {
     fn restore_exact_keeps_unmatched_winner() {
         let workspace = workspace("restore-exact-winner");
         let _ = persist_complete_normalized_baseline(&workspace);
-        let previous_owner = json!({
-            "pane_id": "%99",
-            "provider": "codex",
-            "leader_session_uuid": "uuid-prev",
-            "owner_epoch": 1
-        });
-        let previous_receiver = json!({
-            "status": "attached",
-            "pane_id": "%99",
-            "provider": "codex",
-            "owner_epoch": 1,
-            "tmux_socket": "/tmp/prev.sock"
-        });
-        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
-        state["teams"]["fresh"]["team_owner"] = previous_owner.clone();
-        state["teams"]["fresh"]["leader_receiver"] = previous_receiver.clone();
-        crate::state::persist::save_runtime_state_with_receiver_authority(
-            &workspace,
-            &state,
-            "fresh",
-            None,
-        )
-        .unwrap();
+        let previous_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let previous_owner = complete_owner("%99", "codex", previous_uuid, 1);
+        let previous_receiver =
+            complete_receiver("%99", "codex", previous_uuid, 1, "/tmp/prev.sock");
+        commit_fresh_binding(&workspace, &previous_owner, &previous_receiver, 1);
         let snapshot = super::BindingFileSnapshot::capture(
             crate::state::persist::runtime_state_path(&workspace),
         );
-        let this_owner = json!({
-            "pane_id": "%42",
-            "provider": "pi",
-            "leader_session_uuid": "uuid-fresh",
-            "owner_epoch": 1
-        });
-        let this_receiver = json!({
-            "status": "attached",
-            "pane_id": "%42",
-            "provider": "pi",
-            "owner_epoch": 1,
-            "tmux_socket": "/private/tmp/tmux-test/default"
-        });
-        let winner_owner = json!({
-            "pane_id": "%7",
-            "provider": "codex",
-            "leader_session_uuid": "uuid-win",
-            "owner_epoch": 2
-        });
-        let winner_receiver = json!({
-            "status": "attached",
-            "pane_id": "%7",
-            "provider": "codex",
-            "owner_epoch": 2,
-            "tmux_socket": "/tmp/win.sock"
-        });
-        state["teams"]["fresh"]["team_owner"] = winner_owner.clone();
-        state["teams"]["fresh"]["leader_receiver"] = winner_receiver.clone();
-        crate::state::persist::save_runtime_state_with_receiver_authority(
-            &workspace,
-            &state,
-            "fresh",
-            None,
-        )
-        .unwrap();
+        let this_uuid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let this_owner = complete_owner("%42", "pi", this_uuid, 1);
+        let this_receiver = complete_receiver(
+            "%42",
+            "pi",
+            this_uuid,
+            1,
+            "/private/tmp/tmux-test/default",
+        );
+        commit_fresh_binding(&workspace, &this_owner, &this_receiver, 1);
+        let this_receipt = (this_owner.clone(), this_receiver.clone());
+        let winner_uuid = "cccccccccccccccccccccccccccccccc";
+        let winner_owner = complete_owner("%7", "codex", winner_uuid, 2);
+        let winner_receiver = complete_receiver("%7", "codex", winner_uuid, 2, "/tmp/win.sock");
+        commit_fresh_binding(&workspace, &winner_owner, &winner_receiver, 2);
+        assert_ne!(
+            (winner_owner.clone(), winner_receiver.clone()),
+            this_receipt
+        );
         super::restore_this_attempt_state(
             &workspace,
             "fresh",
             Some(&snapshot),
-            Some(&(this_owner, this_receiver)),
+            Some(&this_receipt),
             &[],
         )
         .unwrap();
         let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert_eq!(after["teams"]["fresh"]["team_owner"], winner_owner);
         assert_eq!(after["teams"]["fresh"]["leader_receiver"], winner_receiver);
+        assert_eq!(after["teams"]["fresh"]["owner_epoch"], json!(2));
+        assert_ne!(after["teams"]["fresh"]["team_owner"], previous_owner);
+        assert_ne!(after["teams"]["fresh"]["leader_receiver"], previous_receiver);
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
