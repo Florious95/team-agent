@@ -266,10 +266,18 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             self.last_failure_reason = Some("receiver_scope_unavailable");
             return false;
         };
-        let Some(receiver) = resolved.state.get("leader_receiver") else {
+        let Some(receiver) =
+            super::selected_team_leader_receiver(&resolved.state, team_key)
+        else {
             self.last_failure_reason = Some("receiver_missing");
             return false;
         };
+        if crate::lifecycle::launch::classify_leader_binding(workspace, team_key)
+            != super::LeaderBindingClass::Attached
+        {
+            self.last_failure_reason = Some("registry_identity_mismatch");
+            return false;
+        }
         if !matches!(
             crate::messaging::resolve_live_leader_channel(
                 workspace,
@@ -518,13 +526,22 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     // the owner. Cleanup is allowed only when the caller supplies the exact
     // in-memory seed created immediately before this bind attempt and the
     // projected state still contains that seed.
+    let current_receiver = state.get("leader_receiver");
+    let pending_seed_receiver = current_receiver.is_some_and(|receiver| {
+        receiver.get("status").and_then(serde_json::Value::as_str) == Some("pending")
+            && receiver
+                .get("discovery")
+                .and_then(serde_json::Value::as_str)
+                == Some("quick_start_seed")
+    });
     let fresh_seeded_binding = seeded_owner.is_some_and(|seed| {
         state
             .get("team_owner")
             .is_some_and(|current| current == seed)
+            && pending_seed_receiver
     });
     let seeded_receiver = if fresh_seeded_binding {
-        state.get("leader_receiver").cloned()
+        current_receiver.cloned()
     } else {
         None
     };
@@ -712,10 +729,10 @@ fn preflight_fresh_leader_identity(
 ) -> Option<(String, Vec<String>, Vec<String>)> {
     let pane = std::env::var("TMUX_PANE")
         .ok()
-        .filter(|pane| !pane.is_empty())?;
+        .filter(|pane| !pane.is_empty());
     let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
     match crate::layout::worker_env::caller_provider_resolution(
-        Some(pane.as_str()),
+        pane.as_deref(),
         current_endpoint.as_deref(),
         transport.tmux_endpoint().as_deref(),
     ) {
@@ -729,6 +746,9 @@ fn preflight_fresh_leader_identity(
         )),
         crate::layout::worker_env::CallerProviderResolution::Valid(_) => None,
         crate::layout::worker_env::CallerProviderResolution::Absent => {
+            let Some(pane) = pane else {
+                return None;
+            };
             let command = transport
                 .query(
                     &Target::Pane(PaneId::new(pane)),
@@ -740,6 +760,15 @@ fn preflight_fresh_leader_identity(
             let explicit = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
                 .ok()
                 .filter(|provider| !provider.is_empty());
+            if command.trim().is_empty() {
+                return Some((
+                    "quick-start refused before spawn: command unobservable".to_string(),
+                    vec!["stage=command_observation reason=command_unobservable".to_string()],
+                    vec![
+                        "run from a live provider pane; do not run claim-leader".to_string(),
+                    ],
+                ));
+            }
             if crate::leader::owner_bind::strict_owner_bind_provider(
                 explicit.as_deref(),
                 &command,
@@ -1162,12 +1191,27 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
                 }
                 next_actions.extend(attach_commands.iter().cloned());
             }
+            let agent_ids = state
+                .get("agents")
+                .and_then(serde_json::Value::as_object)
+                .map(|agents| agents.keys().cloned().collect::<Vec<_>>())
+                .or_else(|| {
+                    state
+                        .get("teams")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|teams| requested_team.as_ref().and_then(|team| teams.get(team)))
+                        .and_then(|team| team.get("agents"))
+                        .and_then(serde_json::Value::as_object)
+                        .map(|agents| agents.keys().cloned().collect())
+                })
+                .unwrap_or_default();
             return Ok(QuickStartReport::ExistingRuntime {
                 team: requested_team.clone(),
                 session_name,
                 state_path: Some(state_path),
                 next_actions,
                 attach_commands,
+                agent_ids,
             });
         }
     }
@@ -1343,6 +1387,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         attach_commands,
         display_backend,
         worker_readiness,
+        team: state_team_key,
     })
 }
 

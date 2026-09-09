@@ -1308,10 +1308,14 @@ fn restart_with_selected_team_and_transport(
             Some(selected.team_key.as_str()),
             &state,
         );
+        let persisted = load_restart_bind_state(
+            &selected.run_workspace,
+            selected.team_key.as_str(),
+        );
         let (leader_bind_ok, leader_bind_reason) = restart_bind_status(
             &selected.run_workspace,
             selected.team_key.as_str(),
-            &state,
+            persisted.as_ref().unwrap_or(&state),
         );
         return Ok(RestartReport::Partial {
             session_name,
@@ -1341,6 +1345,7 @@ fn restart_with_selected_team_and_transport(
     // user can still run `team-agent attach-leader` manually.
     let attach_window_failures =
         try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+    let persisted = load_restart_bind_state(&selected.run_workspace, selected.team_key.as_str());
     if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
     {
         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
@@ -1357,7 +1362,7 @@ fn restart_with_selected_team_and_transport(
     let (leader_bind_ok, leader_bind_reason) = restart_bind_status(
         &selected.run_workspace,
         selected.team_key.as_str(),
-        &state,
+        persisted.as_ref().unwrap_or(&state),
     );
     Ok(RestartReport::Restarted {
         session_name,
@@ -1838,24 +1843,33 @@ fn verify_spawned_agent_live(
 /// E51 guard). In that case the user must still run `attach-leader` manually,
 /// matching pre-fix behaviour. We log to stderr so the operator sees why
 /// auto-attach didn't take.
+fn load_restart_bind_state(
+    workspace: &std::path::Path,
+    team_key: &str,
+) -> Option<serde_json::Value> {
+    crate::state::projection::select_runtime_state(workspace, Some(team_key)).ok()
+}
+
 fn selected_team_receiver<'a>(
     state: &'a serde_json::Value,
     team_key: &str,
 ) -> Option<&'a serde_json::Value> {
-    state
-        .get("teams")
-        .and_then(|teams| teams.get(team_key))
-        .and_then(|team| team.get("leader_receiver"))
-        .or_else(|| {
-            let active = state
-                .get("active_team_key")
-                .and_then(serde_json::Value::as_str);
-            if active == Some(team_key) {
-                state.get("leader_receiver")
-            } else {
-                None
-            }
-        })
+    crate::lifecycle::launch::selected_team_leader_receiver(state, team_key)
+}
+
+fn transport_for_receiver(
+    workspace: &std::path::Path,
+    receiver: &serde_json::Value,
+) -> Box<dyn crate::transport::Transport> {
+    if let Some(endpoint) = receiver
+        .get("tmux_socket")
+        .and_then(serde_json::Value::as_str)
+        .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")
+    {
+        Box::new(crate::transport_factory::tmux_endpoint_transport(endpoint))
+    } else {
+        Box::new(crate::transport_factory::tmux_workspace_transport(workspace))
+    }
 }
 
 fn restart_bind_status(
@@ -1866,27 +1880,44 @@ fn restart_bind_status(
     let Some(receiver) = selected_team_receiver(state, team_key) else {
         return (false, Some("selected_team_receiver_missing".to_string()));
     };
-    let transport = crate::transport_factory::tmux_workspace_transport(workspace);
-    match crate::messaging::leader_channel::resolve_live_leader_channel(
-        workspace, receiver, &transport,
+    let transport = transport_for_receiver(workspace, receiver);
+    let live = match crate::messaging::leader_channel::resolve_live_leader_channel(
+        workspace, receiver, transport.as_ref(),
     ) {
-        crate::messaging::leader_channel::LeaderChannelResolution::Live(_) => (true, None),
+        crate::messaging::leader_channel::LeaderChannelResolution::Live(_) => true,
         crate::messaging::leader_channel::LeaderChannelResolution::Unbound(reason) => {
-            (false, Some(reason.reason_code().to_string()))
+            return (false, Some(reason.reason_code().to_string()));
         }
         crate::messaging::leader_channel::LeaderChannelResolution::ProbeFailed(error) => {
-            (false, Some(format!("probe_failed:{error}")))
+            return (false, Some(format!("probe_failed:{error}")));
         }
+    };
+    match crate::lifecycle::launch::classify_leader_binding(workspace, team_key) {
+        crate::lifecycle::launch::LeaderBindingClass::Attached => (live, None),
+        crate::lifecycle::launch::LeaderBindingClass::IndexMissing if live => {
+            (true, Some("registry_index_missing".to_string()))
+        }
+        crate::lifecycle::launch::LeaderBindingClass::Unknown if live => {
+            (true, Some("leader_binding_unknown".to_string()))
+        }
+        other => (false, Some(other.issue_id().to_string())),
     }
 }
 
-fn owner_conflicts_with_caller(state: &serde_json::Value, team_key: &str) -> bool {
+fn owner_conflicts_with_caller(
+    workspace: &std::path::Path,
+    state: &serde_json::Value,
+    team_key: &str,
+) -> bool {
+    let Some(receiver) = selected_team_receiver(state, team_key) else {
+        return false;
+    };
     let Some(owner_pane) = state
         .get("teams")
         .and_then(|teams| teams.get(team_key))
         .and_then(|team| team.pointer("/team_owner/pane_id"))
         .and_then(serde_json::Value::as_str)
-        .or_else(|| state.pointer("/team_owner/pane_id").and_then(serde_json::Value::as_str))
+        .or_else(|| receiver.get("pane_id").and_then(serde_json::Value::as_str))
     else {
         return false;
     };
@@ -1896,7 +1927,61 @@ fn owner_conflicts_with_caller(state: &serde_json::Value, team_key: &str) -> boo
     else {
         return false;
     };
-    owner_pane != caller
+    let owner_socket = receiver
+        .get("tmux_socket")
+        .and_then(serde_json::Value::as_str);
+    let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let same_socket = match (owner_socket, caller_socket.as_deref()) {
+        (Some(owner), Some(caller)) => owner == caller,
+        _ => true,
+    };
+    if owner_pane == caller && same_socket {
+        return false;
+    }
+    let transport = transport_for_receiver(workspace, receiver);
+    matches!(
+        crate::messaging::leader_channel::resolve_live_leader_channel(
+            workspace,
+            receiver,
+            transport.as_ref(),
+        ),
+        crate::messaging::leader_channel::LeaderChannelResolution::Live(_)
+    )
+}
+
+fn maintain_live_binding_index(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    state: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let team_key = team.unwrap_or("");
+    let _ = crate::leader::registry::register_binding_from_state_best_effort(
+        workspace,
+        team,
+        "restart-live-index",
+    );
+    let receiver = selected_team_receiver(state, team_key)?;
+    let pane = receiver
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())?;
+    let store = crate::message_store::MessageStore::open(workspace).ok()?;
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let team_id = crate::model::ids::TeamKey::new(team_key.to_string());
+    let pane_id = crate::transport::PaneId::new(pane);
+    crate::messaging::watchers::requeue_delivery_exhausted_watchers(
+        workspace,
+        &store,
+        &event_log,
+        &team_id,
+        &pane_id,
+    )
+    .ok()
+    .map(|notices| {
+        serde_json::json!({
+            "notices": notices.len(),
+        })
+    })
 }
 
 fn try_autobind_leader_after_restart(
@@ -1906,27 +1991,22 @@ fn try_autobind_leader_after_restart(
 ) -> Option<serde_json::Value> {
     let team_key = team.unwrap_or("");
     if restart_bind_status(workspace, team_key, state).0 {
-        return None;
+        return maintain_live_binding_index(workspace, team, state);
     }
-    if owner_conflicts_with_caller(state, team_key) {
+    if owner_conflicts_with_caller(workspace, state, team_key) {
         eprintln!(
             "team_agent::restart auto_attach_leader skipped reason=owner_conflict team={team:?}"
         );
         return None;
     }
     if std::env::var_os("TMUX_PANE").is_none() {
-        return None;
+        return maintain_live_binding_index(workspace, team, state);
     }
     let Some(provider) = state
         .get("teams")
         .and_then(|teams| teams.get(team_key))
         .and_then(|team| team.pointer("/team_owner/provider"))
         .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            state
-                .pointer("/team_owner/provider")
-                .and_then(serde_json::Value::as_str)
-        })
         .or_else(|| {
             selected_team_receiver(state, team_key)
                 .and_then(|receiver| receiver.get("provider"))

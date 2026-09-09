@@ -3294,10 +3294,22 @@ pub mod lifecycle_port {
                 "caller_pane_missing".to_string(),
                 Some("run from the intended leader tmux pane; do not run claim-leader".to_string()),
             ),
-            _ => (
+            Some("registry_readback_unavailable")
+            | Some("receiver_scope_unavailable")
+            | Some("receiver_live_channel_unavailable") => (
+                "leader_binding_unknown",
+                reason.unwrap_or("unknown").to_string(),
+                Some("team-agent diagnose --json".to_string()),
+            ),
+            Some("no_attached_owner") => (
                 "leader_receiver_unbound",
-                reason.unwrap_or("no_attached_owner").to_string(),
+                "no_attached_owner".to_string(),
                 Some("team-agent claim-leader --confirm --json".to_string()),
+            ),
+            _ => (
+                "leader_binding_unknown",
+                reason.unwrap_or("unclassified_bind_failure").to_string(),
+                Some("team-agent diagnose --json".to_string()),
             ),
         }
     }
@@ -3334,6 +3346,7 @@ pub mod lifecycle_port {
                 attach_commands,
                 display_backend,
                 worker_readiness,
+                team,
             } => {
                 // BUG-7: never emit bare "ready" while worker tool-load is unverified.
                 // The summary string + a structured `worker_readiness` block tell the
@@ -3468,6 +3481,7 @@ pub mod lifecycle_port {
                     "reason": readiness_json.get("reason").cloned().unwrap_or(Value::Null),
                     "ready": readiness_json.get("ready").cloned().unwrap_or(Value::Bool(false)),
                     "session_name": session_name.as_str(),
+                    "team": team,
                     "agent_ids": launch.started.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
                     "dry_run": launch.dry_run,
                     "display_backend": display_backend,
@@ -3484,12 +3498,14 @@ pub mod lifecycle_port {
                 state_path,
                 next_actions,
                 attach_commands,
+                agent_ids,
             } => json!({
                 "ok": false,
                 "status": "existing_runtime",
                 "reason": "team already has runtime state; use restart",
                 "summary": "existing runtime",
                 "team": team,
+                "agent_ids": agent_ids,
                 "session_name": session_name.map(|s| s.as_str().to_string()),
                 "state_path": state_path.map(|p| p.to_string_lossy().to_string()),
                 "next_actions": next_actions,
@@ -3608,6 +3624,29 @@ pub mod lifecycle_port {
         }
 
         #[test]
+        fn existing_runtime_json_includes_canonical_team_and_agent_ids() {
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: Some("from-spec".to_string()),
+                session_name: Some(crate::transport::SessionName::new("team-from-spec")),
+                state_path: Some(PathBuf::from("/tmp/state.json")),
+                next_actions: vec!["restart".to_string()],
+                attach_commands: Vec::new(),
+                agent_ids: vec!["sol".to_string(), "luna".to_string()],
+            });
+            assert_eq!(value.get("team").and_then(Value::as_str), Some("from-spec"));
+            assert_eq!(
+                value
+                    .get("agent_ids")
+                    .and_then(Value::as_array)
+                    .map(|items| items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()),
+                Some(vec!["sol", "luna"])
+            );
+        }
+
+        #[test]
         fn existing_runtime_json_includes_attach_commands() {
             let value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
                 team: Some("teamA".to_string()),
@@ -3617,6 +3656,7 @@ pub mod lifecycle_port {
                 attach_commands: vec![
                     "tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker".to_string()
                 ],
+                agent_ids: vec!["worker".to_string()],
             });
             assert_eq!(
                 value.pointer("/attach_commands/0").and_then(Value::as_str),
@@ -3781,7 +3821,10 @@ pub mod lifecycle_port {
                 if let Some(debt) = attach_window_failures {
                     value["attach_window_failures"] = debt;
                 }
-                let _ = leader_bind_ok;
+                if !leader_bind_ok {
+                    value["ok"] = json!(false);
+                    value["status"] = json!("partial_binding_incomplete");
+                }
                 if let Some(reason) = leader_bind_reason {
                     value["leader_bind_reason"] = json!(reason);
                 }

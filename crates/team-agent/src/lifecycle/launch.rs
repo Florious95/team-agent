@@ -360,7 +360,10 @@ pub(crate) use quick_start_transport::{
 };
 
 pub mod readiness;
-pub use readiness::launched_team_receiver_is_attached;
+pub use readiness::{
+    classify_leader_binding, launched_team_receiver_is_attached, selected_team_leader_receiver,
+    LeaderBindingClass,
+};
 pub(super) use readiness::*;
 
 mod add_agent;

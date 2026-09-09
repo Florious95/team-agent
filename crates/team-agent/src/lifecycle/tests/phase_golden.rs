@@ -195,15 +195,33 @@ fn phase_golden_unbound_not_ready_requires_claim_leader() {
         .get("suggested_repairs")
         .map(Value::to_string)
         .unwrap_or_default();
+    let issue_ids: Vec<&str> = issues
+        .iter()
+        .filter_map(|issue| issue.as_str())
+        .collect();
     assert!(
-        !repairs.contains("claim-leader")
-            || issues.iter().any(|issue| issue.as_str() == Some("leader_not_attached")
-                && diagnose
-                    .pointer("/binding/kind")
-                    .and_then(Value::as_str)
-                    == Some("unbound")),
-        "claim-leader is only legal for proven missing ownership; diagnose={diagnose}"
+        issue_ids.iter().any(|id| {
+            matches!(
+                *id,
+                "leader_receiver_unbound"
+                    | "leader_registry_index_missing"
+                    | "leader_binding_unknown"
+                    | "leader_receiver_not_committed"
+            )
+        }),
+        "diagnose must classify missing index/unknown/unbound; diagnose={diagnose}"
     );
+    if issue_ids.contains(&"leader_receiver_unbound") {
+        assert!(
+            repairs.contains("claim-leader"),
+            "proven unbound may recommend claim-leader; diagnose={diagnose}"
+        );
+    } else {
+        assert!(
+            !repairs.contains("team-agent claim-leader --confirm"),
+            "unknown/index-missing must not force claim-leader; diagnose={diagnose}"
+        );
+    }
 }
 
 #[derive(Clone, Copy)]

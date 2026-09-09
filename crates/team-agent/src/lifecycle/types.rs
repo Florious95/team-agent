@@ -621,6 +621,7 @@ pub enum QuickStartReport {
         /// [`QuickStartReadiness::PendingToolLoad`] (or `Degraded` if any agent
         /// failed to spawn) so the CLI surface cannot lie about availability.
         worker_readiness: QuickStartReadiness,
+        team: String,
     },
     /// 已有 runtime state → quick-start 拒绝并引导用 restart。
     ExistingRuntime {
@@ -629,6 +630,7 @@ pub enum QuickStartReport {
         state_path: Option<PathBuf>,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
+        agent_ids: Vec<String>,
     },
     /// preflight 阻塞(`quick_start.py:59`)。
     PreflightBlocked {

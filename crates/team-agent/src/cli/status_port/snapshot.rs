@@ -95,17 +95,21 @@ impl RuntimeSnapshot {
             .filter(|team| !team.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| crate::state::projection::team_state_key(state));
-        if !team_key.is_empty()
-            && !crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
-        {
-            if let Some(object) = readiness.as_object_mut() {
-                object.insert("all_attached_receiver".to_string(), json!(false));
-                object.insert("ready".to_string(), json!(false));
-                object.insert("state".to_string(), json!("leader_receiver_unbound"));
-                object.insert(
-                    "reason".to_string(),
-                    json!("leader registry does not authorize this workspace"),
-                );
+        if !team_key.is_empty() {
+            let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
+            if class != crate::lifecycle::launch::LeaderBindingClass::Attached {
+                if let Some(object) = readiness.as_object_mut() {
+                    object.insert("all_attached_receiver".to_string(), json!(false));
+                    object.insert("ready".to_string(), json!(false));
+                    object.insert("state".to_string(), json!(class.issue_id()));
+                    object.insert("reason".to_string(), json!(class.issue_id()));
+                    if class == crate::lifecycle::launch::LeaderBindingClass::Unbound {
+                        object.insert(
+                            "next_action".to_string(),
+                            json!(class.repair()),
+                        );
+                    }
+                }
             }
         }
         let grok_slot = crate::cli::grok_slot_report(workspace, state).to_json();

@@ -229,3 +229,59 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
 }
+
+#[cfg(test)]
+mod claim_rework_live_tests {
+    use super::*;
+    use crate::transport::test_support::OfflineTransport;
+    use crate::transport::{PaneId, PaneInfo, SessionName};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    #[test]
+    fn pending_receiver_is_not_a_live_channel() {
+        let workspace = PathBuf::from("/tmp/claim-rework-a3-pending");
+        let receiver = json!({
+            "mode": "direct_tmux",
+            "status": "pending",
+            "pane_id": "%1",
+            "tmux_socket": "/tmp/ta-offline.sock"
+        });
+        let transport = OfflineTransport::default().with_tmux_endpoint("/tmp/ta-offline.sock");
+        match resolve_live_leader_channel(&workspace, &receiver, &transport) {
+            LeaderChannelResolution::Unbound(LeaderChannelUnbound::ReceiverNotAttached) => {}
+            other => panic!("pending seed must not be live; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dead_pane_with_matching_endpoint_is_pane_not_live() {
+        let workspace = PathBuf::from("/tmp/claim-rework-a3-dead");
+        let endpoint = "/tmp/ta-claim-rework-a3.sock";
+        let receiver = json!({
+            "mode": "direct_tmux",
+            "status": "attached",
+            "pane_id": "%missing",
+            "tmux_socket": endpoint
+        });
+        let transport = OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![PaneInfo {
+                pane_id: PaneId::new("%other"),
+                session: SessionName::new("team"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        match resolve_live_leader_channel(&workspace, &receiver, &transport) {
+            LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneNotLive) => {}
+            other => panic!("matching endpoint + missing pane must be PaneNotLive; got {other:?}"),
+        }
+    }
+}

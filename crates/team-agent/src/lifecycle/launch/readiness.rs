@@ -116,28 +116,97 @@ pub(super) fn quick_start_session_capture_incomplete_agents(
 /// ---
 /// Host registry is the deliverability authority. Workspace `state.json`
 /// is only a copy. Detection failure is unbound, never attached.
-pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
-    match registry_deliverability(workspace, team_key) {
-        RegistryDeliverability::Attached => {}
-        RegistryDeliverability::Unbound | RegistryDeliverability::Undecidable => return false,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderBindingClass {
+    Attached,
+    IndexMissing,
+    Unknown,
+    Unbound,
+}
+
+impl LeaderBindingClass {
+    pub fn issue_id(self) -> &'static str {
+        match self {
+            Self::Attached => "leader_receiver_attached",
+            Self::IndexMissing => "leader_registry_index_missing",
+            Self::Unknown => "leader_binding_unknown",
+            Self::Unbound => "leader_receiver_unbound",
+        }
     }
-    let Ok(state) = load_runtime_state(workspace) else {
-        return false;
+
+    pub fn repair(self) -> &'static str {
+        match self {
+            Self::Attached => "",
+            Self::IndexMissing => {
+                "publish the leader registry index for the selected team; do not claim-leader"
+            }
+            Self::Unknown => "team-agent diagnose --json",
+            Self::Unbound => "team-agent claim-leader --confirm --json",
+        }
+    }
+}
+
+pub fn selected_team_leader_receiver<'a>(
+    state: &'a serde_json::Value,
+    team_key: &str,
+) -> Option<&'a serde_json::Value> {
+    if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {
+        if let Some(team) = teams.get(team_key) {
+            return team.get("leader_receiver");
+        }
+    }
+    state.get("leader_receiver")
+}
+
+pub fn classify_leader_binding(workspace: &Path, team_key: &str) -> LeaderBindingClass {
+    let registry = registry_deliverability(workspace, team_key);
+    let state = match load_runtime_state(workspace) {
+        Ok(state) => state,
+        Err(_) => {
+            return match registry {
+                RegistryDeliverability::Undecidable => LeaderBindingClass::Unknown,
+                _ => LeaderBindingClass::Unknown,
+            };
+        }
     };
-    let receiver = state
-        .get("teams")
-        .and_then(|teams| teams.get(team_key))
-        .and_then(|team| team.get("leader_receiver"))
-        .or_else(|| {
-            let active = state
-                .get("active_team_key")
-                .and_then(serde_json::Value::as_str);
-            (active == Some(team_key)).then(|| state.get("leader_receiver")).flatten()
-        });
-    receiver
+    let receiver = selected_team_leader_receiver(&state, team_key);
+    let receiver_attached = receiver
         .and_then(|value| value.get("status"))
         .and_then(serde_json::Value::as_str)
-        == Some("attached")
+        == Some("attached");
+    let has_owner = if let Some(team) = state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(team_key))
+    {
+        team.get("team_owner").is_some()
+    } else {
+        state.get("team_owner").is_some()
+    };
+    match registry {
+        RegistryDeliverability::Undecidable => LeaderBindingClass::Unknown,
+        RegistryDeliverability::Attached if receiver_attached => LeaderBindingClass::Attached,
+        RegistryDeliverability::Attached => LeaderBindingClass::Unknown,
+        RegistryDeliverability::Unbound if has_owner || receiver_attached => {
+            LeaderBindingClass::IndexMissing
+        }
+        RegistryDeliverability::Unbound => LeaderBindingClass::Unbound,
+    }
+}
+
+pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
+    classify_leader_binding(workspace, team_key) == LeaderBindingClass::Attached
+}
+
+#[cfg(test)]
+mod claim_rework_class_tests {
+    use super::*;
+
+    #[test]
+    fn undecidable_registry_dir_without_home_is_unknown_or_unbound() {
+        let class = classify_leader_binding(Path::new("/no/such/claim-rework-a3"), "alpha");
+        assert_ne!(class, LeaderBindingClass::Attached);
+    }
 }
 
 enum RegistryDeliverability {

@@ -186,7 +186,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                             .and_then(Value::as_str)
                             .unwrap_or("unknown"),
                         "leader_provider_unreachable",
-                        "team-agent diagnose --json",
+                        "leader pane provider is unreachable; restart the provider in the bound pane",
                     ));
                 }
                 crate::leader::LeaderProviderHealth::Alive => {}
@@ -290,17 +290,19 @@ fn append_registry_channel_unbound_issue(
     repairs: &mut Value,
 ) {
     let team_key = crate::state::projection::team_state_key(state);
-    if team_key.is_empty()
-        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
-    {
+    if team_key.is_empty() {
+        return;
+    }
+    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
+    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
         return;
     }
     if let Some(items) = issues.as_array_mut() {
         if !items.iter().any(|item| {
-            item.as_str() == Some("leader_not_attached")
-                || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
+            item.as_str() == Some(class.issue_id())
+                || item.get("id").and_then(Value::as_str) == Some(class.issue_id())
         }) {
-            items.push(json!("leader_not_attached"));
+            items.push(json!(class.issue_id()));
         }
     }
     if let Some(items) = repairs.as_array_mut() {
@@ -309,8 +311,8 @@ fn append_registry_channel_unbound_issue(
                 .get("session_name")
                 .and_then(Value::as_str)
                 .unwrap_or(team_key.as_str()),
-            "leader_not_attached",
-            "inspect selected-team registry and live channel; claim-leader only if ownership is missing",
+            class.issue_id(),
+            class.repair(),
         ));
     }
 }
@@ -454,9 +456,11 @@ pub(crate) fn append_registry_channel_unbound_to_report(
                 .map(|state| crate::state::projection::team_state_key(&state))
         })
         .unwrap_or_default();
-    if team_key.is_empty()
-        || crate::lifecycle::launch::launched_team_receiver_is_attached(workspace, &team_key)
-    {
+    if team_key.is_empty() {
+        return;
+    }
+    let class = crate::lifecycle::launch::classify_leader_binding(workspace, &team_key);
+    if class == crate::lifecycle::launch::LeaderBindingClass::Attached {
         return;
     }
     let Some(object) = report.as_object_mut() else {
@@ -467,11 +471,8 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if !issues.iter().any(|item| {
-        item.as_str() == Some("leader_not_attached")
-            || item.get("id").and_then(Value::as_str) == Some("leader_channel_unbound")
-    }) {
-        issues.push(json!("leader_not_attached"));
+    if !issues.iter().any(|item| item.as_str() == Some(class.issue_id())) {
+        issues.push(json!(class.issue_id()));
     }
     object.insert("issues".to_string(), Value::Array(issues));
     let mut repairs = object
@@ -479,11 +480,7 @@ pub(crate) fn append_registry_channel_unbound_to_report(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    repairs.push(recovery_hint(
-        &team_key,
-        "leader_not_attached",
-        "inspect selected-team registry and live channel; claim-leader only if ownership is missing",
-    ));
+    repairs.push(recovery_hint(&team_key, class.issue_id(), class.repair()));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
 }
 

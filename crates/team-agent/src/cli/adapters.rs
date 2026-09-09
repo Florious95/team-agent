@@ -188,15 +188,12 @@ fn append_send_guidance(value: &mut Value, workspace: &Path, team: Option<&str>)
     if value.get("ok").and_then(Value::as_bool) != Some(true) && !existing {
         return;
     }
-    let team = team
+    let team = value
+        .get("team")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty())
         .map(str::to_string)
-        .or_else(|| {
-            value
-                .get("team")
-                .and_then(Value::as_str)
-                .filter(|team| !team.is_empty())
-                .map(str::to_string)
-        });
+        .or_else(|| team.map(str::to_string));
     let team = team.as_deref();
     let agents = value
         .get("agent_ids")
@@ -1611,21 +1608,49 @@ mod tests {
         );
     }
 
+    fn split_shell_argv(command: &str) -> Vec<String> {
+        let mut argv = Vec::new();
+        let mut current = String::new();
+        let mut chars = command.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(ch) = chars.next() {
+            match (quote, ch) {
+                (None, '\'') | (None, '"') => quote = Some(ch),
+                (Some(q), c) if c == q => quote = None,
+                (None, c) if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        argv.push(std::mem::take(&mut current));
+                    }
+                }
+                (_, c) => current.push(c),
+            }
+        }
+        if !current.is_empty() {
+            argv.push(current);
+        }
+        argv
+    }
+
     #[test]
     fn send_command_message_is_one_argv_token() {
-        let command = send_command("coder", Path::new("/tmp/ws"), Some("team")).unwrap();
-        let parts: Vec<&str> = command.split_whitespace().collect();
+        let command = send_command(
+            "worker name; echo unsafe",
+            Path::new("/tmp/my workspace"),
+            Some("team-a"),
+        )
+        .unwrap();
+        let argv = split_shell_argv(&command);
         assert_eq!(
-            parts,
+            argv,
             [
                 "team-agent",
                 "send",
-                "coder",
+                "worker name; echo unsafe",
                 "MESSAGE",
                 "--workspace",
-                "/tmp/ws",
+                "/tmp/my workspace",
                 "--team",
-                "team"
+                "team-a"
             ]
         );
     }

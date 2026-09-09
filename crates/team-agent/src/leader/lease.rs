@@ -107,7 +107,24 @@ pub fn attach_leader(
     if let Some(endpoint) = target.endpoint.as_ref() {
         receiver.tmux_socket = Some(endpoint.clone());
     }
-    let validation = validate_attach_target(workspace, &state, &target.info, provider);
+    let validation = validate_attach_target(
+        workspace,
+        &state,
+        &target.info,
+        provider,
+        target.endpoint.as_deref(),
+    );
+    if validation.is_ok()
+        && grant_allows_attach_target(
+            workspace,
+            &state,
+            &target.info,
+            provider,
+            target.endpoint.as_deref(),
+        )
+    {
+        copy_verified_grant_from_state(&state, &target.info, target.endpoint.as_deref(), &mut receiver);
+    }
     if validation.is_err() {
         let pane_info = pane_info_value(&target.info);
         let targets_value = Value::Array(
@@ -1825,6 +1842,7 @@ fn validate_attach_target(
     state: &Value,
     target: &PaneInfo,
     requested_provider: Provider,
+    endpoint: Option<&str>,
 ) -> Result<(), &'static str> {
     // 0.5.9 (E6 real-machine e2e wiring): an explicit `--provider fake`
     // is the operator's declaration that this pane is a fake-provider
@@ -1837,7 +1855,7 @@ fn validate_attach_target(
     // provider list, only wired in test/fixture flows.
     let claim_target = match workspace_claim_target_from_pane_info(workspace, target) {
         Some(target) => Some(target),
-        None if grant_allows_attach_target(workspace, state, target) => {
+        None if grant_allows_attach_target(workspace, state, target, requested_provider, endpoint) => {
             claim_target_from_pane_info(target)
         }
         None if matches!(requested_provider, Provider::Fake) => None,
@@ -1875,28 +1893,34 @@ fn receiver_for_attach_target(
     let identity = leader_identity_context(workspace, None, Some(state))?;
     let epoch = current_owner_epoch(state);
     let pane = NonEmptyPaneId::try_from_pane(&target.pane_id)?;
-    let mut receiver = make_receiver(
+    Ok(make_receiver(
         provider,
         &pane,
         &identity.leader_session_uuid,
         epoch,
         discovery,
         Some(target.clone()),
-    );
-    copy_live_grant_from_state(state, target, &mut receiver);
-    Ok(receiver)
+    ))
 }
 
-fn grant_allows_attach_target(workspace: &Path, state: &Value, target: &PaneInfo) -> bool {
-    let Some(receiver) = state.get("leader_receiver").or_else(|| {
-        state
-            .get("teams")
-            .and_then(Value::as_object)
-            .and_then(|teams| {
-                let key = crate::state::projection::team_state_key(state);
-                teams.get(&key).and_then(|team| team.get("leader_receiver"))
-            })
-    }) else {
+fn selected_grant_receiver<'a>(state: &'a Value) -> Option<&'a Value> {
+    let key = crate::state::projection::team_state_key(state);
+    if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+        if let Some(team) = teams.get(&key) {
+            return team.get("leader_receiver");
+        }
+    }
+    state.get("leader_receiver")
+}
+
+fn grant_allows_attach_target(
+    workspace: &Path,
+    state: &Value,
+    target: &PaneInfo,
+    requested_provider: Provider,
+    endpoint: Option<&str>,
+) -> bool {
+    let Some(receiver) = selected_grant_receiver(state) else {
         return false;
     };
     let authority = receiver
@@ -1928,19 +1952,32 @@ fn grant_allows_attach_target(workspace: &Path, state: &Value, target: &PaneInfo
         .get(crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY)
         .map(String::as_str);
     let pane_ok = receiver.get("pane_id").and_then(Value::as_str) == Some(target.pane_id.as_str());
-    let socket_ok = match receiver.get("tmux_socket").and_then(Value::as_str) {
-        Some(socket) => target
-            .leader_env
-            .get("TMUX")
-            .map(|value| value.contains(socket) || socket.ends_with(value.as_str()))
-            .unwrap_or(true),
-        None => true,
+    let socket_ok = match (receiver.get("tmux_socket").and_then(Value::as_str), endpoint) {
+        (Some(recorded), Some(actual)) => recorded == actual,
+        (None, _) | (_, None) => false,
     };
-    pane_ok && socket_ok && live_nonce == Some(recorded_nonce)
+    let provider_ok = receiver
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(crate::provider::wire::parse_provider)
+        == Some(requested_provider);
+    let owner_epoch = get_path_u64(state, &["team_owner", "owner_epoch"])
+        .or_else(|| get_path_u64(state, &["leader_receiver", "owner_epoch"]));
+    let receiver_epoch = receiver.get("owner_epoch").and_then(Value::as_u64);
+    let epoch_ok = match (owner_epoch, receiver_epoch) {
+        (Some(owner), Some(recv)) => owner == recv,
+        _ => true,
+    };
+    pane_ok && socket_ok && live_nonce == Some(recorded_nonce) && provider_ok && epoch_ok
 }
 
-fn copy_live_grant_from_state(state: &Value, target: &PaneInfo, receiver: &mut LeaderReceiver) {
-    let Some(existing) = state.get("leader_receiver") else {
+fn copy_verified_grant_from_state(
+    state: &Value,
+    target: &PaneInfo,
+    _endpoint: Option<&str>,
+    receiver: &mut LeaderReceiver,
+) {
+    let Some(existing) = selected_grant_receiver(state) else {
         return;
     };
     if existing.get("pane_id").and_then(Value::as_str) != Some(target.pane_id.as_str()) {
