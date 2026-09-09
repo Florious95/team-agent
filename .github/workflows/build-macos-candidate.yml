@@ -155,6 +155,20 @@ jobs:
             exit 1
           fi
 
+          package_name="$(awk '
+            /^\[package\]$/ { in_package=1; next }
+            in_package && /^\[/ { exit }
+            in_package && /^[[:space:]]*name[[:space:]]*=/ {
+              sub(/^[^\"]*\"/, "")
+              sub(/\".*$/, "")
+              print
+              exit
+            }
+          ' crates/team-agent/Cargo.toml)"
+          if [[ "$package_name" != "team-agent" ]]; then
+            echo "::error::unexpected target package name: ${package_name}"
+            exit 1
+          fi
           version="$(awk '
             /^\[workspace\.package\]$/ { in_workspace=1; next }
             in_workspace && /^\[/ { exit }
@@ -169,6 +183,7 @@ jobs:
             echo "::error::workspace package version is missing"
             exit 1
           fi
+          expected_cli_version="${package_name} ${version}"
 
           rm -rf "$dist"
           mkdir -p "$dist"
@@ -176,6 +191,11 @@ jobs:
           chmod 755 "$binary"
           "$binary" --version > "${dist}/CLI-VERSION.txt"
           test -s "${dist}/CLI-VERSION.txt"
+          actual_cli_version="$(<"${dist}/CLI-VERSION.txt")"
+          if [[ "$actual_cli_version" != "$expected_cli_version" ]]; then
+            printf '::error::unexpected --version output: %s; expected %s\n' "$actual_cli_version" "$expected_cli_version"
+            exit 1
+          fi
 
           binary_sha256="$(shasum -a 256 "$binary" | awk '{ print $1 }')"
           cat > "${dist}/SOURCE.txt" <<EOF
@@ -186,8 +206,10 @@ jobs:
           repository=${GITHUB_REPOSITORY}
           EOF
           cat > "${dist}/BUILD.txt" <<EOF
-          workflow_sha=${GITHUB_SHA}
-          workflow_ref=${GITHUB_REF}
+          workflow_sha=${GITHUB_WORKFLOW_SHA}
+          workflow_ref=${GITHUB_WORKFLOW_REF}
+          run_context_sha=${GITHUB_SHA}
+          run_context_ref=${GITHUB_REF}
           workflow_run_id=${GITHUB_RUN_ID}
           workflow_run_attempt=${GITHUB_RUN_ATTEMPT}
           runner_name=${RUNNER_NAME}

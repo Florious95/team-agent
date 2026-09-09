@@ -16,7 +16,7 @@ source_sha=d80131d5f87643082227d37ab9aaf760a19228a5
 expected_tree=af5575b76df7893403881cbfdec3a0a4234edae6
 ```
 
-After this workflow is registered on the repository default branch, a dispatch can be made with the GitHub UI or equivalent API request. For example:
+GitHub first registers a `workflow_dispatch` definition only after the workflow file exists on the repository default branch. Once registered, `--ref` may select a branch or other ref that also contains this workflow definition; use `--ref main` when the definition is on `main`. For example:
 
 ```sh
 gh workflow run build-macos-candidate.yml \
@@ -42,4 +42,4 @@ It verifies the host and Rust target are arm64, checks the output is exactly a M
 - `CLI-VERSION.txt`;
 - `SHA256SUMS`.
 
-A workflow file on a non-default branch is not dispatchable through GitHub's normal workflow-dispatch surface. Until this PR is merged to the default branch, no candidate run is attempted; the workflow has no automatic trigger.
+A workflow file that exists only on a non-default branch is not registered yet, so the dispatch API is unavailable until an authorized default-branch registration. Until this PR is merged to the default branch, no candidate run is attempted; after registration, dispatch remains manual-only and has no automatic trigger.
