@@ -361,8 +361,8 @@ pub(crate) use quick_start_transport::{
 
 pub mod readiness;
 pub use readiness::{
-    classify_leader_binding, classify_leader_binding_at, launched_team_receiver_is_attached,
-    selected_team_leader_receiver, LeaderBindingClass,
+    classify_leader_binding, launched_team_receiver_is_attached, selected_team_leader_receiver,
+    LeaderBindingClass,
 };
 pub(super) use readiness::*;
 

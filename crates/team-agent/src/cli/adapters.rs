@@ -1590,7 +1590,7 @@ mod tests {
     use super::{
         agent_pane_id, append_send_guidance, quickstart_human, send_command, split_shell_argv,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
 
     // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
