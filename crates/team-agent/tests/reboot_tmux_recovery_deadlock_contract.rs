@@ -128,7 +128,6 @@ fn claim_uses_observed_target_endpoint_not_state_or_tmux_env() {
         TEAM,
         "--confirm",
         "--json",
-        "--detail",
     ]);
     let claim_json = json_output(&claim, "RED4 claim-leader");
     let observed = case.observed_caller_endpoint();
@@ -188,7 +187,6 @@ fn scoped_claim_persists_convergence_to_restart_selected_state() {
         RETAINED_TEAM,
         "--confirm",
         "--json",
-        "--detail",
     ]);
     let claim_json = json_output(&claim, "RED5 claim retained team");
     let state = case.read_state();
