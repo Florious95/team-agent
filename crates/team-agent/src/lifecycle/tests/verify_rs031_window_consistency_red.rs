@@ -103,13 +103,37 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
 fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_across_tmux_sockets()
 {
     let hermetic = HermeticTestEnv::enter("rs031-external-pane-collision");
-    let _tmux = hermetic.with_env("TMUX", "/tmp/default-tmux-socket,123,0");
+    let caller_endpoint = "/tmp/default-tmux-socket";
+    let _tmux = hermetic.with_env("TMUX", &format!("{caller_endpoint},123,0"));
     let _pane = hermetic.with_env("TMUX_PANE", "%0");
+    let _provider = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "codex");
     let team = codex_only_team_dir(&hermetic, "external-pane-collision");
-    let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
+    let workspace = team.parent().expect("teamdir has parent workspace");
+    let caller = PaneInfo {
+        pane_id: PaneId::new("%0"),
+        session: SessionName::new("leader"),
+        window_index: Some(0),
+        window_name: Some(WindowName::new("leader")),
+        pane_index: Some(0),
+        tty: None,
+        current_command: Some("codex".to_string()),
+        current_path: Some(workspace.to_path_buf()),
+        active: true,
+        pane_pid: None,
+        leader_env: Default::default(),
+    };
+    let transport = RecordingTransport::new()
+        .with_windows(vec![WindowName::new("codexer")])
+        .with_tmux_endpoint(caller_endpoint)
+        .with_targets(vec![caller.clone()]);
+    let live = crate::transport::test_support::OfflineTransport::default()
+        .with_tmux_endpoint(caller_endpoint)
+        .with_targets(vec![caller]);
     let launch = ready_launch(
-        quick_start_with_transport(&team, None, true, None, &transport)
-            .expect("quick-start should reach worker spawn path"),
+        crate::transport_factory::with_leader_endpoint_transport(caller_endpoint, live, || {
+            quick_start_with_transport(&team, None, true, None, &transport)
+        })
+        .expect("quick-start should reach worker spawn path"),
     );
     let worker_pane = launch
         .started
@@ -122,7 +146,6 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
         "fixture precondition: first worker in the product -L socket receives bare pane id %0"
     );
 
-    let workspace = team.parent().expect("teamdir has parent workspace");
     let state = load_runtime_state(workspace).expect("runtime state written by launch");
     let top_receiver_pane = state
         .get("leader_receiver")
@@ -765,6 +788,7 @@ struct RecordingState {
     spawn_argvs: Vec<Vec<String>>,
     liveness: BTreeMap<String, PaneLiveness>,
     targets: Vec<PaneInfo>,
+    tmux_endpoint: Option<String>,
 }
 
 impl RecordingTransport {
@@ -789,6 +813,11 @@ impl RecordingTransport {
         self
     }
 
+    fn with_tmux_endpoint(self, endpoint: impl Into<String>) -> Self {
+        self.with_state(|state| state.tmux_endpoint = Some(endpoint.into()));
+        self
+    }
+
     fn inject_targets(&self) -> Vec<Target> {
         self.with_state(|state| state.inject_targets.clone())
     }
@@ -810,6 +839,10 @@ impl RecordingTransport {
 impl Transport for RecordingTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
+    }
+
+    fn tmux_endpoint(&self) -> Option<String> {
+        self.with_state(|state| state.tmux_endpoint.clone())
     }
 
     fn spawn_first(

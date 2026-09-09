@@ -377,6 +377,7 @@ fn save_runtime_state_with_merge_options(
         exact_owner_seed_to_clear,
         None,
         None,
+        None,
     )
 }
 
@@ -398,6 +399,7 @@ pub(crate) fn save_runtime_state_with_receiver_authority_and_expected(
         Some(receiver_team_key),
         None,
         Some((expected_owner, expected_receiver)),
+        None,
         None,
     )
 }
@@ -421,6 +423,38 @@ pub(crate) fn save_runtime_state_with_exact_owner_receiver_cleanup(
         None,
         None,
         Some((team_key, expected_owner, expected_receiver)),
+        None,
+    )
+}
+
+pub(crate) fn save_runtime_state_with_exact_owner_receiver_restore(
+    workspace: &Path,
+    state: &Value,
+    team_key: &str,
+    expected_owner: &Value,
+    expected_receiver: &Value,
+    previous_owner: &Value,
+    previous_receiver: &Value,
+) -> Result<(), StateError> {
+    persist_runtime_state_with_merge_options_and_expected(
+        workspace,
+        state,
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        Some(team_key),
+        None,
+        None,
+        None,
+        Some((
+            team_key,
+            expected_owner,
+            expected_receiver,
+            previous_owner,
+            previous_receiver,
+        )),
     )
 }
 
@@ -436,6 +470,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
     exact_owner_seed_to_clear: Option<&Value>,
     expected_owner_receiver: Option<(&Value, &Value)>,
     exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
+    exact_owner_receiver_to_restore: Option<(&str, &Value, &Value, &Value, &Value)>,
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
@@ -459,7 +494,8 @@ fn persist_runtime_state_with_merge_options_and_expected(
     // and leave the seed, or skip copying a concurrent owner.
     let skip_pre_lock_fast_path = exact_owner_seed_to_clear.is_some()
         || expected_owner_receiver.is_some()
-        || exact_owner_receiver_to_clear.is_some();
+        || exact_owner_receiver_to_clear.is_some()
+        || exact_owner_receiver_to_restore.is_some();
     if !skip_pre_lock_fast_path && cache_equals(&path, &migrated) {
         return Ok(());
     }
@@ -544,6 +580,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
             &receiver_updates,
             receiver_update_team_key.zip(exact_owner_seed_to_clear),
             exact_owner_receiver_to_clear,
+            exact_owner_receiver_to_restore,
         )?;
     }
     // Stage 3 save-output strip second pass (defence-in-depth): after the
@@ -613,6 +650,7 @@ fn apply_persist_merge_contract(
     receiver_updates: &BTreeSet<String>,
     exact_owner_seed_to_clear: Option<(&str, &Value)>,
     exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
+    exact_owner_receiver_to_restore: Option<(&str, &Value, &Value, &Value, &Value)>,
 ) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
@@ -742,6 +780,25 @@ fn apply_persist_merge_contract(
                         latest_entry,
                         seed,
                         Some(expected_receiver),
+                    );
+                }
+            }
+            if let Some((
+                restore_team,
+                expected_owner,
+                expected_receiver,
+                previous_owner,
+                previous_receiver,
+            )) = exact_owner_receiver_to_restore
+            {
+                if team == restore_team {
+                    apply_lock_held_exact_owner_receiver_restore(
+                        incoming_entry,
+                        latest_entry,
+                        expected_owner,
+                        expected_receiver,
+                        previous_owner,
+                        previous_receiver,
                     );
                 }
             }
@@ -902,6 +959,43 @@ fn apply_lock_held_exact_owner_receiver_cleanup(
             .get("owner_epoch")
             .cloned()
             .or_else(|| latest_owner.and_then(|owner| owner.get("owner_epoch")).cloned())
+        {
+            incoming_obj.insert("owner_epoch".to_string(), epoch);
+        }
+        return;
+    }
+    for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+        match latest.get(key) {
+            Some(value) => {
+                incoming_obj.insert(key.to_string(), value.clone());
+            }
+            None => {
+                incoming_obj.remove(key);
+            }
+        }
+    }
+}
+
+fn apply_lock_held_exact_owner_receiver_restore(
+    incoming: &mut Value,
+    latest: &Value,
+    expected_owner: &Value,
+    expected_receiver: &Value,
+    previous_owner: &Value,
+    previous_receiver: &Value,
+) {
+    let latest_owner = latest.get("team_owner");
+    let latest_receiver = latest.get("leader_receiver");
+    let Some(incoming_obj) = incoming.as_object_mut() else {
+        return;
+    };
+    if latest_owner == Some(expected_owner) && latest_receiver == Some(expected_receiver) {
+        incoming_obj.insert("team_owner".to_string(), previous_owner.clone());
+        incoming_obj.insert("leader_receiver".to_string(), previous_receiver.clone());
+        if let Some(epoch) = previous_owner
+            .get("owner_epoch")
+            .cloned()
+            .or_else(|| latest.get("owner_epoch").cloned())
         {
             incoming_obj.insert("owner_epoch".to_string(), epoch);
         }
@@ -3113,6 +3207,7 @@ mod tests {
             &BTreeSet::new(),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -3147,6 +3242,7 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &receiver_updates,
+            None,
             None,
             None,
         )

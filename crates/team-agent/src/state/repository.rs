@@ -52,6 +52,8 @@ use super::persist::{
         as helper_write_root_with_receiver_authority_and_expected,
     save_runtime_state_with_exact_owner_receiver_cleanup
         as helper_write_root_with_exact_owner_receiver_cleanup,
+    save_runtime_state_with_exact_owner_receiver_restore
+        as helper_write_root_with_exact_owner_receiver_restore,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority as helper_write_root_with_team_tombstone_lifecycle_topology_authority,
     save_runtime_state_with_team_tombstoned_agents as helper_write_root_with_team_tombstoned_agents,
     save_runtime_state_without_migrations as helper_write_root_without_migrations,
@@ -223,6 +225,13 @@ pub enum StateWriteIntent<'a> {
         team_key: &'a str,
         seed: &'a Value,
         expected_receiver: &'a Value,
+    },
+    RestoreExactTeamOwnerAndReceiver {
+        team_key: &'a str,
+        expected_owner: &'a Value,
+        expected_receiver: &'a Value,
+        previous_owner: &'a Value,
+        previous_receiver: &'a Value,
     },
     LeaderBindingRestoreNonTargetTeams {
         target_team_key: &'a str,
@@ -427,6 +436,21 @@ fn route_direct(
             team_key,
             seed,
             expected_receiver,
+        ),
+        StateWriteIntent::RestoreExactTeamOwnerAndReceiver {
+            team_key,
+            expected_owner,
+            expected_receiver,
+            previous_owner,
+            previous_receiver,
+        } => helper_write_root_with_exact_owner_receiver_restore(
+            workspace,
+            state,
+            team_key,
+            expected_owner,
+            expected_receiver,
+            previous_owner,
+            previous_receiver,
         ),
         StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
             helper_write_root_without_migrations(workspace, state)

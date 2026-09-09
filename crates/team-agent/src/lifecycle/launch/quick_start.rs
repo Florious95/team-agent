@@ -78,6 +78,9 @@ trait FreshQuickStartLeaderBindingOps {
     fn frozen_seed_receipt(&self) -> Option<(serde_json::Value, serde_json::Value)> {
         None
     }
+    fn this_attempt_extra_state_keys(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
 }
 
 struct RuntimeFreshQuickStartLeaderBindingOps<'a> {
@@ -636,42 +639,53 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
             let registry_rollback_error = ops
                 .registry_receipt()
                 .and_then(|receipt| restore_registry_receipt(&snapshots, &receipt).err());
-            if let Some((expected_owner, expected_receiver)) = cleanup_grant.as_ref() {
+            let state_rollback_error = if let Some((expected_owner, expected_receiver)) =
+                cleanup_grant.as_ref()
+            {
                 clear_fresh_binding_on_refusal(
                     workspace,
                     &mut state,
                     team_key,
                     expected_owner,
                     Some((expected_owner, expected_receiver)),
-                )?;
+                )
+                .err()
             } else if let Some(seed) = seeded_owner.filter(|seed| {
                 state
                     .get("team_owner")
                     .is_some_and(|current| current == *seed)
             }) {
-                clear_fresh_binding_on_refusal(workspace, &mut state, team_key, seed, None)?;
-            }
-            if let Some(error) = registry_rollback_error {
-                return Err(error);
-            }
-        } else {
-            // Existing bindings are not this attempt's to rewrite. Only
-            // roll back this attempt's exact grant under the persist lock;
-            // never restore a lock-free whole-file snapshot (that would
-            // clobber a concurrent winner). No this-attempt write → leave disk.
-            let registry_rollback_error = ops
-                .registry_receipt()
-                .and_then(|receipt| restore_registry_receipt(&snapshots, &receipt).err());
-            if let Some((expected_owner, expected_receiver)) = ops.applied_grant().as_ref() {
+                clear_fresh_binding_on_refusal(workspace, &mut state, team_key, seed, None).err()
+            } else {
                 restore_this_attempt_state(
                     workspace,
                     team_key,
                     snapshots.first(),
-                    expected_owner,
-                    expected_receiver,
-                )?;
+                    ops.applied_grant().as_ref(),
+                    &ops.this_attempt_extra_state_keys(),
+                )
+                .err()
+            };
+            if let Some(error) =
+                combine_rollback_errors(state_rollback_error, registry_rollback_error)
+            {
+                return Err(error);
             }
-            if let Some(error) = registry_rollback_error {
+        } else {
+            let registry_rollback_error = ops
+                .registry_receipt()
+                .and_then(|receipt| restore_registry_receipt(&snapshots, &receipt).err());
+            let state_rollback_error = restore_this_attempt_state(
+                workspace,
+                team_key,
+                snapshots.first(),
+                ops.applied_grant().as_ref(),
+                &ops.this_attempt_extra_state_keys(),
+            )
+            .err();
+            if let Some(error) =
+                combine_rollback_errors(state_rollback_error, registry_rollback_error)
+            {
                 return Err(error);
             }
         }
@@ -679,14 +693,30 @@ fn bind_fresh_quick_start_leader_with<O: FreshQuickStartLeaderBindingOps>(
     Ok(committed)
 }
 
+fn combine_rollback_errors(
+    state: Option<LifecycleError>,
+    registry: Option<LifecycleError>,
+) -> Option<LifecycleError> {
+    match (state, registry) {
+        (None, None) => None,
+        (Some(error), None) | (None, Some(error)) => Some(error),
+        (Some(state), Some(registry)) => Some(LifecycleError::StatePersist(format!(
+            "{state}; {registry}"
+        ))),
+    }
+}
+
 fn restore_this_attempt_state(
     workspace: &Path,
     team_key: &str,
     snapshot: Option<&BindingFileSnapshot>,
-    expected_owner: &serde_json::Value,
-    expected_receiver: &serde_json::Value,
+    this_grant: Option<&(serde_json::Value, serde_json::Value)>,
+    extra_keys: &[&str],
 ) -> Result<(), LifecycleError> {
-    let current = match crate::state::persist::load_runtime_state(workspace) {
+    if this_grant.is_none() && extra_keys.is_empty() {
+        return Ok(());
+    }
+    let mut current = match crate::state::persist::load_runtime_state(workspace) {
         Ok(state) => state,
         Err(error) => {
             return Err(LifecycleError::StatePersist(format!(
@@ -694,31 +724,86 @@ fn restore_this_attempt_state(
             )));
         }
     };
-    let current_owner = current
-        .pointer(&format!("/teams/{team_key}/team_owner"))
-        .or_else(|| current.get("team_owner"));
-    let current_receiver = current
-        .pointer(&format!("/teams/{team_key}/leader_receiver"))
-        .or_else(|| current.get("leader_receiver"));
-    if current_owner != Some(expected_owner) || current_receiver != Some(expected_receiver) {
-        return Ok(());
-    }
-    let Some(bytes) = snapshot.and_then(|snapshot| snapshot.bytes.as_deref()) else {
-        return Ok(());
+    strip_this_attempt_extra_keys(&mut current, extra_keys);
+    let Some((expected_owner, expected_receiver)) = this_grant else {
+        return crate::state::persist::save_runtime_state(workspace, &current).map_err(|error| {
+            LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+        });
     };
-    let previous: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
-        LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
-    })?;
-    crate::state::persist::save_runtime_state_with_receiver_authority_and_expected(
-        workspace,
-        &previous,
-        team_key,
-        expected_owner,
-        expected_receiver,
-    )
-    .map_err(|error| {
-        LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
-    })
+    let previous = match snapshot.map(|snapshot| snapshot.bytes.as_deref()) {
+        Some(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
+            LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+        })?,
+        Some(None) | None => serde_json::Value::Null,
+    };
+    let previous_owner = previous
+        .pointer(&format!("/teams/{team_key}/team_owner"))
+        .cloned()
+        .or_else(|| previous.get("team_owner").cloned())
+        .unwrap_or(serde_json::Value::Null);
+    let previous_receiver = previous
+        .pointer(&format!("/teams/{team_key}/leader_receiver"))
+        .cloned()
+        .or_else(|| previous.get("leader_receiver").cloned())
+        .unwrap_or(serde_json::Value::Null);
+    let no_previous_binding = previous_owner.is_null() && previous_receiver.is_null();
+    if no_previous_binding {
+        if let Some(team) = current
+            .get_mut("teams")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|teams| teams.get_mut(team_key))
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            team.insert("team_owner".to_string(), serde_json::Value::Null);
+            team.insert("leader_receiver".to_string(), serde_json::Value::Null);
+        }
+        return crate::state::repository::StateRepository::new(workspace)
+            .save(
+                crate::state::repository::StateWriteIntent::ClearExactTeamOwnerAndReceiver {
+                    team_key,
+                    seed: expected_owner,
+                    expected_receiver,
+                },
+                &current,
+            )
+            .map_err(|error| {
+                LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+            });
+    }
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::RestoreExactTeamOwnerAndReceiver {
+                team_key,
+                expected_owner,
+                expected_receiver,
+                previous_owner: &previous_owner,
+                previous_receiver: &previous_receiver,
+            },
+            &current,
+        )
+        .map_err(|error| {
+            LifecycleError::StatePersist(format!("quick-start binding cleanup failed: {error}"))
+        })
+}
+
+fn strip_this_attempt_extra_keys(state: &mut serde_json::Value, extra_keys: &[&str]) {
+    if let Some(root) = state.as_object_mut() {
+        for key in extra_keys {
+            root.remove(*key);
+        }
+    }
+    if let Some(teams) = state
+        .get_mut("teams")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for team in teams.values_mut() {
+            if let Some(object) = team.as_object_mut() {
+                for key in extra_keys {
+                    object.remove(*key);
+                }
+            }
+        }
+    }
 }
 
 fn restore_registry_receipt(
@@ -1513,6 +1598,7 @@ mod fresh_quick_start_leader_binding_tests {
         frozen_owner: Option<serde_json::Value>,
         frozen_receiver: Option<serde_json::Value>,
         last_expected_receiver: Option<serde_json::Value>,
+        extra_state_keys: Vec<&'static str>,
     }
 
     impl Default for MockOps {
@@ -1533,6 +1619,7 @@ mod fresh_quick_start_leader_binding_tests {
                 frozen_owner: None,
                 frozen_receiver: None,
                 last_expected_receiver: None,
+                extra_state_keys: Vec::new(),
             }
         }
     }
@@ -1614,6 +1701,7 @@ mod fresh_quick_start_leader_binding_tests {
             if !self.attach_ok {
                 state["failed_attach_mutation"] = json!(true);
                 let _ = crate::state::persist::save_runtime_state(workspace, state);
+                self.extra_state_keys.push("failed_attach_mutation");
                 return false;
             }
             let team_key = state
@@ -1692,6 +1780,10 @@ mod fresh_quick_start_leader_binding_tests {
                 .zip(self.frozen_receiver.clone())
         }
 
+        fn this_attempt_extra_state_keys(&self) -> Vec<&'static str> {
+            self.extra_state_keys.clone()
+        }
+
         fn register(&mut self, workspace: &Path, team_key: &str) -> bool {
             self.register_calls += 1;
             let mut persisted = crate::state::persist::load_runtime_state(workspace).unwrap();
@@ -1708,6 +1800,7 @@ mod fresh_quick_start_leader_binding_tests {
             if !self.register_ok {
                 persisted["failed_registry_mutation"] = json!(true);
                 crate::state::persist::save_runtime_state(workspace, &persisted).unwrap();
+                self.extra_state_keys.push("failed_registry_mutation");
             }
             self.register_ok
         }
@@ -1718,6 +1811,7 @@ mod fresh_quick_start_leader_binding_tests {
             if !self.readback_ok {
                 persisted["failed_readback_mutation"] = json!(true);
                 crate::state::persist::save_runtime_state(workspace, &persisted).unwrap();
+                self.extra_state_keys.push("failed_readback_mutation");
             }
             self.readback_ok
                 && persisted
@@ -2210,13 +2304,13 @@ mod fresh_quick_start_leader_binding_tests {
         let transport = OfflineTransport::default()
             .with_tmux_endpoint(endpoint)
             .with_targets(vec![PaneInfo {
-                pane_id: PaneId::new("%1"),
+                pane_id: PaneId::new("%42"),
                 session: SessionName::new("s"),
                 window_index: None,
                 window_name: None,
                 pane_index: None,
                 tty: None,
-                current_command: Some("codex".to_string()),
+                current_command: Some("pi".to_string()),
                 current_path: Some(workspace.clone()),
                 active: true,
                 pane_pid: None,
@@ -2613,60 +2707,142 @@ mod fresh_quick_start_leader_binding_tests {
         let _ = std::fs::remove_dir_all(crate::state::persist::runtime_state_path(&workspace));
     }
 
+    fn normalized_state_bytes(workspace: &Path) -> Vec<u8> {
+        let state = crate::state::persist::load_runtime_state(workspace).unwrap();
+        crate::state::persist::save_runtime_state(workspace, &state).unwrap();
+        std::fs::read(crate::state::persist::runtime_state_path(workspace)).unwrap()
+    }
+
+    fn assert_failure_rolls_back_this_attempt(
+        case: &str,
+        mut ops: MockOps,
+        attach_calls: usize,
+        register_calls: usize,
+        readback_calls: usize,
+    ) {
+        let workspace = workspace(case);
+        let state_path = crate::state::persist::runtime_state_path(&workspace);
+        let before = normalized_state_bytes(&workspace);
+        assert!(
+            !bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap(),
+            "{case} must refuse"
+        );
+        let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert!(
+            after.get("failed_attach_mutation").is_none(),
+            "{case} left failed_attach_mutation"
+        );
+        assert!(
+            after.get("failed_registry_mutation").is_none(),
+            "{case} left failed_registry_mutation"
+        );
+        assert!(
+            after.get("failed_readback_mutation").is_none(),
+            "{case} left failed_readback_mutation"
+        );
+        assert_eq!(
+            std::fs::read(&state_path).unwrap(),
+            before,
+            "{case} left partial state bytes"
+        );
+        assert_eq!(ops.attach_calls, attach_calls, "{case} attach_calls");
+        assert_eq!(ops.register_calls, register_calls, "{case} register_calls");
+        assert_eq!(ops.readback_calls, readback_calls, "{case} readback_calls");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
     #[test]
     fn attach_registry_or_readback_failure_rolls_back_exact_state_bytes() {
-        for (case, mut ops) in [
-            (
-                "attach-failure",
-                MockOps {
-                    attach_ok: false,
-                    ..MockOps::default()
-                },
-            ),
-            (
-                "registry-failure",
-                MockOps {
-                    register_ok: false,
-                    ..MockOps::default()
-                },
-            ),
-            (
-                "readback-failure",
-                MockOps {
-                    readback_ok: false,
-                    ..MockOps::default()
-                },
-            ),
-        ] {
-            let workspace = workspace(case);
-            let state_path = crate::state::persist::runtime_state_path(&workspace);
-            let before = std::fs::read(&state_path).unwrap();
-            assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
-                .unwrap());
-            assert_eq!(
-                std::fs::read(&state_path).unwrap(),
-                before,
-                "{case} left partial state bytes"
-            );
-            match case {
-                "attach-failure" => {
-                    assert_eq!(ops.attach_calls, 1);
-                    assert_eq!(ops.register_calls, 0);
-                    assert_eq!(ops.readback_calls, 0);
-                }
-                "registry-failure" => {
-                    assert_eq!(ops.attach_calls, 1);
-                    assert_eq!(ops.register_calls, 1);
-                    assert_eq!(ops.readback_calls, 0);
-                }
-                "readback-failure" => {
-                    assert_eq!(ops.attach_calls, 1);
-                    assert_eq!(ops.register_calls, 1);
-                    assert_eq!(ops.readback_calls, 1);
-                }
-                _ => unreachable!(),
-            }
-        }
+        assert_failure_rolls_back_this_attempt(
+            "attach-failure",
+            MockOps {
+                attach_ok: false,
+                ..MockOps::default()
+            },
+            1,
+            0,
+            0,
+        );
+        assert_failure_rolls_back_this_attempt(
+            "registry-failure",
+            MockOps {
+                register_ok: false,
+                ..MockOps::default()
+            },
+            1,
+            1,
+            0,
+        );
+        assert_failure_rolls_back_this_attempt(
+            "readback-failure",
+            MockOps {
+                readback_ok: false,
+                ..MockOps::default()
+            },
+            1,
+            1,
+            1,
+        );
+    }
+
+    #[test]
+    fn attach_failure_rolls_back_exact_state_bytes() {
+        assert_failure_rolls_back_this_attempt(
+            "attach-failure-only",
+            MockOps {
+                attach_ok: false,
+                ..MockOps::default()
+            },
+            1,
+            0,
+            0,
+        );
+    }
+
+    #[test]
+    fn registry_failure_rolls_back_exact_state_bytes() {
+        assert_failure_rolls_back_this_attempt(
+            "registry-failure-only",
+            MockOps {
+                register_ok: false,
+                ..MockOps::default()
+            },
+            1,
+            1,
+            0,
+        );
+    }
+
+    #[test]
+    fn attach_failure_keeps_unrelated_fields() {
+        let workspace = workspace("unrelated-fields");
+        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        state["tasks"] = json!({"keep": true});
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let mut ops = MockOps {
+            attach_ok: false,
+            ..MockOps::default()
+        };
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
+            .unwrap());
+        let after = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(after.get("tasks"), Some(&json!({"keep": true})));
+        assert!(after.get("failed_attach_mutation").is_none());
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn readback_failure_rolls_back_exact_state_bytes() {
+        assert_failure_rolls_back_this_attempt(
+            "readback-failure-only",
+            MockOps {
+                readback_ok: false,
+                ..MockOps::default()
+            },
+            1,
+            1,
+            1,
+        );
     }
 
     #[test]
@@ -3031,12 +3207,7 @@ mod fresh_quick_start_leader_binding_tests {
             .with_tmux_endpoint("/tmp/tmux.sock")
             .with_pane_current_command("%1", "bash")
             .with_targets(vec![target_with_winner.clone()])
-            .with_target_snapshots(vec![
-                vec![target_without_nonce.clone()],
-                vec![target_with_winner.clone()],
-                vec![target_without_nonce],
-                vec![target_with_winner],
-            ]);
+            .with_target_snapshots(vec![vec![target_without_nonce]]);
         let first_workspace = runtime_workspace(&hermetic, "child-a");
         let second_workspace = runtime_workspace(&hermetic, "child-b");
         let first_seed = seeded_runtime_owner(&first_workspace);
