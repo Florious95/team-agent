@@ -27,6 +27,27 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
 }
 
+fn assert_brief_shape(value: &Value, context: &str) {
+    let nodes = value
+        .get("nodes")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{context}: status must return nodes: {value}"));
+    for node in nodes {
+        let mut keys = node
+            .as_object()
+            .expect("brief node object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
+            "{context}: exact seven-field status projection: {node}"
+        );
+    }
+}
+
 #[test]
 #[serial(env)]
 fn cli_claude_json_does_not_report_success_without_starting_provider_or_tmux() {
@@ -179,8 +200,6 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
             !tmux_log.contains(":leader"),
             "{command} --external-leader must not create or attach the managed :leader window; tmux_log={tmux_log:?}"
         );
-        // 0.4.x compact slim: is_external_leader / leader_topology moved to
-        // --detail; default `--json` doesn't carry them anymore.
         let status = Command::new(bin())
             .args([
                 "status",
@@ -195,11 +214,11 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
         let status_json: Value = serde_json::from_slice(&status.stdout).unwrap_or_else(|err| {
             panic!("status json parse failed: {err}; stdout={status_stdout:?}")
         });
-        assert_eq!(status_json["is_external_leader"], json!(true), "{command}");
-        assert_eq!(
-            status_json["leader_topology"],
-            json!("external"),
-            "{command}"
+        assert_brief_shape(&status_json, &format!("{command} status"));
+        assert!(
+            status_json.get("is_external_leader").is_none()
+                && status_json.get("leader_topology").is_none(),
+            "{command}: brief status must not restore launcher diagnostics: {status_json}"
         );
     }
 }
@@ -298,6 +317,71 @@ fn attach_leader_uses_state_recorded_tmux_socket_endpoint() {
             .lines()
             .any(|line| line.contains("-S") && line.contains(socket_path.to_str().unwrap())),
         "attach-leader must probe the recorded socket endpoint with -S; tmux_log={tmux_log:?}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn attach_leader_prefers_verified_caller_socket_over_worker_socket() {
+    let workspace = tmp_dir("attach-caller-socket");
+    let worker_socket = workspace.join("worker-socket");
+    let caller_socket = workspace.join("caller-socket");
+    save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": "current",
+            "session_name": "team-current",
+            "workspace": workspace.to_string_lossy().to_string(),
+            "tmux_socket": worker_socket.to_string_lossy().to_string(),
+            "agents": {}
+        }),
+    )
+    .expect("seed state with worker socket endpoint");
+    let fake = FakeLauncherTools::new(&workspace);
+    fake.write_tmux_script_for_attach_probe(&worker_socket, "%77");
+    let _env = EnvGuard::set([
+        (
+            "PATH",
+            Some(format!(
+                "{}:{}",
+                fake.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )),
+        ),
+        (
+            "TMUX",
+            Some(format!("{},123,0", caller_socket.display())),
+        ),
+        ("TMUX_PANE", Some("%77".to_string())),
+    ]);
+
+    let attach = Command::new(bin())
+        .args([
+            "attach-leader",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--pane",
+            "%77",
+            "--provider",
+            "claude",
+            "--json",
+        ])
+        .output()
+        .expect("attach leader using caller socket");
+    let stdout = String::from_utf8_lossy(&attach.stdout);
+    let stderr = String::from_utf8_lossy(&attach.stderr);
+    let tmux_log = read_to_string(&fake.tmux_log);
+    assert!(
+        attach.status.success(),
+        "attach-leader must find the caller pane on $TMUX before the persisted worker socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+    );
+    let first_list = tmux_log
+        .lines()
+        .find(|line| line.contains("list-panes"))
+        .unwrap_or("");
+    assert!(
+        first_list.contains(caller_socket.to_str().unwrap()),
+        "caller socket must be probed first for attach target discovery; tmux_log={tmux_log:?}"
     );
 }
 
@@ -690,10 +774,11 @@ if [ "$1" = "-V" ]; then
 fi
 case " $* " in
   *"-S {} list-panes"*)
-    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{}' '{}'
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{pane_id}' '{workspace}'
     exit 0
     ;;
   *" list-panes "*)
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{pane_id}' '{workspace}'
     exit 0
     ;;
   *)
@@ -703,8 +788,7 @@ esac
 "#,
                 self.tmux_log.display(),
                 socket_path.display(),
-                pane_id,
-                self.bin
+                workspace = self.bin
                     .parent()
                     .expect("workspace fake-bin has parent")
                     .to_string_lossy()

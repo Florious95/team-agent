@@ -20,9 +20,9 @@ fn rest_014_restart_team_selector_targets_named_team() {
     let team_b = "rest014b";
 
     let qs_a = quick_start_fake(&ws, team_a);
-    assert!(quick_start_launched(&qs_a), "qs a: {}", qs_a.stdout);
+    assert!(quick_start_workers_available(&qs_a), "qs a: {}", qs_a.stdout);
     let qs_b = quick_start_fake(&ws, team_b);
-    assert!(quick_start_launched(&qs_b), "qs b: {}", qs_b.stdout);
+    assert!(quick_start_workers_available(&qs_b), "qs b: {}", qs_b.stdout);
 
     // Shut both down so restart picks fresh launches.
     let _ = run_ta(

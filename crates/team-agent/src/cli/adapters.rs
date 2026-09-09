@@ -102,7 +102,7 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
-    let value = lifecycle_port::quick_start(
+    let mut value = lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,
         args.name.as_deref(),
@@ -111,6 +111,7 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         !args.no_display,
         args.backend.as_deref(),
     )?;
+    append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
     let readiness = value.get("readiness").and_then(Value::as_object);
     let all_resumable_have_session = readiness
         .and_then(|readiness| readiness.get("all_resumable_have_session"))
@@ -128,6 +129,9 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         .get("status")
         .and_then(Value::as_str)
         .map(str::to_string);
+    if !args.detail {
+        lifecycle_port::compact_quick_start_value(&mut value);
+    }
     if args.json
         || value.get("ok").and_then(Value::as_bool) == Some(false)
         || session_capture_incomplete
@@ -156,16 +160,105 @@ fn quickstart_human(value: &Value) -> String {
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    if attach.is_empty() {
-        return append_reminder(summary.to_string(), crate::cli::QUICK_START_REMINDER);
-    }
+    let sends: Vec<&str> = value
+        .get("send_commands")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     let mut out = String::from(summary);
-    out.push_str("\n\nattach:");
-    for cmd in attach {
-        out.push_str("\n  ");
-        out.push_str(cmd);
+    if !attach.is_empty() {
+        out.push_str("\n\nattach:");
+        for cmd in attach {
+            out.push_str("\n  ");
+            out.push_str(cmd);
+        }
+    }
+    if !sends.is_empty() {
+        out.push_str("\n\nsend:");
+        for cmd in sends {
+            out.push_str("\n  ");
+            out.push_str(cmd);
+        }
     }
     append_reminder(out, crate::cli::QUICK_START_REMINDER)
+}
+
+pub(crate) fn append_send_guidance(value: &mut Value, workspace: &Path, team: Option<&str>) {
+    let existing = value.get("summary").and_then(Value::as_str) == Some("existing runtime");
+    if value.get("ok").and_then(Value::as_bool) != Some(true) && !existing {
+        return;
+    }
+    let team = value
+        .get("team")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty())
+        .map(str::to_string)
+        .or_else(|| team.map(str::to_string));
+    let team = team.as_deref();
+    let agents = value
+        .get("agent_ids")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let commands: Vec<Value> = agents
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|agent| send_command(agent, workspace, team).map(Value::String))
+        .collect();
+    if !commands.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("send_commands".to_string(), Value::Array(commands));
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn split_shell_argv(command: &str) -> Vec<String> {
+    let mut argv = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\'') | (None, '"') => quote = Some(ch),
+            (Some(q), c) if c == q => quote = None,
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    argv.push(std::mem::take(&mut current));
+                }
+            }
+            (_, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        argv.push(current);
+    }
+    argv
+}
+
+pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) -> Option<String> {
+    let workspace = workspace.to_str()?;
+    let mut command = format!(
+        "team-agent send {} {} --workspace {}",
+        shell_quote(agent),
+        shell_quote("MESSAGE"),
+        shell_quote(workspace)
+    );
+    if let Some(team) = team {
+        command.push_str(" --team ");
+        command.push_str(&shell_quote(team));
+    }
+    Some(command)
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':')
+    }) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn append_reminder(text: String, reminder: &str) -> String {
@@ -220,8 +313,8 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
     }
 }
 
-/// `cmd_status`(`commands.py:90`)。三态:`--summary`(xor json,xor agent)→五行文本;
-/// `--json`→`status_port::status(compact=!detail)`;else→`status_port::format_status(agent)`。
+/// `cmd_status`(`commands.py:90`)。CLI status 统一为只读七字段 brief；
+/// `--json` 与人读路径共享 nodeprobe-backed projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
 #[cfg(test)]
 pub(crate) fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
     cmd_status_for_team(args, args.team.as_deref())
@@ -240,121 +333,48 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
     }
     // S4QR-001 (0.4.8): selected-team ambiguity gate. status is a selected-team
     // command: when the workspace has 2+ alive teams and no --team was passed,
-    // refuse instead of silently defaulting to the active team. Uses the same
-    // CommandScope::resolve helper as refuse_if_multi_alive_team_missing_scope
-    // (cli/emit.rs:964-979) so the destructive-command ambiguity gate and the
-    // selected-team-read ambiguity gate share a single source of truth.
+    // refuse instead of silently defaulting to the active team. Uses the
+    // read-only CommandScope helper so the gate cannot migrate/write state.
     if team.is_none() {
-        let scope = crate::state::paths::CommandScope::resolve(&args.workspace, None);
+        let scope = crate::state::paths::CommandScope::resolve_readonly(&args.workspace, None);
         if scope.is_ambiguous() {
             let candidates: Vec<String> = scope.candidates().to_vec();
             let message = format!(
                 "status: workspace has multiple alive teams ({}); pass `--team <key>` to choose one",
                 candidates.join(", ")
             );
-            if args.json {
-                let payload = serde_json::json!({
-                    "ok": false,
-                    "status": "refused",
-                    "reason": "team_target_ambiguous",
-                    "candidates": candidates,
-                    "message": message,
-                });
-                return Ok(CmdResult::from_json(payload, args.json));
-            }
             return Err(CliError::Usage(message));
         }
     }
-    let selected = match crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
         team,
         crate::state::selector::SelectorMode::RuntimeOnly,
-    ) {
-        Ok(selected) => selected,
-        Err(error) => {
-            return Ok(CmdResult::from_json(
-                status_selector_error_payload(&error.to_string(), &args.workspace),
-                args.json,
-            ));
+    )?;
+    if let Some(agent) = args.agent.as_deref() {
+        if !status_port::registered_agent_exists(&selected.state, agent) {
+            return Err(CliError::Runtime(format!("unknown agent id: {agent}")));
         }
-    };
-    if args.summary {
-        // 0.4.x compact slimming: `--summary` renders the five-line triage
-        // text via `format_status_summary`, which needs the full payload
-        // fields (coordinator, leader_receiver, agent_health, queued_messages,
-        // latest_results). The slim compact projection drops those, so the
-        // summary path must request the full payload (compact=false).
-        let value = status_port::status_scoped(
-            &selected.run_workspace,
-            &selected.state,
-            Some(&selected.team_key),
-            false,
-            false,
-        )?;
-        return Ok(CmdResult::human(append_reminder(
-            format_status_summary(&value),
-            crate::cli::STATUS_REMINDER,
-        )));
     }
+    // Status brief is deliberately independent of the legacy RuntimeSnapshot:
+    // it performs one bounded nodeprobe sample and exposes exactly seven
+    // fields. `--summary` and `--detail` remain parser-compatible but do not
+    // re-enable history, runtime diagnostics, or reminder text.
     if args.json {
-        let value = status_port::status_scoped(
-            &selected.run_workspace,
-            &selected.state,
-            Some(&selected.team_key),
-            status_compact_flag(args.detail),
-            args.detail,
-        )?;
-        return Ok(CmdResult::from_json(value, true));
+        return Ok(CmdResult::from_json(
+            status_port::status_brief_scoped(
+                &selected.run_workspace,
+                &selected.state,
+                args.agent.as_deref(),
+            ),
+            true,
+        ));
     }
-    let mut text = status_port::format_status_scoped(
+    Ok(CmdResult::human(status_port::format_status_brief(
         &selected.run_workspace,
         &selected.state,
-        Some(&selected.team_key),
         args.agent.as_deref(),
-    )?;
-    if args.detail {
-        let value = status_port::status_scoped(
-            &selected.run_workspace,
-            &selected.state,
-            Some(&selected.team_key),
-            false,
-            true,
-        )?;
-        if let Some(hint) = value
-            .pointer("/runtime/hint")
-            .and_then(serde_json::Value::as_str)
-            .filter(|hint| !hint.is_empty())
-        {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(hint);
-        }
-    }
-    Ok(CmdResult::human(append_reminder(
-        text,
-        crate::cli::STATUS_REMINDER,
     )))
-}
-
-fn status_selector_error_payload(error: &str, workspace: &Path) -> Value {
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S%.6f");
-    let log_path = std::env::temp_dir()
-        .join("team-agent")
-        .join("cli-errors")
-        .join(format!("status-{stamp}.log"));
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&log_path, format!("{error}\n"));
-    json!({
-        "ok": false,
-        "error": error,
-        "action": "run `team-agent doctor` or inspect the log path shown here",
-        "log": log_path.to_string_lossy().to_string(),
-        "workspace": workspace.to_string_lossy().to_string(),
-        "reminder": crate::cli::STATUS_REMINDER,
-    })
 }
 
 /// `cmd_watch`(`commands.py:103`)。委派 `coordinator::run_watch`;KeyboardInterrupt/正常 → `SystemExit(0)`。
@@ -541,6 +561,42 @@ pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliErr
 
 /// `cmd_diagnose`(`parser.py:298`)。
 pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
+    let team_hint = args
+        .team
+        .as_deref()
+        .filter(|team| !team.is_empty())
+        .unwrap_or("current");
+    // Check the caller-supplied workspace before RuntimeOnly synthesis or
+    // transport setup, which can create `.team` paths and make an empty
+    // directory look like an unbound team.
+    if !crate::cli::diagnose::workspace_has_existing_team_runtime(&args.workspace, team_hint) {
+        let (issues, suggested_repairs) =
+            crate::cli::diagnose::missing_team_runtime_issues_and_repairs(team_hint);
+        let event_log = args
+            .workspace
+            .join(".team")
+            .join("logs")
+            .join("events.jsonl");
+        return Ok(CmdResult::from_json(
+            json!({
+                "event_log": event_log.to_string_lossy().to_string(),
+                "issues": issues,
+                "ok": false,
+                "providers": provider_doctor_checks(),
+                "runtime": {
+                    "workspace": args.workspace.to_string_lossy().to_string(),
+                    "team_key": team_hint,
+                    "session_name": Value::Null,
+                    "leader_receiver": Value::Null,
+                    "agent_count": 0,
+                    "message_count": 0,
+                    "result_count": 0,
+                },
+                "suggested_repairs": suggested_repairs,
+            }),
+            args.json,
+        ));
+    }
     let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
         args.team.as_deref(),
@@ -569,7 +625,12 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
             )),
         };
     let (issues, suggested_repairs) =
-        diagnose_runtime_for_workspace(&selected.run_workspace, &state, backend.as_ref());
+        diagnose_runtime_for_workspace(
+            &selected.run_workspace,
+            &state,
+            backend.as_ref(),
+            Some(selected.team_key.as_str()),
+        );
     let ok = issues.as_array().is_some_and(Vec::is_empty);
     Ok(CmdResult::from_json(
         json!({
@@ -1320,10 +1381,12 @@ pub fn cmd_takeover(args: &TakeoverArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_claim_leader`(`commands.py:156`)。
 pub fn cmd_claim_leader(args: &ClaimLeaderArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?,
-        args.json,
-    ))
+    let mut value =
+        leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?;
+    if !args.detail {
+        leader_port::compact_lease_value(&mut value);
+    }
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_identity`(`commands.py:160`)。
@@ -1344,30 +1407,38 @@ pub fn cmd_shutdown(args: &ShutdownArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_restart`(`commands.py:344`)。
 pub fn cmd_restart(args: &RestartArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        lifecycle_port::restart(
-            &args.workspace,
-            args.allow_fresh,
-            args.team.as_deref(),
-            args.session_converge_deadline_ms,
-        )?,
-        args.json,
-    ))
+    let mut value = lifecycle_port::restart(
+        &args.workspace,
+        args.allow_fresh,
+        args.team.as_deref(),
+        args.session_converge_deadline_ms,
+    )?;
+    if !args.detail {
+        lifecycle_port::compact_restart_value(&mut value);
+    }
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_start_agent`(`commands.py:348`)。
 pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        lifecycle_port::start_agent(
-            &args.workspace,
-            &args.agent,
-            args.force,
-            !args.no_display,
-            args.allow_fresh,
-            args.team.as_deref(),
-        )?,
-        args.json,
-    ))
+    let mut value = lifecycle_port::start_agent(
+        &args.workspace,
+        &args.agent,
+        args.force,
+        !args.no_display,
+        args.allow_fresh,
+        args.team.as_deref(),
+    )?;
+    if value.get("agent_ids").is_none() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "agent_ids".to_string(),
+                json!([args.agent.as_str()]),
+            );
+        }
+    }
+    append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_stop_agent`(`commands.py:359`)。
@@ -1394,17 +1465,24 @@ pub fn cmd_reset_agent(args: &ResetAgentArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_add_agent`(`commands.py:373`)。
 pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        lifecycle_port::add_agent(
-            &args.workspace,
-            &args.agent,
-            &args.role_file,
-            !args.no_display,
-            args.team.as_deref(),
-            args.force,
-        )?,
-        args.json,
-    ))
+    let mut value = lifecycle_port::add_agent(
+        &args.workspace,
+        &args.agent,
+        &args.role_file,
+        !args.no_display,
+        args.team.as_deref(),
+        args.force,
+    )?;
+    if value.get("agent_ids").is_none() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "agent_ids".to_string(),
+                json!([args.agent.as_str()]),
+            );
+        }
+    }
+    append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
+    Ok(CmdResult::from_json(value, args.json))
 }
 
 /// `cmd_fork_agent`(`commands.py:383`)。
@@ -1550,8 +1628,11 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{agent_pane_id, quickstart_human};
-    use serde_json::json;
+    use super::{
+        agent_pane_id, append_send_guidance, quickstart_human, send_command, split_shell_argv,
+    };
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
 
     // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
     #[test]
@@ -1592,6 +1673,88 @@ mod tests {
             quickstart_human(&value2),
             format!("s\n{}", crate::cli::QUICK_START_REMINDER)
         );
+    }
+
+    #[test]
+    fn send_command_message_is_one_argv_token() {
+        let command = send_command(
+            "worker name; echo unsafe",
+            Path::new("/tmp/my workspace"),
+            Some("team-a"),
+        )
+        .unwrap();
+        let argv = split_shell_argv(&command);
+        assert_eq!(
+            argv,
+            [
+                "team-agent",
+                "send",
+                "worker name; echo unsafe",
+                "MESSAGE",
+                "--workspace",
+                "/tmp/my workspace",
+                "--team",
+                "team-a"
+            ]
+        );
+    }
+
+    #[test]
+    fn send_guidance_is_copyable_and_preserves_explicit_scope() {
+        let command = send_command("worker name; echo unsafe", Path::new("/tmp/my workspace"), Some("team-a"))
+            .unwrap();
+        assert_eq!(
+            command,
+            "team-agent send 'worker name; echo unsafe' MESSAGE --workspace '/tmp/my workspace' --team team-a"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_workspace_fails_closed_without_send_guidance() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let workspace = PathBuf::from(OsString::from_vec(b"/tmp/workspace-\xff".to_vec()));
+        assert!(send_command("worker", &workspace, None).is_none());
+        let mut value = json!({"ok": true, "agent_ids": ["worker"]});
+        append_send_guidance(&mut value, &workspace, None);
+        assert!(value.get("send_commands").is_none());
+    }
+
+    #[test]
+    fn quick_start_guidance_lists_every_known_agent_without_guessing() {
+        let mut value = json!({"ok": true, "agent_ids": ["sol", "luna"]});
+        append_send_guidance(&mut value, Path::new("/tmp/ws"), Some("team"));
+        let commands = value.get("send_commands").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].as_str().unwrap().contains("send sol"));
+        assert!(commands[1].as_str().unwrap().contains("send luna"));
+    }
+
+    #[test]
+    fn error_results_do_not_get_send_guidance() {
+        let mut value = json!({"ok": false, "agent_ids": ["worker"]});
+        append_send_guidance(&mut value, Path::new("/tmp/ws"), None);
+        assert!(value.get("send_commands").is_none());
+    }
+
+    #[test]
+    fn existing_runtime_gets_canonical_send_guidance() {
+        let mut value = json!({
+            "ok": false,
+            "summary": "existing runtime",
+            "agent_ids": ["worker"]
+        });
+        append_send_guidance(&mut value, Path::new("/tmp/ws"), Some("team-a"));
+        let command = value
+            .pointer("/send_commands/0")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(command.contains("send worker"));
+        assert!(command.contains("--team team-a"));
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        assert_eq!(parts[3], "MESSAGE");
     }
 
     #[test]

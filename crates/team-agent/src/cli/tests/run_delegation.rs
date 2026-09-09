@@ -225,6 +225,7 @@ fn cli_quick_start_invokes_real_lifecycle_compiles_spec() {
         no_display: false,
         backend: None,
         json: true,
+        detail: false,
     };
     let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
                                     // E5: spec compiled to .team/runtime/<team_key>/, NOT the user team dir.
@@ -260,6 +261,7 @@ fn cli_quick_start_invalid_spec_surfaces_real_compile_error() {
         no_display: false,
         backend: None,
         json: true,
+        detail: false,
     };
     let text = outcome_text(cmd_quick_start(&args));
     assert!(
@@ -281,6 +283,7 @@ fn cli_restart_missing_spec_surfaces_real_teamselect() {
         allow_fresh: false,
         session_converge_deadline_ms: None,
         json: true,
+        detail: false,
     };
     let text = outcome_text(cmd_restart(&args));
     // RED-2-STILL: entry gate now resolves via canonical_run_workspace; for a no-spec workspace
@@ -332,13 +335,12 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
         );
 }
 
-// 5 [P1] — cmd_status --json reflects the REAL coordinator_health + real DB message/result counts.
-// The placeholder status_port::status hardcodes coordinator={status:stopped, schema_ok:false} and
-// messages/results={count:0}. Seed: state.json + a real team.db (2 messages + 1 result) + a healthy
-// coordinator (this pid + metadata) -> the real path must surface running-coordinator + non-zero
-// counts. OS-safe (all reads/seeds, no spawn).
+// 5 [P1] — cmd_status --json emits the concise seven-field node projection.
+// Status must not leak coordinator/db/history diagnostics; missing exact nodeprobe evidence remains
+// an explicit unknown projection. The fixture still seeds a real store to ensure the status path
+// does not accidentally depend on coordinator or mailbox reads.
 #[test]
-fn cli_status_reflects_real_coordinator_health_and_db_counts() {
+fn cli_status_emits_seven_field_brief_without_diagnostics() {
     let ws = seed_status_workspace(); // writes .team/runtime/state.json
     let store = crate::message_store::MessageStore::open(&ws).unwrap();
     let _ = store
@@ -383,25 +385,31 @@ fn cli_status_reflects_real_coordinator_health_and_db_counts() {
         CmdOutput::Json(v) => v,
         other => panic!("status --json must yield a Json CmdOutput; got {other:?}"),
     };
-    assert_ne!(
-        value["coordinator"],
-        json!({"status": "stopped", "schema_ok": false}),
-        "status `coordinator` must reflect the REAL coordinator_health (seeded running), not the \
-             placeholder's hardcoded {{status:stopped, schema_ok:false}}; got {}",
-        value["coordinator"]
+    let nodes = value
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .expect("status brief must expose a nodes array");
+    assert_eq!(nodes.len(), 1);
+    let fields: std::collections::BTreeSet<&str> = nodes[0]
+        .as_object()
+        .expect("status brief node must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "name",
+            "provider",
+            "runtime_status",
+            "activity",
+            "health",
+            "session_name",
+            "tmux_command",
+        ]
+        .into_iter()
+        .collect()
     );
-    assert_ne!(
-            value["messages"],
-            json!({"count": 0}),
-            "status `messages` must reflect the REAL DB rows (2 seeded), not the placeholder's {{count:0}}; got {}",
-            value["messages"]
-        );
-    assert_ne!(
-            value["results"],
-            json!({"count": 0}),
-            "status `results` must reflect the REAL DB result row, not the placeholder's {{count:0}}; got {}",
-            value["results"]
-        );
 }
 
 // 6 [P1] — cmd_shutdown delegates to the REAL crate::coordinator::stop_coordinator (+ tmux

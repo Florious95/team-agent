@@ -29,6 +29,9 @@ use team_agent::leader::registry::{
 };
 use team_agent::lifecycle::launch::launched_team_receiver_is_attached;
 use team_agent::state::persist::save_runtime_state;
+use team_agent::transport::test_support::OfflineTransport;
+use team_agent::transport::{PaneId, PaneInfo, SessionName};
+use team_agent::transport_factory::with_leader_endpoint_transport;
 
 fn mailbox_source() -> String {
     fs::read_to_string(concat!(
@@ -45,9 +48,16 @@ fn seed_attached_state(workspace: &std::path::Path, team: &str, pane: &str, sock
             "active_team_key": team,
             "teams": {
                 team: {
+                    "team_owner": {
+                        "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": "codex"
+                    },
                     "leader_receiver": {
                         "status": "attached",
                         "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": "codex",
                         "tmux_socket": socket,
                         "authorized_team_workspace": workspace.display().to_string(),
                     },
@@ -58,6 +68,36 @@ fn seed_attached_state(workspace: &std::path::Path, team: &str, pane: &str, sock
         }),
     )
     .expect("seed state");
+}
+
+fn live_pane(workspace: &std::path::Path, pane: &str) -> PaneInfo {
+    PaneInfo {
+        pane_id: PaneId::new(pane),
+        session: SessionName::new("s"),
+        window_index: None,
+        window_name: None,
+        pane_index: None,
+        tty: None,
+        current_command: Some("codex".to_string()),
+        current_path: Some(workspace.to_path_buf()),
+        active: true,
+        pane_pid: None,
+        leader_env: Default::default(),
+    }
+}
+
+fn assert_attached_with_live(workspace: &std::path::Path, team: &str, pane: &str, socket: &str) {
+    let transport = OfflineTransport::default()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![live_pane(workspace, pane)]);
+    let attached = with_leader_endpoint_transport(socket, transport, || {
+        launched_team_receiver_is_attached(workspace, team)
+    });
+    assert!(
+        attached,
+        "canonical attached requires registry identity and a live owner pane; workspace={}",
+        workspace.display()
+    );
 }
 
 #[test]
@@ -90,10 +130,7 @@ fn single_workspace_register_stays_attached() {
         register_binding_from_state_best_effort(&workspace, Some("teamdir"), "claim-leader")
             .expect("register");
     assert_eq!(outcome.status, "registered");
-    assert!(
-        launched_team_receiver_is_attached(&workspace, "teamdir"),
-        "a single workspace claim must remain attached"
-    );
+    assert_attached_with_live(&workspace, "teamdir", "%1", "/tmp/lc4-only");
     env.assert_real_registry_unchanged(before);
 }
 
@@ -129,13 +166,94 @@ fn different_pane_entries_do_not_unbind_each_other() {
     assert!(write_entry_best_effort(&b).is_some());
     register_binding_from_state_best_effort(&ws_b, Some("teamb"), "claim-leader")
         .expect("register b");
-    assert!(
-        launched_team_receiver_is_attached(&ws_a, "teama"),
-        "claiming a different pane must not unbind another workspace"
+    assert_attached_with_live(&ws_a, "teama", "%1", "/tmp/lc4-a");
+    assert_attached_with_live(&ws_b, "teamb", "%2", "/tmp/lc4-b");
+    env.assert_real_registry_unchanged(before);
+}
+
+#[test]
+#[serial(env)]
+fn same_pane_different_socket_entries_remain_attached_across_teams() {
+    let before = HermeticTestEnv::real_home_registry_snapshot();
+    let env = HermeticTestEnv::enter("lc3-cross-socket-same-pane");
+    env.scrub_tmux();
+    let ws_a = env.workspace("a");
+    let ws_b = env.workspace("b");
+    let socket_a = "/tmp/lc3-socket-a";
+    let socket_b = "/tmp/lc3-socket-b";
+    seed_attached_state(&ws_a, "teama", "%1", socket_a);
+    seed_attached_state(&ws_b, "teamb", "%1", socket_b);
+    let a = build_entry(
+        &ws_a,
+        "teama",
+        "direct_tmux",
+        json!({"status":"attached","pane_id":"%1","tmux_socket":socket_a}),
+        1,
+        "claim-leader",
+        "2026-08-18T00:00:00Z".to_string(),
     );
-    assert!(
-        launched_team_receiver_is_attached(&ws_b, "teamb"),
-        "the claiming workspace must stay attached"
+    let b = build_entry(
+        &ws_b,
+        "teamb",
+        "direct_tmux",
+        json!({"status":"attached","pane_id":"%1","tmux_socket":socket_b}),
+        1,
+        "claim-leader",
+        "2026-08-18T00:00:00Z".to_string(),
+    );
+    let a_path = write_entry_best_effort(&a).expect("write a");
+    assert!(write_entry_best_effort(&b).is_some(), "write b");
+    register_binding_from_state_best_effort(&ws_b, Some("teamb"), "claim-leader")
+        .expect("register b");
+    let persisted_a: team_agent::leader::registry::LeaderRegistryEntry =
+        serde_json::from_slice(&fs::read(a_path).expect("read a registry entry"))
+            .expect("decode a registry entry");
+    assert_eq!(
+        persisted_a.status, "attached",
+        "pane ids are tmux-server local; independent sockets must not displace each other"
+    );
+    env.assert_real_registry_unchanged(before);
+}
+
+#[test]
+#[serial(env)]
+fn same_pane_same_socket_entries_remain_attached_across_teams() {
+    let before = HermeticTestEnv::real_home_registry_snapshot();
+    let env = HermeticTestEnv::enter("lc3-same-pane");
+    env.scrub_tmux();
+    let ws_a = env.workspace("a");
+    let ws_b = env.workspace("b");
+    let shared_socket = "/tmp/lc3-shared";
+    seed_attached_state(&ws_a, "teama", "%1", shared_socket);
+    seed_attached_state(&ws_b, "teamb", "%1", shared_socket);
+    let a = build_entry(
+        &ws_a,
+        "teama",
+        "direct_tmux",
+        json!({"status":"attached","pane_id":"%1","tmux_socket":shared_socket}),
+        1,
+        "claim-leader",
+        "2026-08-18T00:00:00Z".to_string(),
+    );
+    let b = build_entry(
+        &ws_b,
+        "teamb",
+        "direct_tmux",
+        json!({"status":"attached","pane_id":"%1","tmux_socket":shared_socket}),
+        1,
+        "claim-leader",
+        "2026-08-18T00:00:00Z".to_string(),
+    );
+    let a_path = write_entry_best_effort(&a).expect("write a");
+    assert!(write_entry_best_effort(&b).is_some(), "write b");
+    register_binding_from_state_best_effort(&ws_b, Some("teamb"), "claim-leader")
+        .expect("register b");
+    let persisted_a: team_agent::leader::registry::LeaderRegistryEntry =
+        serde_json::from_slice(&fs::read(a_path).expect("read a registry entry"))
+            .expect("decode a registry entry");
+    assert_eq!(
+        persisted_a.status, "attached",
+        "same leader pane on the same socket may manage an independent Team"
     );
     env.assert_real_registry_unchanged(before);
 }

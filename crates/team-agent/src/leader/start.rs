@@ -1859,6 +1859,17 @@ fn persist_managed_leader_binding(
         &serde_json::json!(socket),
     );
     let bound_panes = merge_bound_panes(existing_recv.as_ref(), new_binding);
+    let existing_owner = state
+        .get("teams")
+        .and_then(|teams| teams.get(&team_key))
+        .and_then(|team| team.get("team_owner"))
+        .cloned();
+    let keep_field = |existing: Option<&serde_json::Value>, key: &str, fallback: serde_json::Value| {
+        existing
+            .and_then(|value| value.get(key))
+            .cloned()
+            .unwrap_or(fallback)
+    };
     let (scalar_pane, scalar_session, scalar_window, scalar_attached_at) =
         match existing_recv.as_ref() {
             Some(recv) if keep_existing_scalar => (
@@ -1867,20 +1878,41 @@ fn persist_managed_leader_binding(
                     .unwrap_or(pane.as_str())
                     .to_string(),
                 recv.get("session_name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(session.as_str())
-                    .to_string(),
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(session)),
                 recv.get("window_name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(window.as_str())
-                    .to_string(),
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!(window)),
                 recv.get("attached_at")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(now.as_str())
                     .to_string(),
             ),
-            _ => (pane.clone(), session.clone(), window.clone(), now.clone()),
+            _ => (
+                pane.clone(),
+                serde_json::json!(session),
+                serde_json::json!(window),
+                now.clone(),
+            ),
         };
+    let leader_session_uuid = if keep_existing_scalar {
+        keep_field(
+            existing_recv.as_ref(),
+            "leader_session_uuid",
+            serde_json::json!(identity.leader_session_uuid),
+        )
+    } else {
+        serde_json::json!(identity.leader_session_uuid)
+    };
+    let discovery = if keep_existing_scalar {
+        keep_field(
+            existing_recv.as_ref(),
+            "discovery",
+            serde_json::json!("managed_launcher"),
+        )
+    } else {
+        serde_json::json!("managed_launcher")
+    };
     let receiver = serde_json::json!({
         "mode": "direct_tmux",
         "status": "attached",
@@ -1890,20 +1922,43 @@ fn persist_managed_leader_binding(
         "session_name": scalar_session,
         "window_name": scalar_window,
         "tmux_socket": socket,
-        "leader_session_uuid": identity.leader_session_uuid,
+        "leader_session_uuid": leader_session_uuid.clone(),
         "owner_epoch": owner_epoch,
         "attached_at": scalar_attached_at,
-        "discovery": "managed_launcher",
+        "discovery": discovery,
         "bound_panes": bound_panes,
     });
+    let owner_uuid = if keep_existing_scalar {
+        keep_field(
+            existing_owner.as_ref(),
+            "leader_session_uuid",
+            leader_session_uuid.clone(),
+        )
+    } else {
+        leader_session_uuid.clone()
+    };
+    let claimed_via = if keep_existing_scalar {
+        keep_field(
+            existing_owner.as_ref(),
+            "claimed_via",
+            serde_json::json!("claim-leader"),
+        )
+    } else {
+        serde_json::json!("claim-leader")
+    };
+    let claimed_at = if keep_existing_scalar {
+        keep_field(existing_owner.as_ref(), "claimed_at", serde_json::json!(now))
+    } else {
+        serde_json::json!(now)
+    };
     let owner = serde_json::json!({
         "pane_id": scalar_pane,
         "provider": provider.clone(),
         "machine_fingerprint": identity.machine_fingerprint,
-        "leader_session_uuid": identity.leader_session_uuid,
+        "leader_session_uuid": owner_uuid,
         "owner_epoch": owner_epoch,
-        "claimed_at": now,
-        "claimed_via": "claim-leader",
+        "claimed_at": claimed_at,
+        "claimed_via": claimed_via,
         "os_user": identity.os_user,
     });
     if let Some(obj) = state.as_object_mut() {
@@ -3881,18 +3936,22 @@ mod tests {
     }
 
     fn persist_test_identity(workspace: &Path) -> LeaderIdentity {
+        persist_test_identity_named(workspace, "tester")
+    }
+
+    fn persist_test_identity_named(workspace: &Path, os_user: &str) -> LeaderIdentity {
         LeaderIdentity {
             leader_session_uuid: LeaderSessionUuid::derive(
                 "fp",
                 &workspace.to_string_lossy(),
-                "tester",
+                os_user,
                 "current",
             )
             .unwrap(),
             leader_session_uuid_source: LeaderSessionUuidSource::Derived,
             machine_fingerprint: "fp".to_string(),
             workspace_abspath: workspace.to_path_buf(),
-            os_user: "tester".to_string(),
+            os_user: os_user.to_string(),
             team_id: TeamKey::new("current"),
         }
     }
@@ -3992,6 +4051,84 @@ mod tests {
             .collect();
         assert!(ids.contains(&"%0"), "bound_panes missing first: {recv}");
         assert!(ids.contains(&"%1"), "bound_panes missing second: {recv}");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn multi_leader_persist_keeps_first_owner_uuid() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-multi-leader-uuid-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(workspace.join(".team").join("runtime")).unwrap();
+        let original_uuid = "b2b230cfd645e78cf49e8147ba32ff3b";
+        let state = serde_json::json!({
+            "active_team_key": "current",
+            "teams": {
+                "current": {
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%0",
+                        "discovery": "env_pane",
+                        "leader_session_uuid": original_uuid,
+                        "owner_epoch": 1,
+                        "attached_at": "2026-09-09T17:08:31.965311+00:00",
+                        "tmux_socket": "/private/tmp/tmux-501/ta-33bddc6e7687",
+                        "session_name": null,
+                        "provider": "codex"
+                    },
+                    "team_owner": {
+                        "pane_id": "%0",
+                        "leader_session_uuid": original_uuid,
+                        "owner_epoch": 1,
+                        "claimed_via": "quick-start"
+                    }
+                }
+            }
+        });
+        std::fs::write(
+            crate::state::persist::runtime_state_path(&workspace),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        let mut plan = persist_test_plan(&workspace);
+        plan.identity = Some(persist_test_identity_named(&workspace, "second-launcher"));
+        let second_uuid = plan
+            .identity
+            .as_ref()
+            .unwrap()
+            .leader_session_uuid
+            .as_str()
+            .to_string();
+        assert_ne!(second_uuid, original_uuid);
+        let spawned = SpawnResult {
+            pane_id: PaneId::new("%2"),
+            session: SessionName::new(
+                "team-agent-leader-codex-team-agent-live-0578-r4-19450903",
+            ),
+            window: WindowName::new("codex-second"),
+            child_pid: Some(2),
+        };
+        persist_managed_leader_binding(&plan, &workspace, &spawned).expect("second persist");
+        let loaded = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        let recv = &loaded["teams"]["current"]["leader_receiver"];
+        let owner = &loaded["teams"]["current"]["team_owner"];
+        assert_eq!(recv["pane_id"], serde_json::json!("%0"));
+        assert_eq!(recv["leader_session_uuid"], serde_json::json!(original_uuid));
+        assert_eq!(recv["discovery"], serde_json::json!("env_pane"));
+        assert_eq!(recv["session_name"], serde_json::Value::Null);
+        assert_eq!(recv["owner_epoch"], serde_json::json!(1));
+        assert_eq!(
+            owner["leader_session_uuid"],
+            serde_json::json!(original_uuid)
+        );
+        let panes = recv["bound_panes"].as_array().expect("bound_panes");
+        let ids: Vec<&str> = panes
+            .iter()
+            .filter_map(|pane| pane.get("pane_id").and_then(serde_json::Value::as_str))
+            .collect();
+        assert!(ids.contains(&"%0"), "bound_panes missing first: {recv}");
+        assert!(ids.contains(&"%2"), "bound_panes missing second: {recv}");
         let _ = std::fs::remove_dir_all(&workspace);
     }
 

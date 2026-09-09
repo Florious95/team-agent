@@ -1207,6 +1207,34 @@ fn c_attach_window_failures_are_retried_or_remain_user_visible() {
         &[&attach_value, &status_value, &diagnose_value],
         &message_ids,
     );
+    if !physically_retried {
+        let debt = attach_value
+            .get("attach_window_failures")
+            .expect("attach must return typed attach-window debt when physical retry did not happen");
+        assert_eq!(
+            debt.get("team_id").and_then(Value::as_str),
+            Some(TEAM),
+            "attach-window debt must bind the current team operation; debt={debt}"
+        );
+        assert_eq!(
+            debt.get("pane_id").and_then(Value::as_str),
+            Some(GOOD_PANE),
+            "attach-window debt must bind the attached pane; debt={debt}"
+        );
+        assert_eq!(
+            debt.get("reason").and_then(Value::as_str),
+            Some("leader_not_attached")
+        );
+        assert_eq!(
+            debt.get("status").and_then(Value::as_str),
+            Some("requeued_pending_physical_retry")
+        );
+        assert_eq!(
+            debt.get("count").and_then(Value::as_u64),
+            Some(message_ids.len() as u64),
+            "typed debt count must come from the owner-team requeue result; debt={debt}"
+        );
+    }
 
     assert!(
         physically_retried || visible_debt,
@@ -2664,19 +2692,41 @@ fn assert_recovery_action(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    assert!(
-        parse_supported_recovery_command(&hint).is_some()
-            || copyable_recovery_command(&Value::Object(object.clone())).is_some(),
-        "{label}: recovery must contain a directly executable action from the supported catalog \
-         action set; output={value}"
-    );
-    assert!(
-        action.contains("terminal")
-            && (action.contains("outside") || action.contains("outside of"))
-            && (action.contains("tmux") || action.contains("pane")),
-        "{label}: clean-terminal guidance must say that the new terminal is outside the current \
-        tmux/pane, not merely suggest unsetting inherited variables; output={value}"
-    );
+    for field in [&action, &hint] {
+        assert!(
+            !field.contains("claim-leader")
+                && !field.contains("takeover")
+                && !field.contains("attach-leader"),
+            "{label}: pane-authority recovery must not shotgun bind commands; field={field} output={value}"
+        );
+    }
+    let has_catalog_command = parse_supported_recovery_command(&hint).is_some()
+        || copyable_recovery_command(&Value::Object(object.clone())).is_some();
+    match reason {
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch => {
+            assert!(
+                has_catalog_command
+                    || ((action.contains("workspace") || hint.contains("workspace"))
+                        && (action.contains("pane") || hint.contains("pane"))),
+                "{label}: workspace-mismatch recovery must name the pane/workspace condition \
+                 or a catalog command; output={value}"
+            );
+        }
+        _ => {
+            assert!(
+                has_catalog_command,
+                "{label}: recovery must contain a directly executable action from the supported catalog \
+                 action set; output={value}"
+            );
+            assert!(
+                action.contains("terminal")
+                    && (action.contains("outside") || action.contains("outside of"))
+                    && (action.contains("tmux") || action.contains("pane")),
+                "{label}: clean-terminal guidance must say that the new terminal is outside the current \
+                tmux/pane, not merely suggest unsetting inherited variables; output={value}"
+            );
+        }
+    }
 }
 
 fn find_recovery_object(

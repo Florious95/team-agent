@@ -742,10 +742,17 @@ fn c4_coordinator_recovery_advances_same_row_without_replacement() {
         "C4 fixture: status must expose coordinator health after the trigger"
     );
     let status = json_stdout(&status_output, "C4 status");
-    assert_eq!(
-        status.pointer("/coordinator/service_available"),
-        Some(&json!(true)),
-        "C4: coordinator health must be positive before row advancement: {status}"
+    let service_available = team_agent::coordinator::coordinator_health(
+        &team_agent::coordinator::WorkspacePath::new(case.workspace.clone()),
+    )
+    .service_available;
+    assert!(
+        service_available,
+        "C4: coordinator health must be positive before row advancement; brief_status={status}"
+    );
+    assert!(
+        status.get("nodes").and_then(Value::as_array).is_some(),
+        "C4: read-only status must retain only the seven-field nodes projection: {status}"
     );
 
     let final_status = case.wait_status(

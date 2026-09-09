@@ -469,11 +469,16 @@ fn launched_ok(json: &Value) -> bool {
             .pointer("/worker_readiness/all_workers_spawned")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    let reason = json
+        .get("reason")
+        .and_then(Value::as_str)
+        .or_else(|| json.pointer("/readiness/reason").and_then(Value::as_str))
+        .unwrap_or_default();
     all_workers
-        && matches!(
+        && (matches!(
             status,
             "leader_receiver_unbound" | "pending_tool_load" | "pending_session_capture"
-        )
+        ) || (status == "leader_binding_incomplete" && reason == "caller_pane_missing"))
 }
 
 fn json_string_array_contains(value: Option<&Value>, needle: &str) -> bool {
