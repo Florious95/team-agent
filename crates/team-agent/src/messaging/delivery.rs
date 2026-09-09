@@ -2259,7 +2259,32 @@ pub(crate) fn paste_to_submit_floor_for_recipient(
     }
 }
 
-fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
+/// ---
+/// purpose: 判断收件 provider 是否必须禁止 submit observer 重按 Enter
+/// returns: CursorAgent 与 Pi 为 true，其余为 false
+/// ---
+pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
+    matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent | Provider::Pi)
+    )
+}
+
+/// ---
+/// purpose: 判断收件 provider 是否允许 Grok send-now 显式队列 flush
+/// returns: CursorAgent 与 Pi 为 false，其余为 true
+/// ---
+pub(crate) fn recipient_allows_explicit_queue_flush(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> bool {
+    !matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent | Provider::Pi)
+    )
+}
+
+pub(crate) fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
     state
         .get("agents")
         .and_then(serde_json::Value::as_object)
