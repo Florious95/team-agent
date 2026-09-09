@@ -1,0 +1,257 @@
+name: Build macOS arm64 candidate
+
+# Manual candidate build only. This workflow deliberately has no push, pull_request,
+# release, tag, npm, or publish trigger.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact 40-character commit SHA to build"
+        required: true
+        type: string
+      expected_tree:
+        description: "Exact 40-character tree SHA expected at source_sha"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build team-agent (macOS arm64)
+    runs-on: macos-14
+    env:
+      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+      EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
+      RUST_TOOLCHAIN: "1.95.0"
+      TARGET: "aarch64-apple-darwin"
+
+    steps:
+      - name: Validate dispatch inputs and runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          validate_sha() {
+            local name="$1"
+            local value="$2"
+            if [[ ! "$value" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::${name} must be exactly 40 hexadecimal characters"
+              exit 1
+            fi
+          }
+
+          validate_sha source_sha "$SOURCE_SHA_INPUT"
+          validate_sha expected_tree "$EXPECTED_TREE_INPUT"
+
+          if [[ "${GITHUB_REPOSITORY:-}" != "Florious95/team-agent" ]]; then
+            echo "::error::workflow must run in Florious95/team-agent"
+            exit 1
+          fi
+          if [[ "${RUNNER_OS:-}" != "macOS" || "${RUNNER_ARCH:-}" != "ARM64" ]]; then
+            echo "::error::runner must report macOS/ARM64 (got ${RUNNER_OS:-unknown}/${RUNNER_ARCH:-unknown})"
+            exit 1
+          fi
+          if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+            echo "::error::host must be Darwin arm64 (got $(uname -s)/$(uname -m))"
+            exit 1
+          fi
+
+      - name: Check out requested source
+        uses: actions/checkout@v5
+        with:
+          repository: Florious95/team-agent
+          ref: ${{ env.SOURCE_SHA_INPUT }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Verify source identity and clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$(printf '%s' "$SOURCE_SHA_INPUT" | tr '[:upper:]' '[:lower:]')"
+          expected_tree="$(printf '%s' "$EXPECTED_TREE_INPUT" | tr '[:upper:]' '[:lower:]')"
+          actual_sha="$(git rev-parse --verify HEAD)"
+          actual_tree="$(git rev-parse --verify 'HEAD^{tree}')"
+
+          if [[ "$actual_sha" != "$source_sha" ]]; then
+            echo "::error::checked out SHA ${actual_sha} does not match requested source SHA"
+            exit 1
+          fi
+          if [[ "$actual_tree" != "$expected_tree" ]]; then
+            echo "::error::source tree ${actual_tree} does not match expected tree"
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            echo "::error::source checkout is not clean"
+            git status --short
+            exit 1
+          fi
+
+          printf 'SOURCE_SHA=%s\n' "$actual_sha" >> "$GITHUB_ENV"
+          printf 'SOURCE_TREE=%s\n' "$actual_tree" >> "$GITHUB_ENV"
+
+      - name: Install and verify Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUST_TOOLCHAIN" "$TARGET"
+          export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+
+          rustc_version="$(rustc --version)"
+          cargo_version="$(cargo --version)"
+          rustc_host="$(rustc -vV | awk '$1 == "host:" { print $2; exit }')"
+          active_toolchain="$(rustup show active-toolchain | awk '{ print $1; exit }')"
+
+          if [[ "$rustc_version" != "rustc ${RUST_TOOLCHAIN}"* ]]; then
+            echo "::error::unexpected rustc version: ${rustc_version}"
+            exit 1
+          fi
+          if [[ "$active_toolchain" != "${RUST_TOOLCHAIN}"* ]]; then
+            echo "::error::unexpected active toolchain: ${active_toolchain}"
+            exit 1
+          fi
+          if [[ "$rustc_host" != "$TARGET" ]]; then
+            echo "::error::Rust host ${rustc_host} does not match ${TARGET}"
+            exit 1
+          fi
+
+          printf 'RUSTC_VERSION=%s\n' "$rustc_version" >> "$GITHUB_ENV"
+          printf 'CARGO_VERSION=%s\n' "$cargo_version" >> "$GITHUB_ENV"
+          printf 'RUSTC_HOST=%s\n' "$rustc_host" >> "$GITHUB_ENV"
+
+      - name: Build requested source
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+          cargo build -p team-agent --bin team-agent --release --target aarch64-apple-darwin --locked
+
+      - name: Verify and package candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          built_binary="target/${TARGET}/release/team-agent"
+          dist="dist"
+          binary_name="team-agent-aarch64-apple-darwin"
+          binary="${dist}/${binary_name}"
+          archive="${dist}/team-agent-macos-arm64.tar.gz"
+
+          test -x "$built_binary"
+          file_info="$(file "$built_binary")"
+          if [[ "$file_info" != *"Mach-O"* || "$file_info" != *"arm64"* ]]; then
+            echo "::error::build is not a Mach-O arm64 executable: ${file_info}"
+            exit 1
+          fi
+          archs="$(lipo -archs "$built_binary" | tr -d '[:space:]')"
+          if [[ "$archs" != "arm64" ]]; then
+            echo "::error::build architectures are not exactly arm64: ${archs}"
+            exit 1
+          fi
+
+          package_name="$(awk '
+            /^\[package\]$/ { in_package=1; next }
+            in_package && /^\[/ { exit }
+            in_package && /^[[:space:]]*name[[:space:]]*=/ {
+              sub(/^[^\"]*\"/, "")
+              sub(/\".*$/, "")
+              print
+              exit
+            }
+          ' crates/team-agent/Cargo.toml)"
+          if [[ "$package_name" != "team-agent" ]]; then
+            echo "::error::unexpected target package name: ${package_name}"
+            exit 1
+          fi
+          version="$(awk '
+            /^\[workspace\.package\]$/ { in_workspace=1; next }
+            in_workspace && /^\[/ { exit }
+            in_workspace && /^[[:space:]]*version[[:space:]]*=/ {
+              sub(/^[^\"]*\"/, "")
+              sub(/\".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "::error::workspace package version is missing"
+            exit 1
+          fi
+          expected_cli_version="${package_name} ${version}"
+
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          cp "$built_binary" "$binary"
+          chmod 755 "$binary"
+          "$binary" --version > "${dist}/CLI-VERSION.txt"
+          test -s "${dist}/CLI-VERSION.txt"
+          actual_cli_version="$(<"${dist}/CLI-VERSION.txt")"
+          if [[ "$actual_cli_version" != "$expected_cli_version" ]]; then
+            printf '::error::unexpected --version output: %s; expected %s\n' "$actual_cli_version" "$expected_cli_version"
+            exit 1
+          fi
+
+          binary_sha256="$(shasum -a 256 "$binary" | awk '{ print $1 }')"
+          cat > "${dist}/SOURCE.txt" <<EOF
+          source_sha=${SOURCE_SHA}
+          source_tree=${SOURCE_TREE}
+          expected_source_sha=$(printf '%s' "$SOURCE_SHA_INPUT" | tr '[:upper:]' '[:lower:]')
+          expected_tree=$(printf '%s' "$EXPECTED_TREE_INPUT" | tr '[:upper:]' '[:lower:]')
+          repository=${GITHUB_REPOSITORY}
+          EOF
+          cat > "${dist}/BUILD.txt" <<EOF
+          workflow_sha=${GITHUB_WORKFLOW_SHA}
+          workflow_ref=${GITHUB_WORKFLOW_REF}
+          run_context_sha=${GITHUB_SHA}
+          run_context_ref=${GITHUB_REF}
+          workflow_run_id=${GITHUB_RUN_ID}
+          workflow_run_attempt=${GITHUB_RUN_ATTEMPT}
+          runner_name=${RUNNER_NAME}
+          runner_os=${RUNNER_OS}
+          runner_arch=${RUNNER_ARCH}
+          host_os=$(uname -s)
+          host_arch=$(uname -m)
+          macos_version=$(sw_vers -productVersion)
+          rust_toolchain=${RUST_TOOLCHAIN}
+          rustc_version=${RUSTC_VERSION}
+          rustc_host=${RUSTC_HOST}
+          cargo_version=${CARGO_VERSION}
+          target=${TARGET}
+          version=${version}
+          binary_sha256=${binary_sha256}
+          EOF
+
+          tar -czf "$archive" -C "$dist" "$binary_name" SOURCE.txt BUILD.txt CLI-VERSION.txt
+          archive_mode="$(tar -tvf "$archive" | awk -v name="$binary_name" '$NF == name { print $1; exit }')"
+          if [[ "$archive_mode" != -rwx* ]]; then
+            echo "::error::tar archive did not preserve executable mode: ${archive_mode}"
+            exit 1
+          fi
+
+          (
+            cd "$dist"
+            shasum -a 256 \
+              "$binary_name" \
+              team-agent-macos-arm64.tar.gz \
+              SOURCE.txt \
+              BUILD.txt \
+              CLI-VERSION.txt > SHA256SUMS
+          )
+          test -s "${dist}/SHA256SUMS"
+          for output in "$binary" "$archive" "${dist}/SOURCE.txt" "${dist}/BUILD.txt" "${dist}/CLI-VERSION.txt" "${dist}/SHA256SUMS"; do
+            test -f "$output"
+          done
+
+      - name: Upload candidate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: team-agent-macos-arm64-candidate
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
