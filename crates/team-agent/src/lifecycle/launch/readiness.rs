@@ -114,20 +114,22 @@ pub(super) fn quick_start_session_capture_incomplete_agents(
 /// purpose: 判断该团队的 leader 收件端是否真的挂上了
 /// returns: 注册表明确记为 attached 且 state 可读时为 true；未绑定或判不出一律 false
 /// ---
-/// Host registry is a deliverability *index*. Unknown reads are not unbound.
-/// Only an attached registry row plus readable state counts as attached.
+/// Host registry is the deliverability authority. Workspace `state.json`
+/// is only a copy. Detection failure is unbound, never attached.
 pub fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
-    crate::leader::observe_leader_binding(workspace, team_key).is_deliverable()
+    match registry_deliverability(workspace, team_key) {
+        RegistryDeliverability::Attached => {}
+        RegistryDeliverability::Unbound | RegistryDeliverability::Undecidable => return false,
+    }
+    load_runtime_state(workspace).is_ok()
 }
 
-#[allow(dead_code)]
 enum RegistryDeliverability {
     Attached,
     Unbound,
     Undecidable,
 }
 
-#[allow(dead_code)]
 fn registry_deliverability(workspace: &Path, team_key: &str) -> RegistryDeliverability {
     let Some(dir) = crate::leader::registry::registry_dir() else {
         return RegistryDeliverability::Undecidable;

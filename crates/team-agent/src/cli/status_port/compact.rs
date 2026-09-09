@@ -60,23 +60,19 @@ pub(super) fn compact_not_ready(full: &Value) -> Value {
         })
         .unwrap_or_default();
     let mut obj = Map::new();
+    let channel_unbound = reasons
+        .iter()
+        .any(|reason| reason == "leader_receiver_unbound");
     obj.insert(
         "reasons".to_string(),
         Value::Array(reasons.into_iter().map(Value::String).collect()),
     );
     obj.insert("agents".to_string(), Value::Array(agents));
-    if let Some(next_action) = full
-        .pointer("/readiness/next_action")
-        .and_then(Value::as_str)
-    {
-        let truly_unbound = full.pointer("/readiness/state").and_then(Value::as_str)
-            == Some("leader_receiver_unbound");
-        if !next_action.contains("claim-leader") || truly_unbound {
-            obj.insert(
-                "next_action".to_string(),
-                Value::String(next_action.to_string()),
-            );
-        }
+    if channel_unbound {
+        obj.insert(
+            "next_action".to_string(),
+            Value::String("claim-leader".to_string()),
+        );
     }
     Value::Object(obj)
 }

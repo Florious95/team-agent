@@ -210,7 +210,6 @@ pub fn launch_with_transport_in_workspace(
         routes,
         permissions,
         leader_receiver_attached: false,
-        leader_binding: crate::leader::BindingFact::default(),
         session_capture_incomplete_agents: Vec::new(),
     })
 }

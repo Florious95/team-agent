@@ -1303,7 +1303,7 @@ fn restart_with_selected_team_and_transport(
         )?;
         // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
         // come up still need a leader_receiver pane to deliver report_result.
-        let leader_binding = try_autobind_leader_after_restart(
+        try_autobind_leader_after_restart(
             &selected.run_workspace,
             Some(selected.team_key.as_str()),
             &state,
@@ -1316,7 +1316,6 @@ fn restart_with_selected_team_and_transport(
             coordinator,
             next_actions,
             attach_commands,
-            leader_binding,
         });
     }
     phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
@@ -1332,8 +1331,7 @@ fn restart_with_selected_team_and_transport(
     // invoked from a tmux pane should bind that pane as leader_receiver,
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
-    let leader_binding =
-        try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+    try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
     if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
     {
         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
@@ -1354,7 +1352,6 @@ fn restart_with_selected_team_and_transport(
         coordinator,
         next_actions,
         attach_commands,
-        leader_binding,
     })
 }
 
@@ -1828,32 +1825,13 @@ fn try_autobind_leader_after_restart(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
-) -> crate::leader::BindingFact {
-    let team_key = team.unwrap_or("");
-    let observed = crate::leader::observe_leader_binding(workspace, team_key);
-    if observed.is_deliverable()
-        || matches!(
-            observed.kind,
-            crate::leader::BindingKind::ExistingBound | crate::leader::BindingKind::Bound
-        )
-    {
-        return observed;
-    }
+) {
     if std::env::var_os("TMUX_PANE").is_none() {
-        return observed;
+        return;
     }
-    if crate::leader::grant_authorizes_workspace(
-        workspace,
-        state,
-        std::env::var("TEAM_AGENT_PANE_BINDING_NONCE")
-            .ok()
-            .as_deref(),
-    ) {
-        let repaired = crate::leader::observe_leader_binding(workspace, team_key);
-        if repaired.kind != crate::leader::BindingKind::Unbound {
-            return repaired;
-        }
-    }
+    // Provider: prefer the existing team_owner.provider (if rebind),
+    // else leader_receiver.provider (stale, but still informative),
+    // else default to ClaudeCode (matches the most common deployment).
     let provider = state
         .pointer("/team_owner/provider")
         .and_then(serde_json::Value::as_str)
@@ -1862,61 +1840,43 @@ fn try_autobind_leader_after_restart(
                 .pointer("/leader_receiver/provider")
                 .and_then(serde_json::Value::as_str)
         })
-        .and_then(crate::provider::wire::parse_provider);
-    let Some(provider) = provider else {
-        return crate::leader::BindingFact {
-            kind: crate::leader::BindingKind::ProviderUnresolved,
-            stage: Some("restart_autobind".to_string()),
-            reason: "provider_unresolved".to_string(),
-            workers_spawned: true,
-            registry: observed.registry,
-            state_receiver: observed.state_receiver,
-            owner_pane: observed.owner_pane,
-            caller_pane: observed.caller_pane,
-            action: Some(crate::leader::BindingAction {
-                id: "supply_provider",
-                command: Some(
-                    "set TEAM_AGENT_LEADER_PROVIDER from the existing owner; do not guess ClaudeCode or claim-leader"
-                        .to_string(),
-                ),
-            }),
-        };
-    };
-    match crate::leader::attach_leader(workspace, team, None, provider) {
+        .and_then(|s| {
+            // Legacy auto-attach: collapse any claude variant to ClaudeCode
+            // (this site historically treated `Claude` and `ClaudeCode` as
+            // the same attach target). Wire-format `parse_provider` keeps
+            // them distinct everywhere else.
+            crate::provider::wire::parse_provider(s).map(|p| match p {
+                crate::model::enums::Provider::Claude => crate::model::enums::Provider::ClaudeCode,
+                other => other,
+            })
+        })
+        .unwrap_or(crate::model::enums::Provider::ClaudeCode);
+    let team_str = team;
+    match crate::leader::attach_leader(workspace, team_str, None, provider) {
         Ok(result) if result.ok => {
             let _ = crate::leader::registry::register_binding_from_state_best_effort(
                 workspace,
-                team,
+                team_str,
                 "restart-auto-attach",
             );
-            crate::leader::observe_leader_binding(workspace, team_key)
+            eprintln!(
+                "team_agent::restart auto_attach_leader ok pane={:?} team={:?}",
+                result.bound_pane_id.as_ref().map(|p| p.as_str()),
+                team_str,
+            );
         }
-        Ok(result) => crate::leader::BindingFact {
-            kind: crate::leader::BindingKind::GrantRejected,
-            stage: Some("restart_autobind".to_string()),
-            reason: result
-                .reason
-                .as_ref()
-                .map(|reason| format!("{reason:?}"))
-                .unwrap_or_else(|| "leader_pane_validation_failed".to_string()),
-            workers_spawned: true,
-            registry: observed.registry,
-            state_receiver: observed.state_receiver,
-            owner_pane: observed.owner_pane,
-            caller_pane: observed.caller_pane,
-            action: None,
-        },
-        Err(error) => crate::leader::BindingFact {
-            kind: crate::leader::BindingKind::GrantRejected,
-            stage: Some("restart_autobind".to_string()),
-            reason: error.to_string(),
-            workers_spawned: true,
-            registry: observed.registry,
-            state_receiver: observed.state_receiver,
-            owner_pane: observed.owner_pane,
-            caller_pane: observed.caller_pane,
-            action: None,
-        },
+        Ok(result) => {
+            eprintln!(
+                "team_agent::restart auto_attach_leader skipped reason={:?} team={:?}",
+                result.reason, team_str,
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "team_agent::restart auto_attach_leader failed error={error} team={team_str:?} \
+                 (run `team-agent attach-leader` from your tmux pane to bind manually)",
+            );
+        }
     }
 }
 

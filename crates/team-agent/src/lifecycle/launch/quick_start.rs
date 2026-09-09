@@ -432,22 +432,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
     // team_key 已在入口由显式 id/name 或 compiled spec identity 单次确定。
     let state_team_key = canonical_team_key;
     warn_ignored_owner_team_id(workspace.as_path(), agents_dir, &state_team_key);
-    if let Some(fact) = crate::leader::preflight_fact(&crate::leader::preflight_caller()) {
-        return Ok(QuickStartReport::PreflightBlocked {
-            summary: format!(
-                "quick-start refused before spawn: {} ({})",
-                fact.public_status(),
-                fact.reason
-            ),
-            blockers: vec![format!(
-                "stage={} reason={}",
-                fact.stage.as_deref().unwrap_or("strict_provider"),
-                fact.reason
-            )],
-            next_actions: fact.next_actions(),
-            attach_commands: Vec::new(),
-        });
-    }
     // E5 spec 迁移:spec 写到 .team/runtime/<team_key>/(中间产物,绝不落用户目录 agents_dir)。
     // Bug2:原子写(tmp+rename),避免半截 spec。
     let spec_path = crate::model::paths::runtime_spec_path(&workspace, &state_team_key);
@@ -496,9 +480,8 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         team_depth.parent_team_key.as_deref(),
         team_depth.team_depth,
     )?;
-    commit_trusted_quick_start_binding(&workspace, &state_team_key);
-    launch.leader_binding = crate::leader::observe_leader_binding(&workspace, &state_team_key);
-    launch.leader_receiver_attached = launch.leader_binding.is_deliverable();
+    launch.leader_receiver_attached =
+        launched_team_receiver_is_attached(&workspace, &state_team_key);
     launch.session_capture_incomplete_agents =
         quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
@@ -569,32 +552,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         display_backend,
         worker_readiness,
     })
-}
-
-fn commit_trusted_quick_start_binding(workspace: &Path, team_key: &str) {
-    let observed = crate::leader::observe_leader_binding(workspace, team_key);
-    if observed.is_deliverable() || observed.kind == crate::leader::BindingKind::ExistingBound {
-        let _ = crate::leader::registry::register_binding_from_state_best_effort(
-            workspace,
-            Some(team_key),
-            "quick-start-existing",
-        );
-        return;
-    }
-    let crate::leader::CallerPreflight::Ready { provider } = crate::leader::preflight_caller()
-    else {
-        return;
-    };
-    match crate::leader::attach_leader(workspace, Some(team_key), None, provider) {
-        Ok(result) if result.ok => {
-            let _ = crate::leader::registry::register_binding_from_state_best_effort(
-                workspace,
-                Some(team_key),
-                "quick-start-bind",
-            );
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]

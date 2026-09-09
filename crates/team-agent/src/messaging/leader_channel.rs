@@ -143,8 +143,7 @@ fn explicit_claim_authority_matches(
     receiver: &Value,
     observed: &PaneInfo,
 ) -> bool {
-    let authority = string_field(receiver, "scope_authority");
-    if authority != Some("explicit_claim") && authority != Some("fresh_caller") {
+    if string_field(receiver, "scope_authority") != Some("explicit_claim") {
         return false;
     }
     let Some(authorized_workspace) = string_field(receiver, "authorized_team_workspace") else {

@@ -205,12 +205,12 @@ pub(super) fn seed_launched_owner_from_caller_with_provider_lookup(
     });
     let mut receiver = serde_json::json!({
         "mode": "direct_tmux",
-        "status": "pending",
+        "status": "attached",
         "pane_id": owner.get("pane_id").cloned().unwrap_or(serde_json::Value::Null),
         "pane": owner.get("pane_id").cloned().unwrap_or(serde_json::Value::Null),
         "leader_session_uuid": owner.get("leader_session_uuid").cloned().unwrap_or(serde_json::Value::Null),
         "owner_epoch": owner_epoch,
-        "discovery": "quick_start_seed",
+        "discovery": "quick_start",
     });
     if let Some(provider) = provider.as_ref() {
         if let Some(owner) = owner.as_object_mut() {

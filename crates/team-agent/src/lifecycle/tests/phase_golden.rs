@@ -190,23 +190,15 @@ fn phase_golden_unbound_not_ready_requires_claim_leader() {
         .cloned()
         .unwrap_or_default();
     assert!(
-        reasons.iter().any(|reason| {
-            matches!(
-                reason.as_str(),
-                Some("leader_receiver_unbound")
-                    | Some("leader_binding_unknown")
-                    | Some("leader_binding_incomplete")
-            )
-        }),
-        "tombstone fixture must still report an honest leader binding gap; not_ready={not_ready:?}"
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("leader_receiver_unbound")),
+        "tombstone fixture must still produce leader_receiver_unbound; not_ready={not_ready:?}"
     );
-    let next_action = not_ready.get("next_action").and_then(Value::as_str);
-    assert!(
-        next_action.map_or(true, |action| !action.contains("claim-leader")
-            || reasons
-                .iter()
-                .any(|reason| reason.as_str() == Some("leader_receiver_unbound"))),
-        "claim-leader is only legal for proven unbound; not_ready={not_ready:?}"
+    assert_eq!(
+        not_ready.get("next_action").and_then(Value::as_str),
+        Some("claim-leader"),
+        "when not_ready.reasons contains leader_receiver_unbound, next_action must be claim-leader; not_ready={not_ready:?}"
     );
 }
 
