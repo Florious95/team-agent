@@ -1095,6 +1095,13 @@ pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
         .get("session_name")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            state
+                .get("leader_receiver")
+                .and_then(|receiver| receiver.get("session_name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .map(SessionName::new)
         .unwrap_or_else(|| SessionName::new("team-agent"))
 }
