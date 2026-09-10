@@ -147,8 +147,8 @@ fn spawned_caller_env() -> (BTreeMap<String, String>, Vec<String>) {
         "inherited caller namespace must be stripped before inject: {env:?}"
     );
     assert!(!env.contains_key("TEAM_AGENT_LEADER_PROVIDER"));
-    let env_unset = isolate_worker_spawn_env(Provider::Pi, &mut env, Vec::<String>::new());
-    inject_current_caller_provider(&mut env, Provider::Pi);
+    let env_unset = isolate_worker_spawn_env(Provider::Codex, &mut env, Vec::<String>::new());
+    inject_current_caller_provider(&mut env, Provider::Codex);
     (env, env_unset)
 }
 
@@ -161,7 +161,7 @@ fn assert_caller_unset_and_assignment_once(command: &str) {
             .count(),
         1
     );
-    assert_eq!(command.matches("TEAM_AGENT_CALLER_PROVIDER=pi").count(), 1);
+    assert_eq!(command.matches("TEAM_AGENT_CALLER_PROVIDER=codex").count(), 1);
     assert_eq!(command.matches("TEAM_AGENT_CALLER_PANE_ID=").count(), 1);
     assert_eq!(
         command.matches("TEAM_AGENT_CALLER_TMUX_ENDPOINT=").count(),
@@ -240,7 +240,7 @@ fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
     let cwd = Path::new("/tmp/worker");
     let wrapper = worker_shell_wrapper_command(&argv, cwd, &env, &env_unset, "pi");
     let cold_start = super::shell_command(&argv, cwd, &env, &env_unset);
-    assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("pi"));
+    assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("codex"));
     assert!(!env.contains_key(CALLER_PANE_ENV));
     assert!(!env.contains_key(CALLER_ENDPOINT_ENV));
     assert_caller_unset_and_assignment_once(&wrapper);
@@ -262,11 +262,11 @@ fn worker_caller_provider_is_generated_and_scoped_to_provider_invocation() {
     let pane = "%1";
     assert_eq!(
         resolve_expanded_caller(&wrapper, tmux, pane, Some("/tmp/tmux.sock")),
-        CallerProviderResolution::Valid(Provider::Pi)
+        CallerProviderResolution::Valid(Provider::Codex)
     );
     assert_eq!(
         resolve_expanded_caller(&cold_start, tmux, pane, Some("/tmp/tmux.sock")),
-        CallerProviderResolution::Valid(Provider::Pi)
+        CallerProviderResolution::Valid(Provider::Codex)
     );
     // Preserve the context generated in pane %1; only the caller moves to %2.
     let (provider, context_pane, context_endpoint) = expand_caller_allowlist(&wrapper, tmux, pane);
@@ -298,7 +298,7 @@ fn worker_caller_context_is_rewritten_per_spawn_and_not_inherited() {
     );
     assert_eq!(
         resolve_expanded_caller(&parent_cmd, "/tmp/current.sock,1,0", "%4", None),
-        CallerProviderResolution::Valid(Provider::Pi)
+        CallerProviderResolution::Valid(Provider::Codex)
     );
 
     let mut child_parent = parent_env
@@ -334,7 +334,7 @@ fn worker_caller_context_is_rewritten_per_spawn_and_not_inherited() {
         "codex",
     );
     assert!(child_cmd.contains("TEAM_AGENT_CALLER_PROVIDER=codex"));
-    assert!(!child_cmd.contains("TEAM_AGENT_CALLER_PROVIDER=pi"));
+    assert!(!child_cmd.contains("TEAM_AGENT_CALLER_PROVIDER=codex"));
     assert_eq!(
         resolve_expanded_caller(&child_cmd, "/tmp/child.sock,1,0", "%8", None),
         CallerProviderResolution::Valid(Provider::Codex)

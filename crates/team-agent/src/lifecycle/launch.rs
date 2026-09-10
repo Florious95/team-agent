@@ -88,6 +88,12 @@ pub(crate) fn launch_with_transport(
     )
 }
 
+pub(crate) fn run_pi_catalog_preflight(
+    _agents_dir: &Path,
+) -> Result<(), LifecycleError> {
+    Ok(())
+}
+
 /// ---
 /// purpose: 冷启全队的实体实现，编译 spec、检查 session 冲突、按序 spawn、落 state、出报告
 /// params:

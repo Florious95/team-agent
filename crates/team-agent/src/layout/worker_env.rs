@@ -449,8 +449,8 @@ mod tests {
             (CALLER_PANE_ENV.to_string(), "%1".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
         ]);
-        inject_current_caller_provider(&mut env, Provider::Pi);
-        assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("pi"));
+        inject_current_caller_provider(&mut env, Provider::Codex);
+        assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("codex"));
         assert!(!env.contains_key(CALLER_PANE_ENV));
         assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
     }
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn isolate_worker_spawn_env_clears_context_from_outer_shell() {
         let mut env = BTreeMap::from([(CALLER_PROVIDER_ENV.to_string(), "pi".to_string())]);
-        let unset = isolate_worker_spawn_env(Provider::Pi, &mut env, Vec::<String>::new());
+        let unset = isolate_worker_spawn_env(Provider::Codex, &mut env, Vec::<String>::new());
         assert!(!env.contains_key(CALLER_PROVIDER_ENV));
         assert!(unset.iter().any(|key| key == CALLER_PROVIDER_ENV));
         assert!(unset.iter().any(|key| key == CALLER_PANE_ENV));
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn caller_context_requires_exact_current_pane_and_endpoint() {
         let resolution = caller_provider_resolution_from_values(
-            Some("pi"),
+            Some("codex"),
             Some("%1"),
             Some("/tmp/tmux.sock"),
             None,
@@ -477,7 +477,7 @@ mod tests {
             Some("/tmp/tmux.sock"),
             Some("/tmp/tmux.sock"),
         );
-        assert_eq!(resolution, CallerProviderResolution::Valid(Provider::Pi));
+        assert_eq!(resolution, CallerProviderResolution::Valid(Provider::Codex));
         assert_eq!(
             caller_provider_resolution_from_values(
                 Some("pi"),
@@ -666,16 +666,16 @@ mod tests {
         );
         assert_eq!(
             caller_provider_resolution_from_values(
-                Some("pi"),
+                Some("codex"),
                 Some("%1"),
                 Some("/tmp/tmux.sock"),
-                Some("pi"),
+                Some("codex"),
                 Some("%1"),
                 Some("%1"),
                 Some("/tmp/tmux.sock"),
                 Some("/tmp/tmux.sock"),
             ),
-            CallerProviderResolution::Valid(Provider::Pi)
+            CallerProviderResolution::Valid(Provider::Codex)
         );
     }
 

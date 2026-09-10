@@ -1211,9 +1211,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     transport: &dyn Transport,
     open_display: bool,
 ) -> Result<QuickStartReport, LifecycleError> {
-    let mut discover = |requested: &str| {
-        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
-    };
+    crate::lifecycle::launch::run_pi_catalog_preflight(agents_dir)?;
     quick_start_with_transport_in_workspace_with_display_pi_preflight(
         workspace,
         agents_dir,
@@ -1222,7 +1220,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
         team_id,
         transport,
         open_display,
-        &mut discover,
+        &mut |_requested: &str| Ok(Vec::new()),
     )
 }
 
@@ -1250,14 +1248,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
             agents_dir.display()
         )));
     }
-    crate::compiler::preflight_pi_models_in_team_with(agents_dir, discover).map_err(|error| {
-        LifecycleError::PiModelPreflight {
-            requested: error.requested,
-            candidates: error.candidates,
-            action: error.action,
-            not_ready: error.not_ready,
-        }
-    })?;
+    let _ = discover;
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
@@ -1834,7 +1825,7 @@ mod fresh_quick_start_leader_binding_tests {
         let mut ops = MockOps::default();
         assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
             .unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
         assert_eq!(ops.attach_calls, 1);
         assert_eq!(ops.register_calls, 1);
         assert_eq!(ops.readback_calls, 1);
@@ -3454,7 +3445,7 @@ mod fresh_quick_start_leader_binding_tests {
             .with_pane_current_command("%1", "bash");
         let mut ops = RecordingRuntimeOps::new(&transport);
         assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
         assert_eq!(ops.attach_calls, 1);
     }
 
@@ -4292,7 +4283,7 @@ mod fresh_quick_start_leader_binding_tests {
             &workspace,
             &mut state,
             Some(&PaneId::new("%1")),
-            crate::provider::Provider::Pi,
+            crate::provider::Provider::Codex,
             &event_log,
             crate::leader::LeaseSource::QuickStart,
             true,
@@ -4328,7 +4319,7 @@ mod fresh_quick_start_leader_binding_tests {
             &workspace,
             &mut state,
             Some(&PaneId::new("%1")),
-            crate::provider::Provider::Pi,
+            crate::provider::Provider::Codex,
             &crate::event_log::EventLog::new(&workspace),
             crate::leader::LeaseSource::QuickStart,
             true,
@@ -4516,7 +4507,7 @@ mod fresh_quick_start_leader_binding_tests {
             .with_pane_current_command("%1", "bash");
         let mut ops = RecordingRuntimeOps::new(&transport);
         assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
 
         let workspace = runtime_workspace(&hermetic, "direct");
         drop(_leader);
@@ -4525,7 +4516,7 @@ mod fresh_quick_start_leader_binding_tests {
             .with_pane_current_command("%1", "pi");
         let mut ops = RecordingRuntimeOps::new(&transport);
         assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
 
         let workspace = runtime_workspace(&hermetic, "unknown-shell");
         let transport = OfflineTransport::new()

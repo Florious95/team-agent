@@ -3305,7 +3305,7 @@ mod tests {
             &workspace,
             &state,
             &pane,
-            crate::provider::Provider::Pi,
+            crate::provider::Provider::Copilot,
             Some("/tmp/leader.sock"),
         ));
     }

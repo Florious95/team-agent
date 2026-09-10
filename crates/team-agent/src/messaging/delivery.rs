@@ -2337,8 +2337,7 @@ fn recipient_pane_has_actionable_startup_prompt(
             crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        Provider::Pi
-        | Provider::Grok
+        Provider::Grok
         | Provider::CursorAgent
         | Provider::GeminiCli
         | Provider::Fake => false,
@@ -2386,7 +2385,7 @@ pub(crate) fn paste_to_submit_floor_for_recipient(
 pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
     matches!(
         recipient_provider(state, recipient),
-        Some(Provider::CursorAgent | Provider::Pi)
+        Some(Provider::CursorAgent)
     )
 }
 
@@ -2400,7 +2399,7 @@ pub(crate) fn recipient_allows_explicit_queue_flush(
 ) -> bool {
     !matches!(
         recipient_provider(state, recipient),
-        Some(Provider::CursorAgent | Provider::Pi)
+        Some(Provider::CursorAgent)
     )
 }
 

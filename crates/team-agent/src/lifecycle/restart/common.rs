@@ -340,15 +340,11 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref().unwrap_or(""),
     );
-    let mcp_config_path = if provider == Provider::Pi {
-        None
-    } else {
-        Some(crate::lifecycle::launch::write_worker_mcp_config(
-            workspace,
-            agent_id.as_str(),
-            &mcp_config,
-        )?)
-    };
+    let mcp_config_path = Some(crate::lifecycle::launch::write_worker_mcp_config(
+        workspace,
+        agent_id.as_str(),
+        &mcp_config,
+    )?);
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -378,57 +374,14 @@ pub(super) fn spawn_agent_window(
         agent_id_hint: Some(agent_id.as_str()),
         effort: restart_effort,
     };
-    let pi_spawn_cwd = (provider == Provider::Pi)
-        .then(|| {
-            agent
-                .get("spawn_cwd")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(std::path::PathBuf::from)
-        })
-        .flatten();
-    let spawn_cwd = spawn_cwd_override
-        .or(pi_spawn_cwd.as_deref())
-        .unwrap_or(workspace);
-    let mut plan = if provider == Provider::Pi {
-        let request = crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
-            workspace,
-            team_id: team_id.as_deref().unwrap_or(""),
-            agent_id: agent_id.as_str(),
-            model: command_model,
-            effort: restart_effort,
-            system_prompt: &system_prompt,
-            tool_categories: &resolved_tool_refs,
-            team_mcp_tools: &["send_message", "report_result"],
-            mcp_config: &mcp_config,
-            session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
-        };
-        match resume_session_id {
-            Some(session_id) => {
-                let rollout_path = agent_rollout_path(agent).ok_or_else(|| {
-                    LifecycleError::RequirementUnmet(
-                        "Pi resume requires the persisted exact session path".to_string(),
-                    )
-                })?;
-                crate::lifecycle::launch::pi_mcp::materialize_pi_resume_plan(
-                    request,
-                    session_id,
-                    rollout_path.as_path(),
-                    spawn_cwd,
-                )
-            }
-            None => crate::lifecycle::launch::pi_mcp::materialize_pi_plan(request),
-        }
-        .map_err(|e| LifecycleError::Provider(e.to_string()))?
-    } else {
-        match resume_session_id {
-            Some(session_id) => adapter
-                .build_resume_command_plan(Some(session_id), context)
-                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-            None => adapter
-                .build_command_plan(context)
-                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        }
+    let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
+    let mut plan = match resume_session_id {
+        Some(session_id) => adapter
+            .build_resume_command_plan(Some(session_id), context)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+        None => adapter
+            .build_command_plan(context)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
     };
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
         if let Some(mcp_config_path) = mcp_config_path.as_ref() {
@@ -477,7 +430,7 @@ pub(super) fn spawn_agent_window(
             &system_prompt,
         )?;
         crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, None)?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace)?;
         crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
         crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
     }
@@ -1427,22 +1380,6 @@ pub(super) fn resume_backing_probe_for_agent(
                 || discovered.as_ref().is_some_and(|dir| {
                     crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
                 })
-        }
-        Provider::Pi => {
-            let spawn_cwd = agent
-                .get("spawn_cwd")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| workspace.to_path_buf());
-            rollout_path.is_some_and(|path| {
-                crate::provider::session_scan::pi::validate_exact_backing(
-                    path.as_path(),
-                    session_id,
-                    &spawn_cwd,
-                )
-                .is_ok()
-            })
         }
         Provider::GeminiCli | Provider::Fake => false,
     };

@@ -370,12 +370,7 @@ mod e11_provider_bind_tests {
 
     #[test]
     fn strict_provider_never_falls_back_from_unknown_explicit_or_command() {
-        assert_eq!(
-            strict_owner_bind_provider(Some("pi"), "codex"),
-            Some(Provider::Pi)
-        );
         assert_eq!(strict_owner_bind_provider(Some("unknown"), "codex"), None);
-        assert_eq!(strict_owner_bind_provider(None, "pi"), Some(Provider::Pi));
         assert_eq!(strict_owner_bind_provider(None, "node"), None);
     }
 
