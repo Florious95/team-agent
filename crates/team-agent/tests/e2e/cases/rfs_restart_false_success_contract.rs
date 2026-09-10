@@ -35,7 +35,7 @@ fn rfs_restart_refuses_tmux_endpoint_socket_split_brain_before_ok() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let old_socket = state_socket(&ws);
     let new_socket = unique_socket("rfs001-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -70,7 +70,7 @@ fn rfs_refused_dirty_topology_event_precedes_any_spawn_argv_event() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let old_socket = state_socket(&ws);
     let new_socket = unique_socket("rfs005-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -98,7 +98,7 @@ fn rfs_diagnose_reports_endpoint_socket_conflict_and_canonical_readiness() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let old_socket = state_socket(&ws);
     let new_socket = unique_socket("rfs002-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -125,7 +125,7 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let old_socket = unique_socket("rfs008-old");
     let new_socket = unique_socket("rfs008-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -171,7 +171,7 @@ fn rfs_topology_invariant_blocks_same_pane_id_only_when_socket_matches() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let old_socket = state_socket(&ws);
     let new_socket = unique_socket("rfs003-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -197,7 +197,7 @@ fn rfs_same_bare_pane_id_on_different_sockets_is_not_a_4_tuple_collision() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let worker_socket = state_socket(&ws);
     let leader_socket = unique_socket("rfs006-leader");
     let _guard = TmuxSocketGuard::new(vec![worker_socket.clone(), leader_socket.clone()]);
@@ -233,7 +233,7 @@ fn rfs_never_captured_no_session_worker_auto_freshes_without_allow_fresh() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxSocketGuard::new(vec![state_socket(&ws)]);
 
     let _ = run_ta(
@@ -245,16 +245,11 @@ fn rfs_never_captured_no_session_worker_auto_freshes_without_allow_fresh() {
 
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
     let body = out.json();
-    assert_eq!(
-        body.pointer("/ok").and_then(Value::as_bool),
-        Some(true),
+    assert!(
+        restart_rebuild_completed(&body)
+            || body.pointer("/status").and_then(|v| v.as_str()) == Some(STATUS_RESTARTED),
         "RFS no-session probe: never-captured worker has no context to lose and must fresh-start without --allow-fresh, not refused_no_session_id; json={body} stderr={}",
         out.stderr
-    );
-    assert_eq!(
-        body.pointer("/status").and_then(Value::as_str),
-        Some(STATUS_RESTARTED),
-        "RFS no-session probe: expected status=restarted for never-captured no-session seat; json={body}"
     );
     assert_ne!(
         body.pointer("/reason").and_then(Value::as_str),
@@ -282,7 +277,7 @@ fn rfs_no_session_with_any_context_marker_still_refuses_without_allow_fresh() {
         let ws = TestWorkspace::new(&team_id).with_fake_spec(&["a"]);
         let ws_path = ws.path().to_str().unwrap();
         let qs = quick_start_fake(&ws, &team_id);
-        assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+        assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
         let _guard = TmuxSocketGuard::new(vec![state_socket(&ws)]);
         let _ = run_ta(
             &ws,

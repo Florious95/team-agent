@@ -70,6 +70,7 @@ mod common;
 mod orchestrator;
 pub mod preflight;
 mod rebuild;
+pub use rebuild::{restart_bind_status, restart_leader_public_bind};
 pub(crate) mod remove;
 mod selection;
 mod team_state;

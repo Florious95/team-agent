@@ -13,7 +13,7 @@ fn agent_001_start_agent_repairs_missing_window() {
     let team_id = "agent001";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     let session = worker_session_name(team_id);
     let stopped = run_ta(
@@ -86,7 +86,7 @@ fn agent_001_force_never_leaves_duplicate_same_role_panes() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
     assert!(
-        quick_start_launched(&qs),
+        quick_start_workers_available(&qs),
         "quick-start: stdout={} stderr={}",
         qs.stdout,
         qs.stderr

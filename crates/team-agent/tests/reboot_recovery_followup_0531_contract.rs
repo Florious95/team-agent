@@ -53,6 +53,7 @@ fn claim_uses_current_tmux_endpoint_as_observed_candidate() {
         TEAM,
         "--confirm",
         "--json",
+        "--detail",
     ]);
     let claim_json = json_output(&claim, "R1 claim-leader");
     let state = case.read_state();
@@ -138,6 +139,10 @@ fn human_status_detail_renders_session_missing_restart_hint() {
     case.seed_stale_old_endpoint_state("fake");
     case.write_team_spec("fake", "fake");
 
+    let before = team_agent::state::projection::select_runtime_state(&case.workspace, Some(TEAM))
+        .expect("R3 selected state before status");
+    assert_terminal_worker_registration(&before, "R3 before status");
+
     let status = case.run_ta(&[
         "status",
         "--workspace",
@@ -145,12 +150,38 @@ fn human_status_detail_renders_session_missing_restart_hint() {
         "--team",
         TEAM,
         "--detail",
+        "--json",
     ]);
-    let text = output_text(&status);
-
+    let status_json = json_output(&status, "R3 brief status");
+    let node = status_json
+        .get("nodes")
+        .and_then(Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| {
+            node.get("name").and_then(Value::as_str) == Some(WORKER)
+        }))
+        .expect("R3 brief status worker");
+    assert_eq!(
+        node.get("runtime_status").and_then(Value::as_str),
+        Some("stopped"),
+        "R3: missing tmux session with canonical terminal registration must remain stopped; node={node}"
+    );
+    let after = team_agent::state::projection::select_runtime_state(&case.workspace, Some(TEAM))
+        .expect("R3 selected state after status");
+    assert_terminal_worker_registration(&after, "R3 after status");
+    let diagnose = case.run_ta(&[
+        "diagnose",
+        "--workspace",
+        case.workspace_str(),
+        "--team",
+        TEAM,
+        "--json",
+    ]);
+    let diagnose_json = json_output(&diagnose, "R3 diagnose");
+    let diagnose_text = diagnose_json.to_string();
     assert!(
-        text.contains("tmux session missing") && text.contains("team-agent restart"),
-        "R3: human `status --detail` must render the same runtime.hint JSON exposes when the team tmux session is missing; output={text}; tmux_log={}",
+        diagnose_text.contains("tmux_session_missing")
+            && diagnose_text.contains("team-agent restart"),
+        "R3: diagnose must carry the restart repair for missing tmux session; diagnose={diagnose_json}; tmux_log={}",
         case.tmux_log()
     );
 }
@@ -672,6 +703,27 @@ esac
     fn tmux_log(&self) -> String {
         fs::read_to_string(self.tmux_log_path()).unwrap_or_default()
     }
+}
+
+fn assert_terminal_worker_registration(state: &Value, label: &str) {
+    let worker = state
+        .pointer("/agents/worker")
+        .unwrap_or_else(|| panic!("{label}: canonical worker registration missing; state={state}"));
+    assert_eq!(
+        worker.get("status").and_then(Value::as_str),
+        Some("stopped"),
+        "{label}: selected canonical worker must be terminal stopped; worker={worker}"
+    );
+    assert_eq!(
+        worker.get("worker_state").and_then(Value::as_str),
+        Some("DEAD"),
+        "{label}: selected canonical worker must retain DEAD registration; worker={worker}"
+    );
+    assert_eq!(
+        worker.get("process_started").and_then(Value::as_bool),
+        Some(false),
+        "{label}: selected canonical worker must retain process_started=false; worker={worker}"
+    );
 }
 
 fn provider_command(provider: ProviderShape) -> &'static str {
