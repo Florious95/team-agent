@@ -205,6 +205,71 @@ fn try_readopt_refuses_when_different_live_owner_uuid_mismatches() {
 }
 
 #[test]
+fn try_readopt_inactive_bash_wrapper_with_matching_owner_uuid() {
+    let ws = ws("readopt-bash-ok");
+    let mut state = json!({"session_name": "sess"});
+    let uuid = "c1e3f7a7aeaed95491667b4d9c3ce6fb";
+    let mut recv = receiver("%0", uuid, 1);
+    let owner = owner("%0", uuid, 1);
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let pane = json!({
+        "pane_id": "%0",
+        "session_name": "sess",
+        "window_name": "pi",
+        "pane_current_command": "bash",
+        "pane_current_path": ws.join("sub").to_string_lossy(),
+        "active": false,
+        "leader_session_uuid": uuid,
+        "leader_env": {
+            "TEAM_AGENT_LEADER_SESSION_UUID": uuid,
+            "TEAM_AGENT_WORKSPACE": ws.to_string_lossy(),
+            "TEAM_AGENT_TEAM_ID": "sess"
+        }
+    });
+    let got = try_readopt_leader_pane(
+        &ws,
+        &mut state,
+        &mut recv,
+        &pane,
+        &json!({"targets": [pane.clone()]}),
+        Some(&owner),
+        Provider::Codex,
+        LeaseSource::Manual,
+        &event_log,
+    )
+    .unwrap();
+    assert!(got.is_some(), "matching inactive wrapper must readopt");
+}
+
+#[test]
+fn try_readopt_bash_without_recorded_owner_uuid_refuses() {
+    let ws = ws("readopt-bash-no-id");
+    let mut state = json!({});
+    let mut recv = receiver("%0", "c1e3f7a7aeaed95491667b4d9c3ce6fb", 1);
+    let event_log = crate::event_log::EventLog::new(&ws);
+    let pane = json!({
+        "pane_id": "%0",
+        "session_name": "sess",
+        "pane_current_command": "bash",
+        "pane_current_path": ws.join("sub").to_string_lossy(),
+        "active": false
+    });
+    let got = try_readopt_leader_pane(
+        &ws,
+        &mut state,
+        &mut recv,
+        &pane,
+        &json!({"targets": [pane.clone()]}),
+        None,
+        Provider::Codex,
+        LeaseSource::Manual,
+        &event_log,
+    )
+    .unwrap();
+    assert!(got.is_none());
+}
+
+#[test]
 fn rediscover_updates_unique_env_triple_match() {
     let ws = ws("rediscover");
     let mut env = BTreeMap::new();

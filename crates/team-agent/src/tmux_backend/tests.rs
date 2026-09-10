@@ -27,10 +27,11 @@ use crate::layout::worker_env::{
 };
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::transport::{
-    normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv,
-    tmux_submit_key_name, AttachOutcome, CaptureRange, InjectPayload, InjectStage,
-    InjectVerification, Key, PaneField, PaneId, SessionName, SetEnvOutcome, SubmitVerification,
-    Target, Transport, TransportError, TurnVerification, WindowName,
+    command_basename, normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv,
+    tmux_spawn_argv, tmux_submit_key_name, AttachOutcome, CaptureRange, CaptureSampleOutcome,
+    InjectPayload, InjectStage, InjectVerification, InputSurfaceProbe, Key, PaneField, PaneId,
+    QueryOutcome, SessionName, SetEnvOutcome, SubmitVerification, Target, Transport,
+    TransportError, TurnVerification, WindowName,
 };
 
 type RecordedArgv = Arc<Mutex<Vec<Vec<String>>>>;
@@ -1105,10 +1106,25 @@ fn inject_token_not_visible_in_pane_reports_capture_missing_token() {
         "U1 #7: a token that never appeared in the pane must read back as \
 CaptureMissingToken, not the static CaptureContainsToken false-positive"
     );
-    assert!(
-        report.submit_diagnostics.is_some(),
-        "token inject records readback diagnostics"
+    let diag = report
+        .submit_diagnostics
+        .as_ref()
+        .expect("token inject records readback diagnostics");
+    assert_eq!(diag.last_capture_outcome, CaptureSampleOutcome::OkTokenMissing);
+    assert_eq!(diag.token_seen_after_paste, Some(false));
+    assert!(diag.capture_ok_count >= 1);
+    assert_eq!(diag.capture_err_count, 0);
+}
+
+#[test]
+fn command_basename_drops_argv_and_path() {
+    assert_eq!(
+        command_basename("/usr/bin/grok --help --model x").as_deref(),
+        Some("grok")
     );
+    assert_eq!(command_basename("node").as_deref(), Some("node"));
+    assert_eq!(command_basename("").as_deref(), None);
+    assert_eq!(command_basename("   ").as_deref(), None);
 }
 
 struct InjectProbeRunner {
@@ -1173,7 +1189,11 @@ fn inject_capture_failure_is_distinct_from_token_missing_and_does_not_pass() {
         InjectVerification::CaptureMissingToken,
         "capture failure must not loosen CaptureMissingToken"
     );
-    assert!(report.submit_diagnostics.is_some());
+    let diag = report.submit_diagnostics.as_ref().expect("diag");
+    assert_eq!(diag.last_capture_outcome, CaptureSampleOutcome::Failed);
+    assert_eq!(diag.token_seen_after_paste, None);
+    assert!(diag.capture_err_count >= 1);
+    assert_eq!(diag.capture_ok_count, 0);
 }
 
 #[test]
@@ -1191,6 +1211,11 @@ fn inject_records_command_basename_without_argv() {
         )
         .expect("inject runs");
     let diag = report.submit_diagnostics.as_ref().expect("diag");
+    assert_eq!(diag.pane_command_basename.as_deref(), Some("grok"));
+    assert_eq!(diag.pane_command_query, QueryOutcome::Observed);
+    assert_eq!(diag.input_surface, InputSurfaceProbe::Input);
+    assert_eq!(diag.target_pane_id.as_deref(), Some("%9"));
+    assert_eq!(diag.target_pane_query_matched, Some(true));
     let blob = format!("{diag:?}");
     assert!(
         !blob.contains("--help") && !blob.contains("grok-4.6"),
@@ -2309,6 +2334,70 @@ fn set_pane_binding_nonce_is_socket_scoped_and_pane_local() {
             "nonce-7",
         ])
     );
+}
+
+#[test]
+fn set_pane_binding_nonce_if_unset_reads_existing_winner() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let runner = MockCommandRunner {
+        recorded: Arc::clone(&rec),
+        stdin_recorded: Arc::new(Mutex::new(Vec::new())),
+        queue: Mutex::new(
+            vec![
+                MockResp::Out(fail(1, "already set: @team_agent_pane_binding_nonce")),
+                MockResp::Out(ok("winner-nonce\n")),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        default: MockResp::Out(ok("")),
+    };
+    let be =
+        TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), "/tmp/ta-pane-binding.sock");
+    assert_eq!(
+        be.set_pane_binding_nonce_if_unset(&PaneId::new("%7"), "loser-nonce")
+            .expect("read the conditional-write winner"),
+        "winner-nonce"
+    );
+    assert_eq!(
+        rec.lock().unwrap().as_slice(),
+        vec![
+            svec(&[
+                "tmux",
+                "-S",
+                "/tmp/ta-pane-binding.sock",
+                "set-option",
+                "-p",
+                "-o",
+                "-t",
+                "%7",
+                "@team_agent_pane_binding_nonce",
+                "loser-nonce",
+            ]),
+            svec(&[
+                "tmux",
+                "-S",
+                "/tmp/ta-pane-binding.sock",
+                "show-options",
+                "-p",
+                "-v",
+                "-t",
+                "%7",
+                "@team_agent_pane_binding_nonce",
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn set_pane_binding_nonce_if_unset_rejects_write_or_read_failure() {
+    let (be, _rec) = backend_with(
+        MockResp::Out(fail(1, "already set: @team_agent_pane_binding_nonce")),
+        vec![MockResp::Out(fail(1, "pane disappeared"))],
+    );
+    assert!(be
+        .set_pane_binding_nonce_if_unset(&PaneId::new("%7"), "nonce-7")
+        .is_err());
 }
 
 // ── 12. attach_session (TRANSPORT TRIO) — `tmux attach-session -t <s>` -> Attached ──────────────

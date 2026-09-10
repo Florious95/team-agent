@@ -42,7 +42,12 @@ pub fn try_readopt_leader_pane(
         )?;
         return Ok(None);
     };
-    if !readopt_candidate_is_usable_leader(workspace, &candidate) {
+    if !readopt_candidate_is_usable_leader(
+        workspace,
+        &candidate,
+        owner_record,
+        receiver_provider,
+    ) {
         event_log.write(
             LeaderEvent::ReceiverRebindRequired.name(),
             json!({"reason": "leader_pane_unusable"}),
@@ -598,14 +603,39 @@ fn target_iter(targets: &Value) -> Vec<LeaderTarget> {
     Vec::new()
 }
 
-fn readopt_candidate_is_usable_leader(workspace: &Path, target: &LeaderTarget) -> bool {
-    if !target.active || target.provider.is_none() {
-        return false;
-    }
-    target
+fn readopt_candidate_is_usable_leader(
+    workspace: &Path,
+    target: &LeaderTarget,
+    owner_record: Option<&TeamOwner>,
+    receiver_provider: Provider,
+) -> bool {
+    if !target
         .current_path
         .as_deref()
         .is_some_and(|path| path_in_workspace(path, workspace))
+    {
+        return false;
+    }
+    if target.provider.is_some() {
+        return true;
+    }
+    let Some(owner) = owner_record else {
+        return false;
+    };
+    if owner.pane_id.as_str() != target.pane_id.as_str() {
+        return false;
+    }
+    if owner.provider != receiver_provider {
+        return false;
+    }
+    match (
+        owner.leader_session_uuid.as_ref(),
+        target.leader_session_uuid.as_ref(),
+    ) {
+        (Some(recorded), Some(live)) => recorded == live,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 fn rediscover_candidate_is_usable_leader(target: &LeaderTarget) -> bool {

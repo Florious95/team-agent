@@ -142,7 +142,28 @@ pub fn bind_owner_from_caller_pane(
         .as_ref()
         .and_then(|info| info.current_command.clone())
         .unwrap_or_else(|| tmux_pane_current_command(workspace, &pane).unwrap_or_default());
-    let provider = bind_provider_from_env_or_pane(&caller_current_command, caller_info);
+    let Some(provider) = bind_provider_from_env_or_pane(&caller_current_command, caller_info) else {
+        let hint = "set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; unknown commands are not Codex";
+        event_log.write(
+            LeaderEvent::OwnerBindRefused.name(),
+            json!({
+                "reason": serde_json::to_value(LeaseReason::CallerNotLeaderShaped)?,
+                "caller_pane_id": pane,
+                "caller_current_command": caller_current_command.clone(),
+                "team_id": team_id.as_str(),
+                "hint": hint,
+            }),
+        )?;
+        return Ok(OwnerBindResult {
+            ok: false,
+            owner: None,
+            caller_pane_id: PaneId::new(pane),
+            caller_current_command,
+            team_id: team_id.clone(),
+            reason: Some(LeaseReason::CallerNotLeaderShaped),
+            hint: Some(hint.to_string()),
+        });
+    };
     let machine_fingerprint = std::env::var("TEAM_AGENT_MACHINE_FINGERPRINT").unwrap_or_default();
     let os_user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -207,17 +228,23 @@ fn emit_owner_bound_event(
     Ok(())
 }
 
-fn bind_provider_from_env_or_pane(command: &str, pane: Option<PaneInfo>) -> Provider {
+fn bind_provider_from_env_or_pane(command: &str, pane: Option<PaneInfo>) -> Option<Provider> {
     let env_provider = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
         .ok()
         .and_then(|raw| super::helpers::parse_provider(&raw));
     env_provider
         .or_else(|| pane.as_ref().and_then(super::attribute_pane_provider))
         .or_else(|| super::attribute_command_provider(command))
-        // E11 层2:未知命令不再静默默认 codex(会误绑任意 provider + 喂错分类器)。
-        // 无法识别时回落 Codex 仅作最末兜底,且该路径已被统一归因入口的显式 None 收窄
-        // (调用方理应只在已知 leader 命令上 bind);保留以不改 fn 签名/上游 panic 面。
-        .unwrap_or(Provider::Codex)
+}
+
+pub(crate) fn strict_owner_bind_provider(
+    explicit_provider: Option<&str>,
+    observed_command: &str,
+) -> Option<Provider> {
+    match explicit_provider.filter(|value| !value.is_empty()) {
+        Some(raw) => super::helpers::parse_provider(raw),
+        None => super::attribute_command_provider(observed_command),
+    }
 }
 
 pub fn owner_bind_provider_wire(command: &str) -> &'static str {
@@ -339,6 +366,12 @@ mod e11_provider_bind_tests {
             Some(Provider::Copilot)
         );
         assert_eq!(owner_bind_provider_wire("copilot --banner"), "copilot");
+    }
+
+    #[test]
+    fn strict_provider_never_falls_back_from_unknown_explicit_or_command() {
+        assert_eq!(strict_owner_bind_provider(Some("unknown"), "codex"), None);
+        assert_eq!(strict_owner_bind_provider(None, "node"), None);
     }
 
     #[test]

@@ -54,14 +54,14 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
         &launch_transport,
     )
     .expect("launch fixture should spawn worker");
-    let launch_command_line = launch_transport.single_spawn_command_line();
+    let launch_spawn = launch_transport.single_spawn();
 
     let restart_team = compiled_team_dir("restart", &[("worker_a", "Restart Worker")]);
     seed_restart_state(&restart_team, "worker_a");
     let restart_transport = RecordingTransport::new().with_session_present(false);
     restart_with_transport(&restart_team, true, None, &restart_transport)
         .expect("restart fixture should spawn worker");
-    let restart_command_line = restart_transport.single_spawn_command_line();
+    let restart_spawn = restart_transport.single_spawn();
 
     let add_team = compiled_team_dir("add-agent", &[("worker_a", "Existing Worker")]);
     seed_running_add_agent_state(&add_team, "worker_a");
@@ -77,23 +77,76 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
         &add_transport,
     )
     .expect("add-agent fixture should spawn worker");
-    let add_command_line = add_transport.single_spawn_command_line();
+    let add_spawn = add_transport.single_spawn();
 
     let failures = [
-        ("quick-start launch", launch_command_line, "worker_a"),
-        ("restart", restart_command_line, "worker_a"),
-        ("add-agent", add_command_line, "worker_b"),
+        ("quick-start launch", launch_spawn, "worker_a"),
+        ("restart", restart_spawn, "worker_a"),
+        ("add-agent", add_spawn, "worker_b"),
     ]
     .into_iter()
-    .flat_map(|(surface, command_line, agent_id)| {
-        spawn_env_contract_failures(surface, &command_line, agent_id)
-    })
+    .flat_map(|(surface, spawn, agent_id)| spawn_env_contract_failures(surface, &spawn, agent_id))
     .collect::<Vec<_>>();
 
     assert!(
         failures.is_empty(),
         "worker spawn env contract failed:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn tmux_control_filter_uses_env_keys_not_substring_in_inherited_values() {
+    let mut env = BTreeMap::from([
+        ("TA_SPAWN_ENV_CANARY".to_string(), "FOO".to_string()),
+        (
+            "HTTP_PROXY".to_string(),
+            "http://canary-proxy:1".to_string(),
+        ),
+        (
+            "NODE_EXTRA_CA_CERTS".to_string(),
+            "/canary/ca.pem".to_string(),
+        ),
+        ("TEAM_AGENT_WORKSPACE".to_string(), "/ws".to_string()),
+        (
+            "TEAM_AGENT_OWNER_TEAM_ID".to_string(),
+            "teamdir".to_string(),
+        ),
+        ("TEAM_AGENT_AGENT_ID".to_string(), "worker_a".to_string()),
+        (
+            "HARNESS_PROBE".to_string(),
+            "printf 'LS_USR_BIN_TMUX=%s\\n'\n".to_string(),
+        ),
+    ]);
+    let spawn = RecordedSpawn {
+        argv: vec!["codex".to_string()],
+        env: env.clone(),
+        env_unset: Vec::new(),
+        session: SessionName::new("s"),
+        window: WindowName::new("w"),
+        pane_id: PaneId::new("%1"),
+    };
+    assert!(
+        spawn_env_contract_failures("harness-value", &spawn, "worker_a").is_empty(),
+        "inherited values may contain the letters TMUX= without leaking TMUX/TMUX_PANE keys"
+    );
+
+    env.insert(
+        "TMUX".to_string(),
+        "/tmp/tmux-canary/default,1".to_string(),
+    );
+    let leaked = RecordedSpawn {
+        env,
+        ..spawn
+    };
+    let failures = spawn_env_contract_failures("key-leak", &leaked, "worker_a");
+    assert!(
+        failures.iter().any(|row| row.contains("present_keys=") && row.contains("TMUX")),
+        "actual TMUX key must still fail closed; failures={failures:?}"
+    );
+    assert!(
+        failures.iter().all(|row| !row.contains("command_line=")),
+        "failures must not dump command_line; failures={failures:?}"
     );
 }
 
@@ -234,42 +287,67 @@ fn worker_spawn_stays_out_of_coordinator_tick_and_daemon_preserves_parent_env() 
     );
 }
 
-fn spawn_env_contract_failures(surface: &str, command_line: &str, agent_id: &str) -> Vec<String> {
+fn spawn_env_has_tmux_control_assignment(spawn: &RecordedSpawn) -> bool {
+    spawn.env.contains_key("TMUX")
+        || spawn.env.contains_key("TMUX_PANE")
+        || spawn.argv.iter().any(|part| {
+            part.split_whitespace().any(|tok| {
+                tok == "TMUX" || tok.starts_with("TMUX=") || tok.starts_with("TMUX_PANE=")
+            })
+        })
+}
+
+fn spawn_env_contract_failures(
+    surface: &str,
+    spawn: &RecordedSpawn,
+    agent_id: &str,
+) -> Vec<String> {
     let mut failures = Vec::new();
-    for expected in [
-        "TA_SPAWN_ENV_CANARY=FOO",
-        "HTTP_PROXY=http://canary-proxy:1",
-        "NODE_EXTRA_CA_CERTS=/canary/ca.pem",
-        "TEAM_AGENT_WORKSPACE=",
-        "TEAM_AGENT_OWNER_TEAM_ID=teamdir",
+    for (key, expected) in [
+        ("TA_SPAWN_ENV_CANARY", Some("FOO")),
+        ("HTTP_PROXY", Some("http://canary-proxy:1")),
+        ("NODE_EXTRA_CA_CERTS", Some("/canary/ca.pem")),
+        ("TEAM_AGENT_OWNER_TEAM_ID", Some("teamdir")),
     ] {
-        if !command_line.contains(expected) {
-            failures.push(format!(
-                "{surface}: missing `{expected}`; worker spawn must inherit parent env and overlay Team Agent identity; command_line={command_line:?}"
-            ));
+        match (spawn.env.get(key).map(String::as_str), expected) {
+            (Some(actual), Some(wanted)) if actual == wanted => {}
+            (Some(_), Some(wanted)) => failures.push(format!(
+                "{surface}: `{key}` present but not `{wanted}`"
+            )),
+            _ => failures.push(format!(
+                "{surface}: missing `{key}` overlay/inherit"
+            )),
         }
     }
-    if !command_line.contains(&format!("TEAM_AGENT_AGENT_ID={agent_id}")) {
-        failures.push(format!(
-            "{surface}: missing `TEAM_AGENT_AGENT_ID={agent_id}` overlay; command_line={command_line:?}"
-        ));
-    }
-    if command_line.contains("TMUX=") || command_line.contains("TMUX_PANE=") {
-        failures.push(format!(
-            "{surface}: worker spawn must filter tmux control env from inherited parent env; command_line={command_line:?}"
-        ));
-    }
-    if !command_line.split_whitespace().any(|part| part == "codex") {
-        failures.push(format!(
-            "{surface}: provider executable must remain the command name `codex`; command_line={command_line:?}"
-        ));
-    }
-    if command_line
-        .split_whitespace()
-        .any(|part| part.ends_with("/codex"))
+    if spawn
+        .env
+        .get("TEAM_AGENT_WORKSPACE")
+        .is_none_or(|value| value.is_empty())
     {
+        failures.push(format!("{surface}: missing `TEAM_AGENT_WORKSPACE` overlay"));
+    }
+    if spawn.env.get("TEAM_AGENT_AGENT_ID").map(String::as_str) != Some(agent_id) {
         failures.push(format!(
-            "{surface}: provider executable must not be hard-coded as an absolute codex path; command_line={command_line:?}"
+            "{surface}: missing `TEAM_AGENT_AGENT_ID={agent_id}` overlay"
+        ));
+    }
+    if spawn_env_has_tmux_control_assignment(spawn) {
+        let present: Vec<&str> = ["TMUX", "TMUX_PANE"]
+            .into_iter()
+            .filter(|key| spawn.env.contains_key(*key))
+            .collect();
+        failures.push(format!(
+            "{surface}: worker spawn must filter tmux control env from inherited parent env; present_keys={present:?}"
+        ));
+    }
+    if !spawn.argv.iter().any(|part| part == "codex") {
+        failures.push(format!(
+            "{surface}: provider executable must remain the command name `codex`"
+        ));
+    }
+    if spawn.argv.iter().any(|part| part.ends_with("/codex")) {
+        failures.push(format!(
+            "{surface}: provider executable must not be hard-coded as an absolute codex path"
         ));
     }
     failures
@@ -580,6 +658,7 @@ impl RecordingTransport {
         self
     }
 
+    #[allow(dead_code)]
     fn single_spawn_command_line(&self) -> String {
         self.single_spawn().command_line()
     }
