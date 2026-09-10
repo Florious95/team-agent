@@ -135,12 +135,16 @@ pub(super) fn spawn_agents(
             .mcp_config(auth_mode)
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         let mcp_config = resolve_mcp_config(mcp_config, workspace, agent_id_raw, &mcp_team_id);
-        let mcp_config_path = write_worker_mcp_config_for_provider(
-            workspace,
-            agent_id_raw,
-            &mcp_config,
-            Some(provider),
-        )?;
+        let mcp_config_path = if provider == Provider::Pi {
+            None
+        } else {
+            Some(write_worker_mcp_config_for_provider(
+                workspace,
+                agent_id_raw,
+                &mcp_config,
+                Some(provider),
+            )?)
+        };
         let profile_dir = team_dir.join("profiles");
         let profile_launch =
             crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
@@ -159,24 +163,45 @@ pub(super) fn spawn_agents(
             let _ = crate::event_log::EventLog::new(workspace)
                 .write("provider.effort_unsupported", event_value);
         }
-        let mut plan = adapter
-            .build_command_plan(crate::provider::ProviderCommandContext {
-                auth_mode,
-                mcp_config: Some(&mcp_config),
-                system_prompt: Some(system_prompt.as_str()),
-                model: command_model,
-                tools: &resolved_tool_refs,
-                profile_launch: Some(&profile_launch),
-                // Layer 1 self-healing (architect probe 2026-06-22): expose
-                // agent_id as a display-name hint so Claude / Copilot
-                // adapters can pass `--name <agent_id>`. Codex has no
-                // equivalent flag and ignores the hint.
-                agent_id_hint: Some(agent_id_raw),
-                effort: agent_effort,
-            })
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?;
+        let command_context = crate::provider::ProviderCommandContext {
+            auth_mode,
+            mcp_config: Some(&mcp_config),
+            system_prompt: Some(system_prompt.as_str()),
+            model: command_model,
+            tools: &resolved_tool_refs,
+            profile_launch: Some(&profile_launch),
+            // Layer 1 self-healing (architect probe 2026-06-22): expose
+            // agent_id as a display-name hint so Claude / Copilot
+            // adapters can pass `--name <agent_id>`. Codex has no
+            // equivalent flag and ignores the hint.
+            agent_id_hint: Some(agent_id_raw),
+            effort: agent_effort,
+        };
+        let mut plan = if provider == Provider::Pi {
+            crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
+                crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+                    workspace,
+                    team_id: &mcp_team_id,
+                    agent_id: agent_id_raw,
+                    model: command_model,
+                    effort: agent_effort,
+                    system_prompt: &system_prompt,
+                    tool_categories: &resolved_tool_refs,
+                    team_mcp_tools: &["send_message", "report_result"],
+                    mcp_config: &mcp_config,
+                    session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
+                },
+            )
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?
+        } else {
+            adapter
+                .build_command_plan(command_context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?
+        };
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-            point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
+            if let Some(mcp_config_path) = mcp_config_path.as_ref() {
+                point_native_mcp_config_at_file(&mut plan.argv, provider, mcp_config_path);
+            }
         }
         // C-A-4 cr verdict v2 — Copilot BYOK(compatible_api)硬性校验:
         // "A model is required for BYOK"(help-providers 原文)。检查 agent
@@ -252,6 +277,10 @@ pub(super) fn spawn_agents(
                 provider,
             ),
         );
+        // The provider is the final typed value after profile overlays. Keep it
+        // separate from inherited LEADER_* identity and let the tmux invocation
+        // boundary add the actual pane/socket only for the provider process.
+        crate::layout::worker_env::inject_current_caller_provider(&mut env, provider);
         // BUG / C-1-2 / C-6-1 cr verdict — Copilot system_prompt 走 spawn env overlay +
         // per-worker AGENTS.md(B2 灵魂件降级):写
         //   <workspace>/.team/runtime/copilot-instructions/<agent_id>/AGENTS.md
@@ -287,15 +316,19 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // Cursor: role 经 .cursor/rules；MCP 身份必须写进 mcp.json env
-        // （不继承父进程 TEAM_AGENT_*）。--workspace 钉物理路径。
-        // mcp.json last-writer：同 workspace 第二 CursorAgent 拒绝。
+        // Cursor: role 经 .cursor/rules。MCP 身份默认写 provider-config/<id>/cursor
+        // （不继承父进程 TEAM_AGENT_*）。--workspace 指该工程根，--add-dir 真 workspace。
+        // 隔离关闭时仍拒绝第二席（共用 mcp.json last-writer）。不改 HOME。
         if matches!(provider, Provider::CursorAgent) {
             refuse_second_cursor_occupant(workspace, agent_id_raw, Some(spec))?;
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
-            apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-            enable_cursor_workspace_mcp(workspace)?;
-            apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+            let project = crate::lifecycle::launch::prepare_cursor_seat_mcp(
+                workspace,
+                agent_id_raw,
+                &mcp_config,
+            )?;
+            enable_cursor_workspace_mcp(workspace, project.as_deref())?;
+            apply_cursor_spawn_workspace_pointers(&mut plan.argv, workspace, agent_id_raw)?;
             let proxy = apply_cursor_subscription_proxy_env(&mut env);
             let event_log = crate::event_log::EventLog::new(workspace);
             let _ = event_log.write(

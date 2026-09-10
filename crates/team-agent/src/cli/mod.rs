@@ -58,6 +58,7 @@ pub mod attach_app_server_leader;
 pub mod diagnose;
 pub mod emit;
 pub mod helpers;
+pub mod models;
 pub mod leader;
 pub mod leaders;
 pub mod named_address;

@@ -225,6 +225,7 @@ fn cli_quick_start_invokes_real_lifecycle_compiles_spec() {
         no_display: false,
         backend: None,
         json: true,
+        detail: false,
     };
     let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
                                     // E5: spec compiled to .team/runtime/<team_key>/, NOT the user team dir.
@@ -260,6 +261,7 @@ fn cli_quick_start_invalid_spec_surfaces_real_compile_error() {
         no_display: false,
         backend: None,
         json: true,
+        detail: false,
     };
     let text = outcome_text(cmd_quick_start(&args));
     assert!(
@@ -281,6 +283,7 @@ fn cli_restart_missing_spec_surfaces_real_teamselect() {
         allow_fresh: false,
         session_converge_deadline_ms: None,
         json: true,
+        detail: false,
     };
     let text = outcome_text(cmd_restart(&args));
     // RED-2-STILL: entry gate now resolves via canonical_run_workspace; for a no-spec workspace

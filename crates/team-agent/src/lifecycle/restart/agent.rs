@@ -333,7 +333,7 @@ pub(crate) fn start_agent_at_paths(
         )));
     }
     let spawn_session_id = if matches!(start_mode, StartMode::Resumed) {
-        session_id.as_ref()
+        session_id.clone()
     } else {
         None
     };
@@ -375,7 +375,7 @@ pub(crate) fn start_agent_at_paths(
         &session_name,
         agent_id,
         &agent,
-        spawn_session_id,
+        spawn_session_id.as_ref(),
         into_existing_session,
         transport,
         Some(&safety),
@@ -390,15 +390,14 @@ pub(crate) fn start_agent_at_paths(
         &session_name,
         &spawn.spawn.window,
     ) {
-        if let Err(rollback_error) = transport.kill_pane(&spawn.spawn.pane_id) {
-            return Err(LifecycleError::RequirementUnmet(format!(
-                "{error}; failed to roll back spawned pane {}: {rollback_error}",
-                spawn.spawn.pane_id.as_str()
-            )));
-        }
-        return Err(error);
+        return Err(rollback_spawned_pane_keep_error(
+            transport,
+            &spawn.spawn.pane_id,
+            error,
+        ));
     }
     let actual_spawn_window = spawn.spawn.window.as_str().to_string();
+    let spawned = (|| {
     mark_agent_started(
         &mut state,
         agent_id,
@@ -457,6 +456,7 @@ pub(crate) fn start_agent_at_paths(
     } else {
         Vec::new()
     };
+    persist_selected_receiver_session_name(&mut state, &session_name);
     save_restart_projected_state_with_capture_backfill_skip(
         workspace,
         &mut state,
@@ -472,7 +472,7 @@ pub(crate) fn start_agent_at_paths(
         start_mode,
         &session_name,
         &actual_spawn_window,
-        spawn_session_id,
+        spawn_session_id.as_ref(),
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
@@ -490,6 +490,29 @@ pub(crate) fn start_agent_at_paths(
         new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
     })
+    })();
+    match spawned {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => Err(rollback_spawned_pane_keep_error(
+            transport,
+            &spawn.spawn.pane_id,
+            error,
+        )),
+    }
+}
+
+fn rollback_spawned_pane_keep_error(
+    transport: &dyn crate::transport::Transport,
+    pane: &crate::transport::PaneId,
+    error: LifecycleError,
+) -> LifecycleError {
+    match transport.kill_pane(pane) {
+        Ok(()) => error,
+        Err(rollback_error) => LifecycleError::Transport(format!(
+            "{error}; failed to roll back spawned pane {}: {rollback_error}",
+            pane.as_str()
+        )),
+    }
 }
 
 fn replay_worker_target_missing_messages(
