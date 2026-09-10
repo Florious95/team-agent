@@ -31,10 +31,10 @@ use crate::provider::wire::{
     is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
 };
 use crate::transport::{
-    submit_verification_wire, turn_verification_wire, CaptureRange, CaptureSampleOutcome,
-    InjectPayload, InjectReport, InjectVerification, InputSurfaceProbe, Key, PaneId, PaneInfo,
-    QueryOutcome, SessionName, SubmitConsumptionReason, SubmitObserver, SubmitVerification, Target,
-    Transport, WindowName,
+    submit_verification_wire, turn_verification_wire, BusySignalKind, CaptureRange,
+    CaptureSampleOutcome, InjectPayload, InjectReport, InjectVerification, InputSurfaceProbe, Key,
+    PaneId, PaneInfo, QueryOutcome, SessionName, SubmitConsumptionReason, SubmitObserver,
+    SubmitVerification, Target, Transport, WindowName,
 };
 
 use super::helpers::{message_exists, MessageStatusShadow};
@@ -2005,6 +2005,30 @@ fn merge_inject_readback_fields(
             .unwrap_or("unknown")),
     );
     obj.insert(
+        "before_busy_signal_kind".to_string(),
+        serde_json::json!(diag.and_then(|d| d.before_busy_signal_kind.map(|kind| kind.as_str()))),
+    );
+    obj.insert(
+        "busy_signal_kind".to_string(),
+        serde_json::json!(diag.and_then(|d| d.busy_signal_kind.map(|kind| kind.as_str()))),
+    );
+    obj.insert(
+        "busy_line_from_bottom".to_string(),
+        serde_json::json!(diag.and_then(|d| d.busy_line_from_bottom)),
+    );
+    obj.insert(
+        "current_marker_in_bottom_15".to_string(),
+        serde_json::json!(diag.and_then(|d| d.current_marker_in_bottom_15)),
+    );
+    obj.insert(
+        "paste_identity_in_composer".to_string(),
+        serde_json::json!(diag.and_then(|d| d.paste_identity_in_composer)),
+    );
+    obj.insert(
+        "consumption_from_capture_result".to_string(),
+        serde_json::json!(diag.and_then(|d| d.consumption_from_capture_result)),
+    );
+    obj.insert(
         "pane_command_basename".to_string(),
         diag.and_then(|d| d.pane_command_basename.as_deref())
             .map(|name| serde_json::json!(name))
@@ -3404,6 +3428,12 @@ mod paste_floor_tests {
             attempts: 1,
             submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
                 consumption_reason: SubmitConsumptionReason::Unverified,
+                before_busy_signal_kind: Some(BusySignalKind::Working),
+                busy_signal_kind: Some(BusySignalKind::SpinnerGlyph),
+                busy_line_from_bottom: Some(2),
+                current_marker_in_bottom_15: Some(false),
+                paste_identity_in_composer: None,
+                consumption_from_capture_result: Some(false),
                 last_capture_outcome: CaptureSampleOutcome::Failed,
                 capture_err_count: 1,
                 capture_sample_count: 1,
@@ -3433,6 +3463,21 @@ mod paste_floor_tests {
         );
         assert_eq!(event["last_capture_outcome"], serde_json::json!("failed"));
         assert_eq!(event["consumption_reason"], serde_json::json!("unverified"));
+        assert_eq!(
+            event["before_busy_signal_kind"],
+            serde_json::json!("working")
+        );
+        assert_eq!(event["busy_signal_kind"], serde_json::json!("spinner_glyph"));
+        assert_eq!(event["busy_line_from_bottom"], serde_json::json!(2));
+        assert_eq!(
+            event["current_marker_in_bottom_15"],
+            serde_json::json!(false)
+        );
+        assert_eq!(event["paste_identity_in_composer"], serde_json::Value::Null);
+        assert_eq!(
+            event["consumption_from_capture_result"],
+            serde_json::json!(false)
+        );
         assert_eq!(event["token_seen_after_paste"], serde_json::Value::Null);
         assert_eq!(event["pane_command_basename"], serde_json::json!("grok"));
         assert_eq!(event["input_surface"], serde_json::json!("input"));

@@ -28,10 +28,10 @@ use crate::layout::worker_env::{
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::transport::{
     command_basename, normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv,
-    tmux_spawn_argv, tmux_submit_key_name, AttachOutcome, CaptureRange, CaptureSampleOutcome,
-    InjectPayload, InjectStage, InjectVerification, InputSurfaceProbe, Key, PaneField, PaneId,
-    QueryOutcome, SessionName, SetEnvOutcome, SubmitConsumptionReason, SubmitVerification, Target,
-    Transport, TransportError, TurnVerification, WindowName,
+    tmux_spawn_argv, tmux_submit_key_name, AttachOutcome, BusySignalKind, CaptureRange,
+    CaptureSampleOutcome, InjectPayload, InjectStage, InjectVerification, InputSurfaceProbe, Key,
+    PaneField, PaneId, QueryOutcome, SessionName, SetEnvOutcome, SubmitConsumptionReason,
+    SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
 type RecordedArgv = Arc<Mutex<Vec<Vec<String>>>>;
@@ -1051,13 +1051,15 @@ fn inject_text_runs_buffer_paste_submit_sequence_and_reports_submit() {
         SubmitVerification::EnterSentWithoutPlaceholderCheck
     );
     assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+    let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert_eq!(
-        report
-            .submit_diagnostics
-            .expect("diagnostics")
-            .consumption_reason,
+        diagnostics.consumption_reason,
         SubmitConsumptionReason::NoMarker
     );
+    assert_eq!(diagnostics.busy_signal_kind, None);
+    assert_eq!(diagnostics.current_marker_in_bottom_15, None);
+    assert_eq!(diagnostics.paste_identity_in_composer, None);
+    assert_eq!(diagnostics.consumption_from_capture_result, None);
 }
 
 #[test]
@@ -1416,6 +1418,10 @@ fn e46_post_submit_matched_token_without_scroll_is_unverified() {
         "token still in composer and no busy must report 没开跑, not unknown/started"
     );
     let diagnostics = report.submit_diagnostics.expect("diagnostics");
+    assert_eq!(diagnostics.busy_signal_kind, None);
+    assert_eq!(diagnostics.current_marker_in_bottom_15, Some(true));
+    assert_eq!(diagnostics.paste_identity_in_composer, None);
+    assert_eq!(diagnostics.consumption_from_capture_result, Some(false));
     assert!(
         diagnostics.attempts_detail.iter().any(|obs| obs.matched),
         "the unverified verdict must still record that paste landed"
@@ -1467,6 +1473,15 @@ fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
         diagnostics.consumption_reason,
         SubmitConsumptionReason::FallbackBusy
     );
+    assert_eq!(
+        diagnostics.before_busy_signal_kind,
+        Some(BusySignalKind::Working)
+    );
+    assert_eq!(diagnostics.busy_signal_kind, Some(BusySignalKind::Working));
+    assert_eq!(diagnostics.busy_line_from_bottom, Some(0));
+    assert_eq!(diagnostics.current_marker_in_bottom_15, Some(true));
+    assert_eq!(diagnostics.paste_identity_in_composer, None);
+    assert_eq!(diagnostics.consumption_from_capture_result, Some(false));
 }
 
 /// NeverSeen + 无占位符：空 pane 不得再把「token 不在底部」写成 consumed。
@@ -1536,13 +1551,14 @@ fn e46_inject_text_with_token_consumed_after_enter_keeps_enter_sent_without_plac
              hold (provider_submit_verification_red.rs:113-159). Got {:?}",
         report.submit_verification
     );
+    let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert_eq!(
-        report
-            .submit_diagnostics
-            .expect("diagnostics")
-            .consumption_reason,
+        diagnostics.consumption_reason,
         SubmitConsumptionReason::ConsumptionFromCapture
     );
+    assert_eq!(diagnostics.busy_signal_kind, None);
+    assert_eq!(diagnostics.current_marker_in_bottom_15, Some(false));
+    assert_eq!(diagnostics.consumption_from_capture_result, Some(true));
 }
 
 /// **E46 RED-3 (resend-to-cap, no double-submit)**: when the FIRST Enter
@@ -3311,13 +3327,15 @@ fn cursor_single_enter_busy_transcript_placeholder_does_not_retry() {
         "busy after first Enter is consumption for cursor; got {:?}",
         report.submit_verification
     );
+    let diagnostics = report.submit_diagnostics.expect("diagnostics");
     assert_eq!(
-        report
-            .submit_diagnostics
-            .expect("diagnostics")
-            .consumption_reason,
+        diagnostics.consumption_reason,
         SubmitConsumptionReason::CursorPollingBusy
     );
+    assert_eq!(diagnostics.busy_signal_kind, Some(BusySignalKind::Working));
+    assert!(diagnostics.busy_line_from_bottom.is_some());
+    assert!(diagnostics.current_marker_in_bottom_15.is_some());
+    assert!(diagnostics.consumption_from_capture_result.is_some());
     let calls = rec.lock().unwrap().clone();
     assert_eq!(
         count_submit_enters(&calls),
@@ -3597,6 +3615,39 @@ fn grok_fold_worker_text_payload_polls_consumption() {
             .skip_consumption_poll(),
         "leader skip path is the only poll_consumption=false arm"
     );
+}
+
+#[test]
+fn provider_busy_signal_match_preserves_category_priority_and_tail_boundary() {
+    let cases = [
+        ("working", BusySignalKind::Working),
+        ("thinking", BusySignalKind::Thinking),
+        ("processing", BusySignalKind::Processing),
+        ("esc to interrupt", BusySignalKind::EscToInterrupt),
+        ("⠋", BusySignalKind::SpinnerGlyph),
+        ("working ⠋", BusySignalKind::Working),
+    ];
+    for (text, expected) in cases {
+        let matched = super::provider_busy_signal_match(text).expect("busy match");
+        assert_eq!(matched.kind, expected, "text={text:?}");
+        assert_eq!(matched.line_from_bottom, 0, "text={text:?}");
+        assert!(super::provider_busy_signal_in_tail(text));
+    }
+
+    let inside_bottom_15 = std::iter::once("working".to_string())
+        .chain((0..14).map(|index| format!("tail-{index}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let matched = super::provider_busy_signal_match(&inside_bottom_15).expect("15th line");
+    assert_eq!(matched.kind, BusySignalKind::Working);
+    assert_eq!(matched.line_from_bottom, 14);
+
+    let outside_bottom_15 = std::iter::once("working".to_string())
+        .chain((0..15).map(|index| format!("tail-{index}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(super::provider_busy_signal_match(&outside_bottom_15).is_none());
+    assert!(!super::provider_busy_signal_in_tail(&outside_bottom_15));
 }
 
 const G4_TOKEN: &str = "[team-agent-token:msg_g4]";

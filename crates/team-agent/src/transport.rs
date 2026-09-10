@@ -470,6 +470,18 @@ pub struct SubmitDiagnostics {
     /// The concrete branch that produced the post-Enter consumption outcome.
     /// Unknown is retained for paths that do not expose a branch reason.
     pub consumption_reason: SubmitConsumptionReason,
+    /// Structured busy predicate category observed before the submit key.
+    pub before_busy_signal_kind: Option<BusySignalKind>,
+    /// Structured busy predicate category for the accepted/current capture.
+    pub busy_signal_kind: Option<BusySignalKind>,
+    /// Bottom-relative non-empty line index of the busy match.
+    pub busy_line_from_bottom: Option<u8>,
+    /// Whether this message marker is in the bottom 15 non-empty lines.
+    pub current_marker_in_bottom_15: Option<bool>,
+    /// Whether the tracked paste identity is still in the composer.
+    pub paste_identity_in_composer: Option<bool>,
+    /// Result of the structural consumption predicate on the current capture.
+    pub consumption_from_capture_result: Option<bool>,
     /// Time spent in the appear-gate (poll for the pasted-content placeholder
     /// before Enter). When `saw_pasted_prompt == false` this is the time we
     /// spent polling before falling through to the E46 token path.
@@ -506,6 +518,30 @@ pub struct SubmitDiagnostics {
     pub target_pane_id: Option<String>,
     /// Inject target pane id vs `#{pane_id}` queried on that same target.
     pub target_pane_query_matched: Option<bool>,
+}
+
+/// Structured category returned by the provider-busy predicate.
+///
+/// This is diagnostic metadata only; it does not change delivery semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusySignalKind {
+    Working,
+    Thinking,
+    Processing,
+    EscToInterrupt,
+    SpinnerGlyph,
+}
+
+impl BusySignalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Thinking => "thinking",
+            Self::Processing => "processing",
+            Self::EscToInterrupt => "esc_to_interrupt",
+            Self::SpinnerGlyph => "spinner_glyph",
+        }
+    }
 }
 
 /// Structured reason for the post-Enter consumption observation.
