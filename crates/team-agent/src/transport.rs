@@ -470,7 +470,7 @@ pub struct SubmitDiagnostics {
     /// The concrete branch that produced the post-Enter consumption outcome.
     /// Unknown is retained for paths that do not expose a branch reason.
     pub consumption_reason: SubmitConsumptionReason,
-    /// Structured busy predicate category observed before the submit key.
+    /// Reserved for a pre-paste baseline; this path has no such capture and emits null.
     pub before_busy_signal_kind: Option<BusySignalKind>,
     /// Structured busy predicate category for the accepted/current capture.
     pub busy_signal_kind: Option<BusySignalKind>,

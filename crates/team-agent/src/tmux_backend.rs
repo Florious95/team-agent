@@ -1476,12 +1476,12 @@ fn submit_diagnostics_for_inject(
     tally: &CaptureTally,
     token_seen_after_paste: Option<bool>,
     token_seen_after_enter: Option<bool>,
-    before_busy_signal_kind: Option<BusySignalKind>,
     surface: InjectTargetSurface,
 ) -> SubmitDiagnostics {
     SubmitDiagnostics {
         consumption_reason: SubmitConsumptionReason::Unknown,
-        before_busy_signal_kind,
+        // No pre-paste capture exists on this path; keep the diagnostic null.
+        before_busy_signal_kind: None,
         busy_signal_kind: None,
         busy_line_from_bottom: None,
         current_marker_in_bottom_15: None,
@@ -3189,7 +3189,6 @@ impl Transport for TmuxBackend {
                 let mut token_ever_visible = false;
                 let mut tracked_paste: Option<PasteLatch> = None;
                 let mut capture_tally = CaptureTally::default();
-                let mut before_busy_signal_kind = None;
                 let mut token_seen_after_paste = None;
                 let mut token_seen_after_enter = None;
                 token_visible_for_report = if let Some(m) = payload_token_marker(payload) {
@@ -3198,10 +3197,6 @@ impl Transport for TmuxBackend {
                         match self.capture(target, CaptureRange::Tail(80)) {
                             Ok(cap) => {
                                 capture_tally.record_ok(&cap.text, Some(m));
-                                if before_busy_signal_kind.is_none() {
-                                    before_busy_signal_kind = provider_busy_signal_match(&cap.text)
-                                        .map(|match_| match_.kind);
-                                }
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 if cap.text.contains(m) {
                                     visible = true;
@@ -3257,7 +3252,6 @@ impl Transport for TmuxBackend {
                             &capture_tally,
                             token_seen_after_paste,
                             None,
-                            before_busy_signal_kind,
                             surface,
                         )),
                     });
@@ -3630,6 +3624,8 @@ impl Transport for TmuxBackend {
                                         }
                                     }
                                     Err(_) => {
+                                        consumption_diagnostics
+                                            .record(ConsumptionCaptureObservation::default());
                                         capture_tally.record_err();
                                         break;
                                     }
@@ -3651,7 +3647,6 @@ impl Transport for TmuxBackend {
                     &capture_tally,
                     token_seen_after_paste,
                     token_seen_after_enter,
-                    before_busy_signal_kind,
                     surface,
                 );
                 submit_diagnostics.consumption_reason = consumption_reason;

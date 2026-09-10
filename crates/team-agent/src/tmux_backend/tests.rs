@@ -1473,15 +1473,52 @@ fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
         diagnostics.consumption_reason,
         SubmitConsumptionReason::FallbackBusy
     );
-    assert_eq!(
-        diagnostics.before_busy_signal_kind,
-        Some(BusySignalKind::Working)
-    );
+    assert_eq!(diagnostics.before_busy_signal_kind, None);
     assert_eq!(diagnostics.busy_signal_kind, Some(BusySignalKind::Working));
     assert_eq!(diagnostics.busy_line_from_bottom, Some(0));
     assert_eq!(diagnostics.current_marker_in_bottom_15, Some(true));
     assert_eq!(diagnostics.paste_identity_in_composer, None);
     assert_eq!(diagnostics.consumption_from_capture_result, Some(false));
+}
+
+#[test]
+fn e46_capture_error_clears_previous_consumption_observation() {
+    let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_capture_error]";
+    let busy_tail = format!("{token_text}\n● Working (1s · esc to interrupt)\n");
+    let visible = ok(token_text);
+    let queued = vec![
+        MockResp::Out(ok("")),         // set-buffer
+        MockResp::Out(ok("")),         // paste-buffer
+        MockResp::Out(ok("")),         // delete-buffer
+        MockResp::Out(visible.clone()), // pasted-content prompt: continue
+        MockResp::Out(visible),         // pre-submit token visibility
+        MockResp::Out(ok("")),         // Escape
+        MockResp::Out(ok("")),         // Enter
+        MockResp::Out(ok(&busy_tail)),  // first post-Enter capture: busy
+        // Default capture error forces the next poll/fallback/resend reads to fail.
+    ];
+    let (be, _rec) = backend_with(MockResp::Io(std::io::ErrorKind::Other), queued);
+    let report = be
+        .inject(
+            &Target::Pane(PaneId::new("%7")),
+            &InjectPayload::Text(token_text.to_string()),
+            Key::Enter,
+            true,
+        )
+        .expect("inject runs through capture failure");
+    let diagnostics = report.submit_diagnostics.expect("diagnostics");
+    assert_eq!(
+        report.submit_verification,
+        SubmitVerification::SubmitConsumptionUnverified
+    );
+    assert_eq!(diagnostics.consumption_reason, SubmitConsumptionReason::Unverified);
+    assert!(diagnostics.capture_err_count > 0);
+    assert_eq!(diagnostics.before_busy_signal_kind, None);
+    assert_eq!(diagnostics.busy_signal_kind, None);
+    assert_eq!(diagnostics.busy_line_from_bottom, None);
+    assert_eq!(diagnostics.current_marker_in_bottom_15, None);
+    assert_eq!(diagnostics.paste_identity_in_composer, None);
+    assert_eq!(diagnostics.consumption_from_capture_result, None);
 }
 
 /// NeverSeen + 无占位符：空 pane 不得再把「token 不在底部」写成 consumed。
