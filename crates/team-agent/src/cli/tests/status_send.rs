@@ -345,7 +345,7 @@ fn status_compact_reports_identity_slot_health_on_grok_identity_slot_ok() {
 }
 
 #[test]
-fn cmd_status_human_appends_harness_reminder() {
+fn cmd_status_human_is_seven_field_brief_without_diagnostics() {
     let ws = seed_status_workspace();
     let args = StatusArgs {
         agent: None,
@@ -362,7 +362,13 @@ fn cmd_status_human_appends_harness_reminder() {
         other => panic!("expected human status output, got {other:?}"),
     };
 
-    assert!(text.ends_with(crate::cli::STATUS_REMINDER), "{text}");
+    assert!(
+        text.contains(
+            "name: a1 provider: unknown runtime_status: unknown activity: unknown health: unknown session_name: null tmux_command: null"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains(crate::cli::STATUS_REMINDER));
     let _ = std::fs::remove_dir_all(&ws);
 }
 

@@ -35,15 +35,37 @@ fn factory_src() -> String {
 /// uses only `//` and `//!` comments for prose. If someone adds
 /// `/* ... */` blocks with forbidden strings inside, extend this.
 fn non_test_body(src: &str) -> String {
-    let non_test = if let Some(idx) = src.find("#[cfg(test)]") {
+    // Drop trailing `mod tests` and skip `#[cfg(test)]` items without cutting
+    // later production code that follows early test-only helpers.
+    let without_mod_tests = if let Some(idx) = src.rfind("\n#[cfg(test)]\nmod tests") {
         &src[..idx]
     } else {
         src
     };
-    let mut out = String::with_capacity(non_test.len());
-    for line in non_test.lines() {
+    let mut out = String::with_capacity(without_mod_tests.len());
+    let mut skip_cfg_item = false;
+    let mut brace_depth = 0;
+    let mut seen_body = false;
+    for line in without_mod_tests.lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") {
+            continue;
+        }
+        if !skip_cfg_item && trimmed.starts_with("#[cfg(test)]") {
+            skip_cfg_item = true;
+            brace_depth = 0;
+            seen_body = false;
+            continue;
+        }
+        if skip_cfg_item {
+            brace_depth += trimmed.chars().filter(|ch| *ch == '{').count() as i32;
+            brace_depth -= trimmed.chars().filter(|ch| *ch == '}').count() as i32;
+            if trimmed.contains('{') {
+                seen_body = true;
+            }
+            if seen_body && brace_depth <= 0 {
+                skip_cfg_item = false;
+            }
             continue;
         }
         out.push_str(line);

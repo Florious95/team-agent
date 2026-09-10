@@ -747,14 +747,21 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     result
 }
 
+fn json_all_workers_spawned(value: &Value) -> bool {
+    value
+        .pointer("/readiness/all_workers_spawned")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || value
+            .pointer("/worker_readiness/all_workers_spawned")
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
 fn quick_start_spawned_workers(result: &TaResult) -> bool {
     serde_json::from_str::<Value>(&result.stdout)
         .ok()
-        .and_then(|value| {
-            value
-                .pointer("/readiness/all_workers_spawned")
-                .and_then(Value::as_bool)
-        })
+        .map(|value| json_all_workers_spawned(&value))
         .unwrap_or_else(|| result.stdout.contains("\"all_workers_spawned\": true"))
 }
 
@@ -1631,12 +1638,9 @@ fn write_delivery_timeout_snapshot(snapshot: &Value) -> PathBuf {
 // 8. Convenience: build a runtime workspace with a single fake-spec quick-start
 // ----------------------------------------------------------------------------
 
-/// Convenience: was the quick-start good enough for E2E to continue? Returns
-/// true if the JSON shows the team was launched, even when the leader receiver
-/// is unbound (which is normal under `cargo test` where no $TMUX is exported
-/// — the framework strips TMUX to keep test isolation, so leader pane binding
-/// fails by design). Tests that specifically need a bound leader_receiver
-/// should attach manually or assert on `qs.json()["status"]` themselves.
+/// True only for a successful bind/launch, or the legacy degraded statuses
+/// that still mean workers spawned. This is **not** a leader-binding success
+/// predicate for `leader_binding_incomplete`.
 pub fn quick_start_launched(result: &TaResult) -> bool {
     let j = result.json();
     let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1645,13 +1649,7 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let all_workers_spawned = j
-        .pointer("/readiness/all_workers_spawned")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    // ok==true is the happy path; ok==false but `leader_receiver_unbound` /
-    // `pending_tool_load` is acceptable for E2E (workers spawned, only the
-    // leader binding gate failed because cargo test runs outside tmux).
+    let all_workers_spawned = json_all_workers_spawned(&j);
     if ok {
         return true;
     }
@@ -1664,6 +1662,67 @@ pub fn quick_start_launched(result: &TaResult) -> bool {
         return true;
     }
     false
+}
+
+/// Restricted no-caller worker-only fixture: workers exist, but this pane is
+/// not a lawful leader bind. All four conditions are required.
+pub fn no_caller_worker_only_fixture_started(result: &TaResult) -> bool {
+    let j = result.json();
+    if j.pointer("/ok").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
+    let spawned = json_all_workers_spawned(&j);
+    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = j
+        .pointer("/reason")
+        .and_then(|v| v.as_str())
+        .or_else(|| j.pointer("/readiness/reason").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let session = j
+        .pointer("/session_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    spawned
+        && status == "leader_binding_incomplete"
+        && reason == "caller_pane_missing"
+        && !session.is_empty()
+}
+
+/// Worker-operation tests may continue when either a real launch succeeded or
+/// the exact no-caller worker-only fixture started. This is not a bind pass.
+pub fn quick_start_workers_available(result: &TaResult) -> bool {
+    quick_start_launched(result) || no_caller_worker_only_fixture_started(result)
+}
+
+/// Restart completed worker rebuild facts. Bind success requires evidence
+/// (`ok=true` + `restarted`). No-caller worker-only must stay exact incomplete.
+pub fn restart_rebuild_completed(json: &Value) -> bool {
+    if json.get("ok").and_then(Value::as_bool) == Some(true) {
+        return json
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "restarted" || status == "ok");
+    }
+    let status = json.get("status").and_then(Value::as_str).unwrap_or("");
+    let reason = json.get("reason").and_then(Value::as_str).unwrap_or("");
+    let coordinator = json
+        .get("coordinator_started")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let agents = json
+        .get("agents")
+        .and_then(Value::as_array)
+        .is_some_and(|agents| !agents.is_empty());
+    status == "restarted_binding_incomplete"
+        && coordinator
+        && agents
+        && matches!(
+            reason,
+            "leader_receiver_unbound"
+                | "leader_binding_unknown"
+                | "leader_registry_index_missing"
+                | "leader_not_attached"
+        )
 }
 
 /// Some tests want a workspace that has gone through quick-start so state.json
