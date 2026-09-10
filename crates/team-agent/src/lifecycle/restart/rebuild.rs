@@ -4407,6 +4407,249 @@ tasks:
         );
     }
 
+    fn restart_index_owner_state(
+        pane: &str,
+        endpoint: &str,
+        uuid: &str,
+        provider: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {
+                        "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": provider,
+                        "leader_session_uuid": uuid
+                    },
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": provider,
+                        "tmux_socket": endpoint,
+                        "leader_session_uuid": uuid,
+                        "discovery": "env_pane"
+                    }
+                }
+            }
+        })
+    }
+
+    fn restart_index_wrapper_pane(
+        workspace: &Path,
+        pane: &str,
+        uuid: Option<&str>,
+        active: bool,
+        command: &str,
+    ) -> PaneInfo {
+        let mut leader_env = BTreeMap::new();
+        if let Some(uuid) = uuid {
+            leader_env.insert(
+                "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+                uuid.to_string(),
+            );
+        }
+        PaneInfo {
+            pane_id: crate::transport::PaneId::new(pane),
+            session: crate::transport::SessionName::new("leader"),
+            window_index: Some(0),
+            window_name: Some(crate::transport::WindowName::new("pi")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some(command.to_string()),
+            current_path: Some(workspace.to_path_buf()),
+            active,
+            pane_pid: Some(42),
+            leader_env,
+        }
+    }
+
+    fn restart_index_bind_after_unregister(
+        workspace: &Path,
+        endpoint: &str,
+        pane: &str,
+        targets: Vec<PaneInfo>,
+    ) -> (
+        (bool, Option<String>),
+        crate::lifecycle::launch::LeaderBindingClass,
+    ) {
+        std::env::set_var("TMUX", format!("{endpoint},1,0"));
+        std::env::set_var("TMUX_PANE", pane);
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(targets);
+        crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+            let bind =
+                restart_leader_public_bind(workspace, Some("alpha"), &serde_json::json!({}));
+            let class = crate::lifecycle::launch::classify_leader_binding(workspace, "alpha");
+            (bind, class)
+        })
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_rebinds_inactive_pi_bash_wrapper_after_unregister() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-r14-idx-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var("HOME", &home);
+        let endpoint = "/tmp/ta-r14-idx-ok.sock";
+        let uuid = "c1e3f7a7aeaed95491667b4d9c3ce6fb";
+        let state = restart_index_owner_state("%0", endpoint, uuid, "codex");
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        assert_eq!(
+            crate::leader::registry::register_binding_from_state_best_effort(
+                &workspace,
+                Some("alpha"),
+                "quick-start",
+            )
+            .as_ref()
+            .map(|outcome| outcome.status),
+            Some("registered")
+        );
+        crate::leader::registry::unregister_entry(&workspace, "alpha");
+        let ((ok, reason), class) = restart_index_bind_after_unregister(
+            &workspace,
+            endpoint,
+            "%0",
+            vec![restart_index_wrapper_pane(
+                &workspace,
+                "%0",
+                Some(uuid),
+                false,
+                "bash",
+            )],
+        );
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!((ok, reason.as_deref()), (true, None));
+        assert_eq!(class, crate::lifecycle::launch::LeaderBindingClass::Attached);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_index_missing_refuses_dead_and_wrong_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-r14-idx-neg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var("HOME", &home);
+        let endpoint = "/tmp/ta-r14-idx-neg.sock";
+        let uuid = "c1e3f7a7aeaed95491667b4d9c3ce6fb";
+        let state = restart_index_owner_state("%0", endpoint, uuid, "codex");
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        crate::leader::registry::unregister_entry(&workspace, "alpha");
+
+        let (dead, _) = restart_index_bind_after_unregister(&workspace, endpoint, "%0", Vec::new());
+        let (wrong_pane, _) = restart_index_bind_after_unregister(
+            &workspace,
+            endpoint,
+            "%9",
+            vec![restart_index_wrapper_pane(
+                &workspace,
+                "%9",
+                Some(uuid),
+                false,
+                "bash",
+            )],
+        );
+        let wrong_socket = {
+            std::env::set_var("TMUX", "/tmp/other.sock,1,0");
+            std::env::set_var("TMUX_PANE", "%0");
+            let transport = crate::transport::test_support::OfflineTransport::default()
+                .with_tmux_endpoint("/tmp/other.sock")
+                .with_targets(vec![restart_index_wrapper_pane(
+                    &workspace,
+                    "%0",
+                    Some(uuid),
+                    false,
+                    "bash",
+                )]);
+            crate::transport_factory::with_leader_endpoint_transport(
+                "/tmp/other.sock",
+                transport,
+                || restart_leader_public_bind(&workspace, Some("alpha"), &serde_json::json!({})),
+            )
+        };
+        let (wrong_uuid, _) = restart_index_bind_after_unregister(
+            &workspace,
+            endpoint,
+            "%0",
+            vec![restart_index_wrapper_pane(
+                &workspace,
+                "%0",
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                false,
+                "bash",
+            )],
+        );
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!dead.0);
+        assert_eq!(dead.1.as_deref(), Some("leader_registry_index_missing"));
+        assert!(!wrong_pane.0);
+        assert_eq!(
+            wrong_pane.1.as_deref(),
+            Some("leader_registry_index_missing")
+        );
+        assert!(!wrong_socket.0);
+        assert_eq!(
+            wrong_socket.1.as_deref(),
+            Some("leader_registry_index_missing")
+        );
+        assert!(!wrong_uuid.0);
+        assert_eq!(
+            wrong_uuid.1.as_deref(),
+            Some("leader_registry_index_missing")
+        );
+    }
+
     #[test]
     #[serial_test::serial(env)]
     fn maintain_live_binding_index_register_failure_is_public() {

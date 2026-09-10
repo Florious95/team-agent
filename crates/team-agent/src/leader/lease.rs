@@ -1751,8 +1751,16 @@ fn claim_target_from_pane_info(target: &PaneInfo) -> Option<LeaderClaimTarget> {
     if !target.active {
         return None;
     }
+    claim_target_from_observed_pane(target)
+}
+
+fn claim_target_from_observed_pane(target: &PaneInfo) -> Option<LeaderClaimTarget> {
     let provider = super::attribute_pane_provider(target)?;
-    Some(LeaderClaimTarget {
+    Some(claim_target_with_provider(target, provider))
+}
+
+fn claim_target_with_provider(target: &PaneInfo, provider: Provider) -> LeaderClaimTarget {
+    LeaderClaimTarget {
         provider,
         leader_session_uuid: target_leader_session_uuid(target),
         team_id: target
@@ -1765,7 +1773,7 @@ fn claim_target_from_pane_info(target: &PaneInfo) -> Option<LeaderClaimTarget> {
         scope_authority: None,
         authorized_team_workspace: None,
         binding_nonce: None,
-    })
+    }
 }
 
 fn workspace_claim_target_from_pane_info(
@@ -1776,7 +1784,7 @@ fn workspace_claim_target_from_pane_info(
     if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
         return None;
     }
-    claim_target_from_pane_info(target)
+    claim_target_from_observed_pane(target)
 }
 
 fn write_claim_target_pane_nonce(target: &mut LeaderClaimTarget) -> Result<(), LeaderError> {
@@ -1885,8 +1893,19 @@ fn validate_attach_target(
     // provider list, only wired in test/fixture flows.
     let claim_target = match workspace_claim_target_from_pane_info(workspace, target) {
         Some(target) => Some(target),
-        None if grant_allows_attach_target(workspace, state, target, requested_provider, endpoint) => {
-            claim_target_from_pane_info(target)
+        None if grant_allows_attach_target(workspace, state, target, requested_provider, endpoint)
+            || recorded_owner_live_facts_match(
+                workspace,
+                state,
+                target,
+                requested_provider,
+                endpoint,
+            ) =>
+        {
+            Some(
+                claim_target_from_observed_pane(target)
+                    .unwrap_or_else(|| claim_target_with_provider(target, requested_provider)),
+            )
         }
         None if matches!(requested_provider, Provider::Fake) => None,
         None => return Err("leader_pane_validation_failed"),
@@ -1994,6 +2013,65 @@ pub(crate) fn grant_allows_attach_target(
         _ => false,
     };
     pane_ok && socket_ok && live_nonce == Some(recorded_nonce) && provider_ok && epoch_ok
+}
+
+fn recorded_owner_live_facts_match(
+    workspace: &Path,
+    state: &Value,
+    target: &PaneInfo,
+    requested_provider: Provider,
+    endpoint: Option<&str>,
+) -> bool {
+    let current_path = target.current_path.as_deref();
+    let Some(current_path) = current_path else {
+        return false;
+    };
+    if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
+        return false;
+    }
+    let receiver = selected_grant_receiver(state);
+    let recorded_pane = get_path_str(state, &["team_owner", "pane_id"])
+        .or_else(|| get_path_str(state, &["leader_receiver", "pane_id"]))
+        .or_else(|| {
+            receiver
+                .and_then(|value| value.get("pane_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    if recorded_pane.as_deref() != Some(target.pane_id.as_str()) {
+        return false;
+    }
+    let recorded_socket = get_path_str(state, &["leader_receiver", "tmux_socket"]).or_else(|| {
+        receiver
+            .and_then(|value| value.get("tmux_socket"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    match (recorded_socket.as_deref(), endpoint) {
+        (Some(recorded), Some(actual)) if recorded == actual => {}
+        _ => return false,
+    }
+    let recorded_provider = get_path_str(state, &["team_owner", "provider"])
+        .or_else(|| get_path_str(state, &["leader_receiver", "provider"]))
+        .or_else(|| {
+            receiver
+                .and_then(|value| value.get("provider"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .and_then(|raw| parse_provider(&raw));
+    if recorded_provider != Some(requested_provider) {
+        return false;
+    }
+    let recorded_uuid = get_path_str(state, &["team_owner", "leader_session_uuid"])
+        .or_else(|| get_path_str(state, &["leader_receiver", "leader_session_uuid"]));
+    let Some(recorded_uuid) = recorded_uuid.filter(|raw| !raw.is_empty()) else {
+        return false;
+    };
+    match target_leader_session_uuid(target) {
+        Some(live_uuid) => live_uuid.as_str() == recorded_uuid,
+        None => true,
+    }
 }
 
 fn copy_verified_grant_from_state(
@@ -3164,6 +3242,19 @@ mod tests {
                 assert_eq!(receiver.scope_authority.as_deref(), Some("fresh_caller"));
             },
         );
+    }
+
+    #[test]
+    #[test]
+    fn claim_leader_discovery_still_requires_focus() {
+        let mut pane = grant_pane("n1");
+        pane.active = false;
+        pane.current_command = Some("codex".to_string());
+        assert!(
+            claim_target_from_pane_info(&pane).is_none(),
+            "claim-leader discovery must keep pane_active; attach validation uses observed pane"
+        );
+        assert!(claim_target_from_observed_pane(&pane).is_some());
     }
 
     #[test]
