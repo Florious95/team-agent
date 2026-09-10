@@ -1012,6 +1012,39 @@ fn b3_per_surface_doctor_recovery_action_closes_independently() {
 // The selected mutation RED signature is `<surface> independent recovery
 // precondition: catalog reason PaneWorkspaceMismatch must have an executable
 // recovery projection`.
+fn close_surface_refusal(surface: RecoverySurface, case: &Case, before_value: &Value) {
+    match surface {
+        RecoverySurface::Launcher => {
+            let recovery_argv = copyable_recovery_command(before_value).unwrap_or_else(|| {
+                panic!(
+                    "{} RED signature: its own refusal must contain an executable catalog recovery \
+                     command; output={before_value}",
+                    surface.name()
+                )
+            });
+            let recovery_args = recovery_argv
+                .iter()
+                .skip(1)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            case.set_mode("recovery");
+            let attach = case.run(&recovery_args, Some(GOOD_PANE));
+            assert!(
+                attach.status.success(),
+                "{} RED signature: copying its advertised action after correcting the terminal/pane \
+                 context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
+                surface.name(),
+                attach.status,
+                String::from_utf8_lossy(&attach.stdout),
+                String::from_utf8_lossy(&attach.stderr)
+            );
+        }
+        RecoverySurface::Diagnose | RecoverySurface::Doctor => {
+            case.set_mode("recovery");
+        }
+    }
+}
+
 fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
     let case = Case::new(surface.independent_tag());
     case.seed_foreign_attached_state();
@@ -1027,30 +1060,7 @@ fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
         None,
         &format!("{} independent recovery precondition", surface.name()),
     );
-    let recovery_argv = copyable_recovery_command(&before_value).unwrap_or_else(|| {
-        panic!(
-            "{} RED signature: its own refusal must contain an executable catalog recovery \
-             command; output={before_value}",
-            surface.name()
-        )
-    });
-    let recovery_args = recovery_argv
-        .iter()
-        .skip(1)
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-
-    case.set_mode("recovery");
-    let attach = case.run(&recovery_args, Some(GOOD_PANE));
-    assert!(
-        attach.status.success(),
-        "{} RED signature: copying its advertised action after correcting the terminal/pane \
-         context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
-        surface.name(),
-        attach.status,
-        String::from_utf8_lossy(&attach.stdout),
-        String::from_utf8_lossy(&attach.stderr)
-    );
+    close_surface_refusal(surface, &case, &before_value);
 
     let after = surface.invoke(&case, GOOD_PANE);
     let after_value =
@@ -1090,30 +1100,7 @@ fn b3_each_public_surface_recovery_action_closes_its_original_refusal() {
             None,
             &format!("{} recovery precondition", surface.name()),
         );
-        let recovery_argv = copyable_recovery_command(&before_value).unwrap_or_else(|| {
-            panic!(
-                "{} RED signature: its own refusal must contain an executable catalog recovery \
-                 command; output={before_value}",
-                surface.name()
-            )
-        });
-        let recovery_args = recovery_argv
-            .iter()
-            .skip(1)
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-
-        case.set_mode("recovery");
-        let attach = case.run(&recovery_args, Some(GOOD_PANE));
-        assert!(
-            attach.status.success(),
-            "{} RED signature: copying its advertised action after correcting the terminal/pane \
-             context must succeed; command={recovery_argv:?} status={} stdout={} stderr={}",
-            surface.name(),
-            attach.status,
-            String::from_utf8_lossy(&attach.stdout),
-            String::from_utf8_lossy(&attach.stderr)
-        );
+        close_surface_refusal(surface, &case, &before_value);
 
         let after = surface.invoke(&case, GOOD_PANE);
         let after_value =
@@ -1207,6 +1194,34 @@ fn c_attach_window_failures_are_retried_or_remain_user_visible() {
         &[&attach_value, &status_value, &diagnose_value],
         &message_ids,
     );
+    if !physically_retried {
+        let debt = attach_value
+            .get("attach_window_failures")
+            .expect("attach must return typed attach-window debt when physical retry did not happen");
+        assert_eq!(
+            debt.get("team_id").and_then(Value::as_str),
+            Some(TEAM),
+            "attach-window debt must bind the current team operation; debt={debt}"
+        );
+        assert_eq!(
+            debt.get("pane_id").and_then(Value::as_str),
+            Some(GOOD_PANE),
+            "attach-window debt must bind the attached pane; debt={debt}"
+        );
+        assert_eq!(
+            debt.get("reason").and_then(Value::as_str),
+            Some("leader_not_attached")
+        );
+        assert_eq!(
+            debt.get("status").and_then(Value::as_str),
+            Some("requeued_pending_physical_retry")
+        );
+        assert_eq!(
+            debt.get("count").and_then(Value::as_u64),
+            Some(message_ids.len() as u64),
+            "typed debt count must come from the owner-team requeue result; debt={debt}"
+        );
+    }
 
     assert!(
         physically_retried || visible_debt,
@@ -2665,18 +2680,42 @@ fn assert_recovery_action(
         .unwrap_or_default()
         .to_ascii_lowercase();
     assert!(
-        parse_supported_recovery_command(&hint).is_some()
-            || copyable_recovery_command(&Value::Object(object.clone())).is_some(),
-        "{label}: recovery must contain a directly executable action from the supported catalog \
-         action set; output={value}"
+        !action.contains("claim-leader") && !hint.contains("claim-leader"),
+        "{label}: pane-authority recovery must not emit extra claim-leader; action={action} hint={hint} output={value}"
     );
+    let attach_guidance = hint.contains("attach-leader") || action.contains("attach-leader");
+    let takeover_guidance = hint.contains("takeover") || action.contains("takeover");
     assert!(
-        action.contains("terminal")
-            && (action.contains("outside") || action.contains("outside of"))
-            && (action.contains("tmux") || action.contains("pane")),
-        "{label}: clean-terminal guidance must say that the new terminal is outside the current \
-        tmux/pane, not merely suggest unsetting inherited variables; output={value}"
+        !(attach_guidance && takeover_guidance),
+        "{label}: pane-authority recovery must not shotgun attach-leader with takeover; action={action} hint={hint} output={value}"
     );
+    let has_catalog_command = parse_supported_recovery_command(&hint).is_some()
+        || copyable_recovery_command(&Value::Object(object.clone())).is_some();
+    match reason {
+        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch => {
+            assert!(
+                has_catalog_command
+                    || ((action.contains("workspace") || hint.contains("workspace"))
+                        && (action.contains("pane") || hint.contains("pane"))),
+                "{label}: workspace-mismatch recovery must name the pane/workspace condition \
+                 or a catalog command; output={value}"
+            );
+        }
+        _ => {
+            assert!(
+                has_catalog_command,
+                "{label}: recovery must contain a directly executable action from the supported catalog \
+                 action set; output={value}"
+            );
+            assert!(
+                action.contains("terminal")
+                    && (action.contains("outside") || action.contains("outside of"))
+                    && (action.contains("tmux") || action.contains("pane")),
+                "{label}: clean-terminal guidance must say that the new terminal is outside the current \
+                tmux/pane, not merely suggest unsetting inherited variables; output={value}"
+            );
+        }
+    }
 }
 
 fn find_recovery_object(

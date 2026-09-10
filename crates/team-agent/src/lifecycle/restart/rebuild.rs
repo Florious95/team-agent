@@ -1303,11 +1303,12 @@ fn restart_with_selected_team_and_transport(
         )?;
         // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
         // come up still need a leader_receiver pane to deliver report_result.
-        try_autobind_leader_after_restart(
-            &selected.run_workspace,
-            Some(selected.team_key.as_str()),
-            &state,
-        );
+        let (attach_window_failures, leader_bind_ok, leader_bind_reason) =
+            restart_leader_public_bind(
+                &selected.run_workspace,
+                Some(selected.team_key.as_str()),
+                &state,
+            );
         return Ok(RestartReport::Partial {
             session_name,
             agents: successful_agents,
@@ -1316,6 +1317,9 @@ fn restart_with_selected_team_and_transport(
             coordinator,
             next_actions,
             attach_commands,
+            attach_window_failures,
+            leader_bind_ok,
+            leader_bind_reason,
         });
     }
     phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
@@ -1331,7 +1335,12 @@ fn restart_with_selected_team_and_transport(
     // invoked from a tmux pane should bind that pane as leader_receiver,
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
-    try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
+    let (attach_window_failures, leader_bind_ok, leader_bind_reason) =
+        restart_leader_public_bind(
+            &selected.run_workspace,
+            Some(selected.team_key.as_str()),
+            &state,
+        );
     if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
     {
         let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
@@ -1352,6 +1361,9 @@ fn restart_with_selected_team_and_transport(
         coordinator,
         next_actions,
         attach_commands,
+        attach_window_failures,
+        leader_bind_ok,
+        leader_bind_reason,
     })
 }
 
@@ -1821,61 +1833,278 @@ fn verify_spawned_agent_live(
 /// E51 guard). In that case the user must still run `attach-leader` manually,
 /// matching pre-fix behaviour. We log to stderr so the operator sees why
 /// auto-attach didn't take.
+fn load_restart_bind_state(
+    workspace: &std::path::Path,
+    team_key: &str,
+) -> Option<serde_json::Value> {
+    crate::state::projection::select_runtime_state(workspace, Some(team_key)).ok()
+}
+
+fn selected_team_receiver<'a>(
+    state: &'a serde_json::Value,
+    team_key: &str,
+) -> Option<&'a serde_json::Value> {
+    crate::lifecycle::launch::selected_team_leader_receiver(state, team_key)
+}
+
+fn transport_for_receiver(
+    _workspace: &std::path::Path,
+    receiver: &serde_json::Value,
+) -> Option<Box<dyn crate::transport::Transport>> {
+    let endpoint = receiver
+        .get("tmux_socket")
+        .and_then(serde_json::Value::as_str)
+        .filter(|endpoint| !endpoint.is_empty() && *endpoint != "default")?;
+    Some(crate::transport_factory::leader_endpoint_transport(
+        endpoint,
+    ))
+}
+
+pub fn restart_bind_status(
+    workspace: &std::path::Path,
+    team_key: &str,
+    state: &serde_json::Value,
+) -> (bool, Option<String>) {
+    let receiver = selected_team_receiver(state, team_key);
+    let transport = receiver.and_then(|receiver| transport_for_receiver(workspace, receiver));
+    match crate::lifecycle::launch::classify_leader_binding_at(
+        workspace,
+        team_key,
+        state,
+        transport.as_deref(),
+    ) {
+        crate::lifecycle::launch::LeaderBindingClass::Attached => (true, None),
+        other => (false, Some(other.issue_id().to_string())),
+    }
+}
+
+fn owner_conflicts_with_caller(
+    workspace: &std::path::Path,
+    state: &serde_json::Value,
+    team_key: &str,
+) -> bool {
+    let Some(receiver) = selected_team_receiver(state, team_key) else {
+        return false;
+    };
+    let Some(owner_pane) = state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .and_then(|team| team.pointer("/team_owner/pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| receiver.get("pane_id").and_then(serde_json::Value::as_str))
+    else {
+        return false;
+    };
+    let Some(caller) = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.is_empty())
+    else {
+        return false;
+    };
+    let owner_socket = receiver
+        .get("tmux_socket")
+        .and_then(serde_json::Value::as_str);
+    let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let same_socket = match (owner_socket, caller_socket.as_deref()) {
+        (Some(owner), Some(caller)) => owner == caller,
+        _ => false,
+    };
+    if owner_pane == caller && same_socket {
+        return false;
+    }
+    let Some(transport) = transport_for_receiver(workspace, receiver) else {
+        return false;
+    };
+    matches!(
+        crate::messaging::leader_channel::resolve_live_leader_channel(
+            workspace,
+            receiver,
+            transport.as_ref(),
+        ),
+        crate::messaging::leader_channel::LeaderChannelResolution::Live(_)
+    )
+}
+
+fn binding_maintain_failed(value: &serde_json::Value) -> bool {
+    value
+        .get("registry_maintain_failed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || value
+            .get("debt_maintain_failed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+fn apply_binding_maintain_failures(
+    attach_window_failures: &Option<serde_json::Value>,
+    ok: bool,
+    reason: Option<String>,
+) -> (bool, Option<String>) {
+    if attach_window_failures
+        .as_ref()
+        .is_some_and(binding_maintain_failed)
+    {
+        (
+            false,
+            reason.or_else(|| Some("leader_registry_maintain_failed".to_string())),
+        )
+    } else {
+        (ok, reason)
+    }
+}
+
+/// Unique production constructor for Restarted/Partial `leader_bind_*`
+/// and `attach_window_failures`. `restart_with_selected_team` is the only
+/// product caller; IsolatedHome reuses this instead of a test success path.
+pub fn restart_leader_public_bind(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    in_memory_state: &serde_json::Value,
+) -> (Option<serde_json::Value>, bool, Option<String>) {
+    let team_key = team.unwrap_or("");
+    let attach_window_failures =
+        try_autobind_leader_after_restart(workspace, team, in_memory_state);
+    let persisted = load_restart_bind_state(workspace, team_key);
+    let (class_ok, class_reason) = restart_bind_status(
+        workspace,
+        team_key,
+        persisted.as_ref().unwrap_or(in_memory_state),
+    );
+    let (ok, reason) =
+        apply_binding_maintain_failures(&attach_window_failures, class_ok, class_reason);
+    (attach_window_failures, ok, reason)
+}
+
+fn maintain_live_binding_index(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    state: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let team_key = team.unwrap_or("");
+    let register = crate::leader::registry::register_binding_from_state_best_effort(
+        workspace,
+        team,
+        "restart-live-index",
+    );
+    let mut report = serde_json::Map::new();
+    if !register
+        .as_ref()
+        .is_some_and(|outcome| outcome.status == "registered")
+    {
+        report.insert("registry_maintain_failed".to_string(), serde_json::json!(true));
+    }
+    let Some(receiver) = selected_team_receiver(state, team_key) else {
+        return Some(serde_json::Value::Object(report));
+    };
+    let Some(pane) = receiver
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())
+    else {
+        report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
+        return Some(serde_json::Value::Object(report));
+    };
+    let store = match crate::message_store::MessageStore::open(workspace) {
+        Ok(store) => store,
+        Err(_) => {
+            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
+            return Some(serde_json::Value::Object(report));
+        }
+    };
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let team_id = crate::model::ids::TeamKey::new(team_key.to_string());
+    let pane_id = crate::transport::PaneId::new(pane);
+    match crate::messaging::watchers::requeue_delivery_exhausted_watchers(
+        workspace,
+        &store,
+        &event_log,
+        &team_id,
+        &pane_id,
+    ) {
+        Ok(notices) => {
+            report.insert("notices".to_string(), serde_json::json!(notices.len()));
+        }
+        Err(_) => {
+            report.insert("debt_maintain_failed".to_string(), serde_json::json!(true));
+        }
+    }
+    Some(serde_json::Value::Object(report))
+}
+
 fn try_autobind_leader_after_restart(
     workspace: &std::path::Path,
     team: Option<&str>,
     state: &serde_json::Value,
-) {
-    if std::env::var_os("TMUX_PANE").is_none() {
-        return;
+) -> Option<serde_json::Value> {
+    let team_key = team.unwrap_or("");
+    let persisted = load_restart_bind_state(workspace, team_key);
+    let state = persisted.as_ref().unwrap_or(state);
+    if restart_bind_status(workspace, team_key, state).0 {
+        return maintain_live_binding_index(workspace, team, state);
     }
-    // Provider: prefer the existing team_owner.provider (if rebind),
-    // else leader_receiver.provider (stale, but still informative),
-    // else default to ClaudeCode (matches the most common deployment).
-    let provider = state
-        .pointer("/team_owner/provider")
+    if std::env::var_os("TMUX_PANE").is_none() {
+        return None;
+    }
+    if owner_conflicts_with_caller(workspace, state, team_key) {
+        eprintln!(
+            "team_agent::restart auto_attach_leader skipped reason=owner_conflict team={team:?}"
+        );
+        return None;
+    }
+    let Some(provider) = state
+        .get("teams")
+        .and_then(|teams| teams.get(team_key))
+        .and_then(|team| team.pointer("/team_owner/provider"))
         .and_then(serde_json::Value::as_str)
         .or_else(|| {
-            state
-                .pointer("/leader_receiver/provider")
+            selected_team_receiver(state, team_key)
+                .and_then(|receiver| receiver.get("provider"))
                 .and_then(serde_json::Value::as_str)
         })
-        .and_then(|s| {
-            // Legacy auto-attach: collapse any claude variant to ClaudeCode
-            // (this site historically treated `Claude` and `ClaudeCode` as
-            // the same attach target). Wire-format `parse_provider` keeps
-            // them distinct everywhere else.
-            crate::provider::wire::parse_provider(s).map(|p| match p {
-                crate::model::enums::Provider::Claude => crate::model::enums::Provider::ClaudeCode,
-                other => other,
-            })
-        })
-        .unwrap_or(crate::model::enums::Provider::ClaudeCode);
-    let team_str = team;
-    match crate::leader::attach_leader(workspace, team_str, None, provider) {
+        .and_then(crate::provider::wire::parse_provider)
+    else {
+        eprintln!(
+            "team_agent::restart auto_attach_leader skipped reason=provider_unresolved team={team:?}"
+        );
+        return None;
+    };
+    match crate::leader::attach_leader(workspace, team, None, provider) {
         Ok(result) if result.ok => {
-            let _ = crate::leader::registry::register_binding_from_state_best_effort(
+            let mut debt = result
+                .attach_window_failures
+                .clone()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let register = crate::leader::registry::register_binding_from_state_best_effort(
                 workspace,
-                team_str,
+                team,
                 "restart-auto-attach",
             );
-            eprintln!(
-                "team_agent::restart auto_attach_leader ok pane={:?} team={:?}",
-                result.bound_pane_id.as_ref().map(|p| p.as_str()),
-                team_str,
-            );
+            if !register
+                .as_ref()
+                .is_some_and(|outcome| outcome.status == "registered")
+            {
+                if let Some(object) = debt.as_object_mut() {
+                    object.insert(
+                        "registry_maintain_failed".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+            }
+            Some(debt)
         }
         Ok(result) => {
             eprintln!(
-                "team_agent::restart auto_attach_leader skipped reason={:?} team={:?}",
-                result.reason, team_str,
+                "team_agent::restart auto_attach_leader skipped reason={:?} team={team:?}",
+                result.reason,
             );
+            None
         }
         Err(error) => {
             eprintln!(
-                "team_agent::restart auto_attach_leader failed error={error} team={team_str:?} \
-                 (run `team-agent attach-leader` from your tmux pane to bind manually)",
+                "team_agent::restart auto_attach_leader failed error={error} team={team:?}"
             );
+            None
         }
     }
 }
@@ -3983,5 +4212,561 @@ tasks:
                 "{pointer} must not retain the old startup probe epoch"
             );
         }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_bind_status_live_index_missing_is_not_ok() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-n1-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = workspace.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let state = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": "/tmp/leader-not-workspace.sock"
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let (ok, reason) = restart_bind_status(&workspace, "alpha", &state);
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(!ok, "Live/index-missing must not report bind success");
+        assert_eq!(reason.as_deref(), Some("leader_registry_index_missing"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_bind_status_uses_persisted_receiver_endpoint() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-n1-persisted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = workspace.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let state = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "leader_receiver": {
+                        "status": "pending",
+                        "pane_id": "%old"
+                    }
+                }
+            }
+        });
+        let persisted = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%2", "owner_epoch": 2, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%2",
+                        "owner_epoch": 2,
+                        "tmux_socket": "/tmp/caller-socket.sock"
+                    }
+                }
+            }
+        });
+        let (ok_stale, reason_stale) = restart_bind_status(&workspace, "alpha", &state);
+        let (ok_new, reason_new) = restart_bind_status(&workspace, "alpha", &persisted);
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&workspace);
+        assert!(!ok_stale, "pending without owner/registry is not bind success");
+        assert_eq!(
+            reason_stale.as_deref(),
+            Some("leader_receiver_unbound"),
+            "hermetic empty registry + pending receiver is Unbound, not Unknown"
+        );
+        assert!(!ok_new);
+        assert_eq!(
+            reason_new.as_deref(),
+            Some("leader_registry_index_missing"),
+            "persisted attached+owner without registry is index-missing, not the stale pending class"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_bind_status_attached_live_is_ok() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-n1-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let endpoint = "/tmp/ta-n1-leader-not-workspace.sock";
+        let pending = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "pending",
+                        "discovery": "quick_start_seed",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": endpoint
+                    }
+                }
+            }
+        });
+        let attached = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1, "provider": "codex"},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": endpoint
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &attached).unwrap();
+        assert_eq!(
+            crate::leader::registry::register_binding_from_state_best_effort(
+                &workspace,
+                Some("alpha"),
+                "restart-ok",
+            )
+            .as_ref()
+            .map(|outcome| outcome.status),
+            Some("registered")
+        );
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(vec![crate::transport::PaneInfo {
+                pane_id: crate::transport::PaneId::new("%1"),
+                session: crate::transport::SessionName::new("s"),
+                window_index: None,
+                window_name: None,
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: Some(workspace.clone()),
+                active: true,
+                pane_pid: None,
+                leader_env: Default::default(),
+            }]);
+        let (ok, reason) = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport.clone(),
+            || restart_bind_status(&workspace, "alpha", &attached),
+        );
+        let (ok_pending, _) = crate::transport_factory::with_leader_endpoint_transport(
+            endpoint,
+            transport,
+            || restart_bind_status(&workspace, "alpha", &pending),
+        );
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!((ok, reason.as_deref()), (true, None));
+        assert!(
+            !ok_pending,
+            "in-memory pending snapshot must not flip restart success"
+        );
+    }
+
+    fn restart_index_owner_state(
+        pane: &str,
+        endpoint: &str,
+        uuid: &str,
+        provider: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {
+                        "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": provider,
+                        "leader_session_uuid": uuid
+                    },
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": pane,
+                        "owner_epoch": 1,
+                        "provider": provider,
+                        "tmux_socket": endpoint,
+                        "leader_session_uuid": uuid,
+                        "discovery": "env_pane"
+                    }
+                }
+            }
+        })
+    }
+
+    fn restart_index_wrapper_pane(
+        workspace: &Path,
+        pane: &str,
+        uuid: Option<&str>,
+        active: bool,
+        command: &str,
+    ) -> PaneInfo {
+        let mut leader_env = BTreeMap::new();
+        if let Some(uuid) = uuid {
+            leader_env.insert(
+                "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+                uuid.to_string(),
+            );
+        }
+        PaneInfo {
+            pane_id: crate::transport::PaneId::new(pane),
+            session: crate::transport::SessionName::new("leader"),
+            window_index: Some(0),
+            window_name: Some(crate::transport::WindowName::new("pi")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some(command.to_string()),
+            current_path: Some(workspace.to_path_buf()),
+            active,
+            pane_pid: Some(42),
+            leader_env,
+        }
+    }
+
+    fn restart_index_bind_after_unregister(
+        workspace: &Path,
+        endpoint: &str,
+        pane: &str,
+        targets: Vec<PaneInfo>,
+    ) -> (
+        (bool, Option<String>),
+        crate::lifecycle::launch::LeaderBindingClass,
+    ) {
+        std::env::set_var("TMUX", format!("{endpoint},1,0"));
+        std::env::set_var("TMUX_PANE", pane);
+        let transport = crate::transport::test_support::OfflineTransport::default()
+            .with_tmux_endpoint(endpoint)
+            .with_targets(targets);
+        crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+            let (_failures, ok, reason) =
+                restart_leader_public_bind(workspace, Some("alpha"), &serde_json::json!({}));
+            let class = crate::lifecycle::launch::classify_leader_binding(workspace, "alpha");
+            ((ok, reason), class)
+        })
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_rebinds_inactive_pi_bash_wrapper_after_unregister() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-r14-idx-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var("HOME", &home);
+        let endpoint = "/tmp/ta-r14-idx-ok.sock";
+        let uuid = "c1e3f7a7aeaed95491667b4d9c3ce6fb";
+        let state = restart_index_owner_state("%0", endpoint, uuid, "codex");
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        assert_eq!(
+            crate::leader::registry::register_binding_from_state_best_effort(
+                &workspace,
+                Some("alpha"),
+                "quick-start",
+            )
+            .as_ref()
+            .map(|outcome| outcome.status),
+            Some("registered")
+        );
+        crate::leader::registry::unregister_entry(&workspace, "alpha");
+        let ((ok, reason), class) = restart_index_bind_after_unregister(
+            &workspace,
+            endpoint,
+            "%0",
+            vec![restart_index_wrapper_pane(
+                &workspace,
+                "%0",
+                Some(uuid),
+                false,
+                "bash",
+            )],
+        );
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!((ok, reason.as_deref()), (true, None));
+        assert_eq!(class, crate::lifecycle::launch::LeaderBindingClass::Attached);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_index_missing_refuses_dead_and_wrong_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-r14-idx-neg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_tmux = std::env::var_os("TMUX");
+        let previous_pane = std::env::var_os("TMUX_PANE");
+        std::env::set_var("HOME", &home);
+        let endpoint = "/tmp/ta-r14-idx-neg.sock";
+        let uuid = "c1e3f7a7aeaed95491667b4d9c3ce6fb";
+        let state = restart_index_owner_state("%0", endpoint, uuid, "codex");
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        crate::leader::registry::unregister_entry(&workspace, "alpha");
+
+        let (dead, _) = restart_index_bind_after_unregister(&workspace, endpoint, "%0", Vec::new());
+        let (wrong_pane, _) = restart_index_bind_after_unregister(
+            &workspace,
+            endpoint,
+            "%9",
+            vec![restart_index_wrapper_pane(
+                &workspace,
+                "%9",
+                Some(uuid),
+                false,
+                "bash",
+            )],
+        );
+        let wrong_socket = {
+            std::env::set_var("TMUX", "/tmp/other.sock,1,0");
+            std::env::set_var("TMUX_PANE", "%0");
+            let transport = crate::transport::test_support::OfflineTransport::default()
+                .with_tmux_endpoint("/tmp/other.sock")
+                .with_targets(vec![restart_index_wrapper_pane(
+                    &workspace,
+                    "%0",
+                    Some(uuid),
+                    false,
+                    "bash",
+                )]);
+            crate::transport_factory::with_leader_endpoint_transport(
+                "/tmp/other.sock",
+                transport,
+                || {
+                    let (_failures, ok, reason) = restart_leader_public_bind(
+                        &workspace,
+                        Some("alpha"),
+                        &serde_json::json!({}),
+                    );
+                    (ok, reason)
+                },
+            )
+        };
+        let (wrong_uuid, _) = restart_index_bind_after_unregister(
+            &workspace,
+            endpoint,
+            "%0",
+            vec![restart_index_wrapper_pane(
+                &workspace,
+                "%0",
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                false,
+                "bash",
+            )],
+        );
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_tmux {
+            Some(value) => std::env::set_var("TMUX", value),
+            None => std::env::remove_var("TMUX"),
+        }
+        match previous_pane {
+            Some(value) => std::env::set_var("TMUX_PANE", value),
+            None => std::env::remove_var("TMUX_PANE"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!dead.0);
+        assert_eq!(dead.1.as_deref(), Some("leader_registry_index_missing"));
+        assert!(!wrong_pane.0);
+        assert_eq!(
+            wrong_pane.1.as_deref(),
+            Some("leader_registry_index_missing")
+        );
+        assert!(!wrong_socket.0);
+        assert_eq!(
+            wrong_socket.1.as_deref(),
+            Some("leader_registry_index_missing")
+        );
+        assert!(!wrong_uuid.0);
+        assert_eq!(
+            wrong_uuid.1.as_deref(),
+            Some("leader_registry_index_missing")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn maintain_live_binding_index_register_failure_is_public() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-n1-debt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(home.join(".team-agent"), b"not-a-directory").unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        let state = serde_json::json!({
+            "teams": {
+                "alpha": {
+                    "team_owner": {"pane_id": "%1", "owner_epoch": 1},
+                    "leader_receiver": {
+                        "status": "attached",
+                        "pane_id": "%1",
+                        "owner_epoch": 1,
+                        "tmux_socket": "/tmp/ta-n1-debt.sock"
+                    }
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+        let debt = maintain_live_binding_index(&workspace, Some("alpha"), &state);
+        let (ok, reason) = apply_binding_maintain_failures(&debt, true, None);
+        let (keep_ok, keep_reason) = apply_binding_maintain_failures(
+            &debt,
+            false,
+            Some("leader_registry_index_missing".to_string()),
+        );
+        let coordinator = crate::lifecycle::CoordinatorStartSummary {
+            ok: true,
+            status: "started".to_string(),
+            pid: None,
+            binary_path: None,
+            binary_version: None,
+            rotation_reason: None,
+            binary_identity_relation: "same".to_string(),
+        };
+        let restarted = crate::cli::lifecycle_port::restart_value(
+            crate::lifecycle::RestartReport::Restarted {
+                session_name: crate::transport::SessionName::new("s"),
+                agents: Vec::new(),
+                coordinator_started: true,
+                coordinator: coordinator.clone(),
+                next_actions: Vec::new(),
+                attach_commands: Vec::new(),
+                attach_window_failures: debt.clone(),
+                leader_bind_ok: ok,
+                leader_bind_reason: reason.clone(),
+            },
+            Some("alpha"),
+        );
+        let partial = crate::cli::lifecycle_port::restart_value(
+            crate::lifecycle::RestartReport::Partial {
+                session_name: crate::transport::SessionName::new("s"),
+                agents: Vec::new(),
+                failed_agents: Vec::new(),
+                coordinator_started: true,
+                coordinator,
+                next_actions: Vec::new(),
+                attach_commands: Vec::new(),
+                attach_window_failures: debt.clone(),
+                leader_bind_ok: ok,
+                leader_bind_reason: reason.clone(),
+            },
+            Some("alpha"),
+        );
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            debt.as_ref()
+                .and_then(|value| value.get("registry_maintain_failed"))
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(!ok);
+        assert_eq!(reason.as_deref(), Some("leader_registry_maintain_failed"));
+        assert!(!keep_ok);
+        assert_eq!(
+            keep_reason.as_deref(),
+            Some("leader_registry_index_missing"),
+            "earlier bind reason must not be overwritten by maintain failure"
+        );
+        assert_eq!(restarted.get("ok").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            restarted.get("reason").and_then(serde_json::Value::as_str),
+            Some("leader_registry_maintain_failed")
+        );
+        assert_eq!(
+            partial.get("leader_bind_ok").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial
+                .get("leader_bind_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("leader_registry_maintain_failed")
+        );
     }
 }

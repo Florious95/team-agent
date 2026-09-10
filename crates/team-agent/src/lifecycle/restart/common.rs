@@ -340,11 +340,15 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref().unwrap_or(""),
     );
-    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
-        workspace,
-        agent_id.as_str(),
-        &mcp_config,
-    )?;
+    let mcp_config_path = if provider == Provider::Pi {
+        None
+    } else {
+        Some(crate::lifecycle::launch::write_worker_mcp_config(
+            workspace,
+            agent_id.as_str(),
+            &mcp_config,
+        )?)
+    };
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -427,11 +431,13 @@ pub(super) fn spawn_agent_window(
         }
     };
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-        crate::lifecycle::launch::point_native_mcp_config_at_file(
-            &mut plan.argv,
-            provider,
-            &mcp_config_path,
-        );
+        if let Some(mcp_config_path) = mcp_config_path.as_ref() {
+            crate::lifecycle::launch::point_native_mcp_config_at_file(
+                &mut plan.argv,
+                provider,
+                mcp_config_path,
+            );
+        }
     }
     crate::lifecycle::launch::fill_spawn_placeholders_full(
         &mut plan.argv,
@@ -487,6 +493,9 @@ pub(super) fn spawn_agent_window(
         crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
         crate::lifecycle::launch::apply_grok_mcp_overlay(workspace, &mcp_config)?;
     }
+    // Non-Pi spawn cwd is override-or-workspace (E56: ignore drifted state
+    // `.team/runtime/<team_key>/`). Pi resume uses captured agent.spawn_cwd
+    // already resolved above so exact-path header checks match capture.
     // 0.4.x provider effort MVP step 9: scrub CLAUDE_EFFORT for Claude
     // worker spawn so a parent shell env cannot silently override the
     // framework's effort decision.
@@ -498,6 +507,9 @@ pub(super) fn spawn_agent_window(
             provider,
         ),
     );
+    // Keep the launcher-known typed provider independent from inherited
+    // LEADER_* identity. The tmux wrapper binds pane/socket at invocation time.
+    crate::layout::worker_env::inject_current_caller_provider(&mut env, provider);
 
     // 0.4.6 Stage 2: write actual spawn plan event BEFORE invoking the
     // transport spawn. Mirrors `launch.rs:359-380` (the reference impl)
@@ -1424,6 +1436,22 @@ pub(super) fn resume_backing_probe_for_agent(
                     crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
                 })
         }
+        Provider::Pi => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            rollout_path.is_some_and(|path| {
+                crate::provider::session_scan::pi::validate_exact_backing(
+                    path.as_path(),
+                    session_id,
+                    &spawn_cwd,
+                )
+                .is_ok()
+            })
+        }
         Provider::GeminiCli | Provider::Fake => false,
     };
 
@@ -2263,6 +2291,27 @@ mod e36_transcript_backing_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn agent_rollout_path_keeps_captured_exact_session_file() {
+        // Live T1 public session.captured (events-before.jsonl / events-after-t1.jsonl):
+        // rollout_path was already assigned before shutdown; resume must not
+        // invent a different file or drop the captured path.
+        let captured = "/Volumes/nvme/tmp/team-agent-live-0578-r2-3087abc5/.team/runtime/pi/claim-live-0578-r2/echo/sessions/2026-09-09T15-53-03-460Z_0dac7250-aa88-45be-aa3e-03a6833f9552.jsonl";
+        let agent = serde_json::json!({
+            "session_id": "0dac7250-aa88-45be-aa3e-03a6833f9552",
+            "rollout_path": captured,
+        });
+        let path = agent_rollout_path(&agent).expect("captured exact path");
+        assert_eq!(path.as_path().to_string_lossy(), captured);
+        assert!(
+            agent_rollout_path(&serde_json::json!({
+                "session_id": "0dac7250-aa88-45be-aa3e-03a6833f9552",
+            }))
+            .is_none(),
+            "session_id alone is not an exact session path"
+        );
     }
 
     #[test]
