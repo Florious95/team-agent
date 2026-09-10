@@ -31,7 +31,9 @@ use crate::model::yaml::Value as YamlValue;
 use crate::provider::wire::command_name;
 use crate::provider::Provider;
 
-use super::cursor_mcp_iso::{cursor_mcp_isolation_enabled, cursor_mcp_project_dir};
+use super::cursor_mcp_iso::{
+    cursor_mcp_isolation_enabled, cursor_mcp_project_dir, materialize_cursor_mcp_project,
+};
 
 /// Keys that must appear in mcp.json env. Cursor strips parent env down to
 /// HOME/PATH/TERM/… — TEAM_AGENT_ID only survives if it is in this table.
@@ -265,17 +267,36 @@ pub fn cursor_mcp_enable_argv() -> Vec<String> {
 /// returns: 测试隔离环境或显式跳过标志下直接成功，避免写用户全局配置
 /// errors: 命令跑不起来或退出码非零时返回 RequirementUnmet，错误里只记输出长度不记内容
 /// ---
+pub fn cursor_mcp_enable_working_dir(workspace: &Path, project_root: Option<&Path>) -> PathBuf {
+    match project_root {
+        Some(root) => physical_workspace_path(root),
+        None => physical_workspace_path(workspace),
+    }
+}
+
+pub fn prepare_cursor_seat_mcp(
+    workspace: &Path,
+    agent_id: &str,
+    mcp_config: &crate::provider::McpConfig,
+) -> Result<Option<PathBuf>, LifecycleError> {
+    if cursor_mcp_isolation_enabled() {
+        let project = materialize_cursor_mcp_project(workspace, agent_id)?;
+        apply_cursor_mcp_overlay(&project, mcp_config)?;
+        Ok(Some(project))
+    } else {
+        apply_cursor_mcp_overlay(workspace, mcp_config)?;
+        Ok(None)
+    }
+}
+
 pub fn enable_cursor_workspace_mcp(
     workspace: &Path,
     project_root: Option<&Path>,
 ) -> Result<(), LifecycleError> {
+    let physical = cursor_mcp_enable_working_dir(workspace, project_root);
     if skip_cursor_mcp_enable() {
         return Ok(());
     }
-    let physical = match project_root {
-        Some(root) => physical_workspace_path(root),
-        None => physical_workspace_path(workspace),
-    };
     let argv = cursor_mcp_enable_argv();
     let output = Command::new(&argv[0])
         .args(&argv[1..])

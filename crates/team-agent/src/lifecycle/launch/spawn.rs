@@ -322,15 +322,11 @@ pub(super) fn spawn_agents(
         if matches!(provider, Provider::CursorAgent) {
             refuse_second_cursor_occupant(workspace, agent_id_raw, Some(spec))?;
             apply_cursor_agent_rules_overlay(workspace, agent_id_raw, system_prompt.as_str())?;
-            apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-            let project = if crate::lifecycle::launch::cursor_mcp_isolation_enabled() {
-                Some(crate::lifecycle::launch::cursor_mcp_project_dir(
-                    workspace,
-                    agent_id_raw,
-                )?)
-            } else {
-                None
-            };
+            let project = crate::lifecycle::launch::prepare_cursor_seat_mcp(
+                workspace,
+                agent_id_raw,
+                &mcp_config,
+            )?;
             enable_cursor_workspace_mcp(workspace, project.as_deref())?;
             apply_cursor_spawn_workspace_pointers(&mut plan.argv, workspace, agent_id_raw)?;
             let proxy = apply_cursor_subscription_proxy_env(&mut env);

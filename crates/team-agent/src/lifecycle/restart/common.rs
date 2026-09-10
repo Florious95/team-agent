@@ -374,13 +374,57 @@ pub(super) fn spawn_agent_window(
         agent_id_hint: Some(agent_id.as_str()),
         effort: restart_effort,
     };
-    let mut plan = match resume_session_id {
-        Some(session_id) => adapter
-            .build_resume_command_plan(Some(session_id), context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        None => adapter
-            .build_command_plan(context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+    let pi_spawn_cwd = (provider == crate::provider::Provider::Pi)
+        .then(|| {
+            agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .flatten();
+    let spawn_cwd = spawn_cwd_override
+        .or(pi_spawn_cwd.as_deref())
+        .unwrap_or(workspace);
+    let mut plan = if provider == crate::provider::Provider::Pi {
+        let request = crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
+            workspace,
+            team_id: team_id.as_deref().unwrap_or(""),
+            agent_id: agent_id.as_str(),
+            model: command_model,
+            effort: restart_effort,
+            system_prompt: &system_prompt,
+            tool_categories: &resolved_tool_refs,
+            team_mcp_tools: &["send_message", "report_result"],
+            mcp_config: &mcp_config,
+            session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
+        };
+        match resume_session_id {
+            Some(session_id) => {
+                let rollout_path = agent_rollout_path(agent).ok_or_else(|| {
+                    LifecycleError::RequirementUnmet(
+                        "Pi resume requires the persisted exact session path".to_string(),
+                    )
+                })?;
+                crate::lifecycle::launch::pi_mcp::materialize_pi_resume_plan(
+                    request,
+                    session_id,
+                    rollout_path.as_path(),
+                    spawn_cwd,
+                )
+            }
+            None => crate::lifecycle::launch::pi_mcp::materialize_pi_plan(request),
+        }
+        .map_err(|e| LifecycleError::Provider(e.to_string()))?
+    } else {
+        match resume_session_id {
+            Some(session_id) => adapter
+                .build_resume_command_plan(Some(session_id), context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+            None => adapter
+                .build_command_plan(context)
+                .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+        }
     };
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
         crate::lifecycle::launch::point_native_mcp_config_at_file(
@@ -426,28 +470,23 @@ pub(super) fn spawn_agent_window(
             agent_id.as_str(),
             &system_prompt,
         )?;
-        crate::lifecycle::launch::apply_cursor_mcp_overlay(workspace, &mcp_config)?;
-        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, None)?;
-        crate::lifecycle::launch::apply_cursor_workspace_physical_path(&mut plan.argv, workspace);
+        let project = crate::lifecycle::launch::prepare_cursor_seat_mcp(
+            workspace,
+            agent_id.as_str(),
+            &mcp_config,
+        )?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, project.as_deref())?;
+        crate::lifecycle::launch::apply_cursor_spawn_workspace_pointers(
+            &mut plan.argv,
+            workspace,
+            agent_id.as_str(),
+        )?;
         crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
     }
     if provider == crate::provider::Provider::Grok {
         crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;
         crate::lifecycle::launch::apply_grok_mcp_overlay(workspace, &mcp_config)?;
     }
-    // 0.3.28 Step 3: per Python parity, worker spawn cwd is ALWAYS `workspace`.
-    // The persisted-state `agent.spawn_cwd` override is ignored (it was a
-    // Rust-only extension that drifted to `.team/runtime/<team_key>/` after
-    // rebuild.rs:138 — root cause of E56). The `spawn_cwd_override` parameter
-    // is still honoured for callers that need an explicit cwd (e.g. spec
-    // YAML-resolved cwd at first launch in `lifecycle/launch.rs`), but
-    // restart never passes it (see commit 71864c0 which fixed rebuild.rs:297
-    // to stop pinning `.team/runtime/<team_key>/`).
-    //
-    // NOTE: Step 4 will thread the YAML spec down to here so we can honour
-    // a per-agent YAML `spawn_cwd` field if one is set. Until then, override
-    // > workspace; state-based override is silently dropped.
-    let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
     // 0.4.x provider effort MVP step 9: scrub CLAUDE_EFFORT for Claude
     // worker spawn so a parent shell env cannot silently override the
     // framework's effort decision.
