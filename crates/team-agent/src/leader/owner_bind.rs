@@ -369,7 +369,7 @@ mod e11_provider_bind_tests {
     }
 
     #[test]
-    fn strict_provider_never_falls_back_from_unknown_explicit_or_command() {
+    fn provider_independent_rejects_unknown_or_node_without_fallback() {
         assert_eq!(strict_owner_bind_provider(Some("unknown"), "codex"), None);
         assert_eq!(strict_owner_bind_provider(None, "node"), None);
     }
