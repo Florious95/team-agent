@@ -307,10 +307,33 @@ pub(crate) use mcp_config::{
     write_worker_mcp_config_for_provider,
 };
 
+pub(crate) mod pi_mcp;
+
+pub(crate) fn run_pi_catalog_preflight(
+    agents_dir: &std::path::Path,
+) -> Result<(), crate::lifecycle::LifecycleError> {
+    crate::compiler::preflight_pi_models_in_team_with(agents_dir, |requested| {
+        pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    })
+    .map_err(|error| crate::lifecycle::LifecycleError::PiModelPreflight {
+        requested: error.requested,
+        candidates: error.candidates,
+        action: error.action,
+        not_ready: error.not_ready,
+    })
+}
+
+mod cursor_mcp_iso;
+pub use cursor_mcp_iso::{
+    cursor_mcp_isolation_enabled, cursor_mcp_json_path, cursor_mcp_project_dir,
+    materialize_cursor_mcp_project,
+};
 mod cursor_mcp;
 pub use cursor_mcp::{
-    apply_cursor_mcp_overlay, apply_cursor_workspace_physical_path, cursor_mcp_enable_argv,
-    enable_cursor_workspace_mcp, physical_workspace_path, refuse_second_cursor_occupant,
+    apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
+    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, cursor_mcp_enable_working_dir,
+    enable_cursor_workspace_mcp, physical_workspace_path, prepare_cursor_seat_mcp,
+    refuse_second_cursor_occupant,
 };
 
 mod cursor_create_chat;

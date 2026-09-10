@@ -29,7 +29,23 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::model::yaml::Value as YamlValue;
+use crate::provider::wire::{parse_provider, provider_wire};
 use crate::provider::Provider;
+
+/// Current worker caller context is deliberately separate from `TEAM_AGENT_LEADER_*`.
+/// The launcher writes only the typed provider; the tmux invocation boundary adds the
+/// actual pane and socket for the provider command itself.
+pub(crate) const CALLER_CONTEXT_PREFIX: &str = "TEAM_AGENT_CALLER_";
+pub(crate) const CALLER_PROVIDER_ENV: &str = "TEAM_AGENT_CALLER_PROVIDER";
+pub(crate) const CALLER_PANE_ENV: &str = "TEAM_AGENT_CALLER_PANE_ID";
+pub(crate) const CALLER_ENDPOINT_ENV: &str = "TEAM_AGENT_CALLER_TMUX_ENDPOINT";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallerProviderResolution {
+    Absent,
+    Valid(Provider),
+    Invalid,
+}
 
 /// Env-key PREFIXES that are stripped from the inherited parent env
 /// before worker spawn. These carry leader-process identity and must
@@ -38,6 +54,7 @@ const STRIP_PREFIXES: &[&str] = &[
     "TEAM_AGENT_LEADER_",
     "TEAM_AGENT_LEADER_BYPASS",
     "TEAM_AGENT_MACHINE_FINGERPRINT",
+    CALLER_CONTEXT_PREFIX,
 ];
 
 /// Exact env-keys stripped from the inherited parent env.
@@ -114,6 +131,101 @@ where
     env
 }
 
+/// Overlay the final typed provider after profile/env overlays. Any inherited or
+/// profile-supplied caller namespace is discarded before this fresh value is written.
+pub(crate) fn inject_current_caller_provider(
+    env: &mut BTreeMap<String, String>,
+    provider: Provider,
+) {
+    env.retain(|key, _| !key.starts_with(CALLER_CONTEXT_PREFIX));
+    env.insert(
+        CALLER_PROVIDER_ENV.to_string(),
+        provider_wire(provider).to_string(),
+    );
+}
+
+/// Resolve the narrow caller context used by both initial-state seeding and fresh bind.
+/// `current_*` come from the invoking process; `scoped_endpoint` comes from the selected
+/// transport. A partial, malformed, stale, or conflicting context is never downgraded to
+/// command attribution.
+pub(crate) fn caller_provider_resolution(
+    current_pane: Option<&str>,
+    current_endpoint: Option<&str>,
+    scoped_endpoint: Option<&str>,
+) -> CallerProviderResolution {
+    let provider = std::env::var(CALLER_PROVIDER_ENV).ok();
+    let context_pane = std::env::var(CALLER_PANE_ENV).ok();
+    let context_endpoint = std::env::var(CALLER_ENDPOINT_ENV).ok();
+    let explicit_provider = std::env::var("TEAM_AGENT_LEADER_PROVIDER").ok();
+    let explicit_pane = std::env::var("TEAM_AGENT_LEADER_PANE_ID").ok();
+    caller_provider_resolution_from_values(
+        provider.as_deref(),
+        context_pane.as_deref(),
+        context_endpoint.as_deref(),
+        explicit_provider.as_deref(),
+        explicit_pane.as_deref(),
+        current_pane,
+        current_endpoint,
+        scoped_endpoint,
+    )
+}
+
+pub(crate) fn caller_provider_resolution_from_values(
+    provider_raw: Option<&str>,
+    context_pane: Option<&str>,
+    context_endpoint: Option<&str>,
+    explicit_provider: Option<&str>,
+    explicit_pane: Option<&str>,
+    current_pane: Option<&str>,
+    current_endpoint: Option<&str>,
+    scoped_endpoint: Option<&str>,
+) -> CallerProviderResolution {
+    if provider_raw.is_none() && context_pane.is_none() && context_endpoint.is_none() {
+        return CallerProviderResolution::Absent;
+    }
+    let Some(provider_raw) = provider_raw.filter(|value| !value.is_empty()) else {
+        return CallerProviderResolution::Invalid;
+    };
+    let Some(provider) = parse_provider(provider_raw) else {
+        return CallerProviderResolution::Invalid;
+    };
+    let Some(context_pane) = context_pane.filter(|value| !value.is_empty()) else {
+        return CallerProviderResolution::Invalid;
+    };
+    let Some(context_endpoint) = context_endpoint.filter(|value| !value.is_empty()) else {
+        return CallerProviderResolution::Invalid;
+    };
+    if !valid_tmux_pane(context_pane)
+        || !valid_tmux_endpoint(context_endpoint)
+        || current_pane != Some(context_pane)
+        || current_endpoint != Some(context_endpoint)
+        || scoped_endpoint != Some(context_endpoint)
+    {
+        return CallerProviderResolution::Invalid;
+    }
+    if let Some(explicit) = explicit_provider.filter(|value| !value.is_empty()) {
+        if parse_provider(explicit) != Some(provider) {
+            return CallerProviderResolution::Invalid;
+        }
+    }
+    if let Some(explicit_pane) = explicit_pane.filter(|value| !value.is_empty()) {
+        if explicit_pane != context_pane {
+            return CallerProviderResolution::Invalid;
+        }
+    }
+    CallerProviderResolution::Valid(provider)
+}
+
+fn valid_tmux_pane(value: &str) -> bool {
+    value.strip_prefix('%').is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn valid_tmux_endpoint(value: &str) -> bool {
+    value.starts_with('/') && !value.contains(',')
+}
+
 pub(crate) fn isolate_worker_spawn_env(
     _target_provider: Provider,
     env: &mut BTreeMap<String, String>,
@@ -122,6 +234,12 @@ pub(crate) fn isolate_worker_spawn_env(
     let mut env_unset = base_env_unset
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
+    // Clear any stale values held by the tmux server before the scoped provider
+    // invocation assigns the fresh context. The inert shell tail must not retain it.
+    for key in [CALLER_PROVIDER_ENV, CALLER_PANE_ENV, CALLER_ENDPOINT_ENV] {
+        env.remove(key);
+        env_unset.insert(key.to_string());
+    }
     for key in WORKER_IDENTITY_EXACT {
         env.remove(*key);
         env_unset.insert((*key).to_string());
@@ -311,6 +429,254 @@ mod tests {
         let parent = make_parent_env(&[("CARGO_BIN_EXE_team-agent", "/bin/x")]);
         let env = worker_spawn_env(parent, Path::new("/ws"), "developer", None, None);
         assert!(!env.contains_key("CARGO_BIN_EXE_team-agent"));
+    }
+
+    #[test]
+    fn worker_spawn_env_strips_inherited_caller_context() {
+        let parent = make_parent_env(&[
+            (CALLER_PROVIDER_ENV, "claude"),
+            (CALLER_PANE_ENV, "%1"),
+            (CALLER_ENDPOINT_ENV, "/tmp/old-tmux.sock"),
+        ]);
+        let env = worker_spawn_env(parent, Path::new("/ws"), "developer", None, None);
+        assert!(!env.keys().any(|key| key.starts_with(CALLER_CONTEXT_PREFIX)));
+    }
+
+    #[test]
+    fn inject_current_caller_provider_overwrites_namespace_from_final_provider() {
+        let mut env = BTreeMap::from([
+            (CALLER_PROVIDER_ENV.to_string(), "claude".to_string()),
+            (CALLER_PANE_ENV.to_string(), "%1".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ]);
+        inject_current_caller_provider(&mut env, Provider::Pi);
+        assert_eq!(env.get(CALLER_PROVIDER_ENV).map(String::as_str), Some("pi"));
+        assert!(!env.contains_key(CALLER_PANE_ENV));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn isolate_worker_spawn_env_clears_context_from_outer_shell() {
+        let mut env = BTreeMap::from([(CALLER_PROVIDER_ENV.to_string(), "pi".to_string())]);
+        let unset = isolate_worker_spawn_env(Provider::Pi, &mut env, Vec::<String>::new());
+        assert!(!env.contains_key(CALLER_PROVIDER_ENV));
+        assert!(unset.iter().any(|key| key == CALLER_PROVIDER_ENV));
+        assert!(unset.iter().any(|key| key == CALLER_PANE_ENV));
+        assert!(unset.iter().any(|key| key == CALLER_ENDPOINT_ENV));
+    }
+
+    #[test]
+    fn caller_context_requires_exact_current_pane_and_endpoint() {
+        let resolution = caller_provider_resolution_from_values(
+            Some("pi"),
+            Some("%1"),
+            Some("/tmp/tmux.sock"),
+            None,
+            None,
+            Some("%1"),
+            Some("/tmp/tmux.sock"),
+            Some("/tmp/tmux.sock"),
+        );
+        assert_eq!(resolution, CallerProviderResolution::Valid(Provider::Pi));
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("%2"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("codex"),
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+    }
+
+    #[test]
+    fn caller_context_absent_empty_and_malformed_cases_are_distinct() {
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Absent
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some(""),
+                None,
+                None,
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some(""),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some(""),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("not-a-provider"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("tmux.sock"),
+                None,
+                None,
+                Some("%1"),
+                Some("tmux.sock"),
+                Some("tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock,0"),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock,0"),
+                Some("/tmp/tmux.sock,0"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/other.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/product.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                None,
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                None,
+                Some("%2"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Invalid
+        );
+        assert_eq!(
+            caller_provider_resolution_from_values(
+                Some("pi"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("pi"),
+                Some("%1"),
+                Some("%1"),
+                Some("/tmp/tmux.sock"),
+                Some("/tmp/tmux.sock"),
+            ),
+            CallerProviderResolution::Valid(Provider::Pi)
+        );
     }
 
     #[test]

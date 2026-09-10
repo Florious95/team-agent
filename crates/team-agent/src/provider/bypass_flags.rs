@@ -24,6 +24,7 @@ pub(crate) fn provider_bypass_flag(provider: Provider) -> Option<&'static str> {
         Provider::Copilot => Some("--allow-all"),
         Provider::Grok => Some("--always-approve"),
         Provider::CursorAgent => Some("--force"),
+        Provider::Pi => None,
         // TODO: 查 gemini_cli 的等价 bypass 参数;未定义前 fail-loud。
         Provider::GeminiCli => None,
         Provider::Fake => None,
