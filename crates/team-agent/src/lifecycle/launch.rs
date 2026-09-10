@@ -88,12 +88,6 @@ pub(crate) fn launch_with_transport(
     )
 }
 
-pub(crate) fn run_pi_catalog_preflight(
-    _agents_dir: &Path,
-) -> Result<(), LifecycleError> {
-    Ok(())
-}
-
 /// ---
 /// purpose: 冷启全队的实体实现，编译 spec、检查 session 冲突、按序 spawn、落 state、出报告
 /// params:
@@ -319,15 +313,15 @@ pub(crate) mod pi_mcp;
 
 pub(crate) fn run_pi_catalog_preflight(
     agents_dir: &std::path::Path,
+    discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
 ) -> Result<(), crate::lifecycle::LifecycleError> {
-    crate::compiler::preflight_pi_models_in_team_with(agents_dir, |requested| {
-        pi_mcp::pi_model_candidates(requested).map_err(|_| ())
-    })
-    .map_err(|error| crate::lifecycle::LifecycleError::PiModelPreflight {
-        requested: error.requested,
-        candidates: error.candidates,
-        action: error.action,
-        not_ready: error.not_ready,
+    crate::compiler::preflight_pi_models_in_team_with(agents_dir, discover).map_err(|error| {
+        crate::lifecycle::LifecycleError::PiModelPreflight {
+            requested: error.requested,
+            candidates: error.candidates,
+            action: error.action,
+            not_ready: error.not_ready,
+        }
     })
 }
 
