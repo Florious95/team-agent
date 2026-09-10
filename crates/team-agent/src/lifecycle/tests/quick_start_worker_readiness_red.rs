@@ -88,6 +88,16 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
             || rendered.to_lowercase().contains("unverified"),
         "T1: CLI summary must label the readiness as pending / unverified; got {rendered:?}"
     );
+    assert!(
+        rendered.contains("team started")
+            && rendered.contains("leader bound")
+            && rendered.contains("send a task next"),
+        "T1: CLI summary must explain the successful launch and next send step; got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("doctor"),
+        "T1: normal pending launch must not suggest doctor; got {rendered:?}"
+    );
 }
 
 #[test]
@@ -165,7 +175,7 @@ fn render_quick_start_summary(report: &QuickStartReport) -> String {
                 unhealthy_agents.join(",")
             ),
             QuickStartReadiness::PendingToolLoad => format!(
-                "quick-start launched (worker tool load unverified): {}",
+                "team started; leader bound; send a task next (worker tool load unverified): {}",
                 session_name.as_str()
             ),
         },

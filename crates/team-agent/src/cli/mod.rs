@@ -3426,7 +3426,7 @@ pub mod lifecycle_port {
                         } else if launch.leader_receiver_attached {
                             (
                                 format!(
-                                    "quick-start launched (worker tool load unverified): {}",
+                                    "team started; leader bound; send a task next (worker tool load unverified): {}",
                                     session_name.as_str()
                                 ),
                                 all_spawned && all_attached_receiver && all_resumable_have_session,
@@ -3444,7 +3444,7 @@ pub mod lifecycle_port {
                                     "session_capture_incomplete": !all_resumable_have_session,
                                     "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
                                     "pending_session_agent_ids": incomplete_session_capture_agents,
-                                    "reason": "worker MCP tool set load not yet confirmed; run `team-agent doctor` or wait for first worker turn",
+                                    "reason": "team started; leader bound; send a task next (worker tool load unverified)",
                                 }),
                             )
                         } else {
@@ -3612,6 +3612,64 @@ pub mod lifecycle_port {
             assert!(default["worker_readiness"].get("all_spawned").is_none());
             assert!(detail["readiness"].get("all_spawned").is_some());
             assert!(detail["worker_readiness"].get("leader_receiver_attached").is_some());
+        }
+
+        #[test]
+        fn pending_tool_load_success_output_explains_bound_send_without_doctor() {
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::Ready {
+                session_name: crate::transport::SessionName::new("team-demo"),
+                launch: Box::new(crate::lifecycle::LaunchReport {
+                    session_name: crate::transport::SessionName::new("team-demo"),
+                    started: vec![crate::lifecycle::StartedAgent {
+                        agent_id: crate::model::ids::AgentId::new("worker"),
+                        start_mode: crate::lifecycle::StartMode::Fresh,
+                        target: "worker".to_string(),
+                        spawned_at: "2026-09-10T00:00:00Z".to_string(),
+                        session_id: None,
+                        rollout_path: None,
+                        pending_session_id: None,
+                        claude_config_dir: None,
+                        provider_projects_root: None,
+                        managed_mcp_config: false,
+                        layout_window: None,
+                        layout_index: None,
+                        pane_index: None,
+                        display: crate::lifecycle::WorkerDisplay::Blocked {
+                            reason: crate::lifecycle::AdaptiveBlockReason::AggregatorRebuildFailed,
+                        },
+                    }],
+                    dry_run: false,
+                    tmux_endpoint: None,
+                    routes: Vec::new(),
+                    permissions: Vec::new(),
+                    leader_receiver_attached: true,
+                    leader_bind_stage: None,
+                    leader_bind_reason: None,
+                    session_capture_incomplete_agents: Vec::new(),
+                }),
+                next_actions: Vec::new(),
+                attach_commands: Vec::new(),
+                display_backend: "none".to_string(),
+                worker_readiness: crate::lifecycle::QuickStartReadiness::PendingToolLoad,
+                team: "team-demo".to_string(),
+            });
+            assert_eq!(
+                value.get("summary").and_then(Value::as_str),
+                Some("team started; leader bound; send a task next (worker tool load unverified): team-demo")
+            );
+            assert_eq!(
+                value.get("reason").and_then(Value::as_str),
+                Some("team started; leader bound; send a task next (worker tool load unverified)")
+            );
+            assert_eq!(
+                value.get("status").and_then(Value::as_str),
+                Some("pending_tool_load")
+            );
+            assert_eq!(value.get("ready").and_then(Value::as_bool), Some(true));
+            assert!(value
+                .get("reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.contains("doctor")));
         }
 
         #[test]
