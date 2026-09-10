@@ -491,7 +491,10 @@ pub(super) fn spawn_agent_window(
             workspace,
             agent_id.as_str(),
         )?;
-        crate::lifecycle::launch::apply_cursor_subscription_proxy_env(&mut env);
+        crate::lifecycle::launch::apply_cursor_subscription_proxy_env_with_profile(
+            &mut env,
+            &profile_launch,
+        );
     }
     if provider == crate::provider::Provider::Grok {
         crate::lifecycle::launch::ensure_grok_login_and_folder_trust(workspace)?;

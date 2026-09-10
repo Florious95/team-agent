@@ -214,13 +214,75 @@ fn cursor_subscription_direct_profile_unsets_only_proxy_url_keys() {
         "https_proxy",
         "http_proxy",
         "all_proxy",
-        "GLOBAL_AGENT.HTTPS_PROXY",
-        "GLOBAL_AGENT.HTTP_PROXY",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
     ] {
         assert!(launch.env_unset.contains(key), "direct must unset {key}");
     }
     assert!(!launch.env_unset.contains("NO_PROXY"));
     assert!(!launch.env_unset.contains("no_proxy"));
+}
+
+#[test]
+fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
+    let ws = tmp_dir("cursor-profile-enable-env");
+    let profiles = ws.join(".team/current/profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join("cursor.env"),
+        "AUTH_MODE=subscription\nPROFILE_NAME=cursor\nPROXY_MODE=direct\n",
+    )
+    .unwrap();
+    let launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
+        &ws,
+        "cursor",
+        &serde_json::json!({
+            "id": "cursor",
+            "provider": "cursor_agent",
+            "auth_mode": "subscription",
+            "profile": "cursor"
+        }),
+        None,
+    )
+    .expect("direct Cursor profile should prepare");
+
+    let mut command = std::process::Command::new("/usr/bin/env");
+    for key in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
+    ] {
+        command.env(key, "fixture");
+    }
+    command.env("NO_PROXY", "fixture");
+    crate::lifecycle::launch::apply_cursor_mcp_enable_profile_env(
+        &mut command,
+        Some(&launch),
+    );
+    let output = command.output().expect("env child should run");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for key in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
+    ] {
+        assert!(
+            !text.lines().any(|line| line.starts_with(&format!("{key}="))),
+            "direct MCP child must omit {key}"
+        );
+    }
+    assert!(text.lines().any(|line| line == "NO_PROXY=fixture"));
 }
 
 #[test]

@@ -56,9 +56,15 @@ const CURSOR_DIRECT_PROXY_ENV_KEYS: &[&str] = &[
     "https_proxy",
     "http_proxy",
     "all_proxy",
-    "GLOBAL_AGENT.HTTPS_PROXY",
-    "GLOBAL_AGENT.HTTP_PROXY",
+    "GLOBAL_AGENT_HTTPS_PROXY",
+    "GLOBAL_AGENT_HTTP_PROXY",
 ];
+
+pub(crate) fn cursor_subscription_direct_mode(profile_launch: &ProviderProfileLaunch) -> bool {
+    CURSOR_DIRECT_PROXY_ENV_KEYS
+        .iter()
+        .all(|key| profile_launch.env_unset.contains(*key))
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProfileValues {

@@ -33,6 +33,7 @@ fn init_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     }
     let created_template = write_new_file(&template_path, &body)?;
     write_boundary_files(&dir)?;
+    let actual_proxy_mode = display_proxy_mode(&read_profile_env(&path)?);
 
     let mut obj = Map::new();
     obj.insert("ok".to_string(), Value::Bool(true));
@@ -43,7 +44,11 @@ fn init_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     );
     obj.insert(
         "proxy_mode".to_string(),
-        Value::String(proxy_mode.to_string()),
+        Value::String(actual_proxy_mode),
+    );
+    obj.insert(
+        "proxy_mode_changed".to_string(),
+        Value::Bool(created_profile),
     );
     obj.insert("path".to_string(), path_value(&path));
     obj.insert("template_path".to_string(), path_value(&template_path));
