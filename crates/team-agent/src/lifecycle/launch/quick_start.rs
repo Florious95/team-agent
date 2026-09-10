@@ -1558,7 +1558,7 @@ mod fresh_quick_start_leader_binding_tests {
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    fn workspace(tag: &str) -> PathBuf {
+    fn workspace_with_provider(tag: &str, provider: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "ta-quick-start-bind-{tag}-{}-{}",
             std::process::id(),
@@ -1571,14 +1571,19 @@ mod fresh_quick_start_leader_binding_tests {
                 "active_team_key": "fresh",
                 "team_key": "fresh",
                 "session_name": "team-fresh",
-                "agents": {"sol": {"status": "running", "provider": "pi"}}
+                "agents": {"sol": {"status": "running", "provider": provider}}
             }),
         )
         .unwrap();
         path
     }
 
+    fn workspace(tag: &str) -> PathBuf {
+        workspace_with_provider(tag, "codex")
+    }
+
     struct MockOps {
+        provider: String,
         pane: Option<String>,
         explicit_provider: Option<String>,
         endpoint: Option<String>,
@@ -1600,10 +1605,11 @@ mod fresh_quick_start_leader_binding_tests {
     impl Default for MockOps {
         fn default() -> Self {
             Self {
+                provider: "codex".to_string(),
                 pane: Some("%42".to_string()),
-                explicit_provider: Some("pi".to_string()),
+                explicit_provider: Some("codex".to_string()),
                 endpoint: Some("/private/tmp/tmux-test/default".to_string()),
-                command: Some("pi".to_string()),
+                command: Some("codex".to_string()),
                 attach_ok: true,
                 register_ok: true,
                 readback_ok: true,
@@ -1620,51 +1626,14 @@ mod fresh_quick_start_leader_binding_tests {
         }
     }
 
-    #[test]
-    fn invalid_pi_tool_category_is_rejected_before_runtime_persistence() {
-        let root = std::env::temp_dir().join(format!(
-            "ta-quick-start-pi-tools-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let team = root.join(".team/current");
-        std::fs::create_dir_all(team.join("agents")).unwrap();
-        std::fs::write(
-            team.join("TEAM.md"),
-            "---\nname: pi-tools\nprovider: pi\n---\n\nPi team.\n",
-        )
-        .unwrap();
-        std::fs::write(
-            team.join("agents/worker.md"),
-            "---\nname: worker\nrole: Worker\nprovider: pi\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n  - fs_read\n  - provider_builtin\n---\n\nWorker.\n",
-        )
-        .unwrap();
-
-        let transport = crate::transport::test_support::OfflineTransport::new();
-        let mut discover = |_requested: &str| -> Result<Vec<String>, ()> { Err(()) };
-        let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
-            &root,
-            &team,
-            None,
-            true,
-            None,
-            &transport,
-            false,
-            &mut discover,
-        )
-        .expect_err("invalid Pi category must fail before quick-start persistence");
-        let error = error.to_string();
-        assert!(error.contains("Pi does not support Team Agent tool category \"provider_builtin\""));
-        assert!(error.contains("remove it from the role's tools"));
-        assert!(
-            !crate::state::persist::runtime_state_path(&root).exists(),
-            "quick-start validation failure must not persist runtime state"
-        );
-        assert!(
-            !root.join(".team/runtime").exists(),
-            "quick-start validation failure must not create runtime artifacts"
-        );
-        let _ = std::fs::remove_dir_all(root);
+    impl MockOps {
+        fn with_provider(provider: &str) -> Self {
+            let mut ops = Self::default();
+            ops.provider = provider.to_string();
+            ops.explicit_provider = Some(provider.to_string());
+            ops.command = Some(provider.to_string());
+            ops
+        }
     }
 
     impl FreshQuickStartLeaderBindingOps for MockOps {
@@ -1717,7 +1686,7 @@ mod fresh_quick_start_leader_binding_tests {
             let owner = expected_owner.clone().unwrap_or_else(|| {
                 json!({
                     "pane_id": pane.as_str(),
-                    "provider": "pi",
+                    "provider": self.provider.as_str(),
                     "leader_session_uuid": "uuid-fresh",
                     "owner_epoch": 1
                 })
@@ -1730,7 +1699,7 @@ mod fresh_quick_start_leader_binding_tests {
                 "mode": "direct_tmux",
                 "pane_id": pane.as_str(),
                 "status": "attached",
-                "provider": "pi",
+                "provider": self.provider.as_str(),
                 "leader_session_uuid": "uuid-fresh",
                 "owner_epoch": owner_epoch,
                 "tmux_socket": self.endpoint
@@ -1820,7 +1789,7 @@ mod fresh_quick_start_leader_binding_tests {
     }
 
     #[test]
-    fn fresh_binding_persists_then_registers_then_requires_canonical_readback() {
+    fn fresh_binding_persists_then_registers_then_requires_canonical_readback_provider_independent() {
         let workspace = workspace("positive");
         let mut ops = MockOps::default();
         assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
@@ -1855,7 +1824,7 @@ mod fresh_quick_start_leader_binding_tests {
         let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
         let caller = crate::state::owner_gate::CallerIdentity {
             pane_id: "%42".to_string(),
-            provider: "pi".to_string(),
+            provider: "codex".to_string(),
             machine_fingerprint: "fp".to_string(),
             leader_session_uuid: "uuid-fresh".to_string(),
             leader_session_uuid_source: "env".to_string(),
@@ -2122,12 +2091,12 @@ mod fresh_quick_start_leader_binding_tests {
                 | "dual_state_mismatch" => {
                     state["workspace"] = json!(workspace);
                     state["team_owner"] = json!({
-                        "pane_id": "%42", "provider": "pi",
+                        "pane_id": "%42", "provider": "codex",
                         "leader_session_uuid": "uuid-fresh", "owner_epoch": 1
                     });
                     state["leader_receiver"] = json!({
                         "mode": "direct_tmux", "status": "attached", "pane_id": "%42",
-                        "provider": "pi", "leader_session_uuid": "uuid-fresh", "owner_epoch": 1,
+                        "provider": "codex", "leader_session_uuid": "uuid-fresh", "owner_epoch": 1,
                         "tmux_socket": "/private/tmp/tmux-test/default"
                     });
                     match case {
@@ -2190,7 +2159,7 @@ mod fresh_quick_start_leader_binding_tests {
                 "active_team_key": "fresh",
                 "team_key": "fresh",
                 "session_name": "team-fresh",
-                "agents": {"sol": {"status": "running", "provider": "pi"}},
+                "agents": {"sol": {"status": "running", "provider": "codex"}},
                 "teams": {
                     "current": {
                         "team_key": "current",
@@ -2201,10 +2170,10 @@ mod fresh_quick_start_leader_binding_tests {
                         "workspace": workspace,
                         "team_key": "fresh",
                         "session_name": "team-fresh",
-                        "agents": {"sol": {"status": "running", "provider": "pi"}},
+                        "agents": {"sol": {"status": "running", "provider": "codex"}},
                         "team_owner": {
                             "pane_id": "%42",
-                            "provider": "pi",
+                            "provider": "codex",
                             "leader_session_uuid": "uuid-fresh",
                             "owner_epoch": 1
                         },
@@ -2212,7 +2181,7 @@ mod fresh_quick_start_leader_binding_tests {
                             "mode": "direct_tmux",
                             "status": "attached",
                             "pane_id": "%42",
-                            "provider": "pi",
+                            "provider": "codex",
                             "leader_session_uuid": "uuid-fresh",
                             "owner_epoch": 1,
                             "tmux_socket": ambient
@@ -2238,7 +2207,7 @@ mod fresh_quick_start_leader_binding_tests {
         }
 
         fn explicit_provider(&mut self) -> Option<String> {
-            Some("pi".to_string())
+            Some("codex".to_string())
         }
 
         fn tmux_endpoint(&mut self) -> Option<String> {
@@ -2246,7 +2215,7 @@ mod fresh_quick_start_leader_binding_tests {
         }
 
         fn observe_command(&mut self, _pane: &PaneId) -> Option<String> {
-            Some("pi".to_string())
+            Some("codex".to_string())
         }
 
         fn attach(
@@ -2306,7 +2275,7 @@ mod fresh_quick_start_leader_binding_tests {
                 window_name: None,
                 pane_index: None,
                 tty: None,
-                current_command: Some("pi".to_string()),
+                current_command: Some("codex".to_string()),
                 current_path: Some(workspace.clone()),
                 active: true,
                 pane_pid: None,
@@ -2338,7 +2307,7 @@ mod fresh_quick_start_leader_binding_tests {
         state["workspace"] = json!(workspace);
         state["team_owner"] = json!({
             "pane_id": "%old",
-            "provider": "pi",
+            "provider": "codex",
             "leader_session_uuid": "uuid-old",
             "owner_epoch": 4,
             "claimed_via": "quick-start"
@@ -2347,7 +2316,7 @@ mod fresh_quick_start_leader_binding_tests {
             "mode": "direct_tmux",
             "status": "attached",
             "pane_id": "%old",
-            "provider": "pi",
+            "provider": "codex",
             "leader_session_uuid": "uuid-old",
             "owner_epoch": 4,
             "tmux_socket": "/private/tmp/tmux-test/old"
@@ -2368,7 +2337,7 @@ mod fresh_quick_start_leader_binding_tests {
     fn matching_seed() -> serde_json::Value {
         json!({
             "pane_id": "%42",
-            "provider": "pi",
+            "provider": "codex",
             "leader_session_uuid": "uuid-fresh",
             "owner_epoch": 1,
             "claimed_via": "quick-start"
@@ -2380,7 +2349,7 @@ mod fresh_quick_start_leader_binding_tests {
             "mode": "direct_tmux",
             "status": "attached",
             "pane_id": "%42",
-            "provider": "pi",
+            "provider": "codex",
             "leader_session_uuid": "uuid-fresh",
             "owner_epoch": 1,
             "tmux_socket": "/private/tmp/tmux-test/default"
@@ -2393,7 +2362,7 @@ mod fresh_quick_start_leader_binding_tests {
             "status": "pending",
             "discovery": "quick_start_seed",
             "pane_id": "%42",
-            "provider": "pi",
+            "provider": "codex",
             "leader_session_uuid": "uuid-fresh",
             "owner_epoch": 1,
             "tmux_socket": "/private/tmp/tmux-test/default"
@@ -2410,7 +2379,7 @@ mod fresh_quick_start_leader_binding_tests {
                 "active_team_key": "fresh",
                 "team_key": "fresh",
                 "session_name": "team-fresh",
-                "agents": {"sol": {"status": "running", "provider": "pi"}},
+                "agents": {"sol": {"status": "running", "provider": "codex"}},
                 "team_owner": seed,
                 "leader_receiver": matching_pending_receiver(),
                 "teams": {
@@ -2418,7 +2387,7 @@ mod fresh_quick_start_leader_binding_tests {
                         "workspace": workspace,
                         "team_key": "fresh",
                         "session_name": "team-fresh",
-                        "agents": {"sol": {"status": "running", "provider": "pi"}},
+                        "agents": {"sol": {"status": "running", "provider": "codex"}},
                         "team_owner": seed,
                         "leader_receiver": matching_pending_receiver(),
                         "owner_epoch": 1
@@ -2443,13 +2412,13 @@ mod fresh_quick_start_leader_binding_tests {
                 "active_team_key": "fresh",
                 "team_key": "fresh",
                 "session_name": "team-fresh",
-                "agents": {"sol": {"status": "running", "provider": "pi"}},
+                "agents": {"sol": {"status": "running", "provider": "codex"}},
                 "teams": {
                     "fresh": {
                         "workspace": workspace,
                         "team_key": "fresh",
                         "session_name": "team-fresh",
-                        "agents": {"sol": {"status": "running", "provider": "pi"}},
+                        "agents": {"sol": {"status": "running", "provider": "codex"}},
                         "team_owner": seed,
                         "leader_receiver": matching_receiver(),
                         "owner_epoch": 1
@@ -2711,7 +2680,7 @@ mod fresh_quick_start_leader_binding_tests {
             "agents": {
                 "sol": {
                     "status": "running",
-                    "provider": "pi",
+                    "provider": "codex",
                     "session_id": null,
                     "rollout_path": null,
                     "captured_at": null,
@@ -2983,10 +2952,10 @@ mod fresh_quick_start_leader_binding_tests {
             crate::state::persist::runtime_state_path(&workspace),
         );
         let this_uuid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let this_owner = complete_owner("%42", "pi", this_uuid, 1);
+        let this_owner = complete_owner("%42", "codex", this_uuid, 1);
         let this_receiver = complete_receiver(
             "%42",
-            "pi",
+            "codex",
             this_uuid,
             1,
             "/private/tmp/tmux-test/default",
@@ -3024,10 +2993,10 @@ mod fresh_quick_start_leader_binding_tests {
             crate::state::persist::runtime_state_path(&workspace),
         );
         let this_uuid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let this_owner = complete_owner("%42", "pi", this_uuid, 1);
+        let this_owner = complete_owner("%42", "codex", this_uuid, 1);
         let this_receiver = complete_receiver(
             "%42",
-            "pi",
+            "codex",
             this_uuid,
             1,
             "/private/tmp/tmux-test/default",
@@ -3198,7 +3167,11 @@ mod fresh_quick_start_leader_binding_tests {
         }
     }
 
-    fn runtime_workspace(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+    fn runtime_workspace_with_provider(
+        hermetic: &HermeticTestEnv,
+        tag: &str,
+        provider: &str,
+    ) -> PathBuf {
         let path = hermetic.workspace(tag);
         crate::state::persist::save_runtime_state(
             &path,
@@ -3206,11 +3179,15 @@ mod fresh_quick_start_leader_binding_tests {
                 "active_team_key": "fresh",
                 "team_key": "fresh",
                 "session_name": "team-fresh",
-                "agents": {"sol": {"status": "running", "provider": "pi"}}
+                "agents": {"sol": {"status": "running", "provider": provider}}
             }),
         )
         .unwrap();
         path
+    }
+
+    fn runtime_workspace(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+        runtime_workspace_with_provider(hermetic, tag, "codex")
     }
 
     fn refusal_reason(workspace: &Path) -> Option<(String, String)> {
@@ -3270,7 +3247,7 @@ mod fresh_quick_start_leader_binding_tests {
         let workspace = runtime_workspace(&hermetic, "fresh");
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -3331,7 +3308,7 @@ mod fresh_quick_start_leader_binding_tests {
         let workspace = runtime_workspace(&hermetic, "fresh");
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -3432,25 +3409,6 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn runtime_valid_caller_binds_typed_pi_through_bash() {
-        let hermetic = HermeticTestEnv::enter("runtime-valid-pi-bash");
-        let workspace = runtime_workspace(&hermetic, "fresh");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
-        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
-        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
-        let transport = OfflineTransport::new()
-            .with_tmux_endpoint("/tmp/tmux.sock")
-            .with_pane_current_command("%1", "bash");
-        let mut ops = RecordingRuntimeOps::new(&transport);
-        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
-        assert_eq!(ops.attach_calls, 1);
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
     fn seeded_runtime_bind_publishes_fresh_caller_authority_for_live_parent_pane() {
         let hermetic = HermeticTestEnv::enter("runtime-seeded-fresh-authority");
         let workspace = runtime_workspace(&hermetic, "fresh");
@@ -3458,7 +3416,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -3590,7 +3548,7 @@ mod fresh_quick_start_leader_binding_tests {
         let hermetic = HermeticTestEnv::enter("runtime-seeded-shared-nonce");
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let parent = hermetic.root().join("parent");
@@ -3795,7 +3753,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -3869,7 +3827,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -3930,7 +3888,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -3986,7 +3944,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -4045,7 +4003,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -4128,7 +4086,7 @@ mod fresh_quick_start_leader_binding_tests {
             std::fs::create_dir_all(&parent).unwrap();
             let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
             let _pane = hermetic.with_env("TMUX_PANE", "%1");
-            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
             let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
             let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
             let seed = seeded_runtime_owner(&workspace);
@@ -4208,7 +4166,7 @@ mod fresh_quick_start_leader_binding_tests {
             std::fs::create_dir_all(&parent).unwrap();
             let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
             let _pane = hermetic.with_env("TMUX_PANE", "%1");
-            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
             let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
             let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
             let seed = seeded_runtime_owner(&workspace);
@@ -4258,14 +4216,14 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn first_nonce_writer_is_product_generated_and_consumer_live() {
+    fn first_nonce_writer_is_product_generated_and_consumer_live_provider_independent() {
         let hermetic = HermeticTestEnv::enter("runtime-first-nonce-writer");
         let workspace = runtime_workspace(&hermetic, "fresh");
         let parent = hermetic.root().join("parent");
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -4347,7 +4305,7 @@ mod fresh_quick_start_leader_binding_tests {
         std::fs::create_dir_all(&parent).unwrap();
         let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
         let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
         let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
         let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
         let seed = seeded_runtime_owner(&workspace);
@@ -4427,32 +4385,6 @@ mod fresh_quick_start_leader_binding_tests {
 
     #[test]
     #[serial_test::serial(env)]
-    fn runtime_invalid_caller_refuses_even_when_command_is_pi() {
-        let hermetic = HermeticTestEnv::enter("runtime-invalid-command-pi");
-        let workspace = runtime_workspace(&hermetic, "fresh");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
-        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%9");
-        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
-        let transport = OfflineTransport::new()
-            .with_tmux_endpoint("/tmp/tmux.sock")
-            .with_pane_current_command("%1", "pi");
-        let mut ops = RecordingRuntimeOps::new(&transport);
-        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attach_calls, 0);
-        assert_eq!(ops.attached_provider, None);
-        assert_eq!(
-            refusal_reason(&workspace),
-            Some((
-                "strict_provider".to_string(),
-                "invalid_caller_tuple".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(env)]
     fn runtime_socket_and_explicit_conflicts_refuse_without_command_fallback() {
         for (tag, endpoint, leader, scoped) in [
             (
@@ -4478,13 +4410,13 @@ mod fresh_quick_start_leader_binding_tests {
             let workspace = runtime_workspace(&hermetic, tag);
             let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
             let _pane = hermetic.with_env("TMUX_PANE", "%1");
-            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+            let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "codex");
             let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
             let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, endpoint);
             let _leader = leader.map(|value| hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", value));
             let transport = OfflineTransport::new()
                 .with_tmux_endpoint(scoped)
-                .with_pane_current_command("%1", "pi");
+                .with_pane_current_command("%1", "codex");
             let mut ops = RecordingRuntimeOps::new(&transport);
             assert!(
                 !bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap(),
@@ -4494,43 +4426,4 @@ mod fresh_quick_start_leader_binding_tests {
         }
     }
 
-    #[test]
-    #[serial_test::serial(env)]
-    fn runtime_absent_keeps_explicit_and_direct_paths() {
-        let hermetic = HermeticTestEnv::enter("runtime-absent-compat");
-        let workspace = runtime_workspace(&hermetic, "explicit");
-        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
-        let _pane = hermetic.with_env("TMUX_PANE", "%1");
-        let _leader = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "pi");
-        let transport = OfflineTransport::new()
-            .with_tmux_endpoint("/tmp/tmux.sock")
-            .with_pane_current_command("%1", "bash");
-        let mut ops = RecordingRuntimeOps::new(&transport);
-        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
-
-        let workspace = runtime_workspace(&hermetic, "direct");
-        drop(_leader);
-        let transport = OfflineTransport::new()
-            .with_tmux_endpoint("/tmp/tmux.sock")
-            .with_pane_current_command("%1", "pi");
-        let mut ops = RecordingRuntimeOps::new(&transport);
-        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Codex));
-
-        let workspace = runtime_workspace(&hermetic, "unknown-shell");
-        let transport = OfflineTransport::new()
-            .with_tmux_endpoint("/tmp/tmux.sock")
-            .with_pane_current_command("%1", "bash");
-        let mut ops = RecordingRuntimeOps::new(&transport);
-        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
-        assert_eq!(ops.attach_calls, 0);
-        assert_eq!(
-            refusal_reason(&workspace),
-            Some((
-                "strict_provider".to_string(),
-                "provider_unresolved".to_string()
-            ))
-        );
-    }
 }
