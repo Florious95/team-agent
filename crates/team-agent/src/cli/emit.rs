@@ -438,7 +438,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("sessions") => "usage: team-agent sessions [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
         Some("install-skill") => "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]".to_string(),
-        Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
+        Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
         Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("wait") => "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]".to_string(),
@@ -854,6 +854,7 @@ struct ParsedArgs {
     assignee: Option<String>,
     out: Option<PathBuf>,
     auth_mode: Option<String>,
+    proxy_mode: Option<String>,
     pane: Option<String>,
     to_name: Option<String>,
     /// E7 (0.5.9 host-leader-registry-design §4.2): `send --to-leader NAME`
@@ -952,6 +953,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--assignee" => parsed.assignee = next_arg(args, &mut i),
             "--out" => parsed.out = next_arg(args, &mut i).map(PathBuf::from),
             "--auth-mode" => parsed.auth_mode = next_arg(args, &mut i),
+            "--proxy-mode" => parsed.proxy_mode = next_arg(args, &mut i),
             "--pane" => parsed.pane = next_arg(args, &mut i),
             "--to-name" => parsed.to_name = next_arg(args, &mut i),
             "--to-leader" => parsed.to_leader = next_arg(args, &mut i),
@@ -969,6 +971,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "-h" | "--help" => {}
             other if other.starts_with("--team=") => {
                 parsed.team = Some(other.trim_start_matches("--team=").to_string());
+            }
+            other if other.starts_with("--proxy-mode=") => {
+                parsed.proxy_mode = Some(other.trim_start_matches("--proxy-mode=").to_string());
             }
             other if other.starts_with("--pane=") => {
                 parsed.pane = Some(other.trim_start_matches("--pane=").to_string());
@@ -1704,6 +1709,7 @@ fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
         workspace: resolve_path(&workspace),
         team: parsed.team,
         auth_mode: parsed.auth_mode,
+        proxy_mode: parsed.proxy_mode,
         json: parsed.json,
     })
 }

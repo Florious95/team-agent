@@ -334,7 +334,7 @@ mod cursor_mcp;
 pub use cursor_mcp::{
     apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
     apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, cursor_mcp_enable_working_dir,
-    enable_cursor_workspace_mcp, physical_workspace_path, prepare_cursor_seat_mcp,
+    enable_cursor_workspace_mcp, enable_cursor_workspace_mcp_with_profile, physical_workspace_path, prepare_cursor_seat_mcp,
     refuse_second_cursor_occupant,
 };
 

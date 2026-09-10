@@ -293,23 +293,42 @@ pub fn enable_cursor_workspace_mcp(
     workspace: &Path,
     project_root: Option<&Path>,
 ) -> Result<(), LifecycleError> {
+    enable_cursor_workspace_mcp_with_profile(workspace, project_root, None)
+}
+
+/// Run Cursor's MCP enable command with the same profile-local environment
+/// policy as the worker spawn. In particular, subscription direct mode must
+/// not reintroduce proxy URL keys during this preparatory command.
+pub fn enable_cursor_workspace_mcp_with_profile(
+    workspace: &Path,
+    project_root: Option<&Path>,
+    profile_launch: Option<&crate::provider::ProviderProfileLaunch>,
+) -> Result<(), LifecycleError> {
     let physical = cursor_mcp_enable_working_dir(workspace, project_root);
     if skip_cursor_mcp_enable() {
         return Ok(());
     }
     let argv = cursor_mcp_enable_argv();
-    let output = Command::new(&argv[0])
+    let mut command = Command::new(&argv[0]);
+    command
         .args(&argv[1..])
-        .current_dir(&physical)
-        .output()
-        .map_err(|e| {
-            LifecycleError::RequirementUnmet(format!(
-                "error: cannot run `{} mcp enable team_orchestrator`\n\
-                 reason: {e}\n\
-                 action: install cursor-agent on PATH (same binary as `agent`) and retry",
-                argv[0]
-            ))
-        })?;
+        .current_dir(&physical);
+    if let Some(profile_launch) = profile_launch {
+        for key in &profile_launch.env_unset {
+            command.env_remove(key);
+        }
+        for (key, value) in &profile_launch.env_overlay {
+            command.env(key, value);
+        }
+    }
+    let output = command.output().map_err(|e| {
+        LifecycleError::RequirementUnmet(format!(
+            "error: cannot run `{} mcp enable team_orchestrator`\n\
+             reason: {e}\n\
+             action: install cursor-agent on PATH (same binary as `agent`) and retry",
+            argv[0]
+        ))
+    })?;
     if output.status.success() {
         return Ok(());
     }

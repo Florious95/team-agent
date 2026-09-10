@@ -327,7 +327,11 @@ pub(super) fn spawn_agents(
                 agent_id_raw,
                 &mcp_config,
             )?;
-            enable_cursor_workspace_mcp(workspace, project.as_deref())?;
+            enable_cursor_workspace_mcp_with_profile(
+                workspace,
+                project.as_deref(),
+                Some(&profile_launch),
+            )?;
             apply_cursor_spawn_workspace_pointers(&mut plan.argv, workspace, agent_id_raw)?;
             let proxy = apply_cursor_subscription_proxy_env(&mut env);
             let event_log = crate::event_log::EventLog::new(workspace);

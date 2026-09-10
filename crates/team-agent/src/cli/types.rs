@@ -667,6 +667,7 @@ pub struct ProfileArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub auth_mode: Option<String>,
+    pub proxy_mode: Option<String>,
     pub json: bool,
 }
 

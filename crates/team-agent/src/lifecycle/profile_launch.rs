@@ -46,6 +46,20 @@ const COMPATIBLE_NETWORK_ENV_KEYS: &[&str] = &[
     "REQUESTS_CA_BUNDLE",
 ];
 
+// Cursor subscription direct mode removes only proxy URL inputs. NO_PROXY is
+// deliberately retained: it is a bypass list, not a proxy endpoint, and the
+// observed catalog failure came from the GLOBAL_AGENT proxy URL settings.
+const CURSOR_DIRECT_PROXY_ENV_KEYS: &[&str] = &[
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+    "GLOBAL_AGENT.HTTPS_PROXY",
+    "GLOBAL_AGENT.HTTP_PROXY",
+];
+
 #[derive(Debug, Clone)]
 pub(crate) struct ProfileValues {
     pub(crate) path: PathBuf,
@@ -234,6 +248,15 @@ fn prepare_profile_launch(
             env_overlay.remove(*key);
         }
     }
+    if agent.provider == Provider::CursorAgent
+        && agent.auth_mode == AuthMode::Subscription
+        && profile_proxy_mode(&loaded.values) == "direct"
+    {
+        for key in CURSOR_DIRECT_PROXY_ENV_KEYS {
+            env_unset.insert((*key).to_string());
+            env_overlay.remove(*key);
+        }
+    }
 
     let command_overrides = provider_command_overrides(&agent, &loaded.values);
     write_runtime_env_file(workspace, &agent.id, &env_overlay, &env_unset)?;
@@ -353,6 +376,12 @@ fn validate_profile(
     profile: &str,
     loaded: &ProfileValues,
 ) -> Result<(), LifecycleError> {
+    let proxy_mode = profile_proxy_mode(&loaded.values);
+    if !matches!(proxy_mode.as_str(), "direct" | "inherit") {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "profile {profile} has invalid proxy mode {proxy_mode}; expected direct|inherit"
+        )));
+    }
     if loaded
         .values
         .get("AUTH_MODE")
@@ -481,9 +510,8 @@ fn provider_env_exports(
                 }
             }
         }
-        // grok/cursor_agent 一期无 profile exports（subscription 已登录态）。
-        // Cursor 订阅席的代理透传不在这里：profile 只服务 compatible-api。
-        // 订阅路径见 apply_cursor_subscription_proxy_env（只记有无，不记值）。
+        // grok/cursor_agent 一期无 credential/profile exports（subscription 已登录态）。
+        // Cursor 订阅席默认继承代理；PROXY_MODE=direct 的局部清除在上方处理。
         Provider::Grok | Provider::CursorAgent | Provider::Pi => {}
         Provider::Fake => {}
     }
