@@ -133,6 +133,7 @@ mod named_address;
 mod peer_allow;
 mod run_delegation;
 mod shutdown_kill_plan;
+mod status_brief;
 mod status_send;
 mod verb_install_skill;
 mod verb_profile;

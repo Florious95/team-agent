@@ -100,8 +100,18 @@ fn diagnose_selected_team_without_registry_is_unbound() {
     assert!(
         out["issues"].as_array().is_some_and(|issues| issues
             .iter()
-            .any(|issue| issue.as_str() == Some("leader_not_attached"))),
-        "state-only attached fixture must remain unbound without a registry row; out={out}"
+            .any(|issue| issue.as_str() == Some("leader_registry_index_missing"))),
+        "state-only attached fixture must stay undeliverable as index_missing without a registry row; out={out}"
+    );
+    assert_ne!(out["ok"], json!(true));
+    let repairs = out["suggested_repairs"].clone();
+    assert!(
+        repairs.to_string().contains("do not claim-leader"),
+        "index-missing copy must forbid claim; repairs={repairs}"
+    );
+    assert!(
+        !repairs_induce_claim_command(&repairs),
+        "index-missing must not induce an executable claim command; repairs={repairs}"
     );
 }
 
@@ -135,8 +145,18 @@ fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
     assert!(
         out["issues"].as_array().is_some_and(|issues| issues
             .iter()
-            .any(|issue| issue.as_str() == Some("leader_not_attached"))),
-        "attached state with a foreign-workspace registry row must remain unbound; out={out}"
+            .any(|issue| issue.as_str() == Some("leader_registry_index_missing"))),
+        "foreign-workspace registry row must stay undeliverable as index_missing; out={out}"
+    );
+    assert_ne!(out["ok"], json!(true));
+    let repairs = out["suggested_repairs"].clone();
+    assert!(
+        repairs.to_string().contains("do not claim-leader"),
+        "index-missing copy must forbid claim; repairs={repairs}"
+    );
+    assert!(
+        !repairs_induce_claim_command(&repairs),
+        "index-missing must not induce an executable claim command; repairs={repairs}"
     );
 }
 
@@ -580,6 +600,24 @@ fn mcp_send_same_team_owner_still_creates_team_scoped_message() {
         }),
         "same-team worker MCP send must create a message row scoped to teamA for worker_b; rows={rows:?}"
     );
+}
+
+fn repairs_induce_claim_command(repairs: &Value) -> bool {
+    let Some(items) = repairs.as_array() else {
+        return false;
+    };
+    items.iter().any(|repair| {
+        ["hint_action", "action"].iter().any(|field| {
+            repair
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    let trimmed = text.trim();
+                    trimmed.starts_with("team-agent claim-leader")
+                        || trimmed == "claim-leader"
+                })
+        })
+    })
 }
 
 fn json_result(result: team_agent::cli::CmdResult) -> Value {

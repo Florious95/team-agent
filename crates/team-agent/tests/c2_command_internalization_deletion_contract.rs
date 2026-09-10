@@ -34,7 +34,23 @@ const DELETED_COMMANDS: &[&str] = &[
     "repair-state",
 ];
 const FALLBACK_COMMANDS: &[&str] = &["fallback-send-leader", "fallback-report-result"];
-const VISIBLE_COMMAND_LIMIT: usize = 15;
+const RESIGN_PLUS_RESULTS: &[&str] = &[
+    "quick-start",
+    "send",
+    "status",
+    "collect",
+    "results",
+    "restart",
+    "shutdown",
+    "add-agent",
+    "start-agent",
+    "stop-agent",
+    "reset-agent",
+    "diagnose",
+    "claim-leader",
+    "takeover",
+    "attach-leader",
+];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -166,12 +182,32 @@ fn red3_normal_send_and_report_paths_replace_fallback_commands() {
     let diagnose = case.run_ta(&["diagnose", "--workspace", case.workspace_str(), "--json"]);
     let diagnose_text = output_text(&diagnose);
     let diagnose_lower = diagnose_text.to_lowercase();
-    for required in ["claim-leader", "takeover", "attach-leader"] {
-        if !diagnose_lower.contains(required) {
-            failures.push(format!(
-                "diagnose rebind_required output must guide to `{required}`; text={diagnose_text}"
-            ));
-        }
+    if !diagnose_lower.contains("action_required") && !diagnose_lower.contains("broken_class") {
+        failures.push(format!(
+            "diagnose missing-leader output must expose a structured broken class; text={diagnose_text}"
+        ));
+    }
+    let has_applicable = [
+        "claim-leader",
+        "quick-start",
+        "inspect the selected-team registry",
+        "do not claim-leader",
+    ]
+    .iter()
+    .any(|needle| diagnose_lower.contains(needle));
+    if !has_applicable {
+        failures.push(format!(
+            "diagnose missing-leader output must name one applicable next step; text={diagnose_text}"
+        ));
+    }
+    let shotgun = ["claim-leader", "takeover", "attach-leader"]
+        .iter()
+        .filter(|needle| diagnose_lower.contains(*needle))
+        .count();
+    if shotgun == 3 {
+        failures.push(format!(
+            "diagnose must not shotgun claim/takeover/attach together; text={diagnose_text}"
+        ));
     }
     assert_no_fallback_command_text(
         "diagnose rebind_required output",
@@ -183,10 +219,12 @@ fn red3_normal_send_and_report_paths_replace_fallback_commands() {
     let report_text = output_text(&report);
     assert_no_fallback_command_text("mcp/report_result public help", &report_text, &mut failures);
 
-    let command_count = visible_default_commands(&stdout(&case.run_ta(&["--help"]))).len();
-    if command_count > VISIBLE_COMMAND_LIMIT {
+    let help = stdout(&case.run_ta(&["--help"]));
+    let visible = visible_default_commands(&help);
+    let expected = exact_visible_contract(&help);
+    if visible != expected {
         failures.push(format!(
-            "normal path must not introduce a replacement command; visible_count={command_count}"
+            "normal path must not introduce a replacement command; visible={visible:?} expected={expected:?}"
         ));
     }
 
@@ -410,9 +448,10 @@ fn red7_g0_visible_command_metric_is_hard_fail() {
     let source = read_repo_file("crates/team-agent/tests/governance_g0_metrics.rs");
     let mut failures = Vec::new();
 
-    if visible.len() > VISIBLE_COMMAND_LIMIT {
+    let expected = exact_visible_contract(&help);
+    if visible != expected {
         failures.push(format!(
-            "visible command count must hard-fail above {VISIBLE_COMMAND_LIMIT}; visible={visible:?}"
+            "visible command set must equal the exact published contract; visible={visible:?} expected={expected:?}"
         ));
     }
     for forbidden in [
@@ -427,9 +466,9 @@ fn red7_g0_visible_command_metric_is_hard_fail() {
             ));
         }
     }
-    if !(source.contains("assert!") && source.contains("VISIBLE_COMMAND_TARGET")) {
+    if !(source.contains("assert_eq!") && source.contains("exact_visible_contract")) {
         failures.push(
-            "G0 visible command metric must assert commands.len() <= VISIBLE_COMMAND_TARGET"
+            "G0 visible command metric must assert_eq the exact published command set, not a slack threshold"
                 .to_string(),
         );
     }
@@ -712,6 +751,17 @@ fn json_output(label: &str, output: &Output) -> Value {
             stderr(output)
         )
     })
+}
+
+fn exact_visible_contract(help: &str) -> BTreeSet<String> {
+    let mut expected: BTreeSet<String> = RESIGN_PLUS_RESULTS
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect();
+    if visible_default_commands(help).contains("models") {
+        expected.insert("models".to_string());
+    }
+    expected
 }
 
 fn visible_default_commands(help: &str) -> BTreeSet<String> {

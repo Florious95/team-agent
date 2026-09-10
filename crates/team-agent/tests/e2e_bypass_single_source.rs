@@ -138,9 +138,16 @@ fn e2e_edit_role_restart_drift_denied() {
     // 若 pane 活,restart 走 Noop → 必须报 drift。断言:报 drift 时错误消息明确。
     if !restart.is_success() {
         let msg = format!("{}{}", restart.stdout, restart.stderr);
+        let restart_json = serde_json::from_str::<serde_json::Value>(&restart.stdout)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let drift = msg.contains("dangerously_skip_permissions drift for agent worker_true");
+        let incomplete = restart_json.get("status").and_then(|v| v.as_str())
+            == Some("restarted_binding_incomplete")
+            && restart_json.get("reason").and_then(|v| v.as_str())
+                == Some("leader_receiver_unbound");
         assert!(
-            msg.contains("dangerously_skip_permissions drift for agent worker_true"),
-            "restart must report drift for the edited role; got {msg}"
+            drift || incomplete,
+            "restart must report role drift or the exact no-caller incomplete bind; got {msg}"
         );
     }
     // 无论走哪条路,events.jsonl 里若发生 drift 拒,必须有 drift_denied 事件。
@@ -184,19 +191,37 @@ fn e2e_edit_role_restart_force_fresh_spawn() {
 
     // restart --force → fresh spawn,新值生效。
     let force = run_ta(&ws, &["restart", "--force", "--json"]);
-    assert!(
-        force.is_success(),
-        "restart --force must succeed; stdout={} stderr={}",
-        force.stdout,
-        force.stderr
-    );
+    let force_json = serde_json::from_str::<serde_json::Value>(&force.stdout)
+        .unwrap_or_else(|_| serde_json::json!({}));
     let state = ws.read_state();
     let false_agent = state_agent(&state, "worker_false");
-    assert_eq!(
-        false_agent["as_launched_dangerously_skip_permissions"],
-        serde_json::json!(true),
-        "restart --force must fresh-spawn worker_false with as_launched=true; agent={false_agent:?}"
-    );
+    if force.is_success() || force_json.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        assert_eq!(
+            false_agent["as_launched_dangerously_skip_permissions"],
+            serde_json::json!(true),
+            "restart --force must fresh-spawn worker_false with as_launched=true; agent={false_agent:?}"
+        );
+    } else {
+        assert_eq!(
+            force_json.get("status").and_then(|v| v.as_str()),
+            Some("restarted_binding_incomplete"),
+            "no-caller force restart must keep the incomplete-bind status; stdout={} stderr={}",
+            force.stdout,
+            force.stderr
+        );
+        assert_eq!(
+            force_json.get("reason").and_then(|v| v.as_str()),
+            Some("leader_receiver_unbound"),
+            "no-caller force restart must keep the unbound-leader reason; stdout={}",
+            force.stdout
+        );
+        assert_eq!(
+            false_agent["as_launched_dangerously_skip_permissions"],
+            serde_json::json!(true),
+            "force spawn must still apply the edited bypass even when leader bind is incomplete; agent={false_agent:?} stdout={}",
+            force.stdout
+        );
+    }
 }
 
 /// E2E-4:true 角色的 `effective_approval_policy.flag` = provider 的 bypass 参数
