@@ -30,8 +30,8 @@ use crate::transport::{
     command_basename, normalize_capture, tmux_capture_argv, tmux_query_argv, tmux_send_keys_argv,
     tmux_spawn_argv, tmux_submit_key_name, AttachOutcome, CaptureRange, CaptureSampleOutcome,
     InjectPayload, InjectStage, InjectVerification, InputSurfaceProbe, Key, PaneField, PaneId,
-    QueryOutcome, SessionName, SetEnvOutcome, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    QueryOutcome, SessionName, SetEnvOutcome, SubmitConsumptionReason, SubmitVerification, Target,
+    Transport, TransportError, TurnVerification, WindowName,
 };
 
 type RecordedArgv = Arc<Mutex<Vec<Vec<String>>>>;
@@ -1051,6 +1051,13 @@ fn inject_text_runs_buffer_paste_submit_sequence_and_reports_submit() {
         SubmitVerification::EnterSentWithoutPlaceholderCheck
     );
     assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+    assert_eq!(
+        report
+            .submit_diagnostics
+            .expect("diagnostics")
+            .consumption_reason,
+        SubmitConsumptionReason::NoMarker
+    );
 }
 
 #[test]
@@ -1413,6 +1420,10 @@ fn e46_post_submit_matched_token_without_scroll_is_unverified() {
         diagnostics.attempts_detail.iter().any(|obs| obs.matched),
         "the unverified verdict must still record that paste landed"
     );
+    assert_eq!(
+        diagnostics.consumption_reason,
+        SubmitConsumptionReason::Unverified
+    );
 }
 
 #[test]
@@ -1451,6 +1462,10 @@ fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
             .unwrap_or(false),
         "busy-state capture should be recorded in attempts_detail: {:?}",
         diagnostics.attempts_detail
+    );
+    assert_eq!(
+        diagnostics.consumption_reason,
+        SubmitConsumptionReason::FallbackBusy
     );
 }
 
@@ -1520,6 +1535,13 @@ fn e46_inject_text_with_token_consumed_after_enter_keeps_enter_sent_without_plac
              EnterSentWithoutPlaceholderCheck so MUST-10 delivery semantics \
              hold (provider_submit_verification_red.rs:113-159). Got {:?}",
         report.submit_verification
+    );
+    assert_eq!(
+        report
+            .submit_diagnostics
+            .expect("diagnostics")
+            .consumption_reason,
+        SubmitConsumptionReason::ConsumptionFromCapture
     );
 }
 
@@ -3288,6 +3310,13 @@ fn cursor_single_enter_busy_transcript_placeholder_does_not_retry() {
         SubmitVerification::EnterSentWithoutPlaceholderCheck,
         "busy after first Enter is consumption for cursor; got {:?}",
         report.submit_verification
+    );
+    assert_eq!(
+        report
+            .submit_diagnostics
+            .expect("diagnostics")
+            .consumption_reason,
+        SubmitConsumptionReason::CursorPollingBusy
     );
     let calls = rec.lock().unwrap().clone();
     assert_eq!(

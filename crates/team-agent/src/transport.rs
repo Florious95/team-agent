@@ -467,6 +467,9 @@ pub struct InjectReport {
 /// pasted-prompt branch + (informational) for the appear-gate poll.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubmitDiagnostics {
+    /// The concrete branch that produced the post-Enter consumption outcome.
+    /// Unknown is retained for paths that do not expose a branch reason.
+    pub consumption_reason: SubmitConsumptionReason,
     /// Time spent in the appear-gate (poll for the pasted-content placeholder
     /// before Enter). When `saw_pasted_prompt == false` this is the time we
     /// spent polling before falling through to the E46 token path.
@@ -503,6 +506,39 @@ pub struct SubmitDiagnostics {
     pub target_pane_id: Option<String>,
     /// Inject target pane id vs `#{pane_id}` queried on that same target.
     pub target_pane_query_matched: Option<bool>,
+}
+
+/// Structured reason for the post-Enter consumption observation.
+///
+/// This is diagnostic metadata only; it does not change delivery semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubmitConsumptionReason {
+    /// The token/input identity disappeared in the consumption capture.
+    ConsumptionFromCapture,
+    /// Cursor's bounded polling observed a provider-busy signal.
+    CursorPollingBusy,
+    /// The final fallback capture observed a provider-busy signal.
+    FallbackBusy,
+    /// The payload had no token marker, so no structural consumption probe ran.
+    NoMarker,
+    /// The bounded probe did not establish consumption.
+    Unverified,
+    /// An older or otherwise uncovered path did not provide a reason.
+    #[default]
+    Unknown,
+}
+
+impl SubmitConsumptionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConsumptionFromCapture => "consumption_from_capture",
+            Self::CursorPollingBusy => "cursor_poll_busy",
+            Self::FallbackBusy => "fallback_busy",
+            Self::NoMarker => "no_marker",
+            Self::Unverified => "unverified",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Last capture sample of the inject token path. Distinguishes "read failed"

@@ -33,7 +33,8 @@ use crate::provider::wire::{
 use crate::transport::{
     submit_verification_wire, turn_verification_wire, CaptureRange, CaptureSampleOutcome,
     InjectPayload, InjectReport, InjectVerification, InputSurfaceProbe, Key, PaneId, PaneInfo,
-    QueryOutcome, SessionName, SubmitObserver, SubmitVerification, Target, Transport, WindowName,
+    QueryOutcome, SessionName, SubmitConsumptionReason, SubmitObserver, SubmitVerification, Target,
+    Transport, WindowName,
 };
 
 use super::helpers::{message_exists, MessageStatusShadow};
@@ -1998,6 +1999,12 @@ fn merge_inject_readback_fields(
             .unwrap_or(CaptureSampleOutcome::NotAttempted.as_str())),
     );
     obj.insert(
+        "consumption_reason".to_string(),
+        serde_json::json!(diag
+            .map(|d| d.consumption_reason.as_str())
+            .unwrap_or("unknown")),
+    );
+    obj.insert(
         "pane_command_basename".to_string(),
         diag.and_then(|d| d.pane_command_basename.as_deref())
             .map(|name| serde_json::json!(name))
@@ -3396,6 +3403,7 @@ mod paste_floor_tests {
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: 1,
             submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
+                consumption_reason: SubmitConsumptionReason::Unverified,
                 last_capture_outcome: CaptureSampleOutcome::Failed,
                 capture_err_count: 1,
                 capture_sample_count: 1,
@@ -3424,6 +3432,7 @@ mod paste_floor_tests {
             None,
         );
         assert_eq!(event["last_capture_outcome"], serde_json::json!("failed"));
+        assert_eq!(event["consumption_reason"], serde_json::json!("unverified"));
         assert_eq!(event["token_seen_after_paste"], serde_json::Value::Null);
         assert_eq!(event["pane_command_basename"], serde_json::json!("grok"));
         assert_eq!(event["input_surface"], serde_json::json!("input"));
