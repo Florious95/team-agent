@@ -68,8 +68,8 @@ use crate::transport::{
     tmux_spawn_argv, AttachOutcome, BackendKind, CaptureRange, CaptureSampleOutcome, CapturedText,
     InjectPayload, InjectReport, InjectStage, InjectVerification, InputSurfaceProbe, Key,
     PaneField, PaneId, PaneInfo, PaneMode, QueryOutcome, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitAttemptObservation, SubmitDiagnostics, SubmitObserver, SubmitVerification, Target,
-    Transport, TransportError, TurnVerification, WindowName,
+    SubmitAttemptObservation, SubmitConsumptionReason, SubmitDiagnostics, SubmitObserver,
+    SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
@@ -1478,6 +1478,7 @@ fn submit_diagnostics_for_inject(
     surface: InjectTargetSurface,
 ) -> SubmitDiagnostics {
     SubmitDiagnostics {
+        consumption_reason: SubmitConsumptionReason::Unknown,
         appear_gate_elapsed_ms: 0,
         appear_gate_matched: false,
         total_elapsed_ms,
@@ -3175,6 +3176,7 @@ impl Transport for TmuxBackend {
                 let mut consumption_attempts: u32 = 0;
                 let mut capture_retries: u32 = 0;
                 let mut consumed: Option<bool> = None;
+                let mut consumption_reason = SubmitConsumptionReason::Unknown;
                 let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
                 let mut any_attempt_matched = false;
 
@@ -3234,11 +3236,15 @@ impl Transport for TmuxBackend {
                                     tracked_paste,
                                 ) == Some(true)
                                 {
+                                    consumption_reason =
+                                        SubmitConsumptionReason::ConsumptionFromCapture;
                                     consumed = Some(true);
                                     break;
                                 }
                                 if cursor_single_enter_enabled() {
                                     if provider_busy_signal_in_tail(&cap.text) {
+                                        consumption_reason =
+                                            SubmitConsumptionReason::CursorPollingBusy;
                                         consumed = Some(true);
                                         break;
                                     }
@@ -3340,12 +3346,16 @@ impl Transport for TmuxBackend {
                                         tracked_paste,
                                     ) == Some(true)
                                     {
+                                        consumption_reason =
+                                            SubmitConsumptionReason::ConsumptionFromCapture;
                                         found_consumed = true;
                                         break;
                                     }
                                     if cursor_single_enter_enabled()
                                         && provider_busy_signal_in_tail(&cap.text)
                                     {
+                                        consumption_reason =
+                                            SubmitConsumptionReason::CursorPollingBusy;
                                         found_consumed = true;
                                         break;
                                     }
@@ -3374,7 +3384,8 @@ impl Transport for TmuxBackend {
                         }
                     } else {
                         // Non-token payload: single Enter, no consumption check
-                        // (0.3.27). Not 「没能判断」— 本门不覆盖无 token 路径。
+                        // (0.3.27). Keep the explicit no-marker reason.
+                        consumption_reason = SubmitConsumptionReason::NoMarker;
                         consumed = Some(true);
                         break;
                     }
@@ -3406,14 +3417,22 @@ impl Transport for TmuxBackend {
                                 inject_start.elapsed().as_millis() as u64,
                             ));
                             if provider_busy_signal_in_tail(&cap.text) {
+                                consumption_reason = SubmitConsumptionReason::FallbackBusy;
                                 SubmitVerification::EnterSentWithoutPlaceholderCheck
                             } else {
+                                consumption_reason = SubmitConsumptionReason::Unverified;
                                 SubmitVerification::SubmitConsumptionUnverified
                             }
                         }
-                        Err(_) => SubmitVerification::SubmitConsumptionUnverified,
+                        Err(_) => {
+                            consumption_reason = SubmitConsumptionReason::Unverified;
+                            SubmitVerification::SubmitConsumptionUnverified
+                        }
                     },
-                    None => SubmitVerification::SubmitConsumptionUnverified,
+                    None => {
+                        consumption_reason = SubmitConsumptionReason::Unverified;
+                        SubmitVerification::SubmitConsumptionUnverified
+                    }
                 };
                 // Unverified + 折行缺口：只补一颗 C-m。A 的 should_resubmit_enter
                 // 已为真（latch/底15 token，含打满 cap）时 B 不介入。身份拿不到
@@ -3467,20 +3486,25 @@ impl Transport for TmuxBackend {
                                         );
                                         attempts_detail.push(obs);
                                         last_turn_text = Some(cap.text.clone());
-                                        if consumption_from_capture(
+                                        let capture_consumed = consumption_from_capture(
                                             &cap.text,
                                             m,
                                             token_ever_visible,
                                             tracked_paste,
-                                        ) == Some(true)
-                                            || provider_busy_signal_in_tail(&cap.text)
-                                        {
+                                        ) == Some(true);
+                                        let busy = provider_busy_signal_in_tail(&cap.text);
+                                        if capture_consumed || busy {
                                             // Gone+无 latch 会把折行 token 写成已消费；身份仍在则不算。
                                             if !this_paste_identity_in_composer(
                                                 &cap.text,
                                                 m,
                                                 tracked_paste,
                                             ) {
+                                                consumption_reason = if capture_consumed {
+                                                    SubmitConsumptionReason::ConsumptionFromCapture
+                                                } else {
+                                                    SubmitConsumptionReason::FallbackBusy
+                                                };
                                                 found_consumed = true;
                                                 break;
                                             }
@@ -3490,6 +3514,7 @@ impl Transport for TmuxBackend {
                                             m,
                                             tracked_paste,
                                         ) {
+                                            consumption_reason = SubmitConsumptionReason::Unknown;
                                             found_consumed = true;
                                             break;
                                         }
@@ -3510,6 +3535,15 @@ impl Transport for TmuxBackend {
                 }
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
                 let surface = probe_inject_target_surface(self, target);
+                let mut submit_diagnostics = submit_diagnostics_for_inject(
+                    total_elapsed_ms,
+                    attempts_detail,
+                    &capture_tally,
+                    token_seen_after_paste,
+                    token_seen_after_enter,
+                    surface,
+                );
+                submit_diagnostics.consumption_reason = consumption_reason;
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,
                     inject_verification: inject_verification_after_readback(
@@ -3522,14 +3556,7 @@ impl Transport for TmuxBackend {
                         last_turn_text.as_deref(),
                     ),
                     attempts: consumption_attempts.saturating_add(capture_retries),
-                    submit_diagnostics: Some(submit_diagnostics_for_inject(
-                        total_elapsed_ms,
-                        attempts_detail,
-                        &capture_tally,
-                        token_seen_after_paste,
-                        token_seen_after_enter,
-                        surface,
-                    )),
+                    submit_diagnostics: Some(submit_diagnostics),
                 });
             }
         }
