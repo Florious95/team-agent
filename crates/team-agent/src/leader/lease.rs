@@ -3245,7 +3245,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn claim_leader_discovery_still_requires_focus() {
         let mut pane = grant_pane("n1");
         pane.active = false;

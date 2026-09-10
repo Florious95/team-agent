@@ -4480,10 +4480,10 @@ tasks:
             .with_tmux_endpoint(endpoint)
             .with_targets(targets);
         crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
-            let bind =
+            let (_failures, ok, reason) =
                 restart_leader_public_bind(workspace, Some("alpha"), &serde_json::json!({}));
             let class = crate::lifecycle::launch::classify_leader_binding(workspace, "alpha");
-            (bind, class)
+            ((ok, reason), class)
         })
     }
 
@@ -4603,7 +4603,14 @@ tasks:
             crate::transport_factory::with_leader_endpoint_transport(
                 "/tmp/other.sock",
                 transport,
-                || restart_leader_public_bind(&workspace, Some("alpha"), &serde_json::json!({})),
+                || {
+                    let (_failures, ok, reason) = restart_leader_public_bind(
+                        &workspace,
+                        Some("alpha"),
+                        &serde_json::json!({}),
+                    );
+                    (ok, reason)
+                },
             )
         };
         let (wrong_uuid, _) = restart_index_bind_after_unregister(
