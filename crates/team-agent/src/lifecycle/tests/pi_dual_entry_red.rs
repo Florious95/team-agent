@@ -428,6 +428,84 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         "dynamic add must not create a second tmux session"
     );
 
+    let pi_provider_root = hermetic.workspace("pi-add-provider");
+    let pi_bin = pi_provider_root.join("bin");
+    let pi_package = pi_provider_root.join("pi-mcp-adapter");
+    std::fs::create_dir_all(&pi_bin).expect("create Pi test bin");
+    std::fs::create_dir_all(&pi_package).expect("create Pi test adapter");
+    let pi_real = pi_provider_root.join("pi-cli");
+    std::fs::write(
+        &pi_real,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version) printf '0.84.4\\n' ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\n  *) exit 64 ;;\nesac\n",
+            pi_package.display()
+        ),
+    )
+    .expect("write protocol-capable Pi test executable");
+    std::fs::set_permissions(
+        &pi_real,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("make Pi test executable");
+    std::os::unix::fs::symlink(&pi_real, pi_bin.join("pi")).expect("link Pi test executable");
+    std::fs::write(
+        pi_package.join("package.json"),
+        br#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#,
+    )
+    .expect("write Pi test adapter package");
+    std::fs::write(
+        pi_package.join("index.ts"),
+        b"export const createMcpAdapter = () => {};\n",
+    )
+    .expect("write Pi test adapter entry");
+    let _pi_path = EnvVarGuard::set("PATH", pi_bin.as_os_str());
+    let pi_success_role = "---\nname: mate\nrole: Pi Dynamic Worker\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\n\ndynamic pi\n";
+    let (pi_success_team, pi_success_role_path) =
+        dynamic_add_fixture(&dynamic_root, "dynamic-pi-success", pi_success_role);
+    let pi_success_transport = OfflineTransport::new().with_session_present(true);
+    crate::lifecycle::add_agent_with_transport(
+        &pi_success_team,
+        &AgentId::new("mate"),
+        &pi_success_role_path,
+        false,
+        None,
+        &pi_success_transport,
+    )
+    .expect("Pi dynamic add must commit after spawning its materialized plan");
+    let pi_spawn = pi_success_transport.spawn_records();
+    assert_eq!(pi_spawn.len(), 1, "Pi dynamic add must spawn exactly once");
+    let pi_state = crate::state::persist::load_runtime_state(&pi_success_team)
+        .expect("load successful Pi add state");
+    assert_eq!(
+        pi_state
+            .pointer("/agents/mate/status")
+            .and_then(serde_json::Value::as_str),
+        Some("running"),
+        "successful Pi add must commit the running seat"
+    );
+    let pi_events = crate::event_log::EventLog::new(&pi_success_team)
+        .tail(50)
+        .expect("read successful Pi add events");
+    let pi_start_event = pi_events
+        .iter()
+        .find(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("start_agent.agent_start")
+        })
+        .expect("successful Pi add must emit start event");
+    let pi_event_command = pi_start_event
+        .get("command")
+        .and_then(serde_json::Value::as_array)
+        .expect("successful Pi start event command")
+        .iter()
+        .map(|value| value.as_str().expect("Pi argv string").to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pi_event_command, pi_spawn[0].1,
+        "Pi start event must record the exact materialized plan that was spawned"
+    );
+    drop(_pi_path);
+
     let (rollback_team, rollback_role) =
         dynamic_add_fixture(&dynamic_root, "dynamic-rollback", fake_role);
     let events_path = rollback_team.join(".team/logs/events.jsonl");
