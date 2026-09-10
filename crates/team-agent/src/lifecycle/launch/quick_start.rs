@@ -295,6 +295,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
             agents_dir.display()
         )));
     }
+    crate::lifecycle::launch::run_pi_catalog_preflight(agents_dir)?;
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;

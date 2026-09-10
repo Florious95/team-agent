@@ -309,6 +309,20 @@ pub(crate) use mcp_config::{
 
 pub(crate) mod pi_mcp;
 
+pub(crate) fn run_pi_catalog_preflight(
+    agents_dir: &std::path::Path,
+) -> Result<(), crate::lifecycle::LifecycleError> {
+    crate::compiler::preflight_pi_models_in_team_with(agents_dir, |requested| {
+        pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    })
+    .map_err(|error| crate::lifecycle::LifecycleError::PiModelPreflight {
+        requested: error.requested,
+        candidates: error.candidates,
+        action: error.action,
+        not_ready: error.not_ready,
+    })
+}
+
 mod cursor_mcp_iso;
 pub use cursor_mcp_iso::{
     cursor_mcp_isolation_enabled, cursor_mcp_json_path, cursor_mcp_project_dir,

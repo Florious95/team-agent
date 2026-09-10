@@ -340,11 +340,15 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref().unwrap_or(""),
     );
-    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
-        workspace,
-        agent_id.as_str(),
-        &mcp_config,
-    )?;
+    let mcp_config_path = if provider == crate::provider::Provider::Pi {
+        None
+    } else {
+        Some(crate::lifecycle::launch::write_worker_mcp_config(
+            workspace,
+            agent_id.as_str(),
+            &mcp_config,
+        )?)
+    };
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -1423,6 +1427,22 @@ pub(super) fn resume_backing_probe_for_agent(
                 || discovered.as_ref().is_some_and(|dir| {
                     crate::provider::session_scan::cursor::cursor_session_archive_present(dir)
                 })
+        }
+        Provider::Pi => {
+            let spawn_cwd = agent
+                .get("spawn_cwd")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| workspace.to_path_buf());
+            rollout_path.is_some_and(|path| {
+                crate::provider::session_scan::pi::validate_exact_backing(
+                    path.as_path(),
+                    session_id,
+                    &spawn_cwd,
+                )
+                .is_ok()
+            })
         }
         Provider::GeminiCli | Provider::Fake => false,
     };
