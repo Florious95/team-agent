@@ -481,7 +481,11 @@ pub(super) fn spawn_agent_window(
             agent_id.as_str(),
             &mcp_config,
         )?;
-        crate::lifecycle::launch::enable_cursor_workspace_mcp(workspace, project.as_deref())?;
+        crate::lifecycle::launch::enable_cursor_workspace_mcp_with_profile(
+            workspace,
+            project.as_deref(),
+            Some(&profile_launch),
+        )?;
         crate::lifecycle::launch::apply_cursor_spawn_workspace_pointers(
             &mut plan.argv,
             workspace,

@@ -20,11 +20,13 @@ pub fn cmd_profile(args: &ProfileArgs) -> Result<CmdResult, CliError> {
 fn init_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     let auth_mode = args.auth_mode.as_deref().unwrap_or("subscription");
     validate_auth_mode(auth_mode)?;
+    let proxy_mode = args.proxy_mode.as_deref().unwrap_or("inherit");
+    validate_proxy_mode(proxy_mode)?;
     let dir = profile_dir(args);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.env", args.name));
     let template_path = dir.join(format!("{}.example.env", args.name));
-    let body = profile_template(&args.name, auth_mode);
+    let body = profile_template(&args.name, auth_mode, proxy_mode);
     let created_profile = write_new_file(&path, &body)?;
     if created_profile {
         set_owner_only_permissions(&path)?;
@@ -38,6 +40,10 @@ fn init_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     obj.insert(
         "auth_mode".to_string(),
         Value::String(auth_mode.to_string()),
+    );
+    obj.insert(
+        "proxy_mode".to_string(),
+        Value::String(proxy_mode.to_string()),
     );
     obj.insert("path".to_string(), path_value(&path));
     obj.insert("template_path".to_string(), path_value(&template_path));
@@ -72,6 +78,7 @@ fn doctor_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     let values = read_profile_env(&path)?;
     let auth_mode =
         profile_value(&values, "AUTH_MODE").unwrap_or_else(|| "subscription".to_string());
+    let proxy_mode = display_proxy_mode(&values);
     let secret_keys = secret_keys_present(&values);
     let keys = sorted_keys(&values);
     let mut obj = Map::new();
@@ -83,6 +90,7 @@ fn doctor_profile(args: &ProfileArgs) -> Result<Value, CliError> {
         Value::Bool(credential_present(&values)),
     );
     obj.insert("auth_mode".to_string(), Value::String(auth_mode));
+    obj.insert("proxy_mode".to_string(), Value::String(proxy_mode));
     obj.insert("keys_present".to_string(), string_array(keys));
     obj.insert(
         "raw_file_read_allowed_for_agents".to_string(),
@@ -112,6 +120,7 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     let values = read_profile_env(&path)?;
     let auth_mode =
         profile_value(&values, "AUTH_MODE").unwrap_or_else(|| "subscription".to_string());
+    let proxy_mode = display_proxy_mode(&values);
     let secret_keys = secret_keys_present(&values);
     let missing_common = missing_common_keys(&values, &auth_mode);
     let mut obj = Map::new();
@@ -122,6 +131,7 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
         Value::Bool(credential_present(&values)),
     );
     obj.insert("auth_mode".to_string(), Value::String(auth_mode));
+    obj.insert("proxy_mode".to_string(), Value::String(proxy_mode));
     obj.insert("values".to_string(), redacted_values(&values));
     obj.insert(
         "keys_present".to_string(),
@@ -157,12 +167,21 @@ fn validate_auth_mode(auth_mode: &str) -> Result<(), CliError> {
     }
 }
 
-fn profile_template(name: &str, auth_mode: &str) -> String {
+fn validate_proxy_mode(proxy_mode: &str) -> Result<(), CliError> {
+    match proxy_mode {
+        "direct" | "inherit" => Ok(()),
+        other => Err(CliError::Usage(format!(
+            "invalid --proxy-mode: {other} (expected direct|inherit)"
+        ))),
+    }
+}
+
+fn profile_template(name: &str, auth_mode: &str, proxy_mode: &str) -> String {
     match auth_mode {
         "compatible_api" | "official_api" => {
-            format!("AUTH_MODE={auth_mode}\nPROFILE_NAME={name}\nBASE_URL=\nAPI_KEY=\nMODEL=\n")
+            format!("AUTH_MODE={auth_mode}\nPROFILE_NAME={name}\nPROXY_MODE={proxy_mode}\nBASE_URL=\nAPI_KEY=\nMODEL=\n")
         }
-        _ => format!("AUTH_MODE=subscription\nPROFILE_NAME={name}\n"),
+        _ => format!("AUTH_MODE=subscription\nPROFILE_NAME={name}\nPROXY_MODE={proxy_mode}\n"),
     }
 }
 
@@ -233,6 +252,13 @@ fn profile_value(values: &Map<String, Value>, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn display_proxy_mode(values: &Map<String, Value>) -> String {
+    profile_value(values, "PROXY_MODE")
+        .or_else(|| profile_value(values, "NETWORK_MODE"))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "inherit".to_string())
 }
 
 fn missing_profile_value(args: &ProfileArgs, path: &Path, template_path: Option<&Path>) -> Value {

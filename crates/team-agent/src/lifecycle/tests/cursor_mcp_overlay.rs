@@ -185,6 +185,45 @@ fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
 }
 
 #[test]
+fn cursor_subscription_direct_profile_unsets_only_proxy_url_keys() {
+    let ws = tmp_dir("cursor-profile-direct");
+    let profiles = ws.join(".team/current/profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join("cursor.env"),
+        "AUTH_MODE=subscription\nPROFILE_NAME=cursor\nPROXY_MODE=direct\n",
+    )
+    .unwrap();
+
+    let launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
+        &ws,
+        "cursor",
+        &serde_json::json!({
+            "id": "cursor",
+            "provider": "cursor_agent",
+            "auth_mode": "subscription",
+            "profile": "cursor"
+        }),
+        None,
+    )
+    .expect("direct Cursor profile should prepare");
+    for key in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT.HTTPS_PROXY",
+        "GLOBAL_AGENT.HTTP_PROXY",
+    ] {
+        assert!(launch.env_unset.contains(key), "direct must unset {key}");
+    }
+    assert!(!launch.env_unset.contains("NO_PROXY"));
+    assert!(!launch.env_unset.contains("no_proxy"));
+}
+
+#[test]
 fn cursor_spawn_writes_identity_into_project_mcp_json() {
     let ws = tmp_dir("cursor-mcp-spawn");
     let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
