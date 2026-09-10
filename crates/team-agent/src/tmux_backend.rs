@@ -65,11 +65,12 @@ use crate::provider::wire::{parse_provider, provider_wire};
 use crate::transport::{
     command_basename, normalize_capture, tmux_capture_argv, tmux_empty_inject_argv,
     tmux_inject_text_argv, tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv,
-    tmux_spawn_argv, AttachOutcome, BackendKind, CaptureRange, CaptureSampleOutcome, CapturedText,
-    InjectPayload, InjectReport, InjectStage, InjectVerification, InputSurfaceProbe, Key,
-    PaneField, PaneId, PaneInfo, PaneMode, QueryOutcome, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitAttemptObservation, SubmitConsumptionReason, SubmitDiagnostics, SubmitObserver,
-    SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
+    tmux_spawn_argv, AttachOutcome, BackendKind, BusySignalKind, CaptureRange,
+    CaptureSampleOutcome, CapturedText, InjectPayload, InjectReport, InjectStage,
+    InjectVerification, InputSurfaceProbe, Key, PaneField, PaneId, PaneInfo, PaneMode,
+    QueryOutcome, SessionName, SetEnvOutcome, SpawnResult, SubmitAttemptObservation,
+    SubmitConsumptionReason, SubmitDiagnostics, SubmitObserver, SubmitVerification, Target,
+    Transport, TransportError, TurnVerification, WindowName,
 };
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
@@ -1475,10 +1476,17 @@ fn submit_diagnostics_for_inject(
     tally: &CaptureTally,
     token_seen_after_paste: Option<bool>,
     token_seen_after_enter: Option<bool>,
+    before_busy_signal_kind: Option<BusySignalKind>,
     surface: InjectTargetSurface,
 ) -> SubmitDiagnostics {
     SubmitDiagnostics {
         consumption_reason: SubmitConsumptionReason::Unknown,
+        before_busy_signal_kind,
+        busy_signal_kind: None,
+        busy_line_from_bottom: None,
+        current_marker_in_bottom_15: None,
+        paste_identity_in_composer: None,
+        consumption_from_capture_result: None,
         appear_gate_elapsed_ms: 0,
         appear_gate_matched: false,
         total_elapsed_ms,
@@ -2067,6 +2075,56 @@ pub(crate) fn consumption_from_capture(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ConsumptionCaptureObservation {
+    busy: Option<BusySignalMatch>,
+    marker_in_bottom_15: Option<bool>,
+    paste_identity_in_composer: Option<bool>,
+    consumption_from_capture_result: Option<bool>,
+}
+
+fn consumption_capture_observation(
+    text: &str,
+    marker: Option<&str>,
+    token_ever_visible: bool,
+    tracked: Option<PasteLatch>,
+) -> ConsumptionCaptureObservation {
+    let Some(marker) = marker else {
+        return ConsumptionCaptureObservation::default();
+    };
+    ConsumptionCaptureObservation {
+        busy: provider_busy_signal_match(text),
+        marker_in_bottom_15: Some(token_in_bottom_n(text, marker, 15)),
+        paste_identity_in_composer: tracked
+            .map(|tracked| this_paste_identity_in_composer(text, marker, Some(tracked))),
+        consumption_from_capture_result: consumption_from_capture(
+            text,
+            marker,
+            token_ever_visible,
+            tracked,
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ConsumptionDiagnostics {
+    busy_signal_kind: Option<BusySignalKind>,
+    busy_line_from_bottom: Option<u8>,
+    current_marker_in_bottom_15: Option<bool>,
+    paste_identity_in_composer: Option<bool>,
+    consumption_from_capture_result: Option<bool>,
+}
+
+impl ConsumptionDiagnostics {
+    fn record(&mut self, observation: ConsumptionCaptureObservation) {
+        self.busy_signal_kind = observation.busy.map(|match_| match_.kind);
+        self.busy_line_from_bottom = observation.busy.map(|match_| match_.line_from_bottom);
+        self.current_marker_in_bottom_15 = observation.marker_in_bottom_15;
+        self.paste_identity_in_composer = observation.paste_identity_in_composer;
+        self.consumption_from_capture_result = observation.consumption_from_capture_result;
+    }
+}
+
 /// ---
 /// purpose: Gone 分支在判已消费前复核 composer 占位符（PasteLatch 身份）
 /// contract: 锁定身份仍在，或未锁定但 grok `[Pasted: …]` 仍在 ⇒ Some(false)
@@ -2096,35 +2154,65 @@ fn marker_position_from_bottom(text: &str, marker: &str) -> Option<u32> {
     None
 }
 
-fn provider_busy_signal_in_tail(text: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BusySignalMatch {
+    kind: BusySignalKind,
+    line_from_bottom: u8,
+}
+
+fn busy_signal_kind_in_line(line: &str) -> Option<BusySignalKind> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("working") {
+        return Some(BusySignalKind::Working);
+    }
+    if lower.contains("thinking") {
+        return Some(BusySignalKind::Thinking);
+    }
+    if lower.contains("processing") {
+        return Some(BusySignalKind::Processing);
+    }
+    if lower.contains("esc to interrupt") {
+        return Some(BusySignalKind::EscToInterrupt);
+    }
+    if line.contains('●')
+        || line.contains('⏳')
+        || line.contains('⠋')
+        || line.contains('⠙')
+        || line.contains('⠹')
+        || line.contains('⠸')
+        || line.contains('⠼')
+        || line.contains('⠴')
+        || line.contains('⠦')
+        || line.contains('⠧')
+        || line.contains('⠇')
+        || line.contains('⠏')
+        || line.contains('✶')
+        || line.contains('✢')
+        || line.contains('✻')
+        || line.contains('✽')
+        || line.contains('✳')
+    {
+        return Some(BusySignalKind::SpinnerGlyph);
+    }
+    None
+}
+
+fn provider_busy_signal_match(text: &str) -> Option<BusySignalMatch> {
     text.lines()
         .rev()
         .filter(|line| !line.trim().is_empty())
         .take(15)
-        .any(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("working")
-                || lower.contains("thinking")
-                || lower.contains("processing")
-                || lower.contains("esc to interrupt")
-                || line.contains('●')
-                || line.contains('⏳')
-                || line.contains('⠋')
-                || line.contains('⠙')
-                || line.contains('⠹')
-                || line.contains('⠸')
-                || line.contains('⠼')
-                || line.contains('⠴')
-                || line.contains('⠦')
-                || line.contains('⠧')
-                || line.contains('⠇')
-                || line.contains('⠏')
-                || line.contains('✶')
-                || line.contains('✢')
-                || line.contains('✻')
-                || line.contains('✽')
-                || line.contains('✳')
+        .enumerate()
+        .find_map(|(line_from_bottom, line)| {
+            busy_signal_kind_in_line(line).map(|kind| BusySignalMatch {
+                kind,
+                line_from_bottom: line_from_bottom as u8,
+            })
         })
+}
+
+fn provider_busy_signal_in_tail(text: &str) -> bool {
+    provider_busy_signal_match(text).is_some()
 }
 
 /// ---
@@ -3101,6 +3189,7 @@ impl Transport for TmuxBackend {
                 let mut token_ever_visible = false;
                 let mut tracked_paste: Option<PasteLatch> = None;
                 let mut capture_tally = CaptureTally::default();
+                let mut before_busy_signal_kind = None;
                 let mut token_seen_after_paste = None;
                 let mut token_seen_after_enter = None;
                 token_visible_for_report = if let Some(m) = payload_token_marker(payload) {
@@ -3109,6 +3198,10 @@ impl Transport for TmuxBackend {
                         match self.capture(target, CaptureRange::Tail(80)) {
                             Ok(cap) => {
                                 capture_tally.record_ok(&cap.text, Some(m));
+                                if before_busy_signal_kind.is_none() {
+                                    before_busy_signal_kind = provider_busy_signal_match(&cap.text)
+                                        .map(|match_| match_.kind);
+                                }
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 if cap.text.contains(m) {
                                     visible = true;
@@ -3164,6 +3257,7 @@ impl Transport for TmuxBackend {
                             &capture_tally,
                             token_seen_after_paste,
                             None,
+                            before_busy_signal_kind,
                             surface,
                         )),
                     });
@@ -3177,6 +3271,7 @@ impl Transport for TmuxBackend {
                 let mut capture_retries: u32 = 0;
                 let mut consumed: Option<bool> = None;
                 let mut consumption_reason = SubmitConsumptionReason::Unknown;
+                let mut consumption_diagnostics = ConsumptionDiagnostics::default();
                 let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
                 let mut any_attempt_matched = false;
 
@@ -3217,6 +3312,13 @@ impl Transport for TmuxBackend {
                                     token_seen_after_enter = Some(false);
                                 }
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                let observation = consumption_capture_observation(
+                                    &cap.text,
+                                    marker,
+                                    token_ever_visible,
+                                    tracked_paste,
+                                );
+                                consumption_diagnostics.record(observation);
                                 let obs = submit_attempt_observation(
                                     attempt_index,
                                     &cap,
@@ -3229,20 +3331,14 @@ impl Transport for TmuxBackend {
                                 attempts_detail.push(obs);
                                 // NeverSeen 不得把 token 缺席写成 consumed；
                                 // 见过再消失，或本次占位符身份离开 composer，才停手。
-                                if consumption_from_capture(
-                                    &cap.text,
-                                    m,
-                                    token_ever_visible,
-                                    tracked_paste,
-                                ) == Some(true)
-                                {
+                                if observation.consumption_from_capture_result == Some(true) {
                                     consumption_reason =
                                         SubmitConsumptionReason::ConsumptionFromCapture;
                                     consumed = Some(true);
                                     break;
                                 }
                                 if cursor_single_enter_enabled() {
-                                    if provider_busy_signal_in_tail(&cap.text) {
+                                    if observation.busy.is_some() {
                                         consumption_reason =
                                             SubmitConsumptionReason::CursorPollingBusy;
                                         consumed = Some(true);
@@ -3329,6 +3425,13 @@ impl Transport for TmuxBackend {
                                         token_seen_after_enter = Some(false);
                                     }
                                     tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                    let observation = consumption_capture_observation(
+                                        &cap.text,
+                                        marker,
+                                        token_ever_visible,
+                                        tracked_paste,
+                                    );
+                                    consumption_diagnostics.record(observation);
                                     let obs = submit_attempt_observation(
                                         attempt_index,
                                         &cap,
@@ -3339,21 +3442,13 @@ impl Transport for TmuxBackend {
                                         any_attempt_matched = true;
                                     }
                                     attempts_detail.push(obs);
-                                    if consumption_from_capture(
-                                        &cap.text,
-                                        m,
-                                        token_ever_visible,
-                                        tracked_paste,
-                                    ) == Some(true)
-                                    {
+                                    if observation.consumption_from_capture_result == Some(true) {
                                         consumption_reason =
                                             SubmitConsumptionReason::ConsumptionFromCapture;
                                         found_consumed = true;
                                         break;
                                     }
-                                    if cursor_single_enter_enabled()
-                                        && provider_busy_signal_in_tail(&cap.text)
-                                    {
+                                    if cursor_single_enter_enabled() && observation.busy.is_some() {
                                         consumption_reason =
                                             SubmitConsumptionReason::CursorPollingBusy;
                                         found_consumed = true;
@@ -3361,6 +3456,8 @@ impl Transport for TmuxBackend {
                                     }
                                 }
                                 Err(_) => {
+                                    consumption_diagnostics
+                                        .record(ConsumptionCaptureObservation::default());
                                     capture_tally.record_err();
                                     capture_retries = capture_retries.saturating_add(1);
                                     consecutive_capture_failures =
@@ -3410,13 +3507,20 @@ impl Transport for TmuxBackend {
                     Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
                         Ok(cap) => {
                             last_turn_text = Some(cap.text.clone());
+                            let observation = consumption_capture_observation(
+                                &cap.text,
+                                marker,
+                                token_ever_visible,
+                                tracked_paste,
+                            );
+                            consumption_diagnostics.record(observation);
                             attempts_detail.push(submit_attempt_observation(
                                 consumption_attempts.max(1),
                                 &cap,
                                 marker,
                                 inject_start.elapsed().as_millis() as u64,
                             ));
-                            if provider_busy_signal_in_tail(&cap.text) {
+                            if observation.busy.is_some() {
                                 consumption_reason = SubmitConsumptionReason::FallbackBusy;
                                 SubmitVerification::EnterSentWithoutPlaceholderCheck
                             } else {
@@ -3425,6 +3529,8 @@ impl Transport for TmuxBackend {
                             }
                         }
                         Err(_) => {
+                            consumption_diagnostics
+                                .record(ConsumptionCaptureObservation::default());
                             consumption_reason = SubmitConsumptionReason::Unverified;
                             SubmitVerification::SubmitConsumptionUnverified
                         }
@@ -3478,6 +3584,13 @@ impl Transport for TmuxBackend {
                                             token_seen_after_enter = Some(false);
                                         }
                                         tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                        let observation = consumption_capture_observation(
+                                            &cap.text,
+                                            marker,
+                                            token_ever_visible,
+                                            tracked_paste,
+                                        );
+                                        consumption_diagnostics.record(observation);
                                         let obs = submit_attempt_observation(
                                             consumption_attempts.max(1),
                                             &cap,
@@ -3486,13 +3599,10 @@ impl Transport for TmuxBackend {
                                         );
                                         attempts_detail.push(obs);
                                         last_turn_text = Some(cap.text.clone());
-                                        let capture_consumed = consumption_from_capture(
-                                            &cap.text,
-                                            m,
-                                            token_ever_visible,
-                                            tracked_paste,
-                                        ) == Some(true);
-                                        let busy = provider_busy_signal_in_tail(&cap.text);
+                                        let capture_consumed = observation
+                                            .consumption_from_capture_result
+                                            == Some(true);
+                                        let busy = observation.busy.is_some();
                                         if capture_consumed || busy {
                                             // Gone+无 latch 会把折行 token 写成已消费；身份仍在则不算。
                                             if !this_paste_identity_in_composer(
@@ -3541,9 +3651,19 @@ impl Transport for TmuxBackend {
                     &capture_tally,
                     token_seen_after_paste,
                     token_seen_after_enter,
+                    before_busy_signal_kind,
                     surface,
                 );
                 submit_diagnostics.consumption_reason = consumption_reason;
+                submit_diagnostics.busy_signal_kind = consumption_diagnostics.busy_signal_kind;
+                submit_diagnostics.busy_line_from_bottom =
+                    consumption_diagnostics.busy_line_from_bottom;
+                submit_diagnostics.current_marker_in_bottom_15 =
+                    consumption_diagnostics.current_marker_in_bottom_15;
+                submit_diagnostics.paste_identity_in_composer =
+                    consumption_diagnostics.paste_identity_in_composer;
+                submit_diagnostics.consumption_from_capture_result =
+                    consumption_diagnostics.consumption_from_capture_result;
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,
                     inject_verification: inject_verification_after_readback(
