@@ -333,7 +333,7 @@ pub(super) fn spawn_agents(
                 Some(&profile_launch),
             )?;
             apply_cursor_spawn_workspace_pointers(&mut plan.argv, workspace, agent_id_raw)?;
-            let proxy = apply_cursor_subscription_proxy_env(&mut env);
+            let proxy = apply_cursor_subscription_proxy_env_with_profile(&mut env, &profile_launch);
             let event_log = crate::event_log::EventLog::new(workspace);
             let _ = event_log.write(
                 "provider.cursor.proxy_presence",

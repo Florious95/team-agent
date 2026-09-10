@@ -198,6 +198,43 @@ fn profile_init_accepts_local_proxy_mode_and_rejects_unknown_values() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+#[test]
+fn profile_init_existing_profile_reports_actual_mode_and_show_matches() {
+    let ws = tmp_workspace();
+    let make_args = |command: &str, mode: Option<&str>| ProfileArgs {
+        command: command.to_string(),
+        name: "cursor_sub".to_string(),
+        workspace: ws.clone(),
+        team: None,
+        auth_mode: Some("subscription".to_string()),
+        proxy_mode: mode.map(str::to_string),
+        json: true,
+    };
+    let first = cmd_profile(&make_args("init", Some("direct"))).unwrap();
+    let first = match first.output {
+        CmdOutput::Json(value) => value,
+        other => panic!("expected json output, got {other:?}"),
+    };
+    assert_eq!(first["proxy_mode"], "direct");
+    assert_eq!(first["proxy_mode_changed"], true);
+
+    let repeat = cmd_profile(&make_args("init", Some("inherit"))).unwrap();
+    let repeat = match repeat.output {
+        CmdOutput::Json(value) => value,
+        other => panic!("expected json output, got {other:?}"),
+    };
+    assert_eq!(repeat["proxy_mode"], "direct");
+    assert_eq!(repeat["proxy_mode_changed"], false);
+
+    let shown = cmd_profile(&make_args("show", None)).unwrap();
+    let shown = match shown.output {
+        CmdOutput::Json(value) => value,
+        other => panic!("expected json output, got {other:?}"),
+    };
+    assert_eq!(shown["proxy_mode"], "direct");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 // Golden source:
 // - profiles/core.py:95-119 doctor_profile returns ok=true for existing profiles and
 //   ok=false for missing profiles; parser.py:506-508 maps result.ok false to exit 1.

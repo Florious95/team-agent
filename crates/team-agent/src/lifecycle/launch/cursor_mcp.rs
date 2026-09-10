@@ -313,14 +313,7 @@ pub fn enable_cursor_workspace_mcp_with_profile(
     command
         .args(&argv[1..])
         .current_dir(&physical);
-    if let Some(profile_launch) = profile_launch {
-        for key in &profile_launch.env_unset {
-            command.env_remove(key);
-        }
-        for (key, value) in &profile_launch.env_overlay {
-            command.env(key, value);
-        }
-    }
+    apply_cursor_mcp_enable_profile_env(&mut command, profile_launch);
     let output = command.output().map_err(|e| {
         LifecycleError::RequirementUnmet(format!(
             "error: cannot run `{} mcp enable team_orchestrator`\n\
@@ -348,6 +341,21 @@ pub fn enable_cursor_workspace_mcp_with_profile(
         stderr.len(),
         argv[0]
     )))
+}
+
+pub(crate) fn apply_cursor_mcp_enable_profile_env(
+    command: &mut Command,
+    profile_launch: Option<&crate::provider::ProviderProfileLaunch>,
+) {
+    let Some(profile_launch) = profile_launch else {
+        return;
+    };
+    for key in &profile_launch.env_unset {
+        command.env_remove(key);
+    }
+    for (key, value) in &profile_launch.env_overlay {
+        command.env(key, value);
+    }
 }
 
 /// ---

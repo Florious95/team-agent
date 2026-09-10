@@ -505,6 +505,22 @@ pub fn apply_cursor_subscription_proxy_env(
     }
 }
 
+pub(crate) fn apply_cursor_subscription_proxy_env_with_profile(
+    env: &mut BTreeMap<String, String>,
+    profile_launch: &crate::provider::ProviderProfileLaunch,
+) -> CursorProxyPresence {
+    if crate::lifecycle::profile_launch::cursor_subscription_direct_mode(profile_launch) {
+        for key in &profile_launch.env_unset {
+            env.remove(key);
+        }
+        return CursorProxyPresence {
+            https_proxy: false,
+            no_proxy: env.keys().any(|key| key.eq_ignore_ascii_case("NO_PROXY")),
+        };
+    }
+    apply_cursor_subscription_proxy_env(env)
+}
+
 /// ---
 /// purpose: 把 profile 推出的环境清除与覆盖套用到 spawn 环境上
 /// params:
