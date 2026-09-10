@@ -3086,9 +3086,23 @@ pub mod lifecycle_port {
     /// 匹配 [`LifecycleError`] 的人读消息子串(`agent {id} not found` /
     /// `agent id already exists` / `unknown worker agent id`),给出下一步命令。
     fn error_next_action(message: &str) -> Option<&'static str> {
-        // start-agent 撞"agent ... not found":start-agent 语义=启动 state 已有 agent;
-        // 想新增角色应走 add-agent。
-        if message.contains("not found") && message.contains("agent") {
+        // Missing spec/runtime is not an agent-id miss. Workspace paths often
+        // contain "team-agent", so "not found"+"agent" must not win here.
+        if message.contains("active team spec not found")
+            || message.contains("missing spec for restart")
+        {
+            return Some(
+                "no team spec or runtime was found in this workspace. \
+                 Run `team-agent quick-start <workspace>` for first launch, \
+                 or restart from a workspace that already contains `.team`.",
+            );
+        }
+        // start-agent 撞"agent {id} not found":start-agent 语义=启动 state 已有 agent;
+        // 想新增角色应走 add-agent。要求 agent-id 形态，避免匹配路径里的 team-agent。
+        if message.contains("agent ")
+            && message.contains(" not found")
+            && !message.contains("spec not found")
+        {
             return Some(
                 "start-agent only starts an agent that already exists in state. \
                  To add a NEW role at runtime use: team-agent add-agent <id> --role-file <path>",
@@ -4613,6 +4627,45 @@ pub mod lifecycle_port {
                 error_next_action("state persistence failed: disk full"),
                 None
             );
+        }
+
+        #[test]
+        fn restart_missing_team_spec_does_not_point_to_add_agent() {
+            // Live empty-workspace restart: error is missing spec/runtime, but the
+            // workspace path commonly contains "team-agent", which the substring
+            // "not found"+"agent" matcher treats as start-agent miss.
+            let msg = "team select: active team spec not found: \
+                 input_workspace=/tmp/team-agent-live-missing \
+                 expected_runtime_dir=/tmp/team-agent-live-missing/.team/runtime";
+            let na = error_next_action(msg).expect("missing spec must keep a recovery action");
+            assert!(
+                !na.contains("add-agent"),
+                "must not steer restart-missing-spec to add-agent: {na}"
+            );
+            assert!(
+                !na.contains("start-agent only starts an agent"),
+                "must not reuse the start-agent miss copy: {na}"
+            );
+            assert!(
+                na.contains("quick-start"),
+                "must steer first launch to quick-start: {na}"
+            );
+        }
+
+        #[test]
+        fn restart_missing_spec_error_value_keeps_recovery_action() {
+            let err = crate::lifecycle::LifecycleError::RequirementUnmet(
+                "team select: active team spec not found: input_workspace=/tmp/team-agent-empty expected_runtime_dir=/tmp/team-agent-empty/.team/runtime"
+                    .to_string(),
+            );
+            let v = error_value(err);
+            assert_eq!(v["ok"], serde_json::json!(false));
+            let na = v["next_action"].as_str().unwrap_or("");
+            assert!(
+                na.contains("quick-start"),
+                "error_value must attach spec-missing recovery, got {v}"
+            );
+            assert!(!na.contains("add-agent"), "must not attach add-agent: {v}");
         }
 
         #[test]
