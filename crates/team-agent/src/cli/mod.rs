@@ -3098,11 +3098,12 @@ pub mod lifecycle_port {
             );
         }
         // start-agent 撞"agent {id} not found":start-agent 语义=启动 state 已有 agent;
-        // 想新增角色应走 add-agent。要求 agent-id 形态，避免匹配路径里的 team-agent。
-        if message.contains("agent ")
-            && message.contains(" not found")
-            && !message.contains("spec not found")
-        {
+        // 想新增角色应走 add-agent。只在 RequirementUnmet detail 以 `agent ` 开头时匹配，
+        // 避免 profile 文案中的 `team-agent profile ... not found` 误命中。
+        let agent_not_found = message
+            .strip_prefix("agent start requirement unmet: ")
+            .is_some_and(|detail| detail.starts_with("agent ") && detail.contains(" not found"));
+        if agent_not_found {
             return Some(
                 "start-agent only starts an agent that already exists in state. \
                  To add a NEW role at runtime use: team-agent add-agent <id> --role-file <path>",
@@ -4642,6 +4643,21 @@ pub mod lifecycle_port {
                     .unwrap_or("")
                     .contains("add-agent"),
                 "error_value must attach the add-agent guidance: {v}"
+            );
+        }
+
+        #[test]
+        fn profile_not_found_preserves_error_without_agent_guidance() {
+            let detail =
+                "profile pi-default not found; run team-agent profile init pi-default --auth-mode subscription";
+            let v = error_value(crate::lifecycle::LifecycleError::RequirementUnmet(
+                detail.to_string(),
+            ));
+            let expected = format!("agent start requirement unmet: {detail}");
+            assert_eq!(v["error"].as_str(), Some(expected.as_str()));
+            assert!(
+                v.get("next_action").is_none(),
+                "profile missing must not suggest start-agent/add-agent: {v}"
             );
         }
     }
