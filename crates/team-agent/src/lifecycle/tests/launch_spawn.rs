@@ -247,6 +247,85 @@ fn existing_runtime_producer_scopes_canonical_team() {
 }
 
 #[test]
+#[serial(env)]
+fn existing_runtime_requested_bob_does_not_emit_alice_members_or_attach() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let state = json!({
+        "active_team_key": "alice",
+        "agents": { "alice": { "window": "alice" } },
+        "session_name": "team-alice",
+        "tmux_endpoint": "/tmp/shared.sock",
+        "teams": {
+            "alice": {
+                "agents": { "alice": { "window": "alice" } },
+                "session_name": "team-alice"
+            },
+            "bob": {
+                "agents": { "bob": { "window": "bob" } },
+                "session_name": "team-bob"
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+    let report = quick_start_with_transport(&team, Some("bob"), true, None, &OfflineTransport::new())
+        .expect("requested bob existing runtime");
+    match report {
+        QuickStartReport::ExistingRuntime {
+            team: canonical,
+            agent_ids,
+            session_name,
+            attach_commands,
+            ..
+        } => {
+            assert_eq!(canonical.as_deref(), Some("bob"));
+            assert_eq!(agent_ids, vec!["bob".to_string()]);
+            assert_eq!(
+                session_name.as_ref().map(|session| session.as_str()),
+                Some("team-bob")
+            );
+            assert!(
+                attach_commands.iter().any(|command| command.contains("team-bob")),
+                "attach must follow bob session; got {attach_commands:?}"
+            );
+            assert!(
+                attach_commands
+                    .iter()
+                    .all(|command| !command.contains("alice") && !command.contains("team-alice")),
+                "attach must not steer to alice; got {attach_commands:?}"
+            );
+        }
+        other => panic!("expected ExistingRuntime for bob; got {other:?}"),
+    }
+}
+
+#[test]
+#[serial(env)]
+fn existing_runtime_empty_top_level_agents_still_emits_bob() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let state = json!({
+        "active_team_key": "bob",
+        "agents": {},
+        "teams": {
+            "bob": {
+                "agents": { "bob": { "window": "bob" } },
+                "session_name": "team-bob"
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+    let report = quick_start_with_transport(&team, Some("bob"), true, None, &OfflineTransport::new())
+        .expect("requested bob with empty top-level agents");
+    match report {
+        QuickStartReport::ExistingRuntime { agent_ids, .. } => {
+            assert_eq!(agent_ids, vec!["bob".to_string()]);
+        }
+        other => panic!("expected ExistingRuntime; got {other:?}"),
+    }
+}
+
+#[test]
 fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
     let workspace = temp_ws();
     let team = workspace.join(".team").join("current");

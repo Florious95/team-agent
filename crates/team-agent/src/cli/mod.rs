@@ -3850,6 +3850,37 @@ pub mod lifecycle_port {
         }
 
         #[test]
+        fn existing_runtime_send_guidance_does_not_pair_alice_with_bob() {
+            let mut value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: Some("bob".to_string()),
+                session_name: Some(crate::transport::SessionName::new("team-bob")),
+                state_path: Some(PathBuf::from("/tmp/state.json")),
+                next_actions: vec!["restart".to_string()],
+                attach_commands: Vec::new(),
+                agent_ids: vec!["bob".to_string()],
+            });
+            crate::cli::adapters::append_send_guidance(
+                &mut value,
+                Path::new("/tmp/ws"),
+                Some("bob"),
+            );
+            let command = value
+                .pointer("/send_commands/0")
+                .and_then(Value::as_str)
+                .expect("bob send command");
+            let argv = crate::cli::adapters::split_shell_argv(command);
+            assert_eq!(argv.get(2).map(String::as_str), Some("bob"));
+            assert_eq!(
+                argv.iter()
+                    .position(|item| item == "--team")
+                    .and_then(|i| argv.get(i + 1))
+                    .map(String::as_str),
+                Some("bob")
+            );
+            assert!(!argv.iter().any(|item| item == "alice"));
+        }
+
+        #[test]
         fn preflight_blocked_json_includes_empty_attach_commands() {
             let value = quick_start_value(crate::lifecycle::QuickStartReport::PreflightBlocked {
                 summary: "blocked".to_string(),

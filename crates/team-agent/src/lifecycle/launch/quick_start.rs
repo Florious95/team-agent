@@ -157,11 +157,10 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             self.last_failure_reason = Some("caller_pane_not_live");
             return false;
         };
-        if !caller_target.active
-            || caller_target
-                .current_path
-                .as_ref()
-                .is_none_or(|path| path.as_os_str().is_empty())
+        if caller_target
+            .current_path
+            .as_ref()
+            .is_none_or(|path| path.as_os_str().is_empty())
         {
             self.last_failure_reason = Some("caller_cwd_unobservable");
             return false;
@@ -863,6 +862,20 @@ fn clear_fresh_binding_on_refusal(
         )))
 }
 
+fn existing_runtime_identity_view(
+    state: &serde_json::Value,
+    requested_team: Option<&str>,
+) -> serde_json::Value {
+    let Some(team) = requested_team.filter(|team| !team.is_empty()) else {
+        return state.clone();
+    };
+    let teams = state.get("teams").and_then(serde_json::Value::as_object);
+    if teams.is_some_and(|teams| teams.contains_key(team) || !teams.is_empty()) {
+        return crate::state::projection::project_top_level_view(state, team);
+    }
+    state.clone()
+}
+
 fn preflight_fresh_leader_identity(
     transport: &dyn Transport,
 ) -> Option<(String, Vec<String>, Vec<String>)> {
@@ -1285,7 +1298,8 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
             .as_deref()
             .is_none_or(|team| runtime_state_has_quick_start_team(&state, team))
         {
-            let session_name = state
+            let identity = existing_runtime_identity_view(&state, requested_team.as_deref());
+            let session_name = identity
                 .get("session_name")
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| !s.is_empty())
@@ -1293,11 +1307,19 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
             let attach_commands = session_name
                 .as_ref()
                 .map(|session| {
-                    let windows = quick_start_attach_window_names(&state);
+                    let windows = quick_start_attach_window_names(&identity);
                     attach_commands_for_runtime_windows(
-                        state
+                        identity
                             .get("tmux_endpoint")
                             .and_then(serde_json::Value::as_str)
+                            .or_else(|| {
+                                identity.get("tmux_socket").and_then(serde_json::Value::as_str)
+                            })
+                            .or_else(|| {
+                                state
+                                    .get("tmux_endpoint")
+                                    .and_then(serde_json::Value::as_str)
+                            })
                             .or_else(|| {
                                 state.get("tmux_socket").and_then(serde_json::Value::as_str)
                             }),
@@ -1332,19 +1354,10 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
                 }
                 next_actions.extend(attach_commands.iter().cloned());
             }
-            let agent_ids = state
+            let agent_ids = identity
                 .get("agents")
                 .and_then(serde_json::Value::as_object)
                 .map(|agents| agents.keys().cloned().collect::<Vec<_>>())
-                .or_else(|| {
-                    state
-                        .get("teams")
-                        .and_then(serde_json::Value::as_object)
-                        .and_then(|teams| requested_team.as_ref().and_then(|team| teams.get(team)))
-                        .and_then(|team| team.get("agents"))
-                        .and_then(serde_json::Value::as_object)
-                        .map(|agents| agents.keys().cloned().collect())
-                })
                 .unwrap_or_default();
             return Ok(QuickStartReport::ExistingRuntime {
                 team: requested_team.clone(),
@@ -3259,6 +3272,171 @@ mod fresh_quick_start_leader_binding_tests {
             pane_pid: Some(101),
             leader_env,
         }
+    }
+
+    fn bind_seeded_caller(target: PaneInfo, hermetic_name: &str) -> (bool, Option<&'static str>) {
+        let hermetic = HermeticTestEnv::enter(hermetic_name);
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let seed = seeded_runtime_owner(&workspace);
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash")
+            .with_targets(vec![target]);
+        let mut ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+            cas_conflict: false,
+            applied_grant: None,
+            registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
+            nonce_writer: None,
+        };
+        let ok = crate::transport_factory::with_leader_endpoint_transport(
+            "/tmp/tmux.sock",
+            transport.clone(),
+            || bind_fresh_quick_start_leader_with(&workspace, "fresh", Some(&seed), &mut ops),
+        )
+        .unwrap();
+        (ok, ops.last_failure_reason)
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_bind_ignores_pane_focus_for_same_live_caller() {
+        let parent = std::env::temp_dir().join(format!(
+            "ta-inactive-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let mut focused = caller_target(parent.clone(), Some("shared-live-nonce"));
+        focused.active = true;
+        let (active_ok, active_reason) = bind_seeded_caller(focused, "runtime-focus-active");
+        assert!(active_ok, "focused live caller must bind: {active_reason:?}");
+
+        let mut background = caller_target(parent, Some("shared-live-nonce"));
+        background.active = false;
+        let (inactive_ok, inactive_reason) =
+            bind_seeded_caller(background, "runtime-focus-inactive");
+        assert!(
+            inactive_ok,
+            "same live caller with pane_active=0 must still bind: {inactive_reason:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_bind_dead_pane_still_refuses() {
+        let hermetic = HermeticTestEnv::enter("runtime-dead-pane");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let seed = seeded_runtime_owner(&workspace);
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+            cas_conflict: false,
+            applied_grant: None,
+            registry_receipt: None,
+            frozen_owner: None,
+            frozen_receiver: None,
+            nonce_writer: None,
+        };
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", Some(&seed), &mut ops)
+            .unwrap());
+        assert_eq!(ops.last_failure_reason, Some("caller_pane_not_live"));
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn seeded_runtime_bind_identity_mismatch_still_refuses() {
+        let parent = std::env::temp_dir().join(format!(
+            "ta-mismatch-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let mut other_pane = caller_target(parent, Some("shared-live-nonce"));
+        other_pane.pane_id = PaneId::new("%9");
+        let (ok, reason) = bind_seeded_caller(other_pane, "runtime-identity-mismatch");
+        assert!(!ok);
+        assert_eq!(reason, Some("caller_pane_not_live"));
+    }
+
+    #[test]
+    fn existing_runtime_view_uses_requested_bob_not_top_level_alice() {
+        let state = json!({
+            "agents": { "alice": { "window": "alice" } },
+            "session_name": "team-alice",
+            "tmux_endpoint": "/tmp/shared.sock",
+            "teams": {
+                "alice": {
+                    "agents": { "alice": { "window": "alice" } },
+                    "session_name": "team-alice"
+                },
+                "bob": {
+                    "agents": { "bob": { "window": "bob" } },
+                    "session_name": "team-bob"
+                }
+            }
+        });
+        let view = existing_runtime_identity_view(&state, Some("bob"));
+        let ids = view
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .map(|agents| agents.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(ids, vec!["bob".to_string()]);
+        assert_eq!(view.get("session_name").and_then(serde_json::Value::as_str), Some("team-bob"));
+    }
+
+    #[test]
+    fn existing_runtime_view_empty_top_level_agents_still_emits_bob() {
+        let state = json!({
+            "agents": {},
+            "teams": {
+                "bob": {
+                    "agents": { "bob": { "window": "bob" } },
+                    "session_name": "team-bob"
+                }
+            }
+        });
+        let view = existing_runtime_identity_view(&state, Some("bob"));
+        assert!(view
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|agents| agents.contains_key("bob")));
+    }
+
+    #[test]
+    fn existing_runtime_view_legacy_root_without_teams_map() {
+        let state = json!({
+            "agents": { "alice": { "window": "alice" } },
+            "session_name": "team-alice"
+        });
+        let view = existing_runtime_identity_view(&state, Some("alice"));
+        assert!(view
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|agents| agents.contains_key("alice")));
     }
 
     #[test]

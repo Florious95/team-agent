@@ -2183,7 +2183,7 @@ fn authorize_fresh_caller_receiver(
     let Some(target) = caller_target else {
         return Ok(());
     };
-    if target.pane_id.as_str() != pane.as_pane_id().as_str() || !target.active {
+    if target.pane_id.as_str() != pane.as_pane_id().as_str() {
         return Err(LeaderError::Validation(
             "fresh caller pane observation does not match the bound pane".to_string(),
         ));
