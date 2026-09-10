@@ -484,7 +484,7 @@ fn provider_env_exports(
         // grok/cursor_agent 一期无 profile exports（subscription 已登录态）。
         // Cursor 订阅席的代理透传不在这里：profile 只服务 compatible-api。
         // 订阅路径见 apply_cursor_subscription_proxy_env（只记有无，不记值）。
-        Provider::Grok | Provider::CursorAgent => {}
+        Provider::Grok | Provider::CursorAgent | Provider::Pi => {}
         Provider::Fake => {}
     }
     exports
@@ -567,6 +567,7 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
         // 禁止在这里 unset 代理。
         Provider::Grok => {}
         Provider::CursorAgent => {}
+        Provider::Pi => {}
         Provider::Fake => {}
     }
     unsets
@@ -992,7 +993,7 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
         // 二期 BYOK 立项时填(向后兼容字段保留)。
         Provider::Copilot => &[],
         // 0.5.67: grok/cursor_agent 一期无 BYOK required key 集合 (同 copilot 精神)。
-        Provider::Grok | Provider::CursorAgent => &[],
+        Provider::Grok | Provider::CursorAgent | Provider::Pi => &[],
         Provider::Fake => &[],
     }
 }
