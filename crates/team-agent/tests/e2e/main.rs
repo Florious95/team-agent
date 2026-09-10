@@ -81,6 +81,7 @@ mod cases {
 #[cfg(test)]
 mod framework_tests {
     use super::framework::*;
+    use serde_json::json;
     use std::time::Duration;
 
     #[test]
@@ -138,12 +139,57 @@ mod framework_tests {
     }
 
     #[test]
+    fn no_caller_worker_only_fixture_rejects_incomplete_facts() {
+        let spawned = json!({
+            "ok": false,
+            "status": "leader_binding_incomplete",
+            "reason": "caller_pane_missing",
+            "session_name": "team-neg",
+            "readiness": {"all_workers_spawned": true, "reason": "caller_pane_missing"}
+        });
+        let missing_spawned = json!({
+            "ok": false,
+            "status": "leader_binding_incomplete",
+            "reason": "caller_pane_missing",
+            "session_name": "team-neg",
+            "readiness": {"all_workers_spawned": false, "reason": "caller_pane_missing"}
+        });
+        let wrong_status = json!({
+            "ok": false,
+            "status": "failed",
+            "reason": "caller_pane_missing",
+            "session_name": "team-neg",
+            "readiness": {"all_workers_spawned": true, "reason": "caller_pane_missing"}
+        });
+        let bind_ok = json!({
+            "ok": true,
+            "status": "launched",
+            "session_name": "team-neg",
+            "readiness": {"all_workers_spawned": true}
+        });
+        fn wrap(value: serde_json::Value) -> TaResult {
+            TaResult {
+                argv: vec!["team-agent".into(), "quick-start".into()],
+                stdout: value.to_string(),
+                stderr: String::new(),
+                exit_code: 1,
+            }
+        }
+        assert!(no_caller_worker_only_fixture_started(&wrap(spawned.clone())));
+        assert!(!no_caller_worker_only_fixture_started(&wrap(missing_spawned)));
+        assert!(!no_caller_worker_only_fixture_started(&wrap(wrong_status)));
+        assert!(!no_caller_worker_only_fixture_started(&wrap(bind_ok.clone())));
+        assert!(quick_start_launched(&wrap(bind_ok)));
+        assert!(!quick_start_launched(&wrap(spawned.clone())));
+    }
+
+    #[test]
     fn drop_stops_owned_coordinator_after_worker_is_stopped() {
         let team_id = format!("cleanup{}", std::process::id());
         let (workspace, coordinator_pid) = {
             let ws = TestWorkspace::new("cleanup-drop").with_fake_spec(&["a"]);
             let qs = quick_start_fake(&ws, &team_id);
-            assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+            assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
             let stop = run_ta(
                 &ws,

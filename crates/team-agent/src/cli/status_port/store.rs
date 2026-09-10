@@ -230,7 +230,7 @@ pub(super) fn pending_leader_notifications(
             "created_at": row.get::<_, Option<String>>(4)?,
             "delivery_attempts": row.get::<_, i64>(5)?,
             "channel": channel,
-            "action": "run team-agent attach-leader or team-agent takeover",
+            "action": "historical leader mailbox debt; not proof of current unbound owner",
         }))
     };
     let rows = match owner_team_id {

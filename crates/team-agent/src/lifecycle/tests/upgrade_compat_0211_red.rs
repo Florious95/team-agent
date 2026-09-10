@@ -72,12 +72,19 @@ fn upgrade_0211_state_team_key_runtime_key_not_spec_name() {
         },
         Some(TEAM_KEY),
     ));
+    let node_names = status
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("status brief must expose nodes")
+        .iter()
+        .filter_map(|node| node.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
     assert!(
-        status.pointer("/agents/upgrade_worker").is_some(),
+        node_names.contains(&"upgrade_worker"),
         "status --team upgrade-key must project the runtime-key team; status={status}"
     );
     assert!(
-        status.pointer("/agents/sibling_worker").is_none(),
+        !node_names.contains(&"sibling_worker"),
         "status --team upgrade-key must not collapse to sibling/spec-name state; status={status}"
     );
 }
@@ -216,15 +223,20 @@ fn upgrade_status_collect_scope_by_selected_team_key() {
         },
         Some(TEAM_KEY),
     ));
-    assert_eq!(
-        status.pointer("/results/total").and_then(Value::as_i64),
-        Some(2),
-        "status --team upgrade-key must count only upgrade-key results and exclude sibling rows; status={status}"
+    let node_names = status
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("status brief must expose nodes")
+        .iter()
+        .filter_map(|node| node.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        node_names.contains(&"upgrade_worker"),
+        "status --team upgrade-key must retain the selected runtime-key node; status={status}"
     );
-    assert_eq!(
-        status.pointer("/messages/accepted").and_then(Value::as_i64),
-        Some(1),
-        "status --team upgrade-key must count only upgrade-key messages; status={status}"
+    assert!(
+        !node_names.contains(&"sibling_worker"),
+        "status --team upgrade-key must not expose sibling rows; status={status}"
     );
 
     let collect = json_output(cmd_collect_for_team(

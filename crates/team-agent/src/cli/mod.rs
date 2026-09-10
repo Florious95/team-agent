@@ -2642,9 +2642,48 @@ pub mod lifecycle_port {
             allow_fresh,
             team,
         ) {
-            Ok(report) => {
-                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
+            Ok(crate::lifecycle::StartAgentOutcome::Running {
+                env,
+                start_mode,
+                target,
+                session_id,
+                new_session_id,
+                rollout_path,
+            }) => Ok(agent_action_value(
+                agent,
+                workspace,
+                team,
+                json!({
+                    "ok": true,
+                    "agent_id": env.agent_id.as_str(),
+                    "status": "running",
+                    "start_mode": start_mode,
+                    "target": target,
+                    "session_id": session_id.as_ref().map(|id| id.as_str()),
+                    "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
+                    "rollout_path": rollout_path
+                        .as_ref()
+                        .map(|path| path.as_path().to_string_lossy().to_string()),
+                    "coordinator_started": env.coordinator_started,
+                    "state_file": env.state_file.to_string_lossy(),
+                }),
+            )),
+            Ok(crate::lifecycle::StartAgentOutcome::Noop { env, target }) => {
+                Ok(agent_action_value(agent, workspace, team, json!({
+                    "ok": true,
+                    "agent_id": env.agent_id.as_str(),
+                    "status": "already_running",
+                    "target": target,
+                    "coordinator_started": env.coordinator_started,
+                    "state_file": env.state_file.to_string_lossy(),
+                })))
             }
+            Ok(crate::lifecycle::StartAgentOutcome::Paused { agent_id }) => Ok(json!({
+                "ok": false,
+                "agent_id": agent_id.as_str(),
+                "status": "paused",
+                "reason": "agent_paused",
+            })),
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -2731,14 +2770,34 @@ pub mod lifecycle_port {
             team,
             force,
         ) {
-            Ok(report) => Ok(json!({
-                "ok": true,
-                "agent_id": agent,
-                "role_file": report.role_file.to_string_lossy(),
-            })),
+            Ok(report) => Ok(agent_action_value(
+                agent,
+                workspace,
+                team,
+                json!({
+                    "ok": true,
+                    "agent_id": report.env.agent_id.as_str(),
+                    "status": "running",
+                    "start_mode": report.start_mode,
+                    "role_file": report.role_file.to_string_lossy(),
+                    "coordinator_started": report.env.coordinator_started,
+                    "state_file": report.env.state_file.to_string_lossy(),
+                }),
+            )),
             Err(e) => Ok(error_value(e)),
         }
     }
+    fn agent_action_value(agent: &str, workspace: &Path, team: Option<&str>, mut value: Value) -> Value {
+        if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            if let Some(object) = value.as_object_mut() {
+                if let Some(command) = super::adapters::send_command(agent, workspace, team) {
+                    object.insert("send_commands".to_string(), json!([command]));
+                }
+            }
+        }
+        value
+    }
+
     ///
     /// `runtime.fork_agent`(`cmd_fork_agent`;`--as` 必需)。
     pub fn fork_agent(
@@ -3164,6 +3223,117 @@ pub mod lifecycle_port {
         );
     }
 
+    const COMPACT_READINESS_KEYS: [&str; 6] = [
+        "all_workers_spawned",
+        "state",
+        "ready",
+        "reason",
+        "next_action",
+        "unhealthy_agents",
+    ];
+
+    fn compact_readiness_object(value: Option<&mut Value>) {
+        let Some(object) = value.and_then(Value::as_object_mut) else {
+            return;
+        };
+        object.retain(|key, _| COMPACT_READINESS_KEYS.contains(&key.as_str()));
+    }
+
+    pub(crate) fn compact_quick_start_value(value: &mut Value) {
+        if let Some(object) = value.as_object_mut() {
+            // Default contract: outcome, error/next action, attach/send, and a
+            // short readiness verdict. Diagnostic aliases stay behind --detail.
+            object.remove("agent_ids");
+            object.remove("dry_run");
+            compact_readiness_object(object.get_mut("readiness"));
+            compact_readiness_object(object.get_mut("worker_readiness"));
+        }
+    }
+
+    fn public_leader_bind_failure(
+        stage: Option<&str>,
+        reason: Option<&str>,
+        _workers_spawned: bool,
+    ) -> (&'static str, String, Option<String>) {
+        match reason {
+            Some("invalid_caller_tuple") => (
+                "leader_bind_refused",
+                "invalid_caller_tuple".to_string(),
+                Some(
+                    "fix conflicting CALLER_* identity; do not run claim-leader".to_string(),
+                ),
+            ),
+            Some("provider_unresolved") => (
+                "leader_bind_refused",
+                "provider_unresolved".to_string(),
+                Some(
+                    "set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader"
+                        .to_string(),
+                ),
+            ),
+            Some("caller_pane_missing") => (
+                "leader_binding_incomplete",
+                "caller_pane_missing".to_string(),
+                Some("run from the intended leader tmux pane; do not run claim-leader".to_string()),
+            ),
+            Some("registry_readback_unavailable")
+            | Some("receiver_scope_unavailable")
+            | Some("receiver_live_channel_unavailable")
+            | Some("registry_identity_mismatch") => (
+                "leader_binding_unknown",
+                format!("{}:{}", stage.unwrap_or("bind"), reason.unwrap_or("unknown")),
+                Some(
+                    "inspect the selected-team registry file and live leader channel; do not claim-leader"
+                        .to_string(),
+                ),
+            ),
+            Some("no_attached_owner") => (
+                "leader_receiver_unbound",
+                "no_attached_owner".to_string(),
+                Some("team-agent claim-leader --confirm --json".to_string()),
+            ),
+            Some(reason) => (
+                "leader_binding_unknown",
+                format!("{}:{reason}", stage.unwrap_or("bind")),
+                Some(
+                    "inspect the selected-team registry file and live leader channel; do not claim-leader"
+                        .to_string(),
+                ),
+            ),
+            None => (
+                "leader_binding_unknown",
+                "unclassified_bind_failure".to_string(),
+                Some(
+                    "inspect the selected-team registry file and live leader channel; do not claim-leader"
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+
+    fn dirty_topology_next_actions(reason: &str, issue_ids: &[String], team: &str) -> Vec<String> {
+        if reason == "worker_session_is_leader_session"
+            || issue_ids
+                .iter()
+                .any(|id| id == "worker_session_is_leader_session")
+        {
+            return vec![
+                "repair state.session_name to the worker session; it currently names the leader launcher session".to_string(),
+                format!("team-agent diagnose --team {team} --json"),
+            ];
+        }
+        let mut actions = vec![format!("team-agent diagnose --team {team} --json")];
+        if issue_ids
+            .iter()
+            .any(|id| id.contains("socket") || id.contains("endpoint"))
+        {
+            actions.push(
+                "repair tmux endpoint/socket split from the intended leader socket".to_string(),
+            );
+        }
+        actions
+    }
+
     fn quick_start_value(report: crate::lifecycle::QuickStartReport) -> Value {
         match report {
             crate::lifecycle::QuickStartReport::Ready {
@@ -3173,6 +3343,7 @@ pub mod lifecycle_port {
                 attach_commands,
                 display_backend,
                 worker_readiness,
+                team,
             } => {
                 // BUG-7: never emit bare "ready" while worker tool-load is unverified.
                 // The summary string + a structured `worker_readiness` block tell the
@@ -3196,6 +3367,7 @@ pub mod lifecycle_port {
                         ),
                         false,
                         json!({
+                            "reason": "worker_unhealthy",
                             "all_spawned": all_spawned,
                             "all_workers_spawned": all_workers_spawned,
                             "all_attached_receiver": all_attached_receiver,
@@ -3262,29 +3434,39 @@ pub mod lifecycle_port {
                                 }),
                             )
                         } else {
+                            let (state, reason, next_action) = public_leader_bind_failure(
+                                launch.leader_bind_stage.as_deref(),
+                                launch.leader_bind_reason.as_deref(),
+                                all_spawned,
+                            );
+                            let mut readiness = json!({
+                                "all_spawned": all_spawned,
+                                "all_workers_spawned": all_workers_spawned,
+                                "all_attached_receiver": all_attached_receiver,
+                                "attached_receiver": attached_receiver,
+                                "leader_receiver_attached": leader_receiver_attached,
+                                "all_resumable_have_session": all_resumable_have_session,
+                                "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
+                                "ready": false,
+                                "state": state,
+                                "session_capture_complete": all_resumable_have_session,
+                                "session_capture_incomplete": !all_resumable_have_session,
+                                "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
+                                "pending_session_agent_ids": incomplete_session_capture_agents,
+                                "reason": reason,
+                            });
+                            if let Some(next_action) = next_action {
+                                if let Some(object) = readiness.as_object_mut() {
+                                    object.insert("next_action".to_string(), json!(next_action));
+                                }
+                            }
                             (
                                 format!(
-                                    "quick-start degraded: {}; leader receiver unbound",
+                                    "quick-start degraded: {}; {reason}",
                                     session_name.as_str()
                                 ),
                                 false,
-                                json!({
-                                    "all_spawned": all_spawned,
-                                    "all_workers_spawned": all_workers_spawned,
-                                    "all_attached_receiver": all_attached_receiver,
-                                    "attached_receiver": attached_receiver,
-                                    "leader_receiver_attached": leader_receiver_attached,
-                                    "all_resumable_have_session": all_resumable_have_session,
-                                    "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
-                                    "ready": all_spawned && all_attached_receiver && all_resumable_have_session,
-                                    "state": "leader_receiver_unbound",
-                                    "session_capture_complete": all_resumable_have_session,
-                                    "session_capture_incomplete": !all_resumable_have_session,
-                                    "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
-                                    "pending_session_agent_ids": incomplete_session_capture_agents,
-                                    "reason": "launched team has no attached leader receiver",
-                                    "next_action": "claim-leader",
-                                }),
+                                readiness,
                             )
                         }
                     }
@@ -3296,6 +3478,8 @@ pub mod lifecycle_port {
                     "reason": readiness_json.get("reason").cloned().unwrap_or(Value::Null),
                     "ready": readiness_json.get("ready").cloned().unwrap_or(Value::Bool(false)),
                     "session_name": session_name.as_str(),
+                    "team": team,
+                    "agent_ids": launch.started.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
                     "dry_run": launch.dry_run,
                     "display_backend": display_backend,
                     "next_actions": next_actions,
@@ -3311,10 +3495,14 @@ pub mod lifecycle_port {
                 state_path,
                 next_actions,
                 attach_commands,
+                agent_ids,
             } => json!({
                 "ok": false,
+                "status": "existing_runtime",
+                "reason": "team already has runtime state; use restart",
                 "summary": "existing runtime",
                 "team": team,
+                "agent_ids": agent_ids,
                 "session_name": session_name.map(|s| s.as_str().to_string()),
                 "state_path": state_path.map(|p| p.to_string_lossy().to_string()),
                 "next_actions": next_actions,
@@ -3328,6 +3516,8 @@ pub mod lifecycle_port {
                 attach_commands,
             } => json!({
                 "ok": false,
+                "status": "preflight_blocked",
+                "reason": "quick-start preflight blocked",
                 "summary": summary,
                 "blockers": blockers,
                 "next_actions": next_actions,
@@ -3342,6 +3532,302 @@ pub mod lifecycle_port {
         use super::*;
 
         #[test]
+        fn quick_start_default_receipt_is_compact_but_detail_preserves_readiness() {
+            let readiness = json!({
+                "all_spawned": true,
+                "all_workers_spawned": true,
+                "all_attached_receiver": false,
+                "attached_receiver": false,
+                "leader_receiver_attached": false,
+                "all_resumable_have_session": true,
+                "all_resumable_agents_have_sessions": true,
+                "ready": false,
+                "state": "leader_bind_refused",
+                "session_capture_complete": true,
+                "session_capture_incomplete": false,
+                "incomplete_session_capture_agents": [],
+                "pending_session_agent_ids": [],
+                "reason": "provider_unresolved",
+                "next_action": "set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader"
+            });
+            let detail = json!({
+                "ok": false,
+                "status": "leader_bind_refused",
+                "reason": "provider_unresolved",
+                "ready": false,
+                "session_name": "team-fresh",
+                "next_actions": ["set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader"],
+                "attach_commands": ["tmux attach"],
+                "send_commands": ["team-agent send worker hi"],
+                "agent_ids": ["worker"],
+                "readiness": readiness.clone(),
+                "worker_readiness": readiness,
+                "dry_run": false
+            });
+            let mut default = detail.clone();
+            compact_quick_start_value(&mut default);
+            assert_eq!(default["status"], json!("leader_bind_refused"));
+            assert_eq!(
+                default["reason"],
+                json!("provider_unresolved")
+            );
+            assert_eq!(
+                default["next_actions"],
+                json!(["set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader"])
+            );
+            assert_eq!(default["attach_commands"], json!(["tmux attach"]));
+            assert_eq!(
+                default["send_commands"],
+                json!(["team-agent send worker hi"])
+            );
+            assert!(default.get("agent_ids").is_none());
+            assert!(default.get("dry_run").is_none());
+            assert_eq!(default["readiness"]["all_workers_spawned"], json!(true));
+            assert_eq!(default["readiness"]["state"], json!("leader_bind_refused"));
+            assert_eq!(
+                default["readiness"]["next_action"],
+                json!("set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader")
+            );
+            assert!(default["readiness"].get("all_spawned").is_none());
+            assert!(default["readiness"].get("all_attached_receiver").is_none());
+            assert!(default["readiness"].get("leader_receiver_attached").is_none());
+            assert_eq!(
+                default["worker_readiness"]["all_workers_spawned"],
+                json!(true)
+            );
+            assert!(default["worker_readiness"].get("all_spawned").is_none());
+            assert!(detail["readiness"].get("all_spawned").is_some());
+            assert!(detail["worker_readiness"].get("leader_receiver_attached").is_some());
+        }
+
+        #[test]
+        fn restarted_json_ok_follows_bind_status() {
+            let coordinator = crate::lifecycle::CoordinatorStartSummary {
+                ok: true,
+                status: "started".to_string(),
+                pid: None,
+                binary_path: None,
+                binary_version: None,
+                rotation_reason: None,
+                binary_identity_relation: "same".to_string(),
+            };
+            let value = restart_value(
+                crate::lifecycle::RestartReport::Restarted {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: Vec::new(),
+                    coordinator_started: true,
+                    coordinator: coordinator.clone(),
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                    attach_window_failures: None,
+                    leader_bind_ok: true,
+                    leader_bind_reason: None,
+                },
+                None,
+            );
+            assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true));
+            let incomplete = restart_value(
+                crate::lifecycle::RestartReport::Restarted {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: Vec::new(),
+                    coordinator_started: true,
+                    coordinator,
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                    attach_window_failures: None,
+                    leader_bind_ok: false,
+                    leader_bind_reason: Some("leader_registry_index_missing".to_string()),
+                },
+                None,
+            );
+            assert_eq!(incomplete.get("ok").and_then(Value::as_bool), Some(false));
+            assert_eq!(
+                incomplete.get("reason").and_then(Value::as_str),
+                Some("leader_registry_index_missing")
+            );
+        }
+
+        #[test]
+        fn partial_json_exposes_leader_bind_ok() {
+            let value = restart_value(
+                crate::lifecycle::RestartReport::Partial {
+                    session_name: crate::transport::SessionName::new("s"),
+                    agents: Vec::new(),
+                    failed_agents: Vec::new(),
+                    coordinator_started: true,
+                    coordinator: crate::lifecycle::CoordinatorStartSummary {
+                        ok: true,
+                        status: "started".to_string(),
+                        pid: None,
+                        binary_path: None,
+                        binary_version: None,
+                        rotation_reason: None,
+                        binary_identity_relation: "same".to_string(),
+                    },
+                    next_actions: Vec::new(),
+                    attach_commands: Vec::new(),
+                    attach_window_failures: Some(json!({"registry_maintain_failed": true})),
+                    leader_bind_ok: false,
+                    leader_bind_reason: Some("leader_registry_maintain_failed".to_string()),
+                },
+                None,
+            );
+            assert_eq!(value.get("ok").and_then(Value::as_bool), Some(false));
+            assert_eq!(
+                value.get("leader_bind_ok").and_then(Value::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                value.get("leader_bind_reason").and_then(Value::as_str),
+                Some("leader_registry_maintain_failed")
+            );
+            assert_eq!(
+                value
+                    .pointer("/attach_window_failures/registry_maintain_failed")
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
+        }
+
+        fn restart_default_receipt_is_compact_but_detail_preserves_coordinator() {
+            let detail = json!({
+                "ok": false,
+                "status": "partial",
+                "reason": "restart_agent_failed",
+                "failed_agents": [{"agent_id": "worker", "error": "spawn failed"}],
+                "next_actions": ["restart-agent worker"],
+                "attach_commands": [],
+                "coordinator": {"status": "running", "transport": "default"}
+            });
+            let mut default = detail.clone();
+            compact_restart_value(&mut default);
+            assert_eq!(default["status"], json!("partial"));
+            assert_eq!(default["reason"], json!("restart_agent_failed"));
+            assert_eq!(default["next_actions"], json!(["restart-agent worker"]));
+            assert!(default.get("coordinator").is_none());
+            assert!(detail.get("coordinator").is_some());
+        }
+
+        #[test]
+        #[serial_test::serial(env)]
+        fn existing_runtime_producer_scopes_send_team() {
+            let root = std::env::temp_dir().join(format!(
+                "ta-n5-prod-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let team_dir = root.join("teamdir");
+            std::fs::create_dir_all(team_dir.join("agents")).unwrap();
+            std::fs::write(
+                team_dir.join("TEAM.md"),
+                "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                team_dir.join("agents").join("implementer.md"),
+                "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n",
+            )
+            .unwrap();
+            let transport = crate::transport::test_support::OfflineTransport::new();
+            let first = crate::lifecycle::quick_start_with_transport(
+                &team_dir,
+                Some("from-name"),
+                true,
+                None,
+                &transport,
+            )
+            .expect("first quick-start");
+            let crate::lifecycle::QuickStartReport::Ready { team: ready_team, .. } = &first
+            else {
+                panic!("first producer must return Ready; got {first:?}");
+            };
+            assert_eq!(ready_team, "from-name");
+            let ready_command = crate::cli::adapters::send_command(
+                "implementer",
+                &team_dir,
+                Some(ready_team.as_str()),
+            )
+            .expect("Ready send_command");
+            assert_eq!(
+                crate::cli::adapters::split_shell_argv(&ready_command),
+                vec![
+                    "team-agent".to_string(),
+                    "send".to_string(),
+                    "implementer".to_string(),
+                    "MESSAGE".to_string(),
+                    "--workspace".to_string(),
+                    team_dir.to_string_lossy().into_owned(),
+                    "--team".to_string(),
+                    "from-name".to_string(),
+                ]
+            );
+            let report = crate::lifecycle::quick_start_with_transport(
+                &team_dir,
+                Some("from-name"),
+                true,
+                None,
+                &transport,
+            )
+            .expect("second quick-start");
+            let crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: canonical,
+                agent_ids,
+                ..
+            } = &report
+            else {
+                panic!("producer must return ExistingRuntime; got {report:?}");
+            };
+            assert_eq!(canonical.as_deref(), Some("from-name"));
+            assert!(agent_ids.iter().any(|id| id == "implementer"));
+            let mut value = quick_start_value(report);
+            crate::cli::adapters::append_send_guidance(&mut value, &team_dir, None);
+            let command = value
+                .pointer("/send_commands/0")
+                .and_then(Value::as_str)
+                .expect("producer send_commands");
+            assert_eq!(
+                crate::cli::adapters::split_shell_argv(command),
+                vec![
+                    "team-agent".to_string(),
+                    "send".to_string(),
+                    "implementer".to_string(),
+                    "MESSAGE".to_string(),
+                    "--workspace".to_string(),
+                    team_dir.to_string_lossy().into_owned(),
+                    "--team".to_string(),
+                    "from-name".to_string(),
+                ]
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[test]
+        fn existing_runtime_json_includes_canonical_team_and_agent_ids() {
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: Some("from-spec".to_string()),
+                session_name: Some(crate::transport::SessionName::new("team-from-spec")),
+                state_path: Some(PathBuf::from("/tmp/state.json")),
+                next_actions: vec!["restart".to_string()],
+                attach_commands: Vec::new(),
+                agent_ids: vec!["sol".to_string(), "luna".to_string()],
+            });
+            assert_eq!(value.get("team").and_then(Value::as_str), Some("from-spec"));
+            assert_eq!(
+                value
+                    .get("agent_ids")
+                    .and_then(Value::as_array)
+                    .map(|items| items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()),
+                Some(vec!["sol", "luna"])
+            );
+        }
+
+        #[test]
         fn existing_runtime_json_includes_attach_commands() {
             let value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
                 team: Some("teamA".to_string()),
@@ -3351,6 +3837,7 @@ pub mod lifecycle_port {
                 attach_commands: vec![
                     "tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker".to_string()
                 ],
+                agent_ids: vec!["worker".to_string()],
             });
             assert_eq!(
                 value.pointer("/attach_commands/0").and_then(Value::as_str),
@@ -3361,6 +3848,37 @@ pub mod lifecycle_port {
                 value.get("reminder").and_then(Value::as_str),
                 Some(crate::cli::QUICK_START_REMINDER)
             );
+        }
+
+        #[test]
+        fn existing_runtime_send_guidance_does_not_pair_alice_with_bob() {
+            let mut value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: Some("bob".to_string()),
+                session_name: Some(crate::transport::SessionName::new("team-bob")),
+                state_path: Some(PathBuf::from("/tmp/state.json")),
+                next_actions: vec!["restart".to_string()],
+                attach_commands: Vec::new(),
+                agent_ids: vec!["bob".to_string()],
+            });
+            crate::cli::adapters::append_send_guidance(
+                &mut value,
+                Path::new("/tmp/ws"),
+                Some("bob"),
+            );
+            let command = value
+                .pointer("/send_commands/0")
+                .and_then(Value::as_str)
+                .expect("bob send command");
+            let argv = crate::cli::adapters::split_shell_argv(command);
+            assert_eq!(argv.get(2).map(String::as_str), Some("bob"));
+            assert_eq!(
+                argv.iter()
+                    .position(|item| item == "--team")
+                    .and_then(|i| argv.get(i + 1))
+                    .map(String::as_str),
+                Some("bob")
+            );
+            assert!(!argv.iter().any(|item| item == "alice"));
         }
 
         #[test]
@@ -3396,7 +3914,16 @@ pub mod lifecycle_port {
         }
     }
 
-    fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
+    pub(crate) fn compact_restart_value(value: &mut Value) {
+        if let Some(object) = value.as_object_mut() {
+            // Coordinator internals remain available only through --detail;
+            // outcome, failed-agent errors, attach commands and next actions
+            // stay in the default receipt.
+            object.remove("coordinator");
+        }
+    }
+
+    pub fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
         match report {
             crate::lifecycle::RestartReport::Restarted {
                 session_name,
@@ -3405,17 +3932,29 @@ pub mod lifecycle_port {
                 coordinator,
                 next_actions,
                 attach_commands,
-            } => json!({
-                "ok": true,
-                "status": "restarted",
-                "session_name": session_name.as_str(),
-                "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
-                "coordinator_started": coordinator_started,
-                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
-                "next_actions": next_actions,
-                "attach_commands": attach_commands,
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+                attach_window_failures,
+                leader_bind_ok,
+                leader_bind_reason,
+            } => {
+                let mut value = json!({
+                    "ok": leader_bind_ok,
+                    "status": if leader_bind_ok { "restarted" } else { "restarted_binding_incomplete" },
+                    "session_name": session_name.as_str(),
+                    "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
+                    "coordinator_started": coordinator_started,
+                    "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
+                    "next_actions": next_actions,
+                    "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                });
+                if let Some(debt) = attach_window_failures {
+                    value["attach_window_failures"] = debt;
+                }
+                if let Some(reason) = leader_bind_reason {
+                    value["reason"] = json!(reason);
+                }
+                value
+            },
             crate::lifecycle::RestartReport::Partial {
                 session_name,
                 agents,
@@ -3424,35 +3963,52 @@ pub mod lifecycle_port {
                 coordinator,
                 next_actions,
                 attach_commands,
-            } => json!({
-                "ok": false,
-                "status": "partial",
-                "reason": "restart_agent_failed",
-                "session_name": session_name.as_str(),
-                "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
-                "failed_agents": failed_agents.iter().map(|failure| json!({
-                    "agent_id": failure.agent_id.as_str(),
-                    "restart_mode": failure.restart_mode,
-                    "decision": failure.decision,
-                    "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
-                    "phase": failure.phase,
-                    "error": failure.error,
-                    "action": format!(
-                        "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
-                        failure.agent_id,
-                        failure.agent_id
-                    ),
-                    "log": format!(
-                        ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
-                        failure.agent_id
-                    ),
-                })).collect::<Vec<_>>(),
-                "coordinator_started": coordinator_started,
-                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
-                "next_actions": next_actions,
-                "attach_commands": attach_commands,
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+                attach_window_failures,
+                leader_bind_ok,
+                leader_bind_reason,
+            } => {
+                let mut value = json!({
+                    "ok": false,
+                    "status": "partial",
+                    "reason": "restart_agent_failed",
+                    "leader_bind_ok": leader_bind_ok,
+                    "session_name": session_name.as_str(),
+                    "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
+                    "failed_agents": failed_agents.iter().map(|failure| json!({
+                        "agent_id": failure.agent_id.as_str(),
+                        "restart_mode": failure.restart_mode,
+                        "decision": failure.decision,
+                        "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
+                        "phase": failure.phase,
+                        "error": failure.error,
+                        "action": format!(
+                            "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                            failure.agent_id,
+                            failure.agent_id
+                        ),
+                        "log": format!(
+                            ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
+                            failure.agent_id
+                        ),
+                    })).collect::<Vec<_>>(),
+                    "coordinator_started": coordinator_started,
+                    "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
+                    "next_actions": next_actions,
+                    "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                });
+                if let Some(debt) = attach_window_failures {
+                    value["attach_window_failures"] = debt;
+                }
+                if !leader_bind_ok {
+                    value["ok"] = json!(false);
+                    value["status"] = json!("partial_binding_incomplete");
+                }
+                if let Some(reason) = leader_bind_reason {
+                    value["leader_bind_reason"] = json!(reason);
+                }
+                value
+            },
             crate::lifecycle::RestartReport::Failed {
                 session_name,
                 failed_agents,
@@ -3751,6 +4307,7 @@ pub mod lifecycle_port {
                     "status_class": "refused_resume_atomicity",
                     "allow_fresh": allow_fresh,
                     "error": error_str,
+                    "next_action": "pass --allow-fresh to start fresh, or restore the provider session backing files",
                     "unresumable": unresumable_detail,
                     "unresumable_ids": unresumable_ids,
                     "reminder": crate::cli::QUICK_START_REMINDER,
@@ -3790,6 +4347,7 @@ pub mod lifecycle_port {
                 "status": "refused_invalid_first_send_at",
                 "allow_fresh": allow_fresh,
                 "error": error,
+                "next_action": "pass --allow-fresh to discard the invalid session marker and start fresh",
                 "invalid": invalid.iter().map(|w| w.worker_id.as_str()).collect::<Vec<_>>(),
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
@@ -3825,9 +4383,6 @@ pub mod lifecycle_port {
                 let repair_team = team
                     .filter(|team| !team.is_empty())
                     .unwrap_or(session_name.as_str());
-                let claim =
-                    format!("team-agent claim-leader --team {repair_team} --confirm --json");
-                let takeover = format!("team-agent takeover --team {repair_team} --confirm --json");
                 json!({
                     "ok": false,
                     "status": "refused_dirty_topology",
@@ -3838,11 +4393,11 @@ pub mod lifecycle_port {
                         .iter()
                         .map(|id| json!({"id": id}))
                         .collect::<Vec<_>>(),
-                    "next_actions": [
-                        "team-agent diagnose --json",
-                        claim,
-                        takeover
-                    ],
+                    "next_actions": dirty_topology_next_actions(
+                        &reason,
+                        &issue_ids,
+                        repair_team,
+                    ),
                     "reminder": crate::cli::QUICK_START_REMINDER,
                 })
             }
@@ -4971,6 +5526,31 @@ pub mod leader_port {
         })
     }
 
+    pub(crate) fn compact_lease_value(value: &mut Value) {
+        let topology_status = value
+            .get("topology_convergence")
+            .and_then(|topology| topology.get("status"))
+            .cloned();
+        if value.get("reason").is_none() {
+            if let Some(status) = topology_status {
+                if status.as_str() != Some("converged") {
+                    value["reason"] = status;
+                }
+            }
+        }
+        if let Some(obj) = value.as_object_mut() {
+            for key in [
+                "owner_epoch",
+                "leader_receiver",
+                "team_owner",
+                "topology_convergence",
+                "leader_registry",
+            ] {
+                obj.remove(key);
+            }
+        }
+    }
+
     fn lease_value(result: crate::leader::LeaseResult) -> Value {
         let mut out = serde_json::Map::new();
         out.insert("ok".to_string(), json!(result.ok));
@@ -5005,11 +5585,14 @@ pub mod leader_port {
         if let Some(topology_convergence) = result.topology_convergence {
             out.insert("topology_convergence".to_string(), topology_convergence);
         }
+        if let Some(attach_window_failures) = result.attach_window_failures {
+            out.insert("attach_window_failures".to_string(), attach_window_failures);
+        }
         Value::Object(out)
     }
 
     fn attach_lease_value(result: crate::leader::LeaseResult, requeued: Value) -> Value {
-        json!({
+        let mut value = json!({
             "ok": result.ok,
             "leader_receiver": result
                 .receiver
@@ -5022,7 +5605,11 @@ pub mod leader_port {
                 "action": result.action,
             },
             "requeued_exhausted_watchers": requeued,
-        })
+        });
+        if let Some(attach_window_failures) = result.attach_window_failures {
+            value["attach_window_failures"] = attach_window_failures;
+        }
+        value
     }
 
     fn attach_requeued_exhausted_watchers(

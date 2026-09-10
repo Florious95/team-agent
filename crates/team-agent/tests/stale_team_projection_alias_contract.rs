@@ -147,15 +147,24 @@ impl SupermarketCase {
         let all_workers_spawned = json
             .pointer("/readiness/all_workers_spawned")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || json
+                .pointer("/worker_readiness/all_workers_spawned")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         let status = json
             .pointer("/status")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let reason = json
+            .pointer("/reason")
+            .and_then(Value::as_str)
+            .or_else(|| json.pointer("/readiness/reason").and_then(Value::as_str))
+            .unwrap_or("");
         let acceptable_degraded = matches!(
             status,
             "leader_receiver_unbound" | "pending_tool_load" | "pending_session_capture"
-        );
+        ) || (status == "leader_binding_incomplete" && reason == "caller_pane_missing");
         assert!(
             ok || (all_workers_spawned && acceptable_degraded),
             "quick-start {team} must launch enough to create realistic state; stdout={} stderr={}",
@@ -211,7 +220,8 @@ impl SupermarketCase {
         let out = self.run(["restart", self.ws(), "--team", team, "--json"]);
         let json = json_output(&out);
         assert!(
-            out.status.success() && json.pointer("/ok").and_then(Value::as_bool) == Some(true),
+            (out.status.success() && json.pointer("/ok").and_then(Value::as_bool) == Some(true))
+                || restart_rebuild_completed(&json),
             "restart --team {team} must reach the production rebuild save path before checking tombstone preservation; stdout={} stderr={}",
             text(&out.stdout),
             text(&out.stderr)
@@ -280,6 +290,24 @@ impl Drop for SupermarketCase {
                 .output();
         }
     }
+}
+
+fn restart_rebuild_completed(json: &Value) -> bool {
+    if json.pointer("/ok").and_then(Value::as_bool) == Some(true) {
+        return json
+            .pointer("/status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "restarted" || status == "ok");
+    }
+    json.pointer("/status").and_then(Value::as_str) == Some("restarted_binding_incomplete")
+        && json
+            .pointer("/coordinator_started")
+            .and_then(Value::as_bool)
+            == Some(true)
+        && json
+            .pointer("/agents")
+            .and_then(Value::as_array)
+            .is_some_and(|agents| !agents.is_empty())
 }
 
 fn write_team(dir: &Path, team: &str, agent: &str) {

@@ -14,6 +14,7 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -175,7 +176,64 @@ impl DiagnoseFixture {
     }
 
     fn quiet(tag: &str) -> Self {
-        Self::with_state(tag, quiet_runtime_state, true)
+        let env = hermetic_guard::HermeticTestEnv::enter(tag);
+        let root = env.workspace(tag);
+        std::fs::create_dir_all(team_agent::model::paths::runtime_dir(&root))
+            .expect("create runtime dir");
+        let _ = team_agent::message_store::MessageStore::open(&root).expect("create schema");
+        let (socket, pane) = start_live_owner_tmux(&env, &root, tag);
+        let socket = socket.to_string_lossy().into_owned();
+        save_runtime_state(&root, &quiet_runtime_state_live(&root, tag, &pane, &socket))
+            .expect("save live quiet state");
+        let _ = load_runtime_state(&root).expect("apply runtime state migrations before snapshot");
+        let state = load_runtime_state(&root).expect("load canonical fixture state");
+        let team_key = team_agent::state::projection::team_state_key(&state);
+        let owner_epoch = state
+            .pointer(&format!("/teams/{team_key}/team_owner/owner_epoch"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                state
+                    .pointer("/team_owner/owner_epoch")
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(1);
+        let pane_id = state
+            .pointer(&format!("/teams/{team_key}/leader_receiver/pane_id"))
+            .and_then(Value::as_str)
+            .or_else(|| state.pointer("/leader_receiver/pane_id").and_then(Value::as_str))
+            .unwrap_or(pane.as_str());
+        let tmux_socket = state
+            .pointer(&format!("/teams/{team_key}/leader_receiver/tmux_socket"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                state
+                    .pointer("/leader_receiver/tmux_socket")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or(socket.as_str());
+        let entry = team_agent::leader::registry::build_entry(
+            &root,
+            &team_key,
+            "direct_tmux",
+            json!({
+                "status": "attached",
+                "pane_id": pane_id,
+                "tmux_socket": tmux_socket,
+                "authorized_team_workspace": root.to_string_lossy()
+            }),
+            owner_epoch,
+            "diagnose-coordinator-health-fixture",
+            "2026-08-25T00:00:00Z".to_string(),
+        );
+        assert!(
+            team_agent::leader::registry::write_entry_best_effort(&entry).is_some(),
+            "hermetic HOME must accept a leaders/ registry write"
+        );
+        Self {
+            _env: env,
+            workspace: WorkspacePath::new(root.clone()),
+            root,
+        }
     }
 
     fn with_state(tag: &str, state: fn(&Path) -> Value, create_schema: bool) -> Self {
@@ -190,16 +248,30 @@ impl DiagnoseFixture {
         let _ = load_runtime_state(&root).expect("apply runtime state migrations before snapshot");
         let state = load_runtime_state(&root).expect("load canonical fixture state");
         let team_key = team_agent::state::projection::team_state_key(&state);
+        let owner_epoch = state
+            .pointer(&format!("/teams/{team_key}/team_owner/owner_epoch"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                state
+                    .pointer("/team_owner/owner_epoch")
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(1);
+        let pane_id = state
+            .pointer(&format!("/teams/{team_key}/leader_receiver/pane_id"))
+            .and_then(Value::as_str)
+            .or_else(|| state.pointer("/leader_receiver/pane_id").and_then(Value::as_str))
+            .unwrap_or("%1");
         let entry = team_agent::leader::registry::build_entry(
             &root,
             &team_key,
             "direct_tmux",
             json!({
                 "status": "attached",
-                "pane_id": "%1",
+                "pane_id": pane_id,
                 "authorized_team_workspace": root.to_string_lossy()
             }),
-            0,
+            owner_epoch,
             "diagnose-coordinator-health-fixture",
             "2026-08-25T00:00:00Z".to_string(),
         );
@@ -303,26 +375,104 @@ fn active_runtime_state(root: &Path) -> Value {
                 "status": "alive",
                 "team_dir": team_dir,
                 "session_name": "diagnose-coordinator-health",
-                "leader_receiver": attached_leader_receiver(),
+                "leader_receiver": attached_leader_receiver("/tmp/ta-diag-active.sock"),
                 "agents": {}
             }
         }
     })
 }
 
-fn quiet_runtime_state(_root: &Path) -> Value {
+fn quiet_runtime_state_live(_root: &Path, session: &str, pane: &str, socket: &str) -> Value {
     json!({
+        "active_team_key": "current",
+        "team_key": "current",
+        "session_name": session,
         "leader": {"id": "leader"},
-        "leader_receiver": attached_leader_receiver()
+        "team_owner": {
+            "pane_id": pane,
+            "owner_epoch": 1,
+            "provider": "codex"
+        },
+        "leader_receiver": attached_leader_receiver_live(pane, socket),
+        "teams": {
+            "current": {
+                "team_owner": {
+                    "pane_id": pane,
+                    "owner_epoch": 1,
+                    "provider": "codex"
+                },
+                "leader_receiver": attached_leader_receiver_live(pane, socket)
+            }
+        }
     })
 }
 
-fn attached_leader_receiver() -> Value {
+fn start_live_owner_tmux(
+    env: &hermetic_guard::HermeticTestEnv,
+    workspace: &Path,
+    tag: &str,
+) -> (PathBuf, String) {
+    let socket = hermetic_guard::short_tmux_socket(tag);
+    let _ = fs::remove_file(&socket);
+    let output = Command::new("tmux")
+        .args([
+            "-S",
+            &socket.to_string_lossy(),
+            "new-session",
+            "-d",
+            "-s",
+            tag,
+            "-n",
+            "leader",
+            "-c",
+            &workspace.to_string_lossy(),
+            "/bin/cat",
+        ])
+        .output()
+        .expect("start fixture tmux");
+    assert!(
+        output.status.success(),
+        "tmux start failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    env.register_owned_tmux_socket(&socket);
+    let list = Command::new("tmux")
+        .args([
+            "-S",
+            &socket.to_string_lossy(),
+            "list-panes",
+            "-t",
+            &format!("{tag}:leader"),
+            "-F",
+            "#{pane_id}",
+        ])
+        .output()
+        .expect("list fixture pane");
+    assert!(list.status.success(), "pane lookup failed");
+    let pane = String::from_utf8_lossy(&list.stdout).trim().to_string();
+    assert!(!pane.is_empty(), "tmux pane id required");
+    (socket, pane)
+}
+
+fn attached_leader_receiver(socket: &str) -> Value {
     json!({
         "mode": "direct_tmux",
         "status": "attached",
         "pane_id": "%1",
-        "provider": "codex"
+        "owner_epoch": 1,
+        "provider": "codex",
+        "tmux_socket": socket
+    })
+}
+
+fn attached_leader_receiver_live(pane: &str, socket: &str) -> Value {
+    json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "pane_id": pane,
+        "owner_epoch": 1,
+        "provider": "codex",
+        "tmux_socket": socket
     })
 }
 
