@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::lifecycle::{
-    apply_cursor_mcp_overlay, apply_cursor_subscription_proxy_env,
-    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, physical_workspace_path,
-    LifecycleError,
+    apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
+    apply_cursor_subscription_proxy_env, apply_cursor_workspace_physical_path,
+    cursor_mcp_enable_argv, cursor_mcp_enable_working_dir, cursor_mcp_json_path,
+    physical_workspace_path, prepare_cursor_seat_mcp, LifecycleError,
 };
 use team_agent::provider::McpConfig;
 use team_agent::transport::test_support::OfflineTransport;
@@ -268,6 +269,68 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
             }
         }),
     }
+}
+
+#[test]
+#[serial(env)]
+fn isolated_cursor_prepare_materializes_per_seat_project_not_workspace_overlay() {
+    let ws = tmp_dir("cursor-iso-clean");
+    let project = prepare_cursor_seat_mcp(&ws, "seat-iso", &sample_mcp_config("seat-iso", &ws.to_string_lossy()))
+        .expect("prepare isolated cursor")
+        .expect("isolation defaults on");
+    assert!(
+        project.ends_with("provider-config/seat-iso/cursor"),
+        "per-seat project must be materialized: {}",
+        project.display()
+    );
+    assert!(project.join(".cursor").is_dir());
+    let overlay = std::fs::read_to_string(cursor_mcp_json_path(&ws, "seat-iso").unwrap()).unwrap();
+    assert!(
+        overlay.contains("seat-iso") && overlay.contains("team_orchestrator"),
+        "overlay must land in the per-seat mcp.json"
+    );
+    assert!(
+        !ws.join(".cursor/mcp.json").exists(),
+        "clean workspace overlay must not be written when isolation is on"
+    );
+    let enable_cwd = cursor_mcp_enable_working_dir(&ws, Some(&project));
+    assert_eq!(enable_cwd, physical_workspace_path(&project));
+    let mut argv = vec![
+        "agent".to_string(),
+        "--workspace".to_string(),
+        ws.to_string_lossy().into_owned(),
+    ];
+    apply_cursor_spawn_workspace_pointers(&mut argv, &ws, "seat-iso").unwrap();
+    let workspace_flag = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--workspace")
+        .map(|pair| pair[1].as_str())
+        .unwrap();
+    assert_eq!(workspace_flag, physical_workspace_path(&project).to_string_lossy());
+    assert_eq!(
+        include_str!("../launch/spawn.rs").contains("prepare_cursor_seat_mcp("),
+        true,
+        "fresh spawn must call the shared materializer, not only compute the path"
+    );
+    assert!(
+        include_str!("../restart/common.rs").contains("prepare_cursor_seat_mcp("),
+        "restart spawn_agent_window must use the same materializer"
+    );
+}
+
+#[test]
+fn cursor_enable_working_dir_does_not_depend_on_cfg_test_skip() {
+    let ws = tmp_dir("cursor-enable-cwd");
+    let project = ws.join(".team/runtime/provider-config/seat/cursor");
+    std::fs::create_dir_all(&project).unwrap();
+    assert_eq!(
+        cursor_mcp_enable_working_dir(&ws, Some(&project)),
+        physical_workspace_path(&project)
+    );
+    assert_eq!(
+        cursor_mcp_enable_working_dir(&ws, None),
+        physical_workspace_path(&ws)
+    );
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {

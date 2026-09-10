@@ -46,7 +46,7 @@ fn fault_fact(provider: Provider, record: &serde_json::Value) -> Option<FaultFac
     match provider {
         Provider::Claude | Provider::ClaudeCode => claude_fault_fact(record),
         Provider::Codex => codex_fault_fact(record),
-        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::GeminiCli
+        Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::Pi | Provider::GeminiCli
         | Provider::Fake => None,
     }
 }
