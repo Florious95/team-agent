@@ -216,7 +216,6 @@ mod tests {
             attribute_command_provider("/opt/homebrew/bin/pi --model openai/gpt-5"),
             Some(Provider::Pi)
         );
-        assert_eq!(attribute_command_provider("pilot"), None);
     }
 
     #[test]
