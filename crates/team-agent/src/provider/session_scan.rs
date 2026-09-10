@@ -16,6 +16,7 @@ pub(crate) mod common;
 pub(crate) mod copilot;
 pub(crate) mod cursor;
 pub(crate) mod grok;
+pub(crate) mod pi;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureSessionContext {
@@ -48,6 +49,9 @@ pub(crate) fn scan_session_candidates_once(
     }
     if matches!(provider, Provider::CursorAgent) {
         return Ok(cursor::scan_session_store(context));
+    }
+    if matches!(provider, Provider::Pi) {
+        return pi::scan_session_store(context);
     }
     if matches!(provider, Provider::Claude | Provider::ClaudeCode)
         && context.expected_session_id.is_some()

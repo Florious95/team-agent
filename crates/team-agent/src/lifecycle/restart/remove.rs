@@ -539,6 +539,22 @@ fn remove_agent_at_paths(
             }
         });
     }
+    let pi_cleanup_paths = preflight
+        .seat
+        .state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .and_then(|agent| agent.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::provider::wire::parse_provider)
+        .filter(|provider| *provider == Provider::Pi)
+        .map(|_| {
+            crate::lifecycle::launch::pi_mcp::pi_seat_paths(
+                workspace,
+                &preflight.seat.team_key,
+                agent_id.as_str(),
+            )
+        });
     let paths = LifecyclePathRefs {
         run_workspace: workspace,
         spec_workspace,
@@ -574,7 +590,27 @@ fn remove_agent_at_paths(
         Ok(success)
     });
     match result {
-        Ok(success) => {
+        Ok(mut success) => {
+            if let Some(pi_paths) = pi_cleanup_paths.as_ref() {
+                let cleanup = crate::lifecycle::launch::pi_mcp::pi_cleanup_plan(
+                    crate::lifecycle::launch::pi_mcp::PiCleanupAction::Remove,
+                    pi_paths,
+                );
+                for path in cleanup.delete_paths {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => success
+                            .cleared_locations
+                            .push(serde_json::json!(path.to_string_lossy().to_string())),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(LifecycleError::StatePersist(format!(
+                                "remove-agent completed logical removal for {agent_id}, but exact Pi wrapper cleanup failed at {}: {error}",
+                                path.display()
+                            )));
+                        }
+                    }
+                }
+            }
             // Foundation-0 F0-2: the historical dual-write to the legacy
             // per-session snapshot has been retired
             // (`.team/artifacts/foundation-0-slice-design.md` §§4-5).
