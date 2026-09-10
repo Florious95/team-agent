@@ -4426,4 +4426,248 @@ mod fresh_quick_start_leader_binding_tests {
         }
     }
 
+
+    #[test]
+    fn invalid_pi_tool_category_is_rejected_before_runtime_persistence() {
+        let root = std::env::temp_dir().join(format!(
+            "ta-quick-start-pi-tools-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let team = root.join(".team/current");
+        std::fs::create_dir_all(team.join("agents")).unwrap();
+        std::fs::write(
+            team.join("TEAM.md"),
+            "---\nname: pi-tools\nprovider: pi\n---\n\nPi team.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            team.join("agents/worker.md"),
+            "---\nname: worker\nrole: Worker\nprovider: pi\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n  - fs_read\n  - provider_builtin\n---\n\nWorker.\n",
+        )
+        .unwrap();
+
+        let transport = crate::transport::test_support::OfflineTransport::new();
+        let mut discover = |_requested: &str| -> Result<Vec<String>, ()> { Err(()) };
+        let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
+            &root,
+            &team,
+            None,
+            true,
+            None,
+            &transport,
+            false,
+            &mut discover,
+        )
+        .expect_err("invalid Pi category must fail before quick-start persistence");
+        let error = error.to_string();
+        assert!(error.contains("Pi does not support Team Agent tool category \"provider_builtin\""));
+        assert!(error.contains("remove it from the role's tools"));
+        assert!(
+            !crate::state::persist::runtime_state_path(&root).exists(),
+            "quick-start validation failure must not persist runtime state"
+        );
+        assert!(
+            !root.join(".team/runtime").exists(),
+            "quick-start validation failure must not create runtime artifacts"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fresh_binding_persists_then_registers_then_requires_canonical_readback() {
+        let workspace = workspace_with_provider("positive-pi", "pi");
+        let mut ops = MockOps::with_provider("pi");
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops)
+            .unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attach_calls, 1);
+        assert_eq!(ops.register_calls, 1);
+        assert_eq!(ops.readback_calls, 1);
+        let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(
+            state
+                .get("teams")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|teams| teams.get("fresh"))
+                .and_then(|team| team.get("leader_receiver"))
+                .and_then(|receiver| receiver.get("pane_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("%42")
+        );
+        assert!(
+            crate::event_log::EventLog::new(&workspace)
+                .tail(0)
+                .unwrap()
+                .is_empty(),
+            "successful bind must not emit a refusal event"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_valid_caller_binds_typed_pi_through_bash() {
+        let hermetic = HermeticTestEnv::enter("runtime-valid-pi-bash");
+        let workspace = runtime_workspace_with_provider(&hermetic, "fresh", "pi");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+        assert_eq!(ops.attach_calls, 1);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn first_nonce_writer_is_product_generated_and_consumer_live() {
+        let hermetic = HermeticTestEnv::enter("runtime-first-nonce-writer");
+        let workspace = runtime_workspace_with_provider(&hermetic, "fresh", "pi");
+        let parent = hermetic.root().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%1");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let seed = seeded_runtime_owner(&workspace);
+        let mut state = crate::state::projection::resolve_runtime_team_scope(
+            &workspace,
+            Some("fresh"),
+        )
+        .unwrap()
+        .state;
+        let expected_owner = state["team_owner"].clone();
+        let expected_receiver = state["leader_receiver"].clone();
+        let target = caller_target(parent.clone(), None);
+        let event_log = crate::event_log::EventLog::new(&workspace);
+        let (receiver, _) = crate::leader::attach_leader_to_state_with_target_and_controls(
+            &workspace,
+            &mut state,
+            Some(&PaneId::new("%1")),
+            crate::provider::Provider::Pi,
+            &event_log,
+            crate::leader::LeaseSource::QuickStart,
+            true,
+            Some(&target),
+            Some(&expected_owner),
+            Some(&expected_receiver),
+            Some(&nonce_writer_winner),
+        )
+        .unwrap();
+        let receiver = serde_json::to_value(receiver).unwrap();
+        assert_eq!(receiver["binding_nonce"], json!("writer-winner"));
+        let observed = caller_target(parent, Some("writer-winner"));
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_targets(vec![observed]);
+        assert!(matches!(
+            crate::messaging::resolve_live_leader_channel(&workspace, &receiver, &transport),
+            crate::messaging::LeaderChannelResolution::Live(_)
+        ));
+
+        let workspace = runtime_workspace_with_provider(&hermetic, "writer-failure", "pi");
+        let seed = seeded_runtime_owner(&workspace);
+        let mut state = crate::state::projection::resolve_runtime_team_scope(
+            &workspace,
+            Some("fresh"),
+        )
+        .unwrap()
+        .state;
+        let expected_owner = state["team_owner"].clone();
+        let expected_receiver = state["leader_receiver"].clone();
+        let target = caller_target(hermetic.root().join("parent"), None);
+        let result = crate::leader::attach_leader_to_state_with_target_and_controls(
+            &workspace,
+            &mut state,
+            Some(&PaneId::new("%1")),
+            crate::provider::Provider::Pi,
+            &crate::event_log::EventLog::new(&workspace),
+            crate::leader::LeaseSource::QuickStart,
+            true,
+            Some(&target),
+            Some(&expected_owner),
+            Some(&expected_receiver),
+            Some(&nonce_writer_failure),
+        );
+        assert!(result.is_err());
+        let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(
+            persisted.pointer("/teams/fresh/leader_receiver/binding_nonce"),
+            None
+        );
+        assert!(!persisted.to_string().contains("fresh_caller"));
+        let _ = seed;
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_invalid_caller_refuses_even_when_command_is_pi() {
+        let hermetic = HermeticTestEnv::enter("runtime-invalid-command-pi");
+        let workspace = runtime_workspace_with_provider(&hermetic, "fresh", "pi");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env(CALLER_PROVIDER_ENV, "pi");
+        let _caller_pane = hermetic.with_env(CALLER_PANE_ENV, "%9");
+        let _caller_endpoint = hermetic.with_env(CALLER_ENDPOINT_ENV, "/tmp/tmux.sock");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "pi");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attach_calls, 0);
+        assert_eq!(ops.attached_provider, None);
+        assert_eq!(
+            refusal_reason(&workspace),
+            Some((
+                "strict_provider".to_string(),
+                "invalid_caller_tuple".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn runtime_absent_keeps_explicit_and_direct_paths() {
+        let hermetic = HermeticTestEnv::enter("runtime-absent-compat");
+        let workspace = runtime_workspace_with_provider(&hermetic, "explicit", "pi");
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _leader = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "pi");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+
+        let workspace = runtime_workspace_with_provider(&hermetic, "direct", "pi");
+        drop(_leader);
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "pi");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attached_provider, Some(crate::provider::Provider::Pi));
+
+        let workspace = runtime_workspace_with_provider(&hermetic, "unknown-shell", "pi");
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "bash");
+        let mut ops = RecordingRuntimeOps::new(&transport);
+        assert!(!bind_fresh_quick_start_leader_with(&workspace, "fresh", None, &mut ops).unwrap());
+        assert_eq!(ops.attach_calls, 0);
+        assert_eq!(
+            refusal_reason(&workspace),
+            Some((
+                "strict_provider".to_string(),
+                "provider_unresolved".to_string()
+            ))
+        );
+    }
 }
