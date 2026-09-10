@@ -247,6 +247,7 @@ fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
     .expect("direct Cursor profile should prepare");
 
     let mut command = std::process::Command::new("/usr/bin/env");
+    command.env_clear();
     for key in [
         "HTTPS_PROXY",
         "HTTP_PROXY",
@@ -260,6 +261,7 @@ fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
         command.env(key, "fixture");
     }
     command.env("NO_PROXY", "fixture");
+    command.env("no_proxy", "fixture");
     crate::lifecycle::launch::apply_cursor_mcp_enable_profile_env(
         &mut command,
         Some(&launch),
@@ -283,6 +285,7 @@ fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
         );
     }
     assert!(text.lines().any(|line| line == "NO_PROXY=fixture"));
+    assert!(text.lines().any(|line| line == "no_proxy=fixture"));
 }
 
 #[test]
