@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_pi_command_is_attributed_without_substring_guessing() {
+    fn provider_prefix_is_not_attributed_without_substring_guessing() {
         assert_eq!(attribute_command_provider("pilot"), None);
     }
 
