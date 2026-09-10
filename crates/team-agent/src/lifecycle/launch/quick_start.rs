@@ -1211,7 +1211,9 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
     transport: &dyn Transport,
     open_display: bool,
 ) -> Result<QuickStartReport, LifecycleError> {
-    crate::lifecycle::launch::run_pi_catalog_preflight(agents_dir)?;
+    let mut discover = |requested: &str| {
+        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    };
     quick_start_with_transport_in_workspace_with_display_pi_preflight(
         workspace,
         agents_dir,
@@ -1220,7 +1222,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display(
         team_id,
         transport,
         open_display,
-        &mut |_requested: &str| Ok(Vec::new()),
+        &mut discover,
     )
 }
 
@@ -1248,7 +1250,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
             agents_dir.display()
         )));
     }
-    crate::lifecycle::launch::run_pi_catalog_preflight(agents_dir)?;
+    crate::lifecycle::launch::run_pi_catalog_preflight(agents_dir, discover)?;
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
