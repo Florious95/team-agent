@@ -103,6 +103,10 @@ pub(crate) use helpers::*;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[path = "../../tests/support/hermetic.rs"]
+mod hermetic_test_support;
+
 // =============================================================================
 // CROSS-LANE PLACEHOLDERS(sibling 14a-mcp / status / diagnose / step13-lifecycle
 // 尚未落地;leader 集成时收口到真模块。本层只声明 CLI 调用面所需的最小占位,
@@ -3725,6 +3729,9 @@ pub mod lifecycle_port {
         #[test]
         #[serial_test::serial(env)]
         fn existing_runtime_producer_scopes_send_team() {
+            let _hermetic = super::super::hermetic_test_support::HermeticTestEnv::enter(
+                "quick-start-value-existing-runtime",
+            );
             let root = std::env::temp_dir().join(format!(
                 "ta-n5-prod-{}-{}",
                 std::process::id(),
