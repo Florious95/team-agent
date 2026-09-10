@@ -1678,8 +1678,14 @@ fn restart_readiness(
     let session_created = session_live_or_default(transport, session_name, false);
     let worker_pane_addressable = restart_worker_panes_addressable(state, decisions, transport);
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let coordinator_alive =
-        crate::coordinator::coordinator_health(&coordinator_workspace).ok && session_created;
+    let health = crate::coordinator::coordinator_health(&coordinator_workspace);
+    let coordinator_accepted = health.ok
+        || (health.service_available
+            && matches!(
+                health.binary_identity_relation,
+                crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
+            ));
+    let coordinator_alive = coordinator_accepted && session_created;
     RestartReadiness {
         session_created,
         worker_pane_addressable,
@@ -1781,13 +1787,14 @@ fn restart_readiness_timeout_message(
          - tmux session created: {session}\n\
          - worker pane addressable: {pane}\n\
          - coordinator alive: {coordinator}\n\
-         Action: check coordinator log {log}, then `team-agent restart <agent> --allow-fresh` or `team-agent diagnose`\n\
+         Action: check coordinator log {log}, then inspect this workspace with `team-agent diagnose --workspace '{workspace}'`\n\
          Log: coordinator_log={log} state={state} pid_file={pid}",
         missing = restart_readiness_missing_summary(readiness),
         session = yes_no(readiness.session_created),
         pane = yes_no(readiness.worker_pane_addressable),
         coordinator = yes_no(readiness.coordinator_alive),
         log = crate::coordinator::coordinator_log_path(&coordinator_workspace).display(),
+        workspace = workspace.display(),
         state = crate::state::persist::runtime_state_path(workspace).display(),
         pid = crate::coordinator::coordinator_pid_path(&coordinator_workspace).display(),
     )
@@ -4768,5 +4775,166 @@ tasks:
                 .and_then(serde_json::Value::as_str),
             Some("leader_registry_maintain_failed")
         );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn restart_readiness_accepts_only_healthy_or_newer_daemon() {
+        let identity = crate::coordinator::current_coordinator_binary_identity();
+        let cases = vec![
+            (
+                "same",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION,
+                true,
+                identity.binary_version.clone(),
+                identity.binary_path.clone(),
+                true,
+            ),
+            (
+                "newer",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION,
+                true,
+                "999.0.0".to_string(),
+                identity.binary_path.clone(),
+                true,
+            ),
+            (
+                "caller-newer",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION,
+                true,
+                "0.0.1".to_string(),
+                identity.binary_path.clone(),
+                false,
+            ),
+            (
+                "same-version-path-mismatch",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION,
+                true,
+                identity.binary_version.clone(),
+                "/tmp/team-agent-other-binary".to_string(),
+                false,
+            ),
+            (
+                "unknown-identity",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION,
+                true,
+                "not-a-version".to_string(),
+                identity.binary_path.clone(),
+                false,
+            ),
+            (
+                "dead-process",
+                u32::MAX,
+                crate::coordinator::PROTOCOL_VERSION,
+                true,
+                "999.0.0".to_string(),
+                identity.binary_path.clone(),
+                false,
+            ),
+            (
+                "protocol-mismatch",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION + 1,
+                true,
+                "999.0.0".to_string(),
+                identity.binary_path.clone(),
+                false,
+            ),
+            (
+                "schema-mismatch",
+                std::process::id(),
+                crate::coordinator::PROTOCOL_VERSION,
+                false,
+                "999.0.0".to_string(),
+                identity.binary_path.clone(),
+                false,
+            ),
+        ];
+
+        for (tag, pid, protocol, schema_ok, version, path, expected) in cases {
+            let workspace = std::env::temp_dir().join(format!(
+                "ta-restart-readiness-002-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&workspace);
+            seed_restart_readiness_health(&workspace, pid, protocol, schema_ok, &version, &path);
+            let transport = crate::transport::test_support::OfflineTransport::new()
+                .with_session_present(true);
+            let readiness = restart_readiness(
+                &workspace,
+                &serde_json::json!({}),
+                &SessionName::new("team-current"),
+                &[],
+                &transport,
+            );
+            assert_eq!(
+                readiness.coordinator_alive, expected,
+                "{tag}: coordinator readiness mismatch; readiness={readiness:?}"
+            );
+            assert!(readiness.session_created, "{tag}: session gate changed");
+            assert!(readiness.worker_pane_addressable, "{tag}: pane gate changed");
+            let _ = std::fs::remove_dir_all(&workspace);
+        }
+    }
+
+    #[test]
+    fn restart_readiness_timeout_message_preserves_workspace_diagnosis() {
+        let workspace = Path::new("/tmp/team-agent-restart-002-workspace");
+        let message = restart_readiness_timeout_message(
+            workspace,
+            RestartReadiness {
+                session_created: true,
+                worker_pane_addressable: true,
+                coordinator_alive: false,
+            },
+            std::time::Duration::from_secs(30),
+        );
+        assert!(message.contains("team-agent diagnose --workspace"));
+        assert!(message.contains(workspace.to_string_lossy().as_ref()));
+        assert!(!message.contains("--allow-fresh"));
+        assert!(!message.contains("restart <agent>"));
+    }
+
+    fn seed_restart_readiness_health(
+        workspace: &Path,
+        pid: u32,
+        protocol: u32,
+        schema_ok: bool,
+        binary_version: &str,
+        binary_path: &str,
+    ) {
+        let runtime = crate::model::paths::runtime_dir(workspace);
+        std::fs::create_dir_all(&runtime).expect("create readiness runtime");
+        if schema_ok {
+            crate::message_store::MessageStore::open(workspace)
+                .expect("create readiness message store");
+        } else {
+            std::fs::create_dir(runtime.join("team.db")).expect("corrupt readiness schema");
+        }
+        let wp = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+        let metadata = serde_json::json!({
+            "pid": pid,
+            "protocol_version": protocol,
+            "message_store_schema_version": crate::db::schema::SCHEMA_VERSION,
+            "binary_path": binary_path,
+            "binary_version": binary_version,
+            "source": "boot",
+            "updated_at": "2026-09-10T00:00:00Z",
+        });
+        std::fs::write(
+            crate::coordinator::coordinator_meta_path(&wp),
+            serde_json::to_vec_pretty(&metadata).expect("serialize readiness metadata"),
+        )
+        .expect("write readiness metadata");
+        std::fs::write(
+            crate::coordinator::coordinator_pid_path(&wp),
+            pid.to_string(),
+        )
+        .expect("write readiness pid");
     }
 }
