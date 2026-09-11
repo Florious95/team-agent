@@ -335,14 +335,48 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn safe_runner_observation(
+        elapsed: Duration,
+        observation: &crate::lifecycle::launch::pi_mcp::PiCatalogTestObservation,
+    ) -> String {
+        format!(
+            "elapsed_ms={} spawn_count={} argv={:?} parent_pid={:?} parent_exit_success={:?} parent_exit_code={:?} reader_timeout={}",
+            elapsed.as_millis(),
+            observation.spawn_count,
+            observation.argv,
+            observation.parent_pid,
+            observation.parent_exit_success,
+            observation.parent_exit_code,
+            observation.reader_timeout,
+        )
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_invokes_exact_argv_once_and_drains() {
         let path = fixture(
             "test \"$1\" = --list-models && echo provider model && echo openai-codex gpt-5.6-sol",
         );
-        assert!(run_catalog(&path, Duration::from_secs(1), 1024)
-            .unwrap()
-            .starts_with(b"provider model"));
+        let receipt = native_timeout_receipt();
+        assert!(!receipt.exists());
+        let started = Instant::now();
+        let (result, observation) =
+            crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
+                &receipt,
+                None,
+                || run_catalog(&path, Duration::from_secs(1), 1024),
+            );
+        let elapsed = started.elapsed();
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|bytes| bytes.starts_with(b"provider model")),
+            "runner observation: {}",
+            safe_runner_observation(elapsed, &observation)
+        );
+        let _ = result.unwrap();
+        let _ = std::fs::remove_file(&receipt);
+        let _ = std::fs::remove_file(format!("{}.sock", receipt.display()));
         assert_eq!(
             std::fs::read_to_string(path.with_extension("count")).unwrap(),
             "1:--list-models\n"
@@ -363,11 +397,21 @@ mod tests {
                 Some("descendant"),
                 || run_catalog(&path, Duration::from_millis(40), 1024),
             );
-        assert!(started.elapsed() < Duration::from_millis(500));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "runner observation: {}",
+            safe_runner_observation(elapsed, &observation)
+        );
         assert!(result.unwrap_err().contains("timed out"));
         assert_eq!(observation.spawn_count, 1);
         assert_eq!(observation.argv, vec!["--list-models"]);
-        assert_eq!(observation.parent_exit_success, Some(true));
+        assert_eq!(
+            observation.parent_exit_success,
+            Some(true),
+            "runner observation: {}",
+            safe_runner_observation(elapsed, &observation)
+        );
         assert_eq!(observation.parent_exit_code, Some(0));
         assert!(observation.reader_timeout);
 
