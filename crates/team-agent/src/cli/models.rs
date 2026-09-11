@@ -300,15 +300,17 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn read_native_timeout_receipt(path: &Path) -> BTreeMap<String, String> {
+    fn parse_native_timeout_receipt(path: &Path) -> Option<BTreeMap<String, String>> {
         let mut fields = BTreeMap::new();
-        for line in std::fs::read_to_string(path).unwrap().lines() {
-            let (key, value) = line.split_once('=').expect("receipt key/value");
-            assert!(fields.insert(key.to_string(), value.to_string()).is_none());
+        for line in std::fs::read_to_string(path).ok()?.lines() {
+            let (key, value) = line.split_once('=')?;
+            if fields.insert(key.to_string(), value.to_string()).is_some() {
+                return None;
+            }
         }
-        assert_eq!(
-            fields.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec![
+        let keys = fields.keys().map(String::as_str).collect::<Vec<_>>();
+        (keys
+            == vec![
                 "child_argv_exact",
                 "child_pid",
                 "child_spawn_attempts",
@@ -318,9 +320,22 @@ mod tests {
                 "parent_argv_exact",
                 "parent_pid",
                 "parent_started_once",
-            ]
-        );
-        fields
+            ])
+        .then_some(fields)
+    }
+
+    #[cfg(unix)]
+    fn wait_native_timeout_receipt(path: &Path) -> BTreeMap<String, String> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if let Some(fields) = parse_native_timeout_receipt(path) {
+                return fields;
+            }
+            if Instant::now() >= deadline {
+                panic!("native timeout receipt did not become complete after runner return");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[cfg(unix)]
@@ -421,7 +436,7 @@ mod tests {
         assert_eq!(observation.parent_exit_code, Some(0));
         assert!(observation.reader_timeout);
 
-        let fields = read_native_timeout_receipt(&receipt);
+        let fields = wait_native_timeout_receipt(&receipt);
         assert_eq!(fields["parent_started_once"], "1");
         assert_eq!(fields["parent_argv_exact"], "1");
         assert_eq!(fields["child_spawn_attempts"], "1");
