@@ -4696,6 +4696,45 @@ pub mod lifecycle_port {
         }
 
         #[test]
+        fn restart_missing_team_spec_does_not_point_to_add_agent() {
+            // Live empty-workspace restart: error is missing spec/runtime, but the
+            // workspace path commonly contains "team-agent", which the substring
+            // "not found"+"agent" matcher treats as start-agent miss.
+            let msg = "team select: active team spec not found: \
+                 input_workspace=/tmp/team-agent-live-missing \
+                 expected_runtime_dir=/tmp/team-agent-live-missing/.team/runtime";
+            let na = error_next_action(msg).expect("missing spec must keep a recovery action");
+            assert!(
+                !na.contains("add-agent"),
+                "must not steer restart-missing-spec to add-agent: {na}"
+            );
+            assert!(
+                !na.contains("start-agent only starts an agent"),
+                "must not reuse the start-agent miss copy: {na}"
+            );
+            assert!(
+                na.contains("quick-start"),
+                "must steer first launch to quick-start: {na}"
+            );
+        }
+
+        #[test]
+        fn restart_missing_spec_error_value_keeps_recovery_action() {
+            let err = crate::lifecycle::LifecycleError::RequirementUnmet(
+                "team select: active team spec not found: input_workspace=/tmp/team-agent-empty expected_runtime_dir=/tmp/team-agent-empty/.team/runtime"
+                    .to_string(),
+            );
+            let v = error_value(err);
+            assert_eq!(v["ok"], serde_json::json!(false));
+            let na = v["next_action"].as_str().unwrap_or("");
+            assert!(
+                na.contains("quick-start"),
+                "error_value must attach spec-missing recovery, got {v}"
+            );
+            assert!(!na.contains("add-agent"), "must not attach add-agent: {v}");
+        }
+
+        #[test]
         fn error_value_attaches_next_action_field() {
             let err = crate::lifecycle::LifecycleError::RequirementUnmet(
                 "agent foo not found".to_string(),
