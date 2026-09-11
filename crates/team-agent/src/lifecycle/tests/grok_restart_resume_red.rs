@@ -21,6 +21,13 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -35,6 +42,7 @@ use team_agent::transport::test_support::OfflineTransport;
 #[test]
 #[serial(env)]
 fn grok_fresh_spawn_binds_pending_session_id_to_argv_session_id() {
+    let _hermetic = enter_hermetic("grok-resume-pending");
     let (ws, _home, _guard, team) = seed_grok("pending");
     let transport = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("grokteam"), &transport)
@@ -68,6 +76,7 @@ fn grok_fresh_spawn_binds_pending_session_id_to_argv_session_id() {
 #[test]
 #[serial(env)]
 fn grok_restart_uses_resume_when_session_captured_and_archive_present() {
+    let _hermetic = enter_hermetic("grok-resume-captured");
     let (ws, home, _guard, team) = seed_grok("resume");
     let first = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("grokteam"), &first)

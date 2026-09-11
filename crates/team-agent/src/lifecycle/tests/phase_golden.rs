@@ -90,6 +90,9 @@ fn hermetic_caller_envs() -> &'static [&'static str] {
         "TEAM_AGENT_OWNER_TEAM_ID",
         "TEAM_AGENT_ACTIVE_TEAM",
         "TEAM_AGENT_ID",
+        "TEAM_AGENT_CALLER_PROVIDER",
+        "TEAM_AGENT_CALLER_PANE_ID",
+        "TEAM_AGENT_CALLER_TMUX_ENDPOINT",
     ]
 }
 

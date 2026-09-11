@@ -34,6 +34,9 @@ use team_agent::transport::{
 #[test]
 #[serial(env)]
 fn compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_metadata() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("claude-profile-quick-start");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     assert_s0_profile_launch_shape();
 
     let ws = tmp_dir("profile-launch");

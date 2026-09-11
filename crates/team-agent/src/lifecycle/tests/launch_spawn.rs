@@ -6,6 +6,13 @@ use crate::transport::test_support::OfflineTransport;
 use serde_json::json;
 use serial_test::serial;
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 fn launch_source() -> String {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle");
     let mut files = vec![src.join("launch.rs")];
@@ -163,7 +170,9 @@ fn unowned_running_ws() -> PathBuf {
 // hardcoded "no role docs found" PreflightBlocked. Golden: quick_start.py → _compile_team_dir_spec
 // writes spec_path=team_dir/team.spec.yaml BEFORE launch.
 #[test]
+#[serial(env)]
 fn quick_start_compiles_real_spec_to_team_spec_yaml() {
+    let _hermetic = enter_hermetic("launch-spawn-compile-spec");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
     let result = quick_start_with_transport(&team, None, true, None, &transport);
@@ -196,7 +205,9 @@ fn quick_start_compiles_real_spec_to_team_spec_yaml() {
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
+    let _hermetic = enter_hermetic("launch-spawn-canonical-team");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = crate::model::paths::team_workspace(&team).unwrap();
     let transport = OfflineTransport::new();
@@ -218,6 +229,7 @@ fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
 #[test]
 #[serial(env)]
 fn existing_runtime_producer_scopes_canonical_team() {
+    let _hermetic = enter_hermetic("launch-spawn-existing-producer");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
     let first = quick_start_with_transport(&team, Some("from-name"), true, None, &transport)
@@ -326,7 +338,9 @@ fn existing_runtime_empty_top_level_agents_still_emits_bob() {
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
+    let _hermetic = enter_hermetic("launch-spawn-dot-team-workspace");
     let workspace = temp_ws();
     let team = workspace.join(".team").join("current");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -409,7 +423,9 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_default_workspace_compiled_spec_uses_project_root() {
+    let _hermetic = enter_hermetic("launch-spawn-default-workspace");
     let workspace = temp_ws();
     std::fs::create_dir_all(workspace.join("agents")).unwrap();
     std::fs::write(workspace.join("TEAM.md"), QS_TEAM_MD).unwrap();
@@ -714,7 +730,9 @@ fn unowned_running_ws_all_paused() -> PathBuf {
 // #15 — quick_start seeds runtime state under team_workspace(team_dir) (the PARENT), not inside the
 // team dir, so restart/status can locate it. Golden quick_start.py:35 team_workspace(team_dir).
 #[test]
+#[serial(env)]
 fn spine_quick_start_seeds_state_under_team_workspace_not_team_dir() {
+    let _hermetic = enter_hermetic("launch-spawn-spine-workspace");
     let team = quick_start_team_dir(QS_VALID_ROLE); // <base>/teamdir
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
@@ -1265,9 +1283,7 @@ fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
 #[test]
 #[serial(env)]
 fn quick_start_with_transport_spawns_workers_not_dry_run() {
-    let hermetic = hermetic_guard::HermeticTestEnv::enter("launch-spawn-spawn-path");
-    hermetic.scrub_tmux();
-    hermetic.assert_no_real_tmux();
+    let _hermetic = enter_hermetic("launch-spawn-spawn-path");
     let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider codex
     let workspace = team.parent().expect("team_workspace(team_dir) = parent"); // where start_coordinator runs
     seed_healthy_coordinator(workspace);
@@ -1354,7 +1370,9 @@ fn adaptive_layout_plan_8_workers_is_3_3_2() {
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
+    let _hermetic = enter_hermetic("launch-spawn-adaptive-layout");
     let roles = (1..=4)
         .map(|i| {
             let id = format!("w{i}");
@@ -1437,7 +1455,9 @@ fn quick_start_tmux_backend_prefers_absolute_tmux_env_endpoint() {
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
+    let _hermetic = enter_hermetic("launch-spawn-endpoint-attach");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team_workspace(team_dir) = parent");
     seed_healthy_coordinator(workspace);
@@ -1496,7 +1516,9 @@ fn annotate_runtime_tmux_endpoint_persists_workspace_socket_as_full_path() {
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command() {
+    let _hermetic = enter_hermetic("launch-spawn-managed-leader");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team_workspace(team_dir) = parent");
     seed_healthy_coordinator(workspace);
@@ -1588,7 +1610,9 @@ fn attach_window_names_for_state_agents_include_managed_leader_and_layout_window
 }
 
 #[test]
+#[serial(env)]
 fn quick_start_no_display_keeps_one_window_per_agent() {
+    let _hermetic = enter_hermetic("launch-spawn-no-display");
     let roles = ["w1", "w2"]
         .into_iter()
         .map(|id| (format!("{id}.md"), role_doc(id)))
@@ -3000,7 +3024,9 @@ fn start_agent_adaptive_restarts_missing_pane_in_existing_layout_window() {
 // OS-safe: OfflineTransport (zero real spawn).
 // ═══════════════════════════════════════════════════════════════════════════
 #[test]
+#[serial(env)]
 fn quick_start_seeds_tasks_key_from_compiled_spec() {
+    let _hermetic = enter_hermetic("launch-spawn-tasks-key");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, None, &transport);
@@ -3051,6 +3077,7 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 #[test]
 #[serial(env)]
 fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
+    let _hermetic = enter_hermetic("launch-spawn-state-seeds");
     // Bug 2 owner team-scope: top-level owner triple is dropped when the seeded
     // pane is empty; an ambient TMUX_PANE (tests run inside the dev's tmux session)
     // would otherwise leak into the caller-identity seed, inflate the seeded owner
@@ -3150,6 +3177,7 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
 #[test]
 #[serial(env)]
 fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
+    let _hermetic = enter_hermetic("launch-spawn-running-state");
     const FIXED_SPAWNED_AT: &str = "2026-06-04T00:00:00+00:00";
     let _clock_guard = EnvVarGuard::set("TEAM_AGENT_TEST_FIXED_SPAWNED_AT", FIXED_SPAWNED_AT);
     let team = quick_start_team_dir(QS_VALID_ROLE);

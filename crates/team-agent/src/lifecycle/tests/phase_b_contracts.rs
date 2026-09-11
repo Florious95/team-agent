@@ -1,3 +1,6 @@
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic_guard;
+
 use super::agent_ops::lanea_team_ws;
 use super::lane_ops::{fork_ws, LaneHomeGuard, LaneTransport};
 use super::launch_spawn::{
@@ -19,11 +22,17 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-#[allow(dead_code)]
-struct HermeticTestEnv;
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
 
 #[test]
+#[serial_test::serial(env)]
 fn concurrent_reset_discard_session_serializes() {
+    let _hermetic = enter_hermetic("phase-b-concurrent-reset");
     let ids = (1..=6).map(|n| format!("w{n}")).collect::<Vec<_>>();
     let role_docs = ids
         .iter()
@@ -131,6 +140,7 @@ fn concurrent_reset_discard_session_serializes() {
 #[test]
 #[serial_test::serial(env)]
 fn add_fork_remove_share_lifecycle_lock_behavior() {
+    let _hermetic = enter_hermetic("phase-b-fork");
     let _home = LaneHomeGuard::enter("phase-b-fork");
     let (add_team, add_workspace, add_role, add_transport) = add_fixture();
     let add_agent = aid("w2");
@@ -313,7 +323,9 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn breal_spawn_ownership_mismatch_fails_without_state_pollution() {
+    let _hermetic = enter_hermetic("phase-b-spawn-ownership");
     let (workspace, _team) = breal_workspace();
     let transport = BRealTransport::misowned();
 
@@ -425,7 +437,9 @@ fn breal_reset_rehydrates_role_context_from_compiled_spec() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn breal_restart_rehydrates_role_context_from_compiled_spec() {
+    let _hermetic = enter_hermetic("phase-b-restart-role-context");
     let (workspace, _team) = breal_one_worker_workspace();
     strip_runtime_command_context(&workspace);
     let transport = BRealTransport::owned();

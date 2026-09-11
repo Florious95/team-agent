@@ -14,6 +14,13 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -209,6 +216,7 @@ fn two_grok_seats_coexist_when_toml_has_no_per_seat_keys() {
 #[test]
 #[serial(env)]
 fn leftover_per_seat_key_is_cleared_before_start() {
+    let _hermetic = enter_hermetic("grok-overlay-leftover-seat");
     let ws = tmp_dir("grok-cwd-per-seat");
     let home = tmp_dir("grok-cwd-per-seat-home");
     seed_grok_home(&home, Some(&ws));
@@ -282,6 +290,7 @@ TEAM_AGENT_WORKSPACE = "/stale-ws"
 #[test]
 #[serial(env)]
 fn grok_untrusted_folder_refuses_to_start() {
+    let _hermetic = enter_hermetic("grok-overlay-untrusted");
     let ws = tmp_dir("grok-untrusted");
     let home = tmp_dir("grok-untrusted-home");
     seed_grok_home(&home, None);
@@ -334,6 +343,7 @@ fn grok_missing_login_refuses_to_start() {
 #[test]
 #[serial(env)]
 fn grok_spawn_writes_resolved_team_agent_into_project_grok_config() {
+    let _hermetic = enter_hermetic("grok-overlay-spawn");
     let ws = tmp_dir("grok-mcp-overlay");
     let home = tmp_dir("grok-mcp-overlay-home");
     seed_grok_home(&home, Some(&ws));
