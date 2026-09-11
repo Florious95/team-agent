@@ -694,9 +694,23 @@ fn resolve_worker(
         }
     };
     let matches = matching_session_window(&targets, session, window);
-    match matches.len() {
-        1 => {
-            let pane = matches[0];
+    let selected_pane = match matches.len() {
+        1 => matches.first().copied(),
+        n if n > 1 => {
+            let state_pane_id =
+                string_field(agent_entry, "pane_id").filter(|pane_id| !pane_id.is_empty());
+            let mut state_matches = matches.iter().copied().filter(|pane| {
+                state_pane_id.is_some_and(|pane_id| pane.pane_id.as_str() == pane_id)
+            });
+            match (state_matches.next(), state_matches.next()) {
+                (Some(pane), None) => Some(pane),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    match selected_pane {
+        Some(pane) => {
             let state_pane_id = string_field(agent_entry, "pane_id").map(str::to_string);
             let state_pane_stale = state_pane_id
                 .as_deref()
@@ -727,7 +741,7 @@ fn resolve_worker(
                 warning,
             })
         }
-        0 => Ok(resolved_worker_without_live(
+        None if matches.is_empty() => Ok(resolved_worker_without_live(
             sender_workspace,
             target_workspace,
             team,
@@ -738,7 +752,7 @@ fn resolve_worker(
             window,
             transport.tmux_endpoint(),
         )),
-        _ => Err(name_ambiguous(
+        None => Err(name_ambiguous(
             "multiple live panes match the same session/window",
             matches
                 .into_iter()
