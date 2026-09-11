@@ -493,7 +493,7 @@ mod tests {
             Err(_) => ("unavailable", None),
         };
         let mut fields = BTreeMap::new();
-        if let Some(text) = text {
+        if let Some(ref text) = text {
             for line in text.lines() {
                 let Some((key, value)) = line.split_once('=') else {
                     continue;
