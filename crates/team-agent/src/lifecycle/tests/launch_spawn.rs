@@ -1,3 +1,6 @@
+#[path = "../../../tests/support/hermetic.rs"]
+mod hermetic_guard;
+
 use super::*;
 use crate::transport::test_support::OfflineTransport;
 use serde_json::json;
@@ -25,9 +28,6 @@ fn launch_source() -> String {
         })
         .collect()
 }
-
-#[allow(dead_code)]
-struct HermeticTestEnv;
 
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
@@ -1263,7 +1263,11 @@ fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
 // RED at assertion (NOT a panic). OS-safe: recording transport (no real tmux) + seeded-healthy
 // coordinator (start_coordinator AlreadyRunning -> no daemon subprocess).
 #[test]
+#[serial(env)]
 fn quick_start_with_transport_spawns_workers_not_dry_run() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("launch-spawn-spawn-path");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let team = quick_start_team_dir(QS_VALID_ROLE); // one agent: implementer / provider codex
     let workspace = team.parent().expect("team_workspace(team_dir) = parent"); // where start_coordinator runs
     seed_healthy_coordinator(workspace);
