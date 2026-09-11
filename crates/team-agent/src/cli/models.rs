@@ -136,7 +136,12 @@ fn run_catalog(program: &Path, timeout: Duration, max_bytes: u64) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
+
+    #[cfg(unix)]
+    static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(unix)]
     #[test]
@@ -244,12 +249,13 @@ mod tests {
     #[cfg(unix)]
     fn fixture(body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::current_exe()
             .unwrap()
             .parent()
             .unwrap()
             .join(format!(
-                "team-agent-pi-fixture-{}-{}",
+                "team-agent-pi-fixture-{}-{}-{sequence}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -485,12 +491,16 @@ mod tests {
     #[test]
     fn runner_fails_closed_for_nonzero_oversize_timeout_and_unavailable() {
         let fail = native_timeout_fixture();
+        let started = Instant::now();
         let (failed_result, fail_observation) = with_native_mode("exit7", || {
             run_catalog(&fail, Duration::from_secs(1), 1024)
         });
+        let elapsed = started.elapsed();
         assert_eq!(
             failed_result.unwrap_err(),
-            "Pi model catalog command failed"
+            "Pi model catalog command failed",
+            "runner observation: {}",
+            safe_runner_observation(elapsed, &fail_observation)
         );
         assert_eq!(fail_observation.spawn_count, 1);
         assert_eq!(fail_observation.argv, vec!["--list-models"]);
