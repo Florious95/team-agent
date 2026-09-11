@@ -642,6 +642,66 @@ fn observe_pi_catalog_test(f: impl FnOnce(&mut PiCatalogTestContext)) {
     });
 }
 
+fn spawn_catalog_reader(
+    stdout: std::process::ChildStdout,
+    max_bytes: u64,
+) -> mpsc::Receiver<(std::io::Result<usize>, Vec<u8>)> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
+        let _ = sender.send((result, bytes));
+    });
+    receiver
+}
+
+fn finish_catalog_reader(
+    receiver: mpsc::Receiver<(std::io::Result<usize>, Vec<u8>)>,
+    status: std::process::ExitStatus,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let (result, bytes) = match receiver.recv_timeout(timeout) {
+        Ok(value) => value,
+        Err(_) => {
+            #[cfg(test)]
+            observe_pi_catalog_test(|context| context.observation.reader_timeout = true);
+            return Err("Pi model catalog command timed out".to_string());
+        }
+    };
+    if !status.success() {
+        return Err("Pi model catalog command failed".into());
+    }
+    result.map_err(|_| "Pi model catalog could not be read".to_string())?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("Pi model catalog exceeds the bounded output limit".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn run_pi_catalog_after_parent_exit_for_test(
+    stdout: std::process::ChildStdout,
+    parent_pid: u32,
+    status: std::process::ExitStatus,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    observe_pi_catalog_test(|context| {
+        context.observation.spawn_count += 1;
+        context.observation.argv.push("--list-models".to_string());
+        context.observation.parent_pid = Some(parent_pid);
+        context.observation.parent_exit_success = Some(status.success());
+        context.observation.parent_exit_code = status.code();
+    });
+    finish_catalog_reader(
+        spawn_catalog_reader(stdout, max_bytes),
+        status,
+        timeout,
+        max_bytes,
+    )
+}
+
 /// Discover candidates with one PATH-first catalog observation. This deliberately
 /// does not resolve adapters or scan wrapper chains; callers use it only for
 /// rejecting an unqualified role model before lifecycle mutation.
@@ -685,12 +745,7 @@ pub(crate) fn run_pi_catalog(
         let _ = child.wait();
         "Pi model catalog output unavailable".to_string()
     })?;
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
-        let _ = sender.send((result, bytes));
-    });
+    let receiver = spawn_catalog_reader(stdout, max_bytes);
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -700,18 +755,12 @@ pub(crate) fn run_pi_catalog(
                     context.observation.parent_exit_success = Some(status.success());
                     context.observation.parent_exit_code = status.code();
                 });
-                let (result, bytes) = match receiver.recv_timeout(timeout.saturating_sub(start.elapsed())) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        #[cfg(test)]
-                        observe_pi_catalog_test(|context| context.observation.reader_timeout = true);
-                        return Err("Pi model catalog command timed out".to_string());
-                    }
-                };
-                if !status.success() { return Err("Pi model catalog command failed".into()); }
-                result.map_err(|_| "Pi model catalog could not be read".to_string())?;
-                if bytes.len() as u64 > max_bytes { return Err("Pi model catalog exceeds the bounded output limit".into()); }
-                return Ok(bytes);
+                return finish_catalog_reader(
+                    receiver,
+                    status,
+                    timeout.saturating_sub(start.elapsed()),
+                    max_bytes,
+                );
             }
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) => {

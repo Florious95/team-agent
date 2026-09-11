@@ -406,17 +406,62 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_native_parent_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("native parent did not exit before test setup deadline");
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("native parent status could not be observed: {error}");
+                }
+            }
+        }
+    }
+
+    /// Read/drain seam only: public `run_catalog` spawn coverage remains in the
+    /// normal success and fail-closed tests.
+    #[cfg(unix)]
     #[test]
-    fn runner_timeout_is_bounded_when_descendant_keeps_stdout() {
+    fn reader_deadline_is_bounded_after_parent_exit_with_descendant_pipe() {
         let path = native_timeout_fixture();
         let receipt = native_timeout_receipt();
         assert!(!receipt.exists());
+        let mut parent = std::process::Command::new(&path)
+            .arg("--list-models")
+            .env("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT", &receipt)
+            .env("TEAM_AGENT_MODELS_TIMEOUT_MODE", "descendant")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let parent_pid = parent.id();
+        let parent_status = wait_for_native_parent_exit(&mut parent);
+        let stdout = parent.stdout.take().expect("native parent stdout pipe");
         let started = Instant::now();
         let (result, observation) =
             crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
                 &receipt,
                 Some("descendant"),
-                || run_catalog(&path, Duration::from_millis(40), 1024),
+                || {
+                    crate::lifecycle::launch::pi_mcp::run_pi_catalog_after_parent_exit_for_test(
+                        stdout,
+                        parent_pid,
+                        parent_status,
+                        Duration::from_millis(40),
+                        1024,
+                    )
+                },
             );
         let elapsed = started.elapsed();
         assert!(
