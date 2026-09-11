@@ -147,6 +147,9 @@ gate — N35/MUST-17); found {hits} occurrence(s)"
 #[test]
 #[serial(env)]
 fn b2_quick_start_ready_has_attach_commands_and_socket_miss_is_observable() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("acceptance-b-b2-quick-start");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("b2-attach");
     let team_dir = write_min_team(&ws, "b2team");

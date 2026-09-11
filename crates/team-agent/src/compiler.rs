@@ -30,7 +30,8 @@ use std::path::Path;
 use crate::communication_mode::CommunicationMode;
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
-use crate::model::{paths, spec, yaml, ModelError};
+use crate::model::{paths, permissions, spec, yaml, ModelError};
+use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
 use crate::provider::wire::{
     builtin_provider_model as wire_builtin_provider_model, is_claude_family,
     parse_canonical_provider, provider_model_keys,
@@ -366,6 +367,114 @@ pub struct CompiledRole {
     pub agent: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiModelPreflightError {
+    pub requested: String,
+    pub candidates: Vec<String>,
+    pub action: String,
+    pub not_ready: bool,
+}
+
+impl std::fmt::Display for PiModelPreflightError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Pi role model {:?} is not a qualified exact model",
+            self.requested
+        )
+    }
+}
+
+/// Shared admission gate: omitted and qualified models pass; only an
+/// unqualified present model causes one bounded catalog observation.
+pub fn preflight_pi_role_model(meta: &Value) -> Result<(), PiModelPreflightError> {
+    preflight_pi_role_model_with(meta, |requested| {
+        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    })
+}
+
+pub fn preflight_pi_role_model_with<F>(
+    meta: &Value,
+    mut discover: F,
+) -> Result<(), PiModelPreflightError>
+where
+    F: FnMut(&str) -> Result<Vec<String>, ()>,
+{
+    if parse_canonical_provider(meta.get("provider").and_then(Value::as_str).unwrap_or(""))
+        != Some(Provider::Pi)
+    {
+        return Ok(());
+    }
+    let Some(model) = string_field(meta, "model").filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let requested = model.trim().to_string();
+    if requested.split_once('/').is_some_and(|(provider, name)| {
+        !provider.is_empty() && !name.is_empty() && !requested.contains('*')
+    }) {
+        return Ok(());
+    }
+    let (candidates, not_ready) = match discover(&requested) {
+        Ok(candidates) => (candidates, false),
+        Err(()) => (Vec::new(), true),
+    };
+    let action = if candidates.is_empty() {
+        format!("run `team-agent models --provider pi --search {requested}`")
+    } else {
+        format!("copy a candidate into the role, or run `team-agent models --provider pi --search {requested}`")
+    };
+    Err(PiModelPreflightError {
+        requested,
+        candidates,
+        action,
+        not_ready,
+    })
+}
+
+pub fn preflight_pi_models_in_team(team_dir: &Path) -> Result<(), PiModelPreflightError> {
+    preflight_pi_models_in_team_with(team_dir, |requested| {
+        crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
+    })
+}
+
+pub fn preflight_pi_models_in_team_with<F>(
+    team_dir: &Path,
+    mut discover: F,
+) -> Result<(), PiModelPreflightError>
+where
+    F: FnMut(&str) -> Result<Vec<String>, ()>,
+{
+    let agents_dir = team_dir.join("agents");
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(PiModelPreflightError {
+                requested: "<role directory>".into(),
+                candidates: Vec::new(),
+                action: "repair the role directory and retry".into(),
+                not_ready: true,
+            })
+        }
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        let (meta, _) = read_front_matter(&path).map_err(|_| PiModelPreflightError {
+            requested: path.display().to_string(),
+            candidates: Vec::new(),
+            action: "repair the role document and retry".into(),
+            not_ready: true,
+        })?;
+        preflight_pi_role_model_with(&meta, &mut discover)?;
+    }
+    Ok(())
+}
+
 /// 把一份 role 文档编译成 agent spec 条目。`team_meta` 供 model/auth_mode 继承;
 /// `workspace_s` 是 working_directory。**纯读 `role_path`,无任何文件落地。**
 pub fn compile_role_agent(
@@ -392,10 +501,25 @@ fn compile_role_agent_with_mode(
     let provider = required_string(&meta, role_path, "provider")?;
     require_explicit_grok_role_model(&meta, role_path, &provider)?;
     require_explicit_cursor_role_model(&meta, role_path, &provider)?;
-    let model = resolve_model(&meta, team_meta, &provider);
+    validate_pi_role_fields(&meta, role_path, &provider)?;
+    let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
+    let model = if is_pi {
+        string_field(&meta, "model")
+            .filter(|value| !value.trim().is_empty())
+            .map(Value::Str)
+            .unwrap_or(Value::Null)
+    } else {
+        resolve_model(&meta, team_meta, &provider)
+    };
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
         .unwrap_or_else(|| "subscription".to_string());
+    if is_pi && auth_mode != "subscription" {
+        return Err(ModelError::Validation(format!(
+            "{}: Pi roles support subscription auth_mode only",
+            role_path.display()
+        )));
+    }
     if auth_mode != "subscription" && meta.get("profile").is_none() {
         return Err(ModelError::Validation(format!(
             "{}: profile is required when auth_mode is '{auth_mode}'",
@@ -466,7 +590,11 @@ fn compile_role_agent_with_mode(
         Some(raw) if !raw.trim().is_empty() => ProviderEffort::parse(raw.trim()),
         _ => None,
     };
-    let resolved_effort = role_effort.or(team_effort);
+    let resolved_effort = if is_pi {
+        role_effort
+    } else {
+        role_effort.or(team_effort)
+    };
     if let Some(effort) = resolved_effort {
         // Reject max + non-Claude at compile time.
         let provider_str = agent_items
@@ -478,7 +606,10 @@ fn compile_role_agent_with_mode(
             })
             .unwrap_or("");
         let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
-        if effort.is_claude_only() && !is_claude_family(provider_enum) {
+        if effort.is_claude_only()
+            && !is_claude_family(provider_enum)
+            && provider_enum != Provider::Pi
+        {
             return Err(ModelError::Validation(format!(
                 "{}: effort '{}' is only supported by claude/claude_code (provider: {provider_str})",
                 role_path.display(),
@@ -609,12 +740,49 @@ model: sonnet-4-thinking",
     )))
 }
 
+fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<(), ModelError> {
+    if parse_canonical_provider(provider) != Some(Provider::Pi) {
+        return Ok(());
+    }
+    if let Some(model) = string_field(meta, "model").filter(|value| !value.trim().is_empty()) {
+        let (catalog, name) = model.trim().split_once('/').ok_or_else(|| {
+            ModelError::Validation(format!(
+                "{}: Pi roles require a qualified exact model such as provider/model",
+                path.display()
+            ))
+        })?;
+        if catalog.is_empty() || name.is_empty() || model.contains('*') {
+            return Err(ModelError::Validation(format!(
+                "{}: Pi roles require a qualified exact model",
+                path.display()
+            )));
+        }
+    }
+    let tools = required_tools(meta, path)?;
+    if !tools.iter().any(|tool| tool == "mcp_team") {
+        return Err(ModelError::Validation(format!(
+            "{}: Pi roles require mcp_team",
+            path.display()
+        )));
+    }
+    let expanded = permissions::expand_tool_strings(tools.iter().map(String::as_str));
+    if let Some(category) = first_unsupported_pi_tool_category(
+        expanded
+            .iter()
+            .filter(|category| permissions::is_canonical_tool(category))
+            .map(String::as_str),
+    ) {
+        return Err(ModelError::Validation(format!(
+            "{}: Pi does not support Team Agent tool category {category:?}; remove it from the role's tools",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。
 /// 缺 = 编译失败(消息含硬串);非 bool = 同 fail-loud。
-fn required_dangerously_skip_permissions(
-    meta: &Value,
-    path: &Path,
-) -> Result<bool, ModelError> {
+fn required_dangerously_skip_permissions(meta: &Value, path: &Path) -> Result<bool, ModelError> {
     match meta.get("dangerously_skip_permissions") {
         Some(Value::Bool(value)) => Ok(*value),
         Some(_) => Err(ModelError::Validation(format!(
@@ -646,6 +814,55 @@ fn int_field(meta: &Value, key: &str, default: i64) -> Value {
     match meta.get(key).and_then(py_int_value) {
         Some(i) => Value::Int(i),
         None => Value::Int(default),
+    }
+}
+
+#[cfg(test)]
+mod pi_preflight_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn role(provider: &str, model: Option<&str>) -> Value {
+        let mut fields = vec![("provider".to_string(), Value::Str(provider.into()))];
+        if let Some(model) = model {
+            fields.push(("model".to_string(), Value::Str(model.into())));
+        }
+        Value::Map(fields)
+    }
+
+    #[test]
+    fn omitted_qualified_and_non_pi_do_not_discover() {
+        for meta in [role("pi", None), role("pi", Some("openai/gpt-5")), role("codex", Some("gpt-5"))] {
+            let calls = Cell::new(0);
+            assert!(preflight_pi_role_model_with(&meta, |_| {
+                calls.set(calls.get() + 1);
+                Ok(vec![])
+            }).is_ok());
+            assert_eq!(calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn unqualified_discovers_once_and_projects_candidates() {
+        let calls = Cell::new(0);
+        let error = preflight_pi_role_model_with(&role("pi", Some("gpt-5.6-sol")), |requested| {
+            calls.set(calls.get() + 1);
+            assert_eq!(requested, "gpt-5.6-sol");
+            Ok(vec!["openai-codex/gpt-5.6-sol".into(), "azure/gpt-5.6-sol".into()])
+        }).expect_err("unqualified model must fail closed");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(error.candidates, vec!["openai-codex/gpt-5.6-sol", "azure/gpt-5.6-sol"]);
+        assert!(!error.not_ready);
+        assert!(error.action.contains("team-agent models --provider pi --search gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn catalog_failure_is_not_ready_without_partial_candidates() {
+        let error = preflight_pi_role_model_with(&role("pi", Some("gpt-5.6-sol")), |_| Err(()))
+            .expect_err("catalog failure must reject");
+        assert!(error.not_ready);
+        assert!(error.candidates.is_empty());
+        assert!(!error.to_string().contains("stderr"));
     }
 }
 

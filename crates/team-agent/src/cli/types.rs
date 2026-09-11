@@ -297,6 +297,8 @@ pub struct QuickStartArgs {
     pub yes: bool,
     pub no_display: bool,
     pub json: bool,
+    /// Include internal receiver/topology diagnostics in the response.
+    pub detail: bool,
     /// 0.5.x Phase 1d Batch 2: explicit backend override
     /// (`--backend <tmux|conpty>`). `None` = default (factory 5-layer
     /// resolution; almost always `tmux` on a cold quick-start).
@@ -433,6 +435,8 @@ pub struct ClaimLeaderArgs {
     pub team: Option<String>,
     pub confirm: bool,
     pub json: bool,
+    /// Include internal receiver/topology diagnostics in the response.
+    pub detail: bool,
 }
 
 /// `attach-leader` public CLI args. `cmd_attach_leader` consumes the typed pane/provider
@@ -482,6 +486,8 @@ pub struct RestartArgs {
     pub allow_fresh: bool,
     pub session_converge_deadline_ms: Option<u64>,
     pub json: bool,
+    /// Include internal receiver/topology diagnostics in the response.
+    pub detail: bool,
 }
 
 /// `start-agent`(`parser.py:369`)。
@@ -638,6 +644,14 @@ pub struct LeadersArgs {
     pub json: bool,
 }
 
+/// Read-only Pi model catalog discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelsArgs {
+    pub provider: String,
+    pub search: Option<String>,
+    pub json: bool,
+}
+
 /// `validate [spec=team.spec.yaml] --json`(`parser.py:120`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidateArgs {
@@ -653,6 +667,7 @@ pub struct ProfileArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub auth_mode: Option<String>,
+    pub proxy_mode: Option<String>,
     pub json: bool,
 }
 

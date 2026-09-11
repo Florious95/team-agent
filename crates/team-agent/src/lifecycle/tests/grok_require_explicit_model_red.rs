@@ -13,6 +13,13 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -91,6 +98,7 @@ fn grok_role_missing_model_refuses_to_start() {
 #[test]
 #[serial(env)]
 fn grok_role_explicit_model_reaches_argv() {
+    let _hermetic = enter_hermetic("grok-explicit-model");
     let ws = tmp_dir("grok-with-model");
     let home = tmp_dir("grok-with-model-home");
     seed_grok_home(&home, Some(&ws));
@@ -124,7 +132,9 @@ fn grok_role_explicit_model_reaches_argv() {
 
 /// 3. claude 角色缺 model ⇒ 行为不变（仍能启动，不被 grok 的硬性 model 要求误伤）。
 #[test]
+#[serial(env)]
 fn claude_role_missing_model_still_starts() {
+    let _hermetic = enter_hermetic("grok-claude-missing-model");
     let ws = tmp_dir("claude-no-model");
     let team = write_role_team(
         &ws,

@@ -333,7 +333,7 @@ pub(crate) fn start_agent_at_paths(
         )));
     }
     let spawn_session_id = if matches!(start_mode, StartMode::Resumed) {
-        session_id.as_ref()
+        session_id.clone()
     } else {
         None
     };
@@ -375,7 +375,7 @@ pub(crate) fn start_agent_at_paths(
         &session_name,
         agent_id,
         &agent,
-        spawn_session_id,
+        spawn_session_id.as_ref(),
         into_existing_session,
         transport,
         Some(&safety),
@@ -390,15 +390,14 @@ pub(crate) fn start_agent_at_paths(
         &session_name,
         &spawn.spawn.window,
     ) {
-        if let Err(rollback_error) = transport.kill_pane(&spawn.spawn.pane_id) {
-            return Err(LifecycleError::RequirementUnmet(format!(
-                "{error}; failed to roll back spawned pane {}: {rollback_error}",
-                spawn.spawn.pane_id.as_str()
-            )));
-        }
-        return Err(error);
+        return Err(rollback_spawned_pane_keep_error(
+            transport,
+            &spawn.spawn.pane_id,
+            error,
+        ));
     }
     let actual_spawn_window = spawn.spawn.window.as_str().to_string();
+    let spawned = (|| {
     mark_agent_started(
         &mut state,
         agent_id,
@@ -457,6 +456,7 @@ pub(crate) fn start_agent_at_paths(
     } else {
         Vec::new()
     };
+    persist_selected_receiver_session_name(&mut state, &session_name);
     save_restart_projected_state_with_capture_backfill_skip(
         workspace,
         &mut state,
@@ -468,11 +468,12 @@ pub(crate) fn start_agent_at_paths(
         workspace,
         agent_id,
         &agent,
+        &spawn.plan,
         provider,
         start_mode,
         &session_name,
         &actual_spawn_window,
-        spawn_session_id,
+        spawn_session_id.as_ref(),
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
@@ -490,6 +491,29 @@ pub(crate) fn start_agent_at_paths(
         new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
     })
+    })();
+    match spawned {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => Err(rollback_spawned_pane_keep_error(
+            transport,
+            &spawn.spawn.pane_id,
+            error,
+        )),
+    }
+}
+
+fn rollback_spawned_pane_keep_error(
+    transport: &dyn crate::transport::Transport,
+    pane: &crate::transport::PaneId,
+    error: LifecycleError,
+) -> LifecycleError {
+    match transport.kill_pane(pane) {
+        Ok(()) => error,
+        Err(rollback_error) => LifecycleError::Transport(format!(
+            "{error}; failed to roll back spawned pane {}: {rollback_error}",
+            pane.as_str()
+        )),
+    }
 }
 
 fn replay_worker_target_missing_messages(
@@ -1771,6 +1795,7 @@ fn write_start_agent_start_event(
     workspace: &Path,
     agent_id: &AgentId,
     agent: &serde_json::Value,
+    spawn_plan: &crate::provider::CommandPlan,
     provider: crate::provider::Provider,
     start_mode: StartMode,
     session_name: &SessionName,
@@ -1778,89 +1803,6 @@ fn write_start_agent_start_event(
     session_id: Option<&SessionId>,
     tmux_start_mode: &'static str,
 ) -> Result<(), LifecycleError> {
-    let auth_mode = agent_auth_mode(agent);
-    let model = agent.get("model").and_then(|v| v.as_str());
-    let adapter = crate::provider::get_adapter(provider);
-    // Contract C / F6.4: event log must record the same context-aware argv that the
-    // actual spawn used — so the role/tools/MCP context appears in `start_agent.agent_start`.
-    let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
-        agent,
-        Some(agent_id.as_str()),
-        provider,
-    )?;
-    let system_prompt =
-        crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
-    let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
-        &command_agent,
-        provider,
-    )?;
-    let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
-    let mcp_config = adapter
-        .mcp_config(auth_mode)
-        .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-    let team_id = agent.get("owner_team_id").and_then(|v| v.as_str());
-    let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
-        mcp_config,
-        workspace,
-        agent_id.as_str(),
-        team_id.unwrap_or(""),
-    );
-    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
-        workspace,
-        agent_id.as_str(),
-        &mcp_config,
-    )?;
-    let profile_launch =
-        crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
-            workspace,
-            agent_id.as_str(),
-            agent,
-            Some(&mcp_config),
-        )?;
-    let command_model = profile_launch.command_overrides.model.as_deref().or(model);
-    // 0.4.x provider effort MVP: start_agent path preserves effort from the
-    // persisted agent JSON.
-    let start_agent_effort =
-        crate::lifecycle::launch::provider_effort_for_spawn_json(&agent, provider);
-    if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
-        &agent,
-        provider,
-        agent_id.as_str(),
-    ) {
-        let _ = crate::event_log::EventLog::new(workspace)
-            .write("provider.effort_unsupported", event_value);
-    }
-    let context = crate::provider::ProviderCommandContext {
-        auth_mode,
-        mcp_config: Some(&mcp_config),
-        system_prompt: Some(system_prompt.as_str()),
-        model: command_model,
-        tools: &resolved_tool_refs,
-        profile_launch: Some(&profile_launch),
-        agent_id_hint: Some(agent_id.as_str()),
-        effort: start_agent_effort,
-    };
-    let mut plan = match session_id {
-        Some(session_id) => adapter
-            .build_resume_command_plan(Some(session_id), context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        None => adapter
-            .build_command_plan(context)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-    };
-    if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
-        crate::lifecycle::launch::point_native_mcp_config_at_file(
-            &mut plan.argv,
-            provider,
-            &mcp_config_path,
-        );
-    }
-    crate::lifecycle::launch::fill_spawn_placeholders_full(
-        &mut plan.argv,
-        workspace,
-        agent_id.as_str(),
-        team_id,
-    );
     crate::event_log::EventLog::new(workspace)
         .write(
             "start_agent.agent_start",
@@ -1872,7 +1814,7 @@ fn write_start_agent_start_event(
                 "session": session_name.as_str(),
                 "window": window,
                 "tmux_start_mode": tmux_start_mode,
-                "command": plan.argv,
+                "command": spawn_plan.argv,
                 "mcp_config": agent.get("mcp_config").cloned().unwrap_or(serde_json::Value::Null),
             }),
         )

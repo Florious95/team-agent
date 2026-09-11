@@ -29,7 +29,7 @@ fn rest_002_restart_auto_fresh_never_captured_fake_team_partial_resume() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
     assert!(
-        quick_start_launched(&qs),
+        quick_start_workers_available(&qs),
         "quick-start did not launch: {}",
         qs.stdout
     );
@@ -75,15 +75,9 @@ fn rest_002_restart_auto_fresh_never_captured_fake_team_partial_resume() {
     );
 
     // 0.4.7 partial-resume: never-captured fake worker auto-freshes.
-    let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
     assert!(
-        ok,
+        restart_rebuild_completed(&j),
         "0.4.7: never-captured fake worker must auto-fresh on restart; got {}",
         j
-    );
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
-    assert_eq!(
-        status, "restarted",
-        "0.4.7: never-captured worker → status=restarted (auto-fresh); got {status:?}; json={j}"
     );
 }

@@ -31,9 +31,10 @@ use crate::provider::wire::{
     is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
 };
 use crate::transport::{
-    submit_verification_wire, turn_verification_wire, CaptureRange, InjectPayload, InjectReport,
-    InjectVerification, Key, PaneId, PaneInfo, SessionName, SubmitObserver, SubmitVerification,
-    Target, Transport, WindowName,
+    submit_verification_wire, turn_verification_wire, BusySignalKind, CaptureRange,
+    CaptureSampleOutcome, InjectPayload, InjectReport, InjectVerification, InputSurfaceProbe, Key,
+    PaneId, PaneInfo, QueryOutcome, SessionName, SubmitConsumptionReason, SubmitObserver,
+    SubmitVerification, Target, Transport, WindowName,
 };
 
 use super::helpers::{message_exists, MessageStatusShadow};
@@ -747,16 +748,20 @@ pub fn deliver_pending_message(
         // are preserved byte-for-byte for grep compatibility; new keys are
         // ADDITIONAL.
         let submit_attempts_detail = render_submit_diagnostics(&inject_report);
-        event_log.write(
-            "send.unverified",
-            serde_json::json!({
-                "message_id": message_id,
-                "recipient": message.recipient,
-                "reason": reason,
-                "attempts": inject_report.attempts,
-                "submit_attempts_detail": submit_attempts_detail,
-            }),
-        )?;
+        let mut unverified = serde_json::json!({
+            "message_id": message_id,
+            "recipient": message.recipient,
+            "reason": reason,
+            "attempts": inject_report.attempts,
+            "submit_attempts_detail": submit_attempts_detail,
+        });
+        merge_inject_readback_fields(
+            &mut unverified,
+            &inject_report,
+            Some(&target),
+            resolved.metadata.as_ref(),
+        );
+        event_log.write("send.unverified", unverified)?;
         if inject_report.attempts >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
             store.mark(message_id, "failed", Some("send_unverified_exhausted"))?;
             emit_send_failed_exhausted(
@@ -1068,7 +1073,7 @@ fn persist_submit_verification(workspace: &Path, message_id: &str, report: &Inje
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "message_id": message_id,
         "submit_verification": format!("{:?}", report.submit_verification),
         "inject_verification": format!("{:?}", report.inject_verification),
@@ -1076,6 +1081,7 @@ fn persist_submit_verification(workspace: &Path, message_id: &str, report: &Inje
         "submit_verified": inject_submit_verified(report),
         "attempts": report.attempts,
     });
+    merge_inject_readback_fields(&mut body, report, None, None);
     let _ = std::fs::write(dir.join("submit-verification.json"), format!("{body}\n"));
 }
 
@@ -1912,6 +1918,146 @@ fn render_submit_diagnostics(report: &InjectReport) -> serde_json::Value {
     )
 }
 
+fn json_opt_bool(value: Option<bool>) -> serde_json::Value {
+    match value {
+        Some(flag) => serde_json::Value::Bool(flag),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn inject_pane_id(target: &Target) -> Option<&str> {
+    match target {
+        Target::Pane(pane) => Some(pane.as_str()),
+        Target::SessionWindow { .. } => None,
+    }
+}
+
+fn merge_inject_readback_fields(
+    event: &mut serde_json::Value,
+    report: &InjectReport,
+    target: Option<&Target>,
+    metadata: Option<&TargetMetadata>,
+) {
+    if let Some(metadata) = metadata {
+        append_target_metadata(event, metadata);
+    }
+    let Some(obj) = event.as_object_mut() else {
+        return;
+    };
+    let inject_pane = target.and_then(inject_pane_id);
+    if let Some(pane) = inject_pane {
+        obj.insert(
+            "inject_target_pane_id".to_string(),
+            serde_json::json!(pane),
+        );
+    }
+    let resolved_pane = metadata.map(|meta| meta.target_pane_id.as_str());
+    obj.insert(
+        "target_pane_matched".to_string(),
+        json_opt_bool(match (inject_pane, resolved_pane) {
+            (Some(left), Some(right)) => Some(left == right),
+            _ => None,
+        }),
+    );
+    let inject_endpoint = metadata.and_then(|meta| meta.tmux_endpoint.as_deref());
+    // metadata.tmux_endpoint is the transport used to resolve; compare to
+    // itself is tautological. Equality vs inject target id is the pane check
+    // above. Socket equality is recorded when both sides exist on metadata.
+    obj.insert(
+        "resolved_tmux_endpoint_present".to_string(),
+        serde_json::Value::Bool(inject_endpoint.is_some()),
+    );
+    let diag = report.submit_diagnostics.as_ref();
+    obj.insert(
+        "token_seen_before_paste".to_string(),
+        json_opt_bool(diag.and_then(|d| d.token_seen_before_paste)),
+    );
+    obj.insert(
+        "token_seen_after_paste".to_string(),
+        json_opt_bool(diag.and_then(|d| d.token_seen_after_paste)),
+    );
+    obj.insert(
+        "token_seen_after_enter".to_string(),
+        json_opt_bool(diag.and_then(|d| d.token_seen_after_enter)),
+    );
+    obj.insert(
+        "capture_ok_count".to_string(),
+        serde_json::json!(diag.map(|d| d.capture_ok_count).unwrap_or(0)),
+    );
+    obj.insert(
+        "capture_err_count".to_string(),
+        serde_json::json!(diag.map(|d| d.capture_err_count).unwrap_or(0)),
+    );
+    obj.insert(
+        "capture_sample_count".to_string(),
+        serde_json::json!(diag.map(|d| d.capture_sample_count).unwrap_or(0)),
+    );
+    obj.insert(
+        "last_capture_outcome".to_string(),
+        serde_json::json!(diag
+            .map(|d| d.last_capture_outcome.as_str())
+            .unwrap_or(CaptureSampleOutcome::NotAttempted.as_str())),
+    );
+    obj.insert(
+        "consumption_reason".to_string(),
+        serde_json::json!(diag
+            .map(|d| d.consumption_reason.as_str())
+            .unwrap_or("unknown")),
+    );
+    obj.insert(
+        "before_busy_signal_kind".to_string(),
+        serde_json::json!(diag.and_then(|d| d.before_busy_signal_kind.map(|kind| kind.as_str()))),
+    );
+    obj.insert(
+        "busy_signal_kind".to_string(),
+        serde_json::json!(diag.and_then(|d| d.busy_signal_kind.map(|kind| kind.as_str()))),
+    );
+    obj.insert(
+        "busy_line_from_bottom".to_string(),
+        serde_json::json!(diag.and_then(|d| d.busy_line_from_bottom)),
+    );
+    obj.insert(
+        "current_marker_in_bottom_15".to_string(),
+        serde_json::json!(diag.and_then(|d| d.current_marker_in_bottom_15)),
+    );
+    obj.insert(
+        "paste_identity_in_composer".to_string(),
+        serde_json::json!(diag.and_then(|d| d.paste_identity_in_composer)),
+    );
+    obj.insert(
+        "consumption_from_capture_result".to_string(),
+        serde_json::json!(diag.and_then(|d| d.consumption_from_capture_result)),
+    );
+    obj.insert(
+        "pane_command_basename".to_string(),
+        diag.and_then(|d| d.pane_command_basename.as_deref())
+            .map(|name| serde_json::json!(name))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    obj.insert(
+        "pane_command_query".to_string(),
+        serde_json::json!(diag
+            .map(|d| d.pane_command_query.as_str())
+            .unwrap_or(QueryOutcome::Unavailable.as_str())),
+    );
+    obj.insert(
+        "input_surface".to_string(),
+        serde_json::json!(diag
+            .map(|d| d.input_surface.as_str())
+            .unwrap_or(InputSurfaceProbe::Unavailable.as_str())),
+    );
+    obj.insert(
+        "diag_target_pane_id".to_string(),
+        diag.and_then(|d| d.target_pane_id.as_deref())
+            .map(|pane| serde_json::json!(pane))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    obj.insert(
+        "diag_target_pane_query_matched".to_string(),
+        json_opt_bool(diag.and_then(|d| d.target_pane_query_matched)),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_send_failed_exhausted(
     workspace: &Path,
@@ -1942,21 +2088,22 @@ fn emit_send_failed_exhausted(
         .and_then(|r| r.submit_diagnostics.as_ref())
         .and_then(|d| d.attempts_detail.last())
         .map(|a| a.pane_tail_excerpt.clone());
-    event_log.write(
-        "send.failed",
-        serde_json::json!({
-            "message_id": message_id,
-            "recipient": recipient,
-            "attempts": attempts,
-            "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
-            "reason": failure_reason,
-            "verification": verification,
-            "submit_attempts_detail": submit_attempts_detail,
-            "total_elapsed_ms": total_elapsed_ms,
-            "last_matched_literal": last_matched_literal,
-            "last_pane_tail_excerpt": last_pane_tail_excerpt,
-        }),
-    )?;
+    let mut failed = serde_json::json!({
+        "message_id": message_id,
+        "recipient": recipient,
+        "attempts": attempts,
+        "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
+        "reason": failure_reason,
+        "verification": verification,
+        "submit_attempts_detail": submit_attempts_detail,
+        "total_elapsed_ms": total_elapsed_ms,
+        "last_matched_literal": last_matched_literal,
+        "last_pane_tail_excerpt": last_pane_tail_excerpt,
+    });
+    if let Some(report) = inject_report {
+        merge_inject_readback_fields(&mut failed, report, None, None);
+    }
+    event_log.write("send.failed", failed)?;
     let content = format!(
         "send.failed\nerror: send to {recipient} failed with {failure_reason} after {attempts}/{SEND_RETRY_MAX_ATTEMPTS} attempts\naction: inspect the target pane and retry the send\nlog: .team/logs/events.jsonl"
     );
@@ -2221,7 +2368,11 @@ fn recipient_pane_has_actionable_startup_prompt(
             crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        Provider::Grok | Provider::CursorAgent | Provider::GeminiCli | Provider::Fake => false,
+        Provider::Pi
+        | Provider::Grok
+        | Provider::CursorAgent
+        | Provider::GeminiCli
+        | Provider::Fake => false,
     }
 }
 
@@ -2259,7 +2410,32 @@ pub(crate) fn paste_to_submit_floor_for_recipient(
     }
 }
 
-fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
+/// ---
+/// purpose: 判断收件 provider 是否必须禁止 submit observer 重按 Enter
+/// returns: CursorAgent 与 Pi 为 true，其余为 false
+/// ---
+pub(crate) fn recipient_requires_single_enter(state: &serde_json::Value, recipient: &str) -> bool {
+    matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent | Provider::Pi)
+    )
+}
+
+/// ---
+/// purpose: 判断收件 provider 是否允许 Grok send-now 显式队列 flush
+/// returns: CursorAgent 与 Pi 为 false，其余为 true
+/// ---
+pub(crate) fn recipient_allows_explicit_queue_flush(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> bool {
+    !matches!(
+        recipient_provider(state, recipient),
+        Some(Provider::CursorAgent | Provider::Pi)
+    )
+}
+
+pub(crate) fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
     state
         .get("agents")
         .and_then(serde_json::Value::as_object)
@@ -2842,7 +3018,9 @@ fn project_state_for_owner_team(
             return Ok(OwnerTeamProjection::Refused(outcome));
         }
     };
-    if top_level_state_matches_owner_team(fallback, &canonical_team) {
+    if top_level_state_matches_owner_team(fallback, &canonical_team)
+        && state_has_no_team_entries(fallback)
+    {
         let mut state = fallback.clone();
         carry_top_level_leader_binding(&mut state, &raw);
         return Ok(OwnerTeamProjection::Projected {
@@ -2850,7 +3028,8 @@ fn project_state_for_owner_team(
             canonical_team,
         });
     }
-    if top_level_state_matches_owner_team(&raw, &canonical_team) {
+    if top_level_state_matches_owner_team(&raw, &canonical_team) && state_has_no_team_entries(&raw)
+    {
         return Ok(OwnerTeamProjection::Projected {
             state: raw,
             canonical_team,
@@ -2975,16 +3154,31 @@ fn project_state_for_owner_team_value(
     None
 }
 
-fn top_level_state_matches_owner_team(state: &serde_json::Value, team: &str) -> bool {
-    state
+pub(crate) fn top_level_state_matches_owner_team(state: &serde_json::Value, team: &str) -> bool {
+    if !state.is_object() {
+        return false;
+    }
+    if state
         .get("active_team_key")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|value| value == team)
-        || crate::state::projection::team_state_key(state) == team
-        || state
-            .get("session_name")
+    {
+        return true;
+    }
+    if state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
+    {
+        return true;
+    }
+    let has_explicit_key = ["team_key", "team_dir", "spec_path"].iter().any(|field| {
+        state
+            .get(*field)
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
+            .is_some_and(|value| !value.is_empty())
+    });
+    has_explicit_key && crate::state::projection::team_state_key(state) == team
 }
 
 /// `retry_injection_after_trust_auto_answer` (`trust_auto_answer.py`):leader 路径 trust 应答
@@ -3223,5 +3417,83 @@ mod paste_floor_tests {
             paste_to_submit_floor_for_recipient(&state_with_provider("codex"), "w1"),
             Duration::ZERO
         );
+    }
+
+    fn empty_report() -> InjectReport {
+        InjectReport {
+            stage_reached: crate::transport::InjectStage::Submit,
+            inject_verification: InjectVerification::CaptureMissingToken,
+            submit_verification: SubmitVerification::SubmitConsumptionUnverified,
+            turn_verification: crate::transport::TurnVerification::NotYetObserved,
+            attempts: 1,
+            submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
+                consumption_reason: SubmitConsumptionReason::Unverified,
+                before_busy_signal_kind: Some(BusySignalKind::Working),
+                busy_signal_kind: Some(BusySignalKind::SpinnerGlyph),
+                busy_line_from_bottom: Some(2),
+                current_marker_in_bottom_15: Some(false),
+                paste_identity_in_composer: None,
+                consumption_from_capture_result: Some(false),
+                last_capture_outcome: CaptureSampleOutcome::Failed,
+                capture_err_count: 1,
+                capture_sample_count: 1,
+                pane_command_basename: Some("grok".to_string()),
+                pane_command_query: QueryOutcome::Observed,
+                input_surface: InputSurfaceProbe::Input,
+                target_pane_id: Some("%9".to_string()),
+                target_pane_query_matched: Some(true),
+                token_seen_after_paste: None,
+                ..crate::transport::SubmitDiagnostics::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn inject_readback_fields_are_safe_scalars_and_keep_attempts_array() {
+        let report = empty_report();
+        let mut event = serde_json::json!({
+            "message_id": "msg_x",
+            "submit_attempts_detail": [{"matched": false}],
+        });
+        merge_inject_readback_fields(
+            &mut event,
+            &report,
+            Some(&Target::Pane(PaneId::new("%9"))),
+            None,
+        );
+        assert_eq!(event["last_capture_outcome"], serde_json::json!("failed"));
+        assert_eq!(event["consumption_reason"], serde_json::json!("unverified"));
+        assert_eq!(
+            event["before_busy_signal_kind"],
+            serde_json::json!("working")
+        );
+        assert_eq!(event["busy_signal_kind"], serde_json::json!("spinner_glyph"));
+        assert_eq!(event["busy_line_from_bottom"], serde_json::json!(2));
+        assert_eq!(
+            event["current_marker_in_bottom_15"],
+            serde_json::json!(false)
+        );
+        assert_eq!(event["paste_identity_in_composer"], serde_json::Value::Null);
+        assert_eq!(
+            event["consumption_from_capture_result"],
+            serde_json::json!(false)
+        );
+        assert_eq!(event["token_seen_after_paste"], serde_json::Value::Null);
+        assert_eq!(event["pane_command_basename"], serde_json::json!("grok"));
+        assert_eq!(event["input_surface"], serde_json::json!("input"));
+        assert_eq!(event["inject_target_pane_id"], serde_json::json!("%9"));
+        assert!(event["submit_attempts_detail"].is_array());
+        assert!(event.get("pane_tail_excerpt").is_none());
+        let dump = event.to_string();
+        assert!(
+            !dump.contains("--help") && !dump.contains("argv"),
+            "readback fields must not leak argv: {dump}"
+        );
+        assert_eq!(
+            report.inject_verification,
+            InjectVerification::CaptureMissingToken
+        );
+        assert!(!inject_submit_verified(&report));
+        assert!(!pane_readback_verified(&report));
     }
 }

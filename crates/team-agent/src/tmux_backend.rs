@@ -61,13 +61,16 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::model::enums::PaneLiveness;
+use crate::provider::wire::{parse_provider, provider_wire};
 use crate::transport::{
-    normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
-    tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv, tmux_spawn_argv, AttachOutcome,
-    BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage,
-    InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome,
-    SpawnResult, SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    command_basename, normalize_capture, tmux_capture_argv, tmux_empty_inject_argv,
+    tmux_inject_text_argv, tmux_query_argv, tmux_send_keys_argv, tmux_send_submit_argv,
+    tmux_spawn_argv, AttachOutcome, BackendKind, BusySignalKind, CaptureRange,
+    CaptureSampleOutcome, CapturedText, InjectPayload, InjectReport, InjectStage,
+    InjectVerification, InputSurfaceProbe, Key, PaneField, PaneId, PaneInfo, PaneMode,
+    QueryOutcome, SessionName, SetEnvOutcome, SpawnResult, SubmitAttemptObservation,
+    SubmitConsumptionReason, SubmitDiagnostics, SubmitObserver, SubmitVerification, Target,
+    Transport, TransportError, TurnVerification, WindowName,
 };
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
@@ -372,6 +375,63 @@ impl TmuxBackend {
             nonce.to_string(),
         ];
         self.run_ok(&argv)
+    }
+
+    /// Set the pane-instance nonce only when the pane option is unset. tmux
+    /// serializes commands at the server, so concurrent first claims have one
+    /// winner; losers read back that winner instead of persisting a stale nonce.
+    pub(crate) fn set_pane_binding_nonce_if_unset(
+        &self,
+        pane: &PaneId,
+        nonce: &str,
+    ) -> Result<String, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "set-option".to_string(),
+            "-p".to_string(),
+            "-o".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            TMUX_PANE_BINDING_NONCE_OPTION.to_string(),
+            nonce.to_string(),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if output.success {
+            return Ok(nonce.to_string());
+        }
+        if output
+            .stderr
+            .to_ascii_lowercase()
+            .contains("already set")
+        {
+            return self.read_pane_binding_nonce(pane);
+        }
+        Err(subprocess_error(argv, output))
+    }
+
+    fn read_pane_binding_nonce(&self, pane: &PaneId) -> Result<String, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "show-options".to_string(),
+            "-p".to_string(),
+            "-v".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            TMUX_PANE_BINDING_NONCE_OPTION.to_string(),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if !output.success {
+            return Err(subprocess_error(argv, output));
+        }
+        let nonce = output.stdout.trim();
+        if nonce.is_empty() {
+            return Err(TransportError::Subprocess {
+                argv,
+                code: output.code,
+                stderr: "pane binding nonce remained unset after conditional write".to_string(),
+            });
+        }
+        Ok(nonce.to_string())
     }
 
     /// Backend with an injected runner (tests: canned/recording tmux output). Shared default socket.
@@ -1337,6 +1397,115 @@ fn pane_from_target(target: &Target) -> PaneId {
     }
 }
 
+#[derive(Default)]
+struct CaptureTally {
+    ok: u32,
+    err: u32,
+    last: CaptureSampleOutcome,
+}
+
+impl CaptureTally {
+    fn record_ok(&mut self, text: &str, marker: Option<&str>) {
+        self.ok = self.ok.saturating_add(1);
+        self.last = if marker.is_some_and(|token| text.contains(token)) {
+            CaptureSampleOutcome::OkTokenSeen
+        } else {
+            CaptureSampleOutcome::OkTokenMissing
+        };
+    }
+
+    fn record_err(&mut self) {
+        self.err = self.err.saturating_add(1);
+        self.last = CaptureSampleOutcome::Failed;
+    }
+
+    fn seen_after_ok_samples(&self, visible: bool) -> Option<bool> {
+        if self.ok == 0 {
+            None
+        } else {
+            Some(visible)
+        }
+    }
+}
+
+struct InjectTargetSurface {
+    pane_command_basename: Option<String>,
+    pane_command_query: QueryOutcome,
+    input_surface: InputSurfaceProbe,
+    target_pane_id: String,
+    target_pane_query_matched: Option<bool>,
+}
+
+fn probe_inject_target_surface(backend: &TmuxBackend, target: &Target) -> InjectTargetSurface {
+    let pane = pane_from_target(target);
+    let (pane_command_basename, pane_command_query) =
+        match backend.query(target, PaneField::PaneCurrentCommand) {
+            Ok(Some(raw)) => match command_basename(&raw) {
+                Some(name) => (Some(name), QueryOutcome::Observed),
+                None => (None, QueryOutcome::Unavailable),
+            },
+            _ => (None, QueryOutcome::Unavailable),
+        };
+    let input_surface = match backend.query(target, PaneField::PaneMode) {
+        Ok(Some(raw)) => match pane_mode_from_raw(Some(raw)) {
+            None => InputSurfaceProbe::Input,
+            Some(PaneMode::Copy) => InputSurfaceProbe::Copy,
+            Some(PaneMode::Tree) => InputSurfaceProbe::Tree,
+            Some(PaneMode::View) => InputSurfaceProbe::View,
+            Some(PaneMode::Client) => InputSurfaceProbe::Client,
+            Some(PaneMode::Unknown) => InputSurfaceProbe::UnknownMode,
+        },
+        _ => InputSurfaceProbe::Unavailable,
+    };
+    let target_pane_query_matched = match backend.query(target, PaneField::PaneId) {
+        Ok(Some(id)) if !id.is_empty() => Some(id == pane.as_str()),
+        _ => None,
+    };
+    InjectTargetSurface {
+        pane_command_basename,
+        pane_command_query,
+        input_surface,
+        target_pane_id: pane.as_str().to_string(),
+        target_pane_query_matched,
+    }
+}
+
+fn submit_diagnostics_for_inject(
+    total_elapsed_ms: u64,
+    attempts_detail: Vec<SubmitAttemptObservation>,
+    tally: &CaptureTally,
+    token_seen_after_paste: Option<bool>,
+    token_seen_after_enter: Option<bool>,
+    surface: InjectTargetSurface,
+) -> SubmitDiagnostics {
+    SubmitDiagnostics {
+        consumption_reason: SubmitConsumptionReason::Unknown,
+        // No pre-paste capture exists on this path; keep the diagnostic null.
+        before_busy_signal_kind: None,
+        busy_signal_kind: None,
+        busy_line_from_bottom: None,
+        current_marker_in_bottom_15: None,
+        paste_identity_in_composer: None,
+        consumption_from_capture_result: None,
+        appear_gate_elapsed_ms: 0,
+        appear_gate_matched: false,
+        total_elapsed_ms,
+        attempts_detail,
+        token_seen_before_paste: None,
+        token_seen_after_paste,
+        token_seen_after_enter,
+        capture_ok_count: tally.ok,
+        capture_err_count: tally.err,
+        capture_sample_count: tally.ok.saturating_add(tally.err),
+        last_capture_outcome: tally.last,
+        pane_command_basename: surface.pane_command_basename,
+        pane_command_query: surface.pane_command_query,
+        input_surface: surface.input_surface,
+        target_pane_id: Some(surface.target_pane_id),
+        target_pane_query_matched: surface.target_pane_query_matched,
+    }
+}
+
 fn target_name(target: &Target) -> String {
     match target {
         Target::Pane(pane) => pane.as_str().to_string(),
@@ -1538,13 +1707,23 @@ fn post_submit_token_visible(
     backend: &TmuxBackend,
     target: &Target,
     payload: &InjectPayload,
+    tally: &mut CaptureTally,
 ) -> Result<Option<bool>, TransportError> {
-    if payload_token_marker(payload).is_none() {
+    let Some(marker) = payload_token_marker(payload) else {
         return Ok(None);
-    }
+    };
     for attempt in 0..TOKEN_POST_SUBMIT_READBACK_POLLS {
-        if let Some(true) = token_visible_in_capture(backend, target, payload)? {
-            return Ok(Some(true));
+        match backend.capture(target, CaptureRange::Tail(80)) {
+            Ok(cap) => {
+                tally.record_ok(&cap.text, Some(marker));
+                if cap.text.contains(marker) {
+                    return Ok(Some(true));
+                }
+            }
+            Err(_) => {
+                tally.record_err();
+                return Ok(None);
+            }
         }
         if attempt + 1 < TOKEN_POST_SUBMIT_READBACK_POLLS {
             std::thread::sleep(Duration::from_millis(25));
@@ -1896,6 +2075,56 @@ pub(crate) fn consumption_from_capture(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ConsumptionCaptureObservation {
+    busy: Option<BusySignalMatch>,
+    marker_in_bottom_15: Option<bool>,
+    paste_identity_in_composer: Option<bool>,
+    consumption_from_capture_result: Option<bool>,
+}
+
+fn consumption_capture_observation(
+    text: &str,
+    marker: Option<&str>,
+    token_ever_visible: bool,
+    tracked: Option<PasteLatch>,
+) -> ConsumptionCaptureObservation {
+    let Some(marker) = marker else {
+        return ConsumptionCaptureObservation::default();
+    };
+    ConsumptionCaptureObservation {
+        busy: provider_busy_signal_match(text),
+        marker_in_bottom_15: Some(token_in_bottom_n(text, marker, 15)),
+        paste_identity_in_composer: tracked
+            .map(|tracked| this_paste_identity_in_composer(text, marker, Some(tracked))),
+        consumption_from_capture_result: consumption_from_capture(
+            text,
+            marker,
+            token_ever_visible,
+            tracked,
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ConsumptionDiagnostics {
+    busy_signal_kind: Option<BusySignalKind>,
+    busy_line_from_bottom: Option<u8>,
+    current_marker_in_bottom_15: Option<bool>,
+    paste_identity_in_composer: Option<bool>,
+    consumption_from_capture_result: Option<bool>,
+}
+
+impl ConsumptionDiagnostics {
+    fn record(&mut self, observation: ConsumptionCaptureObservation) {
+        self.busy_signal_kind = observation.busy.map(|match_| match_.kind);
+        self.busy_line_from_bottom = observation.busy.map(|match_| match_.line_from_bottom);
+        self.current_marker_in_bottom_15 = observation.marker_in_bottom_15;
+        self.paste_identity_in_composer = observation.paste_identity_in_composer;
+        self.consumption_from_capture_result = observation.consumption_from_capture_result;
+    }
+}
+
 /// ---
 /// purpose: Gone 分支在判已消费前复核 composer 占位符（PasteLatch 身份）
 /// contract: 锁定身份仍在，或未锁定但 grok `[Pasted: …]` 仍在 ⇒ Some(false)
@@ -1925,35 +2154,65 @@ fn marker_position_from_bottom(text: &str, marker: &str) -> Option<u32> {
     None
 }
 
-fn provider_busy_signal_in_tail(text: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BusySignalMatch {
+    kind: BusySignalKind,
+    line_from_bottom: u8,
+}
+
+fn busy_signal_kind_in_line(line: &str) -> Option<BusySignalKind> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("working") {
+        return Some(BusySignalKind::Working);
+    }
+    if lower.contains("thinking") {
+        return Some(BusySignalKind::Thinking);
+    }
+    if lower.contains("processing") {
+        return Some(BusySignalKind::Processing);
+    }
+    if lower.contains("esc to interrupt") {
+        return Some(BusySignalKind::EscToInterrupt);
+    }
+    if line.contains('●')
+        || line.contains('⏳')
+        || line.contains('⠋')
+        || line.contains('⠙')
+        || line.contains('⠹')
+        || line.contains('⠸')
+        || line.contains('⠼')
+        || line.contains('⠴')
+        || line.contains('⠦')
+        || line.contains('⠧')
+        || line.contains('⠇')
+        || line.contains('⠏')
+        || line.contains('✶')
+        || line.contains('✢')
+        || line.contains('✻')
+        || line.contains('✽')
+        || line.contains('✳')
+    {
+        return Some(BusySignalKind::SpinnerGlyph);
+    }
+    None
+}
+
+fn provider_busy_signal_match(text: &str) -> Option<BusySignalMatch> {
     text.lines()
         .rev()
         .filter(|line| !line.trim().is_empty())
         .take(15)
-        .any(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("working")
-                || lower.contains("thinking")
-                || lower.contains("processing")
-                || lower.contains("esc to interrupt")
-                || line.contains('●')
-                || line.contains('⏳')
-                || line.contains('⠋')
-                || line.contains('⠙')
-                || line.contains('⠹')
-                || line.contains('⠸')
-                || line.contains('⠼')
-                || line.contains('⠴')
-                || line.contains('⠦')
-                || line.contains('⠧')
-                || line.contains('⠇')
-                || line.contains('⠏')
-                || line.contains('✶')
-                || line.contains('✢')
-                || line.contains('✻')
-                || line.contains('✽')
-                || line.contains('✳')
+        .enumerate()
+        .find_map(|(line_from_bottom, line)| {
+            busy_signal_kind_in_line(line).map(|kind| BusySignalMatch {
+                kind,
+                line_from_bottom: line_from_bottom as u8,
+            })
         })
+}
+
+fn provider_busy_signal_in_tail(text: &str) -> bool {
+    provider_busy_signal_match(text).is_some()
 }
 
 /// ---
@@ -2336,6 +2595,7 @@ fn shell_command(
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
+    let caller_provider = caller_provider_for_invocation(env);
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
@@ -2355,14 +2615,45 @@ fn shell_command(
     // contains the very keys we want to scrub (e.g. CLAUDE_EFFORT carried
     // forward from the launching shell into the env map).
     for (key, value) in env {
-        if unset_set.contains(key.as_str()) {
+        if unset_set.contains(key.as_str())
+            || key.starts_with(crate::layout::worker_env::CALLER_CONTEXT_PREFIX)
+        {
             continue;
         }
         parts.push(format!("{key}={}", shell_quote(value)));
     }
+    append_caller_context_assignments(&mut parts, caller_provider);
     parts.push("exec".to_string());
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.join(" ")
+}
+
+fn caller_provider_for_invocation(env: &BTreeMap<String, String>) -> Option<&'static str> {
+    env.get(crate::layout::worker_env::CALLER_PROVIDER_ENV)
+        .and_then(|value| parse_provider(value))
+        .map(provider_wire)
+}
+
+fn append_caller_context_assignments(parts: &mut Vec<String>, provider: Option<&str>) {
+    let Some(provider) = provider else {
+        return;
+    };
+    parts.push(format!(
+        "{}={}",
+        crate::layout::worker_env::CALLER_PROVIDER_ENV,
+        shell_quote(provider)
+    ));
+    // These are expanded by the shell created inside the target pane. They are
+    // assignments on the provider command only, so the exit marker/inert tail
+    // cannot retain a usable caller context.
+    parts.push(format!(
+        "{}=\"${{TMUX_PANE-}}\"",
+        crate::layout::worker_env::CALLER_PANE_ENV
+    ));
+    parts.push(format!(
+        "{}=\"${{TMUX%%,*}}\"",
+        crate::layout::worker_env::CALLER_ENDPOINT_ENV
+    ));
 }
 
 /// 0.4.x (CR R6): single-source marker prefix. The exit marker emitted by
@@ -2534,6 +2825,7 @@ pub fn worker_shell_wrapper_command(
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
+    let caller_provider = caller_provider_for_invocation(env);
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
@@ -2544,11 +2836,14 @@ pub fn worker_shell_wrapper_command(
         parts.push("&&".to_string());
     }
     for (key, value) in env {
-        if unset_set.contains(key.as_str()) {
+        if unset_set.contains(key.as_str())
+            || key.starts_with(crate::layout::worker_env::CALLER_CONTEXT_PREFIX)
+        {
             continue;
         }
         parts.push(format!("{key}={}", shell_quote(value)));
     }
+    append_caller_context_assignments(&mut parts, caller_provider);
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.push(";".to_string());
     parts.push("rc=$?;".to_string());
@@ -2893,11 +3188,15 @@ impl Transport for TmuxBackend {
                 let poll_start = std::time::Instant::now();
                 let mut token_ever_visible = false;
                 let mut tracked_paste: Option<PasteLatch> = None;
+                let mut capture_tally = CaptureTally::default();
+                let mut token_seen_after_paste = None;
+                let mut token_seen_after_enter = None;
                 token_visible_for_report = if let Some(m) = payload_token_marker(payload) {
                     let mut visible = false;
                     while poll_start.elapsed().as_millis() < token_poll_timeout_ms as u128 {
                         match self.capture(target, CaptureRange::Tail(80)) {
                             Ok(cap) => {
+                                capture_tally.record_ok(&cap.text, Some(m));
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
                                 if cap.text.contains(m) {
                                     visible = true;
@@ -2908,10 +3207,14 @@ impl Transport for TmuxBackend {
                                     break;
                                 }
                             }
-                            Err(_) => break, // tmux unavailable, skip poll
+                            Err(_) => {
+                                capture_tally.record_err();
+                                break; // tmux unavailable, skip poll
+                            }
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
+                    token_seen_after_paste = capture_tally.seen_after_ok_samples(visible);
                     Some(visible)
                 } else {
                     None
@@ -2933,6 +3236,7 @@ impl Transport for TmuxBackend {
                     self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
                     notify_submit_observer(observer);
                     let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
+                    let surface = probe_inject_target_surface(self, target);
                     return Ok(InjectReport {
                         stage_reached: InjectStage::Submit,
                         inject_verification: inject_verification_after_readback(
@@ -2942,12 +3246,14 @@ impl Transport for TmuxBackend {
                         submit_verification: submit_verification_for_key(submit),
                         turn_verification: TurnVerification::NotYetObserved,
                         attempts: 1,
-                        submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
-                            appear_gate_elapsed_ms: 0,
-                            appear_gate_matched: false,
+                        submit_diagnostics: Some(submit_diagnostics_for_inject(
                             total_elapsed_ms,
-                            attempts_detail: Vec::new(),
-                        }),
+                            Vec::new(),
+                            &capture_tally,
+                            token_seen_after_paste,
+                            None,
+                            surface,
+                        )),
                     });
                 }
 
@@ -2958,6 +3264,8 @@ impl Transport for TmuxBackend {
                 let mut consumption_attempts: u32 = 0;
                 let mut capture_retries: u32 = 0;
                 let mut consumed: Option<bool> = None;
+                let mut consumption_reason = SubmitConsumptionReason::Unknown;
+                let mut consumption_diagnostics = ConsumptionDiagnostics::default();
                 let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
                 let mut any_attempt_matched = false;
 
@@ -2990,10 +3298,21 @@ impl Transport for TmuxBackend {
                     if attempt > 0 {
                         if let Some(m) = marker {
                             if let Ok(cap) = self.capture(target, CaptureRange::Tail(40)) {
+                                capture_tally.record_ok(&cap.text, Some(m));
                                 if cap.text.contains(m) {
                                     token_ever_visible = true;
+                                    token_seen_after_enter = Some(true);
+                                } else if token_seen_after_enter.is_none() {
+                                    token_seen_after_enter = Some(false);
                                 }
                                 tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                let observation = consumption_capture_observation(
+                                    &cap.text,
+                                    marker,
+                                    token_ever_visible,
+                                    tracked_paste,
+                                );
+                                consumption_diagnostics.record(observation);
                                 let obs = submit_attempt_observation(
                                     attempt_index,
                                     &cap,
@@ -3006,18 +3325,16 @@ impl Transport for TmuxBackend {
                                 attempts_detail.push(obs);
                                 // NeverSeen 不得把 token 缺席写成 consumed；
                                 // 见过再消失，或本次占位符身份离开 composer，才停手。
-                                if consumption_from_capture(
-                                    &cap.text,
-                                    m,
-                                    token_ever_visible,
-                                    tracked_paste,
-                                ) == Some(true)
-                                {
+                                if observation.consumption_from_capture_result == Some(true) {
+                                    consumption_reason =
+                                        SubmitConsumptionReason::ConsumptionFromCapture;
                                     consumed = Some(true);
                                     break;
                                 }
                                 if cursor_single_enter_enabled() {
-                                    if provider_busy_signal_in_tail(&cap.text) {
+                                    if observation.busy.is_some() {
+                                        consumption_reason =
+                                            SubmitConsumptionReason::CursorPollingBusy;
                                         consumed = Some(true);
                                         break;
                                     }
@@ -3063,10 +3380,22 @@ impl Transport for TmuxBackend {
                     // Post-submit token readback (U1 #7 parity: check token
                     // visible after Enter for no-echo panes).
                     if attempt == 0 && matches!(token_visible_for_report, Some(false)) {
-                        token_visible_for_report =
-                            post_submit_token_visible(self, target, payload).unwrap_or(Some(false));
-                        if token_visible_for_report == Some(true) {
+                        let post = post_submit_token_visible(
+                            self,
+                            target,
+                            payload,
+                            &mut capture_tally,
+                        )
+                        .unwrap_or(None);
+                        if post == Some(true) {
+                            token_visible_for_report = Some(true);
                             token_ever_visible = true;
+                            token_seen_after_enter = Some(true);
+                        } else {
+                            token_visible_for_report = Some(false);
+                            if post == Some(false) {
+                                token_seen_after_enter = Some(false);
+                            }
                         }
                     }
 
@@ -3080,12 +3409,23 @@ impl Transport for TmuxBackend {
                             std::thread::sleep(Duration::from_millis(100));
                             match self.capture(target, CaptureRange::Tail(40)) {
                                 Ok(cap) => {
+                                    capture_tally.record_ok(&cap.text, Some(m));
                                     consecutive_capture_failures = 0;
                                     saw_capture = true;
                                     if cap.text.contains(m) {
                                         token_ever_visible = true;
+                                        token_seen_after_enter = Some(true);
+                                    } else if token_seen_after_enter.is_none() {
+                                        token_seen_after_enter = Some(false);
                                     }
                                     tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                    let observation = consumption_capture_observation(
+                                        &cap.text,
+                                        marker,
+                                        token_ever_visible,
+                                        tracked_paste,
+                                    );
+                                    consumption_diagnostics.record(observation);
                                     let obs = submit_attempt_observation(
                                         attempt_index,
                                         &cap,
@@ -3096,24 +3436,23 @@ impl Transport for TmuxBackend {
                                         any_attempt_matched = true;
                                     }
                                     attempts_detail.push(obs);
-                                    if consumption_from_capture(
-                                        &cap.text,
-                                        m,
-                                        token_ever_visible,
-                                        tracked_paste,
-                                    ) == Some(true)
-                                    {
+                                    if observation.consumption_from_capture_result == Some(true) {
+                                        consumption_reason =
+                                            SubmitConsumptionReason::ConsumptionFromCapture;
                                         found_consumed = true;
                                         break;
                                     }
-                                    if cursor_single_enter_enabled()
-                                        && provider_busy_signal_in_tail(&cap.text)
-                                    {
+                                    if cursor_single_enter_enabled() && observation.busy.is_some() {
+                                        consumption_reason =
+                                            SubmitConsumptionReason::CursorPollingBusy;
                                         found_consumed = true;
                                         break;
                                     }
                                 }
                                 Err(_) => {
+                                    consumption_diagnostics
+                                        .record(ConsumptionCaptureObservation::default());
+                                    capture_tally.record_err();
                                     capture_retries = capture_retries.saturating_add(1);
                                     consecutive_capture_failures =
                                         consecutive_capture_failures.saturating_add(1);
@@ -3136,7 +3475,8 @@ impl Transport for TmuxBackend {
                         }
                     } else {
                         // Non-token payload: single Enter, no consumption check
-                        // (0.3.27). Not 「没能判断」— 本门不覆盖无 token 路径。
+                        // (0.3.27). Keep the explicit no-marker reason.
+                        consumption_reason = SubmitConsumptionReason::NoMarker;
                         consumed = Some(true);
                         break;
                     }
@@ -3161,21 +3501,38 @@ impl Transport for TmuxBackend {
                     Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
                         Ok(cap) => {
                             last_turn_text = Some(cap.text.clone());
+                            let observation = consumption_capture_observation(
+                                &cap.text,
+                                marker,
+                                token_ever_visible,
+                                tracked_paste,
+                            );
+                            consumption_diagnostics.record(observation);
                             attempts_detail.push(submit_attempt_observation(
                                 consumption_attempts.max(1),
                                 &cap,
                                 marker,
                                 inject_start.elapsed().as_millis() as u64,
                             ));
-                            if provider_busy_signal_in_tail(&cap.text) {
+                            if observation.busy.is_some() {
+                                consumption_reason = SubmitConsumptionReason::FallbackBusy;
                                 SubmitVerification::EnterSentWithoutPlaceholderCheck
                             } else {
+                                consumption_reason = SubmitConsumptionReason::Unverified;
                                 SubmitVerification::SubmitConsumptionUnverified
                             }
                         }
-                        Err(_) => SubmitVerification::SubmitConsumptionUnverified,
+                        Err(_) => {
+                            consumption_diagnostics
+                                .record(ConsumptionCaptureObservation::default());
+                            consumption_reason = SubmitConsumptionReason::Unverified;
+                            SubmitVerification::SubmitConsumptionUnverified
+                        }
                     },
-                    None => SubmitVerification::SubmitConsumptionUnverified,
+                    None => {
+                        consumption_reason = SubmitConsumptionReason::Unverified;
+                        SubmitVerification::SubmitConsumptionUnverified
+                    }
                 };
                 // Unverified + 折行缺口：只补一颗 C-m。A 的 should_resubmit_enter
                 // 已为真（latch/底15 token，含打满 cap）时 B 不介入。身份拿不到
@@ -3213,10 +3570,21 @@ impl Transport for TmuxBackend {
                                 std::thread::sleep(Duration::from_millis(100));
                                 match self.capture(target, CaptureRange::Tail(40)) {
                                     Ok(cap) => {
+                                        capture_tally.record_ok(&cap.text, Some(m));
                                         if cap.text.contains(m) {
                                             token_ever_visible = true;
+                                            token_seen_after_enter = Some(true);
+                                        } else if token_seen_after_enter.is_none() {
+                                            token_seen_after_enter = Some(false);
                                         }
                                         tracked_paste = latch_paste(&cap.text, tracked_paste);
+                                        let observation = consumption_capture_observation(
+                                            &cap.text,
+                                            marker,
+                                            token_ever_visible,
+                                            tracked_paste,
+                                        );
+                                        consumption_diagnostics.record(observation);
                                         let obs = submit_attempt_observation(
                                             consumption_attempts.max(1),
                                             &cap,
@@ -3225,20 +3593,22 @@ impl Transport for TmuxBackend {
                                         );
                                         attempts_detail.push(obs);
                                         last_turn_text = Some(cap.text.clone());
-                                        if consumption_from_capture(
-                                            &cap.text,
-                                            m,
-                                            token_ever_visible,
-                                            tracked_paste,
-                                        ) == Some(true)
-                                            || provider_busy_signal_in_tail(&cap.text)
-                                        {
+                                        let capture_consumed = observation
+                                            .consumption_from_capture_result
+                                            == Some(true);
+                                        let busy = observation.busy.is_some();
+                                        if capture_consumed || busy {
                                             // Gone+无 latch 会把折行 token 写成已消费；身份仍在则不算。
                                             if !this_paste_identity_in_composer(
                                                 &cap.text,
                                                 m,
                                                 tracked_paste,
                                             ) {
+                                                consumption_reason = if capture_consumed {
+                                                    SubmitConsumptionReason::ConsumptionFromCapture
+                                                } else {
+                                                    SubmitConsumptionReason::FallbackBusy
+                                                };
                                                 found_consumed = true;
                                                 break;
                                             }
@@ -3248,11 +3618,17 @@ impl Transport for TmuxBackend {
                                             m,
                                             tracked_paste,
                                         ) {
+                                            consumption_reason = SubmitConsumptionReason::Unknown;
                                             found_consumed = true;
                                             break;
                                         }
                                     }
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        consumption_diagnostics
+                                            .record(ConsumptionCaptureObservation::default());
+                                        capture_tally.record_err();
+                                        break;
+                                    }
                                 }
                             }
                             if found_consumed {
@@ -3264,6 +3640,25 @@ impl Transport for TmuxBackend {
                     }
                 }
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
+                let surface = probe_inject_target_surface(self, target);
+                let mut submit_diagnostics = submit_diagnostics_for_inject(
+                    total_elapsed_ms,
+                    attempts_detail,
+                    &capture_tally,
+                    token_seen_after_paste,
+                    token_seen_after_enter,
+                    surface,
+                );
+                submit_diagnostics.consumption_reason = consumption_reason;
+                submit_diagnostics.busy_signal_kind = consumption_diagnostics.busy_signal_kind;
+                submit_diagnostics.busy_line_from_bottom =
+                    consumption_diagnostics.busy_line_from_bottom;
+                submit_diagnostics.current_marker_in_bottom_15 =
+                    consumption_diagnostics.current_marker_in_bottom_15;
+                submit_diagnostics.paste_identity_in_composer =
+                    consumption_diagnostics.paste_identity_in_composer;
+                submit_diagnostics.consumption_from_capture_result =
+                    consumption_diagnostics.consumption_from_capture_result;
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,
                     inject_verification: inject_verification_after_readback(
@@ -3276,12 +3671,7 @@ impl Transport for TmuxBackend {
                         last_turn_text.as_deref(),
                     ),
                     attempts: consumption_attempts.saturating_add(capture_retries),
-                    submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
-                        appear_gate_elapsed_ms: 0,
-                        appear_gate_matched: false,
-                        total_elapsed_ms,
-                        attempts_detail,
-                    }),
+                    submit_diagnostics: Some(submit_diagnostics),
                 });
             }
         }

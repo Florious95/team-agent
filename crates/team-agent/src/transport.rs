@@ -467,6 +467,21 @@ pub struct InjectReport {
 /// pasted-prompt branch + (informational) for the appear-gate poll.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubmitDiagnostics {
+    /// The concrete branch that produced the post-Enter consumption outcome.
+    /// Unknown is retained for paths that do not expose a branch reason.
+    pub consumption_reason: SubmitConsumptionReason,
+    /// Reserved for a pre-paste baseline; this path has no such capture and emits null.
+    pub before_busy_signal_kind: Option<BusySignalKind>,
+    /// Structured busy predicate category for the accepted/current capture.
+    pub busy_signal_kind: Option<BusySignalKind>,
+    /// Bottom-relative non-empty line index of the busy match.
+    pub busy_line_from_bottom: Option<u8>,
+    /// Whether this message marker is in the bottom 15 non-empty lines.
+    pub current_marker_in_bottom_15: Option<bool>,
+    /// Whether the tracked paste identity is still in the composer.
+    pub paste_identity_in_composer: Option<bool>,
+    /// Result of the structural consumption predicate on the current capture.
+    pub consumption_from_capture_result: Option<bool>,
     /// Time spent in the appear-gate (poll for the pasted-content placeholder
     /// before Enter). When `saw_pasted_prompt == false` this is the time we
     /// spent polling before falling through to the E46 token path.
@@ -483,6 +498,162 @@ pub struct SubmitDiagnostics {
     /// prompt loop. Empty when `saw_pasted_prompt == false` and the inject
     /// went through the E46 token path.
     pub attempts_detail: Vec<SubmitAttemptObservation>,
+    /// Token visibility before paste. `None` means this inject did not sample
+    /// (honest unknown). Never inferred from later captures.
+    pub token_seen_before_paste: Option<bool>,
+    /// Token visibility from successful post-paste captures. `None` if every
+    /// post-paste capture failed or none ran.
+    pub token_seen_after_paste: Option<bool>,
+    /// Token visibility from successful post-Enter captures. `None` if none ran
+    /// or all failed.
+    pub token_seen_after_enter: Option<bool>,
+    pub capture_ok_count: u32,
+    pub capture_err_count: u32,
+    pub capture_sample_count: u32,
+    pub last_capture_outcome: CaptureSampleOutcome,
+    /// Basename only of `#{pane_current_command}` at inject; never argv.
+    pub pane_command_basename: Option<String>,
+    pub pane_command_query: QueryOutcome,
+    pub input_surface: InputSurfaceProbe,
+    pub target_pane_id: Option<String>,
+    /// Inject target pane id vs `#{pane_id}` queried on that same target.
+    pub target_pane_query_matched: Option<bool>,
+}
+
+/// Structured category returned by the provider-busy predicate.
+///
+/// This is diagnostic metadata only; it does not change delivery semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusySignalKind {
+    Working,
+    Thinking,
+    Processing,
+    EscToInterrupt,
+    SpinnerGlyph,
+}
+
+impl BusySignalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Thinking => "thinking",
+            Self::Processing => "processing",
+            Self::EscToInterrupt => "esc_to_interrupt",
+            Self::SpinnerGlyph => "spinner_glyph",
+        }
+    }
+}
+
+/// Structured reason for the post-Enter consumption observation.
+///
+/// This is diagnostic metadata only; it does not change delivery semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubmitConsumptionReason {
+    /// The token/input identity disappeared in the consumption capture.
+    ConsumptionFromCapture,
+    /// Cursor's bounded polling observed a provider-busy signal.
+    CursorPollingBusy,
+    /// The final fallback capture observed a provider-busy signal.
+    FallbackBusy,
+    /// The payload had no token marker, so no structural consumption probe ran.
+    NoMarker,
+    /// The bounded probe did not establish consumption.
+    Unverified,
+    /// An older or otherwise uncovered path did not provide a reason.
+    #[default]
+    Unknown,
+}
+
+impl SubmitConsumptionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConsumptionFromCapture => "consumption_from_capture",
+            Self::CursorPollingBusy => "cursor_poll_busy",
+            Self::FallbackBusy => "fallback_busy",
+            Self::NoMarker => "no_marker",
+            Self::Unverified => "unverified",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Last capture sample of the inject token path. Distinguishes "read failed"
+/// from "read succeeded and token was absent". Does not change delivery gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureSampleOutcome {
+    #[default]
+    NotAttempted,
+    OkTokenSeen,
+    OkTokenMissing,
+    Failed,
+}
+
+impl CaptureSampleOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::OkTokenSeen => "ok_token_seen",
+            Self::OkTokenMissing => "ok_token_missing",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryOutcome {
+    #[default]
+    Unavailable,
+    Observed,
+}
+
+impl QueryOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Observed => "observed",
+        }
+    }
+}
+
+/// Typed pane input surface from existing `pane_mode` probe. `Unavailable`
+/// means the query failed; it is not a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputSurfaceProbe {
+    #[default]
+    Unavailable,
+    Input,
+    Copy,
+    Tree,
+    View,
+    Client,
+    UnknownMode,
+}
+
+impl InputSurfaceProbe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Input => "input",
+            Self::Copy => "copy",
+            Self::Tree => "tree",
+            Self::View => "view",
+            Self::Client => "client",
+            Self::UnknownMode => "unknown_mode",
+        }
+    }
+}
+
+/// First token of a pane command, basename only. Empty/missing → `None`.
+pub(crate) fn command_basename(raw: &str) -> Option<String> {
+    let first = raw.split_whitespace().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+    std::path::Path::new(first)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 /// E50 PR-1 single attempt observation (one Enter + one capture). All fields

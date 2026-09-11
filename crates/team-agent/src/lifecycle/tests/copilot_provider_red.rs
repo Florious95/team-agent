@@ -31,6 +31,13 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -64,6 +71,7 @@ const COPILOT_TMP_PREFIX: &str = "ta-rs-copilot";
 #[test]
 #[serial(env)]
 fn copilot_argv_golden_restricted_role() {
+    let _hermetic = enter_hermetic("copilot-argv-restricted");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("argv-restricted");
     let team_dir = write_copilot_team(&ws, "cp-restricted", &["mcp_team"], false);
@@ -235,6 +243,7 @@ team_orchestrator or @<.team/runtime/mcp/worker_a.json>; got {value:?}"
 #[test]
 #[serial(env)]
 fn copilot_argv_dangerous_maps_to_allow_all() {
+    let _hermetic = enter_hermetic("copilot-argv-dangerous");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("argv-dangerous");
     let team_dir = write_copilot_team(&ws, "cp-dangerous", &["mcp_team"], true);
@@ -285,6 +294,7 @@ used for the dangerous tier; argv={argv:?}"
 #[test]
 #[serial(env)]
 fn copilot_agents_md_is_the_compiled_prompt_and_env_points_at_it() {
+    let _hermetic = enter_hermetic("copilot-agents-md");
     let home = tmp_ws("fake-home");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
@@ -384,6 +394,7 @@ with the identity section FIRST; head={:?}",
 #[test]
 #[serial(env)]
 fn copilot_permission_note_registers_fs_tools_prompt_only() {
+    let _hermetic = enter_hermetic("copilot-permission-note");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("enforcement");
     let team_dir = write_copilot_team(
@@ -441,6 +452,7 @@ agents_md_present={}",
 #[test]
 #[serial(env)]
 fn copilot_fork_is_supported_but_missing_backing_never_falls_back_fresh() {
+    let _hermetic = enter_hermetic("copilot-fork-missing-backing");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("fork");
     let team_dir = write_copilot_team(&ws, "cp-fork", &["mcp_team"], false);
@@ -715,6 +727,7 @@ leader's session); candidates={safety_lock:?}"
 #[test]
 #[serial(env)]
 fn copilot_p0_terminal_title_disabled_and_window_name_stable() {
+    let _hermetic = enter_hermetic("copilot-terminal-title");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("p0-title");
     let team_dir = write_copilot_team(&ws, "cp-title", &["mcp_team"], false);
@@ -771,6 +784,7 @@ incident); got {:?}",
 #[test]
 #[serial(env)]
 fn copilot_mcp_residual_named_disabled_and_recorded() {
+    let _hermetic = enter_hermetic("copilot-mcp-residual-named");
     let home = tmp_ws("mcp-home");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
@@ -869,6 +883,7 @@ provider.copilot.mcp_residual_detected (user-visible, not silent); events tail={
 #[test]
 #[serial(env)]
 fn copilot_mcp_residual_scan_unavailable_degrades_honestly_no_false_positive() {
+    let _hermetic = enter_hermetic("copilot-mcp-residual-unavailable");
     // Empty isolated HOME (no ~/.copilot config) and a PATH with NO copilot binary, so
     // the scan exercises the `Err(_)` / unavailable arm deterministically.
     let home = tmp_ws("residual-unavail-home");
@@ -946,6 +961,7 @@ unavailable (honest 'I could not check')",
 #[test]
 #[serial(env)]
 fn copilot_mcp_config_uses_copilot_field_name() {
+    let _hermetic = enter_hermetic("copilot-mcp-config");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("mcp-schema");
     let team_dir = write_copilot_team(&ws, "cp-schema", &["mcp_team"], false);
@@ -983,6 +999,7 @@ fn copilot_mcp_config_uses_copilot_field_name() {
 #[test]
 #[serial(env)]
 fn copilot_resume_argv_has_no_session_id_resume_conflict() {
+    let _hermetic = enter_hermetic("copilot-resume-argv");
     let home = tmp_ws("resume-home");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
@@ -1032,6 +1049,7 @@ fn copilot_resume_argv_has_no_session_id_resume_conflict() {
 #[test]
 #[serial(env)]
 fn copilot_subscription_model_argv_only_when_configured() {
+    let _hermetic = enter_hermetic("copilot-subscription-model");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
 
     let ws = tmp_ws("model-set");
@@ -1088,6 +1106,7 @@ fn copilot_subscription_model_argv_only_when_configured() {
 #[test]
 #[serial(env)]
 fn copilot_subscription_model_precedence_role_over_profile() {
+    let _hermetic = enter_hermetic("copilot-subscription-precedence");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("model-prec");
     let team_dir = write_copilot_team_model(&ws, "cp-prec", &["mcp_team"], Some("role-model-x"));
@@ -1125,6 +1144,7 @@ cross-provider reuse); argv={argv:?}"
 #[test]
 #[serial(env)]
 fn copilot_subscription_env_no_provider_or_token_injection() {
+    let _hermetic = enter_hermetic("copilot-subscription-env");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
         ("COPILOT_GITHUB_TOKEN", "user-tok-keepme"),
@@ -1178,6 +1198,7 @@ fn copilot_subscription_env_no_provider_or_token_injection() {
 #[test]
 #[serial(env)]
 fn copilot_byok_profile_exports_provider_env_and_requires_model() {
+    let _hermetic = enter_hermetic("copilot-byok-profile");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let mut failures = Vec::new();
 
@@ -1272,6 +1293,7 @@ green; the hint must be weak/unknown (honest — can't confirm logged-in); got {
 #[test]
 #[serial(env)]
 fn copilot_token_passthrough_emits_warning_event() {
+    let _hermetic = enter_hermetic("copilot-token-passthrough");
     // Fake HOME so the residual MCP scan reads an empty copilot config (isolation:
     // otherwise it reads the real ~/.copilot and muddies this token-focused case).
     let home = tmp_ws("token-home");

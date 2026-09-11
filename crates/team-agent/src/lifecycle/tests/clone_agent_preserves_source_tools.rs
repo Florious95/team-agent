@@ -16,8 +16,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+
+use serde_json::{json, Value as JsonValue};
 
 #[path = "../../../tests/support/hermetic.rs"]
 mod hermetic_guard;
@@ -40,6 +43,8 @@ const SIX: &[&str] = &[
     "provider_builtin",
 ];
 const THREE: &[&str] = &["fs_list", "fs_read", "mcp_team"];
+const OBSERVED_AGENT_IDS: &[&str] = &[CLONE, NARROW_CLONE];
+const DIAGNOSTIC_FILE: &str = "clone-agent-presence.jsonl";
 
 struct Case {
     env: HermeticTestEnv,
@@ -61,6 +66,60 @@ impl Case {
 
     fn run(&self, args: &[&str]) -> Output {
         self.env.run_cli(&self.workspace, args)
+    }
+
+    /// Test-only bounded observation. It records only fixed fixture IDs,
+    /// selected team, managed-role presence, and event type/sequence/time;
+    /// never serializes state/spec/role contents or environment values.
+    fn observe(&self, phase: &str) {
+        let selected =
+            crate::state::projection::select_runtime_state(&self.workspace, Some(TEAM_NAME)).ok();
+        let raw = crate::state::persist::load_runtime_state(&self.workspace).ok();
+        let selected_team = selected
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .get("team_key")
+                    .or_else(|| state.get("active_team_key"))
+            })
+            .and_then(JsonValue::as_str)
+            .map(str::to_string);
+        let selected_agents = selected.as_ref().and_then(|state| state.get("agents"));
+        let raw_agents = raw.as_ref().and_then(|state| state.get("agents"));
+        let team_agents = raw
+            .as_ref()
+            .and_then(|state| state.get("teams"))
+            .and_then(|teams| teams.get(TEAM_NAME))
+            .and_then(|team| team.get("agents"));
+        let record = json!({
+            "phase": phase,
+            "observed_at": chrono::Utc::now().to_rfc3339(),
+            "selected_read": selected.is_some(),
+            "raw_state_read": raw.is_some(),
+            "selected_team": selected_team,
+            "presence": {
+                "selected_agents": fixed_presence(selected_agents),
+                "raw_agents": fixed_presence(raw_agents),
+                "team_agents": fixed_presence(team_agents),
+                "managed_roles": managed_role_presence(&self.workspace),
+            },
+            "events": relevant_event_marks(&self.workspace),
+        });
+        let path = self
+            .workspace
+            .join(".team")
+            .join("diagnostics")
+            .join(DIAGNOSTIC_FILE);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{record}");
+        }
     }
 
     fn shutdown(&self) {
@@ -148,6 +207,60 @@ fn write_role(workspace: &Path, name: &str, tools: &[&str]) {
     .expect("role doc");
 }
 
+fn fixed_presence(agents: Option<&JsonValue>) -> JsonValue {
+    let mut result = serde_json::Map::new();
+    for agent_id in OBSERVED_AGENT_IDS {
+        let present = agents
+            .and_then(JsonValue::as_object)
+            .is_some_and(|entries| entries.contains_key(*agent_id));
+        result.insert((*agent_id).to_string(), JsonValue::Bool(present));
+    }
+    JsonValue::Object(result)
+}
+
+fn managed_role_presence(workspace: &Path) -> JsonValue {
+    let managed = workspace.join(".team").join("dynamic-role-files");
+    let mut result = serde_json::Map::new();
+    for agent_id in OBSERVED_AGENT_IDS {
+        result.insert(
+            (*agent_id).to_string(),
+            JsonValue::Bool(managed.join(format!("{agent_id}.md")).is_file()),
+        );
+    }
+    JsonValue::Object(result)
+}
+
+fn relevant_event_marks(workspace: &Path) -> JsonValue {
+    let events = crate::event_log::EventLog::new(workspace)
+        .tail(256)
+        .unwrap_or_default();
+    let mut marks = Vec::new();
+    for (sequence, event) in events.into_iter().enumerate() {
+        let Some(event_name) = event.get("event").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let event_agent = ["agent_id", "source_agent_id", "new_agent_id", "as_agent_id"]
+            .into_iter()
+            .find_map(|field| {
+                event
+                    .get(field)
+                    .and_then(JsonValue::as_str)
+                    .filter(|value| OBSERVED_AGENT_IDS.contains(&value))
+            });
+        let Some(agent_id) = event_agent else {
+            continue;
+        };
+        marks.push(json!({
+            "sequence": sequence,
+            "sequence_scope": "tail_256",
+            "event": event_name,
+            "agent": agent_id,
+            "ts": event.get("ts").and_then(JsonValue::as_str),
+        }));
+    }
+    JsonValue::Array(marks)
+}
+
 fn role_tools(path: &Path) -> BTreeSet<String> {
     let (meta, _) = team_agent::compiler::read_front_matter(path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -210,7 +323,8 @@ fn set_of(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| (*s).to_string()).collect()
 }
 
-fn clone_ok(case: &Case, source: &str, dest: &str) {
+fn clone_ok(case: &Case, source: &str, dest: &str, phase: &str) {
+    case.observe(&format!("{phase}_before"));
     let out = case.run(&[
         "clone-agent",
         source,
@@ -225,6 +339,7 @@ fn clone_ok(case: &Case, source: &str, dest: &str) {
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
+    case.observe(&format!("{phase}_after"));
     assert!(
         out.status.success(),
         "clone-agent {source} --as {dest} must exit 0; code={:?} stderr={stderr} stdout={stdout}",
@@ -246,6 +361,7 @@ fn clone_agent_preserves_source_tools() {
         "--yes",
         "--json",
     ]);
+    case.observe("after_quick_start");
     let spec = case
         .workspace
         .join(".team")
@@ -277,7 +393,7 @@ fn clone_agent_preserves_source_tools() {
         "leader must stay the three-set ceiling so the conflict surface exists; leader={leader_spec:?}"
     );
 
-    clone_ok(&case, SOURCE, CLONE);
+    clone_ok(&case, SOURCE, CLONE, "first_clone");
 
     let clone_role = role_tools(
         &case
@@ -298,7 +414,7 @@ fn clone_agent_preserves_source_tools() {
 
     let narrow_src = spec_tools(&case.workspace, NARROW);
     assert_eq!(narrow_src, set_of(THREE), "narrow source fixture");
-    clone_ok(&case, NARROW, NARROW_CLONE);
+    clone_ok(&case, NARROW, NARROW_CLONE, "second_clone");
     let narrow_clone = spec_tools(&case.workspace, NARROW_CLONE);
     assert_eq!(
         narrow_clone, narrow_src,

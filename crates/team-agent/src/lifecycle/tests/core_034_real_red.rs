@@ -5,6 +5,13 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 #[path = "../../../tests/support/composite_source.rs"]
 mod composite_source;
 use std::collections::BTreeMap;
@@ -31,6 +38,7 @@ fn bin() -> &'static str {
 #[test]
 #[serial(env)]
 fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
+    let _hermetic = enter_hermetic("core034-claude-argv");
     let _ancestry = EnvGuard::set(
         "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
         "[\"/bin/zsh\"]",
@@ -115,6 +123,7 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
 #[test]
 #[serial(env)]
 fn claude_control_role_without_native_tools_still_disallows_native_tools() {
+    let _hermetic = enter_hermetic("core034-claude-control");
     let _ancestry = EnvGuard::set(
         "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
         "[\"/bin/zsh\"]",
@@ -170,6 +179,7 @@ fn claude_control_role_without_native_tools_still_disallows_native_tools() {
 #[test]
 #[serial(env)]
 fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_tools() {
+    let _hermetic = enter_hermetic("core034-restart-tools");
     let _ancestry = EnvGuard::set(
         "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
         "[\"/bin/zsh\"]",
@@ -307,6 +317,7 @@ fn worker_command_context_uses_single_prompt_and_permission_sources() {
 #[test]
 #[serial(env)]
 fn quick_start_default_display_adaptive_and_none_escape_hatch_are_observable() {
+    let _hermetic = enter_hermetic("core034-display");
     let default_ws = tmp_dir("display-default");
     let default_team = write_team(
         &default_ws,
@@ -396,6 +407,7 @@ fn quick_start_default_display_adaptive_and_none_escape_hatch_are_observable() {
 #[test]
 #[serial(env)]
 fn quick_start_and_restart_emit_copyable_workspace_socket_attach_commands() {
+    let _hermetic = enter_hermetic("core034-attach-command");
     let ws = tmp_dir("attach-command");
     let team = write_team(
         &ws,

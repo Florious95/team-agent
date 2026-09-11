@@ -85,10 +85,12 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         "TOOTH-1: runner changed the documented argv"
     );
     assert!(
-        out.stdout.contains("status: leader_receiver_unbound")
-            && out.stdout.contains("\"all_workers_spawned\": true"),
-        "TOOTH-1: hermetic documented quick-start must reach the expected post-spawn \
-         leader-binding boundary; exit={} stdout={} stderr={}",
+        out.stdout.contains("status: leader_binding_incomplete")
+            && out.stdout.contains("caller_pane_missing")
+            && out.stdout.contains("\"all_workers_spawned\": true")
+            && out.stdout.contains("do not run claim-leader"),
+        "TOOTH-1: hermetic documented quick-start must spawn workers and report the \
+         no-caller incomplete bind boundary; exit={} stdout={} stderr={}",
         out.exit_code,
         out.stdout,
         out.stderr
@@ -199,7 +201,7 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
     let ws = TestWorkspace::new("gate061-send").with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, "gate061-send");
     assert!(
-        quick_start_launched(&qs),
+        quick_start_workers_available(&qs),
         "TOOTH-2 setup quick-start failed: stdout={} stderr={}",
         qs.stdout,
         qs.stderr

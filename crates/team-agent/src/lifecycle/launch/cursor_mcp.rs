@@ -7,7 +7,9 @@
 //!     - name: cursor_mcp_enable_argv
 //!       what: 组 `agent mcp enable team_orchestrator`（不认 --workspace）
 //!     - name: enable_cursor_workspace_mcp
-//!       what: 在物理工作目录跑 enable；测试隔离下跳过以免写 ~/.cursor
+//!       what: 在工程根（可选）或物理工作目录跑 enable；测试隔离下跳过以免写 ~/.cursor
+//!     - name: apply_cursor_spawn_workspace_pointers
+//!       what: 隔离开时 --workspace 指 per-seat 工程根，--add-dir 指真 workspace
 //!     - name: physical_workspace_path
 //!       what: pwd -P 等价路径；mcp enable 按 getcwd 分片
 //!     - name: refuse_second_cursor_occupant
@@ -28,6 +30,10 @@ use crate::lifecycle::LifecycleError;
 use crate::model::yaml::Value as YamlValue;
 use crate::provider::wire::command_name;
 use crate::provider::Provider;
+
+use super::cursor_mcp_iso::{
+    cursor_mcp_isolation_enabled, cursor_mcp_project_dir, materialize_cursor_mcp_project,
+};
 
 /// Keys that must appear in mcp.json env. Cursor strips parent env down to
 /// HOME/PATH/TERM/… — TEAM_AGENT_ID only survives if it is in this table.
@@ -261,24 +267,61 @@ pub fn cursor_mcp_enable_argv() -> Vec<String> {
 /// returns: 测试隔离环境或显式跳过标志下直接成功，避免写用户全局配置
 /// errors: 命令跑不起来或退出码非零时返回 RequirementUnmet，错误里只记输出长度不记内容
 /// ---
-pub fn enable_cursor_workspace_mcp(workspace: &Path) -> Result<(), LifecycleError> {
+pub fn cursor_mcp_enable_working_dir(workspace: &Path, project_root: Option<&Path>) -> PathBuf {
+    match project_root {
+        Some(root) => physical_workspace_path(root),
+        None => physical_workspace_path(workspace),
+    }
+}
+
+pub fn prepare_cursor_seat_mcp(
+    workspace: &Path,
+    agent_id: &str,
+    mcp_config: &crate::provider::McpConfig,
+) -> Result<Option<PathBuf>, LifecycleError> {
+    if cursor_mcp_isolation_enabled() {
+        let project = materialize_cursor_mcp_project(workspace, agent_id)?;
+        apply_cursor_mcp_overlay(&project, mcp_config)?;
+        Ok(Some(project))
+    } else {
+        apply_cursor_mcp_overlay(workspace, mcp_config)?;
+        Ok(None)
+    }
+}
+
+pub fn enable_cursor_workspace_mcp(
+    workspace: &Path,
+    project_root: Option<&Path>,
+) -> Result<(), LifecycleError> {
+    enable_cursor_workspace_mcp_with_profile(workspace, project_root, None)
+}
+
+/// Run Cursor's MCP enable command with the same profile-local environment
+/// policy as the worker spawn. In particular, subscription direct mode must
+/// not reintroduce proxy URL keys during this preparatory command.
+pub fn enable_cursor_workspace_mcp_with_profile(
+    workspace: &Path,
+    project_root: Option<&Path>,
+    profile_launch: Option<&crate::provider::ProviderProfileLaunch>,
+) -> Result<(), LifecycleError> {
+    let physical = cursor_mcp_enable_working_dir(workspace, project_root);
     if skip_cursor_mcp_enable() {
         return Ok(());
     }
-    let physical = physical_workspace_path(workspace);
     let argv = cursor_mcp_enable_argv();
-    let output = Command::new(&argv[0])
+    let mut command = Command::new(&argv[0]);
+    command
         .args(&argv[1..])
-        .current_dir(&physical)
-        .output()
-        .map_err(|e| {
-            LifecycleError::RequirementUnmet(format!(
-                "error: cannot run `{} mcp enable team_orchestrator`\n\
-                 reason: {e}\n\
-                 action: install cursor-agent on PATH (same binary as `agent`) and retry",
-                argv[0]
-            ))
-        })?;
+        .current_dir(&physical);
+    apply_cursor_mcp_enable_profile_env(&mut command, profile_launch);
+    let output = command.output().map_err(|e| {
+        LifecycleError::RequirementUnmet(format!(
+            "error: cannot run `{} mcp enable team_orchestrator`\n\
+             reason: {e}\n\
+             action: install cursor-agent on PATH (same binary as `agent`) and retry",
+            argv[0]
+        ))
+    })?;
     if output.status.success() {
         return Ok(());
     }
@@ -300,6 +343,21 @@ pub fn enable_cursor_workspace_mcp(workspace: &Path) -> Result<(), LifecycleErro
     )))
 }
 
+pub(crate) fn apply_cursor_mcp_enable_profile_env(
+    command: &mut Command,
+    profile_launch: Option<&crate::provider::ProviderProfileLaunch>,
+) {
+    let Some(profile_launch) = profile_launch else {
+        return;
+    };
+    for key in &profile_launch.env_unset {
+        command.env_remove(key);
+    }
+    for (key, value) in &profile_launch.env_overlay {
+        command.env(key, value);
+    }
+}
+
 /// ---
 /// purpose: 把 argv 里 workspace 参数的值换成物理路径
 /// params:
@@ -313,6 +371,31 @@ pub fn apply_cursor_workspace_physical_path(argv: &mut [String], workspace: &Pat
     if let Some(value) = argv.get_mut(index.saturating_add(1)) {
         *value = physical.to_string_lossy().into_owned();
     }
+}
+
+/// ---
+/// purpose: 隔离开时把 cursor --workspace 指到 per-seat 工程根，并用 --add-dir 挂上真 workspace
+/// ---
+pub fn apply_cursor_spawn_workspace_pointers(
+    argv: &mut Vec<String>,
+    workspace: &Path,
+    agent_id: &str,
+) -> Result<(), LifecycleError> {
+    if cursor_mcp_isolation_enabled() {
+        let project = physical_workspace_path(&cursor_mcp_project_dir(workspace, agent_id)?);
+        apply_cursor_workspace_physical_path(argv, &project);
+        let team = physical_workspace_path(workspace);
+        let already = argv
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && Path::new(&pair[1]) == team.as_path());
+        if !already {
+            argv.push("--add-dir".to_string());
+            argv.push(team.to_string_lossy().into_owned());
+        }
+    } else {
+        apply_cursor_workspace_physical_path(argv, workspace);
+    }
+    Ok(())
 }
 
 fn skip_cursor_mcp_enable() -> bool {

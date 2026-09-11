@@ -185,7 +185,7 @@ fn run_stdio_loop<R: BufRead, W: Write>(
     let mut report = ServerRunReport::default();
     let marker = McpServerLifecycleMarker::from_env(workspace);
     marker.write_started();
-    let result = run_stdio_loop_inner(&tools, reader, &mut writer, &mut report);
+    let result = run_stdio_loop_inner(&tools, reader, &mut writer, &mut report, &marker);
     match &result {
         Ok(_) => marker.write_exit("stdin_eof", None),
         Err(error) => marker.write_exit("fatal_error", Some(&error.to_string())),
@@ -198,16 +198,20 @@ fn run_stdio_loop_inner<R: BufRead, W: Write>(
     reader: R,
     writer: &mut W,
     report: &mut ServerRunReport,
+    marker: &McpServerLifecycleMarker,
 ) -> Result<ServerRunReport, McpError> {
     for line in reader.lines() {
         let line = line?;
         report.requests_read = report.requests_read.saturating_add(1);
-        let frame = handle_stdin_line(tools, &line, report)?;
+        let (frame, tools_list_success) = handle_stdin_line(tools, &line, report)?;
         if let Some(value) = frame {
             let value = crate::redaction::redact_external_value(&value);
             serde_json::to_writer(&mut *writer, &value)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
+            if tools_list_success {
+                marker.write_tools_list_response_written();
+            }
             report.responses_written = report.responses_written.saturating_add(1);
         }
     }
@@ -219,29 +223,34 @@ fn handle_stdin_line(
     tools: &TeamOrchestratorTools,
     line: &str,
     report: &mut ServerRunReport,
-) -> Result<Option<Value>, McpError> {
+) -> Result<(Option<Value>, bool), McpError> {
     let request: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
             report.error_frames = report.error_frames.saturating_add(1);
-            return Ok(Some(error_response_value(
-                RpcId::Null,
-                -32700,
-                format!("parse error: {err}"),
-            )));
+            return Ok((
+                Some(error_response_value(
+                    RpcId::Null,
+                    -32700,
+                    format!("parse error: {err}"),
+                )),
+                false,
+            ));
         }
     };
     if request.get("jsonrpc").and_then(Value::as_str) == Some("2.0") {
+        let is_tools_list = request.get("method").and_then(Value::as_str) == Some("tools/list");
         match handle_mcp(tools, &request)? {
             Some(response) => {
+                let tools_list_success = is_tools_list && response.error.is_none();
                 if response.error.is_some() {
                     report.error_frames = report.error_frames.saturating_add(1);
                 }
-                Ok(Some(serde_json::to_value(response)?))
+                Ok((Some(serde_json::to_value(response)?), tools_list_success))
             }
             None => {
                 report.notifications_skipped = report.notifications_skipped.saturating_add(1);
-                Ok(None)
+                Ok((None, false))
             }
         }
     } else {
@@ -252,7 +261,7 @@ fn handle_stdin_line(
                 err.to_envelope()
             }
         };
-        Ok(Some(value))
+        Ok((Some(value), false))
     }
 }
 
@@ -299,6 +308,23 @@ impl McpServerLifecycleMarker {
 
     fn write_started(&self) {
         self.write("mcp.server_started", None, None);
+    }
+
+    fn write_tools_list_response_written(&self) {
+        let _ = EventLog::new(&self.workspace).write(
+            "mcp.tools_list_response_written",
+            serde_json::json!({
+                "method": "tools/list",
+                "success": true,
+                "agent_id": self.agent_id.as_deref(),
+                "owner_team_id": self.owner_team_id.as_deref(),
+                "workspace": self.workspace.display().to_string(),
+                "pid": self.pid,
+                "ppid": self.ppid,
+                "spawn_epoch": null,
+                "spawn_epoch_source": "unavailable",
+            }),
+        );
     }
 
     fn write_exit(&self, reason: &str, error: Option<&str>) {
@@ -796,6 +822,109 @@ mod e23_lifecycle_marker_tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn stdio_loop_logs_tools_list_after_flush_once_per_response() {
+        let ws = marker_ws("tools-list-success");
+        let input = std::io::Cursor::new(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+"#.to_vec(),
+        );
+        let mut output = Vec::new();
+
+        let report = run_stdio_loop(&ws, input, &mut output).unwrap();
+
+        assert_eq!(report.responses_written, 2);
+        assert_eq!(output.iter().filter(|byte| **byte == b'\n').count(), 2);
+        let events = EventLog::new(&ws).tail(0).unwrap();
+        let tool_events: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == serde_json::json!("mcp.tools_list_response_written"))
+            .collect();
+        assert_eq!(tool_events.len(), 2, "one event per successful tools/list response");
+        for event in tool_events {
+            assert_eq!(event["method"], serde_json::json!("tools/list"));
+            assert_eq!(event["success"], serde_json::json!(true));
+            assert_eq!(event["workspace"], serde_json::json!(ws.display().to_string()));
+            assert_eq!(event["pid"], serde_json::json!(std::process::id()));
+            assert_eq!(event["spawn_epoch"], serde_json::Value::Null);
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn stdio_loop_does_not_log_tools_list_when_write_fails() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated stdout write failure"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let ws = marker_ws("tools-list-write-fail");
+        let input = std::io::Cursor::new(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.to_vec(),
+        );
+        let error = run_stdio_loop(&ws, input, FailingWriter).expect_err("write must fail");
+        assert!(error.to_string().contains("simulated stdout write failure"));
+        let events = EventLog::new(&ws).tail(0).unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| event["event"] == serde_json::json!("mcp.tools_list_response_written")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn stdio_loop_does_not_log_tools_list_when_flush_fails() {
+        struct FlushFailWriter(Vec<u8>);
+        impl Write for FlushFailWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("simulated stdout flush failure"))
+            }
+        }
+
+        let ws = marker_ws("tools-list-flush-fail");
+        let input = std::io::Cursor::new(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.to_vec(),
+        );
+        let error = run_stdio_loop(&ws, input, FlushFailWriter(Vec::new()))
+            .expect_err("flush must fail");
+        assert!(error.to_string().contains("simulated stdout flush failure"));
+        let events = EventLog::new(&ws).tail(0).unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| event["event"] == serde_json::json!("mcp.tools_list_response_written")));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn stdio_loop_does_not_log_tools_list_for_initialize_or_notification() {
+        let ws = marker_ws("tools-list-not-applicable");
+        let input = std::io::Cursor::new(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+"#.to_vec(),
+        );
+        let mut output = Vec::new();
+
+        run_stdio_loop(&ws, input, &mut output).unwrap();
+
+        let events = EventLog::new(&ws).tail(0).unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| event["event"] == serde_json::json!("mcp.tools_list_response_written")));
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

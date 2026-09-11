@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
+use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::model::enums::{AuthMode, Provider};
 use team_agent::provider::{
@@ -29,7 +30,11 @@ use team_agent::transport::{
 };
 
 #[test]
+#[serial(env)]
 fn compatible_api_profile_writes_claude_settings_and_project_state_with_mcp_servers() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("claude-compatible-config");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let ws = tmp_dir("compatible-config-files");
     let team = write_claude_profile_team(&ws, "cfgteam", "clauder");
     let transport = RecordingTransport::default();

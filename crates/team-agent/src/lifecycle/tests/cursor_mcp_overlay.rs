@@ -1,6 +1,7 @@
 //! purpose: cursor 席位必须把身份写进它实际会读的 mcp.json env
-//! contract: overlay 后 `<workspace>/.cursor/mcp.json` 含 team_orchestrator.env.TEAM_AGENT_ID
-//!   （不是 `.team/runtime/mcp/*.json`，也不是靠 pane env 继承）
+//! contract: 隔离默认开时 overlay 写 per-seat 工程根 `.cursor/mcp.json`（`--workspace` /
+//!   enable cwd 同一根）；关隔离时写 `<workspace>/.cursor/mcp.json`。不是
+//!   `.team/runtime/mcp/*.json`，也不是靠 pane env 继承。
 //! boundary: 只覆盖 cursor launch 产物；不改 claude/codex/copilot/grok 路径
 //!
 //! 生产侧判据，未经血统审计。
@@ -18,9 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::lifecycle::{
-    apply_cursor_mcp_overlay, apply_cursor_subscription_proxy_env,
-    apply_cursor_workspace_physical_path, cursor_mcp_enable_argv, physical_workspace_path,
-    LifecycleError,
+    apply_cursor_mcp_overlay, apply_cursor_spawn_workspace_pointers,
+    apply_cursor_subscription_proxy_env, apply_cursor_workspace_physical_path,
+    cursor_mcp_enable_argv, cursor_mcp_enable_working_dir, cursor_mcp_json_path,
+    cursor_mcp_project_dir, physical_workspace_path, prepare_cursor_seat_mcp, LifecycleError,
 };
 use team_agent::provider::McpConfig;
 use team_agent::transport::test_support::OfflineTransport;
@@ -183,13 +185,119 @@ fn cursor_subscription_proxy_copies_keys_without_requiring_profile() {
 }
 
 #[test]
+fn cursor_subscription_direct_profile_unsets_only_proxy_url_keys() {
+    let ws = tmp_dir("cursor-profile-direct");
+    let profiles = ws.join(".team/current/profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join("cursor.env"),
+        "AUTH_MODE=subscription\nPROFILE_NAME=cursor\nPROXY_MODE=direct\n",
+    )
+    .unwrap();
+
+    let launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
+        &ws,
+        "cursor",
+        &serde_json::json!({
+            "id": "cursor",
+            "provider": "cursor_agent",
+            "auth_mode": "subscription",
+            "profile": "cursor"
+        }),
+        None,
+    )
+    .expect("direct Cursor profile should prepare");
+    for key in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
+    ] {
+        assert!(launch.env_unset.contains(key), "direct must unset {key}");
+    }
+    assert!(!launch.env_unset.contains("NO_PROXY"));
+    assert!(!launch.env_unset.contains("no_proxy"));
+}
+
+#[test]
+fn cursor_mcp_enable_child_env_applies_direct_profile_unsets() {
+    let ws = tmp_dir("cursor-profile-enable-env");
+    let profiles = ws.join(".team/current/profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    std::fs::write(
+        profiles.join("cursor.env"),
+        "AUTH_MODE=subscription\nPROFILE_NAME=cursor\nPROXY_MODE=direct\n",
+    )
+    .unwrap();
+    let launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
+        &ws,
+        "cursor",
+        &serde_json::json!({
+            "id": "cursor",
+            "provider": "cursor_agent",
+            "auth_mode": "subscription",
+            "profile": "cursor"
+        }),
+        None,
+    )
+    .expect("direct Cursor profile should prepare");
+
+    let mut command = std::process::Command::new("/usr/bin/env");
+    command.env_clear();
+    for key in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
+    ] {
+        command.env(key, "fixture");
+    }
+    command.env("NO_PROXY", "fixture");
+    command.env("no_proxy", "fixture");
+    crate::lifecycle::launch::apply_cursor_mcp_enable_profile_env(
+        &mut command,
+        Some(&launch),
+    );
+    let output = command.output().expect("env child should run");
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for key in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
+    ] {
+        assert!(
+            !text.lines().any(|line| line.starts_with(&format!("{key}="))),
+            "direct MCP child must omit {key}"
+        );
+    }
+    assert!(text.lines().any(|line| line == "NO_PROXY=fixture"));
+    assert!(text.lines().any(|line| line == "no_proxy=fixture"));
+}
+
+#[test]
+#[serial(env)]
 fn cursor_spawn_writes_identity_into_project_mcp_json() {
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-mcp-spawn");
     let ws = tmp_dir("cursor-mcp-spawn");
     let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
-    let config_path = ws.join(".cursor").join("mcp.json");
+    let selected = cursor_mcp_json_path(&ws, "cursor_writer").unwrap();
     assert!(
-        !config_path.exists(),
-        "precondition: project cursor mcp.json must be absent before spawn"
+        !selected.exists() && !ws.join(".cursor/mcp.json").exists(),
+        "precondition: selected project and workspace overlay must be absent before spawn"
     );
 
     quick_start_with_transport_in_workspace(
@@ -202,13 +310,66 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
     )
     .expect("cursor quick-start through offline transport should spawn");
 
+    let text = std::fs::read_to_string(&selected).unwrap_or_else(|err| {
+        panic!(
+            "cursor spawn must materialize {}; isolation default reads this per-seat file: {err}",
+            selected.display()
+        )
+    });
+    assert_cursor_identity_overlay(&text, "cursor_writer", &ws);
+    assert!(
+        !ws.join(".cursor/mcp.json").exists(),
+        "default isolation must not dual-write the team workspace overlay"
+    );
+    let project = cursor_mcp_project_dir(&ws, "cursor_writer").unwrap();
+    let enable_cwd = cursor_mcp_enable_working_dir(&ws, Some(&project));
+    assert_eq!(enable_cwd, physical_workspace_path(&project));
+    let argv_workspace = spawn_argv_workspace_flag(&ws).expect("spawn argv --workspace");
+    assert_eq!(argv_workspace, physical_workspace_path(&project).to_string_lossy());
+}
+
+#[test]
+#[serial(env)]
+fn cursor_spawn_isolation_off_writes_workspace_mcp_json() {
+    let _hermetic = hermetic_guard::HermeticTestEnv::enter("cursor-mcp-spawn-legacy");
+    let key = "TEAM_AGENT_CURSOR_MCP_ISOLATION";
+    let prev = std::env::var(key).ok();
+    std::env::set_var(key, "0");
+    let ws = tmp_dir("cursor-mcp-spawn-legacy");
+    let team = write_cursor_team(&ws, "cursortm", "cursor_writer");
+    let result = quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        Some("cursortm"),
+        &OfflineTransport::new(),
+    );
+    match prev {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+    result.expect("legacy isolation-off cursor spawn");
+    let config_path = ws.join(".cursor").join("mcp.json");
     let text = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
         panic!(
-            "cursor spawn must materialize {}; cursor only reads this workspace file: {err}",
+            "isolation-off spawn must write {}; cursor --workspace is the team root: {err}",
             config_path.display()
         )
     });
-    let workspace = ws.to_string_lossy();
+    assert_cursor_identity_overlay(&text, "cursor_writer", &ws);
+    assert!(
+        !cursor_mcp_json_path(&ws, "cursor_writer")
+            .unwrap()
+            .exists(),
+        "isolation-off must not materialize the per-seat project overlay"
+    );
+    let argv_workspace = spawn_argv_workspace_flag(&ws).expect("spawn argv --workspace");
+    assert_eq!(argv_workspace, physical_workspace_path(&ws).to_string_lossy());
+}
+
+fn assert_cursor_identity_overlay(text: &str, agent_id: &str, workspace: &Path) {
+    let workspace = workspace.to_string_lossy();
     assert!(
         text.contains("\"team_orchestrator\""),
         "spawned overlay must declare team_orchestrator"
@@ -219,10 +380,10 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
     );
     assert!(
         text.contains(workspace.as_ref()),
-        "workspace must be the real path, not a placeholder"
+        "TEAM_AGENT_WORKSPACE / mcp args must be the real team path, not a placeholder"
     );
     assert!(
-        text.contains("\"TEAM_AGENT_ID\"") && text.contains("cursor_writer"),
+        text.contains("\"TEAM_AGENT_ID\"") && text.contains(agent_id),
         "identity must be in json env"
     );
     assert!(
@@ -231,6 +392,27 @@ fn cursor_spawn_writes_identity_into_project_mcp_json() {
             && !text.contains("{team_id}"),
         "placeholders must be resolved before cursor reads the file"
     );
+}
+
+fn spawn_argv_workspace_flag(workspace: &Path) -> Option<String> {
+    let log = workspace.join(".team").join("logs").join("events.jsonl");
+    let text = std::fs::read_to_string(log).ok()?;
+    for line in text.lines().rev() {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        if value.get("event").and_then(serde_json::Value::as_str)
+            != Some("provider.worker.spawn_argv")
+        {
+            continue;
+        }
+        let argv = value.get("argv")?.as_array()?;
+        let mut items = argv.iter().filter_map(serde_json::Value::as_str);
+        while let Some(item) = items.next() {
+            if item == "--workspace" {
+                return items.next().map(str::to_string);
+            }
+        }
+    }
+    None
 }
 
 fn write_cursor_team(ws: &Path, team_key: &str, agent_id: &str) -> PathBuf {
@@ -268,6 +450,68 @@ fn sample_mcp_config(agent_id: &str, workspace: &str) -> McpConfig {
             }
         }),
     }
+}
+
+#[test]
+#[serial(env)]
+fn isolated_cursor_prepare_materializes_per_seat_project_not_workspace_overlay() {
+    let ws = tmp_dir("cursor-iso-clean");
+    let project = prepare_cursor_seat_mcp(&ws, "seat-iso", &sample_mcp_config("seat-iso", &ws.to_string_lossy()))
+        .expect("prepare isolated cursor")
+        .expect("isolation defaults on");
+    assert!(
+        project.ends_with("provider-config/seat-iso/cursor"),
+        "per-seat project must be materialized: {}",
+        project.display()
+    );
+    assert!(project.join(".cursor").is_dir());
+    let overlay = std::fs::read_to_string(cursor_mcp_json_path(&ws, "seat-iso").unwrap()).unwrap();
+    assert!(
+        overlay.contains("seat-iso") && overlay.contains("team_orchestrator"),
+        "overlay must land in the per-seat mcp.json"
+    );
+    assert!(
+        !ws.join(".cursor/mcp.json").exists(),
+        "clean workspace overlay must not be written when isolation is on"
+    );
+    let enable_cwd = cursor_mcp_enable_working_dir(&ws, Some(&project));
+    assert_eq!(enable_cwd, physical_workspace_path(&project));
+    let mut argv = vec![
+        "agent".to_string(),
+        "--workspace".to_string(),
+        ws.to_string_lossy().into_owned(),
+    ];
+    apply_cursor_spawn_workspace_pointers(&mut argv, &ws, "seat-iso").unwrap();
+    let workspace_flag = argv
+        .windows(2)
+        .find(|pair| pair[0] == "--workspace")
+        .map(|pair| pair[1].as_str())
+        .unwrap();
+    assert_eq!(workspace_flag, physical_workspace_path(&project).to_string_lossy());
+    assert_eq!(
+        include_str!("../launch/spawn.rs").contains("prepare_cursor_seat_mcp("),
+        true,
+        "fresh spawn must call the shared materializer, not only compute the path"
+    );
+    assert!(
+        include_str!("../restart/common.rs").contains("prepare_cursor_seat_mcp("),
+        "restart spawn_agent_window must use the same materializer"
+    );
+}
+
+#[test]
+fn cursor_enable_working_dir_does_not_depend_on_cfg_test_skip() {
+    let ws = tmp_dir("cursor-enable-cwd");
+    let project = ws.join(".team/runtime/provider-config/seat/cursor");
+    std::fs::create_dir_all(&project).unwrap();
+    assert_eq!(
+        cursor_mcp_enable_working_dir(&ws, Some(&project)),
+        physical_workspace_path(&project)
+    );
+    assert_eq!(
+        cursor_mcp_enable_working_dir(&ws, None),
+        physical_workspace_path(&ws)
+    );
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {

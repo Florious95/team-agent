@@ -54,6 +54,9 @@ const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
 #[test]
 #[serial(env)]
 fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("behavioral-d123-codex");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_dir("d123-codex-argv");
     let team_dir = write_team(
@@ -178,6 +181,9 @@ fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
 #[test]
 #[serial(env)]
 fn d4_worker_shell_env_sets_team_agent_id_to_worker_self() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("behavioral-d4-shell-env");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
         ("TEAM_AGENT_ID", "stale-mcp-caller"),
@@ -218,6 +224,9 @@ fn d4_worker_shell_env_sets_team_agent_id_to_worker_self() {
 #[test]
 #[serial(env)]
 fn d5_fresh_launch_spawn_cwd_and_state_use_workspace() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("behavioral-d5-spawn-cwd");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_dir("d5-spawn-cwd");
     let team_dir = write_team(&ws, &simple_codex_team("d5team", "worker_a", "Cwd Worker"));
@@ -259,6 +268,9 @@ fn d5_fresh_launch_spawn_cwd_and_state_use_workspace() {
 #[test]
 #[serial(env)]
 fn d6_compiled_system_prompt_first_section_is_identity() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("behavioral-d6-prompt");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_dir("d6-prompt-order");
     let team_dir = write_team(
@@ -311,6 +323,9 @@ chunks=[identity, TEAMMATE_SYSTEM_PROMPT, ...]; live ps confirms identity-first)
 #[test]
 #[serial(env)]
 fn d7_runtime_fast_sends_codex_fast_mode_toggle() {
+    let hermetic = hermetic_guard::HermeticTestEnv::enter("behavioral-d7-fast-mode");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
     let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_dir("d7-fast-mode");
     let mut fixture = simple_codex_team("d7team", "worker_a", "Fast Worker");

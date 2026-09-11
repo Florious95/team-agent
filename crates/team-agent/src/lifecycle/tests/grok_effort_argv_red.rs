@@ -21,6 +21,13 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+fn enter_hermetic(tag: &str) -> hermetic_guard::HermeticTestEnv {
+    let env = hermetic_guard::HermeticTestEnv::enter(tag);
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    env
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,6 +38,7 @@ use team_agent::transport::test_support::OfflineTransport;
 #[test]
 #[serial(env)]
 fn grok_role_effort_medium_reaches_argv() {
+    let _hermetic = enter_hermetic("grok-effort-medium");
     let (ws, _home, _guard, team) = seed_grok("effort-medium", Some("medium"));
     let transport = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("grokteam"), &transport)
@@ -45,6 +53,7 @@ fn grok_role_effort_medium_reaches_argv() {
 #[test]
 #[serial(env)]
 fn grok_role_without_effort_emits_zero_effort_flags() {
+    let _hermetic = enter_hermetic("grok-effort-absent");
     let (ws, _home, _guard, team) = seed_grok("effort-absent", None);
     let transport = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("grokteam"), &transport)
@@ -60,6 +69,7 @@ fn grok_role_without_effort_emits_zero_effort_flags() {
 #[test]
 #[serial(env)]
 fn grok_restart_keeps_declared_effort_medium() {
+    let _hermetic = enter_hermetic("grok-effort-restart");
     let (ws, _home, _guard, team) = seed_grok("effort-restart", Some("medium"));
     let first = OfflineTransport::new();
     quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("grokteam"), &first)

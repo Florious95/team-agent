@@ -54,14 +54,14 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
         &launch_transport,
     )
     .expect("launch fixture should spawn worker");
-    let launch_command_line = launch_transport.single_spawn_command_line();
+    let launch_spawn = launch_transport.single_spawn();
 
     let restart_team = compiled_team_dir("restart", &[("worker_a", "Restart Worker")]);
     seed_restart_state(&restart_team, "worker_a");
     let restart_transport = RecordingTransport::new().with_session_present(false);
     restart_with_transport(&restart_team, true, None, &restart_transport)
         .expect("restart fixture should spawn worker");
-    let restart_command_line = restart_transport.single_spawn_command_line();
+    let restart_spawn = restart_transport.single_spawn();
 
     let add_team = compiled_team_dir("add-agent", &[("worker_a", "Existing Worker")]);
     seed_running_add_agent_state(&add_team, "worker_a");
@@ -77,23 +77,173 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
         &add_transport,
     )
     .expect("add-agent fixture should spawn worker");
-    let add_command_line = add_transport.single_spawn_command_line();
+    let add_spawn = add_transport.single_spawn();
 
     let failures = [
-        ("quick-start launch", launch_command_line, "worker_a"),
-        ("restart", restart_command_line, "worker_a"),
-        ("add-agent", add_command_line, "worker_b"),
+        ("quick-start launch", launch_spawn, "worker_a"),
+        ("restart", restart_spawn, "worker_a"),
+        ("add-agent", add_spawn, "worker_b"),
     ]
     .into_iter()
-    .flat_map(|(surface, command_line, agent_id)| {
-        spawn_env_contract_failures(surface, &command_line, agent_id)
-    })
+    .flat_map(|(surface, spawn, agent_id)| spawn_env_contract_failures(surface, &spawn, agent_id))
     .collect::<Vec<_>>();
 
     assert!(
         failures.is_empty(),
         "worker spawn env contract failed:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+#[serial(env)]
+fn cursor_subscription_proxy_profile_reaches_fresh_and_restart_transport_final_env() {
+    let _guard = EnvGuard::set([
+        ("HTTPS_PROXY", "https://upper-https:1"),
+        ("HTTP_PROXY", "http://upper-http:1"),
+        ("ALL_PROXY", "socks5://upper-all:1"),
+        ("https_proxy", "https://lower-https:1"),
+        ("http_proxy", "http://lower-http:1"),
+        ("all_proxy", "socks5://lower-all:1"),
+        ("NO_PROXY", "localhost,127.0.0.1"),
+        ("no_proxy", "localhost,127.0.0.1"),
+        ("GLOBAL_AGENT_HTTPS_PROXY", "https://global-https:1"),
+        ("GLOBAL_AGENT_HTTP_PROXY", "http://global-http:1"),
+    ]);
+
+    let launch_direct = compiled_cursor_profile_team("cursor-direct-launch", "direct");
+    let launch_transport = RecordingTransport::new().with_session_present(false);
+    launch_with_transport(
+        &launch_direct.join("team.spec.yaml"),
+        false,
+        true,
+        true,
+        &launch_transport,
+    )
+    .expect("direct Cursor launch fixture should spawn");
+    assert_cursor_proxy_spawn(&launch_transport.single_spawn(), true);
+
+    let restart_direct = compiled_cursor_profile_team("cursor-direct-restart", "direct");
+    seed_restart_state_with_profile(&restart_direct, "worker_a", "cursor_proxy");
+    let restart_transport = RecordingTransport::new().with_session_present(false);
+    restart_with_transport(&restart_direct, true, None, &restart_transport)
+        .expect("direct Cursor restart fixture should spawn");
+    assert_cursor_proxy_spawn(&restart_transport.single_spawn(), true);
+
+    let launch_inherit = compiled_cursor_profile_team("cursor-inherit-launch", "inherit");
+    let inherit_transport = RecordingTransport::new().with_session_present(false);
+    launch_with_transport(
+        &launch_inherit.join("team.spec.yaml"),
+        false,
+        true,
+        true,
+        &inherit_transport,
+    )
+    .expect("inherit Cursor launch fixture should spawn");
+    assert_cursor_proxy_spawn(&inherit_transport.single_spawn(), false);
+
+    let restart_inherit = compiled_cursor_profile_team("cursor-inherit-restart", "inherit");
+    seed_restart_state_with_profile(&restart_inherit, "worker_a", "cursor_proxy");
+    let restart_inherit_transport = RecordingTransport::new().with_session_present(false);
+    restart_with_transport(
+        &restart_inherit,
+        true,
+        None,
+        &restart_inherit_transport,
+    )
+    .expect("inherit Cursor restart fixture should spawn");
+    assert_cursor_proxy_spawn(&restart_inherit_transport.single_spawn(), false);
+}
+
+fn assert_cursor_proxy_spawn(spawn: &RecordedSpawn, direct: bool) {
+    let keys = [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+        "GLOBAL_AGENT_HTTPS_PROXY",
+        "GLOBAL_AGENT_HTTP_PROXY",
+    ];
+    for key in keys {
+        if direct {
+            assert!(!spawn.env.contains_key(key), "direct env must omit {key}");
+            assert!(
+                spawn.env_unset.iter().any(|candidate| candidate == key),
+                "direct env_unset must contain {key}; got {:?}",
+                spawn.env_unset
+            );
+        } else {
+            assert!(spawn.env.contains_key(key), "inherit env must preserve {key}");
+            assert!(
+                spawn.env_unset.iter().all(|candidate| candidate != key),
+                "inherit env_unset must not contain {key}; got {:?}",
+                spawn.env_unset
+            );
+        }
+    }
+    for key in ["NO_PROXY", "no_proxy"] {
+        assert!(spawn.env.contains_key(key), "NO_PROXY bypass key must remain: {key}");
+        assert!(
+            spawn.env_unset.iter().all(|candidate| candidate != key),
+            "NO_PROXY bypass key must not be unset: {key}"
+        );
+    }
+}
+
+#[test]
+fn tmux_control_filter_uses_env_keys_not_substring_in_inherited_values() {
+    let mut env = BTreeMap::from([
+        ("TA_SPAWN_ENV_CANARY".to_string(), "FOO".to_string()),
+        (
+            "HTTP_PROXY".to_string(),
+            "http://canary-proxy:1".to_string(),
+        ),
+        (
+            "NODE_EXTRA_CA_CERTS".to_string(),
+            "/canary/ca.pem".to_string(),
+        ),
+        ("TEAM_AGENT_WORKSPACE".to_string(), "/ws".to_string()),
+        (
+            "TEAM_AGENT_OWNER_TEAM_ID".to_string(),
+            "teamdir".to_string(),
+        ),
+        ("TEAM_AGENT_AGENT_ID".to_string(), "worker_a".to_string()),
+        (
+            "HARNESS_PROBE".to_string(),
+            "printf 'LS_USR_BIN_TMUX=%s\\n'\n".to_string(),
+        ),
+    ]);
+    let spawn = RecordedSpawn {
+        argv: vec!["codex".to_string()],
+        env: env.clone(),
+        env_unset: Vec::new(),
+        session: SessionName::new("s"),
+        window: WindowName::new("w"),
+        pane_id: PaneId::new("%1"),
+    };
+    assert!(
+        spawn_env_contract_failures("harness-value", &spawn, "worker_a").is_empty(),
+        "inherited values may contain the letters TMUX= without leaking TMUX/TMUX_PANE keys"
+    );
+
+    env.insert(
+        "TMUX".to_string(),
+        "/tmp/tmux-canary/default,1".to_string(),
+    );
+    let leaked = RecordedSpawn {
+        env,
+        ..spawn
+    };
+    let failures = spawn_env_contract_failures("key-leak", &leaked, "worker_a");
+    assert!(
+        failures.iter().any(|row| row.contains("present_keys=") && row.contains("TMUX")),
+        "actual TMUX key must still fail closed; failures={failures:?}"
+    );
+    assert!(
+        failures.iter().all(|row| !row.contains("command_line=")),
+        "failures must not dump command_line; failures={failures:?}"
     );
 }
 
@@ -234,42 +384,67 @@ fn worker_spawn_stays_out_of_coordinator_tick_and_daemon_preserves_parent_env() 
     );
 }
 
-fn spawn_env_contract_failures(surface: &str, command_line: &str, agent_id: &str) -> Vec<String> {
+fn spawn_env_has_tmux_control_assignment(spawn: &RecordedSpawn) -> bool {
+    spawn.env.contains_key("TMUX")
+        || spawn.env.contains_key("TMUX_PANE")
+        || spawn.argv.iter().any(|part| {
+            part.split_whitespace().any(|tok| {
+                tok == "TMUX" || tok.starts_with("TMUX=") || tok.starts_with("TMUX_PANE=")
+            })
+        })
+}
+
+fn spawn_env_contract_failures(
+    surface: &str,
+    spawn: &RecordedSpawn,
+    agent_id: &str,
+) -> Vec<String> {
     let mut failures = Vec::new();
-    for expected in [
-        "TA_SPAWN_ENV_CANARY=FOO",
-        "HTTP_PROXY=http://canary-proxy:1",
-        "NODE_EXTRA_CA_CERTS=/canary/ca.pem",
-        "TEAM_AGENT_WORKSPACE=",
-        "TEAM_AGENT_OWNER_TEAM_ID=teamdir",
+    for (key, expected) in [
+        ("TA_SPAWN_ENV_CANARY", Some("FOO")),
+        ("HTTP_PROXY", Some("http://canary-proxy:1")),
+        ("NODE_EXTRA_CA_CERTS", Some("/canary/ca.pem")),
+        ("TEAM_AGENT_OWNER_TEAM_ID", Some("teamdir")),
     ] {
-        if !command_line.contains(expected) {
-            failures.push(format!(
-                "{surface}: missing `{expected}`; worker spawn must inherit parent env and overlay Team Agent identity; command_line={command_line:?}"
-            ));
+        match (spawn.env.get(key).map(String::as_str), expected) {
+            (Some(actual), Some(wanted)) if actual == wanted => {}
+            (Some(_), Some(wanted)) => failures.push(format!(
+                "{surface}: `{key}` present but not `{wanted}`"
+            )),
+            _ => failures.push(format!(
+                "{surface}: missing `{key}` overlay/inherit"
+            )),
         }
     }
-    if !command_line.contains(&format!("TEAM_AGENT_AGENT_ID={agent_id}")) {
-        failures.push(format!(
-            "{surface}: missing `TEAM_AGENT_AGENT_ID={agent_id}` overlay; command_line={command_line:?}"
-        ));
-    }
-    if command_line.contains("TMUX=") || command_line.contains("TMUX_PANE=") {
-        failures.push(format!(
-            "{surface}: worker spawn must filter tmux control env from inherited parent env; command_line={command_line:?}"
-        ));
-    }
-    if !command_line.split_whitespace().any(|part| part == "codex") {
-        failures.push(format!(
-            "{surface}: provider executable must remain the command name `codex`; command_line={command_line:?}"
-        ));
-    }
-    if command_line
-        .split_whitespace()
-        .any(|part| part.ends_with("/codex"))
+    if spawn
+        .env
+        .get("TEAM_AGENT_WORKSPACE")
+        .is_none_or(|value| value.is_empty())
     {
+        failures.push(format!("{surface}: missing `TEAM_AGENT_WORKSPACE` overlay"));
+    }
+    if spawn.env.get("TEAM_AGENT_AGENT_ID").map(String::as_str) != Some(agent_id) {
         failures.push(format!(
-            "{surface}: provider executable must not be hard-coded as an absolute codex path; command_line={command_line:?}"
+            "{surface}: missing `TEAM_AGENT_AGENT_ID={agent_id}` overlay"
+        ));
+    }
+    if spawn_env_has_tmux_control_assignment(spawn) {
+        let present: Vec<&str> = ["TMUX", "TMUX_PANE"]
+            .into_iter()
+            .filter(|key| spawn.env.contains_key(*key))
+            .collect();
+        failures.push(format!(
+            "{surface}: worker spawn must filter tmux control env from inherited parent env; present_keys={present:?}"
+        ));
+    }
+    if !spawn.argv.iter().any(|part| part == "codex") {
+        failures.push(format!(
+            "{surface}: provider executable must remain the command name `codex`"
+        ));
+    }
+    if spawn.argv.iter().any(|part| part.ends_with("/codex")) {
+        failures.push(format!(
+            "{surface}: provider executable must not be hard-coded as an absolute codex path"
         ));
     }
     failures
@@ -332,6 +507,39 @@ fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
     compiled_team_dir_for_provider(label, agents, "codex")
 }
 
+fn compiled_cursor_profile_team(label: &str, proxy_mode: &str) -> PathBuf {
+    let team = tmp_dir(label).join("teamdir");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: envteam\nobjective: Cursor proxy environment contract.\nprovider: cursor_agent\n---\n\nTeam.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        team.join("agents").join("worker_a.md"),
+        "---\nname: worker_a\nrole: Cursor Worker\nprovider: cursor_agent\nmodel: sonnet-4-thinking\nauth_mode: subscription\nprofile: cursor_proxy\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nCursor worker.\n",
+    )
+    .unwrap();
+    for directory in [
+        team.join("profiles"),
+        team.join(".team/current/profiles"),
+    ] {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("cursor_proxy.env"),
+            format!("AUTH_MODE=subscription\nPROFILE_NAME=cursor_proxy\nPROXY_MODE={proxy_mode}\n"),
+        )
+        .unwrap();
+    }
+    let spec = team_agent::compiler::compile_team(&team).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
+    team
+}
+
 fn compiled_team_dir_for_provider(label: &str, agents: &[(&str, &str)], provider: &str) -> PathBuf {
     let team = tmp_dir(label).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -370,6 +578,13 @@ fn role_doc_for_provider(name: &str, role: &str, provider: &str) -> String {
 
 fn seed_restart_state(team: &Path, agent_id: &str) {
     seed_restart_state_as(team, agent_id, "codex");
+}
+
+fn seed_restart_state_with_profile(team: &Path, agent_id: &str, profile: &str) {
+    seed_restart_state_as(team, agent_id, "cursor_agent");
+    let mut state = team_agent::state::persist::load_runtime_state(team).unwrap();
+    state["agents"][agent_id]["profile"] = json!(profile);
+    team_agent::state::persist::save_runtime_state(team, &state).unwrap();
 }
 
 fn seed_restart_state_as(team: &Path, agent_id: &str, provider: &str) {
@@ -580,6 +795,7 @@ impl RecordingTransport {
         self
     }
 
+    #[allow(dead_code)]
     fn single_spawn_command_line(&self) -> String {
         self.single_spawn().command_line()
     }
