@@ -137,7 +137,6 @@ fn launch_restart_start_add_and_fork_all_delegate_to_the_profile_launch_resolver
         ("add-agent", &launch, "add_agent_with_transport"),
         ("fork-agent", &launch, "fork_agent_with_transport"),
         ("restart", &restart_common, "restart_with_transport"),
-        ("start-agent", &restart_agent, "start_agent_at_paths"),
     ];
     for (surface, source, entry) in surfaces {
         let section = source
@@ -149,6 +148,23 @@ fn launch_restart_start_add_and_fork_all_delegate_to_the_profile_launch_resolver
             "{surface} must call the single profile resolver before building/spawning provider argv; entry={entry}"
         );
     }
+
+    let start_agent = restart_agent
+        .find("pub(crate) fn start_agent_at_paths(")
+        .map(|idx| &restart_agent[idx..])
+        .unwrap_or(restart_agent.as_str());
+    assert!(
+        start_agent.contains("spawn_agent_window("),
+        "start-agent must delegate spawning through the shared spawn helper"
+    );
+    let spawn_agent_window = restart_common
+        .find("pub(super) fn spawn_agent_window")
+        .map(|idx| &restart_common[idx..])
+        .unwrap_or(restart_common.as_str());
+    assert!(
+        spawn_agent_window.contains("prepare_provider_profile_launch"),
+        "the shared start-agent spawn helper must call the single profile resolver before building/spawning provider argv"
+    );
 }
 
 #[test]

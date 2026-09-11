@@ -2102,7 +2102,9 @@ mod fresh_quick_start_leader_binding_tests {
                         "tmux_socket": "/private/tmp/tmux-test/default"
                     });
                     match case {
-                        "provider_mismatch" => state["leader_receiver"]["provider"] = json!("codex"),
+                        "provider_mismatch" => {
+                            state["leader_receiver"]["provider"] = json!("claude")
+                        },
                         "socket_mismatch" => state["leader_receiver"]["tmux_socket"] = json!("/tmp/other"),
                         "workspace_mismatch" => state["workspace"] = json!(workspace.join("other")),
                         "dual_state_mismatch" => state["team_owner"]["owner_epoch"] = json!(2),
@@ -4402,9 +4404,11 @@ mod fresh_quick_start_leader_binding_tests {
                 "/tmp/product.sock",
             ),
             (
+                // The explicit leader provider intentionally conflicts with the
+                // caller provider; worker_env must reject this before command fallback.
                 "leader",
                 "/tmp/tmux.sock",
-                Some("codex"),
+                Some("claude"),
                 "/tmp/tmux.sock",
             ),
         ] {
