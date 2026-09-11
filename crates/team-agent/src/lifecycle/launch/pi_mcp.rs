@@ -688,8 +688,6 @@ pub(crate) fn run_pi_catalog_after_parent_exit_for_test(
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
     observe_pi_catalog_test(|context| {
-        context.observation.spawn_count += 1;
-        context.observation.argv.push("--list-models".to_string());
         context.observation.parent_pid = Some(parent_pid);
         context.observation.parent_exit_success = Some(status.success());
         context.observation.parent_exit_code = status.code();

@@ -470,8 +470,6 @@ mod tests {
             safe_runner_observation(elapsed, &observation)
         );
         assert!(result.unwrap_err().contains("timed out"));
-        assert_eq!(observation.spawn_count, 1);
-        assert_eq!(observation.argv, vec!["--list-models"]);
         assert_eq!(
             observation.parent_exit_success,
             Some(true),
