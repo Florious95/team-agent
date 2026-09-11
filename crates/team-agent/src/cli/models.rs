@@ -278,6 +278,18 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn fixture_with_sidecars(body: &str) -> std::path::PathBuf {
+        let path = fixture(body);
+        let script = std::fs::read_to_string(&path).unwrap();
+        let script = script.strip_prefix("#!/bin/sh\n").unwrap();
+        let script = format!(
+            "#!/bin/sh\nprintf '1\\n' > \"$0.entered\" || :\n{script}body_status=$?\nprintf '1\\n' > \"$0.completed\" || :\nexit \"$body_status\"\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
     fn cleanup_fixture(path: &Path) {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -363,6 +375,26 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn safe_fixture_sidecar(path: &Path, expected: &str) -> &'static str {
+        match std::fs::read_to_string(path) {
+            Ok(text) if text == expected => "present_expected",
+            Ok(_) => "present_unexpected",
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+            Err(_) => "unavailable",
+        }
+    }
+
+    #[cfg(unix)]
+    fn safe_runner_fixture_observation(path: &Path) -> String {
+        format!(
+            "fixture_entered={} fixture_completed={} fixture_count={}",
+            safe_fixture_sidecar(&path.with_extension("entered"), "1\n"),
+            safe_fixture_sidecar(&path.with_extension("completed"), "1\n"),
+            safe_fixture_sidecar(&path.with_extension("count"), "1:--list-models\n"),
+        )
+    }
+
+    #[cfg(unix)]
     fn safe_runner_observation(
         elapsed: Duration,
         observation: &crate::lifecycle::launch::pi_mcp::PiCatalogTestObservation,
@@ -423,7 +455,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runner_invokes_exact_argv_once_and_drains() {
-        let path = fixture(
+        let path = fixture_with_sidecars(
             "test \"$1\" = --list-models && echo provider model && echo openai-codex gpt-5.6-sol",
         );
         let receipt = native_timeout_receipt();
@@ -436,12 +468,14 @@ mod tests {
                 || run_catalog(&path, Duration::from_secs(1), 1024),
             );
         let elapsed = started.elapsed();
+        let fixture_observation = safe_runner_fixture_observation(&path);
         assert!(
             result
                 .as_ref()
                 .is_ok_and(|bytes| bytes.starts_with(b"provider model")),
-            "runner observation: {}",
-            safe_runner_observation(elapsed, &observation)
+            "runner observation: {}; {}",
+            safe_runner_observation(elapsed, &observation),
+            fixture_observation
         );
         let _ = result.unwrap();
         let _ = std::fs::remove_file(&receipt);
