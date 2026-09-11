@@ -137,6 +137,8 @@ fn run_catalog(program: &Path, timeout: Duration, max_bytes: u64) -> Result<Vec<
 mod tests {
     use super::*;
     #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
@@ -300,6 +302,11 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn native_timeout_stage_receipt(receipt: &Path) -> std::path::PathBuf {
+        receipt.with_extension("stage")
+    }
+
+    #[cfg(unix)]
     fn parse_native_timeout_receipt(path: &Path) -> Option<BTreeMap<String, String>> {
         let mut fields = BTreeMap::new();
         for line in std::fs::read_to_string(path).ok()?.lines() {
@@ -373,6 +380,47 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn safe_models_result_class(result: &CmdResult) -> &'static str {
+        let CmdOutput::Human(text) = &result.output else {
+            return "non_human_output";
+        };
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            return "non_json_output";
+        };
+        match value.get("ok").and_then(Value::as_bool) {
+            Some(true) => "success_json",
+            Some(false) => match value.get("error").and_then(Value::as_str) {
+                Some(error) if error.contains("unavailable") => "runner_unavailable",
+                Some(error) if error.contains("timed out") => "runner_timeout",
+                Some(error) if error.contains("command failed") => "runner_exit",
+                Some(error) if error.contains("could not be read") => "reader_error",
+                Some(error) if error.contains("exceeds") => "reader_oversize",
+                Some(error) if error.contains("catalog") => "parser_catalog_error",
+                Some(_) => "failure_json",
+                None => "failure_json_missing_error",
+            },
+            None => "json_missing_ok",
+        }
+    }
+
+    #[cfg(unix)]
+    fn safe_models_observation(
+        elapsed: Duration,
+        result: &CmdResult,
+        observation: &crate::lifecycle::launch::pi_mcp::PiCatalogTestObservation,
+    ) -> String {
+        format!(
+            "class={} elapsed_ms={} parent_pid={:?} parent_exit_success={:?} parent_exit_code={:?} reader_timeout={}",
+            safe_models_result_class(result),
+            elapsed.as_millis(),
+            observation.parent_pid,
+            observation.parent_exit_success,
+            observation.parent_exit_code,
+            observation.reader_timeout,
+        )
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_invokes_exact_argv_once_and_drains() {
         let path = fixture(
@@ -406,7 +454,74 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn wait_for_native_parent_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
+    const NATIVE_STAGE_KEYS: [&str; 5] = [
+        "parent_entry_ms",
+        "parent_before_child_spawn_ms",
+        "parent_after_child_spawn_ms",
+        "parent_before_exit_ms",
+        "test_spawn_return_ms",
+    ];
+
+    #[cfg(unix)]
+    // Match the native helper's UNIX epoch millisecond clock exactly.
+    fn append_native_stage(path: &Path, key: &str) {
+        if !NATIVE_STAGE_KEYS.contains(&key) {
+            return;
+        }
+        let Some(milliseconds) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis())
+        else {
+            return;
+        };
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return;
+        };
+        let _ = writeln!(file, "{key}={milliseconds}");
+    }
+
+    #[cfg(unix)]
+    fn safe_native_stage(path: &Path) -> String {
+        let (read_state, text) = match std::fs::read_to_string(path) {
+            Ok(text) => ("ok", Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => ("missing", None),
+            Err(_) => ("unavailable", None),
+        };
+        let mut fields = BTreeMap::new();
+        if let Some(text) = text {
+            for line in text.lines() {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                if NATIVE_STAGE_KEYS.contains(&key)
+                    && value.len() <= 20
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    fields.entry(key).or_insert(value);
+                }
+            }
+        }
+        let field = |key: &str| fields.get(key).copied().unwrap_or("unknown");
+        format!(
+            "stage_read={read_state} parent_entry_ms={} parent_before_child_spawn_ms={} parent_after_child_spawn_ms={} parent_before_exit_ms={} test_spawn_return_ms={}",
+            field("parent_entry_ms"),
+            field("parent_before_child_spawn_ms"),
+            field("parent_after_child_spawn_ms"),
+            field("parent_before_exit_ms"),
+            field("test_spawn_return_ms"),
+        )
+    }
+
+    #[cfg(unix)]
+    fn wait_for_native_parent_exit(
+        child: &mut std::process::Child,
+        stage: &Path,
+    ) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_millis(500);
         loop {
             match child.try_wait() {
@@ -415,14 +530,22 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Ok(None) => {
+                    let before_kill = safe_native_stage(stage);
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("native parent did not exit before test setup deadline");
+                    let after_wait = safe_native_stage(stage);
+                    panic!(
+                        "native parent did not exit before test setup deadline; stage_before_kill={before_kill}; stage_after_wait={after_wait}"
+                    );
                 }
-                Err(error) => {
+                Err(_) => {
+                    let before_kill = safe_native_stage(stage);
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("native parent status could not be observed: {error}");
+                    let after_wait = safe_native_stage(stage);
+                    panic!(
+                        "native parent status could not be observed; stage_before_kill={before_kill}; stage_after_wait={after_wait}"
+                    );
                 }
             }
         }
@@ -435,18 +558,22 @@ mod tests {
     fn reader_deadline_is_bounded_after_parent_exit_with_descendant_pipe() {
         let path = native_timeout_fixture();
         let receipt = native_timeout_receipt();
+        let stage = native_timeout_stage_receipt(&receipt);
         assert!(!receipt.exists());
+        assert!(!stage.exists());
         let mut parent = std::process::Command::new(&path)
             .arg("--list-models")
             .env("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT", &receipt)
+            .env("TEAM_AGENT_MODELS_TIMEOUT_STAGE_RECEIPT", &stage)
             .env("TEAM_AGENT_MODELS_TIMEOUT_MODE", "descendant")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
+        append_native_stage(&stage, "test_spawn_return_ms");
         let parent_pid = parent.id();
-        let parent_status = wait_for_native_parent_exit(&mut parent);
+        let parent_status = wait_for_native_parent_exit(&mut parent, &stage);
         let stdout = parent.stdout.take().expect("native parent stdout pipe");
         let started = Instant::now();
         let (result, observation) =
@@ -492,6 +619,7 @@ mod tests {
         );
         assert_eq!(fields["child_pid"], fields["descendant_pid"]);
         let _ = std::fs::remove_file(&receipt);
+        let _ = std::fs::remove_file(&stage);
         let _ = std::fs::remove_file(format!("{}.sock", receipt.display()));
     }
 
@@ -506,16 +634,72 @@ mod tests {
             search: Some("sol".into()),
             json: true,
         };
-        let result = cmd_models_with(&args, &path, Duration::from_secs(1), 1024).unwrap();
-        let CmdOutput::Human(text) = result.output else {
-            panic!("expected JSON projection")
+        let receipt = native_timeout_receipt();
+        assert!(!receipt.exists());
+        let started = Instant::now();
+        let (result, observation) =
+            crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
+                &receipt,
+                None,
+                || cmd_models_with(&args, &path, Duration::from_secs(1), 1024),
+            );
+        let elapsed = started.elapsed();
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => panic!(
+                "command boundary returned a CLI error; class=cli_error elapsed_ms={} parent_pid={:?} parent_exit_success={:?} parent_exit_code={:?} reader_timeout={}",
+                elapsed.as_millis(),
+                observation.parent_pid,
+                observation.parent_exit_success,
+                observation.parent_exit_code,
+                observation.reader_timeout,
+            ),
         };
-        let value: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["schema_version"], "models.v1");
-        assert_eq!(value["models"][0]["role_model"], "openai-codex/gpt-5.6-sol");
-        assert_eq!(value["models"][0]["current"], false);
-        assert_eq!(value["auth"], "ok");
-        assert_eq!(value["models"].as_array().unwrap().len(), 1);
+        let CmdOutput::Human(text) = &result.output else {
+            panic!(
+                "expected JSON projection; {}",
+                safe_models_observation(elapsed, &result, &observation)
+            )
+        };
+        let value: Value = serde_json::from_str(text).unwrap_or_else(|_| {
+            panic!(
+                "expected valid JSON projection; {}",
+                safe_models_observation(elapsed, &result, &observation)
+            )
+        });
+        assert_eq!(
+            value["schema_version"],
+            "models.v1",
+            "{}",
+            safe_models_observation(elapsed, &result, &observation)
+        );
+        assert_eq!(
+            value["models"][0]["role_model"],
+            "openai-codex/gpt-5.6-sol",
+            "{}",
+            safe_models_observation(elapsed, &result, &observation)
+        );
+        assert_eq!(
+            value["models"][0]["current"],
+            false,
+            "{}",
+            safe_models_observation(elapsed, &result, &observation)
+        );
+        assert_eq!(
+            value["auth"],
+            "ok",
+            "{}",
+            safe_models_observation(elapsed, &result, &observation)
+        );
+        let model_count = value["models"].as_array().map(|models| models.len());
+        assert_eq!(
+            model_count,
+            Some(1),
+            "{}",
+            safe_models_observation(elapsed, &result, &observation)
+        );
+        let _ = std::fs::remove_file(&receipt);
+        let _ = std::fs::remove_file(format!("{}.sock", receipt.display()));
         let human = cmd_models_with(
             &ModelsArgs {
                 provider: "pi".into(),
