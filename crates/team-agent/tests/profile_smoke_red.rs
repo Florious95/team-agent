@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,17 @@ fn preflight_compatible_api_profile_smoke_passes_only_after_real_http_probe() {
     assert!(
         server.was_called(),
         "preflight must actually POST to the compatible_api profile endpoint; report={report}"
+    );
+    let request: Value = serde_json::from_str(
+        &server
+            .request_body()
+            .expect("mock endpoint must capture the transmitted request body"),
+    )
+    .expect("profile smoke request body must be valid JSON");
+    assert_eq!(
+        request.get("model").and_then(Value::as_str),
+        Some("mock-claude"),
+        "profile smoke must transmit the model selected by the launch profile; request={request}"
     );
     assert!(
         !report.to_string().contains("local-secret"),
@@ -210,6 +221,7 @@ fn profile_smoke_check(report: &Value) -> &Value {
 struct MockLlmServer {
     url: String,
     called: Arc<AtomicBool>,
+    request_body: Arc<Mutex<Option<String>>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -220,14 +232,20 @@ impl MockLlmServer {
         let addr = listener.local_addr().unwrap();
         let called = Arc::new(AtomicBool::new(false));
         let called_in_thread = called.clone();
+        let request_body = Arc::new(Mutex::new(None));
+        let request_body_in_thread = request_body.clone();
         let handle = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_millis(700);
             while Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _addr)) => {
                         called_in_thread.store(true, Ordering::SeqCst);
-                        let mut buf = [0_u8; 4096];
-                        let _ = stream.read(&mut buf);
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(700)))
+                            .unwrap();
+                        if let Some(body) = read_request_body(&mut stream) {
+                            *request_body_in_thread.lock().unwrap() = Some(body);
+                        }
                         let response = format!(
                             "HTTP/1.1 {status} test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                             body.len()
@@ -245,6 +263,7 @@ impl MockLlmServer {
         Self {
             url: format!("http://{addr}/v1"),
             called,
+            request_body,
             handle: Some(handle),
         }
     }
@@ -255,6 +274,10 @@ impl MockLlmServer {
 
     fn was_called(&self) -> bool {
         self.called.load(Ordering::SeqCst)
+    }
+
+    fn request_body(&self) -> Option<String> {
+        self.request_body.lock().unwrap().clone()
     }
 }
 
@@ -314,4 +337,34 @@ fn tmp_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::canonicalize(dir).unwrap()
+}
+
+fn read_request_body(stream: &mut TcpStream) -> Option<String> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let count = stream.read(&mut chunk).ok()?;
+        if count == 0 {
+            return None;
+        }
+        request.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        else {
+            continue;
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).ok()?;
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })?;
+        let body_start = header_end + 4;
+        if request.len() < body_start + content_length {
+            continue;
+        }
+        return String::from_utf8(request[body_start..body_start + content_length].to_vec()).ok();
+    }
 }
