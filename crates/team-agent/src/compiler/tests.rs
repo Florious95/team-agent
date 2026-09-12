@@ -817,7 +817,7 @@ fn config_authority_t02_compiled_model_provenance_is_paired_and_no_profile_defau
         ("profile: p\n", "", None, "profile"),
         ("", "", Some("gpt-5.5"), "default"),
     ] {
-        let role = format!("---\nname: worker\nrole: worker\nprovider: codex\n{extra}dangerously_skip_permissions: false\ntools: [mcp_team]\n---\nbody\n");
+        let role = format!("---\nname: worker\nrole: worker\nprovider: codex\n{extra}dangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nbody\n");
         let team_text = format!("---\nname: test\nobjective: config authority\n{team_extra}---\n");
         let team = build_team(&team_text, &[("worker.md", &role)], &[("p.env", "AUTH_MODE=subscription\n")]);
         let spec = compile_team(&team).unwrap();
