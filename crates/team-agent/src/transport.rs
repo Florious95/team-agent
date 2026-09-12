@@ -981,6 +981,12 @@ pub trait Transport: Send + Sync {
     /// pane 存活三态(`PaneLiveness`,bug-085 穷尽 match;unknown ≠ dead ≠ live)。
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError>;
 
+    /// Exit status recorded by the provider's supervising wrapper, never inferred
+    /// from terminal text. None means running or no authoritative receipt.
+    fn provider_exit_status(&self, _pane: &PaneId) -> Result<Option<u8>, TransportError> {
+        Ok(None)
+    }
+
     /// Cheap direct pane existence check when a backend can prove it. `Ok(None)`
     /// preserves the existing Unknown boundary.
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {

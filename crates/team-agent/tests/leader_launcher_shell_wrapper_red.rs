@@ -6,9 +6,8 @@
 //! 2. `managed_leader_shell_line_emits_exit_marker_and_inert_sh_tail` — the
 //!    wrapper line has all 4 sections (cd, unset, env+cmd no exec, exit
 //!    marker + inert `sh` tail).
-//! 3. `leader_provider_health_detects_provider_exited_when_shell_with_marker` —
-//!    when a pane is addressable but current-command is a shell and the
-//!    exit marker is in the capture, health reports `ProviderExited`.
+//! 3. A live shell rendering historical exit markers stays alive; only a
+//!    supervising wrapper exit receipt reports `ProviderExited`.
 //! 4. `leader_env_unset_single_source_grep_guard` — repo grep guard
 //!    asserting that the Claude unset literals live in only ONE source
 //!    file (CR C-1).
@@ -35,6 +34,57 @@ use team_agent::transport::PaneLiveness as TransportPaneLiveness;
 
 const A37_INERT_SH_TAIL: &str = r#"exec /bin/sh -c 'trap '\'''\'' INT QUIT; stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done'"#;
 const LEGACY_LOGIN_SHELL_TAIL: &str = "exec \"${SHELL:-/bin/zsh}\" -l";
+
+#[cfg(unix)]
+#[test]
+fn leader_wrapper_records_exit_only_after_provider_returns() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let root = std::env::temp_dir().join(format!(
+        "leader-exit-receipt-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let receipt = root.join("receipt");
+    let tmux = root.join("tmux");
+    std::fs::write(
+        &tmux,
+        "#!/bin/sh\nfor last; do :; done\nprintf '%s\\n' \"$last\" > \"$EXIT_RECEIPT\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Synthetic restored output: while printing both old markers, the provider
+    // must still have a running receipt. Only its real return may publish 17.
+    let provider = "printf '%s\\n' '[team-agent] pi exited with 0' '[team-agent] Provider exited'; test \"$(cat \"$EXIT_RECEIPT\")\" = running || exit 99; exit 17";
+    let line = leader_shell_wrapper_command(
+        &["/bin/sh".into(), "-c".into(), provider.into()],
+        &root,
+        &BTreeMap::new(),
+        &[],
+        "pi",
+    );
+    // Do not enter the deliberately infinite inert tail in this shell fixture.
+    let prefix = line.strip_suffix(A37_INERT_SH_TAIL).unwrap();
+    let output = Command::new("/bin/sh")
+        .args(["-c", &format!("{prefix}exit \"$rc\"")])
+        .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+        .env("TMUX", "/tmp/synthetic.sock,123,0")
+        .env("TMUX_PANE", "%47")
+        .env("EXIT_RECEIPT", &receipt)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(17),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap().trim(), "17");
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 // CR C-1 + C-2 unit test: the leader shell wrapper for a Claude launcher
 // must include EVERY entry in profile_launch::provider_env_unsets(Claude, *)
@@ -149,7 +199,7 @@ fn worker_shell_line_uses_exact_a37_inert_sh_tail() {
 
 // CR C-3 P0: leader_provider_health distinguishes ProviderExited from Alive.
 #[test]
-fn leader_provider_health_detects_provider_exited_when_shell_with_marker() {
+fn leader_provider_health_ignores_replayed_exit_marker_in_live_shell() {
     let transport = HealthMockTransport::new(
         PaneLiveness::Live,
         Some("zsh".to_string()),
@@ -166,26 +216,27 @@ fn leader_provider_health_detects_provider_exited_when_shell_with_marker() {
     let health = leader_provider_health(&transport, &pane_id, "claude");
     assert_eq!(
         health,
-        LeaderProviderHealth::ProviderExited,
-        "shell + exit marker must report ProviderExited; got {health:?}"
+        LeaderProviderHealth::Alive,
+        "shell + historical exit marker cannot prove provider exit; got {health:?}"
     );
 }
 
 #[test]
-fn a37_inert_sh_basename_with_marker_still_reports_provider_exited() {
+fn a37_inert_sh_tail_with_exit_receipt_reports_provider_exited() {
     let marker = leader_provider_exit_marker("claude");
-    let transport = HealthMockTransport::new(
+    let mut transport = HealthMockTransport::new(
         PaneLiveness::Live,
         Some("sh".to_string()),
         Some(format!(
             "{marker} 17\n[team-agent] Provider exited; pane is inert"
         )),
     );
+    transport.exit_status = Some(17);
     let pane_id = PaneId::new("%a37");
     assert_eq!(
         leader_provider_health(&transport, &pane_id, "claude"),
         LeaderProviderHealth::ProviderExited,
-        "A-37 inert tail basename `sh` must remain on the provider-exit marker path"
+        "A-37 real wrapper receipt must still prove provider exit"
     );
 }
 
@@ -213,10 +264,9 @@ fn leader_provider_health_reports_unreachable_when_pane_dead() {
     );
 }
 
-// CR R6: single-source marker — wrapper printf text and health check
-// substring share the same `leader_provider_exit_marker` helper.
+// The public marker remains stable for display, but does not authorize cleanup.
 #[test]
-fn leader_exit_marker_single_source_wrapper_and_health_agree() {
+fn leader_exit_marker_is_display_only_without_wrapper_receipt() {
     let env: BTreeMap<String, String> = BTreeMap::new();
     let line = leader_shell_wrapper_command(
         &["claude".to_string()],
@@ -231,8 +281,7 @@ fn leader_exit_marker_single_source_wrapper_and_health_agree() {
         "wrapper line must contain the single-source marker `{marker}`; \
          got line: {line}"
     );
-    // Round-trip: the captured pane text containing the marker should be
-    // detected as ProviderExited by the health helper.
+    // Replaying the same display text cannot prove that this provider exited.
     let transport = HealthMockTransport::new(
         PaneLiveness::Live,
         Some("zsh".to_string()),
@@ -241,8 +290,8 @@ fn leader_exit_marker_single_source_wrapper_and_health_agree() {
     let pane_id = PaneId::new("%99");
     assert_eq!(
         leader_provider_health(&transport, &pane_id, "claude"),
-        LeaderProviderHealth::ProviderExited,
-        "round-trip: marker emitted by wrapper must be detected by health"
+        LeaderProviderHealth::Alive,
+        "display text alone must never authorize cleanup"
     );
 }
 
@@ -358,6 +407,7 @@ struct HealthMockTransport {
     liveness: PaneLiveness,
     current_command: Option<String>,
     capture_text: Mutex<Option<String>>,
+    exit_status: Option<u8>,
 }
 
 impl HealthMockTransport {
@@ -370,11 +420,15 @@ impl HealthMockTransport {
             liveness,
             current_command,
             capture_text: Mutex::new(capture_text),
+            exit_status: None,
         }
     }
 }
 
 impl Transport for HealthMockTransport {
+    fn provider_exit_status(&self, _pane: &PaneId) -> Result<Option<u8>, TransportError> {
+        Ok(self.exit_status)
+    }
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
