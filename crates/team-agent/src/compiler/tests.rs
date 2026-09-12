@@ -821,7 +821,7 @@ fn config_authority_t07_known_effort_matrix_compiles_validates_and_reaches_comma
         for effort in [None, Some("low"), Some("medium"), Some("high"), Some("xhigh"), Some("max")] {
             let known_supported = matches!(provider, "claude" | "claude_code" | "codex" | "grok" | "pi");
             let accepted = effort.is_none() || (provider != "cursor_agent" && (effort != Some("max") || matches!(provider, "claude" | "claude_code" | "pi")));
-            let role = format!("---\nname: worker\nrole: worker\nprovider: {provider}\nmodel: openai-codex/gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools: [mcp_team]\n---\nbody\n");
+            let role = format!("---\nname: worker\nrole: worker\nprovider: {provider}\nmodel: openai-codex/gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nbody\n");
             let team = build_team("---\nname: effort-team\nobjective: effort policy\n---\n", &[("worker.md", &role)], &[]);
             let mut direct = compile_team(&team).unwrap();
             let configured_role = match effort {
@@ -885,7 +885,7 @@ fn config_authority_t07_known_effort_matrix_compiles_validates_and_reaches_comma
 fn config_authority_t07_role_team_precedence_and_pi_native_default_are_preserved() {
     for (provider, role_effort, expected) in [("claude", Some("high"), Some("high")), ("claude", None, Some("medium")), ("pi", None, None), ("pi", Some("max"), Some("max"))] {
         let effort = role_effort.map(|value| format!("effort: {value}\n")).unwrap_or_default();
-        let role = format!("---\nname: w\nrole: worker\nprovider: {provider}\n{effort}dangerously_skip_permissions: false\ntools: [mcp_team]\n---\nbody\n");
+        let role = format!("---\nname: w\nrole: worker\nprovider: {provider}\n{effort}dangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nbody\n");
         let team = build_team("---\nname: team\nobjective: precedence\nprovider_effort: medium\n---\n", &[("w.md", &role)], &[]);
         let compiled = compile_team(&team).unwrap();
         let agent = &compiled.get("agents").unwrap().as_list().unwrap()[0];
