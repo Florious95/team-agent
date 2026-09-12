@@ -903,16 +903,11 @@ fn fanout_send(
     opts: &SendOptions,
     channel_label: &str,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    let mut last_message_id: Option<String> = None;
-    let mut first_failure: Option<DeliveryOutcome> = None;
-    let mut any_failure = false;
-    let mut delivered_count = 0usize;
-    let mut attempted_count = 0usize;
+    let mut outcomes = Vec::new();
     for recipient in recipients {
         if recipient.is_empty() || recipient == opts.sender.as_str() {
             continue;
         }
-        attempted_count = attempted_count.saturating_add(1);
         // Every expanded recipient re-enters the same presentation-aware send
         // funnel. Strip the caller idempotency key so each durable fanout row
         // receives its own stable message id.
@@ -924,48 +919,58 @@ fn fanout_send(
             content,
             &inner_opts,
         )?;
-        if outcome.ok {
-            delivered_count = delivered_count.saturating_add(1);
-            if let Some(mid) = outcome.message_id.clone() {
-                last_message_id = Some(mid);
-            }
-        } else {
-            any_failure = true;
-            if first_failure.is_none() {
-                first_failure = Some(outcome);
-            }
-        }
+        outcomes.push(outcome);
     }
-    if delivered_count == 0 && attempted_count == 1 {
-        if let Some(outcome) = first_failure {
-            return Ok(outcome);
-        }
+    if outcomes.len() == 1 && !outcomes[0].ok {
+        return Ok(outcomes.remove(0));
     }
+    let evidence = outcomes.iter().map(|out| (out.ok, out.status)).collect::<Vec<_>>();
+    let (ok, status) = aggregate_fanout_status(&evidence);
+    let last_message_id = outcomes.iter().rev()
+        .find_map(|out| out.message_id.clone());
+    let reason = outcomes.iter().find_map(|out| out.reason);
     let presentation = decide_presentation(&opts.presentation, PresentationSource::Send);
-    let stored_only = presentation.effective_sink != PresentationSink::Leader;
-    let status = if any_failure {
-        DeliveryStatus::FanoutPartial
-    } else if delivered_count > 0 && stored_only {
-        DeliveryStatus::StoredOnly
-    } else if delivered_count > 0 {
-        DeliveryStatus::FanoutDelivered
-    } else {
-        DeliveryStatus::Failed
-    };
+    let stored_only = status == DeliveryStatus::StoredOnly;
     Ok(DeliveryOutcome {
-        ok: !any_failure && delivered_count > 0,
+        ok,
         status,
         message_status: MessageStatusShadow(status_wire(status).to_string()),
         message_id: last_message_id,
         verification: stored_only.then(|| "durable_without_live_inject".to_string()),
         stage: None,
-        reason: None,
+        reason,
         channel: Some(if stored_only {
             presentation.effective_sink.as_str().to_string()
         } else {
             channel_label.to_string()
         }),
-        ack_forced_off: false,
+        ack_forced_off: outcomes.iter().any(|out| out.ack_forced_off),
         turn_verification: None,
     })
+}
+
+/// Accepted is an operation result, not a delivery receipt. Both workspace-local
+/// fanout and cross-scope CLI fanout fold the same child evidence here.
+pub(crate) fn aggregate_fanout_status(outcomes: &[(bool, DeliveryStatus)]) -> (bool, DeliveryStatus) {
+    if outcomes.is_empty() {
+        return (false, DeliveryStatus::Failed);
+    }
+    if outcomes.iter().any(|(ok, status)| !ok || matches!(status,
+        DeliveryStatus::Failed | DeliveryStatus::Refused | DeliveryStatus::FanoutPartial
+        | DeliveryStatus::BroadcastPartial | DeliveryStatus::TrustAutoAnswerExhausted)) {
+        return (false, DeliveryStatus::FanoutPartial);
+    }
+    let all = |predicate: fn(DeliveryStatus) -> bool| outcomes.iter().all(|(_, status)| predicate(*status));
+    let status = if all(DeliveryStatus::delivery_proven) {
+        DeliveryStatus::FanoutDelivered
+    } else if all(|status| status == DeliveryStatus::StoredOnly) {
+        DeliveryStatus::StoredOnly
+    } else if outcomes.iter().any(|(_, status)| *status == DeliveryStatus::Blocked) {
+        DeliveryStatus::Blocked
+    } else if outcomes.iter().any(|(_, status)| matches!(status, DeliveryStatus::StoredOnly | DeliveryStatus::FanoutMixed)) {
+        DeliveryStatus::FanoutMixed
+    } else {
+        DeliveryStatus::Queued
+    };
+    (true, status)
 }

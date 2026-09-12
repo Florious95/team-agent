@@ -219,6 +219,12 @@ pub(crate) fn delivery_outcome_value(out: &DeliveryOutcome) -> Value {
         }
         if let Some(warning) = out.verification.as_deref() {
             obj.insert("warning".to_string(), Value::String(warning.to_string()));
+        } else if matches!(out.status, crate::messaging::DeliveryStatus::Blocked) {
+            // Successful MCP envelopes retain warnings, while their compact
+            // projection omits reason. Keep the aggregate blocker observable.
+            if let Some(reason) = out.reason {
+                obj.insert("warning".to_string(), enum_value(reason));
+            }
         }
     }
     value

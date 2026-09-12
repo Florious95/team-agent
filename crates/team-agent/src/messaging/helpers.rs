@@ -40,6 +40,7 @@ pub(crate) fn status_wire(status: DeliveryStatus) -> &'static str {
         DeliveryStatus::BroadcastPartial => "broadcast_partial",
         DeliveryStatus::FanoutDelivered => "fanout_delivered",
         DeliveryStatus::FanoutPartial => "fanout_partial",
+        DeliveryStatus::FanoutMixed => "fanout_mixed",
     }
 }
 

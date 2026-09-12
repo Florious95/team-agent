@@ -5,6 +5,10 @@ use crate::cli::{CliError, SendArgs};
 use crate::messaging::{MessageTarget, TrustedSender};
 use serde_json::{json, Value};
 
+#[cfg(test)]
+#[path = "rules_t03_tests.rs"]
+mod rules_t03_tests;
+
 pub(super) fn warn_send_alias(flag: &str) {
     let spec = crate::cli::spec::command_spec("send");
     let sunset = spec
@@ -244,25 +248,41 @@ pub(super) fn send_to_logical_to(
     for recipient in &resolved {
         results.push(send_to_resolved_name(args, recipient, content)?);
     }
-    let ok = results
-        .iter()
-        .all(|value| value.get("ok").and_then(Value::as_bool) == Some(true));
-    let message_id = results
-        .iter()
-        .rev()
-        .find_map(|value| value.get("message_id").and_then(Value::as_str))
-        .map(str::to_string);
-    Ok(json!({
-        "ok": ok,
-        "status": if ok { "fanout_delivered" } else { "fanout_partial" },
-        "delivery_status": if ok { "pending" } else { "fanout_partial" },
-        "delivered": false,
-        "target": logical_to.split(',').map(str::trim).collect::<Vec<_>>(),
-        "content_length_bytes": content.len(),
-        "sender": args.sender,
-        "message_id": message_id,
-        "results": results,
-    }))
+    let evidence = results.iter().map(|value| {
+        let ok = value.get("ok").and_then(Value::as_bool) == Some(true);
+        // The existing enum's serde spelling is the wire authority. An
+        // unrecognized refusal remains a failure, with its full child result.
+        let status = serde_json::from_value(value["status"].clone())
+            .unwrap_or(crate::messaging::DeliveryStatus::Refused);
+        (ok, status)
+    }).collect::<Vec<_>>();
+    let (ok, status) = crate::messaging::send::aggregate_fanout_status(&evidence);
+    let outcome = crate::messaging::DeliveryOutcome {
+        ok,
+        status,
+        message_status: crate::messaging::helpers::MessageStatusShadow(
+            crate::messaging::helpers::status_wire(status).to_string()),
+        message_id: results.iter().rev()
+            .find_map(|value| value.get("message_id").and_then(Value::as_str))
+            .map(str::to_string),
+        verification: (status == crate::messaging::DeliveryStatus::StoredOnly)
+            .then(|| "durable_without_live_inject".to_string()),
+        stage: None,
+        reason: None,
+        channel: Some("fanout".to_string()),
+        ack_forced_off: results.iter().any(|value| value["ack_forced_off"] == true),
+        turn_verification: None,
+    };
+    let target = MessageTarget::Fanout(logical_to.split(',').map(|name| name.trim().to_string()).collect());
+    let opts = super::persist::send_options_from_args(args);
+    let mut value = super::presentation::delivery_outcome_json(&outcome, &target, content, &opts);
+    if let Some(object) = value.as_object_mut() {
+        if let Some(reason) = results.iter().find_map(|child| child.get("reason").filter(|reason| !reason.is_null())) {
+            object.insert("reason".to_string(), reason.clone());
+        }
+        object.insert("results".to_string(), Value::Array(results));
+    }
+    Ok(value)
 }
 
 pub(super) fn resolution_refusal_json(
