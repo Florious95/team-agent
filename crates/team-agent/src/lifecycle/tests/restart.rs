@@ -67,6 +67,15 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
     use crate::transport::test_support::OfflineTransport;
     for single in [true, false] {
         rules_t01_restore(ws, state);
+        // Capture the exact on-disk input before either entry loads it. In
+        // particular, a missing field must stay distinguishable from JSON
+        // null; load_runtime_state intentionally normalizes root session
+        // fields after this point.
+        let persisted_before: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(crate::state::persist::runtime_state_path(ws)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_before, *state, "fixture seed changed before entry");
         let transport = OfflineTransport::new()
             .with_capture_for_pane("%0", "OpenAI Codex\ncodex>\n");
         let result = if single {
@@ -79,7 +88,8 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
         };
         let rendered = format!("{result:?}");
         eprintln!("T01 single={single} allow_fresh={allow_fresh} result={rendered}");
-        // Compare persisted facts before the reader inserts missing session fields as null.
+        // Read the raw file so the normalizer does not erase the distinction
+        // between missing and null while the refusal is being checked.
         let persisted: serde_json::Value = serde_json::from_slice(
             &std::fs::read(crate::state::persist::runtime_state_path(ws)).unwrap(),
         ).unwrap();
@@ -91,7 +101,22 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
             for key in ["session_id", "rollout_path", "captured_at", "captured_via", "first_send_at",
                 "last_result_at", "task_prompt_delivered"] {
                 for pointer in ["/agents/alpha", "/teams/recovery/agents/alpha"] {
-                    assert_eq!(persisted.pointer(pointer).unwrap().get(key), state.pointer(pointer).unwrap().get(key), "{pointer}/{key}: {rendered}");
+                    let before = persisted_before.pointer(pointer).unwrap().get(key);
+                    let observed = persisted.pointer(pointer).unwrap().get(key);
+                    // The production reader's documented compatibility
+                    // normalizer inserts null only for these six root-agent
+                    // fields. Do not compare missing and null as equivalent:
+                    // assert the insertion explicitly, and require exact
+                    // preservation everywhere else (including the team view).
+                    let normalized_root_field = pointer == "/agents/alpha"
+                        && ["session_id", "rollout_path", "captured_at", "captured_via"]
+                            .contains(&key)
+                        && before.is_none();
+                    if normalized_root_field {
+                        assert!(observed.is_some_and(serde_json::Value::is_null), "{pointer}/{key}: expected reader normalization, got {observed:?}; {rendered}");
+                    } else {
+                        assert_eq!(observed, before, "{pointer}/{key}: {rendered}");
+                    }
                 }
             }
         } else {
