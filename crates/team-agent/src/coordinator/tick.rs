@@ -320,6 +320,7 @@ impl Coordinator {
             self.daemon_team_key.as_deref(),
         )
         .unwrap_or(raw_state);
+        let before_observation = state.clone();
         let store = crate::message_store::MessageStore::open(self.workspace.as_path())?;
         let event_log = EventLog::new(self.workspace.as_path());
         increment_coordinator_tick_iteration_count(&self.workspace);
@@ -506,23 +507,14 @@ impl Coordinator {
         let saved = match &self.save_hook {
             Some(hook) => hook(&self.workspace, &state),
             None => {
-                // 0.5.42 S1b (s1b-writer-cluster-locate.md §3.2 /
-                // §4.4): the daemon tick's single terminal save
-                // routes through `StateRepository` with the
-                // `CoordinatorTick` intent. Repository dispatch is
-                // byte-identical to the old `save_team_scoped_state`
-                // helper (see `state/repository.rs:CoordinatorTick =>
-                // helper_write_team_scoped`), so persist/merge/lock/
-                // atomic-rename semantics and degraded-mapping stay
-                // unchanged. No cached repository, no extra load, no
-                // retry — the caller still owns the `Value` and
-                // failure still returns `TickReport{PersistenceDegraded}`
-                // via the `saved.is_err()` branch below.
+                // Keep the sampled topology guard, but commit only this tick's
+                // observations onto latest so task/note writers cannot be lost.
                 let team_key = crate::state::projection::team_state_key(&state);
-                crate::state::repository::StateRepository::new(self.workspace.as_path()).save(
+                crate::state::repository::StateRepository::new(self.workspace.as_path()).commit_observations(
                     crate::state::repository::StateWriteIntent::CoordinatorTick {
                         team_key: team_key.as_str(),
                     },
+                    &before_observation,
                     &state,
                 )
             }
