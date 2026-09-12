@@ -79,6 +79,10 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
         };
         let rendered = format!("{result:?}");
         eprintln!("T01 single={single} allow_fresh={allow_fresh} result={rendered}");
+        // Compare persisted facts before the reader inserts missing session fields as null.
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(crate::state::persist::runtime_state_path(ws)).unwrap(),
+        ).unwrap();
         let after = crate::state::persist::load_runtime_state(ws).unwrap();
         if let Some(reason) = refusal {
             assert!(rendered.contains(reason), "{rendered}");
@@ -86,7 +90,9 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
             assert!(!transport.calls().contains(&"kill_session"));
             for key in ["session_id", "rollout_path", "captured_at", "captured_via", "first_send_at",
                 "last_result_at", "task_prompt_delivered"] {
-                assert_eq!(after["agents"]["alpha"].get(key), state["agents"]["alpha"].get(key), "{key}: {rendered}");
+                for pointer in ["/agents/alpha", "/teams/recovery/agents/alpha"] {
+                    assert_eq!(persisted.pointer(pointer).unwrap().get(key), state.pointer(pointer).unwrap().get(key), "{pointer}/{key}: {rendered}");
+                }
             }
         } else {
             assert!(result.is_ok(), "{rendered}");
@@ -198,7 +204,7 @@ fn rules_t01_add_and_discard_reset_remain_fresh() {
     let role = ws.join("bravo.md");
     std::fs::write(&role, super::launch_spawn::DELEG_ROLE_BRAVO).unwrap();
     let transport = crate::transport::test_support::OfflineTransport::new().with_session_present(true);
-    let added = add_agent_with_transport(&ws, &aid("bravo"), &role, false,
+    let added = add_agent_with_transport(&ws.join("definition"), &aid("bravo"), &role, false,
         Some("recovery"), &transport).unwrap();
     assert_eq!(transport.spawn_records().len(), 1, "{added:?}");
     assert!(crate::state::persist::load_runtime_state(&ws).unwrap()["agents"]["bravo"]["session_id"].is_null());
