@@ -326,11 +326,21 @@ fn profile_show_routes_and_preserves_redacted_secret_contract() {
 #[test]
 fn config_authority_t04_show_doctor_and_runtime_parse_the_same_profile_bytes() {
     let ws = tmp_workspace();
+    let runtime_dir = ws.join(".team/runtime");
+    std::fs::remove_dir(&runtime_dir).unwrap();
+    assert!(
+        !runtime_dir.exists(),
+        "T04 fixture must start without a runtime directory"
+    );
     let dir = profiles_dir(&ws);
     std::fs::create_dir_all(&dir).unwrap();
     let body = "# synthetic fixture\nexport AUTH_MODE = 'compatible_api'\nPROXY_MODE=inherit\nexport PROXY_MODE = \"direct\"\nMODEL = 'synthetic-model'\nBASE_URL = \"http://127.0.0.1:9/v1\"\nexport API_KEY = 'synthetic-secret-placeholder'\nPLAIN=plain\nBAD-KEY=ignored\n1BAD=ignored\nMISSING_EQUALS\n";
     std::fs::write(dir.join("syntax.env"), body).unwrap();
     let runtime = crate::lifecycle::profile_launch::load_profile(&ws, "syntax", None).unwrap();
+    assert!(
+        !runtime_dir.exists(),
+        "load_profile must not create the runtime directory"
+    );
     for (key, value) in [("AUTH_MODE", "compatible_api"), ("PROXY_MODE", "direct"), ("MODEL", "synthetic-model"), ("PLAIN", "plain")] {
         assert_eq!(runtime.values.get(key).map(String::as_str), Some(value));
     }
@@ -342,6 +352,10 @@ fn config_authority_t04_show_doctor_and_runtime_parse_the_same_profile_bytes() {
             team: None, auth_mode: None, proxy_mode: None, json: true,
         }).unwrap();
         let CmdOutput::Json(output) = result.output else { panic!("expected JSON") };
+        assert!(
+            !runtime_dir.exists(),
+            "profile {command} must not create the runtime directory"
+        );
         assert_eq!(output["auth_mode"], runtime.values["AUTH_MODE"]);
         assert_eq!(output["proxy_mode"], runtime.values["PROXY_MODE"]);
         assert_eq!(output["credential_present"], true);
