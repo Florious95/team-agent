@@ -358,3 +358,97 @@ fn config_authority_t04_show_doctor_and_runtime_parse_the_same_profile_bytes() {
     assert!(!dir.join("syntax.example.env").exists());
     assert!(!ws.join(".team/runtime").exists());
 }
+
+fn profile_scope_fixture() -> (std::path::PathBuf, std::path::PathBuf) {
+    let ws = tmp_workspace();
+    let team_a = ws.join("team-a");
+    let team_b = ws.join("team-b");
+    for (directory, model) in [(team_a.join("profiles"), "A"), (team_b.join("profiles"), "B"), (profiles_dir(&ws), "current")] {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("p.env"), format!("AUTH_MODE=subscription\nMODEL={model}\nAPI_KEY=synthetic-secret-only\n")).unwrap();
+    }
+    let state = serde_json::json!({"teams": {
+        "a": {"status": "alive", "team_dir": team_a, "session_name": "shared", "agents": {}},
+        "b": {"status": "alive", "team_dir": team_b, "session_name": "shared", "agents": {}}
+    }});
+    std::fs::create_dir_all(ws.join(".team/runtime")).unwrap();
+    std::fs::write(ws.join(".team/runtime/state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+    (ws, team_a)
+}
+
+fn profile_query_json(ws: &std::path::Path, team: Option<&str>, command: &str, name: &str) -> Value {
+    let result = cmd_profile(&ProfileArgs {
+        command: command.into(), name: name.into(), workspace: ws.into(),
+        team: team.map(str::to_string), auth_mode: None, proxy_mode: None, json: true,
+    }).unwrap();
+    let CmdOutput::Json(value) = result.output else { panic!("expected JSON") };
+    value
+}
+
+#[test]
+fn config_authority_t05_selected_team_matches_runtime_profile_and_queries_do_not_write() {
+    let (ws, _) = profile_scope_fixture();
+    let state_path = ws.join(".team/runtime/state.json");
+    let before = std::fs::read(&state_path).unwrap();
+    for (key, model) in [("a", "A"), ("b", "B")] {
+        let selected = crate::state::selector::resolve_active_team_readonly(&ws, Some(key), crate::state::selector::SelectorMode::RuntimeOnly).unwrap();
+        let loaded = crate::lifecycle::profile_launch::load_profile(&ws, "p", Some(&selected.team_dir.join("profiles"))).unwrap();
+        for command in ["show", "doctor"] {
+            let output = profile_query_json(&ws, Some(key), command, "p");
+            assert_eq!(output["path"], loaded.path.to_string_lossy().as_ref());
+            assert_eq!(output["lookup_context"], "selected_team_default");
+            assert!(!output.to_string().contains("synthetic-secret-only"));
+            if command == "show" { assert_eq!(output["values"]["MODEL"]["value"], model); }
+        }
+    }
+    assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    assert!(!ws.join(".team/runtime/team.db").exists());
+}
+
+#[test]
+fn config_authority_t05_all_envs_precede_examples_and_fallback_order_matches_runtime() {
+    let (ws, team) = profile_scope_fixture();
+    std::fs::remove_file(team.join("profiles/p.env")).unwrap();
+    std::fs::write(team.join("profiles/p.example.env"), "MODEL=example\n").unwrap();
+    std::fs::create_dir_all(ws.join("profiles")).unwrap();
+    std::fs::write(ws.join("profiles/p.env"), "MODEL=fallback\n").unwrap();
+    for expected in [profiles_dir(&ws).join("p.env"), ws.join("profiles/p.env"), team.join("profiles/p.example.env")] {
+        let loaded = crate::lifecycle::profile_launch::load_profile(&ws, "p", Some(&team.join("profiles"))).unwrap();
+        assert_eq!(loaded.path, expected);
+        for command in ["show", "doctor"] {
+            let output = profile_query_json(&ws, Some("a"), command, "p");
+            assert_eq!(output["path"], expected.to_string_lossy().as_ref());
+        }
+        std::fs::remove_file(expected).unwrap();
+    }
+    let missing = profile_query_json(&ws, Some("a"), "show", "p");
+    assert_eq!(missing["ok"], false);
+    assert!(missing["lookup_paths"].as_array().unwrap().contains(&serde_json::json!(team.join("profiles/p.env"))));
+}
+
+#[test]
+fn config_authority_t05_explicit_selection_refuses_and_default_queries_need_no_runtime() {
+    let (ws, team) = profile_scope_fixture();
+    for requested in ["missing-team", "shared"] {
+        let error = cmd_profile(&ProfileArgs {
+            command: "show".into(), name: "p".into(), workspace: ws.clone(),
+            team: Some(requested.into()), auth_mode: None, proxy_mode: None, json: true,
+        }).unwrap_err().to_string();
+        assert!(error.contains(if requested == "shared" { "ambiguous" } else { "not found" }), "{error}");
+    }
+    let selected_before = std::fs::read(team.join("profiles/p.env")).unwrap();
+    let current_before = std::fs::read(profiles_dir(&ws).join("p.env")).unwrap();
+    let output = profile_query_json(&ws, Some("a"), "init", "p");
+    assert_eq!(output["created_profile"], false);
+    assert_eq!(std::fs::read(team.join("profiles/p.env")).unwrap(), selected_before);
+    assert_eq!(std::fs::read(profiles_dir(&ws).join("p.env")).unwrap(), current_before);
+    let cold = tmp_workspace();
+    std::fs::create_dir_all(profiles_dir(&cold)).unwrap();
+    std::fs::write(profiles_dir(&cold).join("p.env"), "AUTH_MODE=subscription\n").unwrap();
+    for command in ["show", "doctor"] {
+        let output = profile_query_json(&cold, None, command, "p");
+        assert_eq!(output["ok"], true);
+        assert_eq!(output["lookup_context"], "workspace_default");
+    }
+    assert!(!cold.join(".team/runtime").exists());
+}

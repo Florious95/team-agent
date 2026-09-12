@@ -290,16 +290,8 @@ pub(crate) fn load_profile(
     name: &str,
     profile_dir: Option<&Path>,
 ) -> Result<ProfileValues, LifecycleError> {
-    let dirs = profile_lookup_dirs(workspace, profile_dir);
-    let path = dirs
-        .iter()
-        .map(|directory| directory.join(format!("{name}.env")))
-        .find(|path| path.exists())
-        .or_else(|| {
-            dirs.iter()
-                .map(|directory| directory.join(format!("{name}.example.env")))
-                .find(|path| path.exists())
-        })
+    let paths = profile_lookup_paths(workspace, name, profile_dir);
+    let path = paths.into_iter().find(|path| path.exists())
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet(format!(
                 "profile {name} not found; run team-agent profile init {name} --auth-mode subscription"
@@ -311,6 +303,19 @@ pub(crate) fn load_profile(
         path,
         values: parse_env_text(&text),
     })
+}
+
+/// Runtime and read-only profile inspection share the same ordered candidates:
+/// every .env directory precedes every .example.env directory.
+pub(crate) fn profile_lookup_paths(
+    workspace: &Path,
+    name: &str,
+    profile_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let dirs = profile_lookup_dirs(workspace, profile_dir);
+    ["env", "example.env"].into_iter()
+        .flat_map(|suffix| dirs.iter().map(move |dir| dir.join(format!("{name}.{suffix}"))))
+        .collect()
 }
 
 fn profile_lookup_dirs(workspace: &Path, profile_dir: Option<&Path>) -> Vec<PathBuf> {
