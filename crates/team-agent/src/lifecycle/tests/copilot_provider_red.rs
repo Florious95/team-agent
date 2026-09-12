@@ -1017,6 +1017,10 @@ fn rules_t02_final_mcp_across_fresh_start_restart_and_add() {
     let ws = hermetic.workspace("mcp");
     let team_dir = write_copilot_team(&ws, "cp-resume", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
+    let health = team_agent::coordinator::coordinator_health(
+        &team_agent::coordinator::WorkspacePath::new(ws.clone()),
+    );
+    assert!(health.ok, "seeded coordinator must prevent daemon spawn: {health:?}");
     let fresh = RecordingTransport::new();
     quick_start_with_transport_in_workspace(
         &ws, &team_dir, None, true, Some("cpresume"), &fresh,
@@ -1922,6 +1926,18 @@ fn copilot_empty_mcp_list_shim(tag: &str) -> TempWorkspace {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // coordinator health needs the seeded test PID's real non-zombie status.
+        // Keep PATH isolated and refuse any broader process inspection.
+        std::fs::write(
+            bin.join("ps"),
+            format!(
+                "#!/bin/sh\nif [ \"$#\" = 4 ] && [ \"$1\" = -p ] && [ \"$2\" = {} ] && [ \"$3\" = -o ] && [ \"$4\" = stat= ]; then\n  exec /bin/ps \"$@\"\nfi\nexit 1\n",
+                std::process::id(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("ps"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         std::fs::set_permissions(bin.join("copilot"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
     }
