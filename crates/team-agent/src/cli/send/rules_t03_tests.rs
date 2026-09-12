@@ -65,6 +65,7 @@ fn assert_row(ws: &Path, team: &str, agent: &str, expected: &str) -> String {
     let row = &rows[0];
     assert_eq!(row["status"], expected, "{row}");
     assert!(row["delivered_at"].is_null(), "{row}");
+    assert_eq!(row["delivery_attempts"], 0, "{row}");
     if expected == "queued_coordinator_unavailable" {
         assert_eq!(row["error"], "coordinator_unavailable", "{row}");
     }
@@ -152,7 +153,11 @@ fn rules_t03_mcp_fanout_consumes_same_queued_blocked_and_mailbox_decision() {
         ).unwrap().to_value();
         assert_eq!(value["ok"], true, "{value}");
         assert_eq!(value["status"], expected, "{value}");
-        if blocked { assert_eq!(value["reason"], "coordinator_unavailable"); }
+        if blocked {
+            // MCP's successful compact envelope carries this through warning;
+            // CLI retains its existing reason field.
+            assert_eq!(value["warning"], "coordinator_unavailable");
+        }
         assert!(!value.to_string().contains("synthetic-mcp-body"));
         assert_row(&ws, "one", "a", row_status);
         assert_eq!(value["message_id"], assert_row(&ws, "one", "b", row_status));
