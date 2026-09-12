@@ -130,6 +130,13 @@ fn collect_scoped(
     owner_team_id: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
     let paths = collect_paths(workspace)?;
+    #[cfg(test)]
+    collection_tests::boundary("before_lock")?;
+    // Serialize collectors, but do not hold a SQLite write transaction while
+    // committing state. A process exit releases this existing OS file lock.
+    let collection_lock = crate::state::persist::RuntimeLock::acquire(
+        &paths.run_workspace, "result-collection", 2.0,
+    )?;
     let log = EventLog::new(&paths.run_workspace);
     let resolved_owner_team_id = match owner_team_id.filter(|team| !team.is_empty()) {
         Some(team) => Some(resolve_owner_team_for_read(
@@ -159,7 +166,11 @@ fn collect_scoped(
     let store = MessageStore::open(&paths.run_workspace)?;
     let conn = crate::db::schema::open_db(store.db_path())?;
     if let Some(path) = result_file {
+        #[cfg(test)]
+        collection_tests::boundary("before_ingest")?;
         ingest_result_file(&conn, path, owner_team_id)?;
+        #[cfg(test)]
+        collection_tests::boundary("after_ingest")?;
     }
     let sql = match owner_team_id {
         Some(_) => {
@@ -197,7 +208,7 @@ fn collect_scoped(
     let mut collected_results = Vec::new();
     let mut invalid_results = Vec::new();
     let mut fatal_invalid_results = 0usize;
-    let mut state_dirty = false;
+    let mut ready = Vec::new();
     let mut task_updates = Vec::new();
     for row in rows {
         let envelope: serde_json::Value = match serde_json::from_str(&row.envelope) {
@@ -242,25 +253,37 @@ fn collect_scoped(
             )?;
             continue;
         };
-        match owner_team_id {
-            Some(team) => {
-                conn.execute(
-                    "update results set status = 'collected' where result_id = ?1 and owner_team_id = ?2",
-                    params![row.result_id.as_str(), team],
-                )?;
-            }
-            None => {
-                conn.execute(
-                    "update results set status = 'collected' where result_id = ?1",
-                    params![row.result_id.as_str()],
-                )?;
-            }
-        }
         if scope == "task" {
-            mark_task_done(&mut state, &row.task_id, &row.result_id);
             task_updates.push((row.task_id.clone(), row.result_id.clone()));
-            state_dirty = true;
         }
+        ready.push((row, envelope, scope));
+    }
+    // Pending DB rows remain eligible until the complete task delta is durable.
+    // Preserve the original created_at/result_id order: its last row per task wins.
+    if !task_updates.is_empty() {
+        #[cfg(test)]
+        collection_tests::boundary("before_state")?;
+        state = crate::state::repository::StateRepository::new(&paths.run_workspace).commit(
+            crate::state::repository::StateWriteIntent::ResultCollection { owner_team_id },
+            |latest| {
+                let mut updated = std::collections::BTreeSet::new();
+                for (task_id, result_id) in task_updates.iter().rev() {
+                    if !updated.insert(task_id) { continue; }
+                    let already_applied = latest.get("tasks").and_then(serde_json::Value::as_array)
+                        .is_some_and(|tasks| tasks.iter().any(|task| {
+                            task.get("id").and_then(serde_json::Value::as_str) == Some(task_id.as_str())
+                                && task.get("accepted_result_id").and_then(serde_json::Value::as_str) == Some(result_id.as_str())
+                        }));
+                    if !already_applied { mark_task_done(latest, task_id, result_id); }
+                }
+            },
+        )?;
+        #[cfg(test)]
+        collection_tests::boundary("after_state")?;
+    }
+    for (row, envelope, scope) in ready {
+        #[cfg(test)]
+        collection_tests::boundary("before_event")?;
         log.write(
             "collect.result",
             serde_json::json!({
@@ -270,6 +293,27 @@ fn collect_scoped(
                 "scope": scope,
             }),
         )?;
+        #[cfg(test)]
+        collection_tests::boundary("after_event")?;
+        #[cfg(test)]
+        collection_tests::boundary("before_finalize")?;
+        let finalized = match owner_team_id {
+            Some(team) => {
+                conn.execute(
+                    "update results set status = 'collected' where result_id = ?1 and owner_team_id = ?2 and status not in ('collected', 'invalid')",
+                    params![row.result_id.as_str(), team],
+                )?
+            }
+            None => {
+                conn.execute(
+                    "update results set status = 'collected' where result_id = ?1 and status not in ('collected', 'invalid')",
+                    params![row.result_id.as_str()],
+                )?
+            }
+        };
+        #[cfg(test)]
+        collection_tests::boundary("after_finalize")?;
+        if finalized == 0 { continue; }
         collected.push(envelope.clone());
         let summary = serde_json::json!({
             "result_id": row.result_id,
@@ -286,17 +330,8 @@ fn collect_scoped(
         });
         collected_results.push(summary);
     }
-    if state_dirty {
-        state = crate::state::repository::StateRepository::new(&paths.run_workspace).commit(
-            crate::state::repository::StateWriteIntent::ResultCollection { owner_team_id },
-            |latest| {
-                for (task_id, result_id) in &task_updates {
-                    mark_task_done(latest, task_id, result_id);
-                }
-            },
-        )?;
-    }
     let counts = result_counts(&conn, owner_team_id)?;
+    drop(collection_lock);
     // results.py:157 — ensure_coordinator=true runs the REAL ensure step; the
     // `{ok:false,status:"not_required"}` literal is ONLY the ensure=false branch.
     let coordinator = if ensure_coordinator {
@@ -1482,6 +1517,9 @@ pub fn collect_results_and_notify_watchers(
         "notified": notified
     }))
 }
+
+#[cfg(test)]
+mod collection_tests;
 
 #[cfg(test)]
 mod tests {
