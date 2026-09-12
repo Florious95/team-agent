@@ -993,6 +993,115 @@ fn copilot_mcp_config_uses_copilot_field_name() {
     );
 }
 
+fn assert_rules_t02_final_mcp(argv: &[String], ws: &Path, agent_id: &str, team: &str) {
+    let argument = flag_value(argv, "--additional-mcp-config").expect("final MCP flag");
+    let path = argument.strip_prefix('@').expect("final plan references a file");
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let server = &config["mcpServers"]["team_orchestrator"];
+    assert_eq!(server["transport"], "stdio", "{config}");
+    assert!(server.get("type").is_none(), "{config}");
+    assert!(Path::new(server["command"].as_str().unwrap()).is_absolute());
+    assert_eq!(server["args"], serde_json::json!(["mcp-server", "--workspace", ws]));
+    assert_eq!(server["env"]["TEAM_AGENT_WORKSPACE"], ws.to_string_lossy().as_ref());
+    assert_eq!(server["env"]["TEAM_AGENT_ID"], agent_id);
+    assert_eq!(server["env"]["TEAM_AGENT_OWNER_TEAM_ID"], team);
+    eprintln!("T02 final MCP: agent={agent_id} team={team} argv={argv:?} config={config}");
+}
+
+#[test]
+#[serial(env)]
+fn rules_t02_final_mcp_across_fresh_start_restart_and_add() {
+    let hermetic = enter_hermetic("rules-t02-final-mcp");
+    let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
+    let ws = hermetic.workspace("mcp");
+    let team_dir = write_copilot_team(&ws, "cp-resume", &["mcp_team"], false);
+    seed_healthy_coordinator(&ws);
+    let health = team_agent::coordinator::coordinator_health(
+        &team_agent::coordinator::WorkspacePath::new(ws.clone()),
+    );
+    assert!(health.ok, "seeded coordinator must prevent daemon spawn: {health:?}");
+    let fresh = RecordingTransport::new();
+    quick_start_with_transport_in_workspace(
+        &ws, &team_dir, None, true, Some("cpresume"), &fresh,
+    ).expect("fresh entry");
+    let argv = fresh.single_spawn().argv;
+    assert_rules_t02_final_mcp(&argv, &ws, "worker_a", "cpresume");
+    assert!(flag_value(&argv, "--session-id").is_some());
+    assert!(flag_value(&argv, "--resume").is_none());
+
+    seed_running_resumable(&ws, "worker_a");
+    seed_copilot_session_store(hermetic.home(), "99999999-aaaa-4bbb-8ccc-dddddddddddd");
+    for single in [true, false] {
+        // A previous file is an output, never the authority for the next spawn.
+        std::fs::write(ws.join(".team/runtime/mcp/worker_a.json"),
+            r#"{"mcpServers":{"team_orchestrator":{"type":"stdio","env":{"TEAM_AGENT_ID":"foreign"}}}}"#,
+        ).unwrap();
+        let transport = RecordingTransport::new();
+        if single {
+            team_agent::lifecycle::start_agent_with_transport(
+                &ws, &team_agent::model::ids::AgentId::new("worker_a"),
+                true, false, false, Some("cpresume"), &transport,
+            ).expect("single start entry");
+        } else {
+            team_agent::lifecycle::restart_with_transport(
+                &ws, true, Some("cpresume"), &transport,
+            ).expect("team restart entry");
+        }
+        let argv = transport.single_spawn().argv;
+        assert_rules_t02_final_mcp(&argv, &ws, "worker_a", "cpresume");
+        assert_eq!(flag_value(&argv, "--resume").as_deref(),
+            Some("99999999-aaaa-4bbb-8ccc-dddddddddddd"));
+        assert!(flag_value(&argv, "--session-id").is_none());
+    }
+
+    let role_file = ws.join("worker_b.md");
+    let role = std::fs::read_to_string(team_dir.join("agents/worker_a.md")).unwrap();
+    std::fs::write(&role_file, role.replace("worker_a", "worker_b")).unwrap();
+    let added = RecordingTransport::with_session_present();
+    team_agent::lifecycle::add_agent_with_transport(
+        &team_dir, &team_agent::model::ids::AgentId::new("worker_b"), &role_file,
+        false, Some("cpresume"), &added,
+    ).expect("add entry");
+    assert_rules_t02_final_mcp(&added.single_spawn().argv, &ws, "worker_b", "cpresume");
+}
+
+#[test]
+fn rules_t02_inline_server_map_preserves_unknown_and_non_object_values() {
+    use team_agent::provider::adapters::copilot::copilot_translate_mcp_config;
+    let raw = serde_json::json!({
+        "stdio": {"type": "stdio", "command": "synthetic", "unknown": {"type": "nested"}},
+        "http": {"type": "http", "url": "https://example.invalid"},
+        "opaque": 7,
+    });
+    let translated = copilot_translate_mcp_config(&raw);
+    assert_eq!(translated, serde_json::json!({
+        "stdio": {"transport": "stdio", "command": "synthetic", "unknown": {"type": "nested"}},
+        "http": {"transport": "http", "url": "https://example.invalid"},
+        "opaque": 7,
+    }));
+    assert!(translated.get("mcpServers").is_none());
+    for raw in [serde_json::json!(null), serde_json::json!([1, "opaque"])] {
+        assert_eq!(copilot_translate_mcp_config(&raw), raw);
+    }
+}
+
+#[test]
+#[serial(env)]
+fn rules_t02_non_copilot_writer_keeps_canonical_schema() {
+    let hermetic = enter_hermetic("rules-t02-canonical");
+    let ws = hermetic.workspace("canonical");
+    let config = team_agent::provider::get_adapter(Provider::ClaudeCode)
+        .mcp_config(team_agent::provider::AuthMode::Subscription).unwrap();
+    let path = team_agent::lifecycle::launch::write_worker_mcp_config_for_provider(
+        &ws, "synthetic", &config, Some(Provider::ClaudeCode),
+    ).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(written["mcpServers"], config.raw);
+    assert_eq!(written["mcpServers"]["team_orchestrator"]["type"], "stdio");
+}
+
 /// C-7-3 / RC-24: a resume command line must not carry `--session-id` and `--resume`
 /// together (conflicting session semantics). Driven through the real restart path so
 /// the public resume builder is exercised end to end.
@@ -1637,6 +1746,7 @@ struct RecordedSpawn {
 struct RecordingTransport {
     spawns: Mutex<Vec<RecordedSpawn>>,
     session_present: Mutex<bool>,
+    panes: Mutex<Vec<PaneInfo>>,
 }
 
 impl RecordingTransport {
@@ -1681,8 +1791,22 @@ impl Transport for RecordingTransport {
             window: window.as_str().to_string(),
         });
         *self.session_present.lock().unwrap() = true;
+        let pane_id = PaneId::new(format!("%{}", spawns.len()));
+        self.panes.lock().unwrap().push(PaneInfo {
+            pane_id: pane_id.clone(),
+            session: session.clone(),
+            window_index: None,
+            window_name: Some(window.clone()),
+            pane_index: None,
+            tty: None,
+            current_command: None,
+            current_path: None,
+            active: false,
+            pane_pid: Some(30_000 + spawns.len() as u32),
+            leader_env: BTreeMap::new(),
+        });
         Ok(SpawnResult {
-            pane_id: PaneId::new(format!("%{}", spawns.len())),
+            pane_id,
             session: session.clone(),
             window: window.clone(),
             child_pid: Some(30_000 + spawns.len() as u32),
@@ -1747,7 +1871,7 @@ impl Transport for RecordingTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.panes.lock().unwrap().clone())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
@@ -1769,10 +1893,16 @@ impl Transport for RecordingTransport {
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         *self.session_present.lock().unwrap() = false;
+        self.panes.lock().unwrap().retain(|pane| &pane.session != _session);
         Ok(())
     }
 
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+    fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+        self.panes.lock().unwrap().retain(|pane| match target {
+            Target::Pane(id) => &pane.pane_id != id,
+            Target::SessionWindow { session, window } =>
+                &pane.session != session || pane.window_name.as_ref() != Some(window),
+        });
         Ok(())
     }
 
@@ -1796,6 +1926,18 @@ fn copilot_empty_mcp_list_shim(tag: &str) -> TempWorkspace {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // coordinator health needs the seeded test PID's real non-zombie status.
+        // Keep PATH isolated and refuse any broader process inspection.
+        std::fs::write(
+            bin.join("ps"),
+            format!(
+                "#!/bin/sh\nif [ \"$#\" = 4 ] && [ \"$1\" = -p ] && [ \"$2\" = {} ] && [ \"$3\" = -o ] && [ \"$4\" = stat= ]; then\n  exec /bin/ps \"$@\"\nfi\nexit 1\n",
+                std::process::id(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("ps"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         std::fs::set_permissions(bin.join("copilot"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
     }
