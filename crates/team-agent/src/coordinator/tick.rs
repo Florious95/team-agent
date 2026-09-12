@@ -193,6 +193,8 @@ pub struct Coordinator {
     /// bug-084 save 注入钩。`None` ⇔ 真实 `state::save_runtime_state`。
     #[allow(dead_code)]
     save_hook: Option<SaveHook>,
+    #[cfg(test)]
+    before_save_hook: Option<SaveHook>,
     /// tick 副作用 ORDER 探针。`None` ⇔ 不记录(生产)。
     #[allow(dead_code)]
     order_recorder: Option<OrderRecorder>,
@@ -219,6 +221,8 @@ impl Coordinator {
             transport,
             daemon_team_key: None,
             save_hook: None,
+            #[cfg(test)]
+            before_save_hook: None,
             order_recorder: None,
         }
     }
@@ -263,8 +267,16 @@ impl Coordinator {
             transport,
             daemon_team_key: None,
             save_hook,
+            before_save_hook: None,
             order_recorder,
         }
+    }
+
+    /// A test barrier before the real repository save; never replaces the save.
+    #[cfg(test)]
+    pub(crate) fn with_before_save_hook(mut self, hook: SaveHook) -> Self {
+        self.before_save_hook = Some(hook);
+        self
     }
 
     // ── tick 编排(lifecycle.py:250-385)──────────────────────────────────────
@@ -487,6 +499,10 @@ impl Coordinator {
         };
 
         self.record_step(TickStepGroup::Persist, "atomic_save");
+        #[cfg(test)]
+        if let Some(hook) = &self.before_save_hook {
+            hook(&self.workspace, &state)?;
+        }
         let saved = match &self.save_hook {
             Some(hook) => hook(&self.workspace, &state),
             None => {

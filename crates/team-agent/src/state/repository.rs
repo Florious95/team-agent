@@ -142,6 +142,8 @@ impl<'a> StateRepository<'a> {
     where
         F: FnOnce(&mut Value),
     {
+        #[cfg(test)]
+        test_support::before_commit();
         route_reapply(self.workspace, intent, state, reapply)
     }
 }
@@ -564,3 +566,20 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    thread_local! {
+        static BEFORE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(crate) fn set_before_commit(hook: impl FnOnce() + 'static) {
+        BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn before_commit() {
+        if let Some(hook) = BEFORE_COMMIT.with(|slot| slot.borrow_mut().take()) { hook(); }
+    }
+}
