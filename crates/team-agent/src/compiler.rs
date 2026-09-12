@@ -503,14 +503,7 @@ fn compile_role_agent_with_mode(
     require_explicit_cursor_role_model(&meta, role_path, &provider)?;
     validate_pi_role_fields(&meta, role_path, &provider)?;
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
-    let model = if is_pi {
-        string_field(&meta, "model")
-            .filter(|value| !value.trim().is_empty())
-            .map(Value::Str)
-            .unwrap_or(Value::Null)
-    } else {
-        resolve_model(&meta, team_meta, &provider)
-    };
+    let (model, model_source) = resolve_model(&meta, team_meta, &provider);
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
         .unwrap_or_else(|| "subscription".to_string());
@@ -533,6 +526,7 @@ fn compile_role_agent_with_mode(
         ("role", Value::Str(role.clone())),
         ("provider", Value::Str(provider)),
         ("model", model),
+        ("model_source", Value::Str(model_source.to_string())),
         ("auth_mode", Value::Str(auth_mode)),
         ("working_directory", Value::Str(workspace_s.to_string())),
         (
@@ -902,21 +896,31 @@ fn required_tools(meta: &Value, path: &Path) -> Result<Vec<String>, ModelError> 
         .collect())
 }
 
-fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> Value {
-    if let Some(model) = string_field(role_meta, "model") {
-        return Value::Str(model);
+fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> (Value, &'static str) {
+    let is_pi = parse_canonical_provider(provider) == Some(Provider::Pi);
+    if let Some(model) = string_field(role_meta, "model")
+        .filter(|value| !is_pi || !value.trim().is_empty())
+    {
+        return (Value::Str(model), "role");
+    }
+    // Pi uses its native model unless the role explicitly selects one.
+    if is_pi {
+        return (Value::Null, "default");
     }
     if let Some(model) =
         provider_model(team_meta, provider).or_else(|| string_field(team_meta, "default_model"))
     {
-        return Value::Str(model);
+        return (Value::Str(model), "team");
     }
     if role_meta.get("profile").is_some() {
-        return Value::Null;
+        return (Value::Null, "profile");
     }
-    builtin_provider_model(provider)
-        .map(|m| Value::Str(m.to_string()))
-        .unwrap_or(Value::Null)
+    (
+        builtin_provider_model(provider)
+            .map(|m| Value::Str(m.to_string()))
+            .unwrap_or(Value::Null),
+        "default",
+    )
 }
 
 fn provider_model(team_meta: &Value, provider: &str) -> Option<String> {
