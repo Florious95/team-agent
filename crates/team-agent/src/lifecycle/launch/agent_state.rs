@@ -55,16 +55,11 @@ pub(super) fn running_agent_state(
     started_agent: Option<&StartedAgent>,
     profile_dir: Option<&Path>,
 ) -> Result<serde_json::Value, LifecycleError> {
-    let model = agent.get("model").and_then(Value::as_str);
     let auth_mode = agent
         .get("auth_mode")
         .and_then(Value::as_str)
         .and_then(parse_auth_mode)
         .unwrap_or(AuthMode::Subscription);
-    let profile = agent
-        .get("profile")
-        .map(yaml_value_to_json)
-        .unwrap_or(serde_json::Value::Null);
     let window = started_agent
         .and_then(|started| started.layout_window.as_ref())
         .map(WindowName::as_str)
@@ -78,22 +73,12 @@ pub(super) fn running_agent_state(
         write_worker_mcp_config_for_provider(workspace, id, &mcp_config, Some(provider))?;
     let mut state = serde_json::Map::new();
     state.insert("status".to_string(), serde_json::json!("running"));
-    state.insert("provider".to_string(), serde_json::json!(provider));
     state.insert("agent_id".to_string(), serde_json::json!(id));
-    state.insert(
-        "model".to_string(),
-        model.map_or(serde_json::Value::Null, |m| serde_json::json!(m)),
+    crate::lifecycle::worker_command_context::project_command_context_fields(
+        &mut state,
+        &yaml_value_to_json(agent),
     );
-    state.insert("auth_mode".to_string(), serde_json::json!(auth_mode));
-    // 0.4.x provider effort MVP step 8: persist resolved effort so restart
-    // / resume reads the same value (no re-resolution from role/team).
-    if let Some(effort_str) = agent.get("effort").and_then(Value::as_str) {
-        if !effort_str.is_empty() {
-            state.insert("effort".to_string(), serde_json::json!(effort_str));
-        }
-    }
-    state.insert("profile".to_string(), profile);
-    if agent.get("profile").is_some() {
+    if agent.get("profile").and_then(Value::as_str).is_some() {
         if let Some(profile_dir) = profile_dir {
             state.insert(
                 "_profile_dir".to_string(),

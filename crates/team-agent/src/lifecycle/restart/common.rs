@@ -43,6 +43,7 @@ pub(super) struct SpawnedAgentWindow {
     pub spawned_at: String,
     pub plan: crate::provider::CommandPlan,
     pub profile_launch: crate::provider::ProviderProfileLaunch,
+    pub command_context: serde_json::Value,
     pub layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
     pub spawn_cwd: std::path::PathBuf,
     /// Issue 2 (Round 3b gate review §6): the resolved `owner_team_id` used
@@ -692,6 +693,7 @@ pub(super) fn spawn_agent_window(
         spawned_at,
         plan,
         profile_launch,
+        command_context: agent.clone(),
         layout_placement: layout_placement.cloned(),
         spawn_cwd: spawn_cwd.to_path_buf(),
         owner_team_id: team_id,
@@ -716,7 +718,7 @@ fn is_structural_startup_prompt_error(error: &str) -> bool {
 }
 
 /// ---
-/// purpose: 用 spec 里的同名 agent 补回 state 席位行缺的命令上下文字段
+/// purpose: 用 spec 里的同名 agent 替换配置字段，保留运行事实
 /// returns: 合并后的席位行；spec 读不到或找不到该 agent 时原样返回
 /// ---
 pub(super) fn rehydrate_agent_command_context_from_spec(
@@ -741,24 +743,10 @@ fn merge_command_context_fields(
     let Some(obj) = merged.as_object_mut() else {
         return merged;
     };
-    for field in [
-        "role",
-        "tools",
-        "system_prompt",
-        "output_contract",
-        "provider",
-        "model",
-        "auth_mode",
-        "effort",
-        "profile",
-        "permission_mode",
-        // 0.5.66 bypass 单源:rehydrate 同步合入,restart 的 safety 构造读到新值。
-        "dangerously_skip_permissions",
-    ] {
-        if let Some(value) = spec_agent.get(field).and_then(yaml_value_to_json) {
-            obj.insert(field.to_string(), value);
-        }
-    }
+    crate::lifecycle::worker_command_context::project_command_context_fields(
+        obj,
+        &yaml_value_to_json(spec_agent).unwrap_or(serde_json::Value::Null),
+    );
     merged
 }
 

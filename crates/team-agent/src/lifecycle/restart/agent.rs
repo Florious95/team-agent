@@ -1248,6 +1248,10 @@ fn mark_agent_started(
             agent_id
         )));
     };
+    crate::lifecycle::worker_command_context::project_command_context_fields(
+        agent,
+        &spawn.command_context,
+    );
     // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
     // a successful new process cohort invalidates the per-agent
     // turn/activity observation set. Do this before overwriting the

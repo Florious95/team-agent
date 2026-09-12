@@ -2315,6 +2315,10 @@ fn mark_agent_respawned(
             agent_id
         )));
     };
+    crate::lifecycle::worker_command_context::project_command_context_fields(
+        agent,
+        &spawn.command_context,
+    );
     // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
     // multi-worker restart respawn is a new process cohort; clear the
     // per-agent turn/activity observation set before overwriting lifecycle
@@ -2837,6 +2841,7 @@ impl Clone for ParallelSpawnResult {
                 spawned_at: self.spawn.spawned_at.clone(),
                 plan: self.spawn.plan.clone(),
                 profile_launch: self.spawn.profile_launch.clone(),
+                command_context: self.spawn.command_context.clone(),
                 layout_placement: self.spawn.layout_placement.clone(),
                 spawn_cwd: self.spawn.spawn_cwd.clone(),
                 owner_team_id: self.spawn.owner_team_id.clone(),
@@ -4104,6 +4109,7 @@ tasks:
             spawned_at: chrono::Utc::now().to_rfc3339(),
             plan: crate::provider::CommandPlan::argv_only(vec!["codex".to_string()]),
             profile_launch: crate::provider::ProviderProfileLaunch::default(),
+            command_context: state["agents"]["w1"].clone(),
             layout_placement: None,
             spawn_cwd: std::path::PathBuf::from("/tmp/team-epoch"),
             owner_team_id: None,
