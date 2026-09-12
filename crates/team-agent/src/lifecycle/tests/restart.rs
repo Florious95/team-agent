@@ -20,6 +20,190 @@ use super::*;
 use crate::lifecycle::restart::classify_restart_plan;
 use crate::lifecycle::types::{ResumeDecision, StartMode};
 
+#[path = "../../../tests/support/hermetic.rs"]
+mod rules_hermetic;
+
+fn rules_t01_fixture(env: &rules_hermetic::HermeticTestEnv) -> (PathBuf, crate::transport::test_support::OfflineTransport) {
+    use super::launch_spawn::{seed_healthy_coordinator, DELEG_ROLE_ALPHA};
+    let ws = env.workspace("recovery");
+    let team_dir = ws.join("definition");
+    std::fs::create_dir_all(team_dir.join("agents")).unwrap();
+    std::fs::write(team_dir.join("TEAM.md"),
+        "---\nname: recovery\nobjective: synthetic recovery contract\nprovider: codex\n---\n").unwrap();
+    std::fs::write(team_dir.join("agents/alpha.md"), DELEG_ROLE_ALPHA).unwrap();
+    seed_healthy_coordinator(&ws);
+    let transport = crate::transport::test_support::OfflineTransport::new()
+        .with_capture_for_pane("%1", "OpenAI Codex\ncodex>\n");
+    quick_start_with_transport_in_workspace(
+        &ws, &team_dir, None, false, Some("recovery"), &transport,
+    ).expect("seed synthetic team through fresh entry");
+    (ws, transport)
+}
+
+fn rules_t01_seed_agent(ws: &std::path::Path, patch: serde_json::Value) -> serde_json::Value {
+    let mut state = crate::state::persist::load_runtime_state(ws).unwrap();
+    for pointer in ["/agents/alpha", "/teams/recovery/agents/alpha"] {
+        let agent = state.pointer_mut(pointer).expect("selected agent").as_object_mut().unwrap();
+        for key in ["session_id", "rollout_path", "captured_at", "captured_via", "_pending_session_id",
+            "first_send_at", "last_result_at", "task_prompt_delivered"] {
+            agent.remove(key);
+        }
+        agent.insert("status".into(), json!("stopped"));
+        for (key, value) in patch.as_object().unwrap() {
+            agent.insert(key.clone(), value.clone());
+        }
+    }
+    state["teams"]["untouched"] = json!({"agents": {"other": {"status": "stopped"}}, "sentinel": 7});
+    rules_t01_restore(ws, &state);
+    state
+}
+
+fn rules_t01_restore(ws: &std::path::Path, state: &serde_json::Value) {
+    // Deliberately seed the persisted input (including corrupt historical facts).
+    std::fs::write(crate::state::persist::runtime_state_path(ws), serde_json::to_vec(state).unwrap()).unwrap();
+}
+
+fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fresh: bool, refusal: Option<&str>) {
+    use crate::transport::test_support::OfflineTransport;
+    for single in [true, false] {
+        rules_t01_restore(ws, state);
+        let transport = OfflineTransport::new()
+            .with_capture_for_pane("%1", "OpenAI Codex\ncodex>\n");
+        let result = if single {
+            start_agent_with_transport(ws, &aid("alpha"), false, false, allow_fresh,
+                Some("recovery"), &transport).map(|outcome| format!("{outcome:?}"))
+        } else {
+            crate::lifecycle::restart::restart_with_transport_with_session_convergence_deadline(
+                ws, allow_fresh, Some("recovery"), &transport, Some(0), Some(0),
+            ).map(|outcome| format!("{outcome:?}"))
+        };
+        let rendered = format!("{result:?}");
+        eprintln!("T01 single={single} allow_fresh={allow_fresh} result={rendered}");
+        let after = crate::state::persist::load_runtime_state(ws).unwrap();
+        if let Some(reason) = refusal {
+            assert!(rendered.contains(reason), "{rendered}");
+            assert!(transport.spawn_records().is_empty(), "{rendered}");
+            assert!(!transport.calls().contains(&"kill_session"));
+            for key in ["session_id", "rollout_path", "captured_at", "captured_via", "first_send_at",
+                "last_result_at", "task_prompt_delivered"] {
+                assert_eq!(after["agents"]["alpha"].get(key), state["agents"]["alpha"].get(key), "{key}: {rendered}");
+            }
+        } else {
+            assert!(result.is_ok(), "{rendered}");
+            assert_eq!(transport.spawn_records().len(), 1, "{rendered}");
+            if state["agents"]["alpha"]["session_id"].is_null() || allow_fresh {
+                assert!(after["agents"]["alpha"]["session_id"].is_null());
+                assert!(after["agents"]["alpha"]["rollout_path"].is_null());
+            } else {
+                assert!(transport.spawn_records()[0].1.iter().any(|arg| arg == "resume"));
+            }
+        }
+        for key in ["team_owner", "leader_receiver"] {
+            if refusal.is_some() {
+                assert_eq!(after.get(key), state.get(key), "{key}");
+            }
+        }
+        assert_eq!(after["teams"]["untouched"], state["teams"]["untouched"]);
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn rules_t01_missing_interacted_session_refuses_both_entries() {
+    let env = rules_hermetic::HermeticTestEnv::enter("rules-t01-missing");
+    let _ancestry = env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let (ws, _) = rules_t01_fixture(&env);
+    let state = rules_t01_seed_agent(&ws, json!({
+        "first_send_at": "2026-01-01T00:00:00Z",
+        "rollout_path": ws.join("missing.jsonl"),
+        "captured_at": "2026-01-01T00:00:00Z", "captured_via": "synthetic",
+    }));
+    rules_t01_run_both(&ws, &state, false, Some("resume_not_ready"));
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn rules_t01_identity_mismatch_refuses_and_matching_or_unknown_identity_resumes() {
+    let env = rules_hermetic::HermeticTestEnv::enter("rules-t01-identity");
+    let _ancestry = env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let (ws, _) = rules_t01_fixture(&env);
+    for embedded in ["foreign", "alpha", ""] {
+        let rollout = write_codex_identity_rollout(&ws, "session.jsonl", "rules-t01-session", embedded);
+        if embedded.is_empty() { std::fs::write(&rollout, "{}\n").unwrap(); }
+        let state = rules_t01_seed_agent(&ws, json!({
+            "session_id": "rules-t01-session", "rollout_path": rollout,
+            "captured_at": "2026-01-01T00:00:00Z", "captured_via": "synthetic",
+            "first_send_at": "2026-01-01T00:00:00Z",
+        }));
+        rules_t01_run_both(&ws, &state, false,
+            (embedded == "foreign").then_some("session_identity_mismatch"));
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn rules_t01_corrupt_first_send_at_refuses_even_with_allow_fresh() {
+    let env = rules_hermetic::HermeticTestEnv::enter("rules-t01-corrupt");
+    let _ancestry = env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let (ws, _) = rules_t01_fixture(&env);
+    for corrupt in [json!(false), json!("invalid")] {
+        let state = rules_t01_seed_agent(&ws, json!({"first_send_at": corrupt}));
+        for allow_fresh in [false, true] {
+            rules_t01_run_both(&ws, &state, allow_fresh, Some("invalid first_send_at"));
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn rules_t01_never_captured_and_explicit_fresh_remain_available() {
+    let env = rules_hermetic::HermeticTestEnv::enter("rules-t01-fresh");
+    let _ancestry = env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let (ws, _) = rules_t01_fixture(&env);
+    for (patch, allow_fresh) in [
+        (json!({}), false),
+        (json!({"first_send_at": "2026-01-01T00:00:00Z"}), true),
+        (json!({"session_id": "missing", "rollout_path": ws.join("missing.jsonl")}), true),
+    ] {
+        let state = rules_t01_seed_agent(&ws, patch);
+        rules_t01_run_both(&ws, &state, allow_fresh, None);
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn rules_t01_live_noop_does_not_require_resume_evidence() {
+    let env = rules_hermetic::HermeticTestEnv::enter("rules-t01-noop");
+    let _ancestry = env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let (ws, transport) = rules_t01_fixture(&env);
+    rules_t01_seed_agent(&ws, json!({"first_send_at": "2026-01-01T00:00:00Z"}));
+    let before = transport.spawn_records().len();
+    let outcome = start_agent_with_transport(&ws, &aid("alpha"), false, false, false,
+        Some("recovery"), &transport).unwrap();
+    assert!(matches!(outcome, StartAgentOutcome::Noop { .. }), "{outcome:?}");
+    assert_eq!(transport.spawn_records().len(), before);
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn rules_t01_add_and_discard_reset_remain_fresh() {
+    let env = rules_hermetic::HermeticTestEnv::enter("rules-t01-add-reset");
+    let _ancestry = env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let (ws, _) = rules_t01_fixture(&env);
+    rules_t01_seed_agent(&ws, json!({"first_send_at": "2026-01-01T00:00:00Z"}));
+    let transport = crate::transport::test_support::OfflineTransport::new();
+    let reset = reset_agent_with_transport(&ws, &aid("alpha"), true, false,
+        Some("recovery"), &transport).unwrap();
+    assert_eq!(transport.spawn_records().len(), 1, "{reset:?}");
+    let role = ws.join("bravo.md");
+    std::fs::write(&role, super::launch_spawn::DELEG_ROLE_BRAVO).unwrap();
+    let transport = crate::transport::test_support::OfflineTransport::new().with_session_present(true);
+    let added = add_agent_with_transport(&ws, &aid("bravo"), &role, false,
+        Some("recovery"), &transport).unwrap();
+    assert_eq!(transport.spawn_records().len(), 1, "{added:?}");
+    assert!(crate::state::persist::load_runtime_state(&ws).unwrap()["agents"]["bravo"]["session_id"].is_null());
+}
+
 fn agent_codex(session_id: Option<&str>, first_send_at: serde_json::Value) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("provider".to_string(), json!("codex"));

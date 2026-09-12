@@ -32,7 +32,7 @@
 //! maturity: wired
 //! ---
 use super::common::*;
-use super::selection::decide_start_mode;
+use super::selection::classify_agent_recovery;
 use super::team_state::write_team_state;
 use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
@@ -305,33 +305,23 @@ pub(crate) fn start_agent_at_paths(
         });
     }
     let provider = agent_provider(&agent);
-    let session_id = agent_session_id(&agent);
-    let rollout_path = agent_rollout_path(&agent);
-    let resume_backing_exists = session_id
-        .as_ref()
-        .map(|session| {
-            resume_backing_exists_for_agent(
-                workspace,
-                agent_id,
-                &agent,
-                provider,
-                session,
-                rollout_path.as_ref(),
-            )
-        })
-        .unwrap_or(false);
-    let start_mode = decide_start_mode(
-        provider_wire(provider),
-        session_id.as_ref(),
-        rollout_path.as_ref(),
-        resume_backing_exists,
-        allow_fresh,
-    );
-    if matches!(start_mode, StartMode::Noop) {
+    let (recovery, refusal) =
+        classify_agent_recovery(Some(workspace), agent_id, &agent, allow_fresh)
+            .map_err(|_| LifecycleError::RequirementUnmet(format!(
+                "invalid first_send_at for agent {agent_id}; repair the interaction marker before restarting"
+            )))?;
+    if let Some(refusal) = refusal {
         return Err(LifecycleError::RequirementUnmet(format!(
-            "resume_not_ready: session backing store missing for agent {agent_id}; rerun with --allow-fresh to start fresh"
+            "resume_not_ready: {} for agent {agent_id}; rerun with --allow-fresh to start fresh",
+            refusal.reason,
         )));
     }
+    let session_id = recovery.session_id;
+    let rollout_path = agent_rollout_path(&agent);
+    let start_mode = match recovery.restart_mode {
+        StartMode::Fresh if session_id.is_some() => StartMode::FreshAfterMissingRollout,
+        mode => mode,
+    };
     let spawn_session_id = if matches!(start_mode, StartMode::Resumed) {
         session_id.clone()
     } else {
