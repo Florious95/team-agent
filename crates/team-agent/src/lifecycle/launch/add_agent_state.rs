@@ -155,6 +155,7 @@ pub(super) fn upsert_agent_state_from_role(
     agent_id: &AgentId,
     meta: &Value,
     dynamic_role_file: &Path,
+    profile_dir: Option<&Path>,
 ) -> Result<(), LifecycleError> {
     let mut state =
         crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
@@ -208,10 +209,13 @@ pub(super) fn upsert_agent_state_from_role(
             &yaml_value_to_json(meta),
         );
         if meta.get("profile").and_then(Value::as_str).is_some() {
-            if let Some(team_dir) = dynamic_role_file.parent().and_then(Path::parent) {
+            let profile_dir = profile_dir.map(Path::to_path_buf).or_else(|| {
+                dynamic_role_file.parent().and_then(Path::parent).map(|dir| dir.join("profiles"))
+            });
+            if let Some(profile_dir) = profile_dir {
                 obj.insert(
                     "_profile_dir".to_string(),
-                    serde_json::json!(team_dir.join("profiles").to_string_lossy().to_string()),
+                    serde_json::json!(profile_dir.to_string_lossy().to_string()),
                 );
             }
         }

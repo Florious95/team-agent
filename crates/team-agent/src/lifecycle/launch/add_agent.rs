@@ -210,6 +210,17 @@ pub fn add_agent(
     open_display: bool,
     team: Option<&str>,
 ) -> Result<AddAgentReport, LifecycleError> {
+    add_agent_with_profile_dir(workspace, agent_id, role_file_path, open_display, team, None)
+}
+
+pub(super) fn add_agent_with_profile_dir(
+    workspace: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    profile_dir: Option<&Path>,
+) -> Result<AddAgentReport, LifecycleError> {
     let selected = match crate::state::selector::resolve_active_team(
         workspace,
         team,
@@ -229,13 +240,14 @@ pub fn add_agent(
                 .unwrap_or_else(|_| {
                     crate::tmux_backend::TmuxBackend::for_workspace(&run_workspace)
                 });
-            return add_agent_with_transport(
+            return add_agent_with_transport_and_profile_dir(
                 workspace,
                 agent_id,
                 role_file_path,
                 open_display,
                 team,
                 &transport,
+                profile_dir,
             );
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
@@ -275,6 +287,7 @@ pub fn add_agent(
         &transport,
         Some(reservation),
         false,
+        profile_dir,
     )
 }
 
@@ -345,6 +358,18 @@ pub(crate) fn add_agent_with_transport(
     team: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<AddAgentReport, LifecycleError> {
+    add_agent_with_transport_and_profile_dir(workspace, agent_id, role_file_path, open_display, team, transport, None)
+}
+
+pub(crate) fn add_agent_with_transport_and_profile_dir(
+    workspace: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+    profile_dir: Option<&Path>,
+) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
@@ -365,6 +390,7 @@ pub(crate) fn add_agent_with_transport(
         transport,
         Some(reservation),
         false,
+        profile_dir,
     )
 }
 
@@ -543,6 +569,7 @@ pub(super) fn add_agent_with_transport_at_paths(
         transport,
         None,
         false,
+        None,
     )
 }
 
@@ -566,6 +593,7 @@ fn add_agent_with_transport_at_paths_locked(
         transport,
         None,
         true,
+        None,
     )
 }
 
@@ -580,6 +608,7 @@ fn add_agent_with_transport_at_paths_reserved(
     transport: &dyn Transport,
     reservation: Option<AgentReservation>,
     lifecycle_lock_held: bool,
+    profile_dir: Option<&Path>,
 ) -> Result<AddAgentReport, LifecycleError> {
     let runtime_state = crate::state::persist::load_runtime_state(run_workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -676,6 +705,7 @@ fn add_agent_with_transport_at_paths_reserved(
         agent_id,
         &compiled.agent,
         role_file_path,
+        profile_dir,
     ) {
         rollback_add_agent_atomic(
             run_workspace,

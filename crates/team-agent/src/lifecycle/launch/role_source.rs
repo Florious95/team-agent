@@ -33,8 +33,9 @@ fn set_yaml_map_value(
     Ok(())
 }
 
-pub(super) struct MaterializedRole {
+pub(crate) struct MaterializedRole {
     path: PathBuf,
+    profile_dir: Option<PathBuf>,
     keep: bool,
 }
 
@@ -43,14 +44,18 @@ impl MaterializedRole {
 /// purpose: 取物化出来的角色文件路径
 /// returns: 落盘路径
 /// ---
-    pub(super) fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn profile_dir(&self) -> Option<&Path> {
+        self.profile_dir.as_deref()
     }
 
 /// ---
 /// purpose: 标记该文件由调用方接管，Drop 时不再删除
 /// ---
-    pub(super) fn keep(&mut self) {
+    pub(crate) fn keep(&mut self) {
         self.keep = true;
     }
 }
@@ -72,7 +77,7 @@ impl Drop for MaterializedRole {
 /// returns: 物化结果，未调用 keep 时 Drop 会删掉该文件
 /// errors: 源文件缺失、未声明 name 或声明与源席不符时返回 Compile；目标已存在返回 RequirementUnmet；建目录或写盘失败返回 StatePersist
 /// ---
-pub(super) fn materialize_latest_role(
+pub(crate) fn materialize_latest_role(
     run_workspace: &Path,
     team_dir: &Path,
     state: &serde_json::Value,
@@ -99,6 +104,19 @@ pub(super) fn materialize_latest_role(
             declared, source_agent_id
         )));
     }
+    // The materialized file location is not the configuration source. Keep
+    // the source seat's explicit context, or the original role directory.
+    let profile_dir = meta.get("profile").and_then(Value::as_str)
+        .filter(|profile| !profile.is_empty())
+        .map(|_| {
+            state.get("agents")
+                .and_then(|agents| agents.get(source_agent_id.as_str()))
+                .and_then(|agent| agent.get("_profile_dir"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| source_path.parent().and_then(Path::parent).unwrap_or(team_dir).join("profiles"))
+        });
     set_yaml_map_value(
         &mut meta,
         "name",
@@ -126,7 +144,7 @@ pub(super) fn materialize_latest_role(
         let _ = std::fs::remove_file(&temp);
         return Err(LifecycleError::StatePersist(error.to_string()));
     }
-    Ok(MaterializedRole { path, keep: false })
+    Ok(MaterializedRole { path, profile_dir, keep: false })
 }
 
 fn resolve_role_source(
