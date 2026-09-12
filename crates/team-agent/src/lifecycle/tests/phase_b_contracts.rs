@@ -18,6 +18,7 @@ use crate::transport::{
     SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
     TurnVerification, WindowName,
 };
+use crate::model::enums::{AuthMode, Provider};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
