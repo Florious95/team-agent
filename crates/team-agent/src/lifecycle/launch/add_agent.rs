@@ -667,8 +667,6 @@ fn add_agent_with_transport_at_paths_reserved(
     inject_agent_into_spec(&mut latest_spec, compiled_agent, &compiled.id)?;
     write_spec_atomic(&spec_path, &latest_spec)?;
     drop(reservation_lock);
-    let (meta, _) = crate::compiler::read_front_matter(role_file_path)
-        .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     // upsert writes status="starting" (E42) — start_agent_at_paths::mark_agent_started
     // promotes to "running" on Ok. If anything fails between here and the Ok
     // return below, rollback restores the captured pre-bytes.
@@ -676,7 +674,7 @@ fn add_agent_with_transport_at_paths_reserved(
         run_workspace,
         &canonical_team_key,
         agent_id,
-        &meta,
+        &compiled.agent,
         role_file_path,
     ) {
         rollback_add_agent_atomic(

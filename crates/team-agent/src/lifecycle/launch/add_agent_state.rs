@@ -202,33 +202,17 @@ pub(super) fn upsert_agent_state_from_role(
         "dynamic_role_file": dynamic_role_file.to_string_lossy().to_string(),
         "role_source_ownership": role_source_ownership(workspace, dynamic_role_file),
     });
-    if let Some(model) = meta.get("model").and_then(Value::as_str) {
-        if let Some(obj) = entry.as_object_mut() {
-            obj.insert("model".to_string(), serde_json::json!(model));
-            obj.insert("model_source".to_string(), serde_json::json!("role"));
-        }
-    }
-    if let Some(profile) = meta.get("profile").and_then(Value::as_str) {
-        if let Some(obj) = entry.as_object_mut() {
-            obj.insert("profile".to_string(), serde_json::json!(profile));
+    if let Some(obj) = entry.as_object_mut() {
+        crate::lifecycle::worker_command_context::project_command_context_fields(
+            obj,
+            &yaml_value_to_json(meta),
+        );
+        if meta.get("profile").and_then(Value::as_str).is_some() {
             if let Some(team_dir) = dynamic_role_file.parent().and_then(Path::parent) {
                 obj.insert(
                     "_profile_dir".to_string(),
                     serde_json::json!(team_dir.join("profiles").to_string_lossy().to_string()),
                 );
-            }
-            if !obj.contains_key("model_source") {
-                obj.insert("model_source".to_string(), serde_json::json!("default"));
-            }
-        }
-    }
-    // 0.4.x provider effort MVP step 8 (dynamic add-agent): persist effort
-    // from the role doc front matter (compiler.rs validates syntax/semantics
-    // at compile; add-agent path validates here too in case of direct YAML).
-    if let Some(effort_str) = meta.get("effort").and_then(Value::as_str) {
-        if !effort_str.is_empty() {
-            if let Some(obj) = entry.as_object_mut() {
-                obj.insert("effort".to_string(), serde_json::json!(effort_str));
             }
         }
     }

@@ -463,6 +463,104 @@ fn breal_restart_rehydrates_role_context_from_compiled_spec() {
     );
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t01_fresh_and_add_use_resolved_communication_mode() {
+    let _hermetic = enter_hermetic("config-authority-fresh-add");
+    for mode in ["orchestrated", "leader_centric"] {
+        let role = role_doc("w1");
+        let team = team_dir_with_roles(&[("w1.md", &role)]);
+        if mode == "orchestrated" {
+            let path = team.join("TEAM.md");
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(path, text.replacen("objective:", "communication_mode: orchestrated\nobjective:", 1)).unwrap();
+        }
+        let workspace = team.parent().unwrap();
+        seed_healthy_coordinator(workspace);
+        let fresh = codex_ready_transport();
+        quick_start_with_transport_in_workspace_with_display(
+            workspace, &team, None, true, None, &fresh, false,
+        ).unwrap();
+        let heading = format!("# Team Agent communication contract: {mode}");
+        assert!(fresh.spawn_records()[0].1.join("\n").contains(&heading));
+        let dynamic = workspace.join("w2-role.md");
+        std::fs::write(&dynamic, role_doc("w2")).unwrap();
+        let add = codex_ready_transport().with_session_present(true);
+        crate::lifecycle::add_agent_with_transport(
+            &team, &aid("w2"), &dynamic, false, Some("teamdir"), &add,
+        ).unwrap();
+        assert!(add.spawn_records().last().unwrap().1.join("\n").contains(&heading));
+        let state = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
+        for id in ["w1", "w2"] {
+            assert_eq!(state["agents"][id]["communication_mode"], mode);
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t01_removed_options_stay_removed_after_each_spawn_and_reload() {
+    let _hermetic = enter_hermetic("config-authority-option-removal");
+    for entry in ["start", "reset", "restart"] {
+        for old_file_exists in [false, true] {
+            let (workspace, team) = breal_one_worker_workspace();
+            let mut state = crate::state::projection::select_runtime_state(&workspace, Some("teamdir")).unwrap();
+            let row = state["agents"]["w1"].as_object_mut().unwrap();
+            row.insert("effort".into(), json!("high"));
+            row.insert("profile".into(), json!("removed"));
+            row.insert("auth_mode".into(), json!("compatible_api"));
+            let directory = team.join("profiles");
+            row.insert("_profile_dir".into(), json!(directory.to_string_lossy()));
+            row.insert("owner_team_id".into(), json!("teamdir"));
+            let owner = row.get("owner_team_id").cloned();
+            crate::state::projection::save_team_scoped_state(&workspace, &state).unwrap();
+            if old_file_exists {
+                std::fs::create_dir_all(&directory).unwrap();
+                // Loading the removed profile would fail auth-mode validation.
+                std::fs::write(directory.join("removed.env"), "AUTH_MODE=compatible_api\n").unwrap();
+            }
+            for effort in [None, None, Some("medium")] {
+                let extra = effort.map(|value| format!("effort: {value}\n")).unwrap_or_default();
+                let role = role_doc("w1").replacen("role:", &format!("communication_mode: orchestrated\n{extra}role:"), 1);
+                std::fs::write(team.join("agents/w1.md"), role).unwrap();
+                let spec = crate::compiler::compile_team(&team).unwrap();
+                std::fs::write(
+                    crate::model::paths::runtime_spec_path(&workspace, "teamdir"),
+                    crate::model::yaml::dumps(&spec),
+                ).unwrap();
+                let transport = BRealTransport::owned();
+                match entry {
+                    "start" => {
+                        let outcome = crate::lifecycle::start_agent_with_transport(
+                            &workspace, &aid("w1"), true, false, true, Some("teamdir"), &transport,
+                        ).unwrap();
+                        assert!(matches!(outcome, StartAgentOutcome::Running { .. }));
+                    }
+                    "reset" => {
+                        crate::lifecycle::reset_agent_with_transport(
+                            &workspace, &aid("w1"), true, false, Some("teamdir"), &transport,
+                        ).unwrap();
+                    }
+                    _ => {
+                        crate::lifecycle::restart_with_transport(&workspace, true, Some("teamdir"), &transport).unwrap();
+                    }
+                }
+                let argv = transport.spawn_records().last().unwrap().join("\n");
+                assert!(argv.contains("# Team Agent communication contract: orchestrated"), "{entry}: {argv}");
+                assert!(!argv.contains("model_reasoning_effort=high"), "{entry}: {argv}");
+                assert_eq!(argv.contains("model_reasoning_effort=medium"), effort.is_some(), "{entry}: {argv}");
+                let saved = crate::state::projection::select_runtime_state(&workspace, Some("teamdir")).unwrap();
+                let row = &saved["agents"]["w1"];
+                assert_eq!(row.get("effort").and_then(serde_json::Value::as_str), effort);
+                assert!(row.get("profile").is_none());
+                assert!(row.get("_profile_dir").is_none());
+                assert_eq!(row["auth_mode"], "subscription");
+                assert_eq!(row.get("owner_team_id"), owner.as_ref());
+            }
+        }
+    }
+}
+
 fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
     let team = temp_ws().join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();

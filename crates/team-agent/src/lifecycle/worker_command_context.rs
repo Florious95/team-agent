@@ -26,6 +26,42 @@ use crate::model::enums::{Enforcement, Provider};
 use crate::model::ids::AgentId;
 use crate::model::permissions::{resolve_permissions, AgentPermissionInput};
 
+/// Replace spec-owned command inputs, including removal of optional values.
+/// Runtime identity, pane and capture fields belong to the lifecycle writers.
+pub(crate) fn project_command_context_fields(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Value,
+) {
+    for field in [
+        "role",
+        "tools",
+        "system_prompt",
+        "output_contract",
+        "communication_mode",
+        "provider",
+        "model",
+        "auth_mode",
+        "effort",
+        "profile",
+        "permission_mode",
+        "dangerously_skip_permissions",
+    ] {
+        match source.get(field) {
+            Some(value) => {
+                target.insert(field.to_string(), value.clone());
+            }
+            None => {
+                target.remove(field);
+            }
+        }
+    }
+    if source.get("profile").and_then(serde_json::Value::as_str).is_none() {
+        target.remove("_profile_dir");
+    } else if let Some(directory) = source.get("_profile_dir") {
+        target.insert("_profile_dir".to_string(), directory.clone());
+    }
+}
+
 const RUNTIME_CONTRACT_SECTION: &str = r#"# Team Agent Teammate Runtime Contract
 
 You are a teammate in a Team Agent runtime. The leader cannot see your terminal
@@ -448,6 +484,26 @@ fn provider_default_prompt_only_tools(provider: Provider) -> &'static [&'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_authority_t01_projection_preserves_runtime_identity_and_capture() {
+        let mut state = serde_json::json!({
+            "owner_team_id": "team-a", "pane_id": "%7", "window": "worker",
+            "session_id": "session-a", "rollout_path": "/synthetic/session.jsonl",
+            "captured_at": "time", "captured_via": "fixture", "capture_state": "captured",
+            "spawn_epoch": 8, "effort": "high", "profile": "old", "_profile_dir": "/synthetic/profiles"
+        });
+        let runtime = state.clone();
+        project_command_context_fields(state.as_object_mut().unwrap(), &serde_json::json!({
+            "provider": "codex", "auth_mode": "subscription", "communication_mode": "orchestrated"
+        }));
+        for field in ["owner_team_id", "pane_id", "window", "session_id", "rollout_path", "captured_at", "captured_via", "capture_state", "spawn_epoch"] {
+            assert_eq!(state[field], runtime[field], "{field}");
+        }
+        let command = WorkerCommandAgent::from_json(&state, Some("worker"), Provider::Codex).unwrap();
+        assert!(compile_worker_system_prompt(&command).unwrap().contains("# Team Agent communication contract: orchestrated"));
+        for field in ["effort", "profile", "_profile_dir"] { assert!(state.get(field).is_none()); }
+    }
 
     #[test]
     fn empty_tools_use_role_defaults_and_aliases_resolve_before_command() {
