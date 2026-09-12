@@ -574,28 +574,43 @@ fn config_authority_t02_model_and_source_follow_team_changes_across_spawn_entrie
     seed_healthy_coordinator(workspace);
     let team_text = std::fs::read_to_string(team.join("TEAM.md")).unwrap();
     let cases = [
-        ("default_model: team-A\n", "team-A", "team"),
-        ("default_model: team-A\nprovider_models:\n  codex: provider-C\n", "provider-C", "team"),
-        ("", "profile-B", "profile"),
+        ("default_model: team-A\n", None, "team-A", "team"),
+        ("default_model: team-A\nprovider_models:\n  codex: provider-C\n", None, "provider-C", "team"),
+        ("default_model: team-A\n", Some("role-D"), "role-D", "role"),
+        ("", None, "profile-B", "profile"),
     ];
-    for (index, (extra, model, source)) in cases.iter().enumerate() {
-        std::fs::write(team.join("TEAM.md"), team_text.replacen("objective:", &format!("{extra}objective:"), 1)).unwrap();
+    for (index, (extra, role_model, model, source)) in cases.iter().enumerate() {
+        let configured_team = team_text.replacen("objective:", &format!("{extra}objective:"), 1);
+        let configured_role = match role_model {
+            Some(model) => role.replace("profile: p\n", &format!("profile: p\nmodel: {model}\n")),
+            None => role.clone(),
+        };
+        std::fs::write(team.join("TEAM.md"), &configured_team).unwrap();
+        std::fs::write(team.join("agents/w1.md"), &configured_role).unwrap();
         let spec = crate::compiler::compile_team(&team).unwrap();
-        if index == 0 {
-            let transport = codex_ready_transport();
-            quick_start_with_transport_in_workspace_with_display(
-                workspace, &team, None, true, None, &transport, false,
-            ).unwrap();
-            assert_model_argv(&transport.spawn_records()[0].1, Some(model));
-            std::fs::create_dir_all(team.join("roles")).unwrap();
-            let dynamic = team.join("roles/w2.md");
-            std::fs::write(&dynamic, role.replace("w1", "w2")).unwrap();
-            let add = codex_ready_transport().with_session_present(true);
-            crate::lifecycle::add_agent_with_transport(&team, &aid("w2"), &dynamic, false, Some("teamdir"), &add).unwrap();
-            assert_model_argv(&add.spawn_records().last().unwrap().1, Some(model));
-            // Keep restart's intended cohort to the original worker.
-            crate::lifecycle::remove_agent_with_transport(workspace, &aid("w2"), true, true, Some("teamdir"), &add).unwrap();
-        }
+        // Fresh/add each input in a new workspace; keep the original worker for
+        // the subsequent role/TEAM edits and repeated start/restart projections.
+        let fresh_team = if index == 0 { team.clone() } else {
+            team_dir_with_roles(&[("w1.md", &configured_role)])
+        };
+        let fresh_workspace = fresh_team.parent().unwrap();
+        std::fs::write(fresh_team.join("TEAM.md"), &configured_team).unwrap();
+        std::fs::create_dir_all(fresh_team.join("profiles")).unwrap();
+        std::fs::write(fresh_team.join("profiles/p.env"), "AUTH_MODE=subscription\nMODEL=profile-B\n").unwrap();
+        seed_healthy_coordinator(fresh_workspace);
+        let transport = codex_ready_transport();
+        quick_start_with_transport_in_workspace_with_display(
+            fresh_workspace, &fresh_team, None, true, None, &transport, false,
+        ).unwrap();
+        assert_model_argv(&transport.spawn_records()[0].1, Some(model));
+        std::fs::create_dir_all(fresh_team.join("roles")).unwrap();
+        let dynamic = fresh_team.join("roles/w2.md");
+        std::fs::write(&dynamic, configured_role.replace("w1", "w2")).unwrap();
+        let add = codex_ready_transport().with_session_present(true);
+        crate::lifecycle::add_agent_with_transport(&fresh_team, &aid("w2"), &dynamic, false, Some("teamdir"), &add).unwrap();
+        assert_model_argv(&add.spawn_records().last().unwrap().1, Some(model));
+        // Keep restart's intended cohort to the original worker.
+        crate::lifecycle::remove_agent_with_transport(fresh_workspace, &aid("w2"), true, true, Some("teamdir"), &add).unwrap();
         std::fs::write(crate::model::paths::runtime_spec_path(workspace, "teamdir"), crate::model::yaml::dumps(&spec)).unwrap();
         let mut state = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
         state["agents"]["w1"]["model_source"] = json!("default");
