@@ -1060,7 +1060,7 @@ fn rules_t02_final_mcp_across_fresh_start_restart_and_add() {
     std::fs::write(&role_file, role.replace("worker_a", "worker_b")).unwrap();
     let added = RecordingTransport::with_session_present();
     team_agent::lifecycle::add_agent_with_transport(
-        &ws, &team_agent::model::ids::AgentId::new("worker_b"), &role_file,
+        &team_dir, &team_agent::model::ids::AgentId::new("worker_b"), &role_file,
         false, Some("cpresume"), &added,
     ).expect("add entry");
     assert_rules_t02_final_mcp(&added.single_spawn().argv, &ws, "worker_b", "cpresume");
