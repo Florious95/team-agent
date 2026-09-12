@@ -8,6 +8,77 @@ use crate::model::enums::ProviderEffort;
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 
 const CATALOG: &[u8] = include_bytes!("fixtures/pi_list_models_g0.stdout.txt");
+// Public pi --list-models rows captured for issue #186, preserving column widths.
+const SPACED_IDS_CATALOG: &[u8] = include_bytes!("fixtures/pi_list_models_spaced_ids.stdout.txt");
+
+#[test]
+fn pi_catalog_preserves_spaced_ids_and_qualified_slug_variants() {
+    let models = parse_pi_list_models_table(SPACED_IDS_CATALOG).expect("public catalog rows");
+    assert_eq!(
+        models,
+        vec![
+            "cursor/claude-opus-4-7@1m:fast",
+            "cursor/claude-opus-4-7@1m:slow",
+            "openai-codex/gpt-5.6-luna",
+            "team-agent/Claude Opus 4.6 (Thinking)",
+            "team-agent/Claude Sonnet 4.6 (Thinking)",
+            "team-agent/Gemini 3.8 Flash",
+            "team-agent/gpt-5.6-luna",
+            "team-agent/qwen3.8-27b",
+        ]
+    );
+    for exact in &models {
+        assert_eq!(select_exact_pi_model(&models, exact).unwrap(), *exact);
+        assert!(argv_has_pair(&command_for_model(exact), "--model", exact));
+    }
+}
+
+#[test]
+fn pi_catalog_still_rejects_duplicate_complete_spaced_ids() {
+    let text = std::str::from_utf8(SPACED_IDS_CATALOG).unwrap();
+    let repeated = text
+        .lines()
+        .find(|line| line.contains("Claude Opus 4.6 (Thinking)"))
+        .unwrap();
+    let duplicate = format!("{text}{repeated}\n");
+    let error = parse_pi_list_models_table(duplicate.as_bytes()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("duplicate exact id \"team-agent/Claude Opus 4.6 (Thinking)\""));
+    let exact = "team-agent/Claude Opus 4.6 (Thinking)";
+    assert!(select_exact_pi_model(&[exact.into(), exact.into()], exact).is_err());
+}
+
+#[test]
+fn pi_catalog_preserves_internal_whitespace_with_compact_and_full_headers() {
+    for catalog in [
+        "provider model\r\nteam-agent\tClaude  Opus 4.6 (Thinking)  \r\n",
+        "provider model context max-out thinking images\r\nteam-agent\tClaude  Opus 4.6 (Thinking)\t200K  32.8K\tyes  yes  \r\n",
+    ] {
+        assert_eq!(
+            parse_pi_list_models_table(catalog.as_bytes()).unwrap(),
+            vec!["team-agent/Claude  Opus 4.6 (Thinking)"]
+        );
+    }
+}
+
+#[test]
+fn pi_catalog_rejects_rows_without_model_or_required_trailing_fields() {
+    for row in [
+        "team-agent",
+        "team-agent 200K 32.8K yes yes",
+        "team-agent gpt-5.6-luna 200K 32.8K yes",
+    ] {
+        let catalog = format!("provider model context max-out thinking images\n{row}\n");
+        assert!(
+            parse_pi_list_models_table(catalog.as_bytes())
+                .unwrap_err()
+                .to_string()
+                .contains("row 2 is malformed"),
+            "missing model or capability fields must refuse: {row}"
+        );
+    }
+}
 
 fn argv_has_pair(argv: &[String], flag: &str, value: &str) -> bool {
     argv.windows(2)
