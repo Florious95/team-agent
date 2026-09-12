@@ -64,12 +64,13 @@ pub fn clone_agent(
     // a clone must preserve the source seat's full tools set (add-agent does
     // the same; no leader-ceiling clamp). See role_source.rs for the removed
     // clamp_materialized_role_to_leader.
-    let added = add_agent(
+    let added = add_agent_with_profile_dir(
         &selected.run_workspace,
         as_agent_id,
         materialized.path(),
         open_display,
         Some(selected.team_key.as_str()),
+        materialized.profile_dir(),
     )?;
     let verified = read_agent_session(
         &selected.run_workspace,

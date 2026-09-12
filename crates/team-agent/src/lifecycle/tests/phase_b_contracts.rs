@@ -686,6 +686,93 @@ fn config_authority_t02_profile_plan_has_no_builtin_and_legacy_source_cannot_ove
     }
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t06_materialized_clone_keeps_profile_origin_through_restart() {
+    let _hermetic = enter_hermetic("config-authority-clone-profile-origin");
+    for dynamic_origin in [false, true] {
+        let role = role_doc("w1").replace("model: gpt-5.5\n", "profile: p\n");
+        let team = team_dir_with_roles(&[("w1.md", &role)]);
+        let workspace = team.parent().unwrap();
+        let initial_dir = team.join("profiles");
+        std::fs::create_dir_all(&initial_dir).unwrap();
+        std::fs::write(initial_dir.join("p.env"), "AUTH_MODE=subscription\nMODEL=source-A\n").unwrap();
+        seed_healthy_coordinator(workspace);
+        let fresh = codex_ready_transport();
+        quick_start_with_transport_in_workspace_with_display(workspace, &team, None, true, None, &fresh, false).unwrap();
+        let origin = if dynamic_origin { workspace.join("external-source/profiles") } else { initial_dir };
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("p.env"), "AUTH_MODE=subscription\nMODEL=source-A\n").unwrap();
+        let mut state = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
+        if dynamic_origin {
+            let dynamic_role = workspace.join("external-source/roles/w1.md");
+            std::fs::create_dir_all(dynamic_role.parent().unwrap()).unwrap();
+            std::fs::write(&dynamic_role, &role).unwrap();
+            state["agents"]["w1"]["dynamic_role_file"] = json!(dynamic_role);
+        }
+        state["agents"]["w1"]["_profile_dir"] = json!(origin);
+        crate::state::projection::save_team_scoped_state(workspace, &state).unwrap();
+        for directory in [workspace.join(".team/profiles"), workspace.join(".team/current/profiles")] {
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("p.env"), "AUTH_MODE=subscription\nMODEL=wrong-B\n").unwrap();
+        }
+        let mut materialized = crate::lifecycle::launch::materialize_latest_role(workspace, &team, &state, &aid("w1"), &aid("w2"), Some("Cloned worker")).unwrap();
+        assert_eq!(materialized.profile_dir(), Some(origin.as_path()));
+        assert!(materialized.path().starts_with(workspace.join(".team/dynamic-role-files")));
+        let (meta, _) = crate::compiler::read_front_matter(materialized.path()).unwrap();
+        assert_eq!(meta.get("name").and_then(crate::model::yaml::Value::as_str), Some("w2"));
+        assert_eq!(meta.get("role").and_then(crate::model::yaml::Value::as_str), Some("Cloned worker"));
+        assert_eq!(meta.get("dangerously_skip_permissions"), Some(&crate::model::yaml::Value::Bool(false)));
+        let source_meta = crate::compiler::read_front_matter(&team.join("agents/w1.md")).unwrap().0;
+        assert_eq!(meta.get("tools"), source_meta.get("tools"));
+        let add = codex_ready_transport().with_session_present(true);
+        crate::lifecycle::launch::add_agent_with_transport_and_profile_dir(
+            &team, &aid("w2"), materialized.path(), false, Some("teamdir"), &add, materialized.profile_dir(),
+        ).unwrap();
+        assert_model_argv(&add.spawn_records().last().unwrap().1, Some("source-A"));
+        materialized.keep();
+        for restart in [false, true] {
+            let transport = codex_ready_transport().with_session_present(true);
+            if restart {
+                crate::lifecycle::restart_with_transport(workspace, true, Some("teamdir"), &transport).unwrap();
+            } else {
+                crate::lifecycle::start_agent_with_transport(workspace, &aid("w2"), true, false, true, Some("teamdir"), &transport).unwrap();
+            }
+            let spawns = transport.spawn_records();
+            assert!(!spawns.is_empty());
+            for (_, argv) in spawns {
+                assert_model_argv(&argv, Some("source-A"));
+                assert!(!argv.iter().any(|arg| arg == "resume"));
+            }
+            let saved = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
+            assert_eq!(saved["agents"]["w2"]["_profile_dir"], json!(origin));
+            assert!(saved["agents"]["w2"].get("session_id").is_none_or(serde_json::Value::is_null));
+        }
+        std::fs::remove_file(origin.join("p.env")).unwrap();
+        let saved = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
+        let launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(workspace, "w2", &saved["agents"]["w2"], None).unwrap();
+        assert_eq!(launch.command_overrides.model.as_deref(), Some("wrong-B"), "missing original uses the existing fallback order");
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t06_removed_profile_is_not_inherited_by_materialized_clone() {
+    let _hermetic = enter_hermetic("config-authority-clone-no-profile");
+    let (workspace, team) = breal_one_worker_workspace();
+    let mut state = crate::state::projection::select_runtime_state(&workspace, Some("teamdir")).unwrap();
+    state["agents"]["w1"]["profile"] = json!("removed");
+    state["agents"]["w1"]["_profile_dir"] = json!("/synthetic/missing-profile-source");
+    let materialized = crate::lifecycle::launch::materialize_latest_role(&workspace, &team, &state, &aid("w1"), &aid("w2"), None).unwrap();
+    assert!(materialized.profile_dir().is_none());
+    let add = codex_ready_transport().with_session_present(true);
+    crate::lifecycle::launch::add_agent_with_transport_and_profile_dir(&team, &aid("w2"), materialized.path(), false, Some("teamdir"), &add, materialized.profile_dir()).unwrap();
+    let saved = crate::state::projection::select_runtime_state(&workspace, Some("teamdir")).unwrap();
+    assert!(saved["agents"]["w2"].get("profile").is_none());
+    assert!(saved["agents"]["w2"].get("_profile_dir").is_none());
+    assert!(!workspace.join(".team/dynamic-role-files/removed.env").exists());
+}
+
 fn assert_model_argv(argv: &[String], expected: Option<&str>) {
     let model = argv.windows(2).find(|pair| pair[0] == "--model").map(|pair| pair[1].as_str());
     assert_eq!(model, expected, "argv={argv:?}");

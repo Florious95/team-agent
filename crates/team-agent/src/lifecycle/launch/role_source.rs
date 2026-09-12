@@ -35,6 +35,7 @@ fn set_yaml_map_value(
 
 pub(super) struct MaterializedRole {
     path: PathBuf,
+    profile_dir: Option<PathBuf>,
     keep: bool,
 }
 
@@ -45,6 +46,10 @@ impl MaterializedRole {
 /// ---
     pub(super) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(super) fn profile_dir(&self) -> Option<&Path> {
+        self.profile_dir.as_deref()
     }
 
 /// ---
@@ -99,6 +104,19 @@ pub(super) fn materialize_latest_role(
             declared, source_agent_id
         )));
     }
+    // The materialized file location is not the configuration source. Keep
+    // the source seat's explicit context, or the original role directory.
+    let profile_dir = meta.get("profile").and_then(Value::as_str)
+        .filter(|profile| !profile.is_empty())
+        .map(|_| {
+            state.get("agents")
+                .and_then(|agents| agents.get(source_agent_id.as_str()))
+                .and_then(|agent| agent.get("_profile_dir"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| source_path.parent().and_then(Path::parent).unwrap_or(team_dir).join("profiles"))
+        });
     set_yaml_map_value(
         &mut meta,
         "name",
@@ -126,7 +144,7 @@ pub(super) fn materialize_latest_role(
         let _ = std::fs::remove_file(&temp);
         return Err(LifecycleError::StatePersist(error.to_string()));
     }
-    Ok(MaterializedRole { path, keep: false })
+    Ok(MaterializedRole { path, profile_dir, keep: false })
 }
 
 fn resolve_role_source(
