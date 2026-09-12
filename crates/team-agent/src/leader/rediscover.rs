@@ -1124,7 +1124,7 @@ fn state_receiver(state: &Value) -> Option<LeaderReceiver> {
 
 /// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
 /// route the readopt binding write through the ownership repository.
-/// Behaviour byte-identical to the pre-3a hand-rolled inserts.
+/// Commit all three fields of the new ownership generation together.
 fn write_readopt_state(
     workspace: &Path,
     state: &mut Value,
@@ -1142,7 +1142,8 @@ fn write_readopt_state(
     let team_key = crate::state::projection::team_state_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
         .with_leader_receiver(serde_json::to_value(receiver)?)
-        .with_team_owner(serde_json::to_value(owner)?);
+        .with_team_owner(serde_json::to_value(owner)?)
+        .with_owner_epoch(owner.owner_epoch.0);
     crate::state::ownership::write_owner(state, &team_key, record);
     crate::leader::write_lease_dual_state(workspace, state)
 }
