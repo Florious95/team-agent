@@ -1006,7 +1006,7 @@ fn assert_rules_t02_final_mcp(argv: &[String], ws: &Path, agent_id: &str, team: 
     assert_eq!(server["env"]["TEAM_AGENT_WORKSPACE"], ws.to_string_lossy().as_ref());
     assert_eq!(server["env"]["TEAM_AGENT_ID"], agent_id);
     assert_eq!(server["env"]["TEAM_AGENT_OWNER_TEAM_ID"], team);
-    eprintln!("T02 final MCP: agent={agent_id} team={team} config={config}");
+    eprintln!("T02 final MCP: agent={agent_id} team={team} argv={argv:?} config={config}");
 }
 
 #[test]
