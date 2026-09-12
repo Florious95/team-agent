@@ -355,6 +355,34 @@ fn backend_with(default: MockResp, queued: Vec<MockResp>) -> (TmuxBackend, Recor
     (TmuxBackend::with_runner(Box::new(runner)), recorded)
 }
 
+#[test]
+fn provider_exit_receipt_accepts_only_shell_exit_status() {
+    for (text, expected) in [
+        ("", None),
+        ("running", None),
+        ("[team-agent] pi exited with 0", None),
+        ("256", None),
+        ("0\n", Some(0)),
+        ("17\n", Some(17)),
+        ("143\n", Some(143)),
+    ] {
+        let (backend, recorded) = backend_with(MockResp::Out(ok(text)), Vec::new());
+        assert_eq!(
+            backend.provider_exit_status(&PaneId::new("%47")).unwrap(),
+            expected
+        );
+        let calls = recorded.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][4], "%47");
+        assert_eq!(calls[0][5], "#{@team-agent-provider-exit-status}");
+    }
+    let (backend, _) = backend_with(MockResp::Out(fail(1, "pane unavailable")), Vec::new());
+    assert_eq!(
+        backend.provider_exit_status(&PaneId::new("%47")).unwrap(),
+        None
+    );
+}
+
 fn backend_with_stdin(
     default: MockResp,
     queued: Vec<MockResp>,
