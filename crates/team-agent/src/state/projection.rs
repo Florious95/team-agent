@@ -486,7 +486,13 @@ pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
         .is_some_and(|o| o.contains_key("coordinator"))
         && !p.contains_key("coordinator")
     {
-        p.insert("coordinator".to_string(), state["coordinator"].clone());
+        let mut coordinator = state["coordinator"].clone();
+        // Workspace legacy watch facts have no proven owner in this team.
+        // Preserve other coordinator fields, but never broadcast this cache.
+        if let Some(coordinator) = coordinator.as_object_mut() {
+            coordinator.remove("abnormal_exit_watch");
+        }
+        p.insert("coordinator".to_string(), coordinator);
     }
     Value::Object(p)
 }
