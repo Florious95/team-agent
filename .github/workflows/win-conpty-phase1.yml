@@ -15,6 +15,12 @@ on:
           - state-s1-baseline
           - state-s1
           - config-t01
+          - rules-t01
+          - config-t02
+          - rules-t03
+          - state-s3-baseline
+          - state-s3
+
 
 permissions:
   contents: read
@@ -36,7 +42,7 @@ jobs:
         shell: python
         run: |
           import json, os, pathlib, re
-          candidates = json.loads(r'''{"binding-159":{"id":"binding-159","sha":"f54eb5a4b77cc318ed511cc31b73caed925ae022","tree":"52396923ac8d9080887d3b1332571dbd16e6eac1","pr":159,"lib_selectors":[{"selector":"seeded_cas_conflict_preserves_same_owner_receiver_and_registry_through_bind_rollback","expected_parent_tests":1},{"selector":"fresh_attach_topology_conflict_preserves_cause_and_concurrent_state","expected_parent_tests":1}],"status":"queued","candidate_ref_is_not_source":true},"rules-t02":{"id":"rules-t02","sha":"841d4bb5dea22d513b89449385335963c1b782a7","tree":"e950f9a60ca9bb51b2e07646dd4ec7700df03619","pr":160,"lib_selectors":[{"selector":"rules_t02_","expected_parent_tests":3},{"selector":"copilot_mcp_config_uses_copilot_field_name","expected_parent_tests":1},{"selector":"copilot_resume_argv_has_no_session_id_resume_conflict","expected_parent_tests":1}],"status":"queued","candidate_ref_is_not_source":true},"state-s1-baseline":{"id":"state-s1-baseline","sha":"130c7ce5872a6d06e530d9f7a20caffcea3fd29e","tree":"81050662d654b6778079c0e8c264769236510491","pr":162,"lib_selectors":[{"selector":"leader::rediscover::tests::s1_","expected_parent_tests":3}],"status":"queued","candidate_ref_is_not_source":true,"expected":"baseline assertion failure; retain actual nonzero, not product candidate PASS"},"state-s1":{"id":"state-s1","sha":"28d51321306961d8e53429270eb1239516aaa032","tree":"2fe0c63d1309ad6b6baf443344ff449886b85e6e","pr":162,"lib_selectors":[{"selector":"leader::rediscover::tests::s1_","expected_parent_tests":3},{"selector":"leader::rediscover::tests::","expected_parent_tests":null}],"status":"queued","candidate_ref_is_not_source":true},"config-t01":{"id":"config-t01","sha":"dd497261865affddbb3c7435573963b39bc941a6","tree":"42fb694037ffa4b4fef2c69b35b7a0277ba135aa","pr":161,"lib_selectors":[{"selector":"config_authority_t01","expected_parent_tests":3},{"selector":"communication_mode_runtime_contract_red","expected_parent_tests":null},{"selector":"phase_b_contracts","expected_parent_tests":null}],"status":"queued","candidate_ref_is_not_source":true,"integration_tests":["communication_mode_config_red"],"prebuild_binary":true}}''')
+          candidates = json.loads(r'''{"binding-159":{"id":"binding-159","sha":"f54eb5a4b77cc318ed511cc31b73caed925ae022","tree":"52396923ac8d9080887d3b1332571dbd16e6eac1","lib_selectors":[{"selector":"seeded_cas_conflict_preserves_same_owner_receiver_and_registry_through_bind_rollback","expected_parent_tests":1},{"selector":"fresh_attach_topology_conflict_preserves_cause_and_concurrent_state","expected_parent_tests":1}]},"rules-t02":{"id":"rules-t02","sha":"841d4bb5dea22d513b89449385335963c1b782a7","tree":"e950f9a60ca9bb51b2e07646dd4ec7700df03619","lib_selectors":[{"selector":"rules_t02_","expected_parent_tests":3},{"selector":"copilot_mcp_config_uses_copilot_field_name","expected_parent_tests":1},{"selector":"copilot_resume_argv_has_no_session_id_resume_conflict","expected_parent_tests":1}]},"state-s1-baseline":{"id":"state-s1-baseline","sha":"130c7ce5872a6d06e530d9f7a20caffcea3fd29e","tree":"81050662d654b6778079c0e8c264769236510491","lib_selectors":[{"selector":"leader::rediscover::tests::s1_","expected_parent_tests":3}]},"state-s1":{"id":"state-s1","sha":"28d51321306961d8e53429270eb1239516aaa032","tree":"2fe0c63d1309ad6b6baf443344ff449886b85e6e","lib_selectors":[{"selector":"leader::rediscover::tests::s1_","expected_parent_tests":3},{"selector":"leader::rediscover::tests::","expected_parent_tests":null}]},"config-t01":{"id":"config-t01","sha":"dd497261865affddbb3c7435573963b39bc941a6","tree":"42fb694037ffa4b4fef2c69b35b7a0277ba135aa","lib_selectors":[{"selector":"config_authority_t01","expected_parent_tests":3},{"selector":"communication_mode_runtime_contract_red","expected_parent_tests":null},{"selector":"phase_b_contracts","expected_parent_tests":null}],"integration_tests":["communication_mode_config_red"],"prebuild_binary":true},"rules-t01":{"id":"rules-t01","sha":"4c0b309cb14949e3a30ad420fad79f71143e9b71","tree":"1095652685350d6161ffbda29c12fc782ca27762","lib_selectors":[{"selector":"rules_t01_","expected_parent_tests":6},{"selector":"decide_start_mode_","expected_parent_tests":6},{"selector":"classify_restart_plan_","expected_parent_tests":8},{"selector":"restart_required_missing_","expected_parent_tests":3}],"prebuild_binary":true},"config-t02":{"id":"config-t02","sha":"c59b8e4aeda07e84a01e1cccb4cfbcbeb9cc21cc","tree":"91b8be26ee481a3e7d92e2594391327c175f6ba9","lib_selectors":[{"selector":"config_authority_t02","expected_parent_tests":4},{"selector":"compiler::tests","expected_parent_tests":null},{"selector":"pi_compiler_red","expected_parent_tests":null},{"selector":"grok_require_explicit_model_red","expected_parent_tests":null},{"selector":"cursor_require_explicit_model_red","expected_parent_tests":null},{"selector":"claude_profile_launch_red","expected_parent_tests":null},{"selector":"config_authority_t01","expected_parent_tests":3}],"prebuild_binary":true},"rules-t03":{"id":"rules-t03","sha":"0398ecca9c53fd8522e90b4365d6ab823bdd5daf","tree":"6177875e5fa28fa4812894ac9e7179f3290ff867","lib_selectors":[{"selector":"rules_t03_","expected_parent_tests":6}],"integration_tests":["send_mailbox_universal_paths_red"],"expected_integration_tests":{"send_mailbox_universal_paths_red":2},"prebuild_binary":true},"state-s3-baseline":{"id":"state-s3-baseline","sha":"7c9d43ed2857fde5ccae1f871da6ce5b230ffab8","tree":"ccbd84863f701335a8524a07530a7d0e3e80dc02","lib_selectors":[{"selector":"coordinator::tests::s3_bounded::","expected_parent_tests":4,"expected_ignored":1}]},"state-s3":{"id":"state-s3","sha":"d0bd52f329254d0f4ccaafff73b1dfbaeb44e7a2","tree":"14a2bbf94b86015519b90b91943853712ab58b58","lib_selectors":[{"selector":"coordinator::tests::s3_bounded::","expected_parent_tests":4,"expected_ignored":1},{"selector":"state::persist::tests::","expected_parent_tests":null}],"integration_tests":["mcp_server_assign_task_red","mcp_lifecycle_state_status_red","s1a_state_repository_contract"],"prebuild_binary":true}}''')
           entry = candidates[os.environ['CANDIDATE']]
           assert os.environ['GITHUB_REPOSITORY'] == 'Florious95/team-agent'
           assert all(re.fullmatch('[0-9a-f]{40}', entry[k]) for k in ['sha', 'tree'])
@@ -111,14 +117,14 @@ jobs:
           identity = json.loads((evidence / 'source.json').read_text())
           commands = []
           if entry.get('prebuild_binary'):
-              commands.append((['cargo', 'build', '--locked', '-p', 'team-agent', '--bin', 'team-agent'], None))
+              commands.append((['cargo', 'build', '--locked', '-p', 'team-agent', '--bin', 'team-agent'], None, None))
           for item in entry['lib_selectors']:
-              commands.append((['cargo', 'test', '--locked', '-p', 'team-agent', '--lib', item['selector'], '--', '--nocapture', '--test-threads=1'], item['expected_parent_tests']))
+              commands.append((['cargo', 'test', '--locked', '-p', 'team-agent', '--lib', item['selector'], '--', '--nocapture', '--test-threads=1'], item['expected_parent_tests'], item.get('expected_ignored')))
           for target in entry.get('integration_tests', []):
-              commands.append((['cargo', 'test', '--locked', '-p', 'team-agent', '--test', target, '--', '--nocapture', '--test-threads=1'], None))
+              commands.append((['cargo', 'test', '--locked', '-p', 'team-agent', '--test', target, '--', '--nocapture', '--test-threads=1'], entry.get('expected_integration_tests', {}).get(target), None))
           (evidence / 'command-plan.json').write_text(json.dumps(commands, indent=2) + '\n')
           results = []
-          for index, (argv, expected) in enumerate(commands, 1):
+          for index, (argv, expected, expected_ignored) in enumerate(commands, 1):
               head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
               tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
               assert head == entry['sha'] and tree == entry['tree']
@@ -143,8 +149,8 @@ jobs:
               parent = summaries[-1] if summaries else None
               count = parent['passed'] + parent['failed'] if parent else 0
               is_test = argv[1] == 'test'
-              count_ok = not is_test or (parent is not None and count > 0 and (expected is None or count == expected))
-              receipt = dict(command=shlex.join(argv), argv=argv, exit_code=exit_code, log_path=log.name, log_sha256=hashlib.sha256(log.read_bytes()).hexdigest(), started_at=started, finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), source=identity, expected_parent_tests=expected, executed_parent_tests=count if is_test else None, parent_summary=parent, all_summaries_in_log=summaries, count_ok=count_ok)
+              count_ok = not is_test or (parent is not None and count > 0 and (expected is None or count == expected) and (expected_ignored is None or parent['ignored'] == expected_ignored))
+              receipt = dict(command=shlex.join(argv), argv=argv, exit_code=exit_code, log_path=log.name, log_sha256=hashlib.sha256(log.read_bytes()).hexdigest(), started_at=started, finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), source=identity, expected_parent_tests=expected, expected_ignored=expected_ignored, executed_parent_tests=count if is_test else None, parent_summary=parent, all_summaries_in_log=summaries, count_ok=count_ok)
               results.append(receipt)
               (evidence / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
               (evidence / f'command-{index:02d}.exit').write_text(str(exit_code) + '\n')
