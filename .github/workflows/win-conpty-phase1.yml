@@ -1,122 +1,162 @@
-name: win-conpty-phase1
+name: Scoped source authority CI
+run-name: scoped-ci ${{ inputs.candidate }}
 
-# Phase 1 landing verification.
-#
-# - Ubuntu job: build + run the new `conpty::` lib tests, the C-1
-#   pipe_token grep guard, and the end-to-end fake-worker integration
-#   test on a stock Linux runner. Six §Phase 1 acceptance bullets are
-#   exercised at the trait layer via the LocalShimPipeClient +
-#   FakePaneRuntime seam (all portable, no Windows needed).
-# - Windows job: build BOTH the Phase 0 proof binary (regression
-#   guard so its hermetic sha never silently drifts) AND the new
-#   `windows-shim` binary. Both are uploaded with a per-binary
-#   C-4 tracking record.
-
+# Temporary dispatch carrier; source is always an admitted full commit SHA.
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/win-conpty-phase1]
+    inputs:
+      candidate:
+        description: Fixed candidate and command whitelist
+        required: true
+        type: choice
+        options:
+          - binding-159
+          - rules-t02
+          - state-s1-baseline
+          - state-s1
+          - config-t01
+
+permissions:
+  contents: read
+concurrency:
+  group: source-authority-scoped-ci-20260912
+  cancel-in-progress: false
 
 jobs:
-  lib-tests-linux:
-    runs-on: ubuntu-latest
+  targeted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE: ${{ inputs.candidate }}
+      RUSTUP_TOOLCHAIN: '1.95.0'
+      CARGO_TERM_COLOR: never
+      EVIDENCE_DIR: ${{ runner.temp }}/scoped-ci-evidence
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
-      - name: setup rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: focused conpty lib tests
-        run: cargo test -p team-agent --lib conpty
-      - name: c-1 grep guard
-        run: cargo test -p team-agent --test conpty_pipe_token_no_persist_guard
-      - name: end-to-end fake-worker (Phase 1 six-bullet at trait layer)
-        run: cargo test -p team-agent --test conpty_end_to_end_fake_worker
-
-  windows-binaries:
-    runs-on: windows-latest
-    steps:
-      - name: checkout
-        uses: actions/checkout@v4
-      - name: setup rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - name: build phase 0 binary (Phase 1 regression guard)
-        run: cargo build -p win-conpty-phase0 --bin win-conpty-phase0 --release --target x86_64-pc-windows-msvc
-      - name: build windows-shim binary (Phase 1b)
-        run: cargo build -p win-conpty-phase0 --bin windows-shim --release --target x86_64-pc-windows-msvc
-      - name: build conpty-cli binary (Phase 1c)
-        run: cargo build -p win-conpty-phase0 --bin conpty-cli --release --target x86_64-pc-windows-msvc
-      # 0.5.x Phase 1d 收尾 (msg_76e1d98202b8): also build the
-      # team-agent.exe so SSH acceptance can invoke the real CLI on
-      # Windows (`team-agent quick-start --backend conpty` etc.). This
-      # may fail today because team-agent still has Unix-only code
-      # paths (std::os::unix / libc::pid_t etc.); if so, that's the
-      # honest signal Phase 2 needs to address before Windows leader
-      # hosting lands. `continue-on-error` here so the shim/cli
-      # binaries are still uploaded even if team-agent.exe won't cross
-      # yet; the gate report Round 5 records the outcome truthfully.
-      - name: build team-agent.exe (best-effort)
-        id: team_agent_exe
-        continue-on-error: true
-        run: cargo build -p team-agent --bin team-agent --release --target x86_64-pc-windows-msvc
-      - name: c-4 tracking
-        shell: pwsh
+      - name: Admit fixed candidate
+        id: admit
+        shell: python
         run: |
-          $rev = git rev-parse HEAD
-          $ts  = (Get-Date).ToString("o")
-          $phase0Exe = "target\x86_64-pc-windows-msvc\release\win-conpty-phase0.exe"
-          $shimExe   = "target\x86_64-pc-windows-msvc\release\windows-shim.exe"
-          $cliExe    = "target\x86_64-pc-windows-msvc\release\conpty-cli.exe"
-          $phase0Sha = (Get-FileHash $phase0Exe -Algorithm SHA256).Hash
-          $shimSha   = (Get-FileHash $shimExe   -Algorithm SHA256).Hash
-          $cliSha    = (Get-FileHash $cliExe    -Algorithm SHA256).Hash
-          Write-Host "phase0-tracking git_rev=$rev"
-          Write-Host "phase0-tracking build_timestamp=$ts"
-          Write-Host "phase0-tracking binary_sha256=$phase0Sha"
-          Write-Host "shim-tracking git_rev=$rev"
-          Write-Host "shim-tracking build_timestamp=$ts"
-          Write-Host "shim-tracking binary_sha256=$shimSha"
-          Write-Host "cli-tracking git_rev=$rev"
-          Write-Host "cli-tracking build_timestamp=$ts"
-          Write-Host "cli-tracking binary_sha256=$cliSha"
-          Add-Content -Path phase0-tracking.txt -Value "git_rev=$rev"
-          Add-Content -Path phase0-tracking.txt -Value "build_timestamp=$ts"
-          Add-Content -Path phase0-tracking.txt -Value "binary_sha256=$phase0Sha"
-          Add-Content -Path shim-tracking.txt -Value "git_rev=$rev"
-          Add-Content -Path shim-tracking.txt -Value "build_timestamp=$ts"
-          Add-Content -Path shim-tracking.txt -Value "binary_sha256=$shimSha"
-          Add-Content -Path cli-tracking.txt -Value "git_rev=$rev"
-          Add-Content -Path cli-tracking.txt -Value "build_timestamp=$ts"
-          Add-Content -Path cli-tracking.txt -Value "binary_sha256=$cliSha"
-          # 0.5.x Phase 1d 收尾: team-agent.exe tracking (may be
-          # missing if the best-effort build step above didn't yet
-          # cross to Windows — record explicitly so the gate report is
-          # honest).
-          $taExe = "target\x86_64-pc-windows-msvc\release\team-agent.exe"
-          if (Test-Path $taExe) {
-            $taSha = (Get-FileHash $taExe -Algorithm SHA256).Hash
-            Write-Host "team-agent-tracking git_rev=$rev"
-            Write-Host "team-agent-tracking build_timestamp=$ts"
-            Write-Host "team-agent-tracking binary_sha256=$taSha"
-            Add-Content -Path team-agent-tracking.txt -Value "git_rev=$rev"
-            Add-Content -Path team-agent-tracking.txt -Value "build_timestamp=$ts"
-            Add-Content -Path team-agent-tracking.txt -Value "binary_sha256=$taSha"
-          } else {
-            Write-Host "team-agent-tracking status=not_built"
-            Add-Content -Path team-agent-tracking.txt -Value "status=not_built (Unix-only deps in team-agent lib not yet ported for cross-compile)"
-          }
-      - name: upload artifacts
+          import json, os, pathlib, re
+          candidates = json.loads(r'''{"binding-159":{"id":"binding-159","sha":"f54eb5a4b77cc318ed511cc31b73caed925ae022","tree":"52396923ac8d9080887d3b1332571dbd16e6eac1","pr":159,"lib_selectors":[{"selector":"seeded_cas_conflict_preserves_same_owner_receiver_and_registry_through_bind_rollback","expected_parent_tests":1},{"selector":"fresh_attach_topology_conflict_preserves_cause_and_concurrent_state","expected_parent_tests":1}],"status":"queued","candidate_ref_is_not_source":true},"rules-t02":{"id":"rules-t02","sha":"841d4bb5dea22d513b89449385335963c1b782a7","tree":"e950f9a60ca9bb51b2e07646dd4ec7700df03619","pr":160,"lib_selectors":[{"selector":"rules_t02_","expected_parent_tests":3},{"selector":"copilot_mcp_config_uses_copilot_field_name","expected_parent_tests":1},{"selector":"copilot_resume_argv_has_no_session_id_resume_conflict","expected_parent_tests":1}],"status":"queued","candidate_ref_is_not_source":true},"state-s1-baseline":{"id":"state-s1-baseline","sha":"130c7ce5872a6d06e530d9f7a20caffcea3fd29e","tree":"81050662d654b6778079c0e8c264769236510491","pr":162,"lib_selectors":[{"selector":"leader::rediscover::tests::s1_","expected_parent_tests":3}],"status":"queued","candidate_ref_is_not_source":true,"expected":"baseline assertion failure; retain actual nonzero, not product candidate PASS"},"state-s1":{"id":"state-s1","sha":"28d51321306961d8e53429270eb1239516aaa032","tree":"2fe0c63d1309ad6b6baf443344ff449886b85e6e","pr":162,"lib_selectors":[{"selector":"leader::rediscover::tests::s1_","expected_parent_tests":3},{"selector":"leader::rediscover::tests::","expected_parent_tests":null}],"status":"queued","candidate_ref_is_not_source":true},"config-t01":{"id":"config-t01","sha":"dd497261865affddbb3c7435573963b39bc941a6","tree":"42fb694037ffa4b4fef2c69b35b7a0277ba135aa","pr":161,"lib_selectors":[{"selector":"config_authority_t01","expected_parent_tests":3},{"selector":"communication_mode_runtime_contract_red","expected_parent_tests":null},{"selector":"phase_b_contracts","expected_parent_tests":null}],"status":"queued","candidate_ref_is_not_source":true,"integration_tests":["communication_mode_config_red"],"prebuild_binary":true}}''')
+          entry = candidates[os.environ['CANDIDATE']]
+          assert os.environ['GITHUB_REPOSITORY'] == 'Florious95/team-agent'
+          assert all(re.fullmatch('[0-9a-f]{40}', entry[k]) for k in ['sha', 'tree'])
+          evidence = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          evidence.mkdir()
+          (evidence / 'request.json').write_text(json.dumps(entry, indent=2) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              print('sha=' + entry['sha'], file=out)
+              print('tree=' + entry['tree'], file=out)
+          print(json.dumps(entry, indent=2))
+
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: Florious95/team-agent
+          ref: ${{ steps.admit.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify HEAD and tree
+        id: identity
+        shell: python
+        run: |
+          import json, os, pathlib, subprocess
+          evidence = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          entry = json.loads((evidence / 'request.json').read_text())
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          identity = {k: os.environ[k] for k in ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB', 'GITHUB_WORKFLOW_SHA', 'GITHUB_WORKFLOW_REF', 'GITHUB_SHA', 'GITHUB_REF', 'RUNNER_OS', 'RUNNER_ARCH']}
+          identity.update(head=git('rev-parse', 'HEAD'), tree=git('rev-parse', 'HEAD^{tree}'), clean=not git('status', '--porcelain=v1', '--untracked-files=all'))
+          (evidence / 'source.json').write_text(json.dumps(identity, indent=2) + '\n')
+          print(json.dumps(identity, indent=2))
+          assert identity['head'] == entry['sha'] and identity['tree'] == entry['tree'] and identity['clean']
+
+      - name: Install fixed Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal 2>&1 | tee "$EVIDENCE_DIR/toolchain-install.log"
+          rustc -vV | tee "$EVIDENCE_DIR/rustc-version.txt"
+          cargo --version | tee "$EVIDENCE_DIR/cargo-version.txt"
+          test "$(rustc --version | cut -d ' ' -f 2)" = "$RUSTUP_TOOLCHAIN"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: scoped-registry-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-${{ hashFiles('Cargo.lock') }}
+
+      - name: Cache scoped Cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: scoped-target-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-libdebug-${{ steps.admit.outputs.sha }}
+          restore-keys: |
+            scoped-target-v1-${{ runner.os }}-${{ runner.arch }}-rust1.95.0-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-libdebug-
+
+      - name: Execute admitted commands and record real exits
+        id: tests
+        timeout-minutes: 28
+        shell: python
+        run: |
+          import datetime, hashlib, json, os, pathlib, re, shlex, subprocess, sys
+          evidence = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          entry = json.loads((evidence / 'request.json').read_text())
+          identity = json.loads((evidence / 'source.json').read_text())
+          commands = []
+          if entry.get('prebuild_binary'):
+              commands.append((['cargo', 'build', '--locked', '-p', 'team-agent', '--bin', 'team-agent'], None))
+          for item in entry['lib_selectors']:
+              commands.append((['cargo', 'test', '--locked', '-p', 'team-agent', '--lib', item['selector'], '--', '--nocapture', '--test-threads=1'], item['expected_parent_tests']))
+          for target in entry.get('integration_tests', []):
+              commands.append((['cargo', 'test', '--locked', '-p', 'team-agent', '--test', target, '--', '--nocapture', '--test-threads=1'], None))
+          (evidence / 'command-plan.json').write_text(json.dumps(commands, indent=2) + '\n')
+          results = []
+          for index, (argv, expected) in enumerate(commands, 1):
+              head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+              tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+              assert head == entry['sha'] and tree == entry['tree']
+              assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True).strip()
+              log = evidence / f'command-{index:02d}.log'
+              started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              print(f'COMMAND {index}: {shlex.join(argv)}', flush=True)
+              print(f'SOURCE HEAD={head} TREE={tree}', flush=True)
+              with log.open('wb') as out:
+                  process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                  for line in process.stdout:
+                      out.write(line)
+                      out.flush()
+                      sys.stdout.buffer.write(line)
+                      sys.stdout.buffer.flush()
+                  exit_code = process.wait()
+              text = log.read_text(errors='replace')
+              summaries = [dict(zip(['result', 'passed', 'failed', 'ignored', 'measured', 'filtered'], m)) for m in re.findall(r'test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out', text)]
+              for summary in summaries:
+                  for key in list(summary)[1:]:
+                      summary[key] = int(summary[key])
+              parent = summaries[-1] if summaries else None
+              count = parent['passed'] + parent['failed'] if parent else 0
+              is_test = argv[1] == 'test'
+              count_ok = not is_test or (parent is not None and count > 0 and (expected is None or count == expected))
+              receipt = dict(command=shlex.join(argv), argv=argv, exit_code=exit_code, log_path=log.name, log_sha256=hashlib.sha256(log.read_bytes()).hexdigest(), started_at=started, finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), source=identity, expected_parent_tests=expected, executed_parent_tests=count if is_test else None, parent_summary=parent, all_summaries_in_log=summaries, count_ok=count_ok)
+              results.append(receipt)
+              (evidence / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+              (evidence / f'command-{index:02d}.exit').write_text(str(exit_code) + '\n')
+              print('RECEIPT ' + json.dumps(receipt), flush=True)
+              if exit_code != 0 or not count_ok:
+                  print('::error::Command failed or actual parent test count did not meet the contract; remaining commands were not executed.', flush=True)
+                  sys.exit(exit_code if 0 < exit_code < 256 else 1)
+
+      - name: Upload source bound evidence even on failure
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: win-conpty-phase1-binaries
-          path: |
-            target/x86_64-pc-windows-msvc/release/win-conpty-phase0.exe
-            target/x86_64-pc-windows-msvc/release/windows-shim.exe
-            target/x86_64-pc-windows-msvc/release/conpty-cli.exe
-            target/x86_64-pc-windows-msvc/release/team-agent.exe
-            phase0-tracking.txt
-            shim-tracking.txt
-            cli-tracking.txt
-            team-agent-tracking.txt
-          if-no-files-found: warn
+          name: scoped-ci-${{ inputs.candidate }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/scoped-ci-evidence/
+          if-no-files-found: error
+          retention-days: 14
