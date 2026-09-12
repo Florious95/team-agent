@@ -74,11 +74,11 @@ fn init_profile(args: &ProfileArgs) -> Result<Value, CliError> {
 }
 
 fn doctor_profile(args: &ProfileArgs) -> Result<Value, CliError> {
-    let dir = profile_dir(args);
-    let path = dir.join(format!("{}.env", args.name));
-    let template_path = dir.join(format!("{}.example.env", args.name));
+    let paths = profile_query_paths(args)?;
+    let path = paths.iter().find(|path| path.exists()).unwrap_or(&paths[0]);
+    let template_path = path.parent().unwrap_or(Path::new(".")).join(format!("{}.example.env", args.name));
     if !path.exists() {
-        return Ok(missing_profile_value(args, &path, Some(&template_path)));
+        return Ok(missing_profile_value(args, path, Some(&template_path), &paths));
     }
     let values = read_profile_env(&path)?;
     let auth_mode =
@@ -88,6 +88,7 @@ fn doctor_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     let keys = sorted_keys(&values);
     let mut obj = Map::new();
     obj.insert("ok".to_string(), Value::Bool(true));
+    insert_profile_query_context(&mut obj, args, &paths);
     obj.insert("path".to_string(), path_value(&path));
     obj.insert("profile".to_string(), Value::String(args.name.clone()));
     obj.insert(
@@ -118,9 +119,10 @@ fn doctor_profile(args: &ProfileArgs) -> Result<Value, CliError> {
 }
 
 fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
-    let path = profile_dir(args).join(format!("{}.env", args.name));
+    let paths = profile_query_paths(args)?;
+    let path = paths.iter().find(|path| path.exists()).unwrap_or(&paths[0]);
     if !path.exists() {
-        return Ok(missing_profile_value(args, &path, None));
+        return Ok(missing_profile_value(args, path, None, &paths));
     }
     let values = read_profile_env(&path)?;
     let auth_mode =
@@ -130,6 +132,7 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     let missing_common = missing_common_keys(&values, &auth_mode);
     let mut obj = Map::new();
     obj.insert("ok".to_string(), Value::Bool(true));
+    insert_profile_query_context(&mut obj, args, &paths);
     obj.insert("profile".to_string(), Value::String(args.name.clone()));
     obj.insert(
         "credential_present".to_string(),
@@ -137,6 +140,7 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     );
     obj.insert("auth_mode".to_string(), Value::String(auth_mode));
     obj.insert("proxy_mode".to_string(), Value::String(proxy_mode));
+    obj.insert("path".to_string(), path_value(path));
     obj.insert("values".to_string(), redacted_values(&values));
     obj.insert(
         "keys_present".to_string(),
@@ -157,8 +161,30 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     Ok(Value::Object(obj))
 }
 
+fn profile_query_paths(args: &ProfileArgs) -> Result<Vec<PathBuf>, CliError> {
+    let selected = args.team.as_deref().map(|team| {
+        crate::state::selector::resolve_active_team_readonly(
+            &args.workspace,
+            Some(team),
+            crate::state::selector::SelectorMode::RuntimeOnly,
+        )
+    }).transpose()?;
+    let workspace = selected.as_ref().map(|team| team.run_workspace.as_path()).unwrap_or(&args.workspace);
+    let profile_dir = selected.as_ref().map(|team| team.team_dir.join("profiles"));
+    Ok(crate::lifecycle::profile_launch::profile_lookup_paths(workspace, &args.name, profile_dir.as_deref()))
+}
+
+fn insert_profile_query_context(obj: &mut Map<String, Value>, args: &ProfileArgs, paths: &[PathBuf]) {
+    obj.insert("lookup_context".to_string(), Value::String(
+        if args.team.is_some() { "selected_team_default" } else { "workspace_default" }.to_string(),
+    ));
+    obj.insert("lookup_paths".to_string(), Value::Array(paths.iter().map(|path| path_value(path)).collect()));
+    if let Some(team) = &args.team {
+        obj.insert("team".to_string(), Value::String(team.clone()));
+    }
+}
+
 fn profile_dir(args: &ProfileArgs) -> PathBuf {
-    let _ = &args.team;
     args.workspace
         .join(".team")
         .join("current")
@@ -258,8 +284,9 @@ fn display_proxy_mode(values: &Map<String, Value>) -> String {
         .unwrap_or_else(|| "inherit".to_string())
 }
 
-fn missing_profile_value(args: &ProfileArgs, path: &Path, template_path: Option<&Path>) -> Value {
+fn missing_profile_value(args: &ProfileArgs, path: &Path, template_path: Option<&Path>, paths: &[PathBuf]) -> Value {
     let mut obj = Map::new();
+    insert_profile_query_context(&mut obj, args, paths);
     obj.insert("ok".to_string(), Value::Bool(false));
     obj.insert("profile".to_string(), Value::String(args.name.clone()));
     obj.insert("path".to_string(), path_value(path));
@@ -282,9 +309,10 @@ fn missing_profile_value(args: &ProfileArgs, path: &Path, template_path: Option<
 
 fn safe_inspection_command(args: &ProfileArgs) -> String {
     format!(
-        "team-agent profile show {} --workspace {}",
+        "team-agent profile show {} --workspace {}{}",
         args.name,
-        args.workspace.display()
+        args.workspace.display(),
+        args.team.as_ref().filter(|_| args.command != "init").map(|team| format!(" --team {team}")).unwrap_or_default()
     )
 }
 
