@@ -49,17 +49,20 @@ pub fn decide_start_mode(
     rollout_exists: bool,
     allow_fresh: bool,
 ) -> StartMode {
-    match session_id {
-        None => StartMode::Fresh,
-        Some(_) => {
-            let missing_resume_backing = !provider_wire_supports_resume(provider)
-                || (resumable_provider_requires_backing(provider) && !rollout_exists);
-            match (missing_resume_backing, allow_fresh) {
-                (true, true) => StartMode::FreshAfterMissingRollout,
-                (true, false) => StartMode::Noop,
-                (false, _) => StartMode::Resumed,
-            }
-        }
+    // Compatibility API with tuple-only facts. Lifecycle entries use
+    // classify_agent_recovery so interaction and identity cannot be omitted.
+    match recovery_decision(
+        session_id.is_some(),
+        provider_wire_supports_resume(provider),
+        !resumable_provider_requires_backing(provider) || rollout_exists,
+        false,
+        session_id.is_none(),
+        allow_fresh,
+    ) {
+        ResumeDecision::Resume => StartMode::Resumed,
+        ResumeDecision::FreshStart if session_id.is_some() => StartMode::FreshAfterMissingRollout,
+        ResumeDecision::FreshStart => StartMode::Fresh,
+        ResumeDecision::Refuse => StartMode::Noop,
     }
 }
 
@@ -292,195 +295,15 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
             continue;
         }
 
-        let first_send_at_raw = agent
-            .get("first_send_at")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let first_send_at_state = classify_first_send_at(&first_send_at_raw);
-        if matches!(first_send_at_state, FirstSendAtState::Corrupt) {
-            corrupt_entries.push(CorruptFirstSendAt {
-                worker_id: AgentId::new(worker_id.clone()),
-                raw_first_send_at_type: python_type_name(&first_send_at_raw).to_string(),
-                raw_first_send_at: first_send_at_raw,
-            });
-            continue;
+        match classify_agent_recovery(
+            workspace, &AgentId::new(worker_id.clone()), agent, allow_fresh,
+        ) {
+            Ok((decision, refusal)) => {
+                decisions.push(decision);
+                unresumable.extend(refusal);
+            }
+            Err(corrupt) => corrupt_entries.push(corrupt),
         }
-
-        let session_id = agent
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(SessionId::new);
-        let agent_id = AgentId::new(worker_id.clone());
-        // E6 层2 (C2, 用户裁定"绝不静默 fresh"): null session 只有显式 --allow-fresh 才 fresh,
-        // 否则 Refuse(→ resume_not_ready + 指引)。删 `!interacted` 短路 —— 自启动 worker
-        // (leader 从未发消息 → first_send_at=null → interacted=false)会被它静默 fresh 丢上下文。
-        let provider = agent_provider(agent);
-        let provider_wire = provider_wire(provider);
-        let provider_can_resume = provider_supports_resume(provider);
-        let rollout_path = agent_rollout_path(agent);
-        // Layer 2 self-healing (leader follow-up 2026-06-22): use the
-        // structured probe so we can carry the list of paths the runtime
-        // actually checked into the refusal — operators need to see WHICH
-        // places we looked, not just "missing".
-        let (resume_backing_exists, backing_checked_paths) =
-            match (workspace, session_id.as_ref(), provider_can_resume) {
-                (_, Some(_), false) => (false, Vec::new()),
-                (Some(workspace), Some(session), true) => {
-                    let probe = resume_backing_probe_for_agent(
-                        workspace,
-                        &agent_id,
-                        agent,
-                        provider,
-                        session,
-                        rollout_path.as_ref(),
-                    );
-                    (probe.exists, probe.checked_paths)
-                }
-                (None, Some(_), true) if resumable_provider_requires_backing(provider_wire) => {
-                    let exists = rollout_path
-                        .as_ref()
-                        .is_some_and(|path| path.as_path().exists());
-                    let checked = rollout_path
-                        .as_ref()
-                        .map(|p| vec![p.as_path().to_path_buf()])
-                        .unwrap_or_default();
-                    (exists, checked)
-                }
-                _ => (true, Vec::new()),
-            };
-        let identity_probe =
-            session_identity_probe_for_agent(&agent_id, provider, rollout_path.as_ref());
-        let session_identity_mismatch = session_id.is_some()
-            && provider_can_resume
-            && resume_backing_exists
-            && identity_probe.identity_ok == Some(false);
-        // 0.4.7 partial-resume + RESTART-RESUME-001 (0.4.8): when a worker
-        // has NEVER been captured (no session_id AND no context-bearing
-        // signal at all), it is structurally non-resumable — there is no
-        // context to lose, so auto-fresh is safe even without --allow-fresh.
-        //
-        // The "never_captured" predicate is now the shared
-        // restart_agent_never_captured(): session_id absent AND none of
-        // first_send_at(Valid) / last_result_at / task_prompt_delivered.
-        // This matches the pre-selection convergence semantic in
-        // common.rs::restart_required_missing_session_agent_ids so both
-        // layers refuse / auto-fresh in unison.
-        //
-        // If session_id is None but ANY context signal exists, that's the
-        // "received message/result but session not captured" bug state —
-        // keep the Refuse so we never silently drop context (architect
-        // rule: "绝不静默 fresh").
-        let _ = first_send_at_state; // retained for the Corrupt branch above
-        let never_captured =
-            restart_agent_never_captured(agent, session_id.as_ref().map(|s| s.as_str()));
-        let decision = if session_id.is_some()
-            && provider_can_resume
-            && resume_backing_exists
-            && !session_identity_mismatch
-        {
-            ResumeDecision::Resume
-        } else if session_id.is_some() && allow_fresh {
-            ResumeDecision::FreshStart
-        } else if session_id.is_some() {
-            ResumeDecision::Refuse
-        } else if allow_fresh {
-            ResumeDecision::FreshStart
-        } else if never_captured {
-            // No session_id + never captured → safe to auto-fresh without
-            // --allow-fresh. No context to lose.
-            ResumeDecision::FreshStart
-        } else {
-            ResumeDecision::Refuse
-        };
-        if matches!(decision, ResumeDecision::Refuse) {
-            // unit-5: surface structured ResumeRefusalReason alongside the
-            // legacy free-form string. The string wire is preserved exactly
-            // (round-tripped through ResumeRefusalReason::wire) so the
-            // CLI/JSON contract does not change.
-            let (reason_str, structured) = if session_id.is_some() {
-                if session_identity_mismatch {
-                    let session = session_id
-                        .as_ref()
-                        .map(|session| session.as_str().to_string())
-                        .unwrap_or_default();
-                    (
-                        "session_identity_mismatch".to_string(),
-                        crate::provider::session::ResumeRefusalReason::SessionIdentityMismatch {
-                            expected_agent_id: agent_id.as_str().to_string(),
-                            embedded_agent_id: identity_probe
-                                .embedded_agent_id
-                                .clone()
-                                .unwrap_or_default(),
-                            session_id: session,
-                            rollout_path: identity_probe.rollout_path.clone(),
-                        },
-                    )
-                } else if !provider_can_resume {
-                    (
-                        "session_unresumable".to_string(),
-                        crate::provider::session::ResumeRefusalReason::ProviderResumeUnsupported {
-                            provider: provider_wire.to_string(),
-                        },
-                    )
-                } else if !resume_backing_exists {
-                    // Today the legacy wire collapses backing-missing under
-                    // the catch-all `session_unresumable` — keep that wire,
-                    // but record the structured reason so the new shape is
-                    // available to callers that want it.
-                    //
-                    // Layer 2 self-healing (architect probe 2026-06-22): attach
-                    // a recovery hint pointing at the agent_id (used as
-                    // launch-time `--name`) and spawn_cwd. Operator-facing
-                    // diagnostic only — no auto-resume off the hint.
-                    let recovery_hint = Some(crate::provider::session::RecoveryHint {
-                        provider_session_name_hint: Some(agent_id.as_str().to_string()),
-                        spawn_cwd: agent
-                            .get("spawn_cwd")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(std::path::PathBuf::from),
-                        provider: provider_wire.to_string(),
-                    });
-                    (
-                        "session_unresumable".to_string(),
-                        crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
-                            checked_paths: backing_checked_paths.clone(),
-                            recovery_hint,
-                        },
-                    )
-                } else {
-                    (
-                        "session_unresumable".to_string(),
-                        crate::provider::session::ResumeRefusalReason::Other {
-                            legacy_reason: "session_unresumable".to_string(),
-                        },
-                    )
-                }
-            } else {
-                (
-                    "no_persisted_session_id".to_string(),
-                    crate::provider::session::ResumeRefusalReason::NoSessionId,
-                )
-            };
-            unresumable.push(UnresumableWorker {
-                agent_id: agent_id.clone(),
-                reason: reason_str,
-                refusal_reason: Some(structured),
-                session_id: session_id.clone(),
-                first_send_at: first_send_at_raw.as_str().map(|s| s.to_string()),
-            });
-        }
-        decisions.push(RestartedAgent {
-            agent_id,
-            restart_mode: match decision {
-                ResumeDecision::Resume => StartMode::Resumed,
-                ResumeDecision::FreshStart => StartMode::Fresh,
-                ResumeDecision::Refuse => StartMode::Noop,
-            },
-            decision,
-            session_id,
-        });
     }
 
     Ok(RestartPlan {
@@ -488,4 +311,211 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         corrupt_entries,
         unresumable,
     })
+}
+
+/// One recovery preflight for both single-seat start and team restart.
+/// Read-only probes and prior interaction decide safety before either entry spawns.
+pub(super) fn classify_agent_recovery(
+    workspace: Option<&Path>,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    allow_fresh: bool,
+) -> Result<(RestartedAgent, Option<UnresumableWorker>), CorruptFirstSendAt> {
+    let first_send_at_raw = agent
+        .get("first_send_at")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let first_send_at_state = classify_first_send_at(&first_send_at_raw);
+    if matches!(first_send_at_state, FirstSendAtState::Corrupt) {
+        return Err(CorruptFirstSendAt {
+            worker_id: agent_id.clone(),
+            raw_first_send_at_type: python_type_name(&first_send_at_raw).to_string(),
+            raw_first_send_at: first_send_at_raw,
+        });
+    }
+
+    let session_id = agent
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(SessionId::new);
+    // E6 层2 (C2, 用户裁定"绝不静默 fresh"): null session 只有显式 --allow-fresh 才 fresh,
+    // 否则 Refuse(→ resume_not_ready + 指引)。删 `!interacted` 短路 —— 自启动 worker
+    // (leader 从未发消息 → first_send_at=null → interacted=false)会被它静默 fresh 丢上下文。
+    let provider = agent_provider(agent);
+    let provider_wire = provider_wire(provider);
+    let provider_can_resume = provider_supports_resume(provider);
+    let rollout_path = agent_rollout_path(agent);
+    // Layer 2 self-healing (leader follow-up 2026-06-22): use the
+    // structured probe so we can carry the list of paths the runtime
+    // actually checked into the refusal — operators need to see WHICH
+    // places we looked, not just "missing".
+    let (resume_backing_exists, backing_checked_paths) =
+        match (workspace, session_id.as_ref(), provider_can_resume) {
+            (_, Some(_), false) => (false, Vec::new()),
+            (Some(workspace), Some(session), true) => {
+                let probe = resume_backing_probe_for_agent(
+                    workspace,
+                    agent_id,
+                    agent,
+                    provider,
+                    session,
+                    rollout_path.as_ref(),
+                );
+                (probe.exists, probe.checked_paths)
+            }
+            (None, Some(_), true) if resumable_provider_requires_backing(provider_wire) => {
+                let exists = rollout_path
+                    .as_ref()
+                    .is_some_and(|path| path.as_path().exists());
+                let checked = rollout_path
+                    .as_ref()
+                    .map(|p| vec![p.as_path().to_path_buf()])
+                    .unwrap_or_default();
+                (exists, checked)
+            }
+            _ => (true, Vec::new()),
+        };
+    let identity_probe =
+        session_identity_probe_for_agent(agent_id, provider, rollout_path.as_ref());
+    let session_identity_mismatch = session_id.is_some()
+        && provider_can_resume
+        && resume_backing_exists
+        && identity_probe.identity_ok == Some(false);
+    // 0.4.7 partial-resume + RESTART-RESUME-001 (0.4.8): when a worker
+    // has NEVER been captured (no session_id AND no context-bearing
+    // signal at all), it is structurally non-resumable — there is no
+    // context to lose, so auto-fresh is safe even without --allow-fresh.
+    //
+    // The "never_captured" predicate is now the shared
+    // restart_agent_never_captured(): session_id absent AND none of
+    // first_send_at(Valid) / last_result_at / task_prompt_delivered.
+    // This matches the pre-selection convergence semantic in
+    // common.rs::restart_required_missing_session_agent_ids so both
+    // layers refuse / auto-fresh in unison.
+    //
+    // If session_id is None but ANY context signal exists, that's the
+    // "received message/result but session not captured" bug state —
+    // keep the Refuse so we never silently drop context (architect
+    // rule: "绝不静默 fresh").
+    let never_captured =
+        restart_agent_never_captured(agent, session_id.as_ref().map(|s| s.as_str()));
+    let decision = recovery_decision(
+        session_id.is_some(),
+        provider_can_resume,
+        resume_backing_exists,
+        session_identity_mismatch,
+        never_captured,
+        allow_fresh,
+    );
+    let refusal = if matches!(decision, ResumeDecision::Refuse) {
+        // unit-5: surface structured ResumeRefusalReason alongside the
+        // legacy free-form string. The string wire is preserved exactly
+        // (round-tripped through ResumeRefusalReason::wire) so the
+        // CLI/JSON contract does not change.
+        let (reason_str, structured) = if session_id.is_some() {
+            if session_identity_mismatch {
+                let session = session_id
+                    .as_ref()
+                    .map(|session| session.as_str().to_string())
+                    .unwrap_or_default();
+                (
+                    "session_identity_mismatch".to_string(),
+                    crate::provider::session::ResumeRefusalReason::SessionIdentityMismatch {
+                        expected_agent_id: agent_id.as_str().to_string(),
+                        embedded_agent_id: identity_probe
+                            .embedded_agent_id
+                            .clone()
+                            .unwrap_or_default(),
+                        session_id: session,
+                        rollout_path: identity_probe.rollout_path.clone(),
+                    },
+                )
+            } else if !provider_can_resume {
+                (
+                    "session_unresumable".to_string(),
+                    crate::provider::session::ResumeRefusalReason::ProviderResumeUnsupported {
+                        provider: provider_wire.to_string(),
+                    },
+                )
+            } else if !resume_backing_exists {
+                // Today the legacy wire collapses backing-missing under
+                // the catch-all `session_unresumable` — keep that wire,
+                // but record the structured reason so the new shape is
+                // available to callers that want it.
+                //
+                // Layer 2 self-healing (architect probe 2026-06-22): attach
+                // a recovery hint pointing at the agent_id (used as
+                // launch-time `--name`) and spawn_cwd. Operator-facing
+                // diagnostic only — no auto-resume off the hint.
+                let recovery_hint = Some(crate::provider::session::RecoveryHint {
+                    provider_session_name_hint: Some(agent_id.as_str().to_string()),
+                    spawn_cwd: agent
+                        .get("spawn_cwd")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(std::path::PathBuf::from),
+                    provider: provider_wire.to_string(),
+                });
+                (
+                    "session_unresumable".to_string(),
+                    crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
+                        checked_paths: backing_checked_paths.clone(),
+                        recovery_hint,
+                    },
+                )
+            } else {
+                (
+                    "session_unresumable".to_string(),
+                    crate::provider::session::ResumeRefusalReason::Other {
+                        legacy_reason: "session_unresumable".to_string(),
+                    },
+                )
+            }
+        } else {
+            (
+                "no_persisted_session_id".to_string(),
+                crate::provider::session::ResumeRefusalReason::NoSessionId,
+            )
+        };
+        Some(UnresumableWorker {
+            agent_id: agent_id.clone(),
+            reason: reason_str,
+            refusal_reason: Some(structured),
+            session_id: session_id.clone(),
+            first_send_at: first_send_at_raw.as_str().map(|s| s.to_string()),
+        })
+    } else {
+        None
+    };
+    Ok((
+        RestartedAgent {
+            agent_id: agent_id.clone(),
+            restart_mode: match decision {
+                ResumeDecision::Resume => StartMode::Resumed,
+                ResumeDecision::FreshStart => StartMode::Fresh,
+                ResumeDecision::Refuse => StartMode::Noop,
+            },
+            decision,
+            session_id,
+        },
+        refusal,
+    ))
+}
+
+fn recovery_decision(
+    session_present: bool,
+    provider_can_resume: bool,
+    backing_exists: bool,
+    identity_mismatch: bool,
+    never_captured: bool,
+    allow_fresh: bool,
+) -> ResumeDecision {
+    if session_present && provider_can_resume && backing_exists && !identity_mismatch {
+        ResumeDecision::Resume
+    } else if allow_fresh || never_captured {
+        ResumeDecision::FreshStart
+    } else {
+        ResumeDecision::Refuse
+    }
 }
