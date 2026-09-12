@@ -361,7 +361,7 @@ pub(crate) fn add_agent_with_transport(
     add_agent_with_transport_and_profile_dir(workspace, agent_id, role_file_path, open_display, team, transport, None)
 }
 
-pub(super) fn add_agent_with_transport_and_profile_dir(
+pub(crate) fn add_agent_with_transport_and_profile_dir(
     workspace: &Path,
     agent_id: &AgentId,
     role_file_path: &Path,
