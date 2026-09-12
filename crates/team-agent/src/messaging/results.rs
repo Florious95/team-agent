@@ -130,6 +130,8 @@ fn collect_scoped(
     owner_team_id: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
     let paths = collect_paths(workspace)?;
+    #[cfg(test)]
+    collection_tests::boundary("before_lock")?;
     let log = EventLog::new(&paths.run_workspace);
     let resolved_owner_team_id = match owner_team_id.filter(|team| !team.is_empty()) {
         Some(team) => Some(resolve_owner_team_for_read(
@@ -159,7 +161,11 @@ fn collect_scoped(
     let store = MessageStore::open(&paths.run_workspace)?;
     let conn = crate::db::schema::open_db(store.db_path())?;
     if let Some(path) = result_file {
+        #[cfg(test)]
+        collection_tests::boundary("before_ingest")?;
         ingest_result_file(&conn, path, owner_team_id)?;
+        #[cfg(test)]
+        collection_tests::boundary("after_ingest")?;
     }
     let sql = match owner_team_id {
         Some(_) => {
@@ -242,6 +248,8 @@ fn collect_scoped(
             )?;
             continue;
         };
+        #[cfg(test)]
+        collection_tests::boundary("before_finalize")?;
         match owner_team_id {
             Some(team) => {
                 conn.execute(
@@ -256,11 +264,15 @@ fn collect_scoped(
                 )?;
             }
         }
+        #[cfg(test)]
+        collection_tests::boundary("after_finalize")?;
         if scope == "task" {
             mark_task_done(&mut state, &row.task_id, &row.result_id);
             task_updates.push((row.task_id.clone(), row.result_id.clone()));
             state_dirty = true;
         }
+        #[cfg(test)]
+        collection_tests::boundary("before_event")?;
         log.write(
             "collect.result",
             serde_json::json!({
@@ -270,6 +282,8 @@ fn collect_scoped(
                 "scope": scope,
             }),
         )?;
+        #[cfg(test)]
+        collection_tests::boundary("after_event")?;
         collected.push(envelope.clone());
         let summary = serde_json::json!({
             "result_id": row.result_id,
@@ -287,6 +301,8 @@ fn collect_scoped(
         collected_results.push(summary);
     }
     if state_dirty {
+        #[cfg(test)]
+        collection_tests::boundary("before_state")?;
         state = crate::state::repository::StateRepository::new(&paths.run_workspace).commit(
             crate::state::repository::StateWriteIntent::ResultCollection { owner_team_id },
             |latest| {
@@ -295,6 +311,8 @@ fn collect_scoped(
                 }
             },
         )?;
+        #[cfg(test)]
+        collection_tests::boundary("after_state")?;
     }
     let counts = result_counts(&conn, owner_team_id)?;
     // results.py:157 — ensure_coordinator=true runs the REAL ensure step; the
@@ -1482,6 +1500,9 @@ pub fn collect_results_and_notify_watchers(
         "notified": notified
     }))
 }
+
+#[cfg(test)]
+mod collection_tests;
 
 #[cfg(test)]
 mod tests {
