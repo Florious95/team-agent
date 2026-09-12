@@ -40,6 +40,7 @@ pub(crate) fn project_command_context_fields(
         "communication_mode",
         "provider",
         "model",
+        "model_source",
         "auth_mode",
         "effort",
         "profile",

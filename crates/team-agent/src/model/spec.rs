@@ -418,6 +418,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "role",
         "provider",
         "model",
+        "model_source",
         "working_directory",
         "system_prompt",
         "tools",
@@ -441,6 +442,11 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
     check_keys_y(Some(agent), path, req, allowed, errors);
     if !agent.is_map() {
         return;
+    }
+    if let Some(source) = agent.get("model_source") {
+        if !matches!(source.as_str(), Some("role" | "team" | "profile" | "default")) {
+            errors.push(format!("{path}/model_source: expected role|team|profile|default"));
+        }
     }
     if let Some(value) = agent.get("communication_mode") {
         match value.as_str() {

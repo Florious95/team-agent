@@ -18,6 +18,7 @@ use crate::transport::{
     SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
     TurnVerification, WindowName,
 };
+use crate::model::enums::{AuthMode, Provider};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -559,6 +560,150 @@ fn config_authority_t01_removed_options_stay_removed_after_each_spawn_and_reload
             }
         }
     }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t02_model_and_source_follow_team_changes_across_spawn_entries() {
+    let _hermetic = enter_hermetic("config-authority-model-provenance");
+    let role = role_doc("w1").replace("model: gpt-5.5\n", "profile: p\n");
+    let team = team_dir_with_roles(&[("w1.md", &role)]);
+    let workspace = team.parent().unwrap();
+    std::fs::create_dir_all(team.join("profiles")).unwrap();
+    std::fs::write(team.join("profiles/p.env"), "AUTH_MODE=subscription\nMODEL=profile-B\n").unwrap();
+    seed_healthy_coordinator(workspace);
+    let team_text = std::fs::read_to_string(team.join("TEAM.md")).unwrap();
+    let cases = [
+        ("default_model: team-A\n", None, "team-A", "team"),
+        ("default_model: team-A\nprovider_models:\n  codex: provider-C\n", None, "provider-C", "team"),
+        ("default_model: team-A\n", Some("role-D"), "role-D", "role"),
+        ("", None, "profile-B", "profile"),
+    ];
+    for (index, (extra, role_model, model, source)) in cases.iter().enumerate() {
+        let configured_team = team_text.replacen("objective:", &format!("{extra}objective:"), 1);
+        let configured_role = match role_model {
+            Some(model) => role.replace("profile: p\n", &format!("profile: p\nmodel: {model}\n")),
+            None => role.clone(),
+        };
+        std::fs::write(team.join("TEAM.md"), &configured_team).unwrap();
+        std::fs::write(team.join("agents/w1.md"), &configured_role).unwrap();
+        let spec = crate::compiler::compile_team(&team).unwrap();
+        // Fresh/add each input in a new workspace; keep the original worker for
+        // the subsequent role/TEAM edits and repeated start/restart projections.
+        let fresh_team = if index == 0 { team.clone() } else {
+            team_dir_with_roles(&[("w1.md", &configured_role)])
+        };
+        let fresh_workspace = fresh_team.parent().unwrap();
+        std::fs::write(fresh_team.join("TEAM.md"), &configured_team).unwrap();
+        std::fs::create_dir_all(fresh_team.join("profiles")).unwrap();
+        std::fs::write(fresh_team.join("profiles/p.env"), "AUTH_MODE=subscription\nMODEL=profile-B\n").unwrap();
+        seed_healthy_coordinator(fresh_workspace);
+        let transport = codex_ready_transport();
+        quick_start_with_transport_in_workspace_with_display(
+            fresh_workspace, &fresh_team, None, true, None, &transport, false,
+        ).unwrap();
+        assert_model_argv(&transport.spawn_records()[0].1, Some(model));
+        std::fs::create_dir_all(fresh_team.join("roles")).unwrap();
+        let dynamic = fresh_team.join("roles/w2.md");
+        std::fs::write(&dynamic, configured_role.replace("w1", "w2")).unwrap();
+        let add = codex_ready_transport().with_session_present(true);
+        crate::lifecycle::add_agent_with_transport(&fresh_team, &aid("w2"), &dynamic, false, Some("teamdir"), &add).unwrap();
+        assert_model_argv(&add.spawn_records().last().unwrap().1, Some(model));
+        // Keep restart's intended cohort to the original worker.
+        crate::lifecycle::remove_agent_with_transport(fresh_workspace, &aid("w2"), true, true, Some("teamdir"), &add).unwrap();
+        std::fs::write(crate::model::paths::runtime_spec_path(workspace, "teamdir"), crate::model::yaml::dumps(&spec)).unwrap();
+        let mut state = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
+        state["agents"]["w1"]["model_source"] = json!("default");
+        crate::state::projection::save_team_scoped_state(workspace, &state).unwrap();
+        for restart in [false, true] {
+            let transport = BRealTransport::owned();
+            if restart {
+                crate::lifecycle::restart_with_transport(workspace, true, Some("teamdir"), &transport).unwrap();
+            } else {
+                crate::lifecycle::start_agent_with_transport(workspace, &aid("w1"), true, false, true, Some("teamdir"), &transport).unwrap();
+            }
+            assert_model_argv(transport.spawn_records().last().unwrap(), Some(model));
+            let saved = crate::state::projection::select_runtime_state(workspace, Some("teamdir")).unwrap();
+            assert_eq!(saved["agents"]["w1"]["model_source"], *source);
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t02_fresh_and_add_reject_same_api_model_conflict_before_spawn() {
+    let _hermetic = enter_hermetic("config-authority-api-model-conflict");
+    for profile_model in ["role-A", "profile-B"] {
+        let role = role_doc("w1").replace("model: gpt-5.5", "model: role-A\nprofile: p")
+            .replace("auth_mode: subscription", "auth_mode: compatible_api");
+        let team = team_dir_with_roles(&[("w1.md", &role)]);
+        let workspace = team.parent().unwrap();
+        std::fs::create_dir_all(team.join("profiles")).unwrap();
+        std::fs::write(team.join("profiles/p.env"), format!("AUTH_MODE=compatible_api\nBASE_URL=http://127.0.0.1:9/v1\nAPI_KEY=synthetic-only\nMODEL={profile_model}\n")).unwrap();
+        seed_healthy_coordinator(workspace);
+        let fresh = codex_ready_transport();
+        let outcome = quick_start_with_transport_in_workspace_with_display(workspace, &team, None, true, None, &fresh, false);
+        if profile_model == "profile-B" {
+            assert!(fresh.spawn_records().is_empty());
+            assert!(format!("{outcome:?}").contains("role/team model does not match profile MODEL"));
+        } else {
+            outcome.unwrap();
+            assert_model_argv(&fresh.spawn_records()[0].1, Some("role-A"));
+        }
+        let (add_team, add_workspace, dynamic, transport) = add_fixture();
+        std::fs::create_dir_all(add_team.join("profiles")).unwrap();
+        std::fs::copy(team.join("profiles/p.env"), add_team.join("profiles/p.env")).unwrap();
+        std::fs::create_dir_all(add_team.join("roles")).unwrap();
+        let dynamic = add_team.join("roles").join(dynamic.file_name().unwrap());
+        std::fs::write(&dynamic, role.replace("w1", "w2")).unwrap();
+        let outcome = crate::lifecycle::add_agent_with_transport(&add_team, &aid("w2"), &dynamic, false, Some("teamdir"), &transport);
+        if profile_model == "profile-B" {
+            assert!(transport.spawn_records().is_empty());
+            assert!(outcome.unwrap_err().to_string().contains("role/team model does not match profile MODEL"));
+        } else {
+            outcome.unwrap();
+            assert_model_argv(&transport.spawn_records().last().unwrap().1, Some("role-A"));
+        }
+        assert!(add_workspace.is_dir());
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t02_profile_plan_has_no_builtin_and_legacy_source_cannot_override() {
+    let _hermetic = enter_hermetic("config-authority-effective-profile-model");
+    let workspace = temp_ws();
+    std::fs::create_dir_all(workspace.join("profiles")).unwrap();
+    for source in [None, Some("default"), Some("role"), Some("team")] {
+        for (model, profile_model, auth_mode, expected) in [
+            (Some("A"), Some("B"), AuthMode::Subscription, Some("A")),
+            (None, Some("B"), AuthMode::Subscription, Some("B")),
+            (None, None, AuthMode::Subscription, None),
+            (Some("A"), Some("A"), AuthMode::CompatibleApi, Some("A")),
+            (Some("A"), Some("B"), AuthMode::CompatibleApi, None),
+        ] {
+            let text = format!("BASE_URL=http://127.0.0.1:9/v1\nAPI_KEY=synthetic-only\n{}", profile_model.map(|value| format!("MODEL={value}\n")).unwrap_or_default());
+            std::fs::write(workspace.join("profiles/p.env"), text).unwrap();
+            let agent = json!({"provider": "codex", "auth_mode": auth_mode, "profile": "p", "model": model, "model_source": source});
+            let prepared = crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(&workspace, "worker", &agent, None);
+            if auth_mode == AuthMode::CompatibleApi && model != profile_model {
+                assert!(prepared.unwrap_err().to_string().contains("role/team model does not match profile MODEL"));
+                continue;
+            }
+            let profile = prepared.unwrap();
+            let plan = crate::provider::get_adapter(Provider::Codex).build_command_plan(crate::provider::ProviderCommandContext {
+                auth_mode, mcp_config: None, system_prompt: None,
+                model: profile.command_overrides.model.as_deref().or(model), tools: &[],
+                profile_launch: Some(&profile), agent_id_hint: Some("worker"), effort: None,
+            }).unwrap();
+            assert_model_argv(&plan.argv, expected);
+        }
+    }
+}
+
+fn assert_model_argv(argv: &[String], expected: Option<&str>) {
+    let model = argv.windows(2).find(|pair| pair[0] == "--model").map(|pair| pair[1].as_str());
+    assert_eq!(model, expected, "argv={argv:?}");
 }
 
 fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {

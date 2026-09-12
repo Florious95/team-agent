@@ -80,7 +80,6 @@ struct AgentProfileInput {
     profile: Option<String>,
     profile_dir: Option<PathBuf>,
     model: Option<String>,
-    model_source: Option<String>,
 }
 
 /// ---
@@ -148,11 +147,6 @@ pub(crate) fn prepare_provider_profile_launch_with_profile_dir(
             .and_then(YamlValue::as_str)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
-        model_source: agent
-            .get("model_source")
-            .and_then(YamlValue::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
     };
     prepare_profile_launch(workspace, input, mcp_config)
 }
@@ -197,11 +191,6 @@ pub(crate) fn prepare_provider_profile_launch_from_json(
             .map(PathBuf::from),
         model: agent
             .get("model")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string),
-        model_source: agent
-            .get("model_source")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
@@ -264,7 +253,7 @@ fn prepare_profile_launch(
         }
     }
 
-    let command_overrides = provider_command_overrides(&agent, &loaded.values);
+    let command_overrides = provider_command_overrides(&agent, &loaded)?;
     write_runtime_env_file(workspace, &agent.id, &env_overlay, &env_unset)?;
 
     Ok(ProviderProfileLaunch {
@@ -397,23 +386,7 @@ fn validate_profile(
             "profile {profile} AUTH_MODE does not match agent auth_mode"
         )));
     }
-    if agent.auth_mode == AuthMode::CompatibleApi
-        && matches!(agent.model_source.as_deref(), Some("role" | "team"))
-    {
-        let profile_model = profile_model(&loaded.values);
-        if let Some(profile_model) = profile_model {
-            if agent
-                .model
-                .as_deref()
-                .is_some_and(|model| model != profile_model)
-            {
-                return Err(LifecycleError::RequirementUnmet(format!(
-                    "role/team model does not match profile MODEL in {}",
-                    loaded.path.display()
-                )));
-            }
-        }
-    }
+    let model = resolve_profile_model(agent.model.as_deref(), agent.auth_mode, loaded)?;
     let mut missing: Vec<&str> = Vec::new();
     for key in required_profile_keys(agent.provider, agent.auth_mode) {
         if key == &"API_KEY" {
@@ -424,7 +397,7 @@ fn validate_profile(
         }
     }
     if agent.auth_mode == AuthMode::CompatibleApi
-        && effective_profile_or_agent_model(agent, &loaded.values).is_none()
+        && model.is_none()
     {
         missing.push("MODEL");
     }
@@ -609,16 +582,10 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
 
 fn provider_command_overrides(
     agent: &AgentProfileInput,
-    values: &BTreeMap<String, String>,
-) -> ProviderCommandOverrides {
-    let model = match agent.model_source.as_deref() {
-        Some("role" | "team") => agent.model.clone(),
-        Some("default") => profile_model(values)
-            .map(str::to_string)
-            .or_else(|| agent.model.clone()),
-        _ if agent.model.is_some() => agent.model.clone(),
-        _ => profile_model(values).map(str::to_string),
-    };
+    loaded: &ProfileValues,
+) -> Result<ProviderCommandOverrides, LifecycleError> {
+    let values = &loaded.values;
+    let model = resolve_profile_model(agent.model.as_deref(), agent.auth_mode, loaded)?;
     let mut codex_profile = None;
     let mut codex_config = Vec::new();
     // Python provider_env.py:62-79 (_provider_command_overrides codex branch).
@@ -648,11 +615,11 @@ fn provider_command_overrides(
         }
         _ => {}
     }
-    ProviderCommandOverrides {
+    Ok(ProviderCommandOverrides {
         model,
         codex_profile,
         codex_config,
-    }
+    })
 }
 
 /// Python helpers.py:33-34 `_safe_codex_provider_id`: `[A-Za-z0-9_-]+`.
@@ -1100,11 +1067,26 @@ pub(crate) fn profile_model(values: &BTreeMap<String, String>) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn effective_profile_or_agent_model<'a>(
-    agent: &'a AgentProfileInput,
-    values: &'a BTreeMap<String, String>,
-) -> Option<&'a str> {
-    agent.model.as_deref().or_else(|| profile_model(values))
+/// The compiled model is authoritative. Its provenance travels with the spec;
+/// legacy state source labels cannot change its priority or bypass API conflicts.
+/// Pure: shared by launch and smoke without preparing any runtime files.
+pub(crate) fn resolve_profile_model(
+    model: Option<&str>,
+    auth_mode: AuthMode,
+    loaded: &ProfileValues,
+) -> Result<Option<String>, LifecycleError> {
+    let profile_model = profile_model(&loaded.values);
+    if auth_mode == AuthMode::CompatibleApi {
+        if let (Some(model), Some(profile_model)) = (model, profile_model) {
+            if model != profile_model {
+                return Err(LifecycleError::RequirementUnmet(format!(
+                    "role/team model does not match profile MODEL in {}",
+                    loaded.path.display()
+                )));
+            }
+        }
+    }
+    Ok(model.or(profile_model).map(str::to_string))
 }
 
 pub(crate) use crate::provider::wire::parse_provider;
