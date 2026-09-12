@@ -136,10 +136,10 @@ pub(crate) fn smoke_check_agent_profile(
         return result;
     }
 
-    let target = match SmokeTarget::from_profile(provider, model, &loaded.values) {
+    let target = match SmokeTarget::from_profile(provider, model, &loaded) {
         Ok(target) => target,
         Err(reason) => {
-            let mut result = invalid_profile(&agent_id, provider, profile, auth_mode, reason);
+            let mut result = invalid_profile(&agent_id, provider, profile, auth_mode, &reason);
             merge_proxy_info(&mut result, &loaded.values);
             return result;
         }
@@ -188,60 +188,35 @@ impl SmokeTarget {
     fn from_profile(
         provider: Provider,
         agent_model: Option<&str>,
-        values: &BTreeMap<String, String>,
-    ) -> Result<Self, &'static str> {
-        match provider {
+        loaded: &profile_launch::ProfileValues,
+    ) -> Result<Self, String> {
+        let values = &loaded.values;
+        let (endpoint, token, kind) = match provider {
             Provider::Claude | Provider::ClaudeCode => {
                 let base = value_any(values, &["ANTHROPIC_BASE_URL", "BASE_URL"])
                     .ok_or("missing_base_url")?;
                 let token = value_any(
                     values,
-                    &[
-                        "ANTHROPIC_AUTH_TOKEN",
-                        "AUTH_TOKEN",
-                        "ANTHROPIC_API_KEY",
-                        "API_KEY",
-                        "BEARER_TOKEN",
-                    ],
-                )
-                .ok_or("missing_api_key")?;
-                let model = value_any(values, &["ANTHROPIC_MODEL", "MODEL"])
-                    .or(agent_model)
-                    .ok_or("missing_model")?;
-                Ok(Self {
-                    endpoint: anthropic_endpoint(base),
-                    token: token.to_string(),
-                    model: model.to_string(),
-                    kind: SmokeKind::Anthropic,
-                })
+                    &["ANTHROPIC_AUTH_TOKEN", "AUTH_TOKEN", "ANTHROPIC_API_KEY", "API_KEY", "BEARER_TOKEN"],
+                ).ok_or("missing_api_key")?;
+                (anthropic_endpoint(base), token, SmokeKind::Anthropic)
             }
             Provider::Codex => {
                 let base = value_any(values, &["OPENAI_BASE_URL", "BASE_URL"])
                     .ok_or("missing_base_url")?;
-                let token =
-                    value_any(values, &["OPENAI_API_KEY", "API_KEY"]).ok_or("missing_api_key")?;
-                let model = value_any(values, &["OPENAI_MODEL", "MODEL"])
-                    .or(agent_model)
-                    .ok_or("missing_model")?;
-                Ok(Self {
-                    endpoint: openai_endpoint(base),
-                    token: token.to_string(),
-                    model: model.to_string(),
-                    kind: SmokeKind::OpenAi,
-                })
+                let token = value_any(values, &["OPENAI_API_KEY", "API_KEY"])
+                    .ok_or("missing_api_key")?;
+                (openai_endpoint(base), token, SmokeKind::OpenAi)
             }
-            // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK HTTP smoke
-            // 入口;同 GeminiCli/Fake 走 unsupported_provider_smoke_skipped。
-            // 0.5.67: grok/cursor_agent 同走 skipped (一期 subscription 已登录态)。
-            Provider::Copilot
-            | Provider::Grok
-            | Provider::CursorAgent
-            | Provider::Pi
-            | Provider::GeminiCli
-            | Provider::Fake => {
-                Err("unsupported_provider_smoke_skipped")
+            Provider::Copilot | Provider::Grok | Provider::CursorAgent | Provider::Pi
+            | Provider::GeminiCli | Provider::Fake => {
+                return Err("unsupported_provider_smoke_skipped".to_string());
             }
-        }
+        };
+        let model = profile_launch::resolve_profile_model(agent_model, AuthMode::CompatibleApi, loaded)
+            .map_err(|error| error.to_string())?
+            .ok_or("missing_model")?;
+        Ok(Self { endpoint, token: token.to_string(), model, kind })
     }
 
     fn body(&self) -> String {
@@ -554,5 +529,89 @@ fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {
         AuthMode::Subscription => "subscription",
         AuthMode::OfficialApi => "official_api",
         AuthMode::CompatibleApi => "compatible_api",
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/support/hermetic.rs"]
+mod config_authority_hermetic;
+
+#[cfg(test)]
+mod config_authority_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn config_authority_t03_request_body_matches_actual_launch_model() {
+        let env = config_authority_hermetic::HermeticTestEnv::enter("smoke-model-authority");
+        let workspace = env.workspace("ws");
+        std::fs::create_dir_all(workspace.join("profiles")).unwrap();
+        for provider in ["claude", "claude_code", "codex"] {
+            for (model, source, fields, expected) in [
+                (Some("A"), "role", "MODEL=A\n", "A"),
+                (Some("A"), "team", "MODEL=A\n", "A"),
+                (None, "profile", "MODEL=A\nANTHROPIC_MODEL=B\n", "A"),
+                (None, "profile", "ANTHROPIC_MODEL=B\n", "B"),
+            ] {
+                let text = format!("BASE_URL=http://127.0.0.1:9/v1\nAPI_KEY=synthetic-only\n{fields}");
+                std::fs::write(workspace.join("profiles/p.env"), text).unwrap();
+                let agent = crate::model::yaml::loads(&format!(
+                    "id: worker\nprovider: {provider}\nauth_mode: compatible_api\nprofile: p\nmodel: {}\nmodel_source: {source}\n",
+                    model.unwrap_or("null")
+                )).unwrap();
+                let loaded = profile_launch::load_profile(&workspace, "p", None).unwrap();
+                let provider = profile_launch::parse_provider(provider).unwrap();
+                let target = SmokeTarget::from_profile(provider, model, &loaded).unwrap();
+                let request: Value = serde_json::from_str(&target.body()).unwrap();
+                assert_eq!(request["model"], expected);
+                let launch = profile_launch::prepare_provider_profile_launch(&workspace, "worker", &agent, None).unwrap();
+                let plan = crate::provider::get_adapter(provider).build_command_plan(crate::provider::ProviderCommandContext {
+                    auth_mode: AuthMode::CompatibleApi, mcp_config: None, system_prompt: None,
+                    model: launch.command_overrides.model.as_deref().or(model), tools: &[],
+                    profile_launch: Some(&launch), agent_id_hint: Some("worker"), effort: None,
+                }).unwrap();
+                let actual = plan.argv.windows(2).find(|pair| pair[0] == "--model").unwrap();
+                assert_eq!(actual[1], expected);
+                assert_eq!(request["model"].as_str(), Some(actual[1].as_str()));
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn config_authority_t03_conflict_and_unsupported_model_alias_fail_without_http() {
+        let env = config_authority_hermetic::HermeticTestEnv::enter("smoke-model-invalid");
+        let workspace = env.workspace("ws");
+        std::fs::create_dir_all(workspace.join("profiles")).unwrap();
+        for (model, fields, reason) in [
+            ("A", "MODEL=B\n", "role/team model does not match profile MODEL"),
+            ("null", "OPENAI_MODEL=B\n", "missing_model"),
+        ] {
+            std::fs::write(workspace.join("profiles/p.env"), format!("BASE_URL=http://127.0.0.1:9/v1\nAPI_KEY=synthetic-only\n{fields}")).unwrap();
+            let agent = crate::model::yaml::loads(&format!("id: w\nprovider: codex\nauth_mode: compatible_api\nprofile: p\nmodel: {model}\n")).unwrap();
+            let result = smoke_check_agent_profile(&workspace, &agent, None, Duration::from_millis(10));
+            assert_eq!(result["status"], "profile_invalid");
+            assert!(result["reason"].as_str().unwrap().contains(reason));
+            assert!(!result.to_string().contains("synthetic-only"));
+            let error = profile_launch::prepare_provider_profile_launch(&workspace, "w", &agent, None).unwrap_err().to_string();
+            assert!(error.contains("MODEL"));
+            assert!(!workspace.join(".team/runtime/provider-env/w.env").exists());
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn config_authority_t03_skip_semantics_are_preserved() {
+        let env = config_authority_hermetic::HermeticTestEnv::enter("smoke-model-skips");
+        let workspace = env.workspace("ws");
+        std::fs::create_dir_all(workspace.join("profiles")).unwrap();
+        let agent = crate::model::yaml::loads("id: w\nprovider: codex\nauth_mode: subscription\nprofile: absent\n").unwrap();
+        assert_eq!(smoke_check_agent_profile(&workspace, &agent, None, Duration::from_millis(10))["status"], "not_required");
+        std::fs::write(workspace.join("profiles/p.env"), "PROFILE_SMOKE=false\nMODEL=B\n").unwrap();
+        let agent = crate::model::yaml::loads("id: w\nprovider: codex\nauth_mode: compatible_api\nprofile: p\nmodel: A\n").unwrap();
+        assert_eq!(smoke_check_agent_profile(&workspace, &agent, None, Duration::from_millis(10))["status"], "skipped_by_profile");
+        let loaded = profile_launch::load_profile(&workspace, "p", None).unwrap();
+        assert_eq!(SmokeTarget::from_profile(Provider::Fake, Some("A"), &loaded).err().unwrap(), "unsupported_provider_smoke_skipped");
     }
 }
