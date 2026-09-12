@@ -322,3 +322,39 @@ fn profile_show_routes_and_preserves_redacted_secret_contract() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn config_authority_t04_show_doctor_and_runtime_parse_the_same_profile_bytes() {
+    let ws = tmp_workspace();
+    let dir = profiles_dir(&ws);
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = "# synthetic fixture\nexport AUTH_MODE = 'compatible_api'\nPROXY_MODE=inherit\nexport PROXY_MODE = \"direct\"\nMODEL = 'synthetic-model'\nBASE_URL = \"http://127.0.0.1:9/v1\"\nexport API_KEY = 'synthetic-secret-placeholder'\nPLAIN=plain\nBAD-KEY=ignored\n1BAD=ignored\nMISSING_EQUALS\n";
+    std::fs::write(dir.join("syntax.env"), body).unwrap();
+    let runtime = crate::lifecycle::profile_launch::load_profile(&ws, "syntax", None).unwrap();
+    for (key, value) in [("AUTH_MODE", "compatible_api"), ("PROXY_MODE", "direct"), ("MODEL", "synthetic-model"), ("PLAIN", "plain")] {
+        assert_eq!(runtime.values.get(key).map(String::as_str), Some(value));
+    }
+    assert!(!runtime.values.contains_key("BAD-KEY"));
+    assert!(!runtime.values.contains_key("1BAD"));
+    for command in ["show", "doctor"] {
+        let result = cmd_profile(&ProfileArgs {
+            command: command.into(), name: "syntax".into(), workspace: ws.clone(),
+            team: None, auth_mode: None, proxy_mode: None, json: true,
+        }).unwrap();
+        let CmdOutput::Json(output) = result.output else { panic!("expected JSON") };
+        assert_eq!(output["auth_mode"], runtime.values["AUTH_MODE"]);
+        assert_eq!(output["proxy_mode"], runtime.values["PROXY_MODE"]);
+        assert_eq!(output["credential_present"], true);
+        assert_eq!(output["secret_values_printed"], false);
+        assert!(!output.to_string().contains("synthetic-secret-placeholder"));
+        assert!(!output.to_string().contains("BAD-KEY"));
+        if command == "show" {
+            assert_eq!(output["values"]["MODEL"]["value"], "synthetic-model");
+            assert_eq!(output["values"]["API_KEY"]["redacted"], true);
+            assert_eq!(output["missing_common"], serde_json::json!([]));
+        }
+    }
+    assert_eq!(std::fs::read_to_string(dir.join("syntax.env")).unwrap(), body);
+    assert!(!dir.join("syntax.example.env").exists());
+    assert!(!ws.join(".team/runtime").exists());
+}
