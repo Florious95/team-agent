@@ -73,10 +73,8 @@ pub(crate) fn detect_abnormal_exits(
     let team = crate::state::projection::team_state_key(&snapshot);
     let session_name = snapshot.get("session_name").and_then(Value::as_str);
     for agent in abnormal_watch_agents(&snapshot) {
-        // Unknown team identity cannot authorize consuming a historical cache.
-        if !crate::state::abnormal_watch::begin_observation(state, &agent.agent_id) {
-            continue;
-        }
+        // Reject untrusted history without skipping a fresh provider/path observation.
+        crate::state::abnormal_watch::begin_observation(state, &agent.agent_id);
         // Pane/process liveness is independent of transcript content. A
         // frozen rollout is common after pane death, so probe before the
         // metadata dedupe gate; only the expensive tail scan stays deduped.
@@ -1454,6 +1452,85 @@ mod tests {
             "unchanged baseline must not re-alarm"
         );
         assert!(find_event(&events, "worker.abnormal_exit").is_none());
+    }
+
+    #[test]
+    fn resource188_legacy_missing_cohort_still_observes_fresh_errors_and_dedupes() {
+        let dir = temp_abnormal_dir("188-legacy-cohort");
+        let rollout = dir.join("rollout-w1.jsonl");
+        let error = "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"old\",\"status\":\"failed\"}}}\n";
+        std::fs::write(&rollout, error).unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let mut state = crate::state::persist::load_runtime_state(&dir).unwrap();
+        state["agents"]["w1"]
+            .as_object_mut()
+            .unwrap()
+            .remove("spawn_epoch");
+        let log = EventLog::new(&dir);
+        let transport = crate::transport::test_support::OfflineTransport::new();
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        assert_eq!(
+            state["coordinator"]["abnormal_exit_watch"]["w1"]["error_recency"],
+            "stale"
+        );
+        assert!(find_event(&log.tail(0).unwrap(), "worker.abnormal_exit").is_none());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(error.replace("old", "new-error").as_bytes())
+            .unwrap();
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        let events = log.tail(0).unwrap();
+        assert_eq!(
+            find_event(&events, "worker.abnormal_exit").unwrap()["error_recency"],
+            "fresh"
+        );
+        let notified =
+            state["coordinator"]["abnormal_exit_watch"]["w1"]["last_notified_key"].clone();
+        assert!(notified.is_string());
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        assert_eq!(log.tail(0).unwrap(), events);
+        assert_eq!(
+            state["coordinator"]["abnormal_exit_watch"]["w1"]["last_notified_key"],
+            notified
+        );
+        state["agents"]["w1"]["spawn_epoch"] = serde_json::json!(2);
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        let watch = &state["coordinator"]["abnormal_exit_watch"]["w1"];
+        assert_eq!(
+            watch["error_recency"], "stale",
+            "a known generation must rebaseline unchanged bytes"
+        );
+        assert!(watch.get("last_notified_key").is_none());
+        assert_eq!(
+            log.tail(0)
+                .unwrap()
+                .iter()
+                .filter(|event| event["event"] == "worker.abnormal_exit")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resource188_unknown_team_still_records_fresh_liveness_without_reusing_cache() {
+        let dir = temp_abnormal_dir("188-unknown-team");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(&rollout, "").unwrap();
+        seed_abnormal_state(&dir, &rollout, "dead", 1);
+        let mut state = crate::state::persist::load_runtime_state(&dir).unwrap();
+        state.as_object_mut().unwrap().remove("active_team_key");
+        let log = EventLog::new(&dir);
+        let transport = crate::transport::test_support::OfflineTransport::new();
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        assert_eq!(
+            state["coordinator"]["abnormal_exit_watch"]["w1"]["last_liveness"],
+            "dead"
+        );
+        assert!(state["coordinator"]["abnormal_exit_watch"]["w1"]
+            .get("watch_identity")
+            .is_none());
     }
 
     #[test]
