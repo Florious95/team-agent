@@ -93,9 +93,9 @@ pub(crate) fn observation_identity(state: &Value, agent_id: &str) -> Option<Valu
         .get("spawned_at")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty());
-    if spawn_epoch.is_none() && spawned_at.is_none() {
-        return None;
-    }
+    // Preserve the watcher's existing legacy cohort: missing spawn fields
+    // remain explicit nulls, never a fabricated generation. A later known
+    // cohort changes this identity and establishes a new baseline.
     let team = state
         .get("active_team_key")
         .and_then(Value::as_str)
@@ -123,22 +123,20 @@ pub(crate) fn matches_observation(state: &Value, agent_id: &str, row: &Value) ->
 /// Legacy/foreign-cohort facts cannot be reused as current observation evidence.
 /// This is invoked only when actually observing the member, not for paused or
 /// otherwise ineligible members. The next scan establishes the ordinary baseline.
-pub(crate) fn begin_observation(state: &mut Value, agent_id: &str) -> bool {
-    let Some(identity) = observation_identity(state, agent_id) else {
-        return false;
-    };
+pub(crate) fn begin_observation(state: &mut Value, agent_id: &str) {
+    let identity = observation_identity(state, agent_id);
     if let Some(watch) = state
         .pointer_mut("/coordinator/abnormal_exit_watch")
         .and_then(Value::as_object_mut)
     {
-        if watch
-            .get(agent_id)
-            .is_some_and(|row| row.get("watch_identity") != Some(&identity))
-        {
+        if watch.get(agent_id).is_some_and(|row| {
+            identity
+                .as_ref()
+                .is_none_or(|identity| row.get("watch_identity") != Some(identity))
+        }) {
             watch.remove(agent_id);
         }
     }
-    true
 }
 
 #[cfg(test)]
@@ -345,20 +343,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_team_or_generation_retains_history_without_authorizing_reuse() {
-        for pointer in ["/active_team_key", "/agents/w/spawn_epoch"] {
-            let mut state = observed();
-            *state.pointer_mut(pointer).unwrap() = Value::Null;
-            let before = state.clone();
-            assert!(observation_identity(&state, "w").is_none());
-            begin_observation(&mut state, "w");
-            assert_eq!(state, before);
-            assert!(!matches_observation(
-                &state,
-                "w",
-                &state["coordinator"]["abnormal_exit_watch"]["w"]
-            ));
-        }
+    fn unknown_team_retains_history_until_observation_but_never_authorizes_reuse() {
+        let mut state = observed();
+        state["active_team_key"] = Value::Null;
+        let before = state.clone();
+        assert!(observation_identity(&state, "w").is_none());
+        compact_after_merge(&mut state, None, &[]);
+        assert_eq!(state, before);
+        assert!(!matches_observation(
+            &state,
+            "w",
+            &state["coordinator"]["abnormal_exit_watch"]["w"]
+        ));
+        begin_observation(&mut state, "w");
+        assert!(state["coordinator"]["abnormal_exit_watch"]
+            .get("w")
+            .is_none());
     }
 
     #[test]
