@@ -104,6 +104,194 @@ fn last_event_named(events: &[Value], name: &str) -> Value {
         .unwrap_or_else(|| panic!("missing event {name}; got {events:?}"))
 }
 
+// Each contract runs with a synthetic HOME in a fresh process, including the
+// registry writer. No caller environment or host registry is part of the fixture.
+fn s1_isolated(name: &str, check: impl FnOnce(&Path)) {
+    if let Ok(epoch) = std::env::var("TA_S1_READER") {
+        let epoch: u64 = epoch.parse().unwrap();
+        let workspace = std::env::current_dir().unwrap();
+        let disk = s1_disk(&workspace);
+        assert_eq!(disk["teams"]["sess"]["owner_epoch"], epoch);
+        assert_eq!(disk["teams"]["sess"]["team_owner"]["owner_epoch"], epoch);
+        assert_eq!(disk["teams"]["sess"]["leader_receiver"]["owner_epoch"], epoch);
+        let registry_path = crate::leader::registry::registry_dir().unwrap().join(format!(
+            "{}__sess.json", crate::leader::registry::workspace_hash(&workspace),
+        ));
+        let entry: crate::leader::registry::LeaderRegistryEntry = serde_json::from_str(
+            &std::fs::read_to_string(registry_path).unwrap(),
+        ).unwrap();
+        assert_eq!(entry.owner_epoch, epoch);
+        assert_eq!(crate::leader::registry::classify(&entry), ("LIVE", None));
+        println!("S1 fresh reader scalar/owner/receiver/registry epoch={epoch}");
+        return;
+    }
+    if std::env::var("TA_S1_CHILD").as_deref() == Ok(name) {
+        let workspace = std::env::current_dir().unwrap();
+        check(&workspace);
+        return;
+    }
+    let workspace = ws(name);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &format!("leader::rediscover::tests::{name}"), "--nocapture"])
+        .env_clear()
+        .env("HOME", workspace.join("home"))
+        .env("TA_S1_CHILD", name)
+        .current_dir(&workspace)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+fn s1_bound(workspace: &Path, epoch: u64) -> Value {
+    let state = json!({
+        "session_name": "sess", "active_team_key": "sess",
+        "teams": {
+            "sess": {
+                "session_name": "sess", "owner_epoch": epoch,
+                "team_owner": owner("%1", "OLDUUID123456", epoch),
+                "leader_receiver": receiver("%1", "OLDUUID123456", epoch),
+                "tasks": [{"id": "kept", "status": "working"}], "notes": ["kept"]
+            },
+            "sibling": {
+                "session_name": "sibling", "owner_epoch": 19,
+                "team_owner": owner("%9", "SIBLINGUUID", 19),
+                "leader_receiver": receiver("%9", "SIBLINGUUID", 19)
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(workspace, &state).unwrap();
+    crate::state::projection::select_runtime_state(workspace, Some("sess")).unwrap()
+}
+
+fn s1_disk(workspace: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(
+        crate::state::persist::runtime_state_path(workspace),
+    ).unwrap()).unwrap()
+}
+
+#[test]
+fn s1_readopt_persists_one_generation_and_registry() {
+    s1_isolated("s1_readopt_persists_one_generation_and_registry", |workspace| {
+        let mut state = s1_bound(workspace, 3);
+        let before = s1_disk(workspace);
+        let old_owner = owner("%1", "OLDUUID123456", 3);
+        let mut recv = receiver("%1", "OLDUUID123456", 3);
+        let (attached, validation) = try_readopt_leader_pane(
+            workspace, &mut state, &mut recv,
+            &pane_json(workspace, "%2", "NEWUUID123456"), &json!([]),
+            Some(&old_owner), Provider::Codex, LeaseSource::Manual,
+            &crate::event_log::EventLog::new(workspace),
+        ).unwrap().expect("must enter production readopt");
+        assert_eq!(validation["readopted"], true);
+        let disk = s1_disk(workspace);
+        println!("S1 readopt canonical={}", disk["teams"]["sess"]);
+        assert_eq!(disk["teams"]["sess"]["owner_epoch"], 4);
+        assert_eq!(disk["teams"]["sess"]["team_owner"]["owner_epoch"], 4);
+        assert_eq!(disk["teams"]["sess"]["leader_receiver"]["owner_epoch"], 4);
+        assert_eq!(attached.owner_epoch, Some(OwnerEpoch(4)));
+        assert_eq!(disk["teams"]["sibling"], before["teams"]["sibling"]);
+        for field in ["tasks", "notes"] {
+            assert_eq!(disk["teams"]["sess"][field], before["teams"]["sess"][field]);
+        }
+        for field in ["owner_epoch", "team_owner", "leader_receiver"] {
+            assert!(disk.get(field).is_none(), "root ownership must remain absent");
+        }
+        let registered = crate::leader::registry::register_binding_from_state_best_effort(
+            workspace, Some("sess"), "attach-leader",
+        ).unwrap();
+        assert_eq!(registered.status, "registered");
+        let entry: crate::leader::registry::LeaderRegistryEntry = serde_json::from_str(
+            &std::fs::read_to_string(registered.path.unwrap()).unwrap(),
+        ).unwrap();
+        assert_eq!(entry.owner_epoch, 4);
+        assert_eq!(crate::leader::registry::classify(&entry), ("LIVE", None));
+        let fresh = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "leader::rediscover::tests::s1_readopt_persists_one_generation_and_registry", "--nocapture"])
+            .env_clear().env("HOME", workspace.join("home")).env("TA_S1_READER", "4")
+            .current_dir(workspace).output().unwrap();
+        assert!(fresh.status.success(), "{}\n{}", String::from_utf8_lossy(&fresh.stdout), String::from_utf8_lossy(&fresh.stderr));
+        print!("{}", String::from_utf8_lossy(&fresh.stdout));
+        // Receiver-only observations are idempotent and do not claim ownership.
+        write_receiver_state(workspace, &mut state, &attached).unwrap();
+        write_receiver_state(workspace, &mut state, &attached).unwrap();
+        assert_eq!(s1_disk(workspace)["teams"], disk["teams"]);
+    });
+}
+
+#[test]
+fn s1_attach_adapter_returns_readopt_generation() {
+    s1_isolated("s1_attach_adapter_returns_readopt_generation", |workspace| {
+        let mut state = s1_bound(workspace, 7);
+        let endpoint = workspace.join("offline.sock").to_string_lossy().into_owned();
+        state["teams"]["sess"]["leader_receiver"]["tmux_socket"] = json!(endpoint);
+        crate::leader::write_lease_dual_state(workspace, &state).unwrap();
+        let pane = PaneInfo {
+            pane_id: PaneId::new("%2"), session: SessionName::new("sess"),
+            window_index: None, window_name: None, pane_index: None, tty: None,
+            current_command: Some("codex".to_string()), current_path: Some(workspace.to_path_buf()),
+            active: true, pane_pid: None,
+            leader_env: BTreeMap::from([
+                ("TEAM_AGENT_LEADER_SESSION_UUID".to_string(), "NEWUUID123456".to_string()),
+                ("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), "fp".to_string()),
+                ("TEAM_AGENT_WORKSPACE".to_string(), workspace.to_string_lossy().into_owned()),
+                ("TEAM_AGENT_TEAM_ID".to_string(), "sess".to_string()),
+            ]),
+        };
+        let transport = crate::transport::test_support::OfflineTransport::new()
+            .with_tmux_endpoint(&endpoint).with_targets(vec![pane]);
+        let output = crate::transport_factory::with_leader_endpoint_transport(&endpoint, transport, || {
+            crate::cli::leader_port::attach_leader(
+                workspace, Some("sess"), Some(&PaneId::new("%2")), Provider::Codex, false,
+            ).unwrap()
+        });
+        println!("S1 attach={output}");
+        assert_eq!(output["ok"], true);
+        assert_eq!(output["leader_receiver"]["discovery"], "attach_readopt");
+        assert_eq!(output["leader_receiver"]["owner_epoch"], 8);
+        assert_eq!(s1_disk(workspace)["teams"]["sess"]["owner_epoch"], 8);
+        let events = crate::event_log::EventLog::new(workspace).tail(0).unwrap();
+        assert_eq!(event_named(&events, "owner.adopted_on_restart")["reason"], "attach_readopt");
+        let registered = event_named(&events, "leader_registry.registered");
+        let entry: crate::leader::registry::LeaderRegistryEntry = serde_json::from_str(
+            &std::fs::read_to_string(registered["path"].as_str().unwrap()).unwrap(),
+        ).unwrap();
+        assert_eq!(entry.owner_epoch, 8);
+    });
+}
+
+#[test]
+fn s1_refusals_preserve_binding_and_zero_epoch_refresh() {
+    s1_isolated("s1_refusals_preserve_binding_and_zero_epoch_refresh", |workspace| {
+        let mut state = s1_bound(workspace, 0);
+        let before = s1_disk(workspace);
+        let old_owner = owner("%1", "OLDUUID123456", 0);
+        let mut recv = receiver("%1", "OLDUUID123456", 0);
+        write_receiver_state(workspace, &mut state, &recv).unwrap();
+        assert_eq!(s1_disk(workspace)["teams"], before["teams"]);
+        for (pane, targets) in [
+            (json!({"pane_id": "%2", "pane_current_command": "bash"}), json!([])),
+            (pane_json(workspace, "%2", "NEWUUID123456"),
+             json!({"targets": [pane_json(workspace, "%1", "OLDUUID123456")]})),
+        ] {
+            let result = try_readopt_leader_pane(
+                workspace, &mut state, &mut recv, &pane, &targets, Some(&old_owner),
+                Provider::Codex, LeaseSource::Manual, &crate::event_log::EventLog::new(workspace),
+            ).unwrap();
+            assert!(result.is_none());
+            assert_eq!(s1_disk(workspace)["teams"], before["teams"]);
+            assert!(crate::leader::registry::registry_dir().unwrap().read_dir().is_err());
+        }
+        assert!(try_readopt_leader_pane(
+            workspace, &mut state, &mut recv,
+            &pane_json(workspace, "%2", "NEWUUID123456"), &json!([]), Some(&old_owner),
+            Provider::Codex, LeaseSource::Manual, &crate::event_log::EventLog::new(workspace),
+        ).unwrap().is_some());
+        assert_eq!(s1_disk(workspace)["teams"]["sess"]["owner_epoch"], 1);
+    });
+}
+
 #[test]
 fn try_readopt_writes_owner_receiver_dual_state_and_events() {
     let ws = ws("readopt-ok");
