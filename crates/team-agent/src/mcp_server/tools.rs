@@ -142,14 +142,12 @@ impl TeamOrchestratorTools {
             .canonical_owner_team_key()?
             .map(|team| team.as_str().to_string())
             .or_else(|| assignment_team_key(&state));
-        reconcile_assigned_task(&mut state, team_key.as_deref(), &task_value);
         crate::state::repository::StateRepository::new(&self.workspace)
-            .save_reapplying(
+            .commit(
                 crate::state::repository::StateWriteIntent::McpAssignTask {
                     team_key: team_key.as_deref(),
                     task_id,
                 },
-                &state,
                 |latest| {
                     ensure_object(latest);
                     let latest_team_key = team_key.clone().or_else(|| assignment_team_key(latest));

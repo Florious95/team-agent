@@ -589,8 +589,48 @@ fn persist_runtime_state_with_merge_options_and_expected(
     // on-disk latest. Re-strip here so the serialized payload is always
     // canonical-only when a canonical teams.<key>.team_owner is present.
     crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut migrated);
-    // 字节对拍 Python json.dumps(indent=2, ensure_ascii=False)(无尾换行)。
-    let payload = serde_json::to_string_pretty(&migrated)?;
+    write_state_under_lock(workspace, &path, &migrated)
+}
+
+/// Apply a bounded writer to disk under state-save, without a cache shortcut.
+pub(super) fn update_runtime_state(
+    workspace: &Path,
+    update: impl FnOnce(&Value) -> Result<Value, StateError>,
+) -> Result<Value, StateError> {
+    let path = runtime_state_path(workspace);
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    // Malformed/unreadable state is an error, never an empty store.
+    let mut latest = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    normalize_agent_session_state(&mut latest);
+    migrate_state_identity(&mut latest, &SystemEnv, workspace)?;
+    let _ = migrate_active_team_key(&mut latest);
+    let mut committed = update(&latest)?;
+    merge_ordinary_state(&mut committed, &latest)?;
+    migrate_state_identity(&mut committed, &SystemEnv, workspace)?;
+    crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut committed);
+    if committed == latest {
+        cache_set(&path, &committed);
+        return Ok(committed);
+    }
+    write_state_under_lock(workspace, &path, &committed)?;
+    Ok(committed)
+}
+
+/// Reuse ordinary roster, topology, ownership, capture and endpoint guards.
+pub(super) fn merge_ordinary_state(incoming: &mut Value, latest: &Value) -> Result<(), StateError> {
+    apply_persist_merge_contract(
+        incoming, latest, &BTreeSet::new(), None, &BTreeSet::new(),
+        &BTreeSet::new(), &BTreeSet::new(), None, None, None,
+    )
+}
+
+fn write_state_under_lock(workspace: &Path, path: &Path, migrated: &Value) -> Result<(), StateError> {
+    // Shared retry/self-heal/atomic replacement path; caller owns state-save.
+    let payload = serde_json::to_string_pretty(migrated)?;
     let delays = [0.05_f64, 0.2, 0.5];
 
     for attempt in 0..=delays.len() {

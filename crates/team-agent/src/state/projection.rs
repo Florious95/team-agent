@@ -769,6 +769,30 @@ pub fn save_team_scoped_state(workspace: &Path, team_state: &Value) -> Result<()
     save_team_scoped_state_with_deleted_agents(workspace, team_state, &[])
 }
 
+/// Materialize a bounded Team update from the lock-held workspace. Siblings
+/// come only from latest; retain the existing primary/legacy projection rules.
+pub(super) fn merge_committed_team(existing: &Value, team_state: &Value, target_key: &str) -> Value {
+    let mut primary = existing.get("session_name").and_then(Value::as_str)
+        .filter(|name| !name.is_empty()).map(|_| team_state_key(existing));
+    if primary.as_deref().is_some_and(|key| key != target_key)
+        && existing.get("session_name") == team_state.get("session_name")
+    {
+        primary = Some(target_key.to_string());
+    }
+    let mut teams = take_object(existing.get("teams"));
+    if teams.is_empty() && primary.as_deref() == Some(target_key) {
+        return compact_team_state(team_state);
+    }
+    teams.insert(target_key.to_string(), compact_team_state(team_state));
+    let mut merged = if primary.is_none() || primary.as_deref() == Some(target_key) {
+        to_object(team_state)
+    } else {
+        to_object(existing)
+    };
+    merged.insert("teams".to_string(), Value::Object(teams));
+    Value::Object(merged)
+}
+
 pub(crate) fn save_team_scoped_state_reapplying_after_conflict<F>(
     workspace: &Path,
     team_state: &Value,
