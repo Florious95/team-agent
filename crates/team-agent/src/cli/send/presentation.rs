@@ -133,13 +133,7 @@ pub(super) fn api_delivery_status(outcome: &DeliveryOutcome) -> &'static str {
 }
 
 pub(super) fn delivery_proven(status: DeliveryStatus) -> bool {
-    matches!(
-        status,
-        DeliveryStatus::Delivered
-            | DeliveryStatus::AlreadyDelivered
-            | DeliveryStatus::BroadcastDelivered
-            | DeliveryStatus::FanoutDelivered
-    )
+    status.delivery_proven()
 }
 
 pub(super) fn add_send_reminder_if_ok(value: &mut Value) {
@@ -265,6 +259,12 @@ pub(super) fn send_reminder_for_value(value: &Value) -> &'static str {
     let delivered = value.get("delivered").and_then(Value::as_bool);
     let status = value.get("status").and_then(Value::as_str);
     let delivery_status = value.get("delivery_status").and_then(Value::as_str);
+    match status {
+        Some("stored_only") => return "Message stored in the mailbox; no live delivery was requested.",
+        Some("blocked") => return "Message accepted but delivery is blocked; inspect the reason before proceeding.",
+        Some("fanout_mixed") => return "Fanout recipients have different mailbox and live delivery states; inspect the results or inbox entries.",
+        _ => {}
+    }
     if delivered == Some(false)
         || matches!(status, Some("queued"))
         || matches!(delivery_status, Some("pending"))
@@ -292,23 +292,7 @@ pub(super) fn first_target(target: &MessageTarget) -> String {
 }
 
 pub(super) fn delivery_status_wire(status: DeliveryStatus) -> &'static str {
-    match status {
-        DeliveryStatus::Delivered => "delivered",
-        DeliveryStatus::StoredOnly => "stored_only",
-        DeliveryStatus::Failed => "failed",
-        DeliveryStatus::Queued => "queued",
-        DeliveryStatus::Blocked => "blocked",
-        DeliveryStatus::Refused => "refused",
-        DeliveryStatus::Degraded => "degraded",
-        DeliveryStatus::RetryScheduled => "retry_scheduled",
-        DeliveryStatus::TrustAutoAnswerExhausted => "trust_auto_answer_exhausted",
-        DeliveryStatus::AlreadyDelivered => "already_delivered",
-        DeliveryStatus::FallbackLog => "fallback_log",
-        DeliveryStatus::BroadcastDelivered => "broadcast_delivered",
-        DeliveryStatus::BroadcastPartial => "broadcast_partial",
-        DeliveryStatus::FanoutDelivered => "fanout_delivered",
-        DeliveryStatus::FanoutPartial => "fanout_partial",
-    }
+    crate::messaging::helpers::status_wire(status)
 }
 
 pub(super) fn delivery_refusal_wire(reason: DeliveryRefusal) -> &'static str {

@@ -38,6 +38,14 @@ pub enum DeliveryStatus {
     BroadcastPartial,
     FanoutDelivered,
     FanoutPartial,
+    /// Accepted recipients include both mailbox-only and live delivery dispositions.
+    FanoutMixed,
+}
+
+impl DeliveryStatus {
+    pub(crate) fn delivery_proven(self) -> bool {
+        matches!(self, Self::Delivered | Self::AlreadyDelivered | Self::BroadcastDelivered | Self::FanoutDelivered)
+    }
 }
 
 /// 投递/发件拒绝原因 (card §42)。Python 散裸字符串靠 `==` 比对易拼错;Rust 穷尽 enum。
