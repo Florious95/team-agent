@@ -33,7 +33,7 @@ fn rules_t01_fixture(env: &rules_hermetic::HermeticTestEnv) -> (PathBuf, crate::
     std::fs::write(team_dir.join("agents/alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     seed_healthy_coordinator(&ws);
     let transport = crate::transport::test_support::OfflineTransport::new()
-        .with_capture_for_pane("%1", "OpenAI Codex\ncodex>\n");
+        .with_capture_for_pane("%0", "OpenAI Codex\ncodex>\n");
     quick_start_with_transport_in_workspace(
         &ws, &team_dir, None, false, Some("recovery"), &transport,
     ).expect("seed synthetic team through fresh entry");
@@ -68,7 +68,7 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
     for single in [true, false] {
         rules_t01_restore(ws, state);
         let transport = OfflineTransport::new()
-            .with_capture_for_pane("%1", "OpenAI Codex\ncodex>\n");
+            .with_capture_for_pane("%0", "OpenAI Codex\ncodex>\n");
         let result = if single {
             start_agent_with_transport(ws, &aid("alpha"), false, false, allow_fresh,
                 Some("recovery"), &transport).map(|outcome| format!("{outcome:?}"))
