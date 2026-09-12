@@ -24,14 +24,10 @@ pub(crate) fn update_state(
         }
         Err(err) => return Err(tool_runtime_error(err)),
     };
-    let mut state = selected.state;
-    ensure_object(&mut state);
-    append_note(&mut state, note);
-    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
+    let state = crate::state::repository::StateRepository::new(&selected.run_workspace).commit(
         crate::state::repository::StateWriteIntent::McpUpdateStateNote {
             team_key: Some(&selected.team_key),
         },
-        &state,
         |latest| {
             ensure_object(latest);
             append_note(latest, note);
@@ -65,15 +61,10 @@ fn update_state_without_spec(
         crate::state::selector::SelectorMode::RuntimeOnly,
     )
     .map_err(tool_runtime_error)?;
-    let mut state = selected.state;
-    ensure_object(&mut state);
-    seed_legacy_team_key(&mut state, &selected.run_workspace, &selected.team_key);
-    append_note(&mut state, note);
-    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
+    let state = crate::state::repository::StateRepository::new(&selected.run_workspace).commit(
         crate::state::repository::StateWriteIntent::McpUpdateStateNote {
             team_key: Some(&selected.team_key),
         },
-        &state,
         |latest| {
             ensure_object(latest);
             seed_legacy_team_key(latest, &selected.run_workspace, &selected.team_key);
