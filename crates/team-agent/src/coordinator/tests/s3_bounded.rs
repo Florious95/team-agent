@@ -125,7 +125,13 @@ fn s3_process_worker() {
             let mut state = StateRepository::new(&dir).load_team(Some("T1")).unwrap();
             state["agents"]["w1"]["pane_id"] = json!("%22");
             state["agents"]["w1"]["spawn_epoch"] = json!(2);
-            StateRepository::new(&dir).save(StateWriteIntent::StartAgent { team_key: "T1", agent_id: "w1" }, &state).unwrap();
+            // A concurrent restart owns topology for this agent. StartAgent's
+            // add-only tail intentionally carries no existing-agent authority.
+            StateRepository::new(&dir).save(StateWriteIntent::RestartTeam {
+                team_key: "T1", topology_authority_agent_ids: &["w1"],
+                skip_capture_backfill_agent_ids: &[],
+            }, &state).unwrap();
+            assert_eq!(disk(&dir)["teams"]["T1"]["agents"]["w1"]["pane_id"], "%22");
         }
         _ => panic!("unexpected test action"),
     }
