@@ -73,6 +73,22 @@ fn db_status(dir: &Path) -> Option<String> {
     db(dir).query_row("select status from results where result_id = 'result'", [], |row| row.get(0)).optional().unwrap()
 }
 
+fn install_finalize_execute_error(dir: &Path) {
+    db(dir).execute(
+        "create trigger s2_test_finalize_execute_error
+         before update of status on results
+         when new.status = 'collected'
+         begin
+           select raise(abort, 's2 injected finalize execute error');
+         end",
+        [],
+    ).unwrap();
+}
+
+fn remove_finalize_execute_error(dir: &Path) {
+    db(dir).execute("drop trigger s2_test_finalize_execute_error", []).unwrap();
+}
+
 fn start(dir: &Path, label: &str, point: &str, pause: bool, file: bool) -> Child {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", WORKER, "--ignored", "--nocapture"])
@@ -204,6 +220,41 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
             if backup.exists() { std::fs::rename(&backup, &obstruction).unwrap(); }
             recovered(&dir);
         }
+    });
+}
+
+#[test]
+fn s2_finalize_execute_error_keeps_result_eligible_for_recovery() {
+    isolated("s2_finalize_execute_error_keeps_result_eligible_for_recovery", |dir| {
+        seed(dir);
+        let child = start(dir, "failed", "before_finalize", true, true);
+        let state = disk(dir);
+        assert_eq!(state["teams"]["T1"]["tasks"][0]["status"], "done", "{state}");
+        assert_eq!(state["teams"]["T1"]["tasks"][0]["accepted_result_id"], "result", "{state}");
+        assert_eq!(db_status(dir).as_deref(), Some("success"));
+
+        install_finalize_execute_error(dir);
+        finish(child, true);
+        let failure = output(dir, "failed");
+        let error = failure["error"].as_str().unwrap_or_default();
+        assert!(error.contains("s2 injected finalize execute error"), "{failure}");
+
+        let state = disk(dir);
+        assert_eq!(state["teams"]["T1"]["tasks"][0]["status"], "done", "{state}");
+        assert_eq!(state["teams"]["T1"]["tasks"][0]["accepted_result_id"], "result", "{state}");
+        assert_eq!(db_status(dir).as_deref(), Some("success"));
+
+        remove_finalize_execute_error(dir);
+        let recovered = collect_fresh(dir, "recovered", true);
+        assert_eq!(recovered["response"]["ok"], true, "{recovered}");
+        assert_eq!(recovered["response"]["collected"].as_array().unwrap().len(), 1, "{recovered}");
+        assert_eq!(recovered["response"]["collected_results"].as_array().unwrap().len(), 1, "{recovered}");
+        assert_eq!(recovered["response"]["results"]["collected"], 1, "{recovered}");
+        assert_eq!(db_status(dir).as_deref(), Some("collected"));
+
+        let repeated = collect_fresh(dir, "repeated", true);
+        assert_eq!(repeated["response"]["collected"], json!([]), "{repeated}");
+        assert_eq!(repeated["response"]["results"]["collected"], 1, "{repeated}");
     });
 }
 
