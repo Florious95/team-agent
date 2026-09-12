@@ -240,6 +240,9 @@ impl MockLlmServer {
                 match listener.accept() {
                     Ok((mut stream, _addr)) => {
                         called_in_thread.store(true, Ordering::SeqCst);
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(700)))
+                            .unwrap();
                         if let Some(body) = read_request_body(&mut stream) {
                             *request_body_in_thread.lock().unwrap() = Some(body);
                         }
