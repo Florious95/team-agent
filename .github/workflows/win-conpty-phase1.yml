@@ -30,7 +30,6 @@ jobs:
       CANDIDATE: ${{ inputs.candidate }}
       RUSTUP_TOOLCHAIN: '1.95.0'
       CARGO_TERM_COLOR: never
-      EVIDENCE_DIR: ${{ runner.temp }}/scoped-ci-evidence
     steps:
       - name: Admit fixed candidate
         id: admit
@@ -41,8 +40,10 @@ jobs:
           entry = candidates[os.environ['CANDIDATE']]
           assert os.environ['GITHUB_REPOSITORY'] == 'Florious95/team-agent'
           assert all(re.fullmatch('[0-9a-f]{40}', entry[k]) for k in ['sha', 'tree'])
-          evidence = pathlib.Path(os.environ['EVIDENCE_DIR'])
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'scoped-ci-evidence'
           evidence.mkdir()
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              print('EVIDENCE_DIR=' + str(evidence), file=out)
           (evidence / 'request.json').write_text(json.dumps(entry, indent=2) + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               print('sha=' + entry['sha'], file=out)
