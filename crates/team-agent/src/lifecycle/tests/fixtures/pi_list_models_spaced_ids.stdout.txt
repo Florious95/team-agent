@@ -1,0 +1,9 @@
+provider      model                         context  max-out  thinking  images
+cursor        claude-opus-4-7@1m:fast       1M       16.4K    yes       yes
+cursor        claude-opus-4-7@1m:slow       1M       16.4K    yes       yes
+openai-codex  gpt-5.6-luna                  272K     128K     yes       yes
+team-agent    Claude Opus 4.6 (Thinking)    200K     32.8K    yes       yes
+team-agent    Claude Sonnet 4.6 (Thinking)  200K     32.8K    yes       yes
+team-agent    Gemini 3.8 Flash              200K     32.8K    yes       yes
+team-agent    gpt-5.6-luna                  200K     32.8K    yes       yes
+team-agent    qwen3.8-27b                   262.1K   32.8K    yes       yes
