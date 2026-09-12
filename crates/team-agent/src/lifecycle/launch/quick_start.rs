@@ -197,7 +197,21 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
                 let (error, applied_grant) = error.into_parts();
                 self.applied_grant = applied_grant.map(|grant| (grant.owner, grant.receiver));
                 self.cas_conflict = match &error {
-                    crate::leader::LeaderError::State(crate::state::StateError::SaveConflict(_)) => true,
+                    crate::leader::LeaderError::State(
+                        crate::state::StateError::SaveConflict(detail),
+                    ) => {
+                        // SaveConflict also covers agent topology merges. Keep the
+                        // original cause without logging owner/receiver values or
+                        // changing the refusal and concurrent-winner protection.
+                        let _ = event_log.write(
+                            "quick_start.leader_attach_save_conflict",
+                            serde_json::json!({
+                                "team_key": state.get("active_team_key"),
+                                "detail": detail,
+                            }),
+                        );
+                        true
+                    }
                     _ => false,
                 };
                 self.last_failure_reason = Some(if self.cas_conflict {
@@ -4385,6 +4399,97 @@ mod fresh_quick_start_leader_binding_tests {
         let winner_entry: crate::leader::registry::LeaderRegistryEntry =
             serde_json::from_slice(&std::fs::read(registry_path).unwrap()).unwrap();
         assert_eq!(winner_entry.channel["pane_id"], json!("%winner"));
+        let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+        let conflict = events
+            .iter()
+            .find(|event| event["event"] == "quick_start.leader_attach_save_conflict")
+            .expect("the owner/receiver CAS cause must survive the generic refusal");
+        assert_eq!(conflict["team_key"], json!("fresh"));
+        assert_eq!(
+            conflict["detail"],
+            json!("fresh caller owner/receiver changed before commit")
+        );
+        assert!(!conflict.to_string().contains("writer-winner"));
+        assert_eq!(
+            refusal_reason(&workspace),
+            Some(("attach".into(), "attach_cas_conflict".into()))
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn fresh_attach_topology_conflict_preserves_cause_and_concurrent_state() {
+        let hermetic = HermeticTestEnv::enter("runtime-attach-topology-conflict");
+        let workspace = runtime_workspace(&hermetic, "fresh");
+        let parent = hermetic.root().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let _tmux = hermetic.with_env("TMUX", "/tmp/tmux.sock,1,0");
+        let _pane = hermetic.with_env("TMUX_PANE", "%1");
+        let _provider = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "codex");
+        let seed = seeded_runtime_owner(&workspace);
+        let mut state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        state["agents"]["sol"]["pane_id"] = json!("%worker");
+        save_launched_team_state_for_key(&workspace, &state, Some("fresh"), None).unwrap();
+        let seeded_receiver = state["teams"]["fresh"]["leader_receiver"].clone();
+        let concurrent_writer = |_: &str, _: &PaneId, _: &str|
+         -> Result<String, crate::leader::LeaderError> {
+            let mut winner = crate::state::persist::load_runtime_state(&workspace)?;
+            winner["agents"]["sol"]["pane_id"] = json!("%new-worker");
+            winner["teams"]["fresh"]["agents"]["sol"]["pane_id"] = json!("%new-worker");
+            crate::state::persist::save_runtime_state_with_lifecycle_topology_authority(
+                &workspace,
+                &winner,
+                "fresh",
+                &["sol"],
+            )?;
+            Ok("unpublished-nonce".to_string())
+        };
+        let transport = OfflineTransport::new()
+            .with_tmux_endpoint("/tmp/tmux.sock")
+            .with_pane_current_command("%1", "codex")
+            .with_targets(vec![caller_target(parent, None)]);
+        let mut ops = RuntimeFreshQuickStartLeaderBindingOps {
+            transport: &transport,
+            last_failure_reason: None,
+            cas_conflict: false,
+            applied_grant: None,
+            registry_receipt: None,
+            frozen_owner: Some(seed.clone()),
+            frozen_receiver: Some(seeded_receiver.clone()),
+            nonce_writer: Some(&concurrent_writer),
+        };
+        assert!(!bind_fresh_quick_start_leader_with(
+            &workspace,
+            "fresh",
+            Some(&seed),
+            &mut ops,
+        )
+        .unwrap());
+        assert!(ops.cas_conflict);
+        assert!(ops.applied_grant.is_none());
+        assert!(ops.registry_receipt.is_none());
+        let persisted = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(persisted["teams"]["fresh"]["team_owner"], seed);
+        assert_eq!(persisted["teams"]["fresh"]["leader_receiver"], seeded_receiver);
+        assert_eq!(
+            persisted["teams"]["fresh"]["agents"]["sol"]["pane_id"],
+            json!("%new-worker")
+        );
+        let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+        let conflict = events
+            .iter()
+            .find(|event| event["event"] == "quick_start.leader_attach_save_conflict")
+            .expect("agent topology conflicts must retain their distinct cause");
+        assert_eq!(conflict["team_key"], json!("fresh"));
+        assert_eq!(
+            conflict["detail"],
+            json!("agent_id=sol projection=agents conflicting_fields=pane_id")
+        );
+        assert!(!conflict.to_string().contains("unpublished-nonce"));
+        assert_eq!(
+            refusal_reason(&workspace),
+            Some(("attach".into(), "attach_cas_conflict".into()))
+        );
     }
 
     #[test]
