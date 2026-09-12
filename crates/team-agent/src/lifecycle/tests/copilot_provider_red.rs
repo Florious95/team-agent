@@ -1742,6 +1742,7 @@ struct RecordedSpawn {
 struct RecordingTransport {
     spawns: Mutex<Vec<RecordedSpawn>>,
     session_present: Mutex<bool>,
+    panes: Mutex<Vec<PaneInfo>>,
 }
 
 impl RecordingTransport {
@@ -1786,8 +1787,22 @@ impl Transport for RecordingTransport {
             window: window.as_str().to_string(),
         });
         *self.session_present.lock().unwrap() = true;
+        let pane_id = PaneId::new(format!("%{}", spawns.len()));
+        self.panes.lock().unwrap().push(PaneInfo {
+            pane_id: pane_id.clone(),
+            session: session.clone(),
+            window_index: None,
+            window_name: Some(window.clone()),
+            pane_index: None,
+            tty: None,
+            current_command: None,
+            current_path: None,
+            active: false,
+            pane_pid: Some(30_000 + spawns.len() as u32),
+            leader_env: BTreeMap::new(),
+        });
         Ok(SpawnResult {
-            pane_id: PaneId::new(format!("%{}", spawns.len())),
+            pane_id,
             session: session.clone(),
             window: window.clone(),
             child_pid: Some(30_000 + spawns.len() as u32),
@@ -1852,7 +1867,7 @@ impl Transport for RecordingTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self.panes.lock().unwrap().clone())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
@@ -1874,10 +1889,16 @@ impl Transport for RecordingTransport {
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
         *self.session_present.lock().unwrap() = false;
+        self.panes.lock().unwrap().retain(|pane| &pane.session != _session);
         Ok(())
     }
 
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+    fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+        self.panes.lock().unwrap().retain(|pane| match target {
+            Target::Pane(id) => &pane.pane_id != id,
+            Target::SessionWindow { session, window } =>
+                &pane.session != session || pane.window_name.as_ref() != Some(window),
+        });
         Ok(())
     }
 
