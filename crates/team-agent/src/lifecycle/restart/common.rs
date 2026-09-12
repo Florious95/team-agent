@@ -359,7 +359,7 @@ pub(super) fn spawn_agent_window(
     let command_model = profile_launch.command_overrides.model.as_deref().or(model);
     // 0.4.x provider effort MVP: restart/resume preserves effort from the
     // persisted agent JSON (state's agent["effort"] field, set by launch).
-    let restart_effort = crate::lifecycle::launch::provider_effort_for_spawn_json(agent, provider);
+    let restart_effort = crate::lifecycle::launch::provider_effort_for_spawn_json(agent, provider)?;
     if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
         agent,
         provider,
