@@ -135,7 +135,7 @@ pub(crate) fn write_worker_mcp_config_for_provider(
             .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", parent.display())))?;
     }
     let raw = if matches!(provider, Some(Provider::Copilot)) {
-        copilot_translate_mcp_servers(&config.raw)
+        crate::provider::adapters::copilot::copilot_translate_mcp_config(&config.raw)
     } else {
         config.raw.clone()
     };
@@ -608,36 +608,6 @@ fn upsert_toml_table_prefixes(existing: &str, tables: &[&str], stanza: &str) -> 
     } else {
         format!("{trimmed}\n\n{stanza}")
     }
-}
-
-/// ---
-/// purpose: 把 MCP 配置里每个 server 的 type 字段名换成 transport
-/// returns: 同结构的新值，其余字段全部保留；非对象原样返回
-/// ---
-/// C-3-4 cr verdict v2 — McpConfig.raw 是 `{name: {type, command, args, env}}` 形;
-/// copilot mcp add schema 取 `transport` 替 `type`(stdio|http|sse 同值)。仅
-/// 字段名变换,其余字段全保留。
-pub(super) fn copilot_translate_mcp_servers(raw: &serde_json::Value) -> serde_json::Value {
-    let Some(servers) = raw.as_object() else {
-        return raw.clone();
-    };
-    let mut translated = serde_json::Map::new();
-    for (name, server) in servers {
-        let Some(obj) = server.as_object() else {
-            translated.insert(name.clone(), server.clone());
-            continue;
-        };
-        let mut out = serde_json::Map::new();
-        for (key, value) in obj {
-            if key == "type" {
-                out.insert("transport".to_string(), value.clone());
-            } else {
-                out.insert(key.clone(), value.clone());
-            }
-        }
-        translated.insert(name.clone(), serde_json::Value::Object(out));
-    }
-    serde_json::Value::Object(translated)
 }
 
 /// ---
