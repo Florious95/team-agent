@@ -103,20 +103,15 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
                 for pointer in ["/agents/alpha", "/teams/recovery/agents/alpha"] {
                     let before = persisted_before.pointer(pointer).unwrap().get(key);
                     let observed = persisted.pointer(pointer).unwrap().get(key);
-                    // The production reader's documented compatibility
-                    // normalizer inserts null only for these six root-agent
-                    // fields. Do not compare missing and null as equivalent:
-                    // assert the insertion explicitly, and require exact
-                    // preservation everywhere else (including the team view).
-                    let normalized_root_field = pointer == "/agents/alpha"
-                        && ["session_id", "rollout_path", "captured_at", "captured_via"]
-                            .contains(&key)
-                        && before.is_none();
-                    if normalized_root_field {
-                        assert!(observed.is_some_and(serde_json::Value::is_null), "{pointer}/{key}: expected reader normalization, got {observed:?}; {rendered}");
-                    } else {
-                        assert_eq!(observed, before, "{pointer}/{key}: {rendered}");
-                    }
+                    // `load_runtime_state` normalizes root-agent fields only
+                    // in memory. It persists that normalization only when an
+                    // identity/team-key migration also reports `changed`.
+                    // This fixture has those migration keys already present,
+                    // and both refusal paths stop before a state writer, so
+                    // the on-disk refusal contract is exact raw preservation.
+                    // Keep missing and JSON null distinct; never infer a
+                    // persisted null from the reader's in-memory view.
+                    assert_eq!(observed, before, "{pointer}/{key}: {rendered}");
                 }
             }
         } else {
