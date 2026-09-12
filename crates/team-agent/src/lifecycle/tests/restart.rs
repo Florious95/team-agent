@@ -63,7 +63,12 @@ fn rules_t01_restore(ws: &std::path::Path, state: &serde_json::Value) {
     std::fs::write(crate::state::persist::runtime_state_path(ws), serde_json::to_vec(state).unwrap()).unwrap();
 }
 
-fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fresh: bool, refusal: Option<&str>) {
+fn rules_t01_run_both(
+    ws: &std::path::Path,
+    state: &serde_json::Value,
+    allow_fresh: bool,
+    refusal: Option<(&str, &str)>,
+) {
     use crate::transport::test_support::OfflineTransport;
     for single in [true, false] {
         rules_t01_restore(ws, state);
@@ -78,15 +83,43 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
         assert_eq!(persisted_before, *state, "fixture seed changed before entry");
         let transport = OfflineTransport::new()
             .with_capture_for_pane("%0", "OpenAI Codex\ncodex>\n");
-        let result = if single {
-            start_agent_with_transport(ws, &aid("alpha"), false, false, allow_fresh,
-                Some("recovery"), &transport).map(|outcome| format!("{outcome:?}"))
+        let (rendered, result_ok) = if single {
+            let result = start_agent_with_transport(ws, &aid("alpha"), false, false, allow_fresh,
+                Some("recovery"), &transport);
+            let rendered = format!("{result:?}");
+            if let Some((expected, _)) = refusal {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(crate::lifecycle::types::LifecycleError::RequirementUnmet(message))
+                            if message.contains(expected)
+                    ),
+                    "single entry expected RequirementUnmet containing {expected}; {rendered}"
+                );
+            }
+            (rendered, result.is_ok())
         } else {
-            crate::lifecycle::restart::restart_with_transport_with_session_convergence_deadline(
+            let result = crate::lifecycle::restart::restart_with_transport_with_session_convergence_deadline(
                 ws, allow_fresh, Some("recovery"), &transport, Some(0), Some(0),
-            ).map(|outcome| format!("{outcome:?}"))
+            );
+            let rendered = format!("{result:?}");
+            if let Some((_, expected)) = refusal {
+                let typed_refusal_matches = match &result {
+                    Ok(crate::lifecycle::types::RestartReport::RefusedResumeAtomicity {
+                        unresumable, ..
+                    }) => unresumable.iter().any(|entry| entry.reason == expected),
+                    Ok(crate::lifecycle::types::RestartReport::RefusedInvalidFirstSendAt {
+                        invalid, ..
+                    }) => expected == "invalid first_send_at" && !invalid.is_empty(),
+                    _ => false,
+                };
+                assert!(
+                    typed_refusal_matches,
+                    "team entry expected typed refusal reason {expected}; {rendered}"
+                );
+            }
+            (rendered, result.is_ok())
         };
-        let rendered = format!("{result:?}");
         eprintln!("T01 single={single} allow_fresh={allow_fresh} result={rendered}");
         // Read the raw file so the normalizer does not erase the distinction
         // between missing and null while the refusal is being checked.
@@ -94,8 +127,7 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
             &std::fs::read(crate::state::persist::runtime_state_path(ws)).unwrap(),
         ).unwrap();
         let after = crate::state::persist::load_runtime_state(ws).unwrap();
-        if let Some(reason) = refusal {
-            assert!(rendered.contains(reason), "{rendered}");
+        if refusal.is_some() {
             assert!(transport.spawn_records().is_empty(), "{rendered}");
             assert!(!transport.calls().contains(&"kill_session"));
             for key in ["session_id", "rollout_path", "captured_at", "captured_via", "first_send_at",
@@ -115,7 +147,7 @@ fn rules_t01_run_both(ws: &std::path::Path, state: &serde_json::Value, allow_fre
                 }
             }
         } else {
-            assert!(result.is_ok(), "{rendered}");
+            assert!(result_ok, "{rendered}");
             assert_eq!(transport.spawn_records().len(), 1, "{rendered}");
             if state["agents"]["alpha"]["session_id"].is_null() || allow_fresh {
                 assert!(after["agents"]["alpha"]["session_id"].is_null());
@@ -144,7 +176,12 @@ fn rules_t01_missing_interacted_session_refuses_both_entries() {
         "rollout_path": ws.join("missing.jsonl"),
         "captured_at": "2026-01-01T00:00:00Z", "captured_via": "synthetic",
     }));
-    rules_t01_run_both(&ws, &state, false, Some("resume_not_ready"));
+    rules_t01_run_both(
+        &ws,
+        &state,
+        false,
+        Some(("resume_not_ready", "no_persisted_session_id")),
+    );
 }
 
 #[test]
@@ -161,8 +198,13 @@ fn rules_t01_identity_mismatch_refuses_and_matching_or_unknown_identity_resumes(
             "captured_at": "2026-01-01T00:00:00Z", "captured_via": "synthetic",
             "first_send_at": "2026-01-01T00:00:00Z",
         }));
-        rules_t01_run_both(&ws, &state, false,
-            (embedded == "foreign").then_some("session_identity_mismatch"));
+        rules_t01_run_both(
+            &ws,
+            &state,
+            false,
+            (embedded == "foreign")
+                .then_some(("session_identity_mismatch", "session_identity_mismatch")),
+        );
     }
 }
 
@@ -175,7 +217,12 @@ fn rules_t01_corrupt_first_send_at_refuses_even_with_allow_fresh() {
     for corrupt in [json!(false), json!("invalid")] {
         let state = rules_t01_seed_agent(&ws, json!({"first_send_at": corrupt}));
         for allow_fresh in [false, true] {
-            rules_t01_run_both(&ws, &state, allow_fresh, Some("invalid first_send_at"));
+            rules_t01_run_both(
+                &ws,
+                &state,
+                allow_fresh,
+                Some(("invalid first_send_at", "invalid first_send_at")),
+            );
         }
     }
 }
