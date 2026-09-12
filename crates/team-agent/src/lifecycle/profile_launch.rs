@@ -333,7 +333,7 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-fn parse_env_text(text: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_env_text(text: &str) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     for raw in text.lines() {
         let mut line = raw.trim();

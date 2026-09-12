@@ -222,18 +222,10 @@ fn set_owner_only_permissions(path: &Path) -> Result<(), CliError> {
 
 fn read_profile_env(path: &Path) -> Result<Map<String, Value>, CliError> {
     let raw = std::fs::read_to_string(path)?;
-    let mut values = Map::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        values.insert(key.to_string(), Value::String(value.to_string()));
-    }
-    Ok(values)
+    Ok(crate::lifecycle::profile_launch::parse_env_text(&raw)
+        .into_iter()
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect())
 }
 
 fn redacted_values(values: &Map<String, Value>) -> Value {
