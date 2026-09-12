@@ -808,3 +808,87 @@ fn fix_a11_agents_is_a_file_reports_no_role_docs() {
         "got: {err}"
     );
 }
+
+#[path = "../../tests/support/hermetic.rs"]
+mod config_authority_hermetic;
+
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t07_known_effort_matrix_compiles_validates_and_reaches_commands() {
+    let _env = config_authority_hermetic::HermeticTestEnv::enter("effort-policy-matrix");
+    for provider in ["claude", "claude_code", "codex", "grok", "pi", "cursor_agent", "copilot", "gemini_cli", "fake"] {
+        let provider_enum = parse_canonical_provider(provider).unwrap();
+        for effort in [None, Some("low"), Some("medium"), Some("high"), Some("xhigh"), Some("max")] {
+            let known_supported = matches!(provider, "claude" | "claude_code" | "codex" | "grok" | "pi");
+            let accepted = effort.is_none() || (provider != "cursor_agent" && (effort != Some("max") || matches!(provider, "claude" | "claude_code" | "pi")));
+            let role = format!("---\nname: worker\nrole: worker\nprovider: {provider}\nmodel: openai-codex/gpt-5.5\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nbody\n");
+            let team = build_team("---\nname: effort-team\nobjective: effort policy\n---\n", &[("worker.md", &role)], &[]);
+            let mut direct = compile_team(&team).unwrap();
+            let configured_role = match effort {
+                Some(effort) => role.replacen("role:", &format!("effort: {effort}\nrole:"), 1),
+                None => role.clone(),
+            };
+            fs::write(team.join("agents/worker.md"), configured_role).unwrap();
+            let compiled_team = compile_team(&team);
+            let compiled_role = compile_role_agent(&team.join("agents/worker.md"), &Value::Map(vec![]), &workspace_of(&direct));
+            if let Some(effort) = effort {
+                let Value::Map(root) = &mut direct else { unreachable!() };
+                let Value::List(agents) = &mut root.iter_mut().find(|(key, _)| key == "agents").unwrap().1 else { unreachable!() };
+                let Value::Map(agent) = &mut agents[0] else { unreachable!() };
+                agent.push(("effort".into(), Value::Str(effort.into())));
+            }
+            assert_eq!(compiled_team.is_ok(), accepted, "compile_team {provider}/{effort:?}: {:?}", compiled_team.as_ref().err());
+            assert_eq!(compiled_role.is_ok(), accepted, "compile_role {provider}/{effort:?}");
+            let validated = crate::model::spec::validate_spec(&direct, &team);
+            assert_eq!(validated.is_ok(), accepted, "spec {provider}/{effort:?}: {validated:?}");
+            let raw = serde_json::json!({"provider": provider, "effort": effort});
+            let runtime = crate::lifecycle::launch::provider_effort_for_spawn_json(&raw, provider_enum);
+            assert_eq!(runtime.is_ok(), accepted, "runtime {provider}/{effort:?}: {runtime:?}");
+            if !accepted { continue; }
+            let raw_effort = runtime.unwrap();
+            let dynamic = compiled_role.unwrap().agent;
+            let compiled = compiled_team.unwrap();
+            let static_agent = &compiled.get("agents").unwrap().as_list().unwrap()[0];
+            let selected_effort = crate::lifecycle::launch::provider_effort_for_spawn(&dynamic, provider_enum).unwrap();
+            assert_eq!(selected_effort, raw_effort);
+            assert_eq!(crate::lifecycle::launch::provider_effort_for_spawn(static_agent, provider_enum).unwrap(), selected_effort);
+            let event = crate::lifecycle::launch::provider_effort_event_if_dropped_json(&raw, provider_enum, "worker");
+            assert_eq!(event.is_some(), effort.is_some() && !known_supported);
+            if let Some(event) = event { assert_eq!(event["action"], "ignored"); }
+            let argv = if provider == "pi" {
+                crate::provider::adapters::pi::build_pi_command_argv(crate::provider::adapters::pi::PiCommandRequest {
+                    executable: std::path::Path::new("pi"), extension: &team.join("fixture-extension.ts"),
+                    model: Some("openai-codex/gpt-5.5"), effort: selected_effort,
+                    system_prompt: "fixture", tool_categories: &["mcp_team"],
+                    session_dir: Some(&team.join("sessions")),
+                    session: crate::provider::adapters::pi::PiSessionSelector::Fresh { session_id: "c5ddf218-24a5-4e74-960c-ab6606ea7e8c" },
+                    agent_id: "worker",
+                }).unwrap()
+            } else {
+                crate::provider::get_adapter(provider_enum).build_command_plan(crate::provider::ProviderCommandContext {
+                    auth_mode: crate::model::enums::AuthMode::Subscription,
+                    mcp_config: None, system_prompt: None, model: Some("gpt-5.5"),
+                    tools: &[], profile_launch: None, agent_id_hint: Some("worker"), effort: selected_effort,
+                }).unwrap().argv
+            };
+            let actual = if provider == "codex" {
+                argv.iter().find_map(|arg| arg.strip_prefix("model_reasoning_effort="))
+            } else {
+                argv.windows(2).find(|pair| matches!(pair[0].as_str(), "--effort" | "--thinking")).map(|pair| pair[1].as_str())
+            };
+            assert_eq!(actual, if known_supported { effort } else { None }, "plan {provider}/{effort:?}: {argv:?}");
+        }
+    }
+}
+
+#[test]
+fn config_authority_t07_role_team_precedence_and_pi_native_default_are_preserved() {
+    for (provider, role_effort, expected) in [("claude", Some("high"), Some("high")), ("claude", None, Some("medium")), ("pi", None, None), ("pi", Some("max"), Some("max"))] {
+        let effort = role_effort.map(|value| format!("effort: {value}\n")).unwrap_or_default();
+        let role = format!("---\nname: w\nrole: worker\nprovider: {provider}\n{effort}dangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nbody\n");
+        let team = build_team("---\nname: team\nobjective: precedence\nprovider_effort: medium\n---\n", &[("w.md", &role)], &[]);
+        let compiled = compile_team(&team).unwrap();
+        let agent = &compiled.get("agents").unwrap().as_list().unwrap()[0];
+        assert_eq!(agent.get("effort").and_then(Value::as_str), expected);
+    }
+}

@@ -20,7 +20,7 @@ use crate::model::task_graph::{find_dependency_cycle, TaskNode};
 use crate::model::yaml::Value as Yaml;
 use crate::model::{permissions, yaml};
 use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
-use crate::provider::wire::{is_claude_family, parse_canonical_provider};
+use crate::provider::wire::parse_canonical_provider;
 
 /// result_envelope_v1 顶层 required(= allowed)。
 const RESULT_REQUIRED: &[&str] = &[
@@ -465,15 +465,14 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
                     "{path}/effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max)"
                 ));
             }
-            Some(effort) if effort.is_claude_only() => {
+            Some(effort) => {
                 let provider = agent.get("provider").and_then(Yaml::as_str).unwrap_or("");
-                if !parse_canonical_provider(provider).is_some_and(is_claude_family) {
-                    errors.push(format!(
-                        "{path}/effort: effort '{raw}' is only supported by claude/claude_code (provider: {provider})"
-                    ));
+                if let Some(provider_enum) = parse_canonical_provider(provider) {
+                    if let Err(reason) = effort.resolve_for_provider(provider_enum) {
+                        errors.push(format!("{path}/effort: {reason} (effort: {raw}; provider: {provider})"));
+                    }
                 }
             }
-            Some(_) => {}
         }
     }
     check_keys_y(

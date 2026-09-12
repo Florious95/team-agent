@@ -158,7 +158,7 @@ pub(super) fn spawn_agents(
         // 0.4.x provider effort MVP step 4 + 7: resolve effort and emit
         // unsupported warning event when the spec asked for an effort the
         // provider can't satisfy.
-        let agent_effort = provider_effort_for_spawn(agent, provider);
+        let agent_effort = provider_effort_for_spawn(agent, provider)?;
         if let Some(event_value) = provider_effort_event_if_dropped(agent, provider, agent_id_raw) {
             let _ = crate::event_log::EventLog::new(workspace)
                 .write("provider.effort_unsupported", event_value);

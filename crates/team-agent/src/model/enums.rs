@@ -86,9 +86,8 @@ impl ProviderEffort {
         matches!(self, Self::Max)
     }
 
-    /// True when the given provider supports this effort level. `max` is
-    /// Claude-only; other levels are supported by Claude, Codex, and Grok.
-    /// Copilot/Gemini/CursorAgent/Fake ignore the field (warning at runtime).
+    /// Native command support. Claude/Pi accept max; Codex/Grok accept
+    /// the other levels. Use resolve_for_provider for admission/ignore policy.
     pub fn is_supported_by(self, provider: Provider) -> bool {
         match provider {
             Provider::Claude | Provider::ClaudeCode | Provider::Pi => true,
@@ -98,6 +97,21 @@ impl ProviderEffort {
             }
         }
     }
+    /// One admission policy for compiler, direct specs and runtime commands.
+    /// Ok(None) preserves the legacy warning-and-ignore providers.
+    pub fn resolve_for_provider(self, provider: Provider) -> Result<Option<Self>, &'static str> {
+        if provider == Provider::CursorAgent {
+            return Err("cursor_agent does not support effort; the Cursor CLI has no --effort flag");
+        }
+        if self.is_supported_by(provider) {
+            Ok(Some(self))
+        } else if self.is_claude_only() {
+            Err("effort 'max' is only supported by claude/claude_code/pi")
+        } else {
+            Ok(None)
+        }
+    }
+
 }
 
 /// auth 模式(`AUTH_MODES` `profiles/constants.py:6`)。

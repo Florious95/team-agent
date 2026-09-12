@@ -33,7 +33,7 @@ use crate::model::yaml::Value;
 use crate::model::{paths, permissions, spec, yaml, ModelError};
 use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
 use crate::provider::wire::{
-    builtin_provider_model as wire_builtin_provider_model, is_claude_family,
+    builtin_provider_model as wire_builtin_provider_model,
     parse_canonical_provider, provider_model_keys,
 };
 
@@ -571,8 +571,7 @@ fn compile_role_agent_with_mode(
     }
     // 0.4.x provider effort MVP step 3: resolve effort with role > team > none.
     // Validate (unknown literal) AND check provider/effort compatibility
-    // (max is Claude-only; emit hard error for max + non-Claude here so
-    // unsupported combinations fail at compile, not at runtime).
+    // The shared provider policy rejects invalid combinations before spawn.
     let role_effort = match string_field(&meta, "effort") {
         Some(raw) if !raw.trim().is_empty() => {
             let value = raw.trim();
@@ -596,7 +595,7 @@ fn compile_role_agent_with_mode(
         role_effort.or(team_effort)
     };
     if let Some(effort) = resolved_effort {
-        // Reject max + non-Claude at compile time.
+        // Validate the resolved provider/effort pair without dropping warnings.
         let provider_str = agent_items
             .iter()
             .find(|(k, _)| *k == "provider")
@@ -606,25 +605,12 @@ fn compile_role_agent_with_mode(
             })
             .unwrap_or("");
         let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
-        if effort.is_claude_only()
-            && !is_claude_family(provider_enum)
-            && provider_enum != Provider::Pi
-        {
-            return Err(ModelError::Validation(format!(
-                "{}: effort '{}' is only supported by claude/claude_code (provider: {provider_str})",
-                role_path.display(),
-                effort.as_str()
-            )));
-        }
-        if provider_enum == Provider::CursorAgent {
-            return Err(ModelError::Validation(format!(
-                "{}: cursor_agent does not support effort '{}'. \
-The Cursor CLI has no `--effort` flag; the framework must not drop the field and still launch. \
-Remove effort from the role file (do not map it into `--model[effort=]` until that form is measured).",
-                role_path.display(),
-                effort.as_str()
-            )));
-        }
+        effort.resolve_for_provider(provider_enum).map_err(|reason| {
+            ModelError::Validation(format!(
+                "{}: {reason} (effort: {}; provider: {provider_str})",
+                role_path.display(), effort.as_str()
+            ))
+        })?;
         agent_items.push(("effort", Value::Str(effort.as_str().to_string())));
     }
     Ok(CompiledRole {

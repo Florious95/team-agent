@@ -463,6 +463,38 @@ fn breal_restart_rehydrates_role_context_from_compiled_spec() {
     );
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn config_authority_t07_dynamic_add_and_restore_refuse_invalid_effort_before_spawn() {
+    let _hermetic = enter_hermetic("config-authority-effort-refusal");
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        let (team, _, role, transport) = add_fixture();
+        let text = role_doc("w2").replace("provider: codex", &format!("provider: cursor_agent\neffort: {effort}"));
+        std::fs::write(&role, text).unwrap();
+        let error = crate::lifecycle::add_agent_with_transport(&team, &aid("w2"), &role, false, Some("teamdir"), &transport).unwrap_err();
+        assert!(error.to_string().contains("does not support effort"));
+        assert!(transport.spawn_records().is_empty());
+    }
+    for (provider, effort) in [("codex", "max"), ("cursor_agent", "medium")] {
+        let (workspace, _) = breal_one_worker_workspace();
+        let path = crate::model::paths::runtime_spec_path(&workspace, "teamdir");
+        let text = std::fs::read_to_string(&path).unwrap();
+        // A legacy/direct persisted spec reaches rehydration without role compilation.
+        let mut spec = crate::model::yaml::loads(&text).unwrap();
+        let crate::model::yaml::Value::Map(root) = &mut spec else { panic!("spec map") };
+        let crate::model::yaml::Value::List(agents) = &mut root.iter_mut().find(|(key, _)| key == "agents").unwrap().1 else { panic!("agents list") };
+        let crate::model::yaml::Value::Map(agent) = &mut agents[0] else { panic!("agent map") };
+        agent.retain(|(key, _)| key != "effort" && key != "provider");
+        agent.push(("provider".into(), crate::model::yaml::Value::Str(provider.into())));
+        agent.push(("effort".into(), crate::model::yaml::Value::Str(effort.into())));
+        std::fs::write(path, crate::model::yaml::dumps(&spec)).unwrap();
+        let transport = BRealTransport::owned();
+        let error = crate::lifecycle::start_agent_with_transport(&workspace, &aid("w1"), true, false, true, Some("teamdir"), &transport).unwrap_err();
+        assert!(error.to_string().contains("effort"), "{error}");
+        assert!(transport.spawn_records().is_empty());
+    }
+}
+
 fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
     let team = temp_ws().join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
