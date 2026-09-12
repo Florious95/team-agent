@@ -556,3 +556,130 @@ impl Transport for RecordingTransport {
         Ok(AttachOutcome::Attached)
     }
 }
+
+#[test]
+fn resource188_batch_and_public_single_prepare_once_and_keep_fresh_leader_load() {
+    use crate::messaging::delivery::preparation_probe::COUNTS;
+    for batch in [true, false] {
+        let case = Case::new(if batch { "188-batch" } else { "188-single" });
+        let transport = RecordingTransport::new("");
+        let message = case
+            .store
+            .create_message(
+                None,
+                "worker",
+                "leader",
+                "count",
+                None,
+                false,
+                Some("acceptance-team"),
+            )
+            .unwrap();
+        COUNTS.with(|counts| counts.set((0, 0, 0)));
+        if batch {
+            deliver_pending_messages(&case.workspace, &case.state, &transport, &case.event_log)
+                .unwrap();
+        } else {
+            deliver_pending_message(
+                &case.workspace,
+                &case.store,
+                &transport,
+                &message,
+                &case.event_log,
+                &case.state,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            COUNTS.with(|counts| counts.get()),
+            (1, 2, 1),
+            "one preparation, pre/post-claim projections, one claim"
+        );
+        assert_eq!(transport.inject_count(), 1);
+        assert_eq!(
+            case.message_status(&message),
+            "submitted_pending_acceptance"
+        );
+    }
+}
+
+#[test]
+fn resource188_busy_and_refused_candidates_prepare_once_without_claiming() {
+    use crate::messaging::delivery::preparation_probe::COUNTS;
+    let mut case = Case::new("188-busy");
+    case.state["agents"] = serde_json::json!({"worker": {"agent_id": "worker", "status": "busy"}});
+    case.state["teams"] =
+        serde_json::json!({"acceptance-team": {"agents": case.state["agents"].clone()}});
+    crate::state::persist::save_runtime_state(&case.workspace, &case.state).unwrap();
+    let transport = RecordingTransport::new("");
+    let busy = case
+        .store
+        .create_message(
+            None,
+            "leader",
+            "worker",
+            "busy",
+            None,
+            false,
+            Some("acceptance-team"),
+        )
+        .unwrap();
+    let refused = case
+        .store
+        .create_message(
+            None,
+            "leader",
+            "worker",
+            "refuse",
+            None,
+            false,
+            Some("missing-team"),
+        )
+        .unwrap();
+    let before = case.message_status(&busy);
+    COUNTS.with(|counts| counts.set((0, 0, 0)));
+    deliver_pending_messages(&case.workspace, &case.state, &transport, &case.event_log).unwrap();
+    assert_eq!(COUNTS.with(|counts| counts.get()), (2, 2, 0));
+    assert_eq!(case.message_status(&busy), before);
+    assert_ne!(case.message_status(&refused), "delivered");
+    assert_eq!(transport.inject_count(), 0);
+    assert!(case.events().contains("send.deferred_busy"));
+    assert!(case.events().contains("delivery.projection_refused"));
+}
+
+#[test]
+fn resource188_receiver_revoked_between_prepare_and_claim_is_reloaded() {
+    use crate::messaging::delivery::preparation_probe::{BEFORE_CLAIM, COUNTS};
+    let case = Case::new("188-revoke");
+    let transport = RecordingTransport::new("");
+    let message = case
+        .store
+        .create_message(
+            None,
+            "worker",
+            "leader",
+            "race",
+            None,
+            false,
+            Some("acceptance-team"),
+        )
+        .unwrap();
+    let workspace = case.workspace.clone();
+    BEFORE_CLAIM.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut latest = crate::state::persist::load_runtime_state(&workspace).unwrap();
+            latest["leader_receiver"]["status"] = serde_json::json!("rebind_required");
+            crate::state::persist::save_runtime_state(&workspace, &latest).unwrap();
+        }))
+    });
+    COUNTS.with(|counts| counts.set((0, 0, 0)));
+    deliver_pending_messages(&case.workspace, &case.state, &transport, &case.event_log).unwrap();
+    assert_eq!(COUNTS.with(|counts| counts.get()), (1, 2, 1));
+    assert_eq!(
+        transport.inject_count(),
+        0,
+        "must not use the prepared attached receiver after revoke"
+    );
+    assert_eq!(case.message_status(&message), "failed");
+    assert!(case.events().contains("leader_receiver.delivery_blocked"));
+}

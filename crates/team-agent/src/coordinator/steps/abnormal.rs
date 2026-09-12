@@ -73,6 +73,10 @@ pub(crate) fn detect_abnormal_exits(
     let team = crate::state::projection::team_state_key(&snapshot);
     let session_name = snapshot.get("session_name").and_then(Value::as_str);
     for agent in abnormal_watch_agents(&snapshot) {
+        // Unknown team identity cannot authorize consuming a historical cache.
+        if !crate::state::abnormal_watch::begin_observation(state, &agent.agent_id) {
+            continue;
+        }
         // Pane/process liveness is independent of transcript content. A
         // frozen rollout is common after pane death, so probe before the
         // metadata dedupe gate; only the expensive tail scan stays deduped.
@@ -109,7 +113,7 @@ pub(crate) fn detect_abnormal_exits(
         // re-read below.
         if let (Some(mtime), Some(stored)) = (
             mtime_ns,
-            abnormal_watch_stored_metadata(&snapshot, &agent.agent_id),
+            abnormal_watch_stored_metadata(state, &agent.agent_id),
         ) {
             if stored == (size, mtime) {
                 refresh_abnormal_watch_liveness(state, &agent.agent_id, &liveness);
@@ -149,7 +153,7 @@ pub(crate) fn detect_abnormal_exits(
             .map(|fact| abnormal_error_observation_key(&agent, fact));
         let error_observation_cohort = fact.as_ref().map(|_| abnormal_error_cohort_key(&agent));
         let error_recency = abnormal_error_recency(
-            &snapshot,
+            state,
             &agent,
             error_observation_key.as_deref(),
             error_observation_cohort.as_deref(),
@@ -954,6 +958,9 @@ fn abnormal_watch_payload(
 }
 
 fn upsert_abnormal_watch(state: &mut Value, agent_id: &str, mut payload: Value) {
+    if let Some(identity) = crate::state::abnormal_watch::observation_identity(state, agent_id) {
+        payload["watch_identity"] = identity;
+    }
     let preserved = [
         "last_notified_key",
         "last_notified_at",
@@ -1413,6 +1420,42 @@ mod tests {
             crate::provider::get_adapter(provider)
         }
     }
+    #[test]
+    fn resource188_foreign_metadata_and_dedupe_cannot_skip_new_baseline() {
+        let dir = temp_abnormal_dir("188-foreign-watch");
+        let rollout = dir.join("rollout-w1.jsonl");
+        let error = "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"old\",\"status\":\"failed\"}}}\n";
+        std::fs::write(&rollout, error).unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let mut state = crate::state::persist::load_runtime_state(&dir).unwrap();
+        let metadata = std::fs::metadata(&rollout).unwrap();
+        let mut foreign = crate::state::abnormal_watch::observation_identity(&state, "w1").unwrap();
+        foreign["team_key"] = serde_json::json!("another-team");
+        state["coordinator"] = serde_json::json!({"abnormal_exit_watch": {"w1": {
+            "watch_identity": foreign,
+            "size": metadata.len(), "mtime_ns": metadata_mtime_ns(&metadata),
+            "last_notified_key": "foreign", "last_check_key": "foreign",
+            "last_error_observation_key": "foreign", "last_error_observation_cohort": "foreign"
+        }}});
+        let log = EventLog::new(&dir);
+        let transport = crate::transport::test_support::OfflineTransport::new();
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        let baseline = state["coordinator"]["abnormal_exit_watch"]["w1"].clone();
+        assert_eq!(baseline["error_recency"], "stale");
+        assert!(baseline.get("last_notified_key").is_none());
+        assert!(crate::state::abnormal_watch::matches_observation(
+            &state, "w1", &baseline
+        ));
+        let events = log.tail(0).unwrap();
+        detect_abnormal_exits(&dir, &transport, &mut state, &log, &[]).unwrap();
+        assert_eq!(
+            log.tail(0).unwrap(),
+            events,
+            "unchanged baseline must not re-alarm"
+        );
+        assert!(find_event(&events, "worker.abnormal_exit").is_none());
+    }
+
     #[test]
     fn abnormal_stale_error_baselines_then_fresh_alive_error_notifies() {
         let dir = temp_abnormal_dir("alive-fresh");
