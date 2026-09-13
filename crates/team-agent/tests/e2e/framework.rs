@@ -139,11 +139,12 @@ impl TestWorkspace {
 
     /// Keep the exact persisted tmux session alive with a non-worker window.
     ///
-    /// TestWorkspace has no prior keepalive-window helper. Owned tmux cleanup
-    /// is only `register_owned_tmux_socket` → Drop `kill-server`. Call this
-    /// before `stop-agent` of the last worker so that last-pane kill cannot
-    /// destroy the session the coordinator still gates on.
-    pub fn retain_owned_session_placeholder_window(&self, window: &str) {
+    /// Binds `state.tmux_socket` + `state.session_name` (the workspace record),
+    /// registers that socket via `register_owned_tmux_socket` so Drop's
+    /// `cleanup_owned_coordinator` → `cleanup_owned_tmux` → workspace order
+    /// can `kill-server` it. Returns those exact identities for post-Drop
+    /// residue asserts. Call before `stop-agent` of the last worker.
+    pub fn retain_owned_session_placeholder_window(&self, window: &str) -> (String, String) {
         assert!(
             !window.is_empty() && !window.contains(':'),
             "placeholder window must be a simple tmux window name: {window:?}"
@@ -200,6 +201,7 @@ impl TestWorkspace {
             windows.iter().any(|name| name == window),
             "placeholder window {window} missing on {session}@{socket}; windows={windows:?}"
         );
+        (socket.to_string(), session.to_string())
     }
 
     pub fn path(&self) -> &Path {

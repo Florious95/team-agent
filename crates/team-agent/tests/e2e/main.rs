@@ -186,11 +186,12 @@ mod framework_tests {
     #[test]
     fn drop_stops_owned_coordinator_after_worker_is_stopped() {
         let team_id = format!("cleanup{}", std::process::id());
-        let (workspace, coordinator_pid) = {
+        let (workspace, coordinator_pid, tmux_socket, session_name) = {
             let ws = TestWorkspace::new("cleanup-drop").with_fake_spec(&["a"]);
             let qs = quick_start_fake(&ws, &team_id);
             assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
-            ws.retain_owned_session_placeholder_window("drop-keep");
+            let (tmux_socket, session_name) =
+                ws.retain_owned_session_placeholder_window("drop-keep");
 
             let stop = run_ta(
                 &ws,
@@ -224,7 +225,7 @@ mod framework_tests {
                 pid_is_running(pid),
                 "coordinator pid {pid} should be live before Drop"
             );
-            (ws.path().to_path_buf(), pid)
+            (ws.path().to_path_buf(), pid, tmux_socket, session_name)
         };
 
         assert!(
@@ -235,6 +236,10 @@ mod framework_tests {
             !workspace.exists(),
             "workspace {} should be removed by TestWorkspace::Drop",
             workspace.display()
+        );
+        assert!(
+            !tmux_session_exists_on_socket(&tmux_socket, &session_name),
+            "Drop must clear exact session {session_name} on {tmux_socket}"
         );
     }
 }
