@@ -441,9 +441,11 @@ fn collect_candidate_files(
     allowed_team_root: Option<&Path>,
     out: &mut Vec<SessionCandidate>,
 ) -> Result<(), ProviderError> {
-    if depth > 4 {
+    if depth > 4 || !may_traverse_session_directory(dir, allowed_team_root) {
         return Ok(());
     }
+    #[cfg(test)]
+    tests::record_directory_read(dir);
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if depth == 0 => return Err(ProviderError::Io(format!("{}: {e}", dir.display()))),
@@ -453,8 +455,23 @@ fn collect_candidate_files(
         let Ok(entry) = entry else {
             continue;
         };
+        #[cfg(test)]
+        tests::record_entry();
         let path = entry.path();
-        if path.is_dir() {
+        if !may_traverse_session_directory(&path, allowed_team_root) {
+            continue;
+        }
+        // read_dir already supplies the type for ordinary entries. Only links
+        // (or an unavailable type) need the old, following metadata lookup.
+        let is_dir = match entry.file_type() {
+            Ok(kind) if !kind.is_symlink() => kind.is_dir(),
+            _ => {
+                #[cfg(test)]
+                tests::record_following_metadata();
+                path.is_dir()
+            }
+        };
+        if is_dir {
             collect_candidate_files(
                 &path,
                 agent_id,
@@ -471,6 +488,11 @@ fn collect_candidate_files(
         }
     }
     Ok(())
+}
+
+fn may_traverse_session_directory(path: &Path, allowed_team_root: Option<&Path>) -> bool {
+    !path_is_under_team_runtime(path)
+        || allowed_team_root.is_some_and(|root| path.starts_with(root) || root.starts_with(path))
 }
 
 fn looks_like_session_file(path: &Path, agent_id: &str, allowed_team_root: Option<&Path>) -> bool {
