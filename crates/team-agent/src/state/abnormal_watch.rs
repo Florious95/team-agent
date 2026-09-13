@@ -143,7 +143,7 @@ pub(crate) fn begin_observation(state: &mut Value, agent_id: &str) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::state::persist::{load_runtime_state, runtime_state_path, save_runtime_state};
+    use crate::state::persist::{self, load_runtime_state, runtime_state_path};
 
     fn workspace() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -308,13 +308,13 @@ mod tests {
                 .unwrap(),
             stale
         );
-        save_runtime_state(&ws, &stale).unwrap();
+        persist::save_runtime_state(&ws, &stale).unwrap();
         let first = std::fs::read(runtime_state_path(&ws)).unwrap();
         assert!(
             first.len() < original / 10,
             "size must depend on actual members, not watch x teams"
         );
-        save_runtime_state(&ws, &stale).unwrap();
+        persist::save_runtime_state(&ws, &stale).unwrap();
         assert_eq!(std::fs::read(runtime_state_path(&ws)).unwrap(), first);
         std::fs::remove_dir_all(ws).unwrap();
     }
@@ -325,10 +325,10 @@ mod tests {
         let latest = json!({"active_team_key": "a", "session_name": "team-a", "agents": {
             "w": {"agent_id": "w", "provider": "codex", "status": "paused"}
         }, "coordinator": {"abnormal_exit_watch": {"w": {"last_notified_key": "keep"}}}});
-        save_runtime_state(&ws, &latest).unwrap();
+        persist::save_runtime_state(&ws, &latest).unwrap();
         let mut stale = load_runtime_state(&ws).unwrap();
         stale["agents"] = json!({});
-        save_runtime_state(&ws, &stale).unwrap();
+        persist::save_runtime_state(&ws, &stale).unwrap();
         let merged = load_runtime_state(&ws).unwrap();
         assert!(merged["agents"].get("w").is_some());
         assert_eq!(

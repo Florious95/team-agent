@@ -454,6 +454,38 @@ fn tick_genuine_fast_session_miss_still_stops() {
     );
 }
 
+#[test]
+fn tick_first_has_session_miss_then_present_does_not_stop() {
+    // 34736990670 / e2e drop_stops_owned_coordinator_after_worker_is_stopped:
+    // first has-session after boot returned false while the launch session was
+    // already spawning. Retry the same probe before treating it as a durable miss.
+    let (coord, _dir, seen) = coord_over_staged_tmux(
+        "team-spine",
+        vec![RunnerStep::Exit(false), RunnerStep::Exit(true)],
+        RunnerStep::Exit(true),
+    );
+    let report = coord
+        .tick()
+        .expect("transient has-session miss must not become a tick Err");
+    assert!(
+        report.ok,
+        "session present on retry => ok=true; got {report:?}"
+    );
+    assert!(
+        !report.stop,
+        "session present on retry must not stop the daemon"
+    );
+    let calls = seen.lock().unwrap().clone();
+    let has_session_probes = calls
+        .iter()
+        .filter(|argv| argv.iter().any(|part| part == "has-session"))
+        .count();
+    assert!(
+        has_session_probes >= 2,
+        "gate must re-probe after the first miss; got {calls:?}"
+    );
+}
+
 // ── 3. daemon TOLERATES a transient tick Err: backoff + recover, NO exit on the error — LOCK ──────
 #[test]
 fn run_daemon_backs_off_on_transient_tick_err_then_recovers_without_exiting() {

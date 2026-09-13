@@ -37,6 +37,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -145,7 +146,7 @@ pub enum TickError {
 /// behavior for legacy single-team workspaces and tests that don't seed
 /// `teams.<key>`. Sibling teams under `state.teams.*` are NOT touched.
 fn coordinator_team_scoped_state(
-    workspace: &std::path::Path,
+    _workspace: &std::path::Path,
     raw_state: &Value,
     daemon_team_key: Option<&str>,
 ) -> Option<Value> {
@@ -157,7 +158,34 @@ fn coordinator_team_scoped_state(
     let selected = daemon_team_key
         .filter(|key| !key.is_empty() && teams.contains_key(*key))
         .or_else(|| active.filter(|key| teams.contains_key(*key)))?;
-    crate::state::projection::select_runtime_state(workspace, Some(selected)).ok()
+    // Project the already-loaded snapshot. A second load_runtime_state here can
+    // migrate+save (Issue 188 compact) and must not replace the session_name the
+    // daemon just booted against. Run 34736990670: first tick used a projected
+    // name whose tmux has-session then returned false and stopped the daemon.
+    Some(crate::state::projection::project_top_level_view(
+        raw_state, selected,
+    ))
+}
+
+fn tmux_session_present(
+    transport: &dyn crate::transport::Transport,
+    session: &crate::transport::SessionName,
+) -> Result<bool, TickError> {
+    // has-session returncode!=0 is a fast miss, not a timeout. The first probe
+    // after boot can race the launch session (34736990670: miss 88ms after boot
+    // while the worker pane already existed). Retry the same probe before stop.
+    // Timeouts still surface as TickError::Transport on the first attempt.
+    const ATTEMPTS: u32 = 3;
+    const RETRY_WAIT: Duration = Duration::from_millis(50);
+    for attempt in 0..ATTEMPTS {
+        if transport.has_session(session)? {
+            return Ok(true);
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(RETRY_WAIT);
+        }
+    }
+    Ok(false)
 }
 
 // ===========================================================================
@@ -319,7 +347,7 @@ impl Coordinator {
             .filter(|s| !s.is_empty())
         {
             let session = crate::transport::SessionName::new(session_name);
-            if !self.transport.has_session(&session)? {
+            if !tmux_session_present(self.transport.as_ref(), &session)? {
                 event_log.write(
                     "coordinator.session_missing",
                     serde_json::json!({"session": session_name}),
