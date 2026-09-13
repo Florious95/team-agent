@@ -190,6 +190,7 @@ mod framework_tests {
             let ws = TestWorkspace::new("cleanup-drop").with_fake_spec(&["a"]);
             let qs = quick_start_fake(&ws, &team_id);
             assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
+            ws.retain_owned_session_placeholder_window("drop-keep");
 
             let stop = run_ta(
                 &ws,

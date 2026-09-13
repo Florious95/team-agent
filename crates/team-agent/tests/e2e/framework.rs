@@ -137,6 +137,71 @@ impl TestWorkspace {
         }
     }
 
+    /// Keep the exact persisted tmux session alive with a non-worker window.
+    ///
+    /// TestWorkspace has no prior keepalive-window helper. Owned tmux cleanup
+    /// is only `register_owned_tmux_socket` → Drop `kill-server`. Call this
+    /// before `stop-agent` of the last worker so that last-pane kill cannot
+    /// destroy the session the coordinator still gates on.
+    pub fn retain_owned_session_placeholder_window(&self, window: &str) {
+        assert!(
+            !window.is_empty() && !window.contains(':'),
+            "placeholder window must be a simple tmux window name: {window:?}"
+        );
+        let state = self.read_state();
+        if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+            assert!(
+                !agents.contains_key(window),
+                "placeholder window {window} must not be a worker id; agents={:?}",
+                agents.keys().collect::<Vec<_>>()
+            );
+        }
+        let socket = state
+            .get("tmux_socket")
+            .and_then(Value::as_str)
+            .filter(|socket| !socket.is_empty())
+            .unwrap_or_else(|| panic!("quick-start must persist tmux_socket before retain"));
+        let session = state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .filter(|session| !session.is_empty())
+            .unwrap_or_else(|| panic!("quick-start must persist session_name before retain"));
+        self.register_owned_tmux_socket(Path::new(socket));
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                socket,
+                "new-window",
+                "-d",
+                "-t",
+                session,
+                "-n",
+                window,
+                "tail -f /dev/null",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|error| panic!("tmux new-window {window}: {error}"));
+        assert!(
+            output.status.success(),
+            "tmux new-window -t {session} -n {window} on {} failed: status={:?} stderr={}",
+            socket,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            tmux_session_exists_on_socket(socket, session),
+            "exact session {session} must remain on socket {socket} after placeholder {window}"
+        );
+        let windows = tmux_windows_on_socket(socket, session);
+        assert!(
+            windows.iter().any(|name| name == window),
+            "placeholder window {window} missing on {session}@{socket}; windows={windows:?}"
+        );
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
