@@ -187,7 +187,41 @@ impl<'a> StateRepository<'a> {
         let StateWriteIntent::CoordinatorTick { team_key } = intent else {
             return Err(StateError::SaveFailed("intent does not accept observations".into()));
         };
+        let sampled_legacy =
+            legacy_single_team_state(before) && legacy_single_team_state(observed);
+        let sampled_identity = legacy_team_identity(before);
         super::persist::update_runtime_state(self.workspace, |latest| {
+            if sampled_legacy {
+                if sampled_identity != legacy_team_identity(observed)
+                    || !legacy_single_team_state(latest)
+                    || sampled_identity != legacy_team_identity(latest)
+                {
+                    return Err(StateError::SaveConflict(
+                        "legacy coordinator observation scope changed before commit".to_string(),
+                    ));
+                }
+                let mut checked = observed.clone();
+                super::persist::merge_ordinary_state(&mut checked, latest)?;
+                if !legacy_single_team_state(&checked)
+                    || sampled_identity != legacy_team_identity(&checked)
+                {
+                    return Err(StateError::SaveConflict(
+                        "legacy coordinator observation scope changed during validation"
+                            .to_string(),
+                    ));
+                }
+                let mut selected = latest.clone();
+                for field in ["agents", "coordinator"] {
+                    if before[field] != checked[field] {
+                        apply_observation_delta(
+                            &before[field],
+                            &checked[field],
+                            &mut selected[field],
+                        );
+                    }
+                }
+                return Ok(selected);
+            }
             let mut checked = super::projection::merge_committed_team(latest, observed, team_key);
             super::persist::merge_ordinary_state(&mut checked, latest)?;
             let checked = bounded_team_view(&checked, Some(team_key))?;
@@ -201,6 +235,31 @@ impl<'a> StateRepository<'a> {
         })?;
         Ok(())
     }
+}
+
+fn legacy_single_team_state(state: &Value) -> bool {
+    match state.get("teams") {
+        None => true,
+        Some(Value::Object(teams)) => teams.is_empty(),
+        Some(_) => false,
+    }
+}
+
+fn legacy_team_identity(state: &Value) -> [Option<String>; 5] {
+    [
+        "active_team_key",
+        "team_key",
+        "session_name",
+        "team_dir",
+        "spec_path",
+    ]
+    .map(|field| {
+        state
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn bounded_team_view(state: &Value, team_key: Option<&str>) -> Result<Value, StateError> {
