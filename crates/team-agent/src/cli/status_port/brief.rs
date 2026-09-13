@@ -294,24 +294,39 @@ fn display_optional(value: &Value) -> String {
 }
 
 fn registered_nodes(state: &Value, selected: Option<&str>) -> Vec<RegisteredNode> {
-    let agents = state
-        .get("agents")
-        .and_then(Value::as_object)
-        .or_else(|| {
-            let key = state.get("active_team_key").and_then(Value::as_str)?;
-            state
-                .get("teams")
-                .and_then(|teams| teams.get(key))
-                .and_then(|team| team.get("agents"))
-                .and_then(Value::as_object)
-        });
+    // A projected state can still carry stale top-level agents. Once the
+    // selector identified a canonical team entry, that entry is authoritative;
+    // an empty/missing nested roster must not fall back to the stale projection.
+    let canonical_team = state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .and_then(|key| state.get("teams").and_then(|teams| teams.get(key)));
+    let (agents, lifecycle, defaults) = match canonical_team {
+        Some(team) => (
+            team.get("agents").and_then(Value::as_object),
+            team.get("agent_lifecycle").and_then(Value::as_object),
+            team,
+        ),
+        None => (
+            state.get("agents").and_then(Value::as_object),
+            state.get("agent_lifecycle").and_then(Value::as_object),
+            state,
+        ),
+    };
     let Some(agents) = agents else {
         return Vec::new();
     };
     agents
         .iter()
         .filter(|(name, _)| selected.is_none_or(|selected| selected == name.as_str()))
-        .map(|(name, value)| registered_node(name, value, state))
+        .filter(|(name, _)| {
+            !lifecycle
+                .and_then(|entries| entries.get(*name))
+                .and_then(|entry| entry.get("state"))
+                .and_then(Value::as_str)
+                .is_some_and(|state| state == "retired")
+        })
+        .map(|(name, value)| registered_node(name, value, defaults))
         .collect()
 }
 
@@ -803,7 +818,7 @@ fn parse_probe(bytes: &[u8], requested_endpoint: &str) -> Result<ProbeResult, ()
         .and_then(Value::as_array)
         .ok_or(())?
         .iter()
-        .filter_map(parse_probe_node)
+        .filter_map(|node| parse_probe_node(node, report_socket))
         .collect();
     Ok(ProbeResult { nodes })
 }
@@ -818,9 +833,12 @@ fn probe_has_error(value: &Value) -> bool {
     }
 }
 
-fn parse_probe_node(value: &Value) -> Option<ProbeNode> {
+fn parse_probe_node(value: &Value, report_socket: &str) -> Option<ProbeNode> {
     Some(ProbeNode {
-        socket: non_empty(value, "socket")?,
+        // The accepted producer binds the socket once at the report envelope
+        // and omits the redundant per-node field. An explicit node socket is
+        // still preserved for strict mismatch rejection below.
+        socket: non_empty(value, "socket").unwrap_or_else(|| report_socket.to_string()),
         session: non_empty(value, "session")?,
         window: non_empty(value, "window_name")?,
         pane: non_empty(value, "pane_id")?,
@@ -926,7 +944,13 @@ fn match_result<'a>(
 fn matches_registered(node: &RegisteredNode, observed: &ProbeNode) -> bool {
     node.endpoint.as_deref() == Some(observed.socket.as_str())
         && node.session.as_deref() == Some(observed.session.as_str())
-        && node.window.as_deref() == Some(observed.window.as_str())
+        // Older registrations may not persist a window. The endpoint,
+        // session, and pane tuple remains the narrow compatibility key; a
+        // present window is still an exact constraint.
+        && node
+            .window
+            .as_deref()
+            .is_none_or(|window| window == observed.window)
         && node.pane.as_deref() == Some(observed.pane.as_str())
 }
 

@@ -282,6 +282,7 @@ fn read_event_log_dir(dir: &std::path::Path) -> Vec<serde_json::Value> {
 }
 
 mod a0_lostupdate;
+mod s3_bounded;
 mod abnormal;
 mod api_error_recovery;
 mod basics;

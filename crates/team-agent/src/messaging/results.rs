@@ -287,9 +287,8 @@ fn collect_scoped(
         collected_results.push(summary);
     }
     if state_dirty {
-        crate::state::repository::StateRepository::new(&paths.run_workspace).save_reapplying(
+        state = crate::state::repository::StateRepository::new(&paths.run_workspace).commit(
             crate::state::repository::StateWriteIntent::ResultCollection { owner_team_id },
-            &state,
             |latest| {
                 for (task_id, result_id) in &task_updates {
                     mark_task_done(latest, task_id, result_id);

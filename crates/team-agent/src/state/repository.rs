@@ -1,5 +1,7 @@
 //!
-//! StateRepository facade.
+//! StateRepository facade. Task/note commits apply bounded mutations under the
+//! existing state-save lock; coordinator commits carry only observation deltas.
+//! Other writer clusters retain their legacy dispatch below.
 //!
 //! Ref:
 //! - `.team/artifacts/s1a-state-repository-design.md` (skeleton)
@@ -142,7 +144,92 @@ impl<'a> StateRepository<'a> {
     where
         F: FnOnce(&mut Value),
     {
+        #[cfg(test)]
+        test_support::before_commit();
         route_reapply(self.workspace, intent, state, reapply)
+    }
+
+    /// Commit a task/note delta once against latest under state-save. Return
+    /// the committed Team view for callers that produce Markdown afterwards.
+    pub fn commit<F>(&self, intent: StateWriteIntent<'_>, update: F) -> Result<Value, StateError>
+    where
+        F: FnOnce(&mut Value),
+    {
+        #[cfg(test)]
+        test_support::before_commit();
+        let team_key = match intent {
+            // Assignment's existing reconcile helper updates the root task
+            // array and the explicit Team array independently (legacy parity).
+            StateWriteIntent::McpAssignTask { .. } => None,
+            StateWriteIntent::McpUpdateStateNote { team_key } => team_key,
+            StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
+            _ => return Err(StateError::SaveFailed("intent does not accept a task/note delta".into())),
+        };
+        let committed = super::persist::update_runtime_state(self.workspace, |latest| {
+            let mut selected = bounded_team_view(latest, team_key)?;
+            update(&mut selected);
+            Ok(match team_key {
+                Some(key) => super::projection::merge_committed_team(latest, &selected, key),
+                None => selected,
+            })
+        })?;
+        bounded_team_view(&committed, team_key)
+    }
+
+    /// Fence the sampled incarnation with the existing persist guards, then
+    /// commit only this tick's agent observations and coordinator bookkeeping.
+    pub fn commit_observations(
+        &self,
+        intent: StateWriteIntent<'_>,
+        before: &Value,
+        observed: &Value,
+    ) -> Result<(), StateError> {
+        let StateWriteIntent::CoordinatorTick { team_key } = intent else {
+            return Err(StateError::SaveFailed("intent does not accept observations".into()));
+        };
+        super::persist::update_runtime_state(self.workspace, |latest| {
+            let mut checked = super::projection::merge_committed_team(latest, observed, team_key);
+            super::persist::merge_ordinary_state(&mut checked, latest)?;
+            let checked = bounded_team_view(&checked, Some(team_key))?;
+            let mut selected = bounded_team_view(latest, Some(team_key))?;
+            for field in ["agents", "coordinator"] {
+                if before[field] != checked[field] {
+                    apply_observation_delta(&before[field], &checked[field], &mut selected[field]);
+                }
+            }
+            Ok(super::projection::merge_committed_team(latest, &selected, team_key))
+        })?;
+        Ok(())
+    }
+}
+
+fn bounded_team_view(state: &Value, team_key: Option<&str>) -> Result<Value, StateError> {
+    let Some(key) = team_key else { return Ok(state.clone()); };
+    if state.get("teams").and_then(Value::as_object).is_some_and(|teams| teams.contains_key(key)) {
+        return Ok(super::projection::project_top_level_view(state, key));
+    }
+    if state.get("teams").and_then(Value::as_object).is_some_and(|teams| !teams.is_empty()) {
+        return Err(StateError::TeamSelect(format!("team no longer exists: {key}")));
+    }
+    Ok(state.clone())
+}
+
+// Diffing is limited to the two observation blocks above, never a whole-state
+// merge. Equal fields retain a concurrent writer's value; removed fields clear.
+fn apply_observation_delta(before: &Value, observed: &Value, latest: &mut Value) {
+    if before == observed { return; }
+    if let Some(observed) = observed.as_object() {
+        if !latest.is_object() { *latest = serde_json::json!({}); }
+        if let Some(before) = before.as_object() {
+            for key in before.keys().filter(|key| !observed.contains_key(*key)) {
+                if let Some(latest) = latest.as_object_mut() { latest.remove(key); }
+            }
+        }
+        for (key, value) in observed {
+            apply_observation_delta(&before[key], value, &mut latest[key]);
+        }
+    } else {
+        *latest = observed.clone();
     }
 }
 
@@ -555,6 +642,11 @@ fn route_reapply<F>(
 where
     F: FnOnce(&mut Value),
 {
+    if matches!(&intent, StateWriteIntent::McpAssignTask { .. }
+        | StateWriteIntent::McpUpdateStateNote { .. } | StateWriteIntent::ResultCollection { .. })
+    {
+        return StateRepository::new(workspace).commit(intent, reapply).map(|_| ());
+    }
     if reapply_scope(&intent) == ReapplyScope::Team {
         helper_write_team_scoped_reapply(workspace, state, reapply)
     } else {
@@ -564,3 +656,20 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    thread_local! {
+        static BEFORE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(crate) fn set_before_commit(hook: impl FnOnce() + 'static) {
+        BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn before_commit() {
+        if let Some(hook) = BEFORE_COMMIT.with(|slot| slot.borrow_mut().take()) { hook(); }
+    }
+}
