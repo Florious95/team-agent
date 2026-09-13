@@ -731,7 +731,7 @@ fn cmd_status_uses_canonical_roster_and_filters_same_team_retired_tombstones() {
         "printf '%s\\n' '{\"schema_version\":1,\"socket\":\"/tmp/ta-status-brief.sock\",\"nodes\":[]}'\n",
     );
     let nodes = status_port::with_test_nodeprobe(bin, || {
-        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"))
+        json_nodes(cmd_status(&status_args(&ws, true, None, Some("demo"))).expect("status"))
     });
     let mut names = nodes
         .iter()
@@ -746,7 +746,7 @@ fn cmd_status_uses_canonical_roster_and_filters_same_team_retired_tombstones() {
             .and_then(|node| node["runtime_status"].as_str()),
         Some("stopped")
     );
-    let err = cmd_status(&status_args(&ws, true, Some("retired"), None)).unwrap_err();
+    let err = cmd_status(&status_args(&ws, true, Some("retired"), Some("demo"))).unwrap_err();
     assert!(err.to_string().contains("unknown agent id: retired"), "{err}");
 
     let empty = brief_workspace("canonical-empty");
