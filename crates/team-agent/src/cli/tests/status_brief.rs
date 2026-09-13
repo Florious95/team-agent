@@ -686,6 +686,145 @@ fn cmd_status_multi_endpoint_uses_total_budget() {
 }
 
 #[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn cmd_status_uses_canonical_roster_and_filters_same_team_retired_tombstones() {
+    let ws = brief_workspace("canonical-roster");
+    let mut stale = serde_json::Map::new();
+    for index in 0..220 {
+        stale.insert(
+            format!("stale-{index}"),
+            production_agent(&format!("stale-{index}"), &format!("%{index}")),
+        );
+    }
+    let mut stopped = production_agent("stopped", "%9");
+    stopped["status"] = json!("stopped");
+    let state = json!({
+        "session_name": "team-demo",
+        "tmux_endpoint": "/tmp/ta-status-brief.sock",
+        "tmux_socket": "/tmp/ta-status-brief.sock",
+        "active_team_key": "demo",
+        "agents": stale,
+        "teams": {
+            "demo": {
+                "status": "alive",
+                "session_name": "team-demo",
+                "tmux_endpoint": "/tmp/ta-status-brief.sock",
+                "agents": {
+                    "live": production_agent("live", "%7"),
+                    "retired": production_agent("retired", "%8"),
+                    "stopped": stopped
+                },
+                "agent_lifecycle": {
+                    "retired": {"state": "retired"}
+                }
+            },
+            "sibling": {
+                "status": "alive",
+                "agent_lifecycle": {"live": {"state": "retired"}}
+            }
+        }
+    });
+    write_state(&ws, &state);
+    let bin = write_nodeprobe(
+        &ws.join("probe"),
+        "printf '%s\\n' '{\"schema_version\":1,\"socket\":\"/tmp/ta-status-brief.sock\",\"nodes\":[]}'\n",
+    );
+    let nodes = status_port::with_test_nodeprobe(bin, || {
+        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"))
+    });
+    let mut names = nodes
+        .iter()
+        .filter_map(|node| node["name"].as_str())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    assert_eq!(names, vec!["live", "stopped"]);
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|node| node["name"] == "stopped")
+            .and_then(|node| node["runtime_status"].as_str()),
+        Some("stopped")
+    );
+    let err = cmd_status(&status_args(&ws, true, Some("retired"), None)).unwrap_err();
+    assert!(err.to_string().contains("unknown agent id: retired"), "{err}");
+
+    let empty = brief_workspace("canonical-empty");
+    write_state(
+        &empty,
+        &json!({
+            "active_team_key": "demo",
+            "agents": {"stale": production_agent("stale", "%1")},
+            "teams": {
+                "demo": {
+                    "status": "alive",
+                    "agents": {},
+                    "agent_lifecycle": {}
+                }
+            }
+        }),
+    );
+    assert!(json_nodes(cmd_status(&status_args(&empty, true, None, None)).expect("status")).is_empty());
+    let _ = std::fs::remove_dir_all(&ws);
+    let _ = std::fs::remove_dir_all(&empty);
+}
+
+#[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn cmd_status_allows_only_missing_window_compatibility_match() {
+    let ws = brief_workspace("missing-window");
+    let mut agent = production_agent("worker", "%7");
+    agent.as_object_mut().unwrap().remove("window");
+    agent.as_object_mut().unwrap().remove("layout_window");
+    agent
+        .get_mut("display")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .remove("window");
+    write_state(
+        &ws,
+        &production_state(json!({"worker": agent})),
+    );
+    let report = producer_report(
+        "/tmp/ta-status-brief.sock",
+        "observed-window",
+        "%7",
+        "pi_activity_channel",
+    );
+    let bin = write_nodeprobe(&ws.join("probe"), &format!("cat <<'EOF'\n{report}\nEOF\n"));
+    let nodes = status_port::with_test_nodeprobe(bin, || {
+        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"))
+    });
+    assert_eq!(nodes[0]["runtime_status"], "running");
+    assert_eq!(nodes[0]["activity"], "idle");
+    assert_eq!(
+        nodes[0]["tmux_command"],
+        "tmux -S '/tmp/ta-status-brief.sock' attach -t 'team-demo:observed-window.%7'"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+
+    let conflict = brief_workspace("present-window-conflict");
+    write_state(
+        &conflict,
+        &production_state(json!({"worker": production_agent("worker", "%7")})),
+    );
+    let report = producer_report(
+        "/tmp/ta-status-brief.sock",
+        "different-window",
+        "%7",
+        "pi_activity_channel",
+    );
+    let bin = write_nodeprobe(&conflict.join("probe"), &format!("cat <<'EOF'\n{report}\nEOF\n"));
+    let nodes = status_port::with_test_nodeprobe(bin, || {
+        json_nodes(cmd_status(&status_args(&conflict, true, None, None)).expect("status"))
+    });
+    assert_eq!(nodes[0]["runtime_status"], "unknown");
+    assert!(nodes[0]["tmux_command"].is_null());
+    let _ = std::fs::remove_dir_all(&conflict);
+}
+
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
