@@ -29,6 +29,7 @@ on:
           - config-t07
           - pi-catalog-186
           - resource188-pi187-0579
+          - resource188-pi187-191-0580
 
 
 permissions:
@@ -84,6 +85,18 @@ jobs:
               ],
               "integration_tests": ["notification_abnormal_exit_red", "team_in_team_delivery_scope_red", "u0b_owner_team_id_canonical_red"],
               "expected_integration_tests": {"notification_abnormal_exit_red": 3, "team_in_team_delivery_scope_red": 2, "u0b_owner_team_id_canonical_red": 2},
+              "prebuild_binary": False,
+          }
+          candidates["resource188-pi187-191-0580"] = {
+              "id": "resource188-pi187-191-0580",
+              "sha": "24470051cbec584699e39aa189b92955d6df8718",
+              "tree": "755af6f7e9d985a50cb9d07d8c3e0fe91d747779",
+              "lib_selectors": [
+                  {"selector": "leader::start::tests::managed_attach_", "expected_parent_tests": 6, "expected_ignored": 0, "harness_args": ["--test-threads=1"]},
+                  {"selector": "tmux_backend::tests::provider_exit_receipt_accepts_only_shell_exit_status", "expected_parent_tests": 1, "expected_ignored": 0, "harness_args": ["--exact", "--test-threads=1"]},
+              ],
+              "integration_tests": ["leader_launcher_shell_wrapper_red"],
+              "expected_integration_tests": {"leader_launcher_shell_wrapper_red": 12},
               "prebuild_binary": False,
           }
           entry = candidates[os.environ['CANDIDATE']]
