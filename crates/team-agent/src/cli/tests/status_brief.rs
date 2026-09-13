@@ -825,6 +825,66 @@ fn cmd_status_allows_only_missing_window_compatibility_match() {
 }
 
 #[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn cmd_status_accepts_envelope_bound_node_socket_but_rejects_explicit_mismatch() {
+    let ws = brief_workspace("envelope-node-socket");
+    write_state(
+        &ws,
+        &production_state(json!({"worker": production_agent("worker", "%7")})),
+    );
+    let mut report: Value =
+        serde_json::from_str(&producer_report(
+            "/tmp/ta-status-brief.sock",
+            "worker",
+            "%7",
+            "pi_activity_channel",
+        ))
+        .unwrap();
+    report["nodes"][0].as_object_mut().unwrap().remove("socket");
+    let report = serde_json::to_string(&report).unwrap();
+    let bin = write_nodeprobe(&ws.join("probe"), &format!("cat <<'EOF'\n{report}\nEOF\n"));
+    let nodes = status_port::with_test_nodeprobe(bin, || {
+        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("status"))
+    });
+    assert_eq!(nodes[0]["runtime_status"], "running");
+    assert_eq!(nodes[0]["activity"], "idle");
+    assert_eq!(nodes[0]["health"], "normal");
+    assert_eq!(nodes[0]["session_name"], "pi-session");
+    assert_eq!(
+        nodes[0]["tmux_command"],
+        "tmux -S '/tmp/ta-status-brief.sock' attach -t 'team-demo:worker.%7'"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+
+    let mismatch = brief_workspace("explicit-node-socket-mismatch");
+    write_state(
+        &mismatch,
+        &production_state(json!({"worker": production_agent("worker", "%7")})),
+    );
+    let mut report: Value =
+        serde_json::from_str(&producer_report(
+            "/tmp/ta-status-brief.sock",
+            "worker",
+            "%7",
+            "pi_activity_channel",
+        ))
+        .unwrap();
+    report["nodes"][0]["socket"] = json!("/tmp/other.sock");
+    let report = serde_json::to_string(&report).unwrap();
+    let bin = write_nodeprobe(
+        &mismatch.join("probe"),
+        &format!("cat <<'EOF'\n{report}\nEOF\n"),
+    );
+    let nodes = status_port::with_test_nodeprobe(bin, || {
+        json_nodes(cmd_status(&status_args(&mismatch, true, None, None)).expect("status"))
+    });
+    assert_eq!(nodes[0]["runtime_status"], "unknown");
+    assert!(nodes[0]["tmux_command"].is_null());
+    let _ = std::fs::remove_dir_all(&mismatch);
+}
+
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }

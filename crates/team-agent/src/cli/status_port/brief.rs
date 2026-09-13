@@ -818,7 +818,7 @@ fn parse_probe(bytes: &[u8], requested_endpoint: &str) -> Result<ProbeResult, ()
         .and_then(Value::as_array)
         .ok_or(())?
         .iter()
-        .filter_map(parse_probe_node)
+        .filter_map(|node| parse_probe_node(node, report_socket))
         .collect();
     Ok(ProbeResult { nodes })
 }
@@ -833,9 +833,12 @@ fn probe_has_error(value: &Value) -> bool {
     }
 }
 
-fn parse_probe_node(value: &Value) -> Option<ProbeNode> {
+fn parse_probe_node(value: &Value, report_socket: &str) -> Option<ProbeNode> {
     Some(ProbeNode {
-        socket: non_empty(value, "socket")?,
+        // The accepted producer binds the socket once at the report envelope
+        // and omits the redundant per-node field. An explicit node socket is
+        // still preserved for strict mismatch rejection below.
+        socket: non_empty(value, "socket").unwrap_or_else(|| report_socket.to_string()),
         session: non_empty(value, "session")?,
         window: non_empty(value, "window_name")?,
         pane: non_empty(value, "pane_id")?,
