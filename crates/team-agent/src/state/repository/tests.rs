@@ -59,7 +59,11 @@ fn coordinator_observations_keep_legacy_identity_and_shape()
         "active_team_key": "team",
         "agents": {"w1": {"agent_id": "w1", "provider": "codex", "status": "running"}}
     });
-    crate::state::persist::save_runtime_state(&workspace, &initial)?;
+    let path = super::helper_workspace_path(&workspace);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_vec(&initial)?)?;
     let repository = super::StateRepository::new(&workspace);
     let before = repository.load_workspace()?;
 
@@ -108,7 +112,7 @@ fn coordinator_observations_keep_legacy_identity_and_shape()
 
     let mut changed_latest = second.clone();
     changed_latest["active_team_key"] = serde_json::json!("other");
-    crate::state::persist::save_runtime_state(&workspace, &changed_latest)?;
+    std::fs::write(&path, serde_json::to_vec(&changed_latest)?)?;
     let err = repository
         .commit_observations(
             StateWriteIntent::CoordinatorTick {
