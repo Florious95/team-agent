@@ -28,7 +28,12 @@ fn health_fixture() -> crate::coordinator::HealthReport {
 
 #[test]
 fn runtime_freshness_provider_exit_requires_typed_positive_fact() {
-    let state = serde_json::json!({
+    let mut state = serde_json::json!({
+        "active_team_key": "status-team",
+        "agents": {
+            "pane_only": {"provider": "codex", "rollout_path": "/fixture/pane", "spawn_epoch": 1},
+            "typed_exit": {"provider": "codex", "rollout_path": "/fixture/typed", "spawn_epoch": 1}
+        },
         "coordinator": {
             "abnormal_exit_watch": {
                 "pane_only": {
@@ -43,6 +48,10 @@ fn runtime_freshness_provider_exit_requires_typed_positive_fact() {
         }
     });
 
+    for id in ["pane_only", "typed_exit"] {
+        state["coordinator"]["abnormal_exit_watch"][id]["watch_identity"] =
+            crate::state::abnormal_watch::observation_identity(&state, id).unwrap();
+    }
     let freshness = compute_runtime_freshness(
         Path::new("/nonexistent/status-port-typed-provider-exit-test"),
         &state,
@@ -51,4 +60,31 @@ fn runtime_freshness_provider_exit_requires_typed_positive_fact() {
 
     assert!(!freshness.provider_exited_agents.contains("pane_only"));
     assert!(freshness.provider_exited_agents.contains("typed_exit"));
+}
+
+#[test]
+fn runtime_freshness_rejects_foreign_legacy_and_unknown_watch_identity() {
+    let mut state = json!({
+        "active_team_key": "a",
+        "agents": {"w": {"provider": "codex", "rollout_path": "/fixture/w", "spawn_epoch": 1}},
+        "coordinator": {"abnormal_exit_watch": {"w": {"worker_provider_exited": true}}}
+    });
+    let path = Path::new("/nonexistent/status-watch-188");
+    assert!(compute_runtime_freshness(path, &state, &health_fixture())
+        .provider_exited_agents
+        .is_empty());
+    let identity = crate::state::abnormal_watch::observation_identity(&state, "w").unwrap();
+    state["coordinator"]["abnormal_exit_watch"]["w"]["watch_identity"] = identity;
+    for (pointer, value) in [
+        ("/active_team_key", json!("b")),
+        ("/agents/w/provider", json!("claude")),
+        ("/agents/w/spawn_epoch", json!(2)),
+        ("/agents/w/rollout_path", json!(null)),
+    ] {
+        let mut changed = state.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        assert!(compute_runtime_freshness(path, &changed, &health_fixture())
+            .provider_exited_agents
+            .is_empty());
+    }
 }

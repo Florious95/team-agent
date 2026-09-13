@@ -58,7 +58,9 @@ pub(crate) fn compute_runtime_freshness(
             for (agent_id, entry) in watch {
                 let exited =
                     entry.get("worker_provider_exited").and_then(Value::as_bool) == Some(true);
-                if exited {
+                if exited
+                    && crate::state::abnormal_watch::matches_observation(state, agent_id, entry)
+                {
                     provider_exited_agents.insert(agent_id.clone());
                 }
             }

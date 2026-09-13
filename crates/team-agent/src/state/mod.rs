@@ -15,6 +15,7 @@
 //! 绝不 in-place truncate,绝不让审计/重试失败拖垮可见的原 state。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub(crate) mod abnormal_watch;
 pub mod identity;
 // Stage 0 of identity-boundary unified plan (architect direction 2026-06-23):
 // shared identity primitives. Pure additive — Stage 1+ consume these.

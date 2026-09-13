@@ -2656,24 +2656,22 @@ fn append_caller_context_assignments(parts: &mut Vec<String>, provider: Option<&
     ));
 }
 
-/// 0.4.x (CR R6): single-source marker prefix. The exit marker emitted by
-/// `leader_shell_wrapper_command` and the substring detected by
-/// `leader_provider_health` MUST share this prefix exactly. Format:
+/// Public exit-marker text emitted by `leader_shell_wrapper_command`. Format:
 /// `"[team-agent] {provider_label} exited with {rc}"`.
 pub const LEADER_PROVIDER_EXIT_MARKER_PREFIX: &str = "[team-agent]";
 pub const LEADER_PROVIDER_EXIT_MARKER_SUFFIX: &str = "exited with";
+const PROVIDER_EXIT_STATUS_OPTION: &str = "@team-agent-provider-exit-status";
 
 /// 0.4.x (CR R6): build the leader exit marker text for `provider_label`.
-/// Used by both the shell wrapper (printf source) and the health check
-/// (capture substring) so they cannot drift.
+/// Used by the shell wrapper for human-readable output.
 /// ---
 /// purpose: 单一来源地拼出 leader pane 的 provider 退出标记文本
 /// params:
 ///   provider_label: 人类可读的 provider 名,原样嵌入标记
 /// returns: 前缀 + provider 名 + 后缀 拼成的标记(不含退出码,退出码由 shell 的 printf 补)
 /// boundary:
-///   - 写标记的 shell wrapper 与读标记的健康检查必须都用这一个函数,禁止各写一份字面量
-///   - 这是内容信号:pane 里出现同样文本(如 cat 日志)就会误触发,判定强度到此为止
+///   - shell wrapper 统一使用此显示标记,进程状态另由监督 shell 收据证明
+///   - 仅供显示;历史正文可包含相同文本,不得据此判定进程退出
 /// ---
 pub fn leader_provider_exit_marker(provider_label: &str) -> String {
     format!(
@@ -2905,6 +2903,11 @@ pub fn leader_shell_wrapper_command(
         parts.push(key.clone());
         parts.push("&&".to_string());
     }
+    // Clear any prior receipt before invoking the provider. Terminal content,
+    // including replayed sessions, must never be treated as an exit receipt.
+    parts.push(format!(
+        "{{ tmux -S \"${{TMUX%%,*}}\" set-option -p -t \"$TMUX_PANE\" {PROVIDER_EXIT_STATUS_OPTION} running >/dev/null 2>&1 || :; }} &&"
+    ));
     // 3. env exports + provider (NO `exec` so the provider is a child).
     // 0.4.x ordering fix: skip keys present in env_unset so KEY=val does not
     // re-introduce a just-unset variable from the inherited env map.
@@ -2918,6 +2921,9 @@ pub fn leader_shell_wrapper_command(
     parts.push(";".to_string());
     // 4. exit marker + inert shell tail
     parts.push("rc=$?;".to_string());
+    parts.push(format!(
+        "tmux -S \"${{TMUX%%,*}}\" set-option -p -t \"$TMUX_PANE\" {PROVIDER_EXIT_STATUS_OPTION} \"$rc\" >/dev/null 2>&1;"
+    ));
     parts.push("printf".to_string());
     // CR R6: marker text comes from single-source `leader_provider_exit_marker`.
     parts.push(shell_quote(&format!(
@@ -2930,8 +2936,8 @@ pub fn leader_shell_wrapper_command(
 }
 
 fn inert_pane_tail_command() -> String {
-    // `sh` is deliberate: provider-exit health checks use the shell basename
-    // to reach the exit-marker branch. `sh -c` does not read commands from
+    // `sh` is deliberate: exited-wrapper input classifiers recognize shell
+    // basenames. `sh -c` does not read commands from
     // stdin; disabling echo also prevents input from appearing accepted.
     let script = r#"trap '' INT QUIT; stty -echo 2>/dev/null; printf "%s\n" "[team-agent] Provider exited; this pane no longer accepts input. Restart from another pane with the appropriate team-agent start command."; while :; do sleep 3600 & wait "$!"; done"#;
     format!("exec /bin/sh -c {}", shell_quote(script))
@@ -3741,6 +3747,22 @@ impl Transport for TmuxBackend {
             return Ok(None);
         }
         Ok(Some(output.stdout.trim().to_string()))
+    }
+
+    fn provider_exit_status(&self, pane: &PaneId) -> Result<Option<u8>, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            format!("#{{{PROVIDER_EXIT_STATUS_OPTION}}}"),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if !output.success {
+            return Ok(None);
+        }
+        Ok(output.stdout.trim().parse::<u8>().ok())
     }
 
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {

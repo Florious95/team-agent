@@ -248,6 +248,37 @@ mod tests {
             None
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_survives_unrelated_spaced_model_ids() {
+        let catalog = include_str!("../lifecycle/tests/fixtures/pi_list_models_spaced_ids.stdout.txt");
+        let path = fixture(&format!("printf '%s' '{catalog}'"));
+        let result = cmd_models_with(
+            &ModelsArgs {
+                provider: "pi".into(),
+                search: Some("gpt-5.6-luna".into()),
+                json: true,
+            },
+            &path,
+            Duration::from_secs(10),
+            MAX_CATALOG_BYTES,
+        )
+        .unwrap();
+        cleanup_fixture(&path);
+        assert_eq!(result.exit, ExitCode::Ok);
+        let CmdOutput::Human(text) = result.output else {
+            panic!("expected JSON projection")
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["auth"], "ok");
+        let models = value["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["role_model"], "openai-codex/gpt-5.6-luna");
+        assert_eq!(models[1]["role_model"], "team-agent/gpt-5.6-luna");
+    }
+
     #[cfg(unix)]
     fn fixture(body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;

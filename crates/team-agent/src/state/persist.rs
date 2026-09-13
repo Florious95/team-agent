@@ -492,7 +492,8 @@ fn persist_runtime_state_with_merge_options_and_expected(
     // Exact-seed cleanup must observe lock-held disk, not a pre-lock cache or
     // byte-equality hit. A matching in-memory document would otherwise no-op
     // and leave the seed, or skip copying a concurrent owner.
-    let skip_pre_lock_fast_path = exact_owner_seed_to_clear.is_some()
+    let skip_pre_lock_fast_path = super::abnormal_watch::needs_compaction(&migrated)
+        || exact_owner_seed_to_clear.is_some()
         || expected_owner_receiver.is_some()
         || exact_owner_receiver_to_clear.is_some()
         || exact_owner_receiver_to_restore.is_some();
@@ -542,7 +543,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
             ));
         }
     }
-    if let Some(latest) = latest {
+    if let Some(latest) = latest.as_ref() {
         let deleted = deleted_agent_ids
             .iter()
             .copied()
@@ -572,7 +573,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
             .collect::<BTreeSet<_>>();
         apply_persist_merge_contract(
             &mut migrated,
-            &latest,
+            latest,
             &deleted,
             skip_capture_backfill_team_key,
             &skip_capture_backfill,
@@ -583,6 +584,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
             exact_owner_receiver_to_restore,
         )?;
     }
+    super::abnormal_watch::compact_after_merge(&mut migrated, latest.as_ref(), deleted_agent_ids);
     // Stage 3 save-output strip second pass (defence-in-depth): after the
     // `preserve_latest_roster_entries` lock-held merge, a future addition
     // to the preserve path could re-introduce root owner fields from the

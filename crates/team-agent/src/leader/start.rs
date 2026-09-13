@@ -1412,13 +1412,6 @@ extern "C" fn managed_term_handler(_: libc::c_int) {
 }
 
 fn managed_attach_should_teardown(watch: &ManagedAttachWatch<'_>) -> bool {
-    let marker = crate::tmux_backend::leader_provider_exit_marker(watch.provider_label);
-    let target = Target::Pane(watch.spawned.pane_id.clone());
-    if let Ok(cap) = watch.transport.capture(&target, CaptureRange::Tail(80)) {
-        if cap.text.contains(&marker) || cap.text.contains("[team-agent] Provider exited") {
-            return true;
-        }
-    }
     matches!(
         leader_provider_health(
             watch.transport,
@@ -1674,65 +1667,21 @@ fn ensure_managed_provider_live_after_attach(
     )))
 }
 
-/// 0.4.x (CR C-3 P0): leader provider health reconciliation. The default
-/// `liveness()` check only proves the pane is ADDRESSABLE via tmux — it
-/// returns `Live` even when the provider has exited and the wrapper shell
-/// remains at its inert tail. This function distinguishes
-/// `provider_alive` from `provider_exited` by:
-///   1. Reading `pane_current_command` (tmux `#{pane_current_command}`).
-///   2. If the current command matches the expected provider binary (or
-///      one of its known aliases), report `Alive`.
-///   3. If the current command is a shell tail process AND the pane
-///      content contains the exit marker `[team-agent] <provider> exited`
-///      (emitted by `leader_shell_wrapper_command`), report
-///      `ProviderExited`.
-///   4. Otherwise (Unknown shell, no marker), report `Alive` as the
-///      conservative default — avoid false-positive exit alarms.
-///
-/// Note: when the leader shell wrapper is used (CR C-2), a provider exit
-/// leaves the pane as an inert `/bin/sh -c` tail with the exit marker in
-/// scrollback. Pre-wrapper code that hit `exec claude` would have left the
-/// pane as `[exited]` and `liveness()` would have returned `Dead`. The new
-/// failure mode requires this richer health check to surface
-/// `leader_provider_exited` as a distinct status.
+/// Reconcile real pane liveness with the supervising wrapper's exit receipt.
+/// Restored provider output may contain any exit-marker text; it is not process
+/// state and must never authorize destructive managed-window cleanup.
 pub fn leader_provider_health(
     transport: &dyn Transport,
     pane_id: &PaneId,
-    expected_provider_label: &str,
+    _expected_provider_label: &str,
 ) -> LeaderProviderHealth {
-    use crate::transport::{CaptureRange, PaneField, Target};
-    let liveness = transport.liveness(pane_id).ok();
-    if matches!(liveness, Some(PaneLiveness::Dead)) {
+    if matches!(transport.liveness(pane_id), Ok(PaneLiveness::Dead)) {
         return LeaderProviderHealth::Unreachable;
     }
-    let target = Target::Pane(pane_id.clone());
-    let current_command = transport
-        .query(&target, PaneField::PaneCurrentCommand)
-        .ok()
-        .flatten()
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default();
-    if !current_command.is_empty()
-        && (current_command == expected_provider_label
-            || current_command.contains(expected_provider_label))
-    {
-        return LeaderProviderHealth::Alive;
+    if matches!(transport.provider_exit_status(pane_id), Ok(Some(_))) {
+        return LeaderProviderHealth::ProviderExited;
     }
-    // Current command is NOT the provider — likely fell back to shell.
-    let is_shell = is_interactive_shell_basename(&current_command);
-    if is_shell {
-        // CR R6: marker text from single-source `leader_provider_exit_marker`
-        // so the wrapper printf and the health-check substring cannot drift.
-        let exit_marker_substr =
-            crate::tmux_backend::leader_provider_exit_marker(expected_provider_label);
-        if let Ok(cap) = transport.capture(&target, CaptureRange::Tail(200)) {
-            if cap.text.contains(&exit_marker_substr) {
-                return LeaderProviderHealth::ProviderExited;
-            }
-        }
-    }
-    // Conservative default — pane addressable, but couldn't positively
-    // confirm provider exit. Treat as Alive.
+    // Missing/unsupported receipts (including old wrappers) are not proof of exit.
     LeaderProviderHealth::Alive
 }
 
@@ -1750,7 +1699,6 @@ pub enum LeaderProviderHealth {
 
 /// 0.4.x (CR R6 + R3): single-source shell-tail detection.
 /// Used by:
-///   - `leader_provider_health` to decide "pane is at the shell tail"
 ///   - shutdown logic to recognise a leader pane in shell-tail mode
 ///     as still owned by the leader (not stray).
 ///
@@ -3001,6 +2949,7 @@ mod tests {
         screens: Mutex<Vec<String>>,
         sent: Mutex<Vec<(Target, Vec<Key>)>>,
         liveness: PaneLiveness,
+        exit_status: Option<u8>,
         targets: Vec<PaneInfo>,
         window_options: Mutex<Vec<(String, String)>>,
         window_option_error: Mutex<Option<String>>,
@@ -3014,6 +2963,7 @@ mod tests {
                 screens: Mutex::new(screens),
                 sent: Mutex::new(Vec::new()),
                 liveness: PaneLiveness::Unknown,
+                exit_status: None,
                 targets: Vec::new(),
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(None),
@@ -3027,6 +2977,7 @@ mod tests {
                 screens: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
                 liveness,
+                exit_status: None,
                 targets: Vec::new(),
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(None),
@@ -3040,6 +2991,7 @@ mod tests {
                 screens: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
                 liveness,
+                exit_status: None,
                 targets,
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(None),
@@ -3055,6 +3007,7 @@ mod tests {
                 screens: Mutex::new(Vec::new()),
                 sent: Mutex::new(Vec::new()),
                 liveness: PaneLiveness::Unknown,
+                exit_status: None,
                 targets: Vec::new(),
                 window_options: Mutex::new(Vec::new()),
                 window_option_error: Mutex::new(Some(error.to_string())),
@@ -3184,6 +3137,10 @@ mod tests {
 
         fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
             Ok(self.liveness)
+        }
+
+        fn provider_exit_status(&self, _pane: &PaneId) -> Result<Option<u8>, TransportError> {
+            Ok(self.exit_status)
         }
 
         fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
@@ -3859,22 +3816,37 @@ mod tests {
     }
 
     #[test]
-    fn managed_attach_teardown_detects_provider_exit_marker() {
+    fn managed_attach_teardown_requires_exit_receipt_not_replayed_markers() {
         let spawned = managed_spawn_result();
-        let transport = ScriptedTransport::new(vec![
-            "[team-agent] claude exited with 1\n[team-agent] Provider exited; this pane no longer accepts input.".to_string(),
+        let mut transport = ScriptedTransport::new(vec![
+            "[team-agent] pi exited with 1\n[team-agent] Provider exited".to_string(),
         ]);
-        let watch = super::ManagedAttachWatch {
-            transport: &transport,
-            spawned: &spawned,
-            session: &spawned.session,
-            session_existed_before: false,
-            workspace: Path::new("/tmp"),
-            provider_label: "claude",
-        };
-        assert!(
-            super::managed_attach_should_teardown(&watch),
-            "exit marker in capture must trigger teardown"
+        transport.liveness = PaneLiveness::Live;
+        for exit_status in [None, Some(0), Some(17)] {
+            transport.exit_status = exit_status;
+            let watch = super::ManagedAttachWatch {
+                transport: &transport,
+                spawned: &spawned,
+                session: &spawned.session,
+                session_existed_before: false,
+                workspace: Path::new("/tmp"),
+                provider_label: "pi",
+            };
+            assert_eq!(
+                super::managed_attach_should_teardown(&watch),
+                exit_status.is_some()
+            );
+        }
+        assert_eq!(
+            transport.screens.lock().unwrap().len(),
+            1,
+            "health must not read history"
+        );
+        transport.liveness = PaneLiveness::Dead;
+        transport.exit_status = None;
+        assert_eq!(
+            super::leader_provider_health(&transport, &spawned.pane_id, "pi"),
+            super::LeaderProviderHealth::Unreachable
         );
     }
 

@@ -151,14 +151,30 @@ pub(crate) fn parse_pi_list_models_table(bytes: &[u8]) -> Result<Vec<String>, Pr
         if line.trim().is_empty() {
             continue;
         }
-        let columns = line.split_whitespace().collect::<Vec<_>>();
-        if columns.len() < 2 || columns[0].is_empty() || columns[1].is_empty() {
-            return Err(ProviderError::Command(format!(
+        let malformed = || {
+            ProviderError::Command(format!(
                 "Pi model catalog row {} is malformed",
                 index + 2
-            )));
+            ))
+        };
+        let (provider, model) = line
+            .trim()
+            .split_once(char::is_whitespace)
+            .ok_or_else(malformed)?;
+        let mut model = model.trim();
+        // Pi prints the raw model id, which may contain spaces. Only the
+        // capability columns following it are single whitespace-free values.
+        for _ in 2..header_columns.len() {
+            model = model
+                .rsplit_once(char::is_whitespace)
+                .ok_or_else(malformed)?
+                .0
+                .trim_end();
         }
-        let exact = format!("{}/{}", columns[0], columns[1]);
+        if model.is_empty() {
+            return Err(malformed());
+        }
+        let exact = format!("{provider}/{model}");
         if !seen.insert(exact.clone()) {
             return Err(ProviderError::Command(format!(
                 "Pi model catalog contains duplicate exact id {exact:?}"

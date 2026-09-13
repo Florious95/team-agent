@@ -220,31 +220,128 @@ pub fn deliver_pending_message(
             turn_verification: None,
         });
     };
-    let mut canonical_owner_team_id = message.owner_team_id.clone();
-    let scoped_state;
-    let state = match message.owner_team_id.as_deref() {
-        Some(team) if !team.is_empty() => {
-            match project_state_for_owner_team(
-                workspace,
-                team,
+    match prepare_message_state(
+        workspace, store, message_id, event_log, state, &message, false,
+    )? {
+        Ok(prepared) => deliver_prepared_message(
+            workspace, store, transport, message_id, event_log, state, message, prepared,
+        ),
+        Err(outcome) => Ok(outcome),
+    }
+}
+
+// Thread-local observation only; no production cache or scheduling hook.
+#[cfg(test)]
+pub(super) mod preparation_probe {
+    std::thread_local! {
+        pub static COUNTS: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+        pub static BEFORE_CLAIM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+}
+
+struct PreparedMessageState {
+    scoped: Option<serde_json::Value>,
+    canonical_owner_team_id: Option<String>,
+}
+
+fn prepare_message_state(
+    workspace: &Path,
+    store: &MessageStore,
+    message_id: &str,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+    message: &PendingMessage,
+    batch: bool,
+) -> Result<Result<PreparedMessageState, DeliveryOutcome>, MessagingError> {
+    #[cfg(test)]
+    preparation_probe::COUNTS.with(|counts| {
+        let (prepare, project, claim) = counts.get();
+        counts.set((prepare + 1, project, claim));
+    });
+    let mut prepared = PreparedMessageState {
+        scoped: None,
+        canonical_owner_team_id: message.owner_team_id.clone(),
+    };
+    if let Some(team) = message
+        .owner_team_id
+        .as_deref()
+        .filter(|team| !team.is_empty())
+    {
+        match project_state_for_owner_team(
+            workspace,
+            team,
+            state,
+            Some(store),
+            Some(message_id),
+            Some(event_log),
+        )? {
+            OwnerTeamProjection::Projected {
                 state,
-                Some(store),
-                Some(message_id),
-                Some(event_log),
-            )? {
-                OwnerTeamProjection::Projected {
-                    state,
-                    canonical_team,
-                } => {
-                    canonical_owner_team_id = Some(canonical_team);
-                    scoped_state = state;
-                    &scoped_state
+                canonical_team,
+            } => {
+                prepared.scoped = Some(state);
+                prepared.canonical_owner_team_id = Some(canonical_team);
+            }
+            OwnerTeamProjection::Refused(outcome) => {
+                if batch {
+                    let _ = event_log.write(
+                        "delivery.projection_refused",
+                        serde_json::json!({
+                            "message_id": message_id,
+                            "owner_team_id": team,
+                            "status": super::helpers::status_wire(outcome.status),
+                            "verification": outcome.verification,
+                            "reason": format!("{:?}", outcome.reason),
+                        }),
+                    );
                 }
-                OwnerTeamProjection::Refused(outcome) => return Ok(outcome),
+                return Ok(Err(outcome));
             }
         }
-        _ => state,
-    };
+    }
+    if batch
+        && recipient_is_busy(
+            prepared.scoped.as_ref().unwrap_or(state),
+            &message.recipient,
+        )
+    {
+        event_log.write(
+            "send.deferred_busy",
+            serde_json::json!({
+                "message_id": message_id,
+                "sender": message.sender,
+                "recipient": message.recipient,
+                "reason": "recipient_busy",
+            }),
+        )?;
+        return Ok(Err(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Queued,
+            message_status: MessageStatusShadow(message.status.clone()),
+            message_id: Some(message_id.to_string()),
+            verification: None,
+            stage: None,
+            reason: None,
+            channel: None,
+            ack_forced_off: false,
+            turn_verification: None,
+        }));
+    }
+    Ok(Ok(prepared))
+}
+
+fn deliver_prepared_message(
+    workspace: &Path,
+    store: &MessageStore,
+    transport: &dyn Transport,
+    message_id: &str,
+    event_log: &EventLog,
+    fallback: &serde_json::Value,
+    message: PendingMessage,
+    prepared: PreparedMessageState,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let canonical_owner_team_id = prepared.canonical_owner_team_id;
+    let state = prepared.scoped.as_ref().unwrap_or(fallback);
     if message.recipient == "leader"
         && matches!(
             message.status.as_str(),
@@ -290,6 +387,18 @@ pub fn deliver_pending_message(
                 "revalidated_at": chrono::Utc::now().to_rfc3339(),
             }),
         )?;
+    }
+    #[cfg(test)]
+    {
+        preparation_probe::BEFORE_CLAIM.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        preparation_probe::COUNTS.with(|counts| {
+            let (prepare, project, claim) = counts.get();
+            counts.set((prepare, project, claim + 1));
+        });
     }
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
@@ -1946,10 +2055,7 @@ fn merge_inject_readback_fields(
     };
     let inject_pane = target.and_then(inject_pane_id);
     if let Some(pane) = inject_pane {
-        obj.insert(
-            "inject_target_pane_id".to_string(),
-            serde_json::json!(pane),
-        );
+        obj.insert("inject_target_pane_id".to_string(), serde_json::json!(pane));
     }
     let resolved_pane = metadata.map(|meta| meta.target_pane_id.as_str());
     obj.insert(
@@ -2190,59 +2296,30 @@ pub fn deliver_pending_messages(
     };
     let mut delivered = Vec::new();
     for message_id in message_ids {
-        if let Some(message) = message_for_delivery(&store, &message_id)? {
-            let scoped_state;
-            let state = match message.owner_team_id.as_deref() {
-                Some(team) if !team.is_empty() => {
-                    match project_state_for_owner_team(
-                        workspace,
-                        team,
-                        state,
-                        Some(&store),
-                        Some(&message_id),
-                        Some(event_log),
-                    )? {
-                        OwnerTeamProjection::Projected { state, .. } => {
-                            scoped_state = state;
-                            &scoped_state
-                        }
-                        OwnerTeamProjection::Refused(outcome) => {
-                            let _ = event_log.write(
-                                "delivery.projection_refused",
-                                serde_json::json!({
-                                    "message_id": message_id.as_str(),
-                                    "owner_team_id": team,
-                                    "status": super::helpers::status_wire(outcome.status),
-                                    "verification": outcome.verification,
-                                    "reason": format!("{:?}", outcome.reason),
-                                }),
-                            );
-                            continue;
-                        }
-                    }
-                }
-                _ => state,
-            };
-            if recipient_is_busy(state, &message.recipient) {
-                event_log.write(
-                    "send.deferred_busy",
-                    serde_json::json!({
-                        "message_id": message_id,
-                        "sender": message.sender,
-                        "recipient": message.recipient,
-                        "reason": "recipient_busy",
-                    }),
-                )?;
-                continue;
-            }
-        }
-        let outcome = match deliver_pending_message(
+        let Some(message) = message_for_delivery(&store, &message_id)? else {
+            continue;
+        };
+        let prepared = match prepare_message_state(
+            workspace,
+            &store,
+            &message_id,
+            event_log,
+            state,
+            &message,
+            true,
+        )? {
+            Ok(prepared) => prepared,
+            Err(_) => continue,
+        };
+        let outcome = match deliver_prepared_message(
             workspace,
             &store,
             transport,
             &message_id,
             event_log,
             state,
+            message,
+            prepared,
         ) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -2963,6 +3040,11 @@ fn project_state_for_owner_team(
     message_id: Option<&str>,
     event_log: Option<&EventLog>,
 ) -> Result<OwnerTeamProjection, MessagingError> {
+    #[cfg(test)]
+    preparation_probe::COUNTS.with(|counts| {
+        let (prepare, project, claim) = counts.get();
+        counts.set((prepare, project + 1, claim));
+    });
     let raw = crate::state::persist::load_runtime_state(workspace)?;
     let fallback_has_teams = fallback
         .get("teams")
