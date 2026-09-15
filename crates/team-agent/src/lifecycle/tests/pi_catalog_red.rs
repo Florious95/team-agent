@@ -87,7 +87,6 @@ fn argv_has_pair(argv: &[String], flag: &str, value: &str) -> bool {
 
 fn command_for_model(model: &str) -> Vec<String> {
     build_pi_command_argv(PiCommandRequest {
-        executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/t1/w1/team-mcp.ts"),
         model: Some(model),
         effort: Some(ProviderEffort::Medium),

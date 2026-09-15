@@ -6,7 +6,6 @@ use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiS
 
 fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
     PiCommandRequest {
-        executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts"),
         model: Some("team-agent/qwen3.8-27b"),
         effort: Some(ProviderEffort::High),
@@ -35,7 +34,6 @@ fn pi_command_omits_unset_model_and_thinking_flags() {
 
 fn leader_request() -> PiCommandRequest<'static> {
     PiCommandRequest {
-        executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/current/leader/team-mcp.ts"),
         model: None,
         effort: None,
@@ -56,7 +54,7 @@ fn pi_interactive_leader_argv_preserves_native_session_discovery() {
     assert_eq!(
         argv,
         [
-            "/verified/pi",
+            "pi",
             "-e",
             "/workspace/.team/runtime/pi/current/leader/team-mcp.ts",
             "--append-system-prompt",
@@ -109,7 +107,7 @@ fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
     assert_eq!(
         fresh,
         [
-            "/verified/pi",
+            "pi",
             "-e",
             "/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts",
             "--model",
@@ -143,6 +141,7 @@ fn pi_command_preserves_direct_pi_defaults_with_only_team_runtime_additions() {
     assert!(!resume.iter().any(|arg| arg == "--session-id"));
 
     for argv in [&fresh, &resume] {
+        assert_eq!(argv.first().map(String::as_str), Some("pi"));
         for forbidden in [
             "rpc",
             "--mode",

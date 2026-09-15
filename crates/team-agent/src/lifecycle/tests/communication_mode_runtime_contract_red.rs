@@ -112,7 +112,13 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
     };
 
     let leader = prompt(CommunicationMode::LeaderCentric);
-    for marker in ["Progress", "blocker", "question"] {
+    for marker in [
+        "Progress",
+        "blocker",
+        "question",
+        "actionable requests or questions",
+        "Do not reply to pure ACKs, greetings, or unchanged status notices",
+    ] {
         assert!(
             leader.contains(marker),
             "T06/leader_centric: official template must retain {marker:?} guidance; prompt={leader:?}"
@@ -120,7 +126,11 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
     }
 
     let orchestrated = prompt(CommunicationMode::Orchestrated);
-    for marker in ["declared channel", "task-related", "ACK"] {
+    for marker in [
+        "declared channel",
+        "Respond to task-related messages through Team Agent MCP tools.",
+        "A pure ACK, unrelated status, or non-task message does not require a response.",
+    ] {
         assert!(
             orchestrated.contains(marker),
             "T06/orchestrated: official template must state the on-demand channel/response boundary via {marker:?}; prompt={orchestrated:?}"
@@ -159,7 +169,7 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
 
     for required in [
         "All communication must go through Team Agent MCP tools.",
-        "If blocked or waiting, send_message to the leader. Do not wait silently.",
+        "Do not reply to pure ACKs, greetings, or unchanged status notices",
         "report_result exactly once",
     ] {
         assert!(
@@ -186,7 +196,8 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
         .expect("T07/leader_centric positive control: missing recorded default spawn");
     for required in [
         "Progress, blockers, questions:",
-        "When you receive a message from the leader or a teammate, you MUST respond",
+        "actionable requests or questions",
+        "Do not reply to pure ACKs, greetings, or unchanged status notices",
     ] {
         assert!(
             default_prompt.contains(required),

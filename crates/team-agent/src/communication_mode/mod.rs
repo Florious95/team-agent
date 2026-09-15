@@ -12,9 +12,9 @@ const LEADER_CENTRIC_RUNTIME_CONTRACT: &str = r#"# Team Agent communication cont
 
 - Progress, blockers, questions: {send_message}(to='leader', content='...')
 
-When you receive a message from the leader or a teammate, you MUST respond
-through MCP tools. Writing a reply in your terminal does nothing — the sender
-will never see it."#;
+Respond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it.
+
+"#;
 
 const ORCHESTRATED_RUNTIME_CONTRACT: &str = r#"# Team Agent communication contract: orchestrated
 

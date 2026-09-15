@@ -58,7 +58,6 @@ pub(crate) enum PiSessionSelector<'a> {
 }
 
 pub(crate) struct PiCommandRequest<'a> {
-    pub executable: &'a Path,
     pub extension: &'a Path,
     pub model: Option<&'a str>,
     pub effort: Option<ProviderEffort>,
@@ -72,14 +71,13 @@ pub(crate) struct PiCommandRequest<'a> {
 
 /// ---
 /// purpose: 从已验证 semantic request 构造仅追加 Team Agent MCP/提示/session 的 Pi argv
-/// returns: exact ordered fresh/resume argv
+/// returns: exact ordered fresh/resume argv，argv[0] 固定为裸 `pi`
 /// errors: 必需字段、mcp_team 或工具 category 非法时返回 ProviderError
 /// ---
 pub(crate) fn build_pi_command_argv(
     request: PiCommandRequest<'_>,
 ) -> Result<Vec<String>, ProviderError> {
-    if request.executable.as_os_str().is_empty()
-        || request.extension.as_os_str().is_empty()
+    if request.extension.as_os_str().is_empty()
         || request
             .session_dir
             .is_some_and(|session_dir| session_dir.as_os_str().is_empty())
@@ -88,7 +86,7 @@ pub(crate) fn build_pi_command_argv(
         || request.agent_id.trim().is_empty()
     {
         return Err(ProviderError::Command(
-            "Pi command requires executable, extension, prompt, and agent id".to_string(),
+            "Pi command requires extension, prompt, and agent id".to_string(),
         ));
     }
 
@@ -110,8 +108,10 @@ pub(crate) fn build_pi_command_argv(
         ));
     }
 
+    // Executable discovery/preflight belongs to the lifecycle materializer;
+    // the actual command must remain PATH-resolved at spawn time.
     let mut argv = vec![
-        request.executable.to_string_lossy().into_owned(),
+        "pi".to_string(),
         "-e".to_string(),
         request.extension.to_string_lossy().into_owned(),
     ];

@@ -1089,7 +1089,6 @@ fn materialize_pi_plan_with_session(
     })?;
     let (argv, expected_session_id) = if let Some((_session_id, exact_path)) = resume {
         let argv = build_pi_command_argv(PiCommandRequest {
-            executable: &chain.launch_executable,
             extension: &wrapper,
             model: model.as_deref(),
             effort: request.effort,
@@ -1103,7 +1102,6 @@ fn materialize_pi_plan_with_session(
     } else {
         let session_id = new_pi_session_id();
         let argv = build_pi_command_argv(PiCommandRequest {
-            executable: &chain.launch_executable,
             extension: &wrapper,
             model: model.as_deref(),
             effort: request.effort,

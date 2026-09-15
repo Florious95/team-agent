@@ -28,20 +28,20 @@ use crate::model::permissions::{resolve_permissions, AgentPermissionInput};
 
 const RUNTIME_CONTRACT_SECTION: &str = r#"# Team Agent Teammate Runtime Contract
 
-You are a teammate in a Team Agent runtime. The leader cannot see your terminal
-output. All communication must go through Team Agent MCP tools.
+You are a Team Agent teammate; leader cannot see terminal output.
+All communication must go through Team Agent MCP tools.
 
-## Communication (mandatory)
+## Communication:
 
-- Coordinate with teammate: {send_message}(to='<agent_id>', content='...')
-- Broadcast to all teammates: {send_message}(to='*', content='...')
-- Task complete: {report_result}(summary='...') — call exactly once
+- Teammate: {send_message}(to='<agent_id>', content='...')
+- Broadcast: {send_message}(to='*', content='...')
+- Complete: {report_result}(summary='...') — call exactly once
 
-## Rules
+## Rules:
 
-- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.
-- If blocked or waiting, send_message to the leader. Do not wait silently.
-- On 500/529/rate-limit errors, wait 1-2 minutes before retrying."#;
+- Do not pass sender, task_id, or schema_version — MCP fills them.
+- Do not reply to pure ACKs, greetings, or unchanged status notices (such as "paused" or "waiting"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives.
+- On 500/529/rate limits, retry only after 1-2 minutes."#;
 
 // 0.4.11 trimmed: the runtime contract section above already covers
 // send_message signatures and report_result exactly-once. The output
@@ -363,9 +363,7 @@ fn pi_communication_contract(mode: CommunicationMode) -> String {
 
 - Progress, blockers, questions: mcp({tool:"team_orchestrator_send_message", args:{to:"leader", content:"..."}})
 
-When you receive a message from the leader or a teammate, you MUST respond
-through MCP tools. Writing a reply in your terminal does nothing — the sender
-will never see it."#
+Respond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it."#
             .to_string(),
         CommunicationMode::Orchestrated => mode.runtime_contract("mcp"),
     }
@@ -597,5 +595,41 @@ mod tests {
         let slowdown_phrase = format!("500/{}", 500 + 29);
         assert!(prompt.contains(&slowdown_phrase));
         assert!(prompt.contains("Runtime Developer"));
+    }
+
+    #[test]
+    fn all_provider_mode_prompts_share_silence_contract_without_unconditional_replies() {
+        for provider in [Provider::Codex, Provider::Pi] {
+            for mode in CommunicationMode::ALL.iter().copied() {
+                let agent = WorkerCommandAgent {
+                    id: Some("worker".to_string()),
+                    provider,
+                    role: Some("developer".to_string()),
+                    declared_tools: Some(vec!["mcp_team".to_string()]),
+                    system_prompt_inline: Some("worker body".to_string()),
+                    system_prompt_file: None,
+                    output_contract_format: Some("result_envelope_v1".to_string()),
+                    communication_mode: mode,
+                    dangerously_skip_permissions: false,
+                };
+                let prompt = compile_worker_system_prompt(&agent).unwrap();
+                assert!(prompt.contains(
+                    "Do not reply to pure ACKs, greetings, or unchanged status notices (such as \"paused\" or \"waiting\"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives."
+                ));
+                assert!(!prompt.contains("Silence and resumption (mandatory)"));
+                assert!(!prompt.contains("When you receive a message from the leader or a teammate, you MUST respond"));
+                match mode {
+                    CommunicationMode::LeaderCentric => {
+                        assert!(prompt.contains(
+                            "Respond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it."
+                        ));
+                    }
+                    CommunicationMode::Orchestrated => {
+                        assert!(prompt.contains("Respond to task-related messages through Team Agent MCP tools."));
+                        assert!(prompt.contains("A pure ACK, unrelated status, or non-task message does not require a response."));
+                    }
+                }
+            }
+        }
     }
 }
