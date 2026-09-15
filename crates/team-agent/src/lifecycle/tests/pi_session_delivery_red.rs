@@ -54,7 +54,6 @@ fn scan_context(cwd: &Path, root: &Path, id: &str, generation: &str) -> CaptureS
 
 fn resume_argv(path: &Path) -> Result<Vec<String>, ProviderError> {
     build_pi_command_argv(PiCommandRequest {
-        executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/team-a/worker-a/team-mcp.ts"),
         model: Some("team-agent/qwen3.8-27b"),
         effort: Some(ProviderEffort::Medium),

@@ -40,7 +40,17 @@ output. All communication must go through Team Agent MCP tools.
 ## Rules
 
 - Do not pass sender, task_id, or schema_version — the MCP runtime fills them.
-- If blocked or waiting, send_message to the leader. Do not wait silently.
+- When blocked or waiting for external input, report the blocker and needed input to the leader once. Continue any other authorized work that can proceed. Do not repeat an unchanged blocker or waiting status.
+
+## Silence and resumption (mandatory)
+
+- Do NOT reply to or forward a pure ACK, thanks, repeated status, or a pause/wait/completion notice that contains no actionable request or material new information. Do not send an ACK to an ACK or exchange waiting confirmations.
+- Obey a pause or stop instruction. Acknowledge it once only if confirmation is explicitly requested; otherwise remain silent.
+- After submitting report_result for the current task, stop communication for that task. Do not submit it again or send an extra completion message in response to an ACK or status notice. Report a known submission failure to the leader once; do not claim successful delivery without evidence.
+- After reporting a blocker once, remain silent about that unchanged blocker. Communicate again only for a new authorized task, an explicit question that needs an answer, or material new information that changes the task or blocker. Answer such a question once through the required MCP channel without restarting completed work or repeating report_result.
+- While explicitly paused, do not resume work without an explicit resume instruction or new task authorization. A status notice alone is not authorization.
+- These silence rules apply in every communication mode and take precedence over generic instructions to acknowledge or respond to every message. They do not suppress an actionable request merely because it also contains words such as paused, waiting, or completed.
+
 - On 500/529/rate-limit errors, wait 1-2 minutes before retrying."#;
 
 // 0.4.11 trimmed: the runtime contract section above already covers
@@ -363,9 +373,8 @@ fn pi_communication_contract(mode: CommunicationMode) -> String {
 
 - Progress, blockers, questions: mcp({tool:"team_orchestrator_send_message", args:{to:"leader", content:"..."}})
 
-When you receive a message from the leader or a teammate, you MUST respond
-through MCP tools. Writing a reply in your terminal does nothing — the sender
-will never see it."#
+Respond through Team Agent MCP tools only when a message requires authorized action or an answer, or supplies material new information that requires communication. Follow the common Silence and resumption rules. You MUST NOT respond merely to acknowledge a pure ACK or unchanged status notice.
+Writing a reply in your terminal does not deliver it to the sender."#
             .to_string(),
         CommunicationMode::Orchestrated => mode.runtime_contract("mcp"),
     }
@@ -597,5 +606,38 @@ mod tests {
         let slowdown_phrase = format!("500/{}", 500 + 29);
         assert!(prompt.contains(&slowdown_phrase));
         assert!(prompt.contains("Runtime Developer"));
+    }
+
+    #[test]
+    fn all_provider_mode_prompts_share_silence_contract_without_unconditional_replies() {
+        for provider in [Provider::Codex, Provider::Pi] {
+            for mode in CommunicationMode::ALL.iter().copied() {
+                let agent = WorkerCommandAgent {
+                    id: Some("worker".to_string()),
+                    provider,
+                    role: Some("developer".to_string()),
+                    declared_tools: Some(vec!["mcp_team".to_string()]),
+                    system_prompt_inline: Some("worker body".to_string()),
+                    system_prompt_file: None,
+                    output_contract_format: Some("result_envelope_v1".to_string()),
+                    communication_mode: mode,
+                    dangerously_skip_permissions: false,
+                };
+                let prompt = compile_worker_system_prompt(&agent).unwrap();
+                assert!(prompt.contains("Silence and resumption (mandatory)"));
+                assert!(prompt.contains("report the blocker and needed input to the leader once"));
+                assert!(!prompt.contains("When you receive a message from the leader or a teammate, you MUST respond"));
+                match mode {
+                    CommunicationMode::LeaderCentric => {
+                        assert!(prompt.contains("authorized action or an answer"));
+                        assert!(prompt.contains("pure ACK or unchanged status notice"));
+                    }
+                    CommunicationMode::Orchestrated => {
+                        assert!(prompt.contains("actionable task-related"));
+                        assert!(prompt.contains("pure ACK"));
+                    }
+                }
+            }
+        }
     }
 }

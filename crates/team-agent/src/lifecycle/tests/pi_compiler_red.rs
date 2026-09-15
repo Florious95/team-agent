@@ -53,7 +53,6 @@ fn compile_error(result: Result<CompiledRole, ModelError>) -> ModelError {
 
 fn command(tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<String>, String> {
     build_pi_command_argv(PiCommandRequest {
-        executable: Path::new("/verified/pi"),
         extension: Path::new("/workspace/.team/runtime/pi/t1/pi-worker/team-mcp.ts"),
         model: Some(model),
         effort: Some(effort),

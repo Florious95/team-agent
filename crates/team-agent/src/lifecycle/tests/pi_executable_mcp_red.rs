@@ -586,6 +586,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         !native_paths.sessions.exists(),
         "NativeDefault must not create the Team Agent seat session root"
     );
+    assert_eq!(native.argv.first().map(String::as_str), Some("pi"));
     for forbidden in ["--session-dir", "--cwd", "--workspace", "--session"] {
         assert!(
             !native.argv.iter().any(|arg| arg == forbidden),
@@ -614,6 +615,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         isolated.provider_projects_root.as_deref(),
         Some(isolated_paths.sessions.as_path())
     );
+    assert_eq!(isolated.argv.first().map(String::as_str), Some("pi"));
     assert_session_pair(&isolated.argv, &isolated_paths.sessions);
     assert!(!isolated.argv.iter().any(|arg| arg == "--cwd"));
     assert!(!isolated.argv.iter().any(|arg| arg == "--workspace"));
@@ -645,6 +647,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         resumed.provider_projects_root.as_deref(),
         Some(isolated_paths.sessions.as_path())
     );
+    assert_eq!(resumed.argv.first().map(String::as_str), Some("pi"));
     assert_session_pair(&resumed.argv, &isolated_paths.sessions);
     assert!(
         resumed
@@ -757,6 +760,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
                     .any(|arg| arg.as_str() == paths.wrapper.to_string_lossy().as_ref())
             })
             .expect("transport spawn record for worker seat");
+        assert_eq!(record.1.first().map(String::as_str), Some("pi"));
         assert_session_pair(&record.1, &paths.sessions);
         assert!(
             !record
@@ -861,6 +865,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
         .into_iter()
         .next()
         .expect("restart must reach the worker spawn construction");
+    assert_eq!(restart_record.1.first().map(String::as_str), Some("pi"));
     assert_session_pair(&restart_record.1, &restart_paths.sessions);
     assert!(
         restart_record

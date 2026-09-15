@@ -12,15 +12,14 @@ const LEADER_CENTRIC_RUNTIME_CONTRACT: &str = r#"# Team Agent communication cont
 
 - Progress, blockers, questions: {send_message}(to='leader', content='...')
 
-When you receive a message from the leader or a teammate, you MUST respond
-through MCP tools. Writing a reply in your terminal does nothing — the sender
-will never see it."#;
+Respond through Team Agent MCP tools only when a message requires authorized action or an answer, or supplies material new information that requires communication. Follow the common Silence and resumption rules. You MUST NOT respond merely to acknowledge a pure ACK or unchanged status notice.
+Writing a reply in your terminal does not deliver it to the sender."#;
 
 const ORCHESTRATED_RUNTIME_CONTRACT: &str = r#"# Team Agent communication contract: orchestrated
 
 - Send progress only through the declared channel for the assigned task.
-- Respond to task-related messages through Team Agent MCP tools.
-- A pure ACK, unrelated status, or non-task message does not require a response."#;
+- Respond to actionable task-related messages through Team Agent MCP tools, subject to the common Silence and resumption rules.
+- You MUST NOT respond to a pure ACK, unrelated status, or non-task message that contains no actionable request or material new information."#;
 
 impl CommunicationMode {
     pub const ALL: &[Self] = &[Self::LeaderCentric, Self::Orchestrated];
