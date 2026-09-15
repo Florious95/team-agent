@@ -14,7 +14,7 @@ const LEADER_CENTRIC_RUNTIME_CONTRACT: &str = r#"# Team Agent communication cont
 
 Respond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it.
 
-No repeated ACK, status, or greeting replies."#;
+"#;
 
 const ORCHESTRATED_RUNTIME_CONTRACT: &str = r#"# Team Agent communication contract: orchestrated
 

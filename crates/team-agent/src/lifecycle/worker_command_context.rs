@@ -28,20 +28,20 @@ use crate::model::permissions::{resolve_permissions, AgentPermissionInput};
 
 const RUNTIME_CONTRACT_SECTION: &str = r#"# Team Agent Teammate Runtime Contract
 
-You are a teammate in a Team Agent runtime. The leader cannot see your terminal
-output. All communication must go through Team Agent MCP tools.
+You are a Team Agent teammate; leader cannot see terminal output.
+All communication must go through Team Agent MCP tools.
 
-## Communication (mandatory)
+## Communication:
 
-- Coordinate with teammate: {send_message}(to='<agent_id>', content='...')
-- Broadcast to all teammates: {send_message}(to='*', content='...')
-- Task complete: {report_result}(summary='...') — call exactly once
+- Teammate: {send_message}(to='<agent_id>', content='...')
+- Broadcast: {send_message}(to='*', content='...')
+- Complete: {report_result}(summary='...') — call exactly once
 
-## Rules
+## Rules:
 
-- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.
+- Do not pass sender, task_id, or schema_version — MCP fills them.
 - Do not reply to pure ACKs, greetings, or unchanged status notices (such as "paused" or "waiting"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives.
-- On 500/529/rate-limit errors, wait 1-2 minutes before retrying."#;
+- On 500/529/rate limits, retry only after 1-2 minutes."#;
 
 // 0.4.11 trimmed: the runtime contract section above already covers
 // send_message signatures and report_result exactly-once. The output
