@@ -116,9 +116,8 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
         "Progress",
         "blocker",
         "question",
-        "authorized action or an answer",
-        "pure ACK or unchanged status notice",
-        "Silence and resumption (mandatory)",
+        "actionable requests or questions",
+        "Do not reply to pure ACKs, greetings, or unchanged status notices",
     ] {
         assert!(
             leader.contains(marker),
@@ -129,9 +128,8 @@ fn t06_selected_templates_project_the_two_signed_communication_boundaries() {
     let orchestrated = prompt(CommunicationMode::Orchestrated);
     for marker in [
         "declared channel",
-        "actionable task-related",
-        "pure ACK",
-        "Silence and resumption (mandatory)",
+        "Respond to task-related messages through Team Agent MCP tools.",
+        "A pure ACK, unrelated status, or non-task message does not require a response.",
     ] {
         assert!(
             orchestrated.contains(marker),
@@ -171,8 +169,7 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
 
     for required in [
         "All communication must go through Team Agent MCP tools.",
-        "When blocked or waiting for external input, report the blocker and needed input to the leader once.",
-        "Silence and resumption (mandatory)",
+        "Do not reply to pure ACKs, greetings, or unchanged status notices",
         "report_result exactly once",
     ] {
         assert!(
@@ -199,9 +196,8 @@ fn t07_final_spawn_prompt_does_not_leak_leader_centric_obligations_into_orchestr
         .expect("T07/leader_centric positive control: missing recorded default spawn");
     for required in [
         "Progress, blockers, questions:",
-        "authorized action or an answer",
-        "pure ACK or unchanged status notice",
-        "Silence and resumption (mandatory)",
+        "actionable requests or questions",
+        "Do not reply to pure ACKs, greetings, or unchanged status notices",
     ] {
         assert!(
             default_prompt.contains(required),
