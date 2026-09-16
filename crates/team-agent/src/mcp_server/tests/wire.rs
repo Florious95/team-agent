@@ -264,6 +264,36 @@ fn dispatch_unknown_tool_returns_unknown_tool_error() {
     assert_eq!(err.message, "unknown tool 'nope'");
 }
 
+#[test]
+fn worker_identity_is_bound_before_send_or_report_dispatch() {
+    let tools = TeamOrchestratorTools::with_identity(
+        Path::new("/tmp/ws"),
+        Some(AgentId::new("worker-7")),
+        None,
+    );
+    let send = dispatch(
+        &tools,
+        &json!({
+            "tool": "send_message",
+            "arguments": {"to": "leader", "content": "spoof", "agent_id": "in-dev2"}
+        }),
+    )
+    .expect_err("send_message must reject a spoofed request identity");
+    assert!(send.message.contains("identity_mismatch"));
+    assert_eq!(send.extra.get("expected_agent_id"), Some(&json!("worker-7")));
+
+    let report = dispatch(
+        &tools,
+        &json!({
+            "tool": "report_result",
+            "arguments": {"envelope": {"agent_id": "in-dev2", "summary": "spoof"}}
+        }),
+    )
+    .expect_err("report_result envelope must not override captured identity");
+    assert!(report.message.contains("identity_mismatch"));
+    assert_eq!(report.extra.get("provided_agent_id"), Some(&json!("in-dev2")));
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // requires_ack_for_target — leader-only → false (tools.py:16)
 // ════════════════════════════════════════════════════════════════════════

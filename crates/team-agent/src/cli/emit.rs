@@ -418,7 +418,7 @@ fn command_help(command: Option<&str>) -> String {
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或 nodeprobe 证据时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
-        Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]\n\nPrints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
+        Some("models") => "usage: team-agent models [--provider pi|cursor_agent] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, and display name. Cursor uses the local `agent --list-models` catalog.".to_string(),
         Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
@@ -1007,6 +1007,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             other if other.starts_with("--provider=") => {
                 parsed.provider = Some(other.trim_start_matches("--provider=").to_string());
             }
+            other if other.starts_with("--search=") => {
+                parsed.search = Some(other.trim_start_matches("--search=").to_string());
+            }
             other if other.starts_with("--socket=") => {
                 parsed.socket = Some(other.trim_start_matches("--socket=").to_string());
             }
@@ -1106,17 +1109,19 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
 
 fn models_args(args: &[String]) -> Result<ModelsArgs, CliError> {
     let parsed = parse_args(args);
-    let provider = parsed
-        .provider
-        .ok_or_else(|| CliError::Usage("models requires --provider pi".to_string()))?;
-    if provider != "pi" {
-        return Err(CliError::Usage(format!(
-            "models supports only --provider pi, got {provider:?}"
-        )));
+    let provider = parsed.provider.unwrap_or_else(|| "pi".to_string());
+    if parsed.search.is_some() && !parsed.positionals.is_empty() {
+        return Err(CliError::Usage(
+            "models accepts either QUERY or --search TEXT, not both".to_string(),
+        ));
     }
+    let search = parsed
+        .search
+        .or_else(|| (!parsed.positionals.is_empty()).then(|| parsed.positionals.join(" ")))
+        .filter(|query| !query.trim().is_empty());
     Ok(ModelsArgs {
         provider,
-        search: parsed.search,
+        search,
         json: parsed.json,
     })
 }
@@ -2383,6 +2388,30 @@ mod tests {
             assert!(help.contains(marker), "status help missing {marker}: {help}");
         }
         assert!(!help.contains("错误细分走 status --summary"));
+    }
+
+    #[test]
+    fn models_defaults_provider_and_accepts_one_query_form() {
+        let defaulted = models_args(&cli_argv(&["gpt", "5.6", "luna"])).unwrap();
+        assert_eq!(defaulted.provider, "pi");
+        assert_eq!(defaulted.search.as_deref(), Some("gpt 5.6 luna"));
+
+        let cursor = models_args(&cli_argv(&[
+            "--provider",
+            "cursor_agent",
+            "--search",
+            "GPT Luna",
+        ]))
+        .unwrap();
+        assert_eq!(cursor.provider, "cursor_agent");
+        assert_eq!(cursor.search.as_deref(), Some("GPT Luna"));
+
+        let both = models_args(&cli_argv(&["luna", "--search", "gpt"])).unwrap_err();
+        assert!(
+            matches!(both, CliError::Usage(message) if message.contains("either QUERY or --search TEXT"))
+        );
+        let blank = models_args(&cli_argv(&["--search", "   "])).unwrap();
+        assert_eq!(blank.search, None);
     }
 
     #[test]

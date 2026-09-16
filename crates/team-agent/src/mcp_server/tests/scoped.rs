@@ -163,30 +163,28 @@ fn verify_cleanup_surviving_receipt(
         assert!(!receipt.exists(), "cleanup must remove only the exact receipt path");
     }
 
-    // ── #36 report_result setdefault: populated envelope keys WIN over args ─────
-    // GOLDEN (probe_setdefault.py): envelope {agent_id:env-agent, task_id:env-task,...}
-    // + explicit args agent_id=ARG-agent, task_id=ARG-task → returned dict keeps
-    // env-agent / env-task (setdefault). Rust unconditionally insert-overrides.
+    // ── #36 report_result identity: neither envelope nor args can override capture ─
     #[test]
-    fn report_result_setdefault_envelope_wins_over_args() {
+    fn report_result_rejects_envelope_and_argument_identity_mismatch() {
         let tools = TeamOrchestratorTools::with_identity(
             &unique_ws("report-setdefault"),
             Some(AgentId::new("env-id")),
             None,
         );
-        let ok = tools.report_result(
-            Some(&json!({
-                "agent_id": "env-agent", "task_id": "env-task",
-                "status": "blocked", "summary": "env summary"
-            })),
-            Some("ARG summary"), ResultStatus::Success,
-            None, None, None, None, None,
-            Some("ARG-task"), Some("ARG-agent"),
-        ).expect("report ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        // setdefault: the pre-populated envelope values win.
-        assert_eq!(v.get("agent_id"), Some(&json!("env-agent")), "envelope agent_id wins (setdefault)");
-        assert_eq!(v.get("task_id"), Some(&json!("env-task")), "envelope task_id wins (setdefault)");
+        let error = tools
+            .report_result(
+                Some(&json!({
+                    "agent_id": "env-agent", "task_id": "env-task",
+                    "status": "blocked", "summary": "env summary"
+                })),
+                Some("ARG summary"), ResultStatus::Success,
+                None, None, None, None, None,
+                Some("ARG-task"), Some("ARG-agent"),
+            )
+            .expect_err("envelope and argument identities must be bound to the worker capture");
+        assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
+        assert!(error.message.contains("identity_mismatch"));
+        assert_eq!(error.extra.get("expected_agent_id"), Some(&json!("env-id")));
     }
 
     // ── #44 report_result task_id inference from state (_latest_task_for_assignee)

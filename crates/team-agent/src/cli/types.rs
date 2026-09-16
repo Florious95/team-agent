@@ -655,7 +655,7 @@ pub struct LeadersArgs {
     pub json: bool,
 }
 
-/// Read-only Pi model catalog discovery.
+/// Read-only provider model catalog discovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelsArgs {
     pub provider: String,
