@@ -222,27 +222,60 @@ fn e7_leaders_lists_live_stale_and_ambiguous_without_worker_rows() {
     );
 
     live_b.kill_session();
-    let stale = run_cli_with_home(
+    let default_after_kill = run_cli_with_home(
         &home,
         &live_a.tmux_socket,
         &live_a.workspace,
         vec!["leaders".into(), "--json".into()],
     );
-    let stale_json = json_output(&stale, "leaders --json after kill");
+    let default_json = json_output(&default_after_kill, "leaders --json after kill");
     assert_json_ok(
-        &stale,
-        &stale_json,
-        "leaders should still return JSON when one entry is stale",
+        &default_after_kill,
+        &default_json,
+        "default leaders view should remain JSON when one entry is stale",
     );
-    assert_leader_status(&stale_json, "alpha", "LIVE");
-    assert_leader_status(&stale_json, "beta", "STALE");
+    assert_leader_status(&default_json, "alpha", "LIVE");
     assert!(
-        leader_by_name(&stale_json, "beta")
+        leader_by_name(&default_json, "beta").is_none(),
+        "E7: default LIVE view must omit stale beta; output={default_json}"
+    );
+
+    let all = run_cli_with_home(
+        &home,
+        &live_a.tmux_socket,
+        &live_a.workspace,
+        vec!["leaders".into(), "--all".into(), "--json".into()],
+    );
+    let all_json = json_output(&all, "leaders --all --json after kill");
+    assert_json_ok(
+        &all,
+        &all_json,
+        "leaders --all should include retained stale entries",
+    );
+    assert_leader_status(&all_json, "alpha", "LIVE");
+    assert_leader_status(&all_json, "beta", "STALE");
+    assert!(
+        leader_by_name(&all_json, "beta")
             .and_then(|entry| entry.get("stale_reason"))
             .and_then(Value::as_str)
             .is_some_and(|reason| !reason.is_empty()),
-        "E7 RED: killed target must be STALE with machine-readable stale_reason; output={stale_json}"
+        "E7: killed target must be STALE with machine-readable stale_reason; output={all_json}"
     );
+
+    let stale_only = run_cli_with_home(
+        &home,
+        &live_a.tmux_socket,
+        &live_a.workspace,
+        vec!["leaders".into(), "--stale".into(), "--json".into()],
+    );
+    let stale_only_json = json_output(&stale_only, "leaders --stale --json after kill");
+    assert_json_ok(
+        &stale_only,
+        &stale_only_json,
+        "leaders --stale should isolate retained stale entries",
+    );
+    assert!(leader_by_name(&stale_only_json, "alpha").is_none());
+    assert_leader_status(&stale_only_json, "beta", "STALE");
 
     let live_c = RuntimeCase::with_home(&env, "leaders-live-c", "alpha", home.clone());
     let pane_c = live_c.start_leader_pane("leader");
@@ -522,7 +555,7 @@ fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
 
 #[test]
 #[serial(env)]
-fn e7_registry_gc_prunes_unbound_stale_entries_without_deleting_live_entries() {
+fn e7_explicit_prune_removes_only_terminal_entries_without_listing_side_effects() {
     let env = HermeticTestEnv::enter("e7-registry-gc");
     let home = env.home().to_path_buf();
     let live = RuntimeCase::with_home(&env, "gc-live", "live", home.clone());
@@ -538,38 +571,167 @@ fn e7_registry_gc_prunes_unbound_stale_entries_without_deleting_live_entries() {
         "seed",
     );
 
-    let stale = RuntimeCase::with_home(&env, "gc-stale", "stale", home.clone());
-    stale.seed_state_without_receiver("stale");
-    let stale_path = write_registry_entry(
+    let unattached = RuntimeCase::with_home(&env, "gc-unattached", "unattached", home.clone());
+    unattached.seed_state_without_receiver("unattached");
+    let unattached_path = write_registry_entry(
         &home,
-        &stale.workspace,
-        "stale",
+        &unattached.workspace,
+        "unattached",
         "direct_tmux",
-        json!({"session_name": stale.session_name, "window_name": "leader", "pane_id": "%stale"}),
+        json!({"session_name": unattached.session_name, "window_name": "leader", "pane_id": "%unattached"}),
         0,
         "seed",
     );
 
-    let output = run_cli_with_home(
+    let stopped = RuntimeCase::with_home(&env, "gc-stopped", "stopped", home.clone());
+    stopped.seed_state_with_receiver_status("stopped", "%stopped", 1, "stopped");
+    let stopped_path = write_registry_entry(
+        &home,
+        &stopped.workspace,
+        "stopped",
+        "direct_tmux",
+        json!({"pane_id": "%stopped"}),
+        1,
+        "seed",
+    );
+    let state_before = std::fs::read(&stopped.workspace.join(".team/runtime/state.json"))
+        .expect("read stopped canonical state before prune");
+    let live_before = std::fs::read(&live_path).expect("read live registry before prune");
+    let unattached_before =
+        std::fs::read(&unattached_path).expect("read unattached registry before prune");
+    let stopped_before = std::fs::read(&stopped_path).expect("read stopped registry before prune");
+
+    for (label, args) in [
+        ("leaders default", vec!["leaders", "--json"]),
+        ("leaders all", vec!["leaders", "--all", "--json"]),
+        ("leaders stale", vec!["leaders", "--stale", "--json"]),
+    ] {
+        let output = run_cli_with_home(
+            &home,
+            &live.tmux_socket,
+            &live.workspace,
+            args.into_iter().map(String::from).collect(),
+        );
+        let body = json_output(&output, label);
+        assert_json_ok(&output, &body, label);
+        assert_eq!(
+            std::fs::read(&live_path).expect("read live after listing"),
+            live_before
+        );
+        assert_eq!(
+            std::fs::read(&unattached_path).expect("read unattached after listing"),
+            unattached_before
+        );
+        assert_eq!(
+            std::fs::read(&stopped_path).expect("read stopped after listing"),
+            stopped_before
+        );
+        assert_eq!(
+            std::fs::read(&stopped.workspace.join(".team/runtime/state.json"))
+                .expect("read canonical state after listing"),
+            state_before
+        );
+    }
+
+    let default = run_cli_with_home(
         &home,
         &live.tmux_socket,
         &live.workspace,
         vec!["leaders".into(), "--json".into()],
     );
-    let body = json_output(&output, "leaders --json gc");
-    assert_json_ok(
-        &output,
-        &body,
-        "leaders --json should validate and prune terminal stale entries",
+    let default_json = json_output(&default, "leaders default --json");
+    assert_leader_status(&default_json, "live", "LIVE");
+    assert!(leader_by_name(&default_json, "unattached").is_none());
+    assert!(leader_by_name(&default_json, "stopped").is_none());
+
+    let all = run_cli_with_home(
+        &home,
+        &live.tmux_socket,
+        &live.workspace,
+        vec!["leaders".into(), "--all".into(), "--json".into()],
     );
-    assert!(
-        live_path.exists(),
-        "E7 RED: registry GC must never delete a canonical-live registry entry; output={body}"
+    let all_json = json_output(&all, "leaders --all --json");
+    assert_leader_status(&all_json, "live", "LIVE");
+    assert_leader_status(&all_json, "unattached", "STALE");
+    assert_leader_status(&all_json, "stopped", "STALE");
+
+    let stale = run_cli_with_home(
+        &home,
+        &live.tmux_socket,
+        &live.workspace,
+        vec!["leaders".into(), "--stale".into(), "--json".into()],
     );
+    let stale_json = json_output(&stale, "leaders --stale --json");
+    assert!(leader_by_name(&stale_json, "live").is_none());
+    assert_leader_status(&stale_json, "unattached", "STALE");
+    assert_leader_status(&stale_json, "stopped", "STALE");
+
+    let dry_run = run_cli_with_home(
+        &home,
+        &live.tmux_socket,
+        &live.workspace,
+        vec![
+            "leaders".into(),
+            "--prune".into(),
+            "--dry-run".into(),
+            "--json".into(),
+        ],
+    );
+    let dry_json = json_output(&dry_run, "leaders --prune --dry-run --json");
+    assert_json_ok(&dry_run, &dry_json, "dry-run prune should succeed");
+    let candidates = dry_json
+        .pointer("/prune/candidates")
+        .and_then(Value::as_array)
+        .expect("dry-run candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].get("team_key").and_then(Value::as_str),
+        Some("stopped")
+    );
+    assert!(dry_json
+        .pointer("/prune/removed")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty));
+    assert!(live_path.exists() && unattached_path.exists() && stopped_path.exists());
+    assert_eq!(
+        std::fs::read(&live_path).expect("read live after dry-run"),
+        live_before
+    );
+    assert_eq!(
+        std::fs::read(&unattached_path).expect("read unattached after dry-run"),
+        unattached_before
+    );
+    assert_eq!(
+        std::fs::read(&stopped_path).expect("read stopped after dry-run"),
+        stopped_before
+    );
+
+    let prune = run_cli_with_home(
+        &home,
+        &live.tmux_socket,
+        &live.workspace,
+        vec!["leaders".into(), "--prune".into(), "--json".into()],
+    );
+    let prune_json = json_output(&prune, "leaders --prune --json");
+    assert_json_ok(&prune, &prune_json, "explicit prune should succeed");
+    assert!(!stopped_path.exists(), "terminal index must be removed");
+    assert!(live_path.exists(), "live index must be retained");
     assert!(
-        !stale_path.exists(),
-        "E7 RED: registry GC must prune canonical-unbound terminal stale entries while preserving live entries; output={body} stale_path={}",
-        stale_path.display()
+        unattached_path.exists(),
+        "alive/unattached index must be retained"
+    );
+    assert_eq!(
+        std::fs::read(&live_path).expect("read live after prune"),
+        live_before
+    );
+    assert_eq!(
+        std::fs::read(&unattached_path).expect("read unattached after prune"),
+        unattached_before
+    );
+    assert_eq!(
+        std::fs::read(&stopped.workspace.join(".team/runtime/state.json"))
+            .expect("read canonical state after prune"),
+        state_before
     );
 }
 

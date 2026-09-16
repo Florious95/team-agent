@@ -808,7 +808,7 @@ mod tests {
             workspace,
             team_key,
             "direct_tmux",
-            json!({"owner_epoch": 1}),
+            json!({"pane_id": "%fixture"}),
             1,
             "test",
             "2026-09-16T00:00:00Z".to_string(),
