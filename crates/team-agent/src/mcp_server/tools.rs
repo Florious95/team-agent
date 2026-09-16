@@ -82,6 +82,107 @@ impl TeamOrchestratorTools {
         }
     }
 
+    /// Validate an identity supplied by an MCP request against the identity captured
+    /// when this worker server started. Missing request fields are intentionally valid;
+    /// the captured identity is the only fallback. Present values must be non-empty and
+    /// equal to that capture, otherwise reject before routing or persistence.
+    pub(crate) fn validate_identity_argument(
+        &self,
+        tool: &str,
+        value: Option<&Value>,
+    ) -> Result<(), ToolError> {
+        let expected = self.require_captured_identity(tool)?;
+        let Some(value) = value else {
+            return Ok(());
+        };
+        let Some(provided) = value.as_str().and_then(non_empty_string) else {
+            return Err(self.identity_mismatch(tool, expected.as_str(), None));
+        };
+        if provided != expected.as_str() {
+            return Err(self.identity_mismatch(tool, expected.as_str(), Some(provided)));
+        }
+        Ok(())
+    }
+
+    /// Report requests can carry identity in both the top-level argument and the
+    /// envelope. Validate both independently so an envelope cannot overwrite the
+    /// framework-bound sender after the top-level check.
+    pub(crate) fn validate_report_identity_request(
+        &self,
+        envelope: Option<&Value>,
+        explicit_agent_id: Option<&Value>,
+    ) -> Result<(), ToolError> {
+        self.validate_identity_argument("report_result", explicit_agent_id)?;
+        if let Some(value) = envelope
+            .and_then(Value::as_object)
+            .and_then(|obj| obj.get("agent_id"))
+        {
+            self.validate_identity_argument("report_result", Some(value))?;
+        }
+        Ok(())
+    }
+
+    fn require_captured_identity(&self, tool: &str) -> Result<&AgentId, ToolError> {
+        self.agent_id
+            .as_ref()
+            .filter(|agent| non_empty_string(agent.as_str()).is_some())
+            .ok_or_else(|| self.identity_mismatch(tool, "<missing>", None))
+    }
+
+    fn validate_report_identity_text(
+        &self,
+        envelope: Option<&Value>,
+        explicit_agent_id: Option<&str>,
+    ) -> Result<(), ToolError> {
+        let expected = self.require_captured_identity("report_result")?;
+        if let Some(provided) = explicit_agent_id.and_then(non_empty_string) {
+            if provided != expected.as_str() {
+                return Err(self.identity_mismatch(
+                    "report_result",
+                    expected.as_str(),
+                    Some(provided),
+                ));
+            }
+        } else if explicit_agent_id.is_some() {
+            return Err(self.identity_mismatch("report_result", expected.as_str(), None));
+        }
+        if let Some(value) = envelope
+            .and_then(Value::as_object)
+            .and_then(|obj| obj.get("agent_id"))
+        {
+            self.validate_identity_argument("report_result", Some(value))?;
+        }
+        Ok(())
+    }
+
+    fn identity_mismatch(&self, tool: &str, expected: &str, provided: Option<&str>) -> ToolError {
+        let mut error = ToolError::new(
+            ToolErrorReason::McpScopeRefused,
+            format!(
+                "identity_mismatch: {tool} agent_id must match framework-injected TEAM_AGENT_ID"
+            ),
+            "IdentityError",
+        );
+        error
+            .extra
+            .insert("status".to_string(), Value::String("refused".to_string()));
+        error
+            .extra
+            .insert("identity_mismatch".to_string(), Value::Bool(true));
+        error
+            .extra
+            .insert("tool".to_string(), Value::String(tool.to_string()));
+        error.extra.insert(
+            "expected_agent_id".to_string(),
+            Value::String(expected.to_string()),
+        );
+        error.extra.insert(
+            "provided_agent_id".to_string(),
+            provided.map_or(Value::Null, |value| Value::String(value.to_string())),
+        );
+        error
+    }
+
     /// `assign_task` (`tools.py:84-133`): C8 Family-B task-view reconcile then deliver.
     /// Resolves team key from owner-team env (or `active_team_key`), appends or
     /// field-updates the task in state, then delegates delivery to
@@ -214,6 +315,8 @@ impl TeamOrchestratorTools {
         mailbox: Option<&Value>,
         presentation: Option<&Value>,
     ) -> Result<SendOutcome, ToolError> {
+        // A worker without a spawn-time identity cannot safely emit a message.
+        self.require_captured_identity("send_message")?;
         let normalized =
             crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
                 .map_err(|error| {
@@ -430,6 +533,8 @@ impl TeamOrchestratorTools {
         agent_id: Option<&str>,
         presentation: Option<&Value>,
     ) -> ToolResult {
+        // Validate before scope reads, envelope normalization, or result persistence.
+        self.validate_report_identity_text(envelope, agent_id)?;
         if let Some(envelope) = envelope {
             self.validate_rpc_scope_args("report_result", envelope)?;
         }
@@ -538,17 +643,14 @@ impl TeamOrchestratorTools {
                         .or_insert(Value::String(source.to_string()));
                 }
             }
-            if !obj.contains_key("agent_id") {
-                let resolved = agent_id
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.agent_id
-                            .as_ref()
-                            .map(|env_agent| env_agent.as_str().to_string())
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-                obj.insert("agent_id".to_string(), Value::String(resolved));
-            }
+            // The framework capture is authoritative even when a matching request
+            // value was supplied; this also canonicalizes surrounding whitespace.
+            let resolved = self
+                .agent_id
+                .as_ref()
+                .map(|env_agent| env_agent.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            obj.insert("agent_id".to_string(), Value::String(resolved));
             if !obj.contains_key("changes") {
                 obj.insert(
                     "changes".to_string(),

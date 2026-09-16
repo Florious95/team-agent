@@ -25,31 +25,42 @@
     }
 
     #[test]
-    fn report_result_explicit_agent_overrides_env() {
+    fn report_result_rejects_explicit_agent_mismatch() {
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("report-explicit"),
+            &unique_ws("report-explicit-mismatch"),
             Some(AgentId::new("worker-7")),
             Some(TeamKey::new("teamA")),
         );
-        let ok = tools.report_result(
-            None, Some("done"), ResultStatus::Success,
-            None, None, None, None, None,
-            Some("task-9"), Some("explicit-agent"),
-        ).expect("report ok");
+        let error = tools
+            .report_result(
+                None, Some("done"), ResultStatus::Success,
+                None, None, None, None, None,
+                Some("task-9"), Some("explicit-agent"),
+            )
+            .expect_err("a request agent_id cannot override the captured identity");
+        assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
+        assert!(error.message.contains("identity_mismatch"));
+        assert_eq!(error.extra.get("expected_agent_id"), Some(&json!("worker-7")));
+        assert_eq!(error.extra.get("provided_agent_id"), Some(&json!("explicit-agent")));
+    }
+
+    #[test]
+    fn report_result_accepts_explicit_captured_agent() {
+        let tools = TeamOrchestratorTools::with_identity(
+            &unique_ws("report-explicit-match"),
+            Some(AgentId::new("worker-7")),
+            Some(TeamKey::new("teamA")),
+        );
+        let ok = tools
+            .report_result(
+                None, Some("done"), ResultStatus::Success,
+                None, None, None, None, None,
+                Some("task-9"), Some("worker-7"),
+            )
+            .expect("matching explicit agent_id remains compatible");
         let v = serde_json::to_value(&ok).unwrap();
-        // explicit > env: both task_id and agent_id are ok-whitelist keys
-        // (normalize.py:45-46) echoed by runtime.report_result, so present on success.
-        // UNCONDITIONAL asserts — the override must be proven, not silently skipped.
-        assert_eq!(
-            v.get("agent_id"),
-            Some(&json!("explicit-agent")),
-            "explicit agent_id overrides env"
-        );
-        assert_eq!(
-            v.get("task_id"),
-            Some(&json!("task-9")),
-            "explicit task_id flows through"
-        );
+        assert_eq!(v.get("agent_id"), Some(&json!("worker-7")));
+        assert_eq!(v.get("task_id"), Some(&json!("task-9")));
     }
 
     #[test]

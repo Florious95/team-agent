@@ -1,53 +1,98 @@
-//! Read-only Pi model catalog discovery for `team-agent models`.
+//! Read-only provider model catalog discovery for `team-agent models`.
 use super::{CliError, CmdOutput, CmdResult, ExitCode, ModelsArgs};
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 
-pub fn cmd_models(args: &ModelsArgs) -> Result<CmdResult, CliError> {
-    cmd_models_with(args, Path::new("pi"), CATALOG_TIMEOUT, MAX_CATALOG_BYTES)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogFormat {
+    Pi,
+    CursorAgent,
 }
 
+#[derive(Clone, Debug)]
+struct ModelRecord {
+    provider: String,
+    vendor: String,
+    id: String,
+    display_name: String,
+    default: Option<bool>,
+}
+
+pub fn cmd_models(args: &ModelsArgs) -> Result<CmdResult, CliError> {
+    let (program, format) = match args.provider.as_str() {
+        "pi" => (Path::new("pi"), CatalogFormat::Pi),
+        "cursor_agent" => (Path::new("agent"), CatalogFormat::CursorAgent),
+        provider => {
+            return Ok(failure(
+                args,
+                &format!("unsupported model provider {provider:?}"),
+            ))
+        }
+    };
+    cmd_models_with_format(args, program, format, CATALOG_TIMEOUT, MAX_CATALOG_BYTES)
+}
+
+/// Existing injectable Pi boundary retained for deterministic command/timeout tests.
 fn cmd_models_with(
     args: &ModelsArgs,
     program: &Path,
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<CmdResult, CliError> {
+    cmd_models_with_format(args, program, CatalogFormat::Pi, timeout, max_bytes)
+}
+
+fn cmd_models_with_format(
+    args: &ModelsArgs,
+    program: &Path,
+    format: CatalogFormat,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<CmdResult, CliError> {
     let bytes = match run_catalog(program, timeout, max_bytes) {
         Ok(bytes) => bytes,
-        Err(message) => return Ok(failure(args, &message)),
+        Err(message) => return Ok(failure(args, &catalog_error_prefix(format, message))),
     };
-    let all = match crate::lifecycle::launch::pi_mcp::parse_pi_list_models_table(&bytes) {
+    let all = match parse_catalog(&bytes, format) {
         Ok(models) => models,
-        Err(error) => return Ok(failure(args, &safe_catalog_error(error))),
+        Err(message) => return Ok(failure(args, &message)),
     };
     let visible = args.search.as_deref().map_or_else(
         || all.clone(),
         |search| {
             all.iter()
-                .filter(|model| model.contains(search))
+                .filter(|model| model_matches(model, search))
                 .cloned()
                 .collect::<Vec<_>>()
         },
     );
-    let current = current_role_model(&all);
+    let current = current_model_for(format, &all);
     let entries: Vec<Value> = visible
         .iter()
         .map(|model| {
             json!({
-                "role_model": model,
-                "current": current.as_deref() == Some(model.as_str()),
+                "role_model": model.id,
+                "current": if format == CatalogFormat::Pi {
+                    json!(current.as_deref() == Some(model.id.as_str()))
+                } else {
+                    Value::Null
+                },
+                "provider": model.provider,
+                "vendor": model.vendor,
+                "model_id": model.id,
+                "display_name": model.display_name,
+                "default": model.default,
             })
         })
         .collect();
+    let provider = args.provider.as_str();
     let value = json!({
-        "schema_version": "models.v1", "ok": true, "provider": "pi", "models": entries,
+        "schema_version": "models.v1", "ok": true, "provider": provider, "models": entries,
         "auth": "ok", "auth_basis": "catalog_visibility", "current_role_model": current, "search": args.search,
     });
     if args.json {
@@ -59,11 +104,25 @@ fn cmd_models_with(
             preserve_json_order: true,
         })
     } else {
-        let mut lines = vec!["models.v1 | Pi models (copyable role_model):".to_string()];
+        let mut lines = vec![format!(
+            "models.v1 | {provider} models (copyable model_id):"
+        )];
+        lines.push("PROVIDER VENDOR MODEL_ID DISPLAY_NAME CURRENT DEFAULT".to_string());
         lines.extend(visible.iter().map(|model| {
             format!(
-                "role_model: {model} current={}",
-                current.as_deref() == Some(model.as_str())
+                "{} {} {} {} {} {}",
+                model.provider,
+                model.vendor,
+                model.id,
+                model.display_name,
+                if format == CatalogFormat::Pi {
+                    (current.as_deref() == Some(model.id.as_str())).to_string()
+                } else {
+                    "—".to_string()
+                },
+                model
+                    .default
+                    .map_or_else(|| "—".to_string(), |value| value.to_string()),
             )
         }));
         lines.push(format!(
@@ -71,14 +130,135 @@ fn cmd_models_with(
             visible.len()
         ));
         if visible.is_empty() {
-            lines.push("No models matched --search.".to_string());
+            lines.push("No models matched --search/query.".to_string());
         }
         Ok(CmdResult::human(lines.join("\n")))
     }
 }
 
+fn parse_catalog(bytes: &[u8], format: CatalogFormat) -> Result<Vec<ModelRecord>, String> {
+    match format {
+        CatalogFormat::Pi => crate::lifecycle::launch::pi_mcp::parse_pi_list_models_table(bytes)
+            .map(|models| {
+                models
+                    .into_iter()
+                    .map(|id| {
+                        let vendor = id
+                            .split_once('/')
+                            .map_or_else(|| "pi".to_string(), |(vendor, _)| vendor.to_string());
+                        ModelRecord {
+                            provider: "pi".to_string(),
+                            vendor,
+                            display_name: id.clone(),
+                            id,
+                            default: None,
+                        }
+                    })
+                    .collect()
+            })
+            .map_err(safe_catalog_error),
+        CatalogFormat::CursorAgent => parse_cursor_catalog(bytes),
+    }
+}
+
+fn parse_cursor_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "Cursor model catalog is not valid UTF-8".to_string())?;
+    let mut models = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line
+                .trim_end_matches(':')
+                .eq_ignore_ascii_case("available models")
+        {
+            continue;
+        }
+        let Some((id, display)) = line.split_once(" - ") else {
+            return Err("Cursor model catalog contains a malformed row".to_string());
+        };
+        let id = id.trim();
+        if id.is_empty() || id.chars().any(char::is_whitespace) || display.trim().is_empty() {
+            return Err("Cursor model catalog contains a malformed row".to_string());
+        }
+        if models.iter().any(|model: &ModelRecord| model.id == id) {
+            return Err("Cursor model catalog contains duplicate model ids".to_string());
+        }
+        let default = display.trim_end().ends_with("(default)");
+        let display_name = display.trim().strip_suffix("(default)").map_or_else(
+            || display.trim().to_string(),
+            |name| name.trim().to_string(),
+        );
+        let vendor = id
+            .split_once('-')
+            .map_or_else(|| "cursor".to_string(), |(vendor, _)| vendor.to_string());
+        models.push(ModelRecord {
+            provider: "cursor_agent".to_string(),
+            vendor,
+            id: id.to_string(),
+            display_name,
+            default: Some(default),
+        });
+    }
+    if models.is_empty() {
+        return Err("Cursor model catalog is empty".to_string());
+    }
+    Ok(models)
+}
+
+fn model_matches(model: &ModelRecord, search: &str) -> bool {
+    let fields = [
+        model.provider.as_str(),
+        model.vendor.as_str(),
+        model.id.as_str(),
+        model.display_name.as_str(),
+    ];
+    search
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .all(|needle| {
+            fields
+                .iter()
+                .any(|field| field.to_lowercase().contains(needle.as_str()))
+        })
+}
+
+fn current_model_for(format: CatalogFormat, models: &[ModelRecord]) -> Option<String> {
+    match format {
+        CatalogFormat::Pi => current_role_model(
+            &models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect::<Vec<_>>(),
+        ),
+        // Cursor's catalog does not expose the active role model; never mark a
+        // catalog default as current without an explicit runtime identity.
+        CatalogFormat::CursorAgent => None,
+    }
+}
+
+fn catalog_error_prefix(format: CatalogFormat, message: String) -> String {
+    match format {
+        CatalogFormat::Pi => message,
+        CatalogFormat::CursorAgent => message.replace("Pi", "Cursor"),
+    }
+}
+
 fn failure(args: &ModelsArgs, message: &str) -> CmdResult {
-    let value = json!({ "schema_version": "models.v1", "ok": false, "provider": "pi", "auth": "not_ready", "auth_basis": "catalog_visibility", "models": Value::Array(Vec::new()), "current_role_model": Value::Null, "error": message, "action": "install or repair the PATH-first `pi` executable, then retry `team-agent models --provider pi`" });
+    let executable = if args.provider == "cursor_agent" {
+        "agent"
+    } else {
+        "pi"
+    };
+    let action = if message.starts_with("unsupported model provider") {
+        "choose a supported provider: pi or cursor_agent".to_string()
+    } else {
+        format!(
+            "install or repair the PATH-first `{executable}` executable, then retry `team-agent models --provider {}`",
+            args.provider
+        )
+    };
+    let value = json!({ "schema_version": "models.v1", "ok": false, "provider": args.provider, "auth": "not_ready", "auth_basis": "catalog_visibility", "models": Value::Array(Vec::new()), "current_role_model": Value::Null, "error": message, "action": action });
     if args.json {
         let text = serde_json::to_string_pretty(&value)
             .unwrap_or_else(|_| "{\"schema_version\":\"models.v1\",\"ok\":false}".to_string());
@@ -89,7 +269,7 @@ fn failure(args: &ModelsArgs, message: &str) -> CmdResult {
             preserve_json_order: true,
         }
     } else {
-        CmdResult { output: CmdOutput::Human(format!("models.v1 | error: {message}\naction: install or repair the PATH-first `pi` executable, then retry `team-agent models --provider pi`\nauth: not_ready (catalog_visibility)")), exit: ExitCode::Error, as_json: false, preserve_json_order: false }
+        CmdResult { output: CmdOutput::Human(format!("models.v1 | error: {message}\naction: {action}\nauth: not_ready (catalog_visibility)")), exit: ExitCode::Error, as_json: false, preserve_json_order: false }
     }
 }
 
@@ -277,6 +457,38 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0]["role_model"], "openai-codex/gpt-5.6-luna");
         assert_eq!(models[1]["role_model"], "team-agent/gpt-5.6-luna");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cursor_catalog_parses_copyable_ids_and_multiword_search() {
+        let path = fixture(
+            "printf 'Available models\\ngpt-5.6-luna-high - GPT-5.6 Luna 1M High\\ncursor-grok-4.6-high - Cursor Grok 4.6\\nauto - Auto (default)\\n'",
+        );
+        let result = cmd_models_with_format(
+            &ModelsArgs {
+                provider: "cursor_agent".into(),
+                search: Some("GPT luna".into()),
+                json: true,
+            },
+            &path,
+            CatalogFormat::CursorAgent,
+            Duration::from_secs(1),
+            MAX_CATALOG_BYTES,
+        )
+        .unwrap();
+        let CmdOutput::Human(text) = result.output else {
+            panic!("expected JSON projection")
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["provider"], "cursor_agent");
+        assert_eq!(value["models"].as_array().unwrap().len(), 1);
+        assert_eq!(value["models"][0]["role_model"], "gpt-5.6-luna-high");
+        assert_eq!(value["models"][0]["model_id"], "gpt-5.6-luna-high");
+        assert_eq!(value["models"][0]["display_name"], "GPT-5.6 Luna 1M High");
+        assert_eq!(value["models"][0]["current"], Value::Null);
+        cleanup_fixture(&path);
     }
 
     #[cfg(unix)]
@@ -785,12 +997,7 @@ mod tests {
             &["--provider".into(), "codex".into()],
             Path::new("/tmp"),
         );
-        match refusal {
-            Err(CliError::Usage(message)) => {
-                assert_eq!(message, "models supports only --provider pi, got \"codex\"")
-            }
-            other => panic!("expected provider refusal, got {other:?}"),
-        }
+        assert!(matches!(refusal, Ok(ExitCode::Error)));
         cleanup_fixture(&path);
     }
 
@@ -894,7 +1101,7 @@ mod tests {
         );
         assert_eq!(
             crate::cli::spec::command_spec("models").unwrap().usage,
-            "usage: team-agent models --provider pi [--search TEXT] [--json]"
+            "usage: team-agent models [--provider pi|cursor_agent] [QUERY|--search TEXT] [--json]"
         );
     }
 

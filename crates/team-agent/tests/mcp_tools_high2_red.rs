@@ -49,42 +49,36 @@ fn update_state_appends_note_saves_state_and_writes_file() {
 }
 
 #[test]
-fn report_result_fills_golden_defaults_before_delegate() {
+fn report_result_requires_framework_identity_before_delegate() {
     let ws = tmp_workspace("report-defaults");
     let tools = TeamOrchestratorTools::with_identity(&ws, None, None);
 
-    let value = tool_value(
-        tools
-            .report_result(
-                Some(&json!({})),
-                None,
-                ResultStatus::Success,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect("report_result ok"),
-    );
+    let error = tools
+        .report_result(
+            Some(&json!({})),
+            None,
+            ResultStatus::Success,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("report_result must fail closed without a captured identity");
 
-    assert_eq!(value["task_id"], json!("manual"));
-    assert_eq!(value["agent_id"], json!("unknown"));
+    assert_eq!(
+        error.reason,
+        team_agent::mcp_server::ToolErrorReason::McpScopeRefused
+    );
+    assert!(error.message.contains("identity_mismatch"));
     let store = team_agent::message_store::MessageStore::open(&ws).unwrap();
     let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope: String = conn
-        .query_row(
-            "select envelope from results where task_id = 'manual'",
-            [],
-            |row| row.get(0),
-        )
+    let count: i64 = conn
+        .query_row("select count(*) from results", [], |row| row.get(0))
         .unwrap();
-    let stored: Value = serde_json::from_str(&envelope).unwrap();
-    assert_eq!(stored["summary"], json!("completed"));
-    assert_eq!(stored["task_id"], json!("manual"));
-    assert_eq!(stored["agent_id"], json!("unknown"));
+    assert_eq!(count, 0, "identity rejection must precede result persistence");
 }
 
 #[test]

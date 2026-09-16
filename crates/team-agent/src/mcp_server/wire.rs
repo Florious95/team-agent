@@ -496,7 +496,9 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
             insert_property(
                 &mut properties,
                 "agent_id",
-                string_property("Optional reporting agent id override."),
+                string_property(
+                    "Optional reporting agent id; must match framework-injected TEAM_AGENT_ID.",
+                ),
             );
             insert_property(
                 &mut properties,
@@ -671,6 +673,23 @@ pub(crate) fn dispatch_tool(
     tool: McpTool,
     args: &Value,
 ) -> ToolResult {
+    // Check framework-bound identity before scope resolution or any tool side effect.
+    match tool {
+        McpTool::SendMessage => {
+            tools.validate_identity_argument("send_message", args.get("agent_id"))?;
+            if let Some(value) = args
+                .get("envelope")
+                .and_then(Value::as_object)
+                .and_then(|object| object.get("agent_id"))
+            {
+                tools.validate_identity_argument("send_message", Some(value))?;
+            }
+        }
+        McpTool::ReportResult => {
+            tools.validate_report_identity_request(args.get("envelope"), args.get("agent_id"))?
+        }
+        _ => {}
+    }
     if scope_ceiling_tool(tool) {
         tools.validate_rpc_scope_args(tool.wire_name(), args)?;
     }
