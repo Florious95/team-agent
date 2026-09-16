@@ -1706,12 +1706,35 @@ pub(crate) fn load_runtime_state_without_migrations(workspace: &Path) -> Result<
     Ok(state)
 }
 
+/// Run a read-only callback while holding the canonical `state-save` lock.
+/// Unlike `load_runtime_state`, this helper performs no migration, cache
+/// update, or write. A missing state file is represented as `None` so callers
+/// can conservatively retain derived indexes during workspace unavailability.
+pub(crate) fn with_runtime_state_lock_without_migrations<T>(
+    workspace: &Path,
+    callback: impl FnOnce(Option<Value>) -> T,
+) -> Result<T, StateError> {
+    let path = runtime_state_path(workspace);
+    if !path.exists() {
+        return Ok(callback(None));
+    }
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
+    let state = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(serde_json::from_str::<Value>(&text)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(callback(state))
+}
+
 pub(crate) fn save_runtime_state_without_migrations(
     workspace: &Path,
     state: &Value,
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
-    let _lock = RuntimeLock::acquire(workspace, "state-save-raw", 2.0)?;
+    // Raw writers share the canonical lock so readers/pruners cannot race
+    // a restore write through a parallel lock namespace.
+    let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3545,5 +3568,31 @@ mod tests {
             &expected["teams"]["fresh"]["leader_receiver"],
             2,
         );
+    }
+
+    #[test]
+    fn state_save_lock_serializes_raw_writer_and_prune_reader() {
+        let ws = temp_ws();
+        save_runtime_state(&ws, &json!({"teams": {"fresh": {}}})).unwrap();
+        let lock = RuntimeLock::acquire(&ws, "state-save", 2.0).unwrap();
+
+        let writer_ws = ws.clone();
+        let writer = std::thread::spawn(move || {
+            save_runtime_state_without_migrations(&writer_ws, &json!({"teams": {"fresh": {}}}))
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!writer.is_finished(), "raw writer must share state-save lock");
+        drop(lock);
+        writer.join().unwrap().unwrap();
+
+        let lock = RuntimeLock::acquire(&ws, "state-save", 2.0).unwrap();
+        let reader_ws = ws.clone();
+        let reader = std::thread::spawn(move || {
+            with_runtime_state_lock_without_migrations(&reader_ws, |state| state.is_some())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!reader.is_finished(), "prune reader must use state-save lock");
+        drop(lock);
+        assert!(reader.join().unwrap().unwrap());
     }
 }
