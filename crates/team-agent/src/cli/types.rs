@@ -639,8 +639,19 @@ pub struct SessionsArgs {
 /// enumerates the host discovery index and classifies each entry as
 /// LIVE, STALE, or AMBIGUOUS after re-validating against canonical
 /// workspace state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadersView {
+    Live,
+    All,
+    Stale,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeadersArgs {
+    pub view: LeadersView,
+    pub query: Option<String>,
+    pub prune: bool,
+    pub dry_run: bool,
     pub json: bool,
 }
 

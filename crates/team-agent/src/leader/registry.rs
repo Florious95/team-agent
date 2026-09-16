@@ -367,8 +367,8 @@ pub fn restore_entry_if_current_matches(
         if receipt.path.parent() != Some(dir) {
             return Err(RegistryRollbackError::InvalidReceipt);
         }
-        let current = std::fs::read(&receipt.path)
-            .map_err(|_| RegistryRollbackError::ReadFailed)?;
+        let current =
+            std::fs::read(&receipt.path).map_err(|_| RegistryRollbackError::ReadFailed)?;
         if current != receipt.bytes {
             return Ok(RegistryRollback::Superseded);
         }
@@ -377,33 +377,117 @@ pub fn restore_entry_if_current_matches(
                 Ok(RegistryRollback::Restored)
             }
             Some(_) => Err(RegistryRollbackError::RestoreFailed),
-            None if std::fs::remove_file(&receipt.path).is_ok() => {
-                Ok(RegistryRollback::Restored)
-            }
+            None if std::fs::remove_file(&receipt.path).is_ok() => Ok(RegistryRollback::Restored),
             None => Err(RegistryRollbackError::DeleteFailed),
         }
     })
 }
 
-fn remove_entry_if_matches(path: &Path, expected: &LeaderRegistryEntry) -> bool {
-    with_registry_lock(|_| {
-        let Ok(bytes) = std::fs::read(path) else {
-            return false;
-        };
-        let Ok(current) = serde_json::from_slice::<LeaderRegistryEntry>(&bytes) else {
-            return false;
-        };
-        current == *expected && std::fs::remove_file(path).is_ok()
-    })
-    .unwrap_or(false)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryPruneItem {
+    pub workspace: PathBuf,
+    pub team_key: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryPruneReport {
+    pub dry_run: bool,
+    pub candidates: Vec<RegistryPruneItem>,
+    pub removed: Vec<RegistryPruneItem>,
+    pub kept: Vec<RegistryPruneItem>,
+    pub skipped: Vec<RegistryPruneItem>,
+    pub errors: Vec<RegistryPruneItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PruneAttempt {
+    Removed,
+    Skipped(&'static str),
+    Error,
+}
+
+fn prune_item(entry: &LeaderRegistryEntry, reason: impl Into<String>) -> RegistryPruneItem {
+    RegistryPruneItem {
+        workspace: entry.workspace.clone(),
+        team_key: entry.team_key.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn prune_reason_from_state(entry: &LeaderRegistryEntry, state: &Value) -> Option<&'static str> {
+    let (status, reason) = classify_loaded(entry, state);
+    if status != "STALE" {
+        return None;
+    }
+    match reason.as_deref() {
+        Some("team_key_not_found") => Some("team_key_not_found"),
+        Some("team_not_alive") => Some("team_not_alive"),
+        _ => None,
+    }
+}
+
+fn prune_reason(
+    entry: &LeaderRegistryEntry,
+    status: &str,
+    reason: Option<&str>,
+) -> Option<&'static str> {
+    if status != "STALE" || !crate::state::persist::runtime_state_path(&entry.workspace).is_file() {
+        // A missing state file is unavailable rather than proof that the
+        // workspace was retired. Only an existing, readable canonical state
+        // can authorize the team-key cleanup below.
+        return None;
+    }
+    match reason {
+        Some("team_key_not_found") => Some("team_key_not_found"),
+        Some("team_not_alive") => Some("team_not_alive"),
+        _ => None,
+    }
+}
+
+fn prune_entry_if_current(
+    path: &Path,
+    expected: &LeaderRegistryEntry,
+    snapshot: &[u8],
+) -> PruneAttempt {
+    let result = crate::state::persist::with_runtime_state_lock_without_migrations(
+        &expected.workspace,
+        |state| {
+            let Some(state) = state.as_ref() else {
+                return PruneAttempt::Skipped("canonical_state_unavailable");
+            };
+            // Lock ordering is canonical state -> host registry. The state
+            // remains unchanged while the exact registry bytes are checked.
+            with_registry_lock(|_| {
+                let Ok(bytes) = std::fs::read(path) else {
+                    return PruneAttempt::Skipped("registry_entry_missing");
+                };
+                if bytes != snapshot {
+                    return PruneAttempt::Skipped("registry_entry_changed");
+                }
+                let Ok(current) = serde_json::from_slice::<LeaderRegistryEntry>(&bytes) else {
+                    return PruneAttempt::Skipped("registry_entry_changed");
+                };
+                if current != *expected {
+                    return PruneAttempt::Skipped("registry_entry_changed");
+                }
+                if prune_reason_from_state(&current, state).is_none() {
+                    return PruneAttempt::Skipped("canonical_state_changed");
+                }
+                if std::fs::remove_file(path).is_ok() {
+                    PruneAttempt::Removed
+                } else {
+                    PruneAttempt::Error
+                }
+            })
+            .unwrap_or(PruneAttempt::Skipped("registry_lock_unavailable"))
+        },
+    );
+    result.unwrap_or(PruneAttempt::Skipped("canonical_state_unavailable"))
 }
 
 fn replace_entry_bytes_locked(path: &Path, bytes: &[u8]) -> bool {
-    let tmp = path.with_extension(format!(
-        "rollback-{}-{}",
-        std::process::id(),
-        rand_suffix()
-    ));
+    let tmp = path.with_extension(format!("rollback-{}-{}", std::process::id(), rand_suffix()));
     if std::fs::write(&tmp, bytes).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;
@@ -497,7 +581,7 @@ pub fn unregister_entry(workspace: &Path, team_key: &str) -> Option<PathBuf> {
 /// registry is a derived discovery index and unreadable files are the
 /// "STALE / UNREADABLE" dirty class rather than an error.
 #[must_use]
-fn read_all_entries() -> Vec<(PathBuf, LeaderRegistryEntry)> {
+fn read_all_entries_with_bytes() -> Vec<(PathBuf, LeaderRegistryEntry, Vec<u8>)> {
     let Some(dir) = registry_dir() else {
         return Vec::new();
     };
@@ -517,16 +601,24 @@ fn read_all_entries() -> Vec<(PathBuf, LeaderRegistryEntry)> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        let Ok(entry) = serde_json::from_str::<LeaderRegistryEntry>(&text) else {
+        let Ok(entry) = serde_json::from_slice::<LeaderRegistryEntry>(&bytes) else {
             continue;
         };
-        out.push((path, entry));
+        out.push((path, entry, bytes));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+#[must_use]
+fn read_all_entries() -> Vec<(PathBuf, LeaderRegistryEntry)> {
+    read_all_entries_with_bytes()
+        .into_iter()
+        .map(|(path, entry, _bytes)| (path, entry))
+        .collect()
 }
 
 /// Validate a registry entry against its canonical workspace state.
@@ -538,11 +630,17 @@ pub fn classify(entry: &LeaderRegistryEntry) -> (&'static str, Option<String>) {
     let Ok(state) = crate::state::persist::load_runtime_state(&entry.workspace) else {
         return ("STALE", Some("workspace_no_state".to_string()));
     };
-    let team = state
-        .get("teams")
-        .and_then(|v| v.as_object())
-        .and_then(|teams| teams.get(&entry.team_key));
-    let team = match team {
+    classify_loaded(entry, &state)
+}
+
+fn classify_loaded(entry: &LeaderRegistryEntry, state: &Value) -> (&'static str, Option<String>) {
+    // A missing or malformed `teams` root is an unavailable/legacy state,
+    // not proof that this registry entry's team was retired. Keep it out of
+    // the prune candidate set unless a valid map was independently found.
+    let Some(teams) = state.get("teams").and_then(Value::as_object) else {
+        return ("STALE", Some("teams_invalid".to_string()));
+    };
+    let team = match teams.get(&entry.team_key) {
         Some(t) => t,
         None => return ("STALE", Some("team_key_not_found".to_string())),
     };
@@ -599,47 +697,57 @@ fn tmux_pane_live(socket: &str, pane_id: &str) -> bool {
     }
 }
 
-/// Read all entries, classify each, and prune terminal-stale entries
-/// (`workspace_no_state`, `team_key_not_found`). Live entries are never
-/// touched. Returns the surviving (LIVE + STALE-not-yet-pruned) entries
-/// classified for the `leaders` command output.
-///
-/// Design §14 step 6: "Successful scoped shutdown removes matching registry
-/// entry. Failed/degraded shutdown leaves entry STALE, not deleted."
-/// The pruning here is the GC arm — it only removes entries whose
-/// canonical workspace/team has no state at all, i.e. the target has been
-/// permanently removed. Leader-detached-but-team-alive stays STALE and
-/// visible so the operator can decide.
+/// Explicitly prune only entries whose readable canonical state proves that
+/// the team is gone or terminal. Dead panes, old epochs, unattached leaders,
+/// missing/unreadable state, and probe failures remain untouched.
 #[must_use]
-pub fn list_validated_with_gc() -> Vec<(LeaderRegistryEntry, &'static str, Option<String>)> {
-    let mut out = Vec::new();
-    for (path, entry) in read_all_entries() {
-        let (status, reason) = classify(&entry);
-        // Terminal stale reasons that indicate the entry can never be
-        // useful again: canonical workspace/team gone, or the leader
-        // binding has been fully released (no receiver at all). These
-        // are safe to prune; leader-attached-with-dead-pane and
-        // epoch-mismatch stay visible so the operator can see them.
-        if status == "STALE"
-            && reason.as_deref().is_some_and(|r| {
-                r == "workspace_no_state"
-                    || r == "team_key_not_found"
-                    || r == "leader_not_attached"
-                    || r == "team_not_alive"
-            })
-        {
-            let _ = remove_entry_if_matches(&path, &entry);
+pub fn prune_registry(dry_run: bool) -> RegistryPruneReport {
+    let mut report = RegistryPruneReport {
+        dry_run,
+        candidates: Vec::new(),
+        removed: Vec::new(),
+        kept: Vec::new(),
+        skipped: Vec::new(),
+        errors: Vec::new(),
+    };
+    let mut registry_lock_unavailable = false;
+    for (path, entry, snapshot) in read_all_entries_with_bytes() {
+        let (status, classified_reason) = classify(&entry);
+        let reason = prune_reason(&entry, status, classified_reason.as_deref());
+        let kept_reason = classified_reason.as_deref().unwrap_or("LIVE");
+        let Some(reason) = reason else {
+            report.kept.push(prune_item(&entry, kept_reason));
+            continue;
+        };
+        let candidate = prune_item(&entry, reason);
+        report.candidates.push(candidate.clone());
+        if dry_run {
             continue;
         }
-        out.push((entry, status, reason));
+        if registry_lock_unavailable {
+            report
+                .skipped
+                .push(prune_item(&entry, "registry_lock_unavailable"));
+            continue;
+        }
+        match prune_entry_if_current(&path, &entry, &snapshot) {
+            PruneAttempt::Removed => report.removed.push(candidate),
+            PruneAttempt::Skipped(reason) => {
+                if reason == "registry_lock_unavailable" {
+                    registry_lock_unavailable = true;
+                }
+                report.skipped.push(prune_item(&entry, reason));
+            }
+            PruneAttempt::Error => report.errors.push(prune_item(&entry, "remove_failed")),
+        }
     }
-    out
+    report
 }
 
-/// Same as `list_validated_with_gc` but preserves all entries. `send
-/// --to-leader` needs to see stale entries so it can refuse with
+/// Read all entries and classify each without mutating the derived index.
+/// `send --to-leader` needs to see stale entries so it can refuse with
 /// `registry_stale` (and never silently fall through to
-/// `leader_name_not_found` just because GC ran first).
+/// `leader_name_not_found` just because a listing ran first).
 #[must_use]
 pub fn list_validated_no_gc() -> Vec<(LeaderRegistryEntry, &'static str, Option<String>)> {
     read_all_entries()
@@ -649,4 +757,127 @@ pub fn list_validated_no_gc() -> Vec<(LeaderRegistryEntry, &'static str, Option<
             (entry, status, reason)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use super::*;
+    use serde_json::json;
+    use serial_test::serial;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(home) = self.0.take() {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn test_home(label: &str) -> (HomeGuard, PathBuf, PathBuf) {
+        let n = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let home =
+            std::env::temp_dir().join(format!("ta-registry-{label}-{}-{n}", std::process::id()));
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        (HomeGuard(previous), home, workspace)
+    }
+
+    fn write_state(workspace: &Path, state: Value) {
+        let path = crate::state::persist::runtime_state_path(workspace);
+        std::fs::create_dir_all(path.parent().expect("runtime parent")).expect("create runtime");
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&state).expect("serialize state"),
+        )
+        .expect("write state");
+    }
+
+    fn entry(workspace: &Path, team_key: &str) -> LeaderRegistryEntry {
+        build_entry(
+            workspace,
+            team_key,
+            "direct_tmux",
+            json!({"owner_epoch": 1}),
+            1,
+            "test",
+            "2026-09-16T00:00:00Z".to_string(),
+        )
+    }
+
+    #[test]
+    #[serial]
+    fn prune_removes_team_proven_terminal() {
+        let (_home_guard, _home, workspace) = test_home("terminal");
+        write_state(
+            &workspace,
+            json!({"teams": {"retired": {"status": "stopped"}}}),
+        );
+        let registered = entry(&workspace, "retired");
+        let path = write_entry_best_effort(&registered).expect("register terminal team");
+
+        let report = prune_registry(false);
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.removed.len(), 1);
+        assert!(report.skipped.is_empty());
+        assert!(!path.exists(), "terminal registry entry must be removed");
+    }
+
+    #[test]
+    #[serial]
+    fn prune_removes_missing_key_only_from_valid_teams_map() {
+        let (_home_guard, _home, workspace) = test_home("missing-key");
+        write_state(&workspace, json!({"teams": {"other": {"status": "alive"}}}));
+        let registered = entry(&workspace, "gone");
+        let path = write_entry_best_effort(&registered).expect("register missing team");
+
+        let report = prune_registry(false);
+        assert_eq!(report.removed.len(), 1);
+        assert!(
+            !path.exists(),
+            "missing key in valid teams map is removable"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn prune_keeps_null_nonobject_and_legacy_teams_shapes() {
+        for (label, state) in [
+            ("null", json!({"teams": null})),
+            ("array", json!({"teams": []})),
+            ("string", json!({"teams": "legacy"})),
+            (
+                "single",
+                json!({"team_key": "retired", "status": "stopped"}),
+            ),
+        ] {
+            let (_home_guard, _home, workspace) = test_home(label);
+            write_state(&workspace, state);
+            let registered = entry(&workspace, "retired");
+            let path = write_entry_best_effort(&registered).expect("register malformed state");
+
+            let report = prune_registry(false);
+            assert!(
+                report.candidates.is_empty(),
+                "malformed shape became candidate: {label}"
+            );
+            assert_eq!(
+                report.kept.len(),
+                1,
+                "malformed shape must be retained: {label}"
+            );
+            assert_eq!(report.kept[0].reason, "teams_invalid");
+            assert!(path.exists(), "malformed state entry must remain: {label}");
+        }
+    }
 }

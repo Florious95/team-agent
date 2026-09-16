@@ -1,220 +1,357 @@
-//! ---
-//! purpose: `team-agent leaders` 发现面。人读默认面按节点列出 workspace 全路径、
-//!   team/leader、可复制 `team-agent send '<ws>::<team>/leader' '<消息>'`。
-//! contract:
-//!   provides:
-//!     - name: cmd_leaders
-//!       what: --json 保持 E7 字段(含 hash/send_hint); 默认 stdout 只有三要素、不含 hash/channel/pane id
-//! boundary:
-//!   - 不改 send 解析; 不把 --json 字段从默认面漏出去
-//!   - Leaders-only; worker 行仍缺席
-//! ---
+//! `team-agent leaders` host-level discovery and registry maintenance.
 //!
-//! E7 (0.5.9 host-leader-registry-design §4.1): `team-agent leaders` command.
-//!
-//! Enumerates entries under `~/.team-agent/leaders`, re-validates each
-//! against the target workspace's canonical runtime state, and emits a
-//! LIVE / STALE / AMBIGUOUS classification. Leaders-only — worker rows,
-//! task rows, and result rows are deliberately absent from the output.
-//!
-//! The command is a **discovery** surface, not a route authority. Callers
-//! that consume `send_hint` must still re-validate via
-//! `named_address::resolve_name_for_cli` before delivery — this file only
-//! reports what registry sees now.
+//! Listing is read-only: it validates the derived registry index without
+//! deleting entries. Explicit `--prune` is the only path that removes entries.
+//! The command is a discovery surface, not a route authority; send callers
+//! continue to re-validate through the named-address resolver.
 
-use super::{types::LeadersArgs, CliError, CmdResult};
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
+use super::{
+    types::{LeadersArgs, LeadersView},
+    CliError, CmdResult, ExitCode,
+};
+use crate::leader::registry::{LeaderRegistryEntry, RegistryPruneItem, RegistryPruneReport};
+
+#[derive(Debug, Clone)]
+struct LeaderRow {
+    entry: LeaderRegistryEntry,
+    status: &'static str,
+    stale_reason: Option<String>,
+    send_hint: String,
+}
+
+/// E7 CLI entry point.
 ///
-/// E7 CLI entry point (E7 test 2 marker: `cmd_leaders`).
-///
-/// Reads registry entries, canonical-validates each, and groups by
-/// delivery_name to classify each as LIVE / STALE / AMBIGUOUS. Terminal
-/// stale entries (canonical workspace/team gone) are pruned as GC side
-/// effect. Leader-detached-but-team-alive stays visible as STALE so the
-/// operator can decide.
+/// The default view contains only canonical-live entries. `--all` preserves
+/// live and retained stale entries, while `--stale` selects only stale rows.
+/// None of the listing views mutates the host registry.
 pub fn cmd_leaders(args: &LeadersArgs) -> Result<CmdResult, CliError> {
     let dir = crate::leader::registry::registry_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "~/.team-agent/leaders".to_string());
-    let classified = crate::leader::registry::list_validated_with_gc();
-    let mut name_counts: std::collections::HashMap<String, Vec<Value>> =
-        std::collections::HashMap::new();
-    for (entry, _status, _reason) in &classified {
-        name_counts
-            .entry(entry.delivery_name.clone())
-            .or_default()
-            .push(json!({
-                "name": entry.qualified_name,
-                "workspace": entry.workspace.display().to_string(),
-                "team_key": entry.team_key,
-                "workspace_hash": entry.workspace_hash,
-                "stable_qualified_name": entry.stable_qualified_name,
-            }));
+    if args.prune {
+        return cmd_prune(args, &dir);
     }
-    let ambiguous_map: std::collections::HashMap<String, Vec<Value>> = name_counts
+
+    let mut classified = crate::leader::registry::list_validated_no_gc();
+    classified.sort_by(|left, right| {
+        left.0
+            .workspace
+            .cmp(&right.0.workspace)
+            .then_with(|| left.0.team_key.cmp(&right.0.team_key))
+    });
+    let mut active_candidates: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for (entry, status, _) in &classified {
+        if *status == "LIVE" {
+            active_candidates
+                .entry(entry.delivery_name.clone())
+                .or_default()
+                .push(candidate_json(entry));
+        }
+    }
+    let ambiguous_names = active_candidates
         .iter()
-        .filter(|(_, list)| list.len() > 1)
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let mut leaders: Vec<Value> = Vec::new();
-    for (entry, status, reason) in &classified {
-        let final_status = if ambiguous_map.contains_key(&entry.delivery_name) {
-            "AMBIGUOUS"
-        } else {
-            *status
-        };
-        let send_hint = format!(
-            "team-agent send --to-leader {} MESSAGE",
-            entry.qualified_name
-        );
-        leaders.push(json!({
-            "name": entry.delivery_name,
-            "delivery_name": entry.delivery_name,
-            "qualified_name": entry.qualified_name,
-            "stable_qualified_name": entry.stable_qualified_name,
-            "workspace": entry.workspace.display().to_string(),
-            "workspace_hash": entry.workspace_hash,
-            "workspace_short": entry.workspace_short,
-            "team_key": entry.team_key,
-            "transport_kind": entry.transport_kind,
-            "owner_epoch": entry.owner_epoch,
-            "status": final_status,
-            "stale_reason": reason.clone(),
-            "send_hint": send_hint,
-        }));
-    }
-    let ambiguous_names: Vec<Value> = ambiguous_map
-        .into_iter()
+        .filter(|(_, candidates)| candidates.len() > 1)
         .map(|(name, candidates)| {
             json!({
                 "name": name,
                 "candidates": candidates,
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    let rows = classified
+        .into_iter()
+        .map(|(entry, status, reason)| {
+            let ambiguous = status == "LIVE"
+                && active_candidates
+                    .get(&entry.delivery_name)
+                    .is_some_and(|candidates| candidates.len() > 1);
+            let status = if ambiguous { "AMBIGUOUS" } else { status };
+            let stale_reason = if ambiguous {
+                Some(crate::leader::registry::REASON_AMBIGUOUS.to_string())
+            } else {
+                reason
+            };
+            let send_hint = if status == "STALE" {
+                "-".to_string()
+            } else {
+                send_hint(&entry)
+            };
+            LeaderRow {
+                entry,
+                status,
+                stale_reason,
+                send_hint,
+            }
+        })
+        .collect::<Vec<_>>();
+    let rows = filter_rows(rows, args.view, args.query.as_deref());
+
+    let leaders = rows.iter().map(row_json).collect::<Vec<_>>();
     let value = json!({
         "ok": true,
         "registry_dir": dir,
         "leaders": leaders,
-        "ambiguous_names": ambiguous_names,
-        // Status vocabulary pinned by E7 RED: LIVE / STALE / AMBIGUOUS.
-        // "stale_reason" is null for LIVE and carries a machine-readable
-        // reason for STALE/AMBIGUOUS entries.
+        "ambiguous_names": if matches!(args.view, LeadersView::Stale) {
+            Vec::<Value>::new()
+        } else {
+            ambiguous_names
+        },
         "status_wire_values": ["LIVE", "STALE", "AMBIGUOUS"],
     });
     if args.json {
         return Ok(CmdResult::from_json(value, true));
     }
-    let rows: Vec<(String, String)> = classified
-        .iter()
-        .map(|(entry, _, _)| {
-            (
-                entry.workspace.display().to_string(),
-                entry.team_key.clone(),
-            )
+    Ok(CmdResult::human(format_leaders_human(&rows, args.view)))
+}
+
+fn candidate_json(entry: &LeaderRegistryEntry) -> Value {
+    json!({
+        "name": entry.qualified_name,
+        "workspace": entry.workspace.display().to_string(),
+        "team_key": entry.team_key,
+        "workspace_hash": entry.workspace_hash,
+        "stable_qualified_name": entry.stable_qualified_name,
+    })
+}
+
+fn send_hint(entry: &LeaderRegistryEntry) -> String {
+    let to = format!("{}::{}/leader", entry.workspace.display(), entry.team_key);
+    format!(
+        "team-agent send {} {}",
+        quote_cli_arg(&to),
+        quote_cli_arg("消息")
+    )
+}
+
+fn row_json(row: &LeaderRow) -> Value {
+    json!({
+        "name": row.entry.delivery_name,
+        "delivery_name": row.entry.delivery_name,
+        "qualified_name": row.entry.qualified_name,
+        "stable_qualified_name": row.entry.stable_qualified_name,
+        "workspace": row.entry.workspace.display().to_string(),
+        "workspace_hash": row.entry.workspace_hash,
+        "workspace_short": row.entry.workspace_short,
+        "team_key": row.entry.team_key,
+        "transport_kind": row.entry.transport_kind,
+        "owner_epoch": row.entry.owner_epoch,
+        "status": row.status,
+        "stale_reason": row.stale_reason,
+        "send_hint": row.send_hint,
+    })
+}
+
+fn filter_rows(rows: Vec<LeaderRow>, view: LeadersView, query: Option<&str>) -> Vec<LeaderRow> {
+    let query = query.map(str::to_lowercase);
+    rows.into_iter()
+        .filter(|row| match view {
+            LeadersView::Live => row.status == "LIVE" || row.status == "AMBIGUOUS",
+            LeadersView::All => true,
+            LeadersView::Stale => row.status == "STALE",
         })
-        .collect();
-    Ok(CmdResult::human(format_leaders_human(&rows)))
+        .filter(|row| {
+            let Some(query) = query.as_deref() else {
+                return true;
+            };
+            [
+                row.entry.workspace.display().to_string(),
+                row.entry.team_key.clone(),
+                row.entry.qualified_name.clone(),
+                row.entry.delivery_name.clone(),
+            ]
+            .iter()
+            .any(|field| field.to_lowercase().contains(query))
+        })
+        .collect()
 }
 
 fn quote_cli_arg(raw: &str) -> String {
-    if !raw.contains('\'') {
-        format!("'{raw}'")
-    } else {
-        format!("\"{}\"", raw.replace('\\', "\\\\").replace('"', "\\\""))
-    }
+    // POSIX single-quoted strings are literal except for the quote itself;
+    // split and escape quotes rather than falling back to unsafe double quotes.
+    format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
-/// Default human face: workspace path, `<team>/leader`, copyable send line.
-fn format_leaders_human(rows: &[(String, String)]) -> String {
+/// Human face: status, complete workspace path, canonical team key, and a
+/// copyable SEND command. Tabs keep paths and commands intact without a table
+/// dependency or truncation.
+fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
     if rows.is_empty() {
-        return "no registered leaders\n".to_string();
+        return match view {
+            LeadersView::Live => "no live leaders\n".to_string(),
+            LeadersView::All => "no registered leaders\n".to_string(),
+            LeadersView::Stale => "no stale leaders\n".to_string(),
+        };
     }
-    let mut out = String::new();
-    for (workspace, team_key) in rows {
-        let role = format!("{team_key}/leader");
-        let to = format!("{workspace}::{role}");
-        out.push_str(workspace);
-        out.push('\n');
-        out.push_str(&role);
-        out.push('\n');
-        out.push_str("team-agent send ");
-        out.push_str(&quote_cli_arg(&to));
-        out.push(' ');
-        out.push_str(&quote_cli_arg("消息"));
+    let mut out = String::from("STATUS\tWORKSPACE\tTEAM\tSEND\n");
+    for row in rows {
+        out.push_str(row.status);
+        out.push('\t');
+        out.push_str(&row.entry.workspace.display().to_string());
+        out.push('\t');
+        out.push_str(&row.entry.team_key);
+        out.push('\t');
+        out.push_str(&row.send_hint);
         out.push('\n');
     }
     out
+}
+
+fn prune_item_json(item: &RegistryPruneItem) -> Value {
+    json!({
+        "workspace": item.workspace.display().to_string(),
+        "team_key": item.team_key,
+        "reason": item.reason,
+    })
+}
+
+fn prune_json(report: &RegistryPruneReport) -> Value {
+    json!({
+        "dry_run": report.dry_run,
+        "candidates": report.candidates.iter().map(prune_item_json).collect::<Vec<_>>(),
+        "removed": report.removed.iter().map(prune_item_json).collect::<Vec<_>>(),
+        "kept": report.kept.iter().map(prune_item_json).collect::<Vec<_>>(),
+        "skipped": report.skipped.iter().map(prune_item_json).collect::<Vec<_>>(),
+        "errors": report.errors.iter().map(prune_item_json).collect::<Vec<_>>(),
+    })
+}
+
+fn format_prune_human(report: &RegistryPruneReport) -> String {
+    let mut out = format!("dry-run: {}\n", report.dry_run);
+    for (label, items) in [
+        ("candidates", &report.candidates),
+        ("removed", &report.removed),
+        ("kept", &report.kept),
+        ("skipped", &report.skipped),
+        ("errors", &report.errors),
+    ] {
+        out.push_str(&format!("{label}: {}\n", items.len()));
+        for item in items {
+            out.push_str("  ");
+            out.push_str(&item.workspace.display().to_string());
+            out.push_str("::");
+            out.push_str(&item.team_key);
+            out.push_str(" [");
+            out.push_str(&item.reason);
+            out.push_str("]\n");
+        }
+    }
+    out
+}
+
+fn cmd_prune(args: &LeadersArgs, dir: &str) -> Result<CmdResult, CliError> {
+    let report = crate::leader::registry::prune_registry(args.dry_run);
+    let value = json!({
+        "ok": report.errors.is_empty(),
+        "registry_dir": dir,
+        "prune": prune_json(&report),
+    });
+    if args.json {
+        return Ok(CmdResult::from_json(value, true));
+    }
+    let mut result = CmdResult::human(format_prune_human(&report));
+    if !report.errors.is_empty() {
+        result.exit = ExitCode::Error;
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sample_human() -> String {
-        format_leaders_human(&[
-            (
-                "/Volumes/nvme/Projects/讨论team-agent".to_string(),
-                "wiki-team".to_string(),
-            ),
-            (
-                "/Users/alauda/Documents/code/agent前沿探索/多agent协作".to_string(),
-                "refactor-maintainability".to_string(),
-            ),
-        ])
+    fn row(workspace: &str, team: &str, status: &'static str, send_hint: &str) -> LeaderRow {
+        LeaderRow {
+            entry: LeaderRegistryEntry {
+                schema_version: crate::leader::registry::REGISTRY_SCHEMA_VERSION,
+                delivery_name: team.to_string(),
+                qualified_name: format!("workspace/{team}"),
+                stable_qualified_name: format!("hash/{team}"),
+                aliases: Vec::new(),
+                workspace: workspace.into(),
+                workspace_hash: "hash".to_string(),
+                workspace_short: "workspace".to_string(),
+                team_key: team.to_string(),
+                transport_kind: "direct_tmux".to_string(),
+                channel: Value::Null,
+                owner_epoch: 1,
+                attached_at: String::new(),
+                updated_at: String::new(),
+                source: "test".to_string(),
+                status: "attached".to_string(),
+            },
+            status,
+            stale_reason: (status == "STALE").then(|| "leader_pane_dead".to_string()),
+            send_hint: send_hint.to_string(),
+        }
     }
 
     #[test]
-    fn leaders_human_lists_workspace_team_role_and_copyable_send() {
-        let out = sample_human();
-        assert!(
-            out.contains("team-agent send '/"),
-            "A: copyable send TO must start with absolute workspace path; got {out:?}"
-        );
-        assert!(
-            out.contains("::wiki-team/leader'"),
-            "B: send TO must contain ::<team>/<role>; got {out:?}"
-        );
-        assert!(
-            out.contains(
-                "team-agent send '/Volumes/nvme/Projects/讨论team-agent::wiki-team/leader' '消息'"
+    fn leaders_human_is_a_status_table_and_stale_has_no_send() {
+        let rows = vec![
+            row(
+                "/Volumes/nvme/Projects/讨论team-agent",
+                "wiki-team",
+                "LIVE",
+                "send-live",
             ),
-            "C: complete copyable send line; got {out:?}"
-        );
-        assert!(out.contains("/Volumes/nvme/Projects/讨论team-agent\nwiki-team/leader\n"));
-        assert!(out.contains(
-            "/Users/alauda/Documents/code/agent前沿探索/多agent协作\nrefactor-maintainability/leader\n"
-        ));
-        assert!(out.contains(
-            "team-agent send '/Users/alauda/Documents/code/agent前沿探索/多agent协作::refactor-maintainability/leader' '消息'"
-        ));
+            row("/Users/alauda/stale", "old-team", "STALE", "-"),
+        ];
+        let out = format_leaders_human(&rows, LeadersView::All);
+        assert!(out.starts_with("STATUS\tWORKSPACE\tTEAM\tSEND\n"));
+        assert!(out.contains("LIVE\t/Volumes/nvme/Projects/讨论team-agent\twiki-team\tsend-live\n"));
+        assert!(out.contains("STALE\t/Users/alauda/stale\told-team\t-\n"));
     }
 
     #[test]
-    fn leaders_human_omits_hash_channel_and_pane_id_fields() {
-        let out = sample_human();
-        for noise in [
-            "workspace_hash",
-            "stable_qualified_name",
-            "channel_id",
-            "\"channel\":",
-            "pane_id",
-        ] {
-            assert!(
-                !out.contains(noise),
-                "D: default surface must not print {noise}; got {out:?}"
-            );
-        }
-        let empty = format_leaders_human(&[]);
-        for noise in [
-            "workspace_hash",
-            "stable_qualified_name",
-            "channel_id",
-            "\"channel\":",
-            "pane_id",
-        ] {
-            assert!(!empty.contains(noise), "empty surface leaked {noise}");
-        }
+    fn stale_rows_are_filtered_from_live_view() {
+        let rows = vec![
+            row("/live", "live", "LIVE", "send"),
+            row("/stale", "stale", "STALE", "-"),
+        ];
+        let rows = filter_rows(rows, LeadersView::Live, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entry.team_key, "live");
+    }
+
+    #[test]
+    fn quote_cli_arg_escapes_single_quotes_without_shell_expansion() {
+        assert_eq!(quote_cli_arg("a'b $HOME `date`"), "'a'\\''b $HOME `date`'");
+    }
+
+    #[test]
+    fn search_matches_selected_fields_case_insensitively() {
+        let rows = vec![
+            row(
+                "/Volumes/nvme/Projects/讨论team-agent",
+                "Wiki-Team",
+                "LIVE",
+                "send",
+            ),
+            row("/Users/alauda/stale", "old-team", "STALE", "-"),
+        ];
+        let rows = filter_rows(rows, LeadersView::All, Some("WIKI-"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entry.team_key, "Wiki-Team");
+    }
+
+    #[test]
+    fn empty_view_names_are_explicit() {
+        assert_eq!(
+            format_leaders_human(&[], LeadersView::Live),
+            "no live leaders\n"
+        );
+        assert_eq!(
+            format_leaders_human(&[], LeadersView::Stale),
+            "no stale leaders\n"
+        );
+        assert_eq!(
+            format_leaders_human(&[], LeadersView::All),
+            "no registered leaders\n"
+        );
     }
 }

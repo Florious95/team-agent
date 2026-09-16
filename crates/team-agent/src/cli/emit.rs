@@ -218,7 +218,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         // resolve short/qualified/hash-qualified names to a canonical
         // (workspace, team_key) tuple and delegates to the E6 named-leader
         // delivery path — no separate route authority.
-        "leaders" => cmd_leaders(&leaders_args(args, cwd)).map(emit_result),
+        "leaders" => cmd_leaders(&leaders_args(args, cwd)?).map(emit_result),
         "models" => cmd_models(&models_args(args)?).map(emit_result),
         "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
@@ -324,7 +324,15 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "Core",
-        &["quick-start", "send", "status", "collect", "results", "models"],
+        &[
+            "quick-start",
+            "send",
+            "status",
+            "collect",
+            "results",
+            "models",
+            "leaders",
+        ],
     );
     append_help_section(
         &mut out,
@@ -411,6 +419,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或 nodeprobe 证据时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models --provider pi [--search TEXT] [--json]\n\nPrints models.v1 exact role_model entries; each entry includes current=true|false. Catalog readiness is reported as auth=ok|not_ready with auth_basis=catalog_visibility.".to_string(),
+        Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
@@ -1683,9 +1692,109 @@ fn sessions_args(args: &[String], cwd: &Path) -> SessionsArgs {
     }
 }
 
-fn leaders_args(args: &[String], _cwd: &Path) -> LeadersArgs {
-    let parsed = parse_args(args);
-    LeadersArgs { json: parsed.json }
+fn leaders_args(args: &[String], _cwd: &Path) -> Result<LeadersArgs, CliError> {
+    let mut view = None;
+    let mut query = None;
+    let mut prune = false;
+    let mut dry_run = false;
+    let mut json = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--json" => json = true,
+            "--all" => {
+                if view.replace(LeadersView::All).is_some() {
+                    return Err(CliError::Usage(
+                        "leaders accepts only one of --all or --stale".to_string(),
+                    ));
+                }
+            }
+            "--stale" => {
+                if view.replace(LeadersView::Stale).is_some() {
+                    return Err(CliError::Usage(
+                        "leaders accepts only one of --all or --stale".to_string(),
+                    ));
+                }
+            }
+            "--prune" => {
+                if prune {
+                    return Err(CliError::Usage(
+                        "leaders accepts --prune at most once".to_string(),
+                    ));
+                }
+                prune = true;
+            }
+            "--dry-run" => dry_run = true,
+            "--search" => {
+                let Some(value) = args.get(i.saturating_add(1)) else {
+                    return Err(CliError::Usage(
+                        "leaders --search requires TEXT".to_string(),
+                    ));
+                };
+                if value.starts_with('-') {
+                    return Err(CliError::Usage(
+                        "leaders --search requires TEXT".to_string(),
+                    ));
+                }
+                i = i.saturating_add(1);
+                if query.replace(value.clone()).is_some() {
+                    return Err(CliError::Usage(
+                        "leaders accepts only one QUERY or --search TEXT".to_string(),
+                    ));
+                }
+            }
+            value if value.starts_with("--search=") => {
+                let value = value.trim_start_matches("--search=").to_string();
+                if query.replace(value).is_some() {
+                    return Err(CliError::Usage(
+                        "leaders accepts only one QUERY or --search TEXT".to_string(),
+                    ));
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown leaders argument: {value}"
+                )))
+            }
+            value => {
+                if query.replace(value.to_string()).is_some() {
+                    return Err(CliError::Usage(
+                        "leaders accepts only one QUERY or --search TEXT".to_string(),
+                    ));
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    if query
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(CliError::Usage("leaders QUERY cannot be blank".to_string()));
+    }
+    if prune && view.is_some() {
+        return Err(CliError::Usage(
+            "leaders --prune cannot be combined with --all or --stale".to_string(),
+        ));
+    }
+    if prune && query.is_some() {
+        return Err(CliError::Usage(
+            "leaders --prune cannot be combined with QUERY or --search".to_string(),
+        ));
+    }
+    if dry_run && !prune {
+        return Err(CliError::Usage(
+            "leaders --dry-run requires --prune".to_string(),
+        ));
+    }
+    Ok(LeadersArgs {
+        view: view.unwrap_or(LeadersView::Live),
+        query,
+        prune,
+        dry_run,
+        json,
+    })
 }
 
 fn validate_args(args: &[String], cwd: &Path) -> ValidateArgs {
@@ -1936,6 +2045,37 @@ mod tests {
     }
 
     #[test]
+    fn leaders_parser_supports_views_and_search() {
+        let parsed = leaders_args(
+            &cli_argv(&["--all", "--search", "Wiki", "--json"]),
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(parsed.view, LeadersView::All);
+        assert_eq!(parsed.query.as_deref(), Some("Wiki"));
+        assert!(!parsed.prune);
+        assert!(!parsed.dry_run);
+        assert!(parsed.json);
+    }
+
+    #[test]
+    fn leaders_parser_rejects_invalid_search_and_prune_combinations() {
+        for args in [
+            cli_argv(&["one", "two"]),
+            cli_argv(&["one", "--search", "two"]),
+            cli_argv(&["--search", "   "]),
+            cli_argv(&["--dry-run"]),
+            cli_argv(&["--prune", "--stale"]),
+            cli_argv(&["--prune", "--search", "x"]),
+        ] {
+            assert!(
+                leaders_args(&args, Path::new(".")).is_err(),
+                "args={args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn command_specs_have_unique_names_and_valid_aliases() {
         let mut names = std::collections::BTreeSet::new();
         for spec in COMMAND_SPECS {
@@ -2023,12 +2163,26 @@ mod tests {
     fn hidden_commands_not_in_default_help() {
         let top_help = command_help(None);
         let visible = visible_help_commands(&top_help);
-        for command in ["leaders", "doctor", "e2e", "peek", "coordinator"] {
+        for command in ["doctor", "e2e", "peek", "coordinator"] {
             assert!(
                 !visible.iter().any(|visible| visible == command),
                 "`{command}` must stay hidden from default help"
             );
         }
+        assert!(
+            visible.iter().any(|visible| visible == "leaders"),
+            "leaders must be discoverable from default help"
+        );
+    }
+
+    #[test]
+    fn leaders_help_publishes_selectors_and_prune() {
+        let help = command_help(Some("leaders"));
+        assert!(help.contains("--all"));
+        assert!(help.contains("--stale"));
+        assert!(help.contains("--search TEXT"));
+        assert!(help.contains("--prune"));
+        assert!(help.contains("--dry-run"));
     }
 
     #[test]
