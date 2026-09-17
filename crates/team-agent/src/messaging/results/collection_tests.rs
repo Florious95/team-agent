@@ -428,66 +428,57 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
     isolated(
         "s2_event_and_state_io_failures_remain_recoverable",
         |root| {
-            for point in ["before_event", "before_state"] {
-                let dir = root.join(point);
-                seed(&dir);
-                let child = start(&dir, "failed", point, true, true);
-                let (obstruction, backup) = if point == "before_event" {
-                    (
-                        dir.join(".team/logs/events.jsonl"),
-                        Some(dir.join(".team/logs/events.jsonl.fault-original")),
-                    )
-                } else {
-                    let tmp = dir
-                        .join(".team/runtime")
-                        .join(format!("state.json.tmp.{}.0.tmp", child.id()));
-                    (tmp, None)
-                };
-                std::fs::create_dir_all(obstruction.parent().unwrap()).unwrap();
-                if let Some(backup) = &backup {
-                    if obstruction.exists() {
-                        std::fs::rename(&obstruction, backup).unwrap();
-                    }
-                } else {
-                    assert!(
-                        !obstruction.exists(),
-                        "unexpected state temp path: {obstruction:?}"
-                    );
-                }
-                std::fs::create_dir(&obstruction).unwrap();
-                finish(child, true);
-                let failure = output(&dir, "failed");
-                let error = failure["error"].as_str().unwrap_or_default();
-                let expected_error = if point == "before_event" {
-                    "event log"
-                } else {
-                    "state"
-                };
-                assert!(error.contains(expected_error), "{failure}");
-                assert_eq!(db_status(&dir).as_deref(), Some("success"));
-                let expected_task_status = if point == "before_event" {
-                    "done"
-                } else {
-                    "pending"
-                };
-                assert_eq!(
-                    disk(&dir)["teams"]["T1"]["tasks"][0]["status"],
-                    expected_task_status
-                );
-                assert_eq!(collect_event_count(&dir), 0, "{failure}");
-                println!(
-                    "S2 real IO failure at={point} error={failure} task={} db={:?}",
-                    disk(&dir)["teams"]["T1"]["tasks"],
-                    db_status(&dir)
-                );
-                std::fs::remove_dir(&obstruction).unwrap();
-                if let Some(backup) = backup {
-                    if backup.exists() {
-                        std::fs::rename(backup, &obstruction).unwrap();
-                    }
-                }
-                recovered(&dir, false, 1);
+            let event_dir = root.join("before_event");
+            seed(&event_dir);
+            let event_child = start(&event_dir, "failed", "before_event", true, true);
+            let event_log = event_dir.join(".team/logs/events.jsonl");
+            let event_backup = event_dir.join(".team/logs/events.jsonl.fault-original");
+            std::fs::rename(&event_log, &event_backup).unwrap();
+            std::fs::create_dir(&event_log).unwrap();
+            finish(event_child, true);
+            let failure = output(&event_dir, "failed");
+            assert!(
+                failure["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("event log")),
+                "{failure}"
+            );
+            assert_eq!(db_status(&event_dir).as_deref(), Some("success"));
+            assert_eq!(disk(&event_dir)["teams"]["T1"]["tasks"][0]["status"], "done");
+            assert_eq!(collect_event_count(&event_dir), 0, "{failure}");
+            std::fs::remove_dir(&event_log).unwrap();
+            std::fs::rename(event_backup, event_log).unwrap();
+            recovered(&event_dir, false, 1);
+
+            let state_dir = root.join("before_state");
+            seed(&state_dir);
+            let state_child = start(&state_dir, "failed", "before_state", true, true);
+            let runtime_dir = state_dir.join(".team/runtime");
+            let pid = state_child.id();
+            let state_tmp_obstructions: Vec<_> = (0..32)
+                .map(|seq| runtime_dir.join(format!("state.json.tmp.{pid}.{seq}.tmp")))
+                .collect();
+            for path in &state_tmp_obstructions {
+                std::fs::create_dir(path).unwrap();
             }
+            finish(state_child, true);
+            let failure = output(&state_dir, "failed");
+            assert!(
+                failure["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("state")),
+                "{failure}"
+            );
+            assert_eq!(db_status(&state_dir).as_deref(), Some("success"));
+            assert_eq!(
+                disk(&state_dir)["teams"]["T1"]["tasks"][0]["status"],
+                "pending"
+            );
+            assert_eq!(collect_event_count(&state_dir), 0, "{failure}");
+            for path in state_tmp_obstructions {
+                std::fs::remove_dir(path).unwrap();
+            }
+            recovered(&state_dir, false, 1);
         },
     );
 }
