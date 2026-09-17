@@ -157,13 +157,13 @@ fn errno_name(errno: Option<i32>) -> Option<&'static str> {
 /// semantic mapping. The Batch 0 non-Unix `not_yet_implemented`
 /// fallback is now removed (CR C-2 fallback burn-down; grep guard
 /// `platform_fallback_burndown_batch0.rs` flipped in this batch).
-struct RuntimeLock {
+pub(crate) struct RuntimeLock {
     #[allow(dead_code)]
     file: std::fs::File,
 }
 
 impl RuntimeLock {
-    fn acquire(workspace: &Path, name: &str, timeout: f64) -> Result<Self, StateError> {
+    pub(crate) fn acquire(workspace: &Path, name: &str, timeout: f64) -> Result<Self, StateError> {
         let lock_path = runtime_dir(workspace).join(format!("{name}.lock"));
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
