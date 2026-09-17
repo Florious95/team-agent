@@ -433,6 +433,7 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
             let event_child = start(&event_dir, "failed", "before_event", true, true);
             let event_log = event_dir.join(".team/logs/events.jsonl");
             let event_backup = event_dir.join(".team/logs/events.jsonl.fault-original");
+            std::fs::create_dir_all(event_log.parent().unwrap()).unwrap();
             if event_log.exists() {
                 std::fs::rename(&event_log, &event_backup).unwrap();
             }
