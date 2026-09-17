@@ -444,7 +444,10 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
                 "{failure}"
             );
             assert_eq!(db_status(&event_dir).as_deref(), Some("success"));
-            assert_eq!(disk(&event_dir)["teams"]["T1"]["tasks"][0]["status"], "done");
+            assert_eq!(
+                disk(&event_dir)["teams"]["T1"]["tasks"][0]["status"],
+                "done"
+            );
             assert_eq!(collect_event_count(&event_dir), 0, "{failure}");
             std::fs::remove_dir(&event_log).unwrap();
             std::fs::rename(event_backup, event_log).unwrap();
