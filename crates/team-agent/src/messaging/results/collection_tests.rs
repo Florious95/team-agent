@@ -53,6 +53,14 @@ fn envelope(result: &str, task: &str) -> Value {
         "artifacts": [], "changes": [], "tests": [], "risks": [], "next_actions": []})
 }
 
+fn write_fixture_state(dir: &Path, state: &Value) {
+    let path = crate::state::persist::runtime_state_path(dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(state).unwrap()).unwrap();
+}
+
 fn seed(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     let mut teams = serde_json::Map::new();
@@ -70,7 +78,7 @@ fn seed(dir: &Path) {
     let mut state = teams["T1"].clone();
     state["active_team_key"] = json!("T1");
     state["teams"] = Value::Object(teams);
-    crate::state::persist::save_runtime_state(dir, &state).unwrap();
+    write_fixture_state(dir, &state);
     MessageStore::open(dir).unwrap();
     std::fs::write(
         dir.join("result.json"),
@@ -86,7 +94,7 @@ fn seed_batch(dir: &Path) {
         .as_array_mut()
         .unwrap()
         .push(json!({"id": "task-b", "title": "Task B", "status": "pending"}));
-    crate::state::persist::save_runtime_state(dir, &state).unwrap();
+    write_fixture_state(dir, &state);
     let conn = db(dir);
     for (id, task_id, created_at) in [
         ("a1", "task", "1"),
@@ -154,7 +162,7 @@ fn remove_task_from_state(dir: &Path, task_id: &str) {
         .and_then(Value::as_array_mut)
         .unwrap();
     tasks.retain(|task| task.get("id").and_then(Value::as_str) != Some(task_id));
-    crate::state::persist::save_runtime_state(dir, &state).unwrap();
+    write_fixture_state(dir, &state);
 }
 
 fn collect_event_count(dir: &Path) -> usize {
