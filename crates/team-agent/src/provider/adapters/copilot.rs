@@ -57,7 +57,7 @@ pub(crate) fn copilot_base_command(
 
 /// Translate `McpConfig.raw` canonical schema (`type`) into the copilot
 /// `mcp add`/`--additional-mcp-config` expected `transport` field
-/// (stdio|http|sse). Only the copilot adapter walks this translation —
+/// (stdio|http|sse). Shared by inline plans and lifecycle config files;
 /// claude/codex paths leave canonical schema untouched.
 pub(crate) fn copilot_translate_mcp_config(raw: &serde_json::Value) -> serde_json::Value {
     let Some(servers) = raw.as_object() else {
