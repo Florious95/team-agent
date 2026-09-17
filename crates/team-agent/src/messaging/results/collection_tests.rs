@@ -433,7 +433,9 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
             let event_child = start(&event_dir, "failed", "before_event", true, true);
             let event_log = event_dir.join(".team/logs/events.jsonl");
             let event_backup = event_dir.join(".team/logs/events.jsonl.fault-original");
-            std::fs::rename(&event_log, &event_backup).unwrap();
+            if event_log.exists() {
+                std::fs::rename(&event_log, &event_backup).unwrap();
+            }
             std::fs::create_dir(&event_log).unwrap();
             finish(event_child, true);
             let failure = output(&event_dir, "failed");
@@ -450,7 +452,9 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
             );
             assert_eq!(collect_event_count(&event_dir), 0, "{failure}");
             std::fs::remove_dir(&event_log).unwrap();
-            std::fs::rename(event_backup, event_log).unwrap();
+            if event_backup.exists() {
+                std::fs::rename(event_backup, event_log).unwrap();
+            }
             recovered(&event_dir, false, 1);
 
             let state_dir = root.join("before_state");
