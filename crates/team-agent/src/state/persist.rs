@@ -163,7 +163,7 @@ pub(crate) struct RuntimeLock {
 }
 
 impl RuntimeLock {
-    pub(crate) fn acquire(workspace: &Path, name: &str, timeout: f64) -> Result<Self, StateError> {
+    fn acquire(workspace: &Path, name: &str, timeout: f64) -> Result<Self, StateError> {
         let lock_path = runtime_dir(workspace).join(format!("{name}.lock"));
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -202,6 +202,20 @@ impl Drop for RuntimeLock {
         // Best-effort unlock. OS releases on handle close if this fails.
         let _ = crate::platform::file_lock::unlock(&self.file);
     }
+}
+
+pub(crate) fn acquire_result_collection_lock(
+    run_workspace: &Path,
+) -> Result<RuntimeLock, StateError> {
+    RuntimeLock::acquire(run_workspace, "result-collection", 2.0)
+}
+
+#[cfg(test)]
+pub(crate) fn acquire_state_save_lock(
+    workspace: &Path,
+    timeout: f64,
+) -> Result<RuntimeLock, StateError> {
+    RuntimeLock::acquire(workspace, "state-save", timeout)
 }
 
 ///

@@ -134,11 +134,8 @@ fn collect_scoped(
     collection_tests::boundary("before_lock")?;
     // Serialize collectors, but do not hold a SQLite write transaction while
     // committing state. A process exit releases this existing OS file lock.
-    let collection_lock = crate::state::persist::RuntimeLock::acquire(
-        &paths.run_workspace,
-        "result-collection",
-        2.0,
-    )?;
+    let collection_lock =
+        crate::state::persist::acquire_result_collection_lock(&paths.run_workspace)?;
     let log = EventLog::new(&paths.run_workspace);
     let resolved_owner_team_id = match owner_team_id.filter(|team| !team.is_empty()) {
         Some(team) => Some(resolve_owner_team_for_read(
