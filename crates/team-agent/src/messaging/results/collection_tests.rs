@@ -469,8 +469,8 @@ fn s2_state_lock_timeout_keeps_result_eligible_for_recovery() {
         "s2_state_lock_timeout_keeps_result_eligible_for_recovery",
         |dir| {
             seed(dir);
-            let lock = crate::state::persist::RuntimeLock::acquire(dir, "state-save", 2.0).unwrap();
             let child = start(dir, "blocked", "before_state", true, true);
+            let lock = crate::state::persist::RuntimeLock::acquire(dir, "state-save", 2.0).unwrap();
             finish(child, true);
             let failure = output(dir, "blocked");
             assert!(
