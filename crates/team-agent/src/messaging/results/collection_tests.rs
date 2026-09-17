@@ -79,6 +79,38 @@ fn seed(dir: &Path) {
     .unwrap();
 }
 
+fn seed_batch(dir: &Path) {
+    seed(dir);
+    let mut state = disk(dir);
+    state["teams"]["T1"]["tasks"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "task-b", "title": "Task B", "status": "pending"}));
+    crate::state::persist::save_runtime_state(dir, &state).unwrap();
+    let conn = db(dir);
+    for (id, task_id, created_at) in [
+        ("a1", "task", "1"),
+        ("a2", "task", "2"),
+        ("b1", "task-b", "3"),
+    ] {
+        insert_result_if_absent(
+            &conn,
+            id,
+            task_id,
+            "w1",
+            &envelope(id, task_id).to_string(),
+            "success",
+            Some("T1"),
+        )
+        .unwrap();
+        conn.execute(
+            "update results set created_at = ?1 where result_id = ?2",
+            rusqlite::params![created_at, id],
+        )
+        .unwrap();
+    }
+}
+
 fn disk(dir: &Path) -> Value {
     serde_json::from_str(
         &std::fs::read_to_string(crate::state::persist::runtime_state_path(dir)).unwrap(),
@@ -91,15 +123,47 @@ fn db(dir: &Path) -> rusqlite::Connection {
 }
 
 fn db_status(dir: &Path) -> Option<String> {
+    db_status_for(dir, "result")
+}
+
+fn db_status_for(dir: &Path, result_id: &str) -> Option<String> {
     use rusqlite::OptionalExtension;
     db(dir)
         .query_row(
-            "select status from results where result_id = 'result'",
-            [],
+            "select status from results where result_id = ?1",
+            [result_id],
             |row| row.get(0),
         )
         .optional()
         .unwrap()
+}
+
+fn collected_ids(response: &Value) -> Vec<String> {
+    response["response"]["collected_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["result_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn remove_task_from_state(dir: &Path, task_id: &str) {
+    let mut state = disk(dir);
+    let tasks = state
+        .pointer_mut("/teams/T1/tasks")
+        .and_then(Value::as_array_mut)
+        .unwrap();
+    tasks.retain(|task| task.get("id").and_then(Value::as_str) != Some(task_id));
+    crate::state::persist::save_runtime_state(dir, &state).unwrap();
+}
+
+fn collect_event_count(dir: &Path) -> usize {
+    let path = dir.join(".team/logs/events.jsonl");
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("collect.result"))
+        .count()
 }
 
 fn install_finalize_execute_error(dir: &Path) {
@@ -123,14 +187,34 @@ fn remove_finalize_execute_error(dir: &Path) {
 }
 
 fn start(dir: &Path, label: &str, point: &str, pause: bool, file: bool) -> Child {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    start_with_options(dir, label, point, pause, file, false)
+}
+
+fn start_with_task_removal(dir: &Path, label: &str, point: &str, pause: bool, file: bool) -> Child {
+    start_with_options(dir, label, point, pause, file, true)
+}
+
+fn start_with_options(
+    dir: &Path,
+    label: &str,
+    point: &str,
+    pause: bool,
+    file: bool,
+    remove_task: bool,
+) -> Child {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", WORKER, "--ignored", "--nocapture"])
         .env_clear()
         .env("HOME", dir.join("home"))
         .env("TA_S2_LABEL", label)
         .env("TA_S2_POINT", point)
         .env("TA_S2_PAUSE", if pause { "1" } else { "0" })
-        .env("TA_S2_FILE", if file { "1" } else { "0" })
+        .env("TA_S2_FILE", if file { "1" } else { "0" });
+    if remove_task {
+        command.env("TA_S2_REMOVE_TASK", "task");
+    }
+    let mut child = command
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -183,9 +267,17 @@ fn collect_fresh(dir: &Path, label: &str, file: bool) -> Value {
     output(dir, label)
 }
 
-fn recovered(dir: &Path) {
-    let result = collect_fresh(dir, "recovered", true);
+fn recovered(dir: &Path, file: bool, expected_output: usize) {
+    let result = collect_fresh(dir, "recovered", file);
     assert_eq!(result["response"]["ok"], true, "{result}");
+    assert_eq!(
+        result["response"]["collected_results"]
+            .as_array()
+            .unwrap()
+            .len(),
+        expected_output,
+        "{result}"
+    );
     let state = disk(dir);
     assert_eq!(
         state["teams"]["T1"]["tasks"][0]["status"], "done",
@@ -197,8 +289,10 @@ fn recovered(dir: &Path) {
     );
     assert_eq!(state["teams"]["T2"]["tasks"][0]["status"], "pending");
     assert_eq!(db_status(dir).as_deref(), Some("collected"));
-    let repeated = collect_fresh(dir, "repeated", true);
+    assert_eq!(result["response"]["results"]["collected"], 1);
+    let repeated = collect_fresh(dir, "repeated", false);
     assert_eq!(repeated["response"]["collected"], json!([]));
+    assert_eq!(repeated["response"]["results"]["collected"], 1);
     println!(
         "S2 recovered state={} db={:?} output={result}",
         state["teams"],
@@ -214,11 +308,16 @@ fn s2_process_collector() {
     let expected = std::env::var("TA_S2_POINT").unwrap();
     let pause = std::env::var("TA_S2_PAUSE").as_deref() == Ok("1");
     let file = std::env::var("TA_S2_FILE").as_deref() == Ok("1");
+    let remove_task = std::env::var("TA_S2_REMOVE_TASK").ok();
+    let hook_dir = dir.clone();
     let mut fired = false;
     HOOK.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(move |point| {
             if !fired && point == expected {
                 fired = true;
+                if let Some(task_id) = remove_task.as_deref() {
+                    remove_task_from_state(&hook_dir, task_id);
+                }
                 println!("S2_READY {point}");
                 std::io::stdout().flush().unwrap();
                 if pause {
@@ -252,7 +351,7 @@ fn s2_original_finalize_window_recovers() {
         );
         child.kill().unwrap();
         assert!(!child.wait().unwrap().success());
-        recovered(dir);
+        recovered(dir, false, 0);
     });
 }
 
@@ -281,8 +380,45 @@ fn s2_all_persistence_windows_recover_in_fresh_processes() {
                 );
                 child.kill().unwrap();
                 assert!(!child.wait().unwrap().success());
-                recovered(&dir);
+                let expected_output = usize::from(point != "after_finalize");
+                let recovery_file = point == "before_ingest";
+                recovered(&dir, recovery_file, expected_output);
             }
+        },
+    );
+}
+
+#[test]
+fn s2_batch_partial_finalize_recovers_only_the_unfinalized_suffix() {
+    isolated(
+        "s2_batch_partial_finalize_recovers_only_the_unfinalized_suffix",
+        |dir| {
+            seed_batch(dir);
+            let mut child = start(dir, "interrupted", "after_finalize", true, false);
+            assert_eq!(db_status_for(dir, "a1").as_deref(), Some("collected"));
+            assert_eq!(db_status_for(dir, "a2").as_deref(), Some("success"));
+            assert_eq!(db_status_for(dir, "b1").as_deref(), Some("success"));
+            child.kill().unwrap();
+            assert!(!child.wait().unwrap().success());
+
+            let recovered = collect_fresh(dir, "recovered", false);
+            assert_eq!(
+                collected_ids(&recovered),
+                vec!["a2".to_string(), "b1".to_string()]
+            );
+            let state = disk(dir);
+            assert_eq!(state["teams"]["T1"]["tasks"][0]["status"], "done");
+            assert_eq!(state["teams"]["T1"]["tasks"][0]["accepted_result_id"], "a2");
+            assert_eq!(state["teams"]["T1"]["tasks"][1]["status"], "done");
+            assert_eq!(state["teams"]["T1"]["tasks"][1]["accepted_result_id"], "b1");
+            assert_eq!(db_status_for(dir, "a1").as_deref(), Some("collected"));
+            assert_eq!(db_status_for(dir, "a2").as_deref(), Some("collected"));
+            assert_eq!(db_status_for(dir, "b1").as_deref(), Some("collected"));
+            assert_eq!(recovered["response"]["results"]["collected"], 3);
+
+            let repeated = collect_fresh(dir, "repeated", false);
+            assert_eq!(repeated["response"]["collected"], json!([]));
+            assert_eq!(repeated["response"]["results"]["collected"], 3);
         },
     );
 }
@@ -321,8 +457,36 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
                 if backup.exists() {
                     std::fs::rename(&backup, &obstruction).unwrap();
                 }
-                recovered(&dir);
+                recovered(&dir, false, 1);
             }
+        },
+    );
+}
+
+#[test]
+fn s2_state_lock_timeout_keeps_result_eligible_for_recovery() {
+    isolated(
+        "s2_state_lock_timeout_keeps_result_eligible_for_recovery",
+        |dir| {
+            seed(dir);
+            let lock = crate::state::persist::RuntimeLock::acquire(dir, "state-save", 2.0).unwrap();
+            let child = start(dir, "blocked", "before_state", true, true);
+            finish(child, true);
+            let failure = output(dir, "blocked");
+            assert!(
+                failure["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("state-save")),
+                "{failure}"
+            );
+            assert_eq!(db_status(dir).as_deref(), Some("success"));
+            assert_eq!(disk(dir)["teams"]["T1"]["tasks"][0]["status"], "pending");
+            drop(lock);
+
+            let recovered = collect_fresh(dir, "recovered", false);
+            assert_eq!(collected_ids(&recovered), vec!["result".to_string()]);
+            assert_eq!(db_status(dir).as_deref(), Some("collected"));
+            assert_eq!(disk(dir)["teams"]["T1"]["tasks"][0]["status"], "done");
         },
     );
 }
@@ -366,7 +530,7 @@ fn s2_finalize_execute_error_keeps_result_eligible_for_recovery() {
             assert_eq!(db_status(dir).as_deref(), Some("success"));
 
             remove_finalize_execute_error(dir);
-            let recovered = collect_fresh(dir, "recovered", true);
+            let recovered = collect_fresh(dir, "recovered", false);
             assert_eq!(recovered["response"]["ok"], true, "{recovered}");
             assert_eq!(
                 recovered["response"]["collected"].as_array().unwrap().len(),
@@ -387,12 +551,37 @@ fn s2_finalize_execute_error_keeps_result_eligible_for_recovery() {
             );
             assert_eq!(db_status(dir).as_deref(), Some("collected"));
 
-            let repeated = collect_fresh(dir, "repeated", true);
+            let repeated = collect_fresh(dir, "repeated", false);
             assert_eq!(repeated["response"]["collected"], json!([]), "{repeated}");
             assert_eq!(
                 repeated["response"]["results"]["collected"], 1,
                 "{repeated}"
             );
+        },
+    );
+}
+
+#[test]
+fn s2_task_disappears_after_read_fails_closed_before_finalize() {
+    isolated(
+        "s2_task_disappears_after_read_fails_closed_before_finalize",
+        |dir| {
+            seed(dir);
+            let child = start_with_task_removal(dir, "vanished", "before_state", true, true);
+            finish(child, true);
+            let failure = output(dir, "vanished");
+            assert!(
+                failure["error"].as_str().is_some_and(|error| {
+                    error.contains("task result projection missing after commit")
+                }),
+                "{failure}"
+            );
+            assert_eq!(db_status(dir).as_deref(), Some("success"));
+            assert_eq!(collect_event_count(dir), 0);
+            assert!(disk(dir)["teams"]["T1"]["tasks"]
+                .as_array()
+                .unwrap()
+                .is_empty());
         },
     );
 }
@@ -416,7 +605,7 @@ fn s2_concurrent_collectors_emit_each_result_once() {
                 + second["response"]["collected"].as_array().unwrap().len(),
             1
         );
-        recovered(dir);
+        recovered(dir, false, 0);
         let notifications: i64 = db(dir)
             .query_row("select count(*) from leader_notification_log", [], |row| {
                 row.get(0)
@@ -487,6 +676,7 @@ fn s2_scope_order_and_legacy_collected_rows_stay_compatible() {
                 response["results"],
                 json!({"total": 5, "collected": 4, "invalid": 1, "uncollected": 0, "by_status": {}})
             );
+            assert_eq!(db_status_for(dir, "foreign").as_deref(), Some("success"));
             let state = disk(dir);
             assert_eq!(state["teams"]["T1"]["tasks"].as_array().unwrap().len(), 1);
             assert_eq!(state["teams"]["T1"]["tasks"][0]["accepted_result_id"], "b");
