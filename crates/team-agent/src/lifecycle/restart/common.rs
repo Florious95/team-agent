@@ -343,10 +343,11 @@ pub(super) fn spawn_agent_window(
     let mcp_config_path = if provider == crate::provider::Provider::Pi {
         None
     } else {
-        Some(crate::lifecycle::launch::write_worker_mcp_config(
+        Some(crate::lifecycle::launch::write_worker_mcp_config_for_provider(
             workspace,
             agent_id.as_str(),
             &mcp_config,
+            Some(provider),
         )?)
     };
     let profile_launch =
