@@ -464,7 +464,7 @@ fn s2_event_and_state_io_failures_remain_recoverable() {
             let runtime_dir = state_dir.join(".team/runtime");
             let pid = state_child.id();
             let state_tmp_obstructions: Vec<_> = (0..32)
-                .map(|seq| runtime_dir.join(format!("state.json.tmp.{pid}.{seq}.tmp")))
+                .map(|seq| runtime_dir.join(format!("state.json.{pid}.{seq}.tmp")))
                 .collect();
             for path in &state_tmp_obstructions {
                 std::fs::create_dir(path).unwrap();
