@@ -47,7 +47,7 @@ fn claude_fork_snapshot_id_is_rfc4122_uuid_and_resume_only() {
                     mcp_config: None,
                     system_prompt: None,
                     model: None,
-                    tools: &[],
+                    dangerously_skip_permissions: false,
                     profile_launch: None,
                     agent_id_hint: None,
                     effort: None,
