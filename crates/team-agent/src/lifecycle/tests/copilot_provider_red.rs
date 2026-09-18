@@ -414,14 +414,21 @@ fn copilot_prompt_omits_removed_permission_note() {
         .env
         .get("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
         .cloned()
-        .unwrap_or_default();
-    let agents_md = std::fs::read_to_string(Path::new(&dir).join("AGENTS.md")).unwrap_or_default();
-
+        .expect("Copilot spawn must carry COPILOT_CUSTOM_INSTRUCTIONS_DIRS");
+    assert!(
+        !dir.is_empty(),
+        "Copilot instructions directory must not be empty"
+    );
+    let agents_md = std::fs::read_to_string(Path::new(&dir).join("AGENTS.md"))
+        .expect("per-worker Copilot AGENTS.md must be readable");
+    let identity = "You are Team Agent worker `worker_a` with role `Copilot Worker`.";
+    assert!(
+        agents_md.starts_with(identity) && agents_md.contains("COPILOT ROLE BODY SENTINEL"),
+        "C-2-1: compiled Copilot prompt must include its identity and role body; content={agents_md:?}"
+    );
     assert!(
         !agents_md.contains("Permission note:"),
-        "C-2-1: removed provider tool enforcement must not emit a Permission note; \
-         agents_md_present={} content={agents_md:?}",
-        !agents_md.is_empty()
+        "C-2-1: removed provider tool enforcement must not emit a Permission note; content={agents_md:?}"
     );
 }
 
