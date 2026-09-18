@@ -3646,7 +3646,6 @@ pub mod lifecycle_port {
                     dry_run: false,
                     tmux_endpoint: None,
                     routes: Vec::new(),
-                    permissions: Vec::new(),
                     leader_receiver_attached: true,
                     leader_bind_stage: None,
                     leader_bind_reason: None,

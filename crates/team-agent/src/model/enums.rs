@@ -323,18 +323,6 @@ mod tests {
                 "\"adaptive\"",
             ),
             (
-                serde_json::to_string(&Tool::ExecuteBash).unwrap(),
-                "\"execute_bash\"",
-            ),
-            (
-                serde_json::to_string(&Tool::ProviderBuiltin).unwrap(),
-                "\"provider_builtin\"",
-            ),
-            (
-                serde_json::to_string(&Enforcement::PromptOnly).unwrap(),
-                "\"prompt_only\"",
-            ),
-            (
                 serde_json::to_string(&PaneLiveness::Unknown).unwrap(),
                 "\"unknown\"",
             ),

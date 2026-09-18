@@ -25,7 +25,6 @@ fn claude_fresh_command_plan_returns_expected_uuid_and_suppresses_managed_mcp_co
     let projects_root = root.join("claude-projects");
     let profile = managed_profile_launch(&root, &projects_root);
     let config = mcp_config();
-    let tools = ["mcp_team"];
     let adapter = get_adapter(Provider::Claude);
 
     let plan = adapter
@@ -34,7 +33,7 @@ fn claude_fresh_command_plan_returns_expected_uuid_and_suppresses_managed_mcp_co
             mcp_config: Some(&config),
             system_prompt: Some("You are a Team Agent worker."),
             model: Some("profile-effective-model"),
-            tools: &tools,
+            dangerously_skip_permissions: false,
             profile_launch: Some(&profile),
             agent_id_hint: None,
             effort: None,
@@ -77,8 +76,6 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
     let adapter = get_adapter(Provider::Claude);
     let config = mcp_config();
     let source_session = SessionId::new("11111111-2222-4333-8444-555555555555");
-    let default_tools = ["mcp_team"];
-    let dangerous_tools = ["dangerous_auto_approve", "mcp_team"];
 
     let resume = adapter
         .build_resume_command_plan(
@@ -88,7 +85,7 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
                 mcp_config: Some(&config),
                 system_prompt: None,
                 model: Some("claude-sonnet-4-6"),
-                tools: &default_tools,
+                dangerously_skip_permissions: false,
                 profile_launch: None,
                 agent_id_hint: None,
                 effort: None,
@@ -115,7 +112,7 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
                 mcp_config: Some(&config),
                 system_prompt: None,
                 model: Some("claude-sonnet-4-6"),
-                tools: &default_tools,
+                dangerously_skip_permissions: false,
                 profile_launch: None,
                 agent_id_hint: None,
                 effort: None,
@@ -146,7 +143,7 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
             mcp_config: Some(&config),
             system_prompt: None,
             model: Some("claude-sonnet-4-6"),
-            tools: &dangerous_tools,
+            dangerously_skip_permissions: true,
             profile_launch: None,
             agent_id_hint: None,
             effort: None,
@@ -158,44 +155,6 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
         "dangerous approval and default permission-mode are mutually exclusive; argv={:?}",
         dangerous.argv
     );
-}
-
-#[test]
-fn claude_disallowed_tools_mapping_covers_the_complete_python_tool_set() {
-    let adapter = get_adapter(Provider::Claude);
-    let config = mcp_config();
-    let no_filesystem_tools = ["mcp_team"];
-
-    let plan = adapter
-        .build_command_plan(ProviderCommandContext {
-            auth_mode: AuthMode::Subscription,
-            mcp_config: Some(&config),
-            system_prompt: None,
-            model: Some("claude-sonnet-4-6"),
-            tools: &no_filesystem_tools,
-            profile_launch: None,
-            agent_id_hint: None,
-            effort: None,
-        })
-        .expect("Claude plan should build with explicit tools");
-    let disallowed = flag_values(&plan.argv, "--disallowedTools");
-
-    for expected in [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "NotebookEdit",
-        "Glob",
-        "Grep",
-    ] {
-        assert!(
-            disallowed.iter().any(|value| value == expected),
-            "Claude --disallowedTools must include the full Python permission mapping when a capability is not granted; missing={expected} disallowed={disallowed:?} argv={:?}",
-            plan.argv
-        );
-    }
 }
 
 #[test]
@@ -488,13 +447,6 @@ fn argv_has_flag(argv: &[String], flag: &str) -> bool {
 fn argv_contains_adjacent(hay: &[String], needle: &[&str]) -> bool {
     hay.windows(needle.len())
         .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
-}
-
-fn flag_values(argv: &[String], flag: &str) -> Vec<String> {
-    argv.windows(2)
-        .filter(|window| window[0] == flag)
-        .map(|window| window[1].clone())
-        .collect()
 }
 
 fn is_rfc4122_uuid(value: &str) -> bool {

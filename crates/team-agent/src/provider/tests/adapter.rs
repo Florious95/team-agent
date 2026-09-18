@@ -550,23 +550,6 @@ fn test_cursor_resume_plan_requires_chat_id_and_never_emits_empty_resume() {
 }
 
 #[test]
-fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
-    use crate::provider::adapters::grok::{grok_tool_mapping, GrokToolMapping};
-    assert_eq!(
-        grok_tool_mapping("network"),
-        GrokToolMapping::Unsupported
-    );
-    assert_eq!(
-        grok_tool_mapping("not_a_real_tool"),
-        GrokToolMapping::Unsupported
-    );
-    assert!(
-        !matches!(grok_tool_mapping("execute_bash"), GrokToolMapping::Unsupported),
-        "known tools must stay mapped"
-    );
-}
-
-#[test]
 fn pi_wire_roundtrip_requires_backing_and_has_no_builtin_model() {
     use crate::provider::wire::{
         aliases, builtin_provider_model, command_name, parse_canonical_provider, parse_provider,

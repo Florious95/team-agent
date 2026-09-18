@@ -520,8 +520,8 @@ fn launch_dry_run_resolves_real_plan_not_stub_error() {
         Ok(report) => {
             assert!(report.dry_run, "dry_run launch must report dry_run=true");
             assert!(
-                !report.routes.is_empty() || !report.permissions.is_empty(),
-                "dry_run launch must resolve a real route/permission plan from the compiled spec"
+                !report.routes.is_empty(),
+                "dry_run launch must resolve a real route plan from the compiled spec"
             );
         }
         // any OTHER Err (a real requirement/transport error) still proves the stub is gone.
