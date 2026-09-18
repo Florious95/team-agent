@@ -17,7 +17,6 @@ use std::process::Command;
 
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
@@ -133,13 +132,6 @@ pub fn launch_with_transport_in_workspace(
             session_name.as_str()
         )));
     }
-    let permissions = spec_agents(&spec)
-        .into_iter()
-        .map(|agent| PermissionSummary {
-            agent_id: agent,
-            raw: serde_json::json!({"source": "compiled_spec"}),
-        })
-        .collect::<Vec<_>>();
     let routes = spec_routes(&spec);
     let started = if dry_run {
         Vec::new()
@@ -208,7 +200,6 @@ pub fn launch_with_transport_in_workspace(
         dry_run,
         tmux_endpoint: transport.tmux_endpoint(),
         routes,
-        permissions,
         leader_receiver_attached: false,
         leader_bind_stage: None,
         leader_bind_reason: None,

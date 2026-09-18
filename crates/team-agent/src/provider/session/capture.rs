@@ -1607,13 +1607,13 @@ pub(crate) mod test_support {
             ))
         }
 
-        fn build_command_with_tools(
+        fn build_command_with_permissions(
             &self,
             _auth_mode: crate::provider::AuthMode,
             _mcp_config: Option<&crate::provider::McpConfig>,
             _system_prompt: Option<&str>,
             _model: Option<&str>,
-            _tools: &[&str],
+            _dangerously_skip_permissions: bool,
         ) -> Result<Vec<String>, ProviderError> {
             Err(ProviderError::CapabilityUnsupported(
                 "test adapter".to_string(),
@@ -1683,7 +1683,7 @@ pub(crate) mod test_support {
             _mcp_config: Option<&crate::provider::McpConfig>,
             _system_prompt: Option<&str>,
             _model: Option<&str>,
-            _tools: &[&str],
+            _dangerously_skip_permissions: bool,
         ) -> Result<Vec<String>, ProviderError> {
             Err(ProviderError::CapabilityUnsupported(
                 "test adapter".to_string(),
@@ -1708,7 +1708,7 @@ pub(crate) mod test_support {
             _mcp_config: Option<&crate::provider::McpConfig>,
             _system_prompt: Option<&str>,
             _model: Option<&str>,
-            _tools: &[&str],
+            _dangerously_skip_permissions: bool,
         ) -> Result<Vec<String>, ProviderError> {
             Err(ProviderError::CapabilityUnsupported(
                 "test adapter".to_string(),

@@ -1,17 +1,13 @@
 //! ---
-//! purpose: 从 spec 里的一个 agent 定义，编译出 worker 启动所需的系统提示词与工具串
+//! purpose: 从 spec 里的一个 agent 定义，编译出 worker 启动所需的系统提示词
 //! contract:
 //!   provides:
 //!     - name: WorkerCommandAgent
 //!       what: 从 YAML 或 JSON 读出的单 agent 命令上下文
 //!     - name: compile_worker_system_prompt
 //!       what: 按身份、runtime 契约、通信模式、角色正文、输出契约、权限说明拼系统提示词
-//!     - name: resolved_tool_strings_for_command
-//!       what: 解析出该 agent 的工具串，声明了 bypass 时追加 dangerous_auto_approve 哨兵
 //!   depends:
-//!     - crate::model::permissions
 //!     - crate::communication_mode
-//!     - crate::provider::bypass_flags
 //! boundary:
 //!   - 只产出字符串，不 spawn 进程、不写盘
 //!   - bypass 只认 agent 自身声明，不从 team/runtime/leader argv 继承
@@ -22,9 +18,7 @@ use std::path::Path;
 
 use crate::communication_mode::CommunicationMode;
 use crate::lifecycle::types::LifecycleError;
-use crate::model::enums::{Enforcement, Provider};
-use crate::model::ids::AgentId;
-use crate::model::permissions::{resolve_permissions, AgentPermissionInput};
+use crate::model::enums::Provider;
 
 const RUNTIME_CONTRACT_SECTION: &str = r#"# Team Agent Teammate Runtime Contract
 
@@ -57,7 +51,6 @@ pub(crate) struct WorkerCommandAgent {
     id: Option<String>,
     provider: Provider,
     role: Option<String>,
-    declared_tools: Option<Vec<String>>,
     system_prompt_inline: Option<String>,
     system_prompt_file: Option<String>,
     output_contract_format: Option<String>,
@@ -94,16 +87,6 @@ impl WorkerCommandAgent {
                 .get("role")
                 .and_then(crate::model::yaml::Value::as_str)
                 .map(str::to_string),
-            declared_tools: agent
-                .get("tools")
-                .and_then(crate::model::yaml::Value::as_list)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(crate::model::yaml::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                }),
             system_prompt_inline: system_prompt
                 .and_then(|prompt| prompt.get("inline"))
                 .and_then(crate::model::yaml::Value::as_str)
@@ -158,16 +141,6 @@ impl WorkerCommandAgent {
                 .get("role")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-            declared_tools: agent
-                .get("tools")
-                .and_then(serde_json::Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                }),
             system_prompt_inline: system_prompt
                 .and_then(|prompt| prompt.get("inline"))
                 .and_then(serde_json::Value::as_str)
@@ -233,9 +206,6 @@ pub(crate) fn compile_worker_system_prompt(
     if let Some(contract) = output_contract(agent, &report_result) {
         chunks.push(contract);
     }
-    if let Some(notes) = permission_notes(agent)? {
-        chunks.push(notes);
-    }
     Ok(chunks
         .into_iter()
         .filter(|chunk| !chunk.is_empty())
@@ -254,43 +224,6 @@ Do not invent a second team protocol or assume that a configured lazy MCP server
         .to_string()
 }
 
-/// ---
-/// purpose: 解析该 agent 最终生效的工具串
-/// params:
-///   provider: 用于查 bypass argv 定义的 provider
-/// returns: 排序后的工具串；agent 声明 bypass 时末尾追加 dangerous_auto_approve
-/// errors: 权限解析失败，或声明了 bypass 但该 provider 没有 bypass argv 定义时返回 RequirementUnmet
-/// ---
-pub(crate) fn resolved_tool_strings_for_command(
-    agent: &WorkerCommandAgent,
-    provider: Provider,
-) -> Result<Vec<String>, LifecycleError> {
-    let mut tools: Vec<String> = resolve_agent_permissions(agent, provider)?
-        .sorted_tool_strings()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    // 0.5.66 bypass 单源:读 agent 自己的 `dangerously_skip_permissions` bool,
-    // 不再收 team/runtime/leader argv 派生的 `DangerousApproval`。true → 加
-    // `dangerous_auto_approve` 哨兵(adapter 消费点不变);provider 无 bypass
-    // argv 定义 → fail-loud,不静默 fallback。
-    if agent.dangerously_skip_permissions && provider != Provider::Pi {
-        let flag = crate::provider::bypass_flags::provider_bypass_flag(provider).ok_or_else(
-            || {
-                LifecycleError::RequirementUnmet(format!(
-                    "provider {} has no bypass argv flag defined; dangerously_skip_permissions=true cannot be honored",
-                    provider_display_name(provider)
-                ))
-            },
-        )?;
-        debug_assert!(flag.starts_with("--"));
-        if !tools.iter().any(|tool| tool == "dangerous_auto_approve") {
-            tools.push("dangerous_auto_approve".to_string());
-        }
-    }
-    Ok(tools)
-}
-
 /// Provider-facing MCP tool name. Only verified call forms are filled in.
 /// Unverified providers keep the historical dotted spelling.
 fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
@@ -306,33 +239,6 @@ fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
         | Provider::GeminiCli
         | Provider::Fake => format!("{server}.{tool}"),
     }
-}
-
-fn provider_display_name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Grok => "grok",
-        Provider::CursorAgent => "cursor_agent",
-        Provider::Pi => "pi",
-        Provider::Fake => "fake",
-    }
-}
-
-fn resolve_agent_permissions(
-    agent: &WorkerCommandAgent,
-    provider: Provider,
-) -> Result<crate::model::permissions::ResolvedPermissions, LifecycleError> {
-    resolve_permissions(&AgentPermissionInput {
-        id: agent.id.as_deref().map(AgentId::new),
-        provider,
-        role: agent.role.clone(),
-        tools: agent.declared_tools.clone(),
-    })
-    .map_err(|e| LifecycleError::Compile(e.to_string()))
 }
 
 fn runtime_contract_section(send_message: &str, report_result: &str) -> String {
@@ -405,161 +311,14 @@ fn output_contract(agent: &WorkerCommandAgent, report_result: &str) -> Option<St
         .then(|| RESULT_ENVELOPE_OUTPUT_CONTRACT.replace("{report_result}", report_result))
 }
 
-fn permission_notes(agent: &WorkerCommandAgent) -> Result<Option<String>, LifecycleError> {
-    let permissions = resolve_agent_permissions(agent, agent.provider)?;
-    // C-2-1/C-2-2 cr verdict — Copilot 一期 framework 不替决 fs_read/fs_list/git_diff/
-    // provider_builtin(provider prompt 控);为诚实(MUST-NOT-13)在 system prompt 内
-    // 总是声明这些 provider-level prompt_only 工具,即便角色未显式声明。
-    let provider_prompt_only_extras = provider_default_prompt_only_tools(agent.provider);
-    let mut prompt_only: std::collections::BTreeSet<String> = permissions
-        .resolved_tools
-        .iter()
-        .filter(|tool| tool.enforcement == Enforcement::PromptOnly)
-        .filter_map(|tool| serde_json::to_value(tool.tool).ok())
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect();
-    for tool in provider_prompt_only_extras {
-        prompt_only.insert((*tool).to_string());
-    }
-    if prompt_only.is_empty() {
-        return Ok(None);
-    }
-    let prompt_only: Vec<String> = prompt_only.into_iter().collect();
-    Ok(Some(format!(
-        "Permission note: these tools are prompt-only for this provider and not hard-enforced: {}",
-        prompt_only.join(", ")
-    )))
-}
-
-/// C-2-1 cr verdict — provider-level prompt_only tools that the framework cannot
-/// hard-enforce. The system prompt declares them so the worker is honest about
-/// where consent gates actually live (provider prompt vs framework).
-fn provider_default_prompt_only_tools(provider: Provider) -> &'static [&'static str] {
-    match provider {
-        // C-2-1: fs_read / fs_list / git_diff / provider_builtin 由 provider prompt
-        // 控制,framework 不替决(prompt_only 诚实声明)。
-        Provider::Copilot => &["fs_list", "fs_read", "git_diff", "provider_builtin"],
-        _ => &[],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn empty_tools_use_role_defaults_and_aliases_resolve_before_command() {
-        let agent = WorkerCommandAgent {
-            id: Some("dev".to_string()),
-            provider: Provider::ClaudeCode,
-            role: Some("developer".to_string()),
-            declared_tools: Some(Vec::new()),
-            system_prompt_inline: None,
-            system_prompt_file: None,
-            output_contract_format: None,
-            communication_mode: CommunicationMode::default(),
-            dangerously_skip_permissions: false,
-        };
-        let tools =
-            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
-        assert_eq!(
-            tools,
-            [
-                "execute_bash",
-                "fs_list",
-                "fs_read",
-                "fs_write",
-                "git_diff",
-                "mcp_team",
-                "provider_builtin"
-            ]
-        );
-
-        let agent = WorkerCommandAgent {
-            declared_tools: Some(vec!["fs_*".to_string(), "@team-orchestrator".to_string()]),
-            ..agent
-        };
-        let tools =
-            resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
-        assert_eq!(tools, ["fs_list", "fs_read", "fs_write", "mcp_team"]);
-    }
-
-    // 0.5.66 bypass 单源 §4.1:true → tools 追加 `dangerous_auto_approve` 哨兵。
-    #[test]
-    fn test_true_field_produces_bypass_flag_argv() {
-        let agent = WorkerCommandAgent {
-            id: Some("dev".to_string()),
-            provider: Provider::ClaudeCode,
-            role: Some("developer".to_string()),
-            declared_tools: Some(vec!["mcp_team".to_string()]),
-            system_prompt_inline: None,
-            system_prompt_file: None,
-            output_contract_format: None,
-            communication_mode: CommunicationMode::default(),
-            dangerously_skip_permissions: true,
-        };
-        let tools = resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
-        assert!(
-            tools.iter().any(|tool| tool == "dangerous_auto_approve"),
-            "true field must append the dangerous_auto_approve sentinel; tools={tools:?}"
-        );
-        assert!(
-            tools.iter().any(|tool| tool == "mcp_team"),
-            "normal tools must remain; tools={tools:?}"
-        );
-    }
-
-    // 0.5.66 bypass 单源 §4.1:false → 不追加哨兵。
-    #[test]
-    fn test_false_field_produces_no_bypass_flag_argv() {
-        let agent = WorkerCommandAgent {
-            id: Some("dev".to_string()),
-            provider: Provider::ClaudeCode,
-            role: Some("developer".to_string()),
-            declared_tools: Some(vec!["mcp_team".to_string()]),
-            system_prompt_inline: None,
-            system_prompt_file: None,
-            output_contract_format: None,
-            communication_mode: CommunicationMode::default(),
-            dangerously_skip_permissions: false,
-        };
-        let tools = resolved_tool_strings_for_command(&agent, Provider::ClaudeCode).unwrap();
-        assert!(
-            !tools.iter().any(|tool| tool == "dangerous_auto_approve"),
-            "false field must not append the sentinel; tools={tools:?}"
-        );
-    }
-
-    // 0.5.66 bypass 单源 §4.1:provider 未定义 bypass 参数 + true → fail-loud。
-    #[test]
-    fn test_provider_without_bypass_flag_definition_errors() {
-        let agent = WorkerCommandAgent {
-            id: Some("dev".to_string()),
-            provider: Provider::GeminiCli,
-            role: Some("developer".to_string()),
-            declared_tools: Some(vec!["mcp_team".to_string()]),
-            system_prompt_inline: None,
-            system_prompt_file: None,
-            output_contract_format: None,
-            communication_mode: CommunicationMode::default(),
-            dangerously_skip_permissions: true,
-        };
-        let err = resolved_tool_strings_for_command(&agent, Provider::GeminiCli).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("no bypass argv flag defined"),
-            "provider without bypass flag + true must fail-loud; got {msg}"
-        );
-        assert!(
-            msg.contains("gemini_cli"),
-            "error must name the provider; got {msg}"
-        );
-    }
-
-    #[test]
     fn system_prompt_uses_identity_then_runtime_contract_python_order() {
         // #264 D6: Python truth source (prompt.py:39, live ps confirmed) builds
-        // chunks = [identity, TEAMMATE_SYSTEM_PROMPT, role_body, output, permissions].
+        // chunks = [identity, TEAMMATE_SYSTEM_PROMPT, role_body, output].
         // The previous assertion locked the inverted contract-first order with no
         // Python evidence; this is the corrected golden.
         // 0.3.5 union (copilot v2 C-1 / B2 MUST-4 行为层守): identity 必须 FIRST —
@@ -569,7 +328,6 @@ mod tests {
             id: Some("coder".to_string()),
             provider: Provider::Codex,
             role: Some("Runtime Developer".to_string()),
-            declared_tools: Some(vec!["mcp_team".to_string()]),
             system_prompt_inline: Some("Implement the assigned slice.".to_string()),
             system_prompt_file: None,
             output_contract_format: Some("result_envelope_v1".to_string()),
@@ -590,8 +348,7 @@ mod tests {
         let output = prompt
             .find("Final completion must call team_orchestrator.report_result exactly once")
             .unwrap();
-        let permissions = prompt.find("Permission note:").unwrap();
-        assert!(identity < runtime && runtime < role && role < output && output < permissions);
+        assert!(identity < runtime && runtime < role && role < output);
         let slowdown_phrase = format!("500/{}", 500 + 29);
         assert!(prompt.contains(&slowdown_phrase));
         assert!(prompt.contains("Runtime Developer"));
@@ -605,7 +362,6 @@ mod tests {
                     id: Some("worker".to_string()),
                     provider,
                     role: Some("developer".to_string()),
-                    declared_tools: Some(vec!["mcp_team".to_string()]),
                     system_prompt_inline: Some("worker body".to_string()),
                     system_prompt_file: None,
                     output_contract_format: Some("result_envelope_v1".to_string()),

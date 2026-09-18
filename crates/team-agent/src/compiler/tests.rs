@@ -633,36 +633,25 @@ fn fix_a5_session_name_override_wins() {
 // ── A6 tools ──
 
 #[test]
-fn fix_a6_tools_shell_maps_to_execute_bash() {
-    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - shell\n  - mcp_team\n---\nb\n";
+fn fix_a6_tools_are_transparent_compatibility_metadata() {
+    let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - shell\n  - provider_builtin\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
-    let spec = compile_team(&team).expect("shell must normalize to execute_bash and compile");
-    assert_eq!(
-        agent0(&spec).get("tools"),
-        Some(&list_str(vec!["execute_bash", "mcp_team"]))
-    );
+    let spec = compile_team(&team).expect("tools metadata must not gate compilation");
+    assert!(agent0(&spec).get("tools").is_none());
 }
 
 #[test]
-fn fix_a6_missing_tools_errors() {
+fn fix_a6_missing_tools_is_allowed() {
     let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
-    let err = compile_team(&team).unwrap_err();
-    assert!(
-        err.to_string().contains("missing front matter field tools"),
-        "got: {err}"
-    );
+    compile_team(&team).expect("omitted tools metadata must compile");
 }
 
 #[test]
-fn fix_a6_tools_not_a_list_errors() {
+fn fix_a6_tools_non_list_is_transparent() {
     let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools: justastring\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
-    let err = compile_team(&team).unwrap_err();
-    assert!(
-        err.to_string().contains("tools must be a list"),
-        "got: {err}"
-    );
+    compile_team(&team).expect("any YAML tools metadata must compile");
 }
 
 // ── A7 system_prompt inline ──

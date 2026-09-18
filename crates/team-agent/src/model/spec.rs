@@ -13,13 +13,12 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::model::enums::{Provider, TaskStatus};
+use crate::model::enums::TaskStatus;
 use crate::model::errors::ModelError;
 use crate::model::ids::TaskId;
 use crate::model::task_graph::{find_dependency_cycle, TaskNode};
 use crate::model::yaml::Value as Yaml;
-use crate::model::{permissions, yaml};
-use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
+use crate::model::yaml;
 use crate::provider::wire::{is_claude_family, parse_canonical_provider};
 
 /// result_envelope_v1 顶层 required(= allowed)。
@@ -333,12 +332,13 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
     if !matches!(mode, Some("supervisor_worker" | "swarm_limited")) {
         e.push("/team/mode: invalid mode".to_string());
     }
-    let leader_keys = &["id", "role", "provider", "model", "tools", "context_policy"];
+    let leader_keys = &["id", "role", "provider", "model", "context_policy"];
+    let leader_allowed = &["id", "role", "provider", "model", "tools", "context_policy"];
     check_keys_y(
         spec.get("leader"),
         "/leader",
         leader_keys,
-        leader_keys,
+        leader_allowed,
         &mut e,
     );
     let cp_keys = &[
@@ -407,7 +407,6 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "model",
         "working_directory",
         "system_prompt",
-        "tools",
         "dangerously_skip_permissions",
         "preferred_for",
         "avoid_for",
@@ -483,7 +482,6 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         &["inline", "file"],
         errors,
     );
-    check_list_y(agent.get("tools"), &format!("{path}/tools"), errors);
     check_list_y(
         agent.get("preferred_for"),
         &format!("{path}/preferred_for"),
@@ -787,67 +785,6 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
                 ));
             }
         }
-        let tools: Vec<&str> = agent
-            .get("tools")
-            .and_then(Yaml::as_list)
-            .unwrap_or(&[])
-            .iter()
-            .filter_map(Yaml::as_str)
-            .collect();
-        let expanded_tools = permissions::expand_tool_strings(tools);
-        for tool in &expanded_tools {
-            if !permissions::is_canonical_tool(tool) {
-                e.push(format!(
-                    "/agents/{idx}/tools: unknown tool {}",
-                    py_repr_str(tool)
-                ));
-            }
-        }
-        if parse_canonical_provider(provider.and_then(Yaml::as_str).unwrap_or(""))
-            == Some(Provider::Pi)
-        {
-            if let Some(category) = first_unsupported_pi_tool_category(
-                expanded_tools
-                    .iter()
-                    .filter(|tool| permissions::is_canonical_tool(tool))
-                    .map(String::as_str),
-            ) {
-                e.push(format!(
-                    "/agents/{idx}/tools: Pi does not support Team Agent tool category {category:?}; remove it from this agent's tools"
-                ));
-            }
-        }
-    }
-
-    let leader_tools: Vec<&str> = leader
-        .and_then(|l| l.get("tools"))
-        .and_then(Yaml::as_list)
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(Yaml::as_str)
-        .collect();
-    let expanded_leader_tools = permissions::expand_tool_strings(leader_tools);
-    for tool in &expanded_leader_tools {
-        if !permissions::is_canonical_tool(tool) {
-            e.push(format!(
-                "/leader/tools: unknown tool {}",
-                py_repr_str(tool)
-            ));
-        }
-    }
-    if parse_canonical_provider(leader_provider.and_then(Yaml::as_str).unwrap_or(""))
-        == Some(Provider::Pi)
-    {
-        if let Some(category) = first_unsupported_pi_tool_category(
-            expanded_leader_tools
-                .iter()
-                .filter(|tool| permissions::is_canonical_tool(tool))
-                .map(String::as_str),
-        ) {
-            e.push(format!(
-                "/leader/tools: Pi does not support Team Agent tool category {category:?}; remove it from the leader's tools"
-            ));
-        }
     }
 
     let routing = spec.get("routing");
@@ -1070,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_spec_accepts_native_categories_and_rejects_provider_builtin() {
+    fn tools_are_transparent_for_all_providers() {
         let pi_text = include_str!("testdata/team.spec.yaml")
             .lines()
             .filter(|line| {
@@ -1093,22 +1030,20 @@ mod tests {
             1,
         );
         let bad_agent = yaml::loads(&bad_agent_text).unwrap();
-        let error = validate_spec(&bad_agent, Path::new(TD)).unwrap_err().to_string();
         assert!(
-            error.contains("/agents/0/tools: Pi does not support Team Agent tool category \"provider_builtin\""),
-            "spec validation must reject the Pi agent category: {error}"
+            validate_spec(&bad_agent, Path::new(TD)).is_ok(),
+            "Pi tools metadata must be ignored"
         );
 
-        let bad_leader_text = pi_text.replacen(
-            "    - mcp_team\n",
-            "    - mcp_team\n    - provider_builtin\n",
-            1,
-        );
-        let bad_leader = yaml::loads(&bad_leader_text).unwrap();
-        let error = validate_spec(&bad_leader, Path::new(TD)).unwrap_err().to_string();
+        let missing_tools = pi_text
+            .lines()
+            .filter(|line| !line.contains("tools:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let missing_tools = yaml::loads(&missing_tools).unwrap();
         assert!(
-            error.contains("/leader/tools: Pi does not support Team Agent tool category \"provider_builtin\""),
-            "spec validation must reject the Pi leader category: {error}"
+            validate_spec(&missing_tools, Path::new(TD)).is_ok(),
+            "omitted tools metadata must be accepted"
         );
     }
 
@@ -1121,7 +1056,6 @@ mod tests {
                 "/version: must equal 1",
                 "/team/mode: invalid mode",
                 "/leader/provider: unknown provider 'badprov'",
-                "/agents/0/tools: unknown tool 'banana'",
             ]
         );
     }

@@ -32,7 +32,7 @@ pub(crate) fn cursor_agent_launch_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
 ) -> Result<Vec<String>, ProviderError> {
     cursor_agent_base_command(
         adapter,
@@ -40,7 +40,7 @@ pub(crate) fn cursor_agent_launch_command(
         mcp_config,
         system_prompt,
         model,
-        tools,
+        dangerously_skip_permissions,
         false,
         None,
     )
@@ -52,14 +52,14 @@ pub(crate) fn cursor_agent_base_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
     managed_mcp_config: bool,
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["agent".to_string()];
     // --trust 跳过 Workspace Trust 闸（已实测）。无此 flag 会停在 Do you trust。
     argv.push("--trust".to_string());
-    if cursor_agent_dangerous_auto_approve(tools) {
+    if dangerously_skip_permissions {
         argv.push("--force".to_string());
     }
     // 与 cursor_seat.sh 主路径一致。沙箱实际隔离面未再拆，但 flag 本身已实测。
@@ -79,8 +79,4 @@ pub(crate) fn cursor_agent_base_command(
     argv.push("--workspace".to_string());
     argv.push("{workspace}".to_string());
     Ok(argv)
-}
-
-pub(crate) fn cursor_agent_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
 }

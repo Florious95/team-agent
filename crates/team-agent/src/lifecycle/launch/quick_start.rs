@@ -31,7 +31,6 @@ use std::process::Command;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneField, PaneId, SessionName, Target, Transport, WindowName};

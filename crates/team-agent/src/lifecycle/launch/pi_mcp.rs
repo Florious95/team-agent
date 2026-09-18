@@ -995,7 +995,6 @@ pub(crate) struct PiMaterializeRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<ProviderEffort>,
     pub system_prompt: &'a str,
-    pub tool_categories: &'a [&'a str],
     pub team_mcp_tools: &'a [&'a str],
     pub mcp_config: &'a McpConfig,
     pub session_scope: PiSessionScope,
@@ -1093,7 +1092,6 @@ fn materialize_pi_plan_with_session(
             model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
-            tool_categories: request.tool_categories,
             session_dir,
             session: PiSessionSelector::Resume { path: &exact_path },
             agent_id: request.agent_id,
@@ -1106,7 +1104,6 @@ fn materialize_pi_plan_with_session(
             model: model.as_deref(),
             effort: request.effort,
             system_prompt: request.system_prompt,
-            tool_categories: request.tool_categories,
             session_dir,
             session: PiSessionSelector::Fresh {
                 session_id: session_id.as_str(),

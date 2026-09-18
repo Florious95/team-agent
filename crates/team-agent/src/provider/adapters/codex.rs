@@ -6,7 +6,7 @@
 //! `json_inline` stays in `adapter.rs` because it is also used by other
 //! sites; this file reaches it via `super::*`.
 
-use crate::model::enums::{AuthMode, Provider};
+use crate::model::enums::AuthMode;
 use crate::provider::adapter::json_inline;
 use crate::provider::{McpConfig, ProviderCommandOverrides};
 
@@ -16,7 +16,7 @@ pub(crate) fn codex_base_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
     overrides: Option<&ProviderCommandOverrides>,
     // 0.4.x provider effort MVP step 6: when Some, inject
     // `-c model_reasoning_effort=<level>` AFTER existing profile
@@ -40,16 +40,11 @@ pub(crate) fn codex_base_command(
         argv.push("--profile".to_string());
         argv.push(profile.to_string());
     }
-    if codex_dangerous_auto_approve(tools) {
+    if dangerously_skip_permissions {
         // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给。
-        let flag = crate::provider::bypass_flags::provider_bypass_flag(Provider::Codex)
+        let flag = crate::provider::bypass_flags::provider_bypass_flag(crate::model::enums::Provider::Codex)
             .expect("codex provider must define a bypass flag");
         argv.push(flag.to_string());
-    } else {
-        argv.push("--sandbox".to_string());
-        argv.push(codex_sandbox_mode(tools).to_string());
-        argv.push("--ask-for-approval".to_string());
-        argv.push("on-request".to_string());
     }
     if let Some(model) = model {
         argv.push("--model".to_string());
@@ -112,20 +107,5 @@ pub(crate) fn append_codex_mcp_overrides(argv: &mut Vec<String>, raw: &serde_jso
         // team_orchestrator calls (report_result etc.) survive the codex default.
         argv.push("-c".to_string());
         argv.push(format!("mcp_servers.{name}.tool_timeout_sec=600.0"));
-    }
-}
-
-pub(crate) fn codex_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-pub(crate) fn codex_sandbox_mode(tools: &[&str]) -> &'static str {
-    if tools
-        .iter()
-        .any(|tool| matches!(*tool, "fs_write" | "execute_bash"))
-    {
-        "workspace-write"
-    } else {
-        "read-only"
     }
 }

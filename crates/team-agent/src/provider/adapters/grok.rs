@@ -41,7 +41,7 @@ pub(crate) fn grok_launch_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = grok_base_command(
         adapter,
@@ -49,7 +49,7 @@ pub(crate) fn grok_launch_command(
         mcp_config,
         system_prompt,
         model,
-        tools,
+        dangerously_skip_permissions,
         false,
         None,
     )?;
@@ -64,12 +64,12 @@ pub(crate) fn grok_base_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
     managed_mcp_config: bool,
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["grok".to_string()];
-    if grok_dangerous_auto_approve(tools) {
+    if dangerously_skip_permissions {
         argv.push("--always-approve".to_string());
     }
     let model = match model.map(str::trim).filter(|value| !value.is_empty()) {
@@ -101,57 +101,5 @@ model: grok-4.6"
     // Grok CLI has no `--mcp-config` flag — the claude inline-MCP block is
     // intentionally absent. Launch writes `<cwd>/.grok/config.toml`.
     let _ = (adapter, auth_mode, mcp_config, managed_mcp_config);
-    for tool in grok_disallowed_tools(tools) {
-        argv.push("--disallowedTools".to_string());
-        argv.push(tool.to_string());
-    }
     Ok(argv)
-}
-
-pub(crate) fn grok_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-pub(crate) fn grok_disallowed_tools(tools: &[&str]) -> Vec<&'static str> {
-    let mut disallowed = Vec::new();
-    for tool in [
-        "execute_bash",
-        "fs_read",
-        "fs_write",
-        "fs_list",
-        "network",
-        "git_diff",
-        "mcp_team",
-        "provider_builtin",
-    ] {
-        if tools.contains(&tool) {
-            continue;
-        }
-        match grok_tool_mapping(tool) {
-            GrokToolMapping::Deny(names) => disallowed.extend(names),
-            GrokToolMapping::Unsupported | GrokToolMapping::Bypass => {}
-        }
-    }
-    disallowed
-}
-
-/// Canonical tool → grok CLI deny names. Unknown tools stay Unsupported
-/// (no invented `--disallowedTools` token).
-pub(crate) fn grok_tool_mapping(tool: &str) -> GrokToolMapping {
-    match tool {
-        "execute_bash" => GrokToolMapping::Deny(&["Bash"]),
-        "fs_read" => GrokToolMapping::Deny(&["Read"]),
-        "fs_write" => GrokToolMapping::Deny(&["Edit", "Write", "MultiEdit", "NotebookEdit"]),
-        "fs_list" => GrokToolMapping::Deny(&["Glob", "Grep"]),
-        "dangerous_auto_approve" => GrokToolMapping::Bypass,
-        "network" | "git_diff" | "mcp_team" | "provider_builtin" => GrokToolMapping::Unsupported,
-        _ => GrokToolMapping::Unsupported,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GrokToolMapping {
-    Deny(&'static [&'static str]),
-    Bypass,
-    Unsupported,
 }

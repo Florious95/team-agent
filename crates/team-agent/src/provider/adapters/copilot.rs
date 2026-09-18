@@ -7,7 +7,7 @@
 //! translation. Auth hint (`copilot_auth_hint`) stays in `adapter.rs`;
 //! session-store scanning lives under `provider/session_scan/copilot.rs`.
 
-use crate::model::enums::{AuthMode, Provider};
+use crate::model::enums::AuthMode;
 use crate::provider::McpConfig;
 
 pub(crate) fn copilot_base_command(
@@ -15,7 +15,7 @@ pub(crate) fn copilot_base_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
 ) -> Vec<String> {
     let _ = (auth_mode, system_prompt);
     let mut argv = vec![
@@ -28,15 +28,11 @@ pub(crate) fn copilot_base_command(
         // spawn-time `copilot mcp list` scan + per-name --disable-mcp-server.
         "--disable-builtin-mcps".to_string(),
     ];
-    if copilot_dangerous_auto_approve(tools) {
+    if dangerously_skip_permissions {
         // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给。
-        let flag = crate::provider::bypass_flags::provider_bypass_flag(Provider::Copilot)
+        let flag = crate::provider::bypass_flags::provider_bypass_flag(crate::model::enums::Provider::Copilot)
             .expect("copilot provider must define a bypass flag");
         argv.push(flag.to_string());
-    } else {
-        for flag in copilot_permission_flags(tools) {
-            argv.push(flag);
-        }
     }
     // mcp_team ∈ canonical → approval-free (whole-server pattern).
     argv.push("--allow-tool".to_string());
@@ -90,36 +86,7 @@ pub(crate) fn copilot_base_command_resume(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
 ) -> Vec<String> {
-    copilot_base_command(auth_mode, mcp_config, system_prompt, model, tools)
-}
-
-pub(crate) fn copilot_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-/// Granular deny mapping (canonical tool → copilot flag, all via
-/// `--deny-tool <kind>`; help-permissions Tool Permissions has four kinds:
-/// shell/write/mcp/url):
-///   execute_bash ∉ allowed → `--deny-tool 'shell'`
-///   fs_write     ∉ allowed → `--deny-tool 'write'`
-///   network      ∉ allowed → `--deny-tool 'url'`
-/// fs_read/fs_list have no copilot deny kind (honestly prompt_only).
-pub(crate) fn copilot_permission_flags(tools: &[&str]) -> Vec<String> {
-    let mut flags = Vec::new();
-    if !tools.contains(&"execute_bash") {
-        flags.push("--deny-tool".to_string());
-        flags.push("shell".to_string());
-    }
-    if !tools.contains(&"fs_write") {
-        flags.push("--deny-tool".to_string());
-        flags.push("write".to_string());
-    }
-    if !tools.contains(&"network") {
-        // `--deny-tool 'url'` (omit domain → match all URLs).
-        flags.push("--deny-tool".to_string());
-        flags.push("url".to_string());
-    }
-    flags
+    copilot_base_command(auth_mode, mcp_config, system_prompt, model, dangerously_skip_permissions)
 }

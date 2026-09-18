@@ -108,14 +108,14 @@
   "$defs": {
     "leader": {
       "type": "object",
-      "required": ["id", "role", "provider", "model", "tools", "context_policy"],
+      "required": ["id", "role", "provider", "model", "context_policy"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "role": { "type": "string", "minLength": 1 },
         "provider": { "type": "string", "minLength": 1 },
         "model": { "type": ["string", "null"] },
-        "tools": { "$ref": "#/$defs/tools" },
+        "tools": {},
         "context_policy": {
           "type": "object",
           "required": ["keep_user_thread", "receive_worker_outputs", "max_worker_result_tokens"],
@@ -130,7 +130,7 @@
     },
     "agent": {
       "type": "object",
-      "required": ["id", "role", "provider", "model", "working_directory", "system_prompt", "tools", "permission_mode", "preferred_for", "avoid_for", "output_contract"],
+      "required": ["id", "role", "provider", "model", "working_directory", "system_prompt", "permission_mode", "preferred_for", "avoid_for", "output_contract"],
       "additionalProperties": false,
       "properties": {
         "id": { "type": "string", "minLength": 1 },
@@ -152,7 +152,7 @@
             "file": { "type": ["string", "null"] }
           }
         },
-        "tools": { "$ref": "#/$defs/tools" },
+        "tools": {},
         "permission_mode": { "enum": ["restricted", "ask", "trusted"] },
         "preferred_for": {
           "type": "array",
@@ -232,11 +232,6 @@
         "retry_limit": { "type": "integer", "minimum": 0 },
         "human_confirmation": { "type": "boolean" }
       }
-    },
-    "tools": {
-      "type": "array",
-      "items": { "type": "string" },
-      "uniqueItems": true
     },
     "stringOrList": {
       "oneOf": [
