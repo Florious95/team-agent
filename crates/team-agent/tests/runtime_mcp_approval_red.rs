@@ -247,12 +247,12 @@ fn claude_argv_three_state_and_mutual_exclusion_cover_launch_resume_and_fork() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
         let disabled_launch = adapter
-            .build_command_with_tools(
+            .build_command_with_permissions(
                 AuthMode::Subscription,
                 None,
                 Some("Worker"),
                 Some("claude-sonnet-4-6"),
-                &[],
+                false,
             )
             .expect("disabled Claude launch argv");
         failures.extend(claude_default_failures(
@@ -261,12 +261,12 @@ fn claude_argv_three_state_and_mutual_exclusion_cover_launch_resume_and_fork() {
         ));
 
         let dangerous_launch = adapter
-            .build_command_with_tools(
+            .build_command_with_permissions(
                 AuthMode::Subscription,
                 None,
                 Some("Worker"),
                 Some("claude-sonnet-4-6"),
-                &["mcp_team", "dangerous_auto_approve"],
+                true,
             )
             .expect("dangerous Claude launch argv");
         failures.extend(claude_dangerous_failures(
@@ -281,7 +281,7 @@ fn claude_argv_three_state_and_mutual_exclusion_cover_launch_resume_and_fork() {
                 None,
                 Some("Worker"),
                 Some("claude-sonnet-4-6"),
-                &["dangerous_auto_approve"],
+                true,
             )
             .expect("dangerous Claude resume argv");
         failures.extend(claude_dangerous_failures(
@@ -296,7 +296,7 @@ fn claude_argv_three_state_and_mutual_exclusion_cover_launch_resume_and_fork() {
                 None,
                 Some("Worker"),
                 Some("claude-sonnet-4-6"),
-                &["dangerous_auto_approve"],
+                true,
             )
             .expect("dangerous Claude fork argv");
         failures.extend(claude_dangerous_failures(
@@ -684,14 +684,14 @@ fn claude_dangerous_failures(argv: &[String], label: &str) -> Vec<String> {
 
 fn claude_default_failures(argv: &[String], label: &str) -> Vec<String> {
     let mut failures = Vec::new();
-    if !has_adjacent(argv, &[CLAUDE_PERMISSION_MODE, CLAUDE_PERMISSION_DEFAULT]) {
-        failures.push(format!(
-            "{label}: Claude disabled/restricted worker argv must contain --permission-mode default; argv={argv:?}"
-        ));
-    }
     if argv.iter().any(|arg| arg == CLAUDE_DANGEROUS) {
         failures.push(format!(
-            "{label}: Claude disabled/restricted worker argv must not contain {CLAUDE_DANGEROUS}; argv={argv:?}"
+            "{label}: bypass flag must only be emitted when dangerously_skip_permissions is true; argv={argv:?}"
+        ));
+    }
+    if has_adjacent(argv, &[CLAUDE_PERMISSION_MODE, CLAUDE_PERMISSION_DEFAULT]) {
+        failures.push(format!(
+            "{label}: role tools must not derive a permission-mode restriction; argv={argv:?}"
         ));
     }
     failures
