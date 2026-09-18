@@ -10,7 +10,6 @@ fn request(session: PiSessionSelector<'static>) -> PiCommandRequest<'static> {
         model: Some("team-agent/qwen3.8-27b"),
         effort: Some(ProviderEffort::High),
         system_prompt: "frozen worker prompt",
-        tool_categories: &["mcp_team", "fs_read", "fs_write", "execute_bash"],
         session_dir: Some(Path::new(
             "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
         )),
@@ -38,7 +37,6 @@ fn leader_request() -> PiCommandRequest<'static> {
         model: None,
         effort: None,
         system_prompt: "frozen leader prompt",
-        tool_categories: &["mcp_team", "fs_read", "fs_write", "execute_bash"],
         session_dir: None,
         session: PiSessionSelector::Fresh {
             session_id: "da8c3622-2378-4d05-a26c-e826a6ef6d63",

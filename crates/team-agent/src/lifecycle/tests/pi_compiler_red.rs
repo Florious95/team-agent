@@ -6,9 +6,7 @@ use crate::lifecycle::launch::pi_mcp::{parse_pi_list_models_table, select_exact_
 use crate::model::enums::ProviderEffort;
 use crate::model::yaml::Value;
 use crate::model::ModelError;
-use crate::provider::adapters::pi::{
-    build_pi_command_argv, pi_tool_mapping, PiCommandRequest, PiSessionSelector, PiToolMapping,
-};
+use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 
 const CATALOG: &[u8] = include_bytes!("fixtures/pi_list_models_g0.stdout.txt");
 static NEXT_ROLE: AtomicU32 = AtomicU32::new(0);
@@ -51,13 +49,12 @@ fn compile_error(result: Result<CompiledRole, ModelError>) -> ModelError {
     }
 }
 
-fn command(tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<String>, String> {
+fn command(_tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<String>, String> {
     build_pi_command_argv(PiCommandRequest {
         extension: Path::new("/workspace/.team/runtime/pi/t1/pi-worker/team-mcp.ts"),
         model: Some(model),
         effort: Some(effort),
         system_prompt: "Pi worker contract.",
-        tool_categories: tools,
         session_dir: Some(Path::new(
             "/workspace/.team/runtime/pi/t1/pi-worker/sessions",
         )),
@@ -70,24 +67,22 @@ fn command(tools: &[&str], effort: ProviderEffort, model: &str) -> Result<Vec<St
 }
 
 #[test]
-fn pi_role_requires_mcp_team_and_preserves_provider_defaults() {
+fn pi_role_ignores_tools_and_preserves_provider_defaults() {
     let positive = compile_pi_role(&valid_role_with(""));
     assert!(positive.is_ok(), "fully explicit Pi role must compile");
 
-    let missing_mcp = valid_role_with("").replace("  - mcp_team\n", "");
+    let missing_tools = valid_role_with("").replace(
+        "tools:\n  - mcp_team\n  - fs_read\n  - fs_list\n  - fs_write\n  - execute_bash\n",
+        "",
+    );
+    compile_pi_role(&missing_tools).expect("omitted tools metadata must compile");
     let unqualified =
         valid_role_with("").replace("model: team-agent/qwen3.8-27b", "model: qwen3.8-27b");
-
-    for (label, role) in [
-        ("mcp_team", missing_mcp),
-        ("qualified exact model", unqualified),
-    ] {
-        let error = compile_error(compile_pi_role(&role));
-        assert!(
-            error.to_string().to_ascii_lowercase().contains(label),
-            "error must name {label}; got {error}"
-        );
-    }
+    let error = compile_error(compile_pi_role(&unqualified));
+    assert!(
+        error.to_string().to_ascii_lowercase().contains("qualified exact model"),
+        "error must name qualified model; got {error}"
+    );
 
     let defaults = valid_role_with("")
         .replace("model: team-agent/qwen3.8-27b\n", "")
@@ -195,42 +190,7 @@ fn pi_max_effort_is_supported_without_model_suffix() {
 }
 
 #[test]
-fn pi_role_tools_validate_team_capabilities_without_replacing_direct_pi_tools() {
-    assert_eq!(pi_tool_mapping("mcp_team"), PiToolMapping::Mcp);
-    assert_eq!(
-        pi_tool_mapping("fs_read"),
-        PiToolMapping::Builtin(&["read"])
-    );
-    assert_eq!(
-        pi_tool_mapping("fs_list"),
-        PiToolMapping::Builtin(&["grep", "find", "ls"])
-    );
-    assert_eq!(
-        pi_tool_mapping("fs_write"),
-        PiToolMapping::Builtin(&["edit", "write"])
-    );
-    assert_eq!(
-        pi_tool_mapping("execute_bash"),
-        PiToolMapping::Builtin(&["bash"])
-    );
-
-    for unsupported in ["git_diff", "network", "provider_builtin", "not_a_tool"] {
-        assert_eq!(
-            pi_tool_mapping(unsupported),
-            PiToolMapping::Unsupported,
-            "unknown categories must not silently broaden to bash"
-        );
-        assert!(
-            command(
-                &["mcp_team", unsupported],
-                ProviderEffort::Medium,
-                "team-agent/qwen3.8-27b"
-            )
-            .is_err(),
-            "unsupported tool must refuse the command: {unsupported}"
-        );
-    }
-
+fn pi_role_command_ignores_legacy_tool_metadata() {
     let argv = command(
         &["mcp_team", "fs_write", "fs_read", "fs_list", "execute_bash"],
         ProviderEffort::Medium,
@@ -240,36 +200,5 @@ fn pi_role_tools_validate_team_capabilities_without_replacing_direct_pi_tools() 
     assert!(
         !argv.iter().any(|arg| arg == "--tools"),
         "role tools validate Team Agent capabilities but must not replace direct Pi tools: {argv:?}"
-    );
-}
-
-#[test]
-fn pi_role_rejects_unsupported_categories_during_compile() {
-    compile_pi_role(&valid_role_with("")).expect("supported Pi tools must compile");
-
-    for unsupported in ["git_diff", "network", "provider_builtin"] {
-        let role = valid_role_with("").replace(
-            "  - execute_bash\n",
-            &format!("  - execute_bash\n  - {unsupported}\n"),
-        );
-        let error = compile_error(compile_pi_role(&role)).to_string();
-        assert!(
-            error.contains(&format!("Pi does not support Team Agent tool category {unsupported:?}")),
-            "compile must reject {unsupported} before launch preparation: {error}"
-        );
-        assert!(
-            error.contains("remove it from the role's tools"),
-            "compile error must provide an actionable fix: {error}"
-        );
-    }
-
-    let alias = valid_role_with("").replace(
-        "  - execute_bash\n",
-        "  - execute_bash\n  - \"@builtin\"\n",
-    );
-    let error = compile_error(compile_pi_role(&alias)).to_string();
-    assert!(
-        error.contains("Pi does not support Team Agent tool category \"provider_builtin\""),
-        "@builtin must use the same Pi capability contract: {error}"
     );
 }
