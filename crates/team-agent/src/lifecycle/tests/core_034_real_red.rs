@@ -37,7 +37,7 @@ fn bin() -> &'static str {
 
 #[test]
 #[serial(env)]
-fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
+fn claude_worker_spawn_argv_uses_compiled_prompt_without_tool_restrictions() {
     let _hermetic = enter_hermetic("core034-claude-argv");
     let _ancestry = EnvGuard::set(
         "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
@@ -80,7 +80,6 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
         "send_message(to='leader'",
         "report_result exactly once",
         "ROLE BODY SENTINEL",
-        "Permission note",
     ] {
         if !prompt.contains(marker) {
             failures.push(format!("B2 missing compiled prompt marker {marker:?}"));
@@ -90,31 +89,15 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
         failures.push("B2 prompt collapsed to the bare role label".to_string());
     }
 
-    let disallowed = flag_values(&spawn.argv, "--disallowedTools");
-    for forbidden in [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "NotebookEdit",
-        "Glob",
-        "Grep",
-    ] {
-        if disallowed.iter().any(|tool| tool == forbidden) {
-            failures.push(format!(
-                "B1 declared capability still disallowed via --disallowedTools {forbidden:?}"
-            ));
-        }
+    if argv_has_flag(&spawn.argv, "--disallowedTools") {
+        failures.push("B1 Claude argv must not derive --disallowedTools from tools metadata".to_string());
     }
     if argv_has_flag(&spawn.argv, "--allowedTools") {
-        failures.push(
-            "B1 Python parity violated: Claude argv must not switch to --allowedTools".to_string(),
-        );
+        failures.push("B1 Claude argv must not derive --allowedTools from tools metadata".to_string());
     }
     assert!(
         failures.is_empty(),
-        "B1/B2 worker argv contract failed:\n{}\nprompt={prompt:?}\ndisallowed={disallowed:?}\nargv={:?}",
+        "B1/B2 worker argv contract failed:\n{}\nprompt={prompt:?}\nargv={:?}",
         failures.join("\n"),
         spawn.argv
     );
@@ -122,7 +105,7 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
 
 #[test]
 #[serial(env)]
-fn claude_control_role_without_native_tools_still_disallows_native_tools() {
+fn claude_control_role_does_not_derive_native_tool_restrictions() {
     let _hermetic = enter_hermetic("core034-claude-control");
     let _ancestry = EnvGuard::set(
         "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
@@ -156,29 +139,21 @@ fn claude_control_role_without_native_tools_still_disallows_native_tools() {
     .expect("quick-start should record the control worker command");
 
     let spawn = transport.single_spawn();
-    let disallowed = flag_values(&spawn.argv, "--disallowedTools");
-    for expected in [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "NotebookEdit",
-        "Glob",
-        "Grep",
-    ] {
-        assert!(
-            disallowed.iter().any(|tool| tool == expected),
-            "B1 negative case: mcp_team-only control roles must still disallow native Claude tools; \
-             missing={expected} disallowed={disallowed:?}\nargv={:?}",
-            spawn.argv
-        );
-    }
+    assert!(
+        !argv_has_flag(&spawn.argv, "--disallowedTools"),
+        "B1 control role must not derive native-tool restrictions from tools metadata; argv={:?}",
+        spawn.argv
+    );
+    assert!(
+        !argv_has_flag(&spawn.argv, "--allowedTools"),
+        "B1 control role must not derive an allowlist from tools metadata; argv={:?}",
+        spawn.argv
+    );
 }
 
 #[test]
 #[serial(env)]
-fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_tools() {
+fn restart_claude_worker_does_not_derive_tool_restrictions_when_runtime_state_has_no_raw_tools() {
     let _hermetic = enter_hermetic("core034-restart-tools");
     let _ancestry = EnvGuard::set(
         "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
@@ -215,34 +190,20 @@ fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_
     let report = restart_with_transport(&ws, true, Some("restarttools"), &restart_transport)
         .expect("restart should reach worker command construction");
     let spawn = restart_transport.single_spawn();
-    let disallowed = flag_values(&spawn.argv, "--disallowedTools");
-
-    for forbidden in [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "NotebookEdit",
-        "Glob",
-        "Grep",
-    ] {
-        assert!(
-            !disallowed.iter().any(|tool| tool == forbidden),
-            "B1 restart contract: when runtime state lacks raw tools, restart must resolve tools from the selected spec/role through resolve_permissions. \
-             {forbidden} must not be disallowed for this role; disallowed={disallowed:?}\nargv={:?}\nreport={report:?}",
-            spawn.argv
-        );
-    }
+    assert!(
+        !argv_has_flag(&spawn.argv, "--disallowedTools"),
+        "B1 restart must not derive native-tool restrictions from tools metadata; argv={:?} report={report:?}",
+        spawn.argv
+    );
     assert!(
         !argv_has_flag(&spawn.argv, "--allowedTools"),
-        "B1 Python parity: restart must keep --disallowedTools semantics, not switch to --allowedTools; argv={:?}",
+        "B1 restart must not derive an allowlist from tools metadata; argv={:?} report={report:?}",
         spawn.argv
     );
 }
 
 #[test]
-fn worker_command_context_uses_single_prompt_and_permission_sources() {
+fn worker_command_context_uses_single_prompt_without_permission_sources() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src_root = crate_root.join("src");
     let launch = composite_source::composite_source("src/lifecycle/launch.rs");
@@ -276,10 +237,9 @@ fn worker_command_context_uses_single_prompt_and_permission_sources() {
             && all_src.contains("runtime_contract_section")
             && all_src.contains("identity_section")
             && all_src.contains("role_body")
-            && all_src.contains("output_contract")
-            && all_src.contains("permission_notes"),
-        "B2 grep guard: worker command construction needs one compiled prompt helper with the CR-approved five sections \
-         (runtime_contract_section, identity_section, role_body, output_contract, permission_notes)."
+            && all_src.contains("output_contract"),
+        "B2 grep guard: worker command construction needs one compiled prompt helper with the CR-approved four sections \
+         (runtime_contract_section, identity_section, role_body, output_contract)."
     );
     assert!(
         !command_sources.contains("system_prompt: role"),
@@ -296,8 +256,9 @@ fn worker_command_context_uses_single_prompt_and_permission_sources() {
     );
 
     assert!(
-        all_src.contains("resolve_permissions") && all_src.contains("resolved_tool_strings"),
-        "B1 grep guard: command argv tools must be calculated through a single resolve_permissions helper, including role defaults and leader ceiling."
+        !command_sources.contains("resolve_permissions")
+            && !command_sources.contains("resolved_tool_strings"),
+        "B1 grep guard: command construction must not derive argv restrictions from tools metadata."
     );
     assert!(
         !command_sources.contains("worker_tool_refs(agent_tool_strings")
@@ -305,8 +266,8 @@ fn worker_command_context_uses_single_prompt_and_permission_sources() {
         "B1 grep guard: command construction must not raw-pass agent.tools/tool_refs into ProviderCommandContext."
     );
     assert!(
-        adapter.contains("--disallowedTools") && !adapter.contains("--allowedTools"),
-        "B1 Python parity: provider adapter must keep Claude --disallowedTools and not invent --allowedTools."
+        !adapter.contains("--disallowedTools") && !adapter.contains("--allowedTools"),
+        "B1 provider adapter must not derive Claude tool restrictions from tools metadata."
     );
     assert!(
         !adapter.contains("resolve_permissions"),
@@ -835,12 +796,6 @@ fn remove_runtime_raw_tools(workspace: &Path, team: &str, agent: &str) {
 fn flag_value(argv: &[String], flag: &str) -> Option<String> {
     argv.windows(2)
         .find_map(|pair| (pair[0] == flag).then(|| pair[1].clone()))
-}
-
-fn flag_values(argv: &[String], flag: &str) -> Vec<String> {
-    argv.windows(2)
-        .filter_map(|pair| (pair[0] == flag).then(|| pair[1].clone()))
-        .collect()
 }
 
 fn argv_has_flag(argv: &[String], flag: &str) -> bool {
