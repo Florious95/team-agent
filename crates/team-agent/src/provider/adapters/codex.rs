@@ -1,5 +1,5 @@
 //!
-//! Codex provider-local command builder + permission/sandbox helpers.
+//! Codex provider-local command builder.
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure
 //! extraction — byte-identical to the original inline forms. Shared helper

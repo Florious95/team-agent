@@ -1401,9 +1401,8 @@ pub(crate) fn json_inline(value: &serde_json::Value) -> String {
 
 // 0.4.x decoupling step 2: provider-local command builders moved to provider/adapters/.
 // Only the entry points the trait impl actually calls are re-imported here;
-// the per-provider helper fns (dangerous_auto_approve, permission flags,
-// disallowed_dangerously_skip_permissions, sandbox_mode, mcp_overrides) are called from within the
-// extracted base_command fns, not directly by this file.
+// The per-provider command helpers and MCP renderers are called from within
+// the extracted base-command functions, not directly by this file.
 use super::adapters::claude::{claude_base_command, claude_launch_command};
 use super::adapters::codex::codex_base_command;
 use super::adapters::copilot::{copilot_base_command, copilot_base_command_resume};

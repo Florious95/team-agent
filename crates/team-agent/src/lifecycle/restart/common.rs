@@ -741,7 +741,6 @@ fn merge_command_context_fields(
     };
     for field in [
         "role",
-        "tools",
         "system_prompt",
         "output_contract",
         "provider",

@@ -3,7 +3,7 @@
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure
 //! extraction — byte-identical to the original inline forms. Scope kept
-//! small on purpose: base command + permission/disallowed-tool mapping +
+//! small on purpose: base command + launch wrapper +
 //! launch wrapper. Auth hints (`claude_auth_hint`) and the context-aware model
 //! resolver (`claude_context_model`) stay in `adapter.rs`; capture scanning
 //! helpers now live under `provider/session_scan/claude.rs`.

@@ -6,8 +6,7 @@
 //! serde_json `preserve_order` 保证 child 迭代序 == Python 插入序。
 //!
 //! 本文件先落地 `validate_result_envelope`(自包含,step 7/11 的门)。`validate_spec`
-//! 依赖 `expand_tools`(permissions)+ `find_dependency_cycle`(task_graph)+ yaml Value,
-//! 待那几个叶子模块集成后再加。
+//! 依赖 `find_dependency_cycle`(task_graph)+ yaml Value。
 
 use std::path::Path;
 

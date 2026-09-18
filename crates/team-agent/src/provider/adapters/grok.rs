@@ -9,7 +9,7 @@
 //!   这是 Provider::Grok 的能力边界，不是框架对所有 provider 的限制。
 //! boundary: 只服务 Provider::Grok。不改 claude/codex/copilot 路径
 //!
-//! Grok CLI provider-local command builders + permission helpers.
+//! Grok CLI provider-local command builders.
 //!
 //! Mirrors `adapters/claude.rs` (0.5.67 provider-adapter step). Pure
 //! flag-name adaptation over the claude skeleton — no new abstraction
@@ -24,7 +24,6 @@
 //!   fork    → `--fork-session` (with --resume)
 //!   effort  → `--effort <level>` (alias of `--reasoning-effort`)
 //!             grok accepts low|medium|high|xhigh; CLI rejects `max`
-//!   deny    → `--disallowed-tools` (compat alias `--disallowedTools`)
 //!   cwd     → `--cwd <CWD>` / `-w, --worktree [<WORKTREE>]`
 //!
 //! No native `--mcp-config` flag on the Grok CLI (`grok mcp` is a subcommand)

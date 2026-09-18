@@ -1,9 +1,9 @@
 //!
-//! Copilot provider-local command builders + permission helpers.
+//! Copilot provider-local command builders.
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure
 //! extraction — byte-identical to the original inline forms. Scope kept
-//! small: base command + resume + permission flags + MCP type→transport
+//! small: base command + resume + MCP type→transport
 //! translation. Auth hint (`copilot_auth_hint`) stays in `adapter.rs`;
 //! session-store scanning lives under `provider/session_scan/copilot.rs`.
 
