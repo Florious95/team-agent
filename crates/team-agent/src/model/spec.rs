@@ -1035,10 +1035,16 @@ mod tests {
         );
 
         let missing_tools = pi_text
-            .lines()
-            .filter(|line| !line.contains("tools:"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .replacen(
+                "  tools:\n    - fs_read\n    - fs_list\n    - mcp_team\n",
+                "",
+                1,
+            )
+            .replacen(
+                "    tools:\n      - fs_read\n      - fs_write\n      - fs_list\n      - execute_bash\n      - mcp_team\n",
+                "",
+                1,
+            );
         let missing_tools = yaml::loads(&missing_tools).unwrap();
         assert!(
             validate_spec(&missing_tools, Path::new(TD)).is_ok(),
