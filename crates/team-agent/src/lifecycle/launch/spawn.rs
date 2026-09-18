@@ -162,10 +162,10 @@ pub(super) fn spawn_agents(
             mcp_config: Some(&mcp_config),
             system_prompt: Some(system_prompt.as_str()),
             model: command_model,
-            dangerously_skip_permissions: agent
-                .get("dangerously_skip_permissions")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            dangerously_skip_permissions: matches!(
+                agent.get("dangerously_skip_permissions"),
+                Some(Value::Bool(true))
+            ),
             profile_launch: Some(&profile_launch),
             // Layer 1 self-healing (architect probe 2026-06-22): expose
             // agent_id as a display-name hint so Claude / Copilot
