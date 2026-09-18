@@ -3210,7 +3210,6 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "profile",
             "window",
             "mcp_config",
-            "permissions",
             "effective_approval_policy",
             // 0.5.66 bypass 单源:fresh spawn 记录运行面 bypass 值(restart drift 挡板)。
             "as_launched_dangerously_skip_permissions",
@@ -3238,16 +3237,6 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
         json!(workspace
             .join(".team/runtime/mcp/implementer.json")
             .to_string_lossy())
-    );
-    assert_eq!(
-        agent["permissions"],
-        json!({
-            "agent_id": "implementer",
-            "provider": "codex",
-            "tools": ["mcp_team"],
-            "resolved_tools": [{"tool": "mcp_team", "enforcement": "prompt_only"}],
-            "has_prompt_only": true
-        })
     );
     assert!(agent["session_id"].is_null());
     assert!(agent["rollout_path"].is_null());

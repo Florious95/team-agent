@@ -1,23 +1,8 @@
-//! clone-agent tools preservation — regression RED→GREEN (P1).
+//! clone-agent tools preservation — transparent compatibility regression.
 //!
-//! Contract: `team-agent clone-agent SOURCE --as NEW` must preserve the source
-//! seat's FULL `tools` set. Baseline defect (0.5.66 = d1289f81, host-proven):
-//! a source whose role declares `fs_read fs_list fs_write execute_bash mcp_team
-//! provider_builtin` clones out with `fs_list fs_read mcp_team` — silently, no
-//! warning/event/help flag (the seat is mid-task before it notices it cannot
-//! write or exec).
-//!
-//! Root cause: `clamp_materialized_role_to_leader`
-//! (crates/team-agent/src/lifecycle/launch/role_source.rs) filters the role's
-//! declared tools down to the leader's hardcoded 3-tool ceiling
-//! `[fs_read, fs_list, mcp_team]` (compiler.rs `compile_team`). The sibling
-//! `add-agent` path does NOT clamp — it compiles the role with all declared
-//! tools — so the clamp is not a coherent "no worker above the leader"
-//! invariant; it is a silent tool drop confined to the clone/fork path, and no
-//! test or doc pins it.
-//!
-//! Baseline RED: the NEW materialized role (and the compiled runtime spec row)
-//! carry the clamped `fs_list fs_read mcp_team` instead of the source's tools.
+//! Contract: `team-agent clone-agent SOURCE --as NEW` preserves the source
+//! role's FULL `tools` set as compatibility metadata, while compiled runtime
+//! specs no longer project or enforce that field.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -249,9 +234,8 @@ fn role_tools(path: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// Find the NEW agent's compiled `tools` in the runtime spec (the seat truth
-/// the spawned worker actually runs with).
-fn runtime_spec_tools_for(workspace: &Path, agent: &str) -> Option<BTreeSet<String>> {
+/// Check whether the NEW agent's compiled runtime spec projects `tools`.
+fn runtime_spec_projects_tools(workspace: &Path, agent: &str) -> Option<bool> {
     let runtime = workspace.join(".team").join("runtime");
     let spec = std::fs::read_dir(&runtime)
         .ok()?
@@ -265,14 +249,7 @@ fn runtime_spec_tools_for(workspace: &Path, agent: &str) -> Option<BTreeSet<Stri
         if row.get("id").and_then(Value::as_str) != Some(agent) {
             continue;
         }
-        let items = row.get("tools")?.as_list()?;
-        return Some(
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-        );
+        return Some(row.get("tools").is_some());
     }
     None
 }
@@ -309,8 +286,7 @@ fn clone_agent_preserves_source_tools() {
         out.status.code()
     );
 
-    // The NEW materialized role is the direct product of clone (materialize →
-    // clamp → compile). Baseline clamps it to the leader's 3-tool ceiling.
+    // The NEW materialized role remains the transparent source of compatibility metadata.
     let new_role = case
         .workspace
         .join(".team")
@@ -324,13 +300,8 @@ fn clone_agent_preserves_source_tools() {
          (baseline silently clamps to the leader ceiling fs_read/fs_list/mcp_team)"
     );
 
-    // The compiled runtime spec is what the spawned seat actually runs with —
-    // it must carry the same preserved tools (seat truth, not just the role file).
-    let new_spec_tools = runtime_spec_tools_for(&case.workspace, NEW)
-        .unwrap_or_else(|| panic!("NEW agent must be present in the compiled runtime spec"));
-    assert_eq!(
-        new_spec_tools, source_tools,
-        "runtime spec NEW tools must match the source seat's tools; \
-         source={source_tools:?} spec={new_spec_tools:?}"
+    assert!(
+        !runtime_spec_projects_tools(&case.workspace, NEW).unwrap_or(false),
+        "compiled runtime spec must not project NEW tools metadata"
     );
 }

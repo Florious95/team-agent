@@ -185,11 +185,11 @@ fn leader_bypass_worker_runtime_approvals_mirror_auto_approve_scope() {
                 .to_string(),
         );
     }
-    if !adapter.contains("dangerous_auto_approve")
+    if !adapter.contains("dangerously_skip_permissions")
         || !adapter.contains("--dangerously-bypass-approvals-and-sandbox")
     {
         failures.push(
-            "Codex command-shape mirror must still expose dangerous_auto_approve/bypass argv for bypass leaders"
+            "Codex command-shape mirror must derive bypass argv from dangerously_skip_permissions"
                 .to_string(),
         );
     }
@@ -689,9 +689,9 @@ fn claude_default_failures(argv: &[String], label: &str) -> Vec<String> {
             "{label}: bypass flag must only be emitted when dangerously_skip_permissions is true; argv={argv:?}"
         ));
     }
-    if has_adjacent(argv, &[CLAUDE_PERMISSION_MODE, CLAUDE_PERMISSION_DEFAULT]) {
+    if !has_adjacent(argv, &[CLAUDE_PERMISSION_MODE, CLAUDE_PERMISSION_DEFAULT]) {
         failures.push(format!(
-            "{label}: role tools must not derive a permission-mode restriction; argv={argv:?}"
+            "{label}: non-bypass Claude worker must use --permission-mode default; argv={argv:?}"
         ));
     }
     failures
