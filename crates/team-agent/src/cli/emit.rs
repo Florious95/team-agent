@@ -1069,17 +1069,20 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         ));
     }
     let parsed = parse_args(args);
+    let explicit_workspace = parsed
+        .workspace
+        .as_deref()
+        .map(|path| resolve_cli_path(cwd, path));
     let positional_agents_dir = parsed.positionals.first().map(PathBuf::from).map(|path| {
         if path.is_absolute() {
             path
+        } else if let Some(workspace) = explicit_workspace.as_ref() {
+            workspace.join(path)
         } else {
             cwd.join(path)
         }
     });
-    let workspace = parsed
-        .workspace
-        .as_ref()
-        .map(|_| workspace(&parsed, cwd))
+    let workspace = explicit_workspace
         .or_else(|| {
             positional_agents_dir
                 .as_ref()
@@ -2573,6 +2576,18 @@ mod tests {
             "quick-start --workspace <ws> agents must resolve the role-doc dir under <ws>, so team-in-team \
              setup works from any caller cwd"
         );
+        let _ = std::fs::remove_dir_all(&cwd);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ux_quick_start_positional_team_dir_is_standalone_workspace() {
+        let cwd = tmp_workspace();
+        let ws = tmp_workspace();
+        std::fs::write(ws.join("TEAM.md"), "# team\n").unwrap();
+        let args = quick_start_args(&cli_argv(&[&ws.to_string_lossy()]), &cwd).unwrap();
+        assert_eq!(args.workspace, ws);
+        assert_eq!(args.agents_dir, ws);
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&ws);
     }
