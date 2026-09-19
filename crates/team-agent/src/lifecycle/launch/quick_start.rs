@@ -31,7 +31,6 @@ use std::process::Command;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneField, PaneId, SessionName, Target, Transport, WindowName};
@@ -4434,7 +4433,7 @@ mod fresh_quick_start_leader_binding_tests {
 
 
     #[test]
-    fn invalid_pi_tool_category_is_rejected_before_runtime_persistence() {
+    fn pi_tool_category_is_transparently_accepted_by_compiler() {
         let root = std::env::temp_dir().join(format!(
             "ta-quick-start-pi-tools-{}-{}",
             std::process::id(),
@@ -4453,29 +4452,20 @@ mod fresh_quick_start_leader_binding_tests {
         )
         .unwrap();
 
-        let transport = crate::transport::test_support::OfflineTransport::new();
-        let mut discover = |_requested: &str| -> Result<Vec<String>, ()> { Err(()) };
-        let error = quick_start_with_transport_in_workspace_with_display_pi_preflight(
-            &root,
-            &team,
-            None,
-            true,
-            None,
-            &transport,
-            false,
-            &mut discover,
-        )
-        .expect_err("invalid Pi category must fail before quick-start persistence");
-        let error = error.to_string();
-        assert!(error.contains("Pi does not support Team Agent tool category \"provider_builtin\""));
-        assert!(error.contains("remove it from the role's tools"));
+        let spec = crate::compiler::compile_team(&team)
+            .expect("tools metadata must be transparently accepted by the compiler");
+        let worker = spec
+            .get("agents")
+            .and_then(Value::as_list)
+            .and_then(|agents| {
+                agents.iter().find(|agent| {
+                    agent.get("id").and_then(Value::as_str) == Some("worker")
+                })
+            })
+            .expect("compiled spec must retain the worker role");
         assert!(
-            !crate::state::persist::runtime_state_path(&root).exists(),
-            "quick-start validation failure must not persist runtime state"
-        );
-        assert!(
-            !root.join(".team/runtime").exists(),
-            "quick-start validation failure must not create runtime artifacts"
+            worker.get("tools").is_none(),
+            "tools metadata must not acquire runtime semantics"
         );
         let _ = std::fs::remove_dir_all(root);
     }

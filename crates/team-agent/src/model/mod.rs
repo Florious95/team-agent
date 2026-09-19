@@ -21,7 +21,6 @@ pub mod ids;
 pub(crate) mod name_similarity;
 pub mod pane_authority_refusal;
 pub mod paths;
-pub mod permissions;
 pub mod routing;
 pub mod spec;
 pub mod task_graph;

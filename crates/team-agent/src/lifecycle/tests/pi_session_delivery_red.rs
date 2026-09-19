@@ -58,7 +58,6 @@ fn resume_argv(path: &Path) -> Result<Vec<String>, ProviderError> {
         model: Some("team-agent/qwen3.8-27b"),
         effort: Some(ProviderEffort::Medium),
         system_prompt: "worker contract",
-        tool_categories: &["mcp_team"],
         session_dir: Some(Path::new(
             "/workspace/.team/runtime/pi/team-a/worker-a/sessions",
         )),

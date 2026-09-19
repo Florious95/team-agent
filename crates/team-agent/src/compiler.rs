@@ -30,8 +30,7 @@ use std::path::Path;
 use crate::communication_mode::CommunicationMode;
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
-use crate::model::{paths, permissions, spec, yaml, ModelError};
-use crate::provider::adapters::pi::first_unsupported_pi_tool_category;
+use crate::model::{paths, spec, yaml, ModelError};
 use crate::provider::wire::{
     builtin_provider_model as wire_builtin_provider_model, is_claude_family,
     parse_canonical_provider, provider_model_keys,
@@ -233,7 +232,6 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
                 ("role", Value::Str(leader_role)),
                 ("provider", Value::Str(leader_provider)),
                 ("model", leader_model),
-                ("tools", list_str(vec!["fs_read", "fs_list", "mcp_team"])),
                 (
                     "context_policy",
                     map(vec![
@@ -526,7 +524,6 @@ fn compile_role_agent_with_mode(
             role_path.display(),
         )));
     }
-    let tools = required_tools(&meta, role_path)?;
     let prompt_inline = non_empty_trimmed(&body).unwrap_or_else(|| role.clone());
     let mut agent_items = vec![
         ("id", Value::Str(id.clone())),
@@ -542,7 +539,6 @@ fn compile_role_agent_with_mode(
                 ("file", Value::Null),
             ]),
         ),
-        ("tools", list_str(tools)),
         // 0.5.66 bypass 单源:compiler 透传角色 md 的 `dangerously_skip_permissions`
         // (必填 bool,spec 校验保证存在)。取代旧"恒发 permission_mode: restricted"。
         (
@@ -758,25 +754,6 @@ fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<
             )));
         }
     }
-    let tools = required_tools(meta, path)?;
-    if !tools.iter().any(|tool| tool == "mcp_team") {
-        return Err(ModelError::Validation(format!(
-            "{}: Pi roles require mcp_team",
-            path.display()
-        )));
-    }
-    let expanded = permissions::expand_tool_strings(tools.iter().map(String::as_str));
-    if let Some(category) = first_unsupported_pi_tool_category(
-        expanded
-            .iter()
-            .filter(|category| permissions::is_canonical_tool(category))
-            .map(String::as_str),
-    ) {
-        return Err(ModelError::Validation(format!(
-            "{}: Pi does not support Team Agent tool category {category:?}; remove it from the role's tools",
-            path.display()
-        )));
-    }
     Ok(())
 }
 
@@ -874,32 +851,6 @@ fn py_int_value(value: &Value) -> Option<i64> {
         Value::Str(s) => s.parse::<i64>().ok(),
         Value::Null | Value::List(_) | Value::Map(_) => None,
     }
-}
-
-fn required_tools(meta: &Value, path: &Path) -> Result<Vec<String>, ModelError> {
-    let Some(value) = meta.get("tools") else {
-        return Err(ModelError::Validation(format!(
-            "{}: missing front matter field tools",
-            path.display()
-        )));
-    };
-    let Some(items) = value.as_list() else {
-        return Err(ModelError::Validation(format!(
-            "{}: tools must be a list",
-            path.display()
-        )));
-    };
-    Ok(items
-        .iter()
-        .filter_map(Value::as_str)
-        .map(|tool| {
-            if tool == "shell" {
-                "execute_bash".to_string()
-            } else {
-                tool.to_string()
-            }
-        })
-        .collect())
 }
 
 fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> Value {

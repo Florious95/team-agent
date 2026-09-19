@@ -901,13 +901,13 @@ impl ProviderAdapter for StaticCaptureAdapter {
         Ok(vec!["fake".to_string()])
     }
 
-    fn build_command_with_tools(
+    fn build_command_with_permissions(
         &self,
         auth_mode: AuthMode,
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        _tools: &[&str],
+        _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         self.build_command(auth_mode, mcp_config, system_prompt, model)
     }
@@ -959,7 +959,7 @@ impl ProviderAdapter for StaticCaptureAdapter {
         mcp_config: Option<&McpConfig>,
         _system_prompt: Option<&str>,
         _model: Option<&str>,
-        _tools: &[&str],
+        _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         self.build_resume_command(session_id, auth_mode, mcp_config)
     }
@@ -980,7 +980,7 @@ impl ProviderAdapter for StaticCaptureAdapter {
         mcp_config: Option<&McpConfig>,
         _system_prompt: Option<&str>,
         _model: Option<&str>,
-        _tools: &[&str],
+        _dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         self.fork(session_id, auth_mode, mcp_config)
     }

@@ -227,29 +227,6 @@ pub enum PermissionMode {
     Trusted,
 }
 
-/// 规范化 tool(`CANONICAL_TOOLS` `permissions.py:5-14`)。别名(`fs_*`/`@builtin`/`*`)
-/// 在 `expand_tools` 展开 —— 那是单独的 alias 输入枚举,不在此(step 2 后续)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Tool {
-    FsRead,
-    FsWrite,
-    FsList,
-    ExecuteBash,
-    GitDiff,
-    Network,
-    McpTeam,
-    ProviderBuiltin,
-}
-
-/// provider×tool enforcement(`PROVIDER_ENFORCEMENT` `permissions.py:44-65`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Enforcement {
-    Hard,
-    PromptOnly,
-}
-
 /// tmux pane 存活态(`state.py:336-341`)。**`Unknown` 既不可当 dead 也不可当 live**
 /// (owner-gate `state.py:382` 用 `!= LIVE`)—— 穷尽 match,不 fallthrough(§11)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -344,18 +321,6 @@ mod tests {
             (
                 serde_json::to_string(&DisplayBackend::Adaptive).unwrap(),
                 "\"adaptive\"",
-            ),
-            (
-                serde_json::to_string(&Tool::ExecuteBash).unwrap(),
-                "\"execute_bash\"",
-            ),
-            (
-                serde_json::to_string(&Tool::ProviderBuiltin).unwrap(),
-                "\"provider_builtin\"",
-            ),
-            (
-                serde_json::to_string(&Enforcement::PromptOnly).unwrap(),
-                "\"prompt_only\"",
             ),
             (
                 serde_json::to_string(&PaneLiveness::Unknown).unwrap(),

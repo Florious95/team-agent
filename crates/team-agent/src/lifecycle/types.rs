@@ -540,8 +540,6 @@ pub struct LaunchReport {
     pub tmux_endpoint: Option<String>,
     /// 路由决策(每 task 一条;`routing.decision` 事件)。
     pub routes: Vec<RoutingDecision>,
-    /// 权限摘要(每 agent 一条)。
-    pub permissions: Vec<PermissionSummary>,
     /// leader receiver(attach 成功时;经 step10 leader::attach_leader_to_state)。
     pub leader_receiver_attached: bool,
     pub leader_bind_stage: Option<String>,
@@ -575,14 +573,6 @@ pub struct RoutingDecision {
     pub selected_agent: AgentId,
     pub reason: String,
     pub manual_override: bool,
-}
-
-/// 权限摘要(`resolve_permissions(agent)` 的 typed 版)。**PLACEHOLDER 字段**:
-/// 实际形状由 step6 compiler 的 `resolve_permissions` 决定,集成时映射。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PermissionSummary {
-    pub agent_id: AgentId,
-    pub raw: serde_json::Value,
 }
 
 /// BUG-7 (0.3.1): quick-start cannot honestly report "ready" before the workers'

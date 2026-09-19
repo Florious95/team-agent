@@ -54,27 +54,26 @@ pub trait ProviderAdapter {
         model: Option<&str>,
     ) -> Result<Vec<String>, ProviderError>;
 
-    /// Same as [`ProviderAdapter::build_command`], with the agent tool list supplied
-    /// so provider-specific sandbox flags can be computed without guessing.
-    fn build_command_with_tools(
+    /// Same as [`ProviderAdapter::build_command`], with the explicit bypass flag.
+    fn build_command_with_permissions(
         &self,
         auth_mode: AuthMode,
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        tools: &[&str],
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError>;
 
     fn build_command_plan(
         &self,
         ctx: ProviderCommandContext<'_>,
     ) -> Result<CommandPlan, ProviderError> {
-        self.build_command_with_tools(
+        self.build_command_with_permissions(
             ctx.auth_mode,
             ctx.mcp_config,
             ctx.system_prompt,
             ctx.model,
-            ctx.tools,
+            ctx.dangerously_skip_permissions,
         )
         .map(CommandPlan::argv_only)
     }
@@ -139,7 +138,7 @@ pub trait ProviderAdapter {
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        tools: &[&str],
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError>;
 
     fn build_resume_command_plan(
@@ -153,7 +152,7 @@ pub trait ProviderAdapter {
             ctx.mcp_config,
             ctx.system_prompt,
             ctx.model,
-            ctx.tools,
+            ctx.dangerously_skip_permissions,
         )
         .map(CommandPlan::argv_only)
     }
@@ -174,7 +173,7 @@ pub trait ProviderAdapter {
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        tools: &[&str],
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError>;
 
     fn fork_plan(
@@ -188,7 +187,7 @@ pub trait ProviderAdapter {
             ctx.mcp_config,
             ctx.system_prompt,
             ctx.model,
-            ctx.tools,
+            ctx.dangerously_skip_permissions,
         )
         .map(CommandPlan::argv_only)
     }
@@ -429,16 +428,16 @@ impl ProviderAdapter for BasicProviderAdapter {
         system_prompt: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<String>, ProviderError> {
-        self.build_command_with_tools(auth_mode, mcp_config, system_prompt, model, &[])
+        self.build_command_with_permissions(auth_mode, mcp_config, system_prompt, model, false)
     }
 
-    fn build_command_with_tools(
+    fn build_command_with_permissions(
         &self,
         auth_mode: AuthMode,
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        tools: &[&str],
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => Ok(claude_launch_command(
@@ -447,7 +446,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 mcp_config,
                 system_prompt,
                 model,
-                tools,
+                dangerously_skip_permissions,
             )?),
             Provider::Codex => Ok(codex_base_command(
                 None,
@@ -455,7 +454,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 mcp_config,
                 system_prompt,
                 model,
-                tools,
+                dangerously_skip_permissions,
                 None,
                 None,
             )),
@@ -470,7 +469,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 mcp_config,
                 system_prompt,
                 model,
-                tools,
+                dangerously_skip_permissions,
             )),
             Provider::GeminiCli => {
                 let mut argv = vec!["gemini".to_string()];
@@ -486,7 +485,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 mcp_config,
                 system_prompt,
                 model,
-                tools,
+                dangerously_skip_permissions,
             )?),
             Provider::CursorAgent => Ok(cursor_agent_base_command(
                 self,
@@ -494,7 +493,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 mcp_config,
                 system_prompt,
                 model,
-                tools,
+                dangerously_skip_permissions,
                 false,
                 None,
             )?),
@@ -542,7 +541,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     managed,
                     ctx.effort,
                 )?;
@@ -581,7 +580,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 ctx.mcp_config,
                 ctx.system_prompt,
                 ctx.model,
-                ctx.tools,
+                ctx.dangerously_skip_permissions,
                 ctx.profile_launch.map(|profile| &profile.command_overrides),
                 ctx.effort,
             ))),
@@ -602,7 +601,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch
                         .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
@@ -623,7 +622,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                 );
                 argv.push("--session-id".to_string());
                 argv.push(expected.clone());
@@ -643,7 +642,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch
                         .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
@@ -659,12 +658,12 @@ impl ProviderAdapter for BasicProviderAdapter {
                 "Pi commands require the shared lifecycle materializer".to_string(),
             )),
             _ => self
-                .build_command_with_tools(
+                .build_command_with_permissions(
                     ctx.auth_mode,
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                 )
                 .map(CommandPlan::argv_only),
         }
@@ -760,7 +759,7 @@ impl ProviderAdapter for BasicProviderAdapter {
         auth_mode: AuthMode,
         mcp_config: Option<&McpConfig>,
     ) -> Result<Vec<String>, ProviderError> {
-        self.build_resume_command_with_context(session_id, auth_mode, mcp_config, None, None, &[])
+        self.build_resume_command_with_context(session_id, auth_mode, mcp_config, None, None, false)
     }
 
     fn build_resume_command_with_context(
@@ -770,7 +769,7 @@ impl ProviderAdapter for BasicProviderAdapter {
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        tools: &[&str],
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         if !self.session_is_resumable(session_id, auth_mode)? {
             return Err(ProviderError::ResumeUnavailable(format!(
@@ -791,7 +790,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     None,
                     None,
                 );
@@ -805,7 +804,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     false,
                     None,
                 )?;
@@ -817,7 +816,7 @@ impl ProviderAdapter for BasicProviderAdapter {
             // copilot --resume 接受 id|name)。
             Provider::Copilot => {
                 let mut argv =
-                    copilot_base_command_resume(auth_mode, mcp_config, system_prompt, model, tools);
+                    copilot_base_command_resume(auth_mode, mcp_config, system_prompt, model, dangerously_skip_permissions);
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -830,7 +829,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     false,
                     None,
                 )?;
@@ -846,7 +845,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     false,
                     None,
                 )?;
@@ -888,7 +887,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     managed,
                     ctx.effort,
                 )?;
@@ -928,7 +927,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch.map(|profile| &profile.command_overrides),
                     ctx.effort,
                 );
@@ -947,7 +946,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch
                         .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
@@ -974,7 +973,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch
                         .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
@@ -990,7 +989,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                 )
                 .map(CommandPlan::argv_only),
         }
@@ -1002,7 +1001,7 @@ impl ProviderAdapter for BasicProviderAdapter {
         auth_mode: AuthMode,
         mcp_config: Option<&McpConfig>,
     ) -> Result<Vec<String>, ProviderError> {
-        self.fork_with_context(session_id, auth_mode, mcp_config, None, None, &[])
+        self.fork_with_context(session_id, auth_mode, mcp_config, None, None, false)
     }
 
     fn fork_with_context(
@@ -1012,7 +1011,7 @@ impl ProviderAdapter for BasicProviderAdapter {
         mcp_config: Option<&McpConfig>,
         system_prompt: Option<&str>,
         model: Option<&str>,
-        tools: &[&str],
+        dangerously_skip_permissions: bool,
     ) -> Result<Vec<String>, ProviderError> {
         if !self.caps().fork || auth_mode == AuthMode::CompatibleApi {
             return Err(ProviderError::CapabilityUnsupported(format!(
@@ -1033,7 +1032,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     None,
                     None,
                 );
@@ -1047,7 +1046,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     false,
                     None,
                 )?;
@@ -1073,7 +1072,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     mcp_config,
                     system_prompt,
                     model,
-                    tools,
+                    dangerously_skip_permissions,
                     false,
                     None,
                 )?;
@@ -1125,7 +1124,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     managed,
                     ctx.effort,
                 )?;
@@ -1156,7 +1155,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch.map(|profile| &profile.command_overrides),
                     ctx.effort,
                 );
@@ -1197,7 +1196,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                 );
                 argv.push("--resume".to_string());
                 argv.push(expected.as_str().to_string());
@@ -1220,7 +1219,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                     ctx.profile_launch
                         .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
@@ -1239,7 +1238,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
-                    ctx.tools,
+                    ctx.dangerously_skip_permissions,
                 )
                 .map(CommandPlan::argv_only),
         }
@@ -1402,9 +1401,8 @@ pub(crate) fn json_inline(value: &serde_json::Value) -> String {
 
 // 0.4.x decoupling step 2: provider-local command builders moved to provider/adapters/.
 // Only the entry points the trait impl actually calls are re-imported here;
-// the per-provider helper fns (dangerous_auto_approve, permission flags,
-// disallowed_tools, sandbox_mode, mcp_overrides) are called from within the
-// extracted base_command fns, not directly by this file.
+// The per-provider command helpers and MCP renderers are called from within
+// the extracted base-command functions, not directly by this file.
 use super::adapters::claude::{claude_base_command, claude_launch_command};
 use super::adapters::codex::codex_base_command;
 use super::adapters::copilot::{copilot_base_command, copilot_base_command_resume};

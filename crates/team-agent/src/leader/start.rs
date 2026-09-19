@@ -304,7 +304,6 @@ fn leader_start_plan_with_ambient_authority(
             identity.team_id.as_str(),
         );
         let prompt = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
-        let tools = ["mcp_team", "fs_read", "fs_list", "fs_write", "execute_bash"];
         let team_mcp_tools = [
             "assign_task",
             "send_message",
@@ -327,7 +326,6 @@ fn leader_start_plan_with_ambient_authority(
                 model: parsed.model.as_deref(),
                 effort: parsed.effort,
                 system_prompt: &prompt,
-                tool_categories: &tools,
                 team_mcp_tools: &team_mcp_tools,
                 mcp_config: &mcp_config,
                 session_scope: crate::lifecycle::launch::pi_mcp::pi_leader_session_scope(

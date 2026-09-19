@@ -10,30 +10,22 @@ fn has_adjacent(argv: &[String], needle: &[&str]) -> bool {
         .any(|window| window.iter().zip(needle).all(|(a, b)| a == b))
 }
 
-fn assert_codex_safety_flags(argv: &[String]) {
-    assert!(
-        has_adjacent(argv, &["--sandbox", "read-only"]),
-        "codex command must always include sandbox mode: {argv:?}"
-    );
-    assert!(
-        has_adjacent(argv, &["--ask-for-approval", "on-request"]),
-        "codex command must always include approval mode: {argv:?}"
-    );
+fn assert_codex_has_no_tool_derived_restrictions(argv: &[String]) {
     assert!(
         !argv
             .iter()
-            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
-        "non-dangerous codex command must not bypass approvals/sandbox: {argv:?}"
+            .any(|arg| arg == "--sandbox" || arg == "--ask-for-approval"),
+        "codex command must not derive sandbox/approval restrictions from role metadata: {argv:?}"
     );
 }
 
 #[test]
-fn codex_sandbox_and_approval_flags_are_not_subscription_gated() {
+fn codex_sandbox_and_approval_flags_are_not_role_metadata_gated() {
     let adapter = get_adapter(Provider::Codex);
     let launch = adapter
         .build_command(AuthMode::CompatibleApi, None, Some("work"), Some("gpt-5.5"))
         .expect("codex launch command");
-    assert_codex_safety_flags(&launch);
+    assert_codex_has_no_tool_derived_restrictions(&launch);
 
     let sid = SessionId::new("session-123");
     let resume = adapter
@@ -43,24 +35,24 @@ fn codex_sandbox_and_approval_flags_are_not_subscription_gated() {
             None,
             Some("work"),
             Some("gpt-5.5"),
-            &[],
+            false,
         )
         .expect("codex resume command");
     assert_eq!(resume.get(1).map(String::as_str), Some("resume"));
     assert_eq!(resume.last().map(String::as_str), Some("session-123"));
-    assert_codex_safety_flags(&resume);
+    assert_codex_has_no_tool_derived_restrictions(&resume);
 }
 
 #[test]
-fn codex_dangerous_auto_approve_replaces_sandbox_and_approval_flags() {
+fn codex_bypass_is_directly_boolean_and_replaces_restrictions() {
     let adapter = get_adapter(Provider::Codex);
     let argv = adapter
-        .build_command_with_tools(
+        .build_command_with_permissions(
             AuthMode::Subscription,
             None,
             Some("work"),
             Some("gpt-5.5"),
-            &["dangerous_auto_approve"],
+            true,
         )
         .expect("codex dangerous command");
     assert!(
@@ -83,7 +75,7 @@ fn codex_dangerous_auto_approve_replaces_sandbox_and_approval_flags() {
             None,
             None,
             None,
-            &["dangerous_auto_approve"],
+            true,
         )
         .expect("codex fork command");
     assert_eq!(fork.get(1).map(String::as_str), Some("fork"));

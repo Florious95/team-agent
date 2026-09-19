@@ -341,7 +341,7 @@ pub struct ProviderCommandContext<'a> {
     pub mcp_config: Option<&'a McpConfig>,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
-    pub tools: &'a [&'a str],
+    pub dangerously_skip_permissions: bool,
     pub profile_launch: Option<&'a ProviderProfileLaunch>,
     /// Optional agent id, used as a launch-time display-name hint for
     /// providers that accept `--name <name>` (Claude, Copilot). Codex has

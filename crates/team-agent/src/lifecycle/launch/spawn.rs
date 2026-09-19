@@ -32,7 +32,6 @@ use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
@@ -123,11 +122,6 @@ pub(super) fn spawn_agents(
         )?;
         let system_prompt =
             crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
-        let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
-            &command_agent,
-            provider,
-        )?;
-        let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
         // 0.5.66 bypass 单源:per-agent safety 只服务 env 注入与审计,不参与 argv 决策。
         let safety = effective_runtime_config_for_worker_spawn(agent, provider)?;
         let mcp_team_id = runtime_team_key_for_spec(spec_path, spec, session_name);
@@ -168,7 +162,10 @@ pub(super) fn spawn_agents(
             mcp_config: Some(&mcp_config),
             system_prompt: Some(system_prompt.as_str()),
             model: command_model,
-            tools: &resolved_tool_refs,
+            dangerously_skip_permissions: matches!(
+                agent.get("dangerously_skip_permissions"),
+                Some(Value::Bool(true))
+            ),
             profile_launch: Some(&profile_launch),
             // Layer 1 self-healing (architect probe 2026-06-22): expose
             // agent_id as a display-name hint so Claude / Copilot
@@ -186,7 +183,6 @@ pub(super) fn spawn_agents(
                     model: command_model,
                     effort: agent_effort,
                     system_prompt: &system_prompt,
-                    tool_categories: &resolved_tool_refs,
                     team_mcp_tools: &["send_message", "report_result"],
                     mcp_config: &mcp_config,
                     session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,

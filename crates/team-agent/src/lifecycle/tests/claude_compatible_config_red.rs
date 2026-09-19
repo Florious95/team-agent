@@ -97,15 +97,13 @@ fn managed_profile_command_plan_omits_mcp_config_even_when_mcp_config_is_availab
             }
         }),
     };
-    let tools = ["mcp_team"];
-
     let plan = get_adapter(Provider::Claude)
         .build_command_plan(ProviderCommandContext {
             auth_mode: AuthMode::CompatibleApi,
             mcp_config: Some(&config),
             system_prompt: Some("worker prompt requiring native MCP"),
             model: Some("profile-effective-haiku"),
-            tools: &tools,
+            dangerously_skip_permissions: false,
             profile_launch: Some(&profile),
             agent_id_hint: None,
             effort: None,

@@ -301,11 +301,6 @@ pub(super) fn spawn_agent_window(
     )?;
     let system_prompt =
         crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
-    let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
-        &command_agent,
-        provider,
-    )?;
-    let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     // owner_team_id resolution priority (Issue 2 fix):
     //   1. caller's explicit override (restart paths pass `selected.team_key`)
     //   2. agent row's persisted `owner_team_id` (set by prior launch/restart)
@@ -374,7 +369,10 @@ pub(super) fn spawn_agent_window(
         mcp_config: Some(&mcp_config),
         system_prompt: Some(system_prompt.as_str()),
         model: command_model,
-        tools: &resolved_tool_refs,
+        dangerously_skip_permissions: agent
+            .get("dangerously_skip_permissions")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         profile_launch: Some(&profile_launch),
         agent_id_hint: Some(agent_id.as_str()),
         effort: restart_effort,
@@ -399,7 +397,6 @@ pub(super) fn spawn_agent_window(
             model: command_model,
             effort: restart_effort,
             system_prompt: &system_prompt,
-            tool_categories: &resolved_tool_refs,
             team_mcp_tools: &["send_message", "report_result"],
             mcp_config: &mcp_config,
             session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
@@ -744,7 +741,6 @@ fn merge_command_context_fields(
     };
     for field in [
         "role",
-        "tools",
         "system_prompt",
         "output_contract",
         "provider",

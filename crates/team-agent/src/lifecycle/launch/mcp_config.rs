@@ -16,7 +16,6 @@
 //!       what: 把 argv 里的 MCP 配置参数改指到已落盘的文件
 //!   depends:
 //!     - crate::provider::McpConfig
-//!     - crate::model::permissions
 //!     - crate::event_log::EventLog
 //!     - crate::lifecycle::profile_launch
 //!     - std::fs
@@ -33,8 +32,6 @@ use std::process::Command;
 
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
-use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
@@ -643,59 +640,4 @@ pub(crate) fn point_native_mcp_config_at_file(
         }
         _ => {}
     }
-}
-
-/// ---
-/// purpose: 解析该席位的权限并序列化成 JSON
-/// returns: 含 agent_id、provider、排序后的工具串、逐工具的执行强度与是否有仅提示项
-/// errors: 权限解析失败时返回 ModelError
-/// ---
-pub(super) fn permissions_json(
-    agent: &Value,
-    id: &str,
-    provider: Provider,
-) -> Result<serde_json::Value, crate::model::ModelError> {
-    let tools = agent.get("tools").and_then(Value::as_list).map(|items| {
-        items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    });
-    let resolved = permissions::resolve_permissions(&AgentPermissionInput {
-        id: Some(AgentId::new(id)),
-        provider,
-        role: agent
-            .get("role")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        tools,
-    })?;
-    let mut out = serde_json::Map::new();
-    out.insert("agent_id".to_string(), serde_json::json!(id));
-    out.insert("provider".to_string(), serde_json::json!(provider));
-    out.insert(
-        "tools".to_string(),
-        serde_json::json!(resolved.sorted_tool_strings()),
-    );
-    out.insert(
-        "resolved_tools".to_string(),
-        serde_json::Value::Array(
-            resolved
-                .resolved_tools
-                .iter()
-                .map(|tool| {
-                    serde_json::json!({
-                        "tool": tool.tool,
-                        "enforcement": tool.enforcement,
-                    })
-                })
-                .collect(),
-        ),
-    );
-    out.insert(
-        "has_prompt_only".to_string(),
-        serde_json::json!(resolved.has_prompt_only),
-    );
-    Ok(serde_json::Value::Object(out))
 }

@@ -1,9 +1,9 @@
 //! ---
-//! purpose: 回归——clone-agent 分身 tools 必须与源席集合相等，禁止静默夹成 leader 三件套
+//! purpose: 回归——clone-agent 分身保留源席 tools，编译 spec 不投影 tools
 //! contract:
 //!   provides:
 //!     - name: clone_agent_preserves_source_tools
-//!       what: 真跑 clone-agent 后，dynamic-role-files / runtime spec 与源席 tools 集合相等
+//!       what: 真跑 clone-agent 后，dynamic-role-files 保留源席 tools，runtime spec 不投影 tools
 //!   requires:
 //!     - name: source-six-set-vs-leader-three-set
 //!       what: 同一 team 里 leader 三件套 + 源席六件套的共享冲突面
@@ -275,6 +275,10 @@ fn role_tools(path: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+fn set_of(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|s| (*s).to_string()).collect()
+}
+
 fn load_runtime_spec(workspace: &Path) -> Value {
     let runtime = workspace.join(".team").join("runtime");
     let spec = std::fs::read_dir(&runtime)
@@ -287,17 +291,7 @@ fn load_runtime_spec(workspace: &Path) -> Value {
         .expect("parse spec")
 }
 
-fn yaml_tool_set(node: &Value) -> BTreeSet<String> {
-    node.get("tools")
-        .and_then(Value::as_list)
-        .unwrap_or_else(|| panic!("tools list missing"))
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect()
-}
-
-fn spec_tools(workspace: &Path, agent: &str) -> BTreeSet<String> {
+fn spec_projects_tools(workspace: &Path, agent: &str) -> bool {
     let parsed = load_runtime_spec(workspace);
     let agents = parsed
         .get("agents")
@@ -305,22 +299,18 @@ fn spec_tools(workspace: &Path, agent: &str) -> BTreeSet<String> {
         .expect("spec agents");
     for row in agents {
         if row.get("id").and_then(Value::as_str) == Some(agent) {
-            return yaml_tool_set(row);
+            return row.get("tools").is_some();
         }
     }
     panic!("agent {agent} missing from runtime spec");
 }
 
-fn leader_spec_tools(workspace: &Path) -> BTreeSet<String> {
-    yaml_tool_set(
-        load_runtime_spec(workspace)
-            .get("leader")
-            .expect("spec leader"),
-    )
-}
-
-fn set_of(items: &[&str]) -> BTreeSet<String> {
-    items.iter().map(|s| (*s).to_string()).collect()
+fn leader_spec_projects_tools(workspace: &Path) -> bool {
+    load_runtime_spec(workspace)
+        .get("leader")
+        .expect("spec leader")
+        .get("tools")
+        .is_some()
 }
 
 fn clone_ok(case: &Case, source: &str, dest: &str, phase: &str) {
@@ -347,7 +337,7 @@ fn clone_ok(case: &Case, source: &str, dest: &str, phase: &str) {
     );
 }
 
-/// clone 后分身 role + spec tools 必须等于源席；三件套源不得被扩成六件。
+/// clone 后分身 role 保留源席 tools；编译 spec 不投影 tools。
 #[test]
 fn clone_agent_preserves_source_tools() {
     let case = Case::start();
@@ -380,21 +370,18 @@ fn clone_agent_preserves_source_tools() {
         String::from_utf8_lossy(&qs.stdout)
     );
 
-    let source_spec = spec_tools(&case.workspace, SOURCE);
-    assert_eq!(
-        source_spec,
-        set_of(SIX),
-        "fixture source must be the six-set"
+    assert!(
+        !spec_projects_tools(&case.workspace, SOURCE),
+        "compiled source spec must not project tools metadata"
     );
-    let leader_spec = leader_spec_tools(&case.workspace);
-    assert_eq!(
-        leader_spec,
-        set_of(THREE),
-        "leader must stay the three-set ceiling so the conflict surface exists; leader={leader_spec:?}"
+    assert!(
+        !leader_spec_projects_tools(&case.workspace),
+        "compiled leader spec must not project tools metadata"
     );
 
     clone_ok(&case, SOURCE, CLONE, "first_clone");
 
+    let source_role = role_tools(&case.workspace.join("agents").join(format!("{SOURCE}.md")));
     let clone_role = role_tools(
         &case
             .workspace
@@ -402,23 +389,32 @@ fn clone_agent_preserves_source_tools() {
             .join("dynamic-role-files")
             .join(format!("{CLONE}.md")),
     );
-    let clone_spec = spec_tools(&case.workspace, CLONE);
     assert_eq!(
-        clone_role, source_spec,
-        "clone role tools must equal source; source={source_spec:?} clone={clone_role:?}"
+        clone_role, source_role,
+        "clone role tools must equal source; source={source_role:?} clone={clone_role:?}"
     );
-    assert_eq!(
-        clone_spec, source_spec,
-        "clone spec tools must equal source; source={source_spec:?} spec={clone_spec:?}"
+    assert!(
+        !spec_projects_tools(&case.workspace, CLONE),
+        "compiled clone spec must not project tools metadata"
     );
 
-    let narrow_src = spec_tools(&case.workspace, NARROW);
-    assert_eq!(narrow_src, set_of(THREE), "narrow source fixture");
+    let narrow_source_role = role_tools(&case.workspace.join("agents").join(format!("{NARROW}.md")));
+    assert_eq!(narrow_source_role, set_of(THREE), "narrow source fixture");
     clone_ok(&case, NARROW, NARROW_CLONE, "second_clone");
-    let narrow_clone = spec_tools(&case.workspace, NARROW_CLONE);
+    let narrow_clone_role = role_tools(
+        &case
+            .workspace
+            .join(".team")
+            .join("dynamic-role-files")
+            .join(format!("{NARROW_CLONE}.md")),
+    );
     assert_eq!(
-        narrow_clone, narrow_src,
-        "narrow clone must keep the three-set (preserve, do not widen); got={narrow_clone:?}"
+        narrow_clone_role, narrow_source_role,
+        "narrow clone role must keep the three-set (preserve, do not widen); got={narrow_clone_role:?}"
+    );
+    assert!(
+        !spec_projects_tools(&case.workspace, NARROW_CLONE),
+        "compiled narrow clone spec must not project tools metadata"
     );
 
     case.shutdown();

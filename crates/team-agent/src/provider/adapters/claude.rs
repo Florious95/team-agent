@@ -3,7 +3,7 @@
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure
 //! extraction — byte-identical to the original inline forms. Scope kept
-//! small on purpose: base command + permission/disallowed-tool mapping +
+//! small on purpose: base command + launch wrapper +
 //! launch wrapper. Auth hints (`claude_auth_hint`) and the context-aware model
 //! resolver (`claude_context_model`) stay in `adapter.rs`; capture scanning
 //! helpers now live under `provider/session_scan/claude.rs`.
@@ -18,7 +18,7 @@ pub(crate) fn claude_launch_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = claude_base_command(
         adapter,
@@ -26,7 +26,7 @@ pub(crate) fn claude_launch_command(
         mcp_config,
         system_prompt,
         model,
-        tools,
+        dangerously_skip_permissions,
         false,
         None,
     )?;
@@ -41,14 +41,14 @@ pub(crate) fn claude_base_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
-    tools: &[&str],
+    dangerously_skip_permissions: bool,
     managed_mcp_config: bool,
     // 0.4.x provider effort MVP step 5: when Some, inject `--effort <level>`
     // immediately after the model (before prompt/MCP).
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["claude".to_string()];
-    if claude_dangerous_auto_approve(tools) {
+    if dangerously_skip_permissions {
         // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给(单源)。
         let flag = crate::provider::bypass_flags::provider_bypass_flag(Provider::Claude)
             .expect("claude provider must define a bypass flag");
@@ -82,30 +82,5 @@ pub(crate) fn claude_base_command(
         argv.push("--mcp-config".to_string());
         argv.push(raw.to_string());
     }
-    for tool in claude_disallowed_tools(tools) {
-        argv.push("--disallowedTools".to_string());
-        argv.push(tool.to_string());
-    }
     Ok(argv)
-}
-
-pub(crate) fn claude_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-pub(crate) fn claude_disallowed_tools(tools: &[&str]) -> Vec<&'static str> {
-    let mut disallowed = Vec::new();
-    if !tools.contains(&"execute_bash") {
-        disallowed.push("Bash");
-    }
-    if !tools.contains(&"fs_read") {
-        disallowed.push("Read");
-    }
-    if !tools.contains(&"fs_write") {
-        disallowed.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-    }
-    if !tools.contains(&"fs_list") {
-        disallowed.extend(["Glob", "Grep"]);
-    }
-    disallowed
 }

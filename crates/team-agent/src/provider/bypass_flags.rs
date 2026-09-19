@@ -11,8 +11,7 @@
 //!   - grok → `--always-approve`
 //!   - cursor_agent → `--force`
 //!
-//! 未定义(返回 None)的 provider:调用侧必须 fail-loud(见
-//! `resolved_tool_strings_for_command`),不得静默 fallback。
+//! 未定义(返回 None)的 provider:调用侧必须 fail-loud,不得静默 fallback。
 
 use crate::model::enums::Provider;
 

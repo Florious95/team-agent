@@ -24,7 +24,6 @@ use std::process::Command;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
@@ -105,11 +104,6 @@ pub(super) fn running_agent_state(
     state.insert(
         "mcp_config".to_string(),
         serde_json::json!(mcp_config_path.to_string_lossy().to_string()),
-    );
-    state.insert(
-        "permissions".to_string(),
-        permissions_json(agent, id, provider)
-            .map_err(|e| LifecycleError::Compile(e.to_string()))?,
     );
     // 0.5.66 bypass 单源:policy 从 agent 字段派生,不再用全队 `DangerousApproval`。
     persist_effective_approval_policy_from_yaml_agent(&mut state, agent, provider);

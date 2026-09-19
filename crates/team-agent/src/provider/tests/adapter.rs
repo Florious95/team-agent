@@ -286,12 +286,12 @@ fn test_grok_build_command_includes_rules_flag_when_system_prompt_set() {
 fn test_grok_build_command_bypass_flag_when_dangerous() {
     let adapter = get_adapter(Provider::Grok);
     let dangerous = adapter
-        .build_command_with_tools(
+        .build_command_with_permissions(
             AuthMode::Subscription,
             None,
             None,
             Some("grok-4"),
-            &["dangerous_auto_approve"],
+            true,
         )
         .expect("dangerous build_command ok");
     assert!(
@@ -369,12 +369,12 @@ fn test_cursor_agent_build_command_includes_workspace_flag() {
 fn test_cursor_agent_build_command_bypass_flag_when_dangerous() {
     let adapter = get_adapter(Provider::CursorAgent);
     let dangerous = adapter
-        .build_command_with_tools(
+        .build_command_with_permissions(
             AuthMode::Subscription,
             None,
             None,
             None,
-            &["dangerous_auto_approve"],
+            true,
         )
         .expect("dangerous build_command ok");
     assert!(
@@ -443,7 +443,7 @@ fn test_grok_build_command_plan_binds_expected_session_id_to_argv() {
             mcp_config: None,
             system_prompt: None,
             model: Some("grok-4.6"),
-            tools: &[],
+            dangerously_skip_permissions: false,
             profile_launch: None,
             agent_id_hint: Some("w1"),
             effort: None,
@@ -492,7 +492,7 @@ fn test_cursor_fresh_plan_has_no_session_id_and_no_resume() {
             mcp_config: None,
             system_prompt: None,
             model: Some("sonnet-4-thinking"),
-            tools: &[],
+            dangerously_skip_permissions: false,
             profile_launch: None,
             agent_id_hint: Some("w1"),
             effort: None,
@@ -523,7 +523,7 @@ fn test_cursor_resume_plan_requires_chat_id_and_never_emits_empty_resume() {
         mcp_config: None,
         system_prompt: None,
         model: Some("sonnet-4-thinking"),
-        tools: &[],
+        dangerously_skip_permissions: false,
         profile_launch: None,
         agent_id_hint: Some("w1"),
         effort: None,
@@ -546,23 +546,6 @@ fn test_cursor_resume_plan_requires_chat_id_and_never_emits_empty_resume() {
         !plan.argv.iter().any(|a| a == "--session-id" || a == "--continue"),
         "resume must not mint --session-id/--continue; argv={:?}",
         plan.argv
-    );
-}
-
-#[test]
-fn test_grok_unknown_tool_mapping_is_explicitly_unsupported() {
-    use crate::provider::adapters::grok::{grok_tool_mapping, GrokToolMapping};
-    assert_eq!(
-        grok_tool_mapping("network"),
-        GrokToolMapping::Unsupported
-    );
-    assert_eq!(
-        grok_tool_mapping("not_a_real_tool"),
-        GrokToolMapping::Unsupported
-    );
-    assert!(
-        !matches!(grok_tool_mapping("execute_bash"), GrokToolMapping::Unsupported),
-        "known tools must stay mapped"
     );
 }
 

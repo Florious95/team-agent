@@ -300,7 +300,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         mcp_config: None,
         system_prompt: None,
         model: None,
-        tools: &[],
+        dangerously_skip_permissions: false,
         profile_launch: None,
         agent_id_hint: None,
         effort: None,

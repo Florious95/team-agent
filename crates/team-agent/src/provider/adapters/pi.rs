@@ -15,42 +15,6 @@ use std::path::Path;
 use crate::model::enums::ProviderEffort;
 use crate::provider::ProviderError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PiToolMapping {
-    Mcp,
-    Builtin(&'static [&'static str]),
-    Unsupported,
-}
-
-/// ---
-/// purpose: 把 Team tool category 映射为 exact Pi builtin/proxy names
-/// returns: 单个或多个 builtin、MCP proxy 或 Unsupported
-/// ---
-pub(crate) fn pi_tool_mapping(category: &str) -> PiToolMapping {
-    match category {
-        "mcp_team" => PiToolMapping::Mcp,
-        "fs_read" => PiToolMapping::Builtin(&["read"]),
-        "fs_list" => PiToolMapping::Builtin(&["grep", "find", "ls"]),
-        "fs_write" => PiToolMapping::Builtin(&["edit", "write"]),
-        "execute_bash" => PiToolMapping::Builtin(&["bash"]),
-        _ => PiToolMapping::Unsupported,
-    }
-}
-
-/// Return the first canonical category that Pi cannot map. Callers own alias
-/// expansion and generic unknown-category validation; this keeps the provider
-/// mapping itself as the only Pi capability contract.
-pub(crate) fn first_unsupported_pi_tool_category<'a, I>(
-    categories: I,
-) -> Option<&'a str>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    categories
-        .into_iter()
-        .find(|category| matches!(pi_tool_mapping(category), PiToolMapping::Unsupported))
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PiSessionSelector<'a> {
     Fresh { session_id: &'a str },
@@ -62,7 +26,6 @@ pub(crate) struct PiCommandRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<ProviderEffort>,
     pub system_prompt: &'a str,
-    pub tool_categories: &'a [&'a str],
     /// Team-owned session root for isolated seats; `None` preserves Pi's native default.
     pub session_dir: Option<&'a Path>,
     pub session: PiSessionSelector<'a>,
@@ -72,7 +35,7 @@ pub(crate) struct PiCommandRequest<'a> {
 /// ---
 /// purpose: 从已验证 semantic request 构造仅追加 Team Agent MCP/提示/session 的 Pi argv
 /// returns: exact ordered fresh/resume argv，argv[0] 固定为裸 `pi`
-/// errors: 必需字段、mcp_team 或工具 category 非法时返回 ProviderError
+/// errors: 必需字段时返回 ProviderError
 /// ---
 pub(crate) fn build_pi_command_argv(
     request: PiCommandRequest<'_>,
@@ -87,24 +50,6 @@ pub(crate) fn build_pi_command_argv(
     {
         return Err(ProviderError::Command(
             "Pi command requires extension, prompt, and agent id".to_string(),
-        ));
-    }
-
-    let mut has_mcp = false;
-    for category in request.tool_categories {
-        match pi_tool_mapping(category) {
-            PiToolMapping::Mcp => has_mcp = true,
-            PiToolMapping::Builtin(_) => {}
-            PiToolMapping::Unsupported => {
-                return Err(ProviderError::Command(format!(
-                    "Pi does not support Team Agent tool category {category:?}"
-                )));
-            }
-        }
-    }
-    if !has_mcp {
-        return Err(ProviderError::Command(
-            "Pi command requires mcp_team".to_string(),
         ));
     }
 

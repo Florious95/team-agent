@@ -17,7 +17,7 @@
 //!  1. worker argv golden (§C1 + C-5-1/3)        — copilot_argv_* tests
 //!  2. per-worker AGENTS.md == compiled prompt    — copilot_agents_md_* tests (C-1-1/2,
 //!     identity-first per the 0.3.4 B2/D6 lock)
-//!  3. permission mapping (C-2-1, via the prompt's Permission note + argv deny flags)
+//!  3. tools metadata transparency (C-2-1, no prompt permission note or argv deny flags)
 //!  4. fork = structured CapabilityUnsupported (C-4-2/3)
 //!  5. startup recognizer supports copilot trust/ready; turn-state Unknown never idles
 //!     (N11, C-3-1/4)
@@ -62,12 +62,12 @@ const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
 const COPILOT_TMP_PREFIX: &str = "ta-rs-copilot";
 
-/// Face 1+3 (§C1 golden + C-5-3, verdict cases `copilot_argv_golden_per_role_tools`
-/// and `non_dangerous_argv_contains_deny_flags_no_allow_all`): a restricted copilot
-/// worker (mcp_team only) gets the full §C1 argv — noise control, inline/`@file` MCP
-/// config carrying team_orchestrator, a pre-assigned `--session-id` equal to the
-/// persisted `_pending_session_id`, `-C <workspace>`, deny flags for the missing
-/// capabilities, and NO --allow-all family flag.
+/// Face 1+3 (§C1 golden + C-5-3, verdict case `copilot_argv_golden_per_role_tools`):
+/// a copilot worker (mcp_team only) gets the full §C1 argv — noise control,
+/// inline/`@file` MCP config carrying team_orchestrator, a pre-assigned
+/// `--session-id` equal to the persisted `_pending_session_id`, and `-C <workspace>`.
+/// Tools metadata must not derive deny flags; non-dangerous workers still omit the
+/// --allow-all family flag.
 #[test]
 #[serial(env)]
 fn copilot_argv_golden_restricted_role() {
@@ -176,21 +176,11 @@ team_orchestrator or @<.team/runtime/mcp/worker_a.json>; got {value:?}"
             flag_value(argv, "-C")
         ));
     }
-    // C-5-3: restricted role (no execute_bash / fs_write / network) → deny flags, and
-    // no --allow-all family flag anywhere.
-    let deny_tools = flag_values(argv, "--deny-tool");
-    for denied in ["shell", "write"] {
-        if !deny_tools.iter().any(|tool| tool.contains(denied)) {
-            failures.push(format!(
-                "C-5-3: restricted copilot worker must carry --deny-tool '{denied}'; deny={deny_tools:?}"
-            ));
-        }
-    }
-    // RC-15 (C-5-2 v2): network deny is `--deny-tool 'url'` (the help has only shell/
-    // write/mcp/url tool kinds; v1's --deny-url is not the v2 form).
-    if !deny_tools.iter().any(|tool| tool.contains("url")) {
+    // Tools metadata is transparent compatibility data; it must not derive
+    // provider-specific deny flags (shell/write/url or any other category).
+    if argv.iter().any(|arg| arg == "--deny-tool") {
         failures.push(format!(
-            "RC-15/C-5-2: restricted copilot worker must deny network via --deny-tool 'url'; deny={deny_tools:?}"
+            "C-5-3: tools metadata must not derive copilot --deny-tool flags; argv={argv:?}"
         ));
     }
     // RC-10 (C-3-5/C-5-2): mcp_team is allowlisted by server name (no approval prompt).
@@ -289,8 +279,8 @@ used for the dangerous tier; argv={argv:?}"
 /// the spawn env must carry COPILOT_CUSTOM_INSTRUCTIONS_DIRS pointing at the
 /// per-worker dir (path contains the agent id; works with NO profile configured), the
 /// AGENTS.md there must BE the compiled worker system prompt (single source: identity
-/// first, runtime contract, role body, output contract, permission note — 0.3.4 B2/D6
-/// lock), and no global ~/.copilot/AGENTS.md may be written.
+/// first, runtime contract, role body, and output contract), and no global
+/// ~/.copilot/AGENTS.md may be written.
 #[test]
 #[serial(env)]
 fn copilot_agents_md_is_the_compiled_prompt_and_env_points_at_it() {
@@ -362,7 +352,6 @@ with the identity section FIRST; head={:?}",
             "# Team Agent Teammate Runtime Contract",
             "COPILOT ROLE BODY SENTINEL",
             "report_result exactly once",
-            "Permission note: these tools are prompt-only for this provider and not hard-enforced:",
         ] {
             if !agents_md.contains(marker) {
                 failures.push(format!(
@@ -386,14 +375,11 @@ with the identity section FIRST; head={:?}",
     );
 }
 
-/// Face 3 (C-2-1, verdict `permission_enforcement_table_copilot_row_prompt_only_for_fs`):
-/// the copilot enforcement row must honestly register the no-hard-deny tools as
-/// prompt-only. Observable single-source: the compiled prompt's Permission note (built
-/// from PROVIDER_ENFORCEMENT) for a full-capability role must list exactly
-/// fs_list/fs_read/git_diff/provider_builtin (sorted).
+/// Face 3: tools metadata is transparent compatibility data and must not produce
+/// a provider-specific Permission note in the compiled Copilot prompt.
 #[test]
 #[serial(env)]
-fn copilot_permission_note_registers_fs_tools_prompt_only() {
+fn copilot_prompt_omits_removed_permission_note() {
     let _hermetic = enter_hermetic("copilot-permission-note");
     let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("enforcement");
@@ -428,21 +414,21 @@ fn copilot_permission_note_registers_fs_tools_prompt_only() {
         .env
         .get("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
         .cloned()
-        .unwrap_or_default();
-    let agents_md = std::fs::read_to_string(Path::new(&dir).join("AGENTS.md")).unwrap_or_default();
-
-    let note_line = agents_md
-        .lines()
-        .find(|line| line.starts_with("Permission note:"))
-        .unwrap_or("")
-        .to_string();
+        .expect("Copilot spawn must carry COPILOT_CUSTOM_INSTRUCTIONS_DIRS");
     assert!(
-        note_line.contains("fs_list, fs_read, git_diff, provider_builtin"),
-        "C-2-1: the copilot enforcement row must register exactly \
-fs_read/fs_list/git_diff/provider_builtin as prompt-only (sorted in the Permission \
-note; execute_bash/fs_write/network/mcp_team are hard); note={note_line:?} \
-agents_md_present={}",
-        !agents_md.is_empty()
+        !dir.is_empty(),
+        "Copilot instructions directory must not be empty"
+    );
+    let agents_md = std::fs::read_to_string(Path::new(&dir).join("AGENTS.md"))
+        .expect("per-worker Copilot AGENTS.md must be readable");
+    let identity = "You are Team Agent worker `worker_a` with role `Copilot Worker`.";
+    assert!(
+        agents_md.starts_with(identity) && agents_md.contains("COPILOT ROLE BODY SENTINEL"),
+        "C-2-1: compiled Copilot prompt must include its identity and role body; content={agents_md:?}"
+    );
+    assert!(
+        !agents_md.contains("Permission note:"),
+        "C-2-1: removed provider tool enforcement must not emit a Permission note; content={agents_md:?}"
     );
 }
 
