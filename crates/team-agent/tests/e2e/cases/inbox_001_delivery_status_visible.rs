@@ -49,8 +49,7 @@ fn inbox_001_delivery_status_visible_for_blocked_inbound_message() {
     let j = inbox_json.json();
     assert_json_field_eq_str(&j, "/messages/0/message_id", message_id);
     assert_json_field_eq_str(&j, "/messages/0/status", "queued_pane_missing");
-    assert_json_field_eq_str(&j, "/messages/0/error", "tmux_target_missing");
-    assert_json_field_present(&j, "/messages/0/delivery_attempts");
+    assert_json_field_eq_str(&j, "/messages/0/summary", "history is not receipt");
 
     let inbox_human = run_ta(&ws, &["inbox", "a", "--workspace", ws_path]);
     assert!(
@@ -61,10 +60,9 @@ fn inbox_001_delivery_status_visible_for_blocked_inbound_message() {
         inbox_human.stderr
     );
     assert!(
-        inbox_human.stdout.contains("status=queued_pane_missing")
-            && inbox_human.stdout.contains("error=tmux_target_missing")
-            && inbox_human.stdout.contains("attempts="),
-        "human inbox must show lifecycle status, attempts, and error; got:\n{}",
+        inbox_human.stdout.contains("queued_pane_missing")
+            && inbox_human.stdout.contains("history is not receipt"),
+        "human inbox must show the compact lifecycle status and summary; got:\n{}",
         inbox_human.stdout
     );
 

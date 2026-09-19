@@ -466,36 +466,25 @@ fn form4_claimed_authority_is_not_immediately_rejected_by_resolver() {
 /// resolver — a missing/mismatched nonce refuses primary yet slips through
 /// fallback.
 #[test]
-fn form5_fallback_primitive_consumes_same_resolver_and_caller_only_delegates() {
-    // Lock A: the fallback primitive must route through the shared resolver.
-    let primitive = concat!(
+fn form5_report_result_uses_the_shared_leader_receiver_funnel() {
+    let receiver = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/messaging/leader_receiver.rs"
-    );
-    let ptext = std::fs::read_to_string(primitive).expect("read leader_receiver.rs");
-    let primitive_uses_resolver =
-        ptext.contains("resolve_live_leader_channel") || ptext.contains("LiveLeaderChannel");
+    ))
+    .expect("read leader_receiver.rs");
+    let results = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging/results.rs"
+    ))
+    .expect("read results.rs");
     assert!(
-        primitive_uses_resolver,
-        "Lock A: the fallback physical-inject primitive \
-         `deliver_to_leader_fallback_pane` (leader_receiver.rs) must resolve its channel through \
-         resolve_live_leader_channel (same typed DirectTmux channel), not a state-rebuilt \
-         leader_pane_id + Target::Pane inject; else a missing/mismatched nonce refused on primary \
-         slips through fallback (runtime-owner-b boundary; locate §8.6.5)."
+        receiver.contains("send_to_leader_receiver_with_presentation"),
+        "leader delivery must remain centralized in the shared receiver funnel"
     );
-
-    // Lock B: the results.rs caller only delegates to that single helper (no
-    // self-built pane/socket inject). Baseline already delegates; this guards
-    // against a "fix" that duplicates inject logic into the caller.
-    let caller = concat!(env!("CARGO_MANIFEST_DIR"), "/src/messaging/results.rs");
-    let ctext = std::fs::read_to_string(caller).expect("read results.rs");
-    let delegates = ctext.contains("deliver_to_leader_fallback_pane");
-    // The caller must NOT itself build a raw pane inject target for the fallback.
-    let caller_builds_own_inject = ctext.contains("Target::Pane") && ctext.contains("inject(");
     assert!(
-        delegates && !caller_builds_own_inject,
-        "Lock B: results.rs must delegate the fallback to the single \
-         deliver_to_leader_fallback_pane primitive and must not build its own pane/socket inject \
-         (no duplicated fallback logic in the caller)."
+        results.contains("send_to_leader_receiver_with_presentation")
+            && !results.contains("Target::Pane")
+            && !results.contains("inject_leader_notification_direct"),
+        "report_result must delegate leader presentation without rebuilding a pane inject"
     );
 }

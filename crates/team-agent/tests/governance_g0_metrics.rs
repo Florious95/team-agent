@@ -18,7 +18,6 @@ const RESIGN_PLUS_RESULTS: &[&str] = &[
     "quick-start",
     "send",
     "status",
-    "collect",
     "results",
     "restart",
     "shutdown",

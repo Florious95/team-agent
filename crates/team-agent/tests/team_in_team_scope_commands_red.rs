@@ -1,8 +1,8 @@
 //! Team-in-team scoped command contracts.
 //!
 //! User-visible contract (#241):
-//! - `status --team <team>` and `collect --team <team>` select that team's runtime
-//!   projection and filter DB rows by `owner_team_id`.
+//! - `status --team <team>` selects that team's runtime projection and filters
+//!   DB rows by `owner_team_id`.
 //! - `shutdown --team <team>` stops only that team's tmux session/state and must not
 //!   tear down the shared workspace tmux server/coordinator used by sibling teams.
 
@@ -33,17 +33,18 @@ use team_agent::transport::{
 
 #[test]
 #[serial(env)]
-fn status_and_collect_advertise_team_selector_on_the_command_surface() {
+fn status_advertises_team_selector_and_collect_is_absent() {
     let status_help = cli_text(["status", "--help"]);
     assert!(
         status_help.contains("--team TEAM"),
         "`team-agent status --help` must expose --team because status is a selected-team command; help={status_help:?}"
     );
 
-    let collect_help = cli_text(["collect", "--help"]);
+    let collect = run_cli(["collect", "--help"]);
     assert!(
-        collect_help.contains("--team TEAM"),
-        "`team-agent collect --help` must expose --team because collect is a selected-team command; help={collect_help:?}"
+        !collect.status.success(),
+        "collect must be absent from the public command surface; output={:?}",
+        String::from_utf8_lossy(&collect.stderr)
     );
 }
 
@@ -181,10 +182,9 @@ fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguo
 
 #[test]
 #[serial(env)]
-fn collect_team_selector_collects_only_that_team_and_writes_back_that_team_state() {
+fn collect_is_absent_in_team_scoped_command_surface() {
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("collect-scope");
-
     let output = run_cli([
         "collect",
         "--workspace",
@@ -193,42 +193,10 @@ fn collect_team_selector_collects_only_that_team_and_writes_back_that_team_state
         "teamA",
         "--json",
     ]);
-    assert_success(&output, "collect --team teamA --json");
-    let collected = stdout_json(&output);
-
-    assert_eq!(
-        collected.get("ok").and_then(Value::as_bool),
-        Some(true),
-        "collect --team teamA should validate and collect only teamA rows; collected={collected}"
-    );
-    let result_ids = collected_result_ids(&collected);
-    assert_eq!(
-        result_ids,
-        vec!["res_team_a".to_string()],
-        "collect --team teamA must not collect or invalidate sibling teamB results; collected={collected}"
-    );
-
-    let conn = db_conn(&fixture.root);
-    assert_eq!(
-        result_status(&conn, "res_team_a").as_deref(),
-        Some("collected")
-    );
-    assert_eq!(
-        result_status(&conn, "res_team_b").as_deref(),
-        Some("success"),
-        "collect --team teamA must leave sibling teamB result uncollected"
-    );
-
-    let state = load_runtime_state(&fixture.root).expect("state after collect");
-    assert_eq!(
-        task_status(&state, "teamA", "task_a").as_deref(),
-        Some("done"),
-        "collect --team teamA must write task completion into state.teams.teamA; state={state}"
-    );
-    assert_eq!(
-        task_status(&state, "teamB", "task_b").as_deref(),
-        Some("running"),
-        "collect --team teamA must not mutate sibling teamB tasks; state={state}"
+    assert!(
+        !output.status.success(),
+        "collect must remain absent even when a team selector is supplied; output={:?}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

@@ -455,31 +455,6 @@
       "step": "send"
     },
     {
-      "result": {
-        "exit_code": 0,
-        "output": {
-          "collected": [],
-          "collected_results": [],
-          "coordinator": {
-            "ok": false,
-            "status": "not_required"
-          },
-          "delivered_messages": [],
-          "invalid_results": [],
-          "ok": true,
-          "results": {
-            "by_status": {},
-            "collected": 0,
-            "invalid": 0,
-            "total": 0,
-            "uncollected": 0
-          },
-          "state_file": "<WORKSPACE>/.team/runtime/teamdir/team_state.md"
-        }
-      },
-      "step": "collect"
-    },
-    {
       "output": {
         "discarded_session_id": null,
         "new_session_id": null,

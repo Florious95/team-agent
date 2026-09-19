@@ -118,14 +118,14 @@
       "plan": "Use an isolated provider/session fixture or authorized subscription gate and bind assertions to fork success or its exact rollback refusal."
     },
     {
-      "command": "team-agent inbox",
+      "command": "team-agent inbox <agent_id> -n 3",
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:messaging",
       "plan": "Execute the exact default inbox argv and bind assertions to its selected recipient and message or empty-state output."
     },
     {
-      "command": "team-agent inbox coder",
+      "command": "team-agent inbox coder -n 3",
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:messaging",

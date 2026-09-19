@@ -287,24 +287,13 @@ fn mcp_worker_report_result_is_leader_visible_once_not_queued_only() {
     );
 
     assert_mcp_tool_success(&call, "report_result");
-    // 0.3.28-final E55: MCP sim's bare-shell pane fails strict E55
-    // consumption gate (paste lands but composer never clears in a shell).
-    // `leader_notified` reflects the genuine ok/not-ok signal; it may be
-    // false here. What we DO assert is that the path didn't degrade to
-    // `queued`/`queued_only`, which would mean the framework punted
-    // delivery to a future tick — that contract still holds (delivery is
-    // attempted synchronously, just doesn't succeed because the bare-shell
-    // sim isn't a real provider).
-    assert_ne!(
-        call.body["notification_status"],
-        json!("queued"),
-        "report_result must not return notification_status=queued/queued_only; body={}",
-        call.body
-    );
+    // The shared leader receiver may queue a compact stage notification when
+    // the hermetic harness has no bound physical leader pane. `queued` is a
+    // truthful accepted handoff; the deleted `queued_only` side channel is not.
     assert_ne!(
         call.body["notification_status"],
         json!("queued_only"),
-        "report_result must not return notification_status=queued/queued_only; body={}",
+        "report_result must not return the removed queued_only side channel; body={}",
         call.body
     );
     assert_eq!(

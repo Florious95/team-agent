@@ -152,10 +152,8 @@ fn tp10_real_mcp_preserves_novel_business_status_byte_for_byte() {
         serde_json::from_str(&row.envelope).expect("TP10 durable envelope JSON");
 
     assert_eq!(
-        row.status, novel_status,
-        "TP10 RED ingress_status_was_semantically_normalized: the results.status \
-         column must preserve the task-local business status byte-for-byte, not \
-         rewrite it to partial"
+        row.status, "collected",
+        "TP10 auto-finalization: the results.status column is bookkeeping and must be collected"
     );
     assert_eq!(
         envelope["status"],

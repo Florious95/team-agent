@@ -44,7 +44,6 @@ const BASELINE_VISIBLE_COMMANDS: &[&str] = &[
     "quick-start",
     "send",
     "status",
-    "collect",
     "results",
     "restart",
     "shutdown",

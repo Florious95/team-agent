@@ -22,7 +22,6 @@ use hermetic_guard::HermeticTestEnv;
 use mcp_sim_harness::McpSimHarness;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::messaging;
 
 const EXTENSION_KEYS: [&str; 3] = ["answer", "evidence", "refs"];
 const FRAMEWORK_KEYS: [&str; 14] = [
@@ -113,7 +112,7 @@ fn tooth1_mcp_report_result_preserves_nested_extension_fields_in_sqlite() {
 
 #[test]
 #[serial(envelope_fidelity)]
-fn tooth2_collect_returns_the_same_full_envelope_that_sqlite_persisted() {
+fn tooth2_auto_finalization_preserves_the_same_full_envelope_that_sqlite_persisted() {
     let _hermetic = HermeticTestEnv::enter("envelope-fidelity-collect");
     let harness = McpSimHarness::new();
     harness.prepare_collect();
@@ -135,22 +134,22 @@ fn tooth2_collect_returns_the_same_full_envelope_that_sqlite_persisted() {
     let persisted: Value =
         serde_json::from_str(&row.envelope).expect("tooth2 backing: persisted envelope is JSON");
 
-    let collected = messaging::collect(harness.workspace_path(), None, false)
-        .expect("tooth2: collect uncollected result from the existing fixture");
-    let returned = collected["collected"]
-        .as_array()
-        .expect("tooth2: collect exposes full collected[]")
-        .iter()
-        .find(|value| value["result_id"] == json!(result_id))
-        .unwrap_or_else(|| {
-            panic!(
-                "tooth2 backing: collect must return persisted result {result_id}; output={collected}"
-            )
-        });
-
     assert_eq!(
-        returned, &persisted,
-        "tooth2 regression point: collect `collected[]` must return the exact canonical SQLite envelope without a second projection or narrowing"
+        row.status, "collected",
+        "tooth2 auto-finalization must mark the durable result collected"
+    );
+    let mut expected = submitted.clone();
+    let expected_object = expected
+        .as_object_mut()
+        .expect("tooth2 submitted envelope object");
+    expected_object.insert("result_id".to_string(), json!(result_id));
+    expected_object.insert(
+        "presentation".to_string(),
+        persisted["presentation"].clone(),
+    );
+    assert_eq!(
+        persisted, expected,
+        "tooth2 regression point: auto-finalization must preserve the exact canonical SQLite envelope without a second projection or narrowing"
     );
 }
 

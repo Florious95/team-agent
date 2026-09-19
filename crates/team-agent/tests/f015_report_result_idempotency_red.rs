@@ -46,8 +46,8 @@ fn duplicate_report_result_preserves_first_result_row() {
     let stored: serde_json::Value =
         serde_json::from_str(&raw_envelope).expect("stored envelope json");
     assert_eq!(
-        status, "success",
-        "duplicate report_result must preserve the first status, not replace it"
+        status, "collected",
+        "auto-finalization marks the preserved first result row collected without replacing it"
     );
     assert_eq!(
         stored.get("summary").and_then(serde_json::Value::as_str),
@@ -100,7 +100,9 @@ fn duplicate_report_result_is_duplicate_ignored_and_does_not_requeue_notificatio
     );
 
     assert_eq!(
-        second_out.get("status").and_then(serde_json::Value::as_str),
+        second_out
+            .get("notification_status")
+            .and_then(serde_json::Value::as_str),
         Some("duplicate_ignored"),
         "duplicate report_result must return an explicit duplicate_ignored outcome"
     );

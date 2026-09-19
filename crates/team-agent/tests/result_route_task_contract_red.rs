@@ -334,10 +334,12 @@ fn tp07_existing_result_id_dedupe_remains_a_route_independent_regression_lock() 
             "TP07 regression: duplicate report_result must retain one canonical row for route={route}"
         );
         let (_, status, envelope) = case.stored_result(&result_id).expect("canonical result");
-        assert_eq!(status, "success");
+        assert_eq!(status, "collected");
         assert_eq!(envelope["summary"], json!("first canonical result"));
         assert_eq!(
-            duplicate.get("status").and_then(Value::as_str),
+            duplicate
+                .get("notification_status")
+                .and_then(Value::as_str),
             Some("duplicate_ignored"),
             "TP07 regression: duplicate outcome stays explicit for route={route}"
         );
@@ -358,8 +360,8 @@ fn tp10_custom_status_bytes_survive_the_durable_result_store() {
         case.submit(&task_id, &result_id, status, "opaque status regression");
         let (_, stored_status, stored) = case.stored_result(&result_id).expect("stored status");
         assert_eq!(
-            stored_status, status,
-            "TP10 status column must preserve the task-local string byte/semantic value"
+            stored_status, "collected",
+            "TP10 auto-finalization stores collected bookkeeping status"
         );
         assert_eq!(
             stored["status"],
@@ -425,11 +427,9 @@ fn tp13_stage_outcome_is_only_an_opaque_pipeline_result_fact() {
         let result_id = format!("res-tp13-{index}");
         case.seed_tasks(&[task(&task_id, Some("pipeline"))]);
         case.submit(&task_id, &result_id, status, "stage word is task-local");
-        let (_, stored_status, _) = case.stored_result(&result_id).expect("stage result");
-        assert_eq!(
-            stored_status, status,
-            "TP13 stage outcome changed in transit"
-        );
+        let (_, stored_status, stored) = case.stored_result(&result_id).expect("stage result");
+        assert_eq!(stored_status, "collected", "TP13 result bookkeeping must auto-finalize");
+        assert_eq!(stored["status"], json!(status), "TP13 stage outcome changed in transit");
         assert_eq!(
             case.leader_message_count(&task_id),
             0,

@@ -249,13 +249,6 @@ fn r2_status_comes_from_the_envelope_after_collect_rewrites_the_column() {
     let case = Case::new("case-results-r2", &[task("case-r2", Some("pipeline"))]);
     let custom_status = "red_gate/等待复核";
     case.report("case-r2", "res-r2-status", custom_status, json!([]), None);
-    let collected = case.run_collect();
-    assert!(
-        collected.status.success(),
-        "R2 setup: collect must run before reading; stdout={} stderr={}",
-        String::from_utf8_lossy(&collected.stdout),
-        String::from_utf8_lossy(&collected.stderr)
-    );
     let stored_column: String = case
         .conn()
         .query_row(
@@ -263,10 +256,10 @@ fn r2_status_comes_from_the_envelope_after_collect_rewrites_the_column() {
             [],
             |row| row.get(0),
         )
-        .expect("read post-collect status column");
+        .expect("read auto-finalized status column");
     assert_eq!(
         stored_column, "collected",
-        "R2 positive control: collect must really rewrite the status column"
+        "R2 positive control: report_result auto-finalization must mark the status column"
     );
 
     let body = results_body(case.run_results("case-r2"), "R2");
@@ -289,17 +282,6 @@ fn r3_two_reads_are_strictly_non_consuming_and_non_notifying() {
         json!([{"path": "artifact://r3/report.md"}]),
         None,
     );
-    let snapshot = case.snapshot("case-results-r3-before-read");
-
-    let control_collect = case.run_collect();
-    assert!(
-        control_collect.status.success(),
-        "R3 setup: control collect failed; stdout={} stderr={}",
-        String::from_utf8_lossy(&control_collect.stdout),
-        String::from_utf8_lossy(&control_collect.stderr)
-    );
-    case.restore(&snapshot);
-
     let before = read_side_effects(&case.conn());
     let first = results_body(case.run_results("case-r3"), "R3-first");
     let second = results_body(case.run_results("case-r3"), "R3-second");
@@ -317,15 +299,10 @@ fn r3_two_reads_are_strictly_non_consuming_and_non_notifying() {
         "R3 RED leader_notified: a read must not enqueue any leader inbox message"
     );
 
-    let after_collect = case.run_collect();
     assert_eq!(
-        (after_collect.status.code(), &after_collect.stdout, &after_collect.stderr),
-        (
-            control_collect.status.code(),
-            &control_collect.stdout,
-            &control_collect.stderr
-        ),
-        "R3 RED result_consumed: collect output changed after two supposedly read-only results calls"
+        read_side_effects(&case.conn()),
+        after,
+        "R3 RED result_consumed: results reads must remain non-consuming after auto-finalization"
     );
 }
 
