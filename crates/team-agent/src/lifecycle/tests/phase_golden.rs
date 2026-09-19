@@ -1,8 +1,8 @@
 use super::launch_spawn::seed_healthy_coordinator;
 use super::*;
 use crate::cli::{
-    cmd_collect, cmd_diagnose, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult,
-    CollectArgs, DiagnoseArgs, SendArgs, StatusArgs,
+    cmd_diagnose, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult, DiagnoseArgs,
+    SendArgs, StatusArgs,
 };
 use crate::transport::test_support::OfflineTransport;
 use crate::transport::WindowName;
@@ -275,12 +275,6 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         to_name: None,
         to_leader: None,
     });
-    let collect = cmd_collect(&CollectArgs {
-        workspace: workspace.clone(),
-        result_file: None,
-        json: true,
-        team: Some(spec.team_key.to_string()),
-    });
     let lifecycle_transport = codex_ready_transport()
         .with_session_present(true)
         .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")]);
@@ -303,7 +297,6 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
             { "step": "status-json", "result": cmd_value(status_compact) },
             { "step": "status-detail-json", "result": cmd_value(status_detail) },
             { "step": "send", "result": cmd_value(send) },
-            { "step": "collect", "result": cmd_value(collect) },
             { "step": "phase-lifecycle-op", "output": lifecycle },
             {
                 "step": "shutdown-keep-logs",

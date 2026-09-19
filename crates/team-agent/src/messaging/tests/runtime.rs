@@ -595,36 +595,16 @@ fn report_result_valid_envelope_returns_ok_with_result_id() {
 }
 
 #[test]
-fn report_result_funnels_into_leader_delivery_primitive_not_queued_scheduled_event() {
-    // #230 N31/N32 funnel (cr verdict §3 I-3 + MUST-8):
-    //
-    // [OLD assertion] report_result inserted a parallel `scheduled_events(kind='send',
-    // target='leader', status='pending')` row + returned `notification_status="queued"`,
-    // and the worker-facing tool body claimed success while leader had not yet seen the
-    // result. That queued-only path was MUST-8 / I-3 violating — `notification_status=
-    // queued` was returned as success but the leader pane never actually got the text.
-    //
-    // [NEW assertion] report_result now synchronously funnels through the shared leader-
-    // delivery primitive (`send_to_leader_receiver`), creating a `messages` row that
-    // `deliver_pending_messages` picks up on the same tick (NO `scheduled_events` row).
-    // Without a bound leader pane (this fixture has no `leader_receiver.pane_id`), the
-    // primitive returns I-4 `rebind_required` (Blocked / ok=false) — the row is persisted
-    // as `failed` for audit and the tool body's `notification_status` is `rebind_required`,
-    // NOT a misleading `queued` success. The contract grep that bans `queue_report_result_
-    // notification` / `notification_status="queued[_only]"` literals in `results.rs` is the
-    // direct mechanical counterpart of this assertion.
-    let ws = tmp_ws("reportnotify");
+fn report_result_auto_finalizes_and_queues_compact_leader_notification() {
+    let ws = tmp_ws("reportauto");
     crate::state::persist::save_runtime_state(
         &ws,
         &serde_json::json!({
-            "session_name": null,
-            "leader": {"id": "leader"},
             "agents": {"worker": {"status": "running"}},
             "tasks": [{"id": "task_1", "status": "running", "assignee": "worker"}]
         }),
     )
     .unwrap();
-    let store = store_for(&ws);
     let envelope = json(serde_json::json!({
         "schema_version": "result_envelope_v1",
         "task_id": "task_1",
@@ -639,63 +619,97 @@ fn report_result_funnels_into_leader_delivery_primitive_not_queued_scheduled_eve
     }));
 
     let out = report_result(&ws, &envelope).unwrap();
-    let result_id = out
-        .get("result_id")
-        .and_then(|v| v.as_str())
-        .expect("report_result returns generated result_id");
-    assert!(
-        result_id.starts_with("res_"),
-        "MessageStore.add_result generates res_* ids; got {result_id}"
-    );
+    assert_eq!(out["finalization_status"], "auto_finalized");
+    assert_eq!(out["notification_status"], "queued");
+    assert_eq!(out["leader_notified"], false);
 
-    // No `scheduled_events` rows: the queued parallel path is gone.
+    let store = store_for(&ws);
     let conn = seed_conn(&store);
-    let scheduled_count: i64 = conn
-        .query_row("select count(*) from scheduled_events", [], |row| {
-            row.get(0)
-        })
+    let result_status: String = conn
+        .query_row("select status from results", [], |row| row.get(0))
+        .unwrap();
+    let message_count: i64 = conn
+        .query_row("select count(*) from messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(result_status, "collected");
+    assert_eq!(message_count, 1);
+    let (presentation, content): (String, String) = conn
+        .query_row(
+            "select presentation, content from messages",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .unwrap();
     assert_eq!(
-        scheduled_count, 0,
-        "N31/N32 funnel: report_result must NOT insert a parallel scheduled_events 'send' row; the leader-delivery primitive is the single funnel"
+        serde_json::from_str::<serde_json::Value>(&presentation).unwrap()["class"],
+        "stage_result"
     );
-
-    // Tool body: no `queued`/`queued_only` notification_status. Without a bound leader
-    // pane this fixture surfaces I-4 `rebind_required` (ok=false on the leader delivery,
-    // but the result row + audit trail are durable for rebind replay).
+    assert!(content.len() < 320, "leader notification must stay compact");
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(state["tasks"][0]["status"], "done");
     assert_eq!(
-        out.get("notification_status").and_then(|v| v.as_str()),
-        Some("rebind_required"),
-        "I-4: unbound leader pane → rebind_required, never queued/queued_only success"
-    );
-    assert_eq!(
-        out.get("leader_notified").and_then(|v| v.as_bool()),
-        Some(false),
-        "I-4: leader_notified=false when no leader pane is bound"
+        state["tasks"][0]["accepted_result_id"].as_str().is_some(),
+        true
     );
     assert!(
-        out.get("notification_event_id")
-            .is_some_and(|v| v.is_null()),
-        "no scheduled_events row → notification_event_id is null"
+        std::fs::read_to_string(ws.join(".team/logs/events.jsonl"))
+            .unwrap()
+            .contains("\"collect.result\"")
     );
+}
 
-    // Audit events: the funnel emits leader_receiver.delivery_blocked (I-4 rebind),
-    // and the legacy mcp.report_result_notify_queued audit is gone.
-    let events_path = ws.join(".team").join("logs").join("events.jsonl");
-    let event_lines =
-        std::fs::read_to_string(events_path).expect("report_result writes events.jsonl");
-    assert!(
-        event_lines.contains("\"leader_receiver.delivery_blocked\""),
-        "I-4 rebind path must emit leader_receiver.delivery_blocked audit; got {event_lines}",
-    );
-    assert!(
-        !event_lines.contains("mcp.report_result_notify_queued"),
-        "legacy queued-notification audit must be gone; got {event_lines}",
-    );
-    assert!(
-        event_lines.contains("\"mcp.report_result\""),
-        "report_result still emits its own audit event; got {event_lines}",
-    );
+#[test]
+fn report_result_message_scope_finalizes_latest_assigned_task() {
+    let ws = tmp_ws("reportauto-message");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({
+            "active_team_key": "team-a",
+            "teams": {
+                "team-a": {
+                    "agents": {"worker": {"status": "running"}},
+                    "tasks": [{"id": "task_initial", "status": "pending", "assignee": "worker"}]
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let store = store_for(&ws);
+    let conn = seed_conn(&store);
+    conn.execute(
+        "insert into messages(message_id, owner_team_id, sender, recipient, status, content, created_at) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            "msg_turn",
+            "team-a",
+            "leader",
+            "worker",
+            "delivered",
+            "complete the task",
+            "2026-09-19T00:00:00Z",
+        ],
+    )
+    .unwrap();
+    let envelope = json(serde_json::json!({
+        "schema_version": "result_envelope_v1",
+        "task_id": "msg_turn",
+        "agent_id": "worker",
+        "status": "success",
+        "summary": "done",
+        "changes": [],
+        "tests": [],
+        "risks": [],
+        "artifacts": [],
+        "next_actions": []
+    }));
+
+    let out = report_result(&ws, &envelope).unwrap();
+    assert_eq!(out["finalization_status"], "auto_finalized");
+    assert_eq!(out["notification_status"], "queued");
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(state["teams"]["team-a"]["tasks"][0]["status"], "done");
+    assert!(state["teams"]["team-a"]["tasks"][0]["accepted_result_id"]
+        .as_str()
+        .is_some());
 }
 
 #[test]
@@ -2420,56 +2434,6 @@ fn retry_result_deliveries_retries_notify_failed_watcher() {
         notice.result_id.as_deref(),
         Some(rid.as_str()),
         "retry resolves and carries the watcher's result_id (rebind_retry path)"
-    );
-}
-
-// ════════════════════════════════════════════════════════════════════════
-// GROUP W — collect_results_and_notify_watchers orchestration shape.
-// results.py:430-447.
-// ════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn collect_results_and_notify_watchers_returns_concrete_ok_shape() {
-    // SEEDED contract (results.py:430-447): with NO uncollected results, collect() is
-    // skipped (the `if store.results(uncollected_only=True)` guard is false), so the
-    // result stays {ok:true, collected_results:[]}; a seeded notify_failed watcher
-    // whose result_id has no matching results row is resolved to None by
-    // retry_result_deliveries → skipped → notified stays []. Probed golden (against
-    // exactly this fixture): {"ok": true, "collected": 0, "notified": []}.
-    // (The previous test asserted only out["ok"].is_some(), trivially passed by
-    // {"ok": false}.)
-    let ws = tmp_ws("collectnotify");
-    let store = store_for(&ws);
-    let log = EventLog::new(&ws);
-
-    seed_watcher(
-        &store,
-        "w-orphan",
-        "team-a",
-        "t1",
-        "alice",
-        "notify_failed",
-        Some("res_missing"),
-        None,
-    );
-
-    let out = collect_results_and_notify_watchers(&ws, &log).unwrap();
-    assert_eq!(
-        out.get("ok").and_then(|v| v.as_bool()),
-        Some(true),
-        "ok==true"
-    );
-    assert_eq!(
-        out.get("collected").and_then(|v| v.as_i64()),
-        Some(0),
-        "no uncollected results → collected==0"
-    );
-    assert_eq!(
-        out.get("notified")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len()),
-        Some(0),
-        "orphan watcher (missing result) is skipped → notified empty"
     );
 }
 

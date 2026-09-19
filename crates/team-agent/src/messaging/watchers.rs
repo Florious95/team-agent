@@ -27,7 +27,7 @@ use super::{MessagingError, WatcherNotice, RESULT_DELIVERY_MAX_ATTEMPTS};
 
 /// `notify_result_watchers` (`result_delivery.py:38`):匹配 + 去重 + (有界) 投递 result 给 leader
 /// watcher。**恰好一次** (Gap 32/38):同 result_id 多 watcher → 1 次注入,余 `superseded`。
-/// 去重唯一原语 = [`MessageStore::claim_leader_notification_delivery`]。`collect`/coordinator tick 调。
+/// 去重唯一原语 = [`MessageStore::claim_leader_notification_delivery`]。由 watcher/rebind recovery 调用。
 pub(crate) fn notify_result_watchers(
     workspace: &Path,
     result: &serde_json::Value,

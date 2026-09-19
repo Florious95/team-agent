@@ -1,7 +1,9 @@
 //! `team-agent` 二进制入口。
 
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned());
     let command = args.next();
     if matches!(command.as_deref(), Some("fake-worker")) {
         let mut workspace = None;
@@ -35,7 +37,10 @@ fn main() -> anyhow::Result<()> {
         team_agent::mcp_server::main(&workspace, &[])?;
         return Ok(());
     }
-    let argv = std::env::args().skip(1).collect::<Vec<_>>();
+    let argv = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     let cwd = std::env::current_dir()?;
     std::process::exit(team_agent::cli::run(&argv, &cwd).code());
 }

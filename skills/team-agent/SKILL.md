@@ -7,7 +7,7 @@ last_verified_against: "0.5.66"
 
 # Team Agent
 
-Sealed appliance for someone who just got the CLI. Operator handbook (permissions, models, routing, recovery): `docs/reference/team-agent-operator.md`.
+Sealed appliance for someone who just got the CLI. Operator handbook (permissions, models, routing, recovery): `references/team-agent-operator.md`.
 
 If `team-agent --version` does not match `last_verified_against`, do not copy examples as current truth. Learn from the live CLI:
 
@@ -29,11 +29,11 @@ team-agent doctor --help
 
 **On failure:** if the CLI prints a structured `action`, run that `action` first, then stop. Do not guess flags. `coordinator.session_missing` is a self-healing transient — re-check `status --json`; do not shutdown because of it.
 
-The current user-facing agent is the leader (orchestrate only). Workers call `report_result` exactly once. Nested teams: `skills/team-agent/references/team-in-team.md`.
+The current user-facing agent is the leader (orchestrate only). Workers call `report_result` exactly once. Nested teams: `references/team-in-team.md`.
 
 ## Provider Capability Matrix
 
-Claude / Codex / Copilot / Gemini / fake: `docs/reference/team-agent-operator.md`. These two are in the runtime but were missing from that table:
+Claude / Codex / Copilot / Gemini / fake: `references/team-agent-operator.md`. These two are in the runtime but were missing from that table:
 `quick-start` / `restart` / `claim-leader` JSON is compact by default (`ok`, `status`/`reason`, next action, attach/send, and `readiness.all_workers_spawned`); pass `--detail` only for internal diagnostics.
 
 | Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |

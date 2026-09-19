@@ -223,10 +223,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
-        "collect" => {
-            cmd_collect_for_team(&collect_args(args, cwd)?, parse_args(args).team.as_deref())
-                .map(emit_result)
-        }
         "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
         "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
@@ -275,7 +271,6 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "validate",
     "install-skill",
     "profile",
-    "collect",
     "results",
     "wait",
     "diagnose",
@@ -328,7 +323,6 @@ pub(crate) fn default_help() -> String {
             "quick-start",
             "send",
             "status",
-            "collect",
             "results",
             "models",
             "leaders",
@@ -441,14 +435,13 @@ fn command_help(command: Option<&str>) -> String {
         Some("attach-app-server-leader") => "usage: team-agent attach-app-server-leader [--workspace WORKSPACE] [--team TEAM] --socket unix:///path.sock --thread-id THREAD_ID [--json]".to_string(),
         Some("identity") => "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("approvals") => "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("inbox") => "usage: team-agent inbox AGENT [--workspace WORKSPACE] [--team TEAM] [--limit N] [--since CURSOR] [--json]".to_string(),
+        Some("inbox") => "usage: team-agent inbox AGENT [-n N|--limit N] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("doctor") => "usage: team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--gate orphans|comms] [--comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]".to_string(),
         Some("watch") => "usage: team-agent watch [--workspace WORKSPACE] [--team TEAM]".to_string(),
         Some("sessions") => "usage: team-agent sessions [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
         Some("install-skill") => "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]".to_string(),
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]".to_string(),
-        Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
         Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("wait") => "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]".to_string(),
         Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
@@ -842,7 +835,6 @@ struct ParsedArgs {
     confirm: bool,
     alert_type: Option<String>,
     limit: Option<usize>,
-    since: Option<String>,
     gate: Option<String>,
     comms: bool,
     fix: bool,
@@ -856,7 +848,6 @@ struct ParsedArgs {
     tail: Option<usize>,
     head: Option<usize>,
     search: Option<String>,
-    result_file: Option<PathBuf>,
     file: Option<PathBuf>,
     result: Option<String>,
     real: bool,
@@ -936,10 +927,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--from-spec" => parsed.from_spec = true,
             "--confirm" => parsed.confirm = true,
             "--alert-type" => parsed.alert_type = next_arg(args, &mut i),
-            "--limit" => {
+            "-n" | "--limit" => {
                 parsed.limit = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok())
             }
-            "--since" => parsed.since = next_arg(args, &mut i),
             "--gate" => parsed.gate = next_arg(args, &mut i),
             "--comms" => parsed.comms = true,
             "--fix" => parsed.fix = true,
@@ -955,7 +945,6 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--tail" => parsed.tail = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
             "--head" => parsed.head = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
             "--search" => parsed.search = next_arg(args, &mut i),
-            "--result-file" => parsed.result_file = next_arg(args, &mut i).map(PathBuf::from),
             "--file" => parsed.file = next_arg(args, &mut i).map(PathBuf::from),
             "--result" => parsed.result = next_arg(args, &mut i),
             "--real" => parsed.real = true,
@@ -1438,12 +1427,19 @@ fn approvals_args(args: &[String], cwd: &Path) -> ApprovalsArgs {
 }
 
 fn inbox_args(args: &[String], cwd: &Path) -> Result<InboxArgs, CliError> {
+    if args
+        .iter()
+        .any(|arg| arg == "--since" || arg.starts_with("--since="))
+    {
+        return Err(CliError::Usage(
+            "inbox only supports -n/--limit; --since is not supported".to_string(),
+        ));
+    }
     let parsed = parse_args(args);
     Ok(InboxArgs {
         agent: required_pos(&parsed, 0, "agent")?,
         workspace: workspace(&parsed, cwd),
-        limit: parsed.limit.unwrap_or(20),
-        since: parsed.since,
+        limit: parsed.limit.unwrap_or(3),
         json: parsed.json,
         team: parsed.team,
     })
@@ -1845,18 +1841,6 @@ fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
         auth_mode: parsed.auth_mode,
         proxy_mode: parsed.proxy_mode,
         json: parsed.json,
-    })
-}
-
-fn collect_args(args: &[String], cwd: &Path) -> Result<CollectArgs, CliError> {
-    let parsed = parse_args(args);
-    let workspace = workspace(&parsed, cwd);
-    refuse_if_multi_alive_team_missing_scope("collect", &workspace, parsed.team.as_deref())?;
-    Ok(CollectArgs {
-        workspace,
-        result_file: parsed.result_file,
-        json: parsed.json,
-        team: parsed.team,
     })
 }
 
@@ -2349,15 +2333,11 @@ mod tests {
                     "--json",
                 ][..],
             ),
-            (
-                "collect",
-                &["--workspace", "--team", "--result-file", "--json"][..],
-            ),
             ("stuck-list", &["--workspace", "--team", "--json"][..]),
             ("approvals", &["--workspace", "--team", "--json"][..]),
             (
                 "inbox",
-                &["--workspace", "--team", "--limit", "--since", "--json"][..],
+                &["--workspace", "--team", "-n", "--limit", "--json"][..],
             ),
             ("sessions", &["--workspace", "--team", "--json"][..]),
             ("diagnose", &["--workspace", "--team", "--json"][..]),
@@ -2666,37 +2646,6 @@ mod tests {
     }
 
     #[test]
-    fn refuse_helper_passes_when_explicit_team_provided_even_in_multi_alive() {
-        let ws = tmp_workspace();
-        seed_two_alive_teams_in(&ws);
-        assert!(
-            refuse_if_multi_alive_team_missing_scope("collect", &ws, Some("alpha")).is_ok(),
-            "explicit --team alpha must bypass the ambiguity gate"
-        );
-    }
-
-    #[test]
-    fn refuse_helper_refuses_when_multi_alive_team_and_no_explicit_team() {
-        let ws = tmp_workspace();
-        seed_two_alive_teams_in(&ws);
-        let err = refuse_if_multi_alive_team_missing_scope("collect", &ws, None)
-            .expect_err("multi-alive-team must refuse without --team");
-        let message = err.to_string();
-        assert!(
-            message.contains("multiple alive teams"),
-            "refusal must name the ambiguity; got: {message}"
-        );
-        assert!(
-            message.contains("alpha") && message.contains("beta"),
-            "refusal must list candidate teams; got: {message}"
-        );
-        assert!(
-            message.contains("collect"),
-            "refusal must name the command for diagnostic clarity; got: {message}"
-        );
-    }
-
-    #[test]
     fn stuck_cancel_args_builder_refuses_on_multi_alive_team() {
         let ws = tmp_workspace();
         seed_two_alive_teams_in(&ws);
@@ -2705,18 +2654,6 @@ mod tests {
         assert!(
             err.to_string().contains("multiple alive teams"),
             "stuck-cancel args builder must surface the refusal; got: {err}"
-        );
-    }
-
-    #[test]
-    fn collect_args_builder_refuses_on_multi_alive_team() {
-        let ws = tmp_workspace();
-        seed_two_alive_teams_in(&ws);
-        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
-        let err = collect_args(&argv, &ws).expect_err("must refuse");
-        assert!(
-            err.to_string().contains("multiple alive teams"),
-            "collect args builder must surface the refusal; got: {err}"
         );
     }
 

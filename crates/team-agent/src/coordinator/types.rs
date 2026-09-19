@@ -543,7 +543,7 @@ pub struct LeaderApiError {
     pub message: String,
 }
 
-/// `_collect_results_and_notify_watchers` 结果(`results.py:430`,step 11 拥有)。**PLACEHOLDER**。
+/// Result projection reported by a coordinator tick. Report results now finalize inline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectedResult {
     pub result_id: String,

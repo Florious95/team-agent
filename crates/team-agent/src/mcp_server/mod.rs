@@ -22,7 +22,7 @@
 //!     `mcp.identity_inference_failed` / `mcp.task_inference_failed` audit events.
 //!   - [`load_runtime_state`] / [`save_runtime_state`] (step 5 persist) — `assign_task`
 //!     / `update_state` read-modify-write; `get_visible_peers` reads team scope.
-//!   - [`messaging`] (step 11) — `send_message` / `report_result` / `collect` /
+//!   - [`messaging`] (step 11) — `send_message` / auto-finalizing `report_result` /
 //!     `stuck_list` / `stuck_cancel` delegated by the tool handlers.
 //!   - [`crate::model::enums`] (step 2) — [`ResultStatus`] / [`ChangeKind`] /
 //!     [`TestStatus`] / [`RiskSeverity`] are the normalized result-envelope value

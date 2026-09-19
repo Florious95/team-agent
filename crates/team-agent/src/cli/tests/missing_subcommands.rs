@@ -275,36 +275,6 @@ fn seed_team_spec(ws: &std::path::Path) {
     std::fs::write(ws.join("team.spec.yaml"), spec).unwrap();
 }
 
-fn seed_collect_runtime_state(ws: &std::path::Path) {
-    crate::state::persist::save_runtime_state(
-        ws,
-        &json!({
-            "active_team_key": "fake-e2e",
-            "team_dir": ws.to_string_lossy().to_string(),
-            "spec_path": ws.join("team.spec.yaml").to_string_lossy().to_string(),
-            "session_name": "team-agent-fake-e2e",
-            "leader": {"id": "leader"},
-            "agents": {
-                "fake_impl": {
-                    "status": "running",
-                    "provider": "fake",
-                    "role": "implementation_engineer",
-                    "window": "fake_impl",
-                    "owner_team_id": "fake-e2e"
-                }
-            },
-            "tasks": [{
-                "id": "task_impl",
-                "title": "Fake implementation",
-                "type": "implementation",
-                "status": "pending",
-                "assignee": "fake_impl"
-            }]
-        }),
-    )
-    .unwrap();
-}
-
 // ── sessions ── golden cli/parser.py:230 `cmd_sessions` -> runtime.sessions(ws). EXIT 0.
 // `team-agent sessions --workspace <ws> --json` on an empty ws ->
 //   {"ok":true,"sessions":[],"workspace":"<ws>"}  (--json sort_keys). RED: unrouted -> Error.
@@ -322,44 +292,6 @@ fn dispatch_routes_sessions_subcommand() {
              today it falls to the unknown-subcommand arm (emit.rs:77) -> Error"
         );
     let _ = std::fs::remove_dir_all(&ws);
-}
-
-// ── collect ── golden parser.py:292 `cmd_collect` -> runtime.collect(ws). With a valid
-// team.spec.yaml present and nothing to collect -> EXIT 0, golden:
-//   {"collected":[],"collected_results":[],"coordinator":{"ok":false,"status":"not_required"},
-//    "delivered_messages":[],"invalid_results":[],"ok":true,"results":{...},"state_file":"<ws>/team_state.md"}
-// RED: unrouted -> Error.
-#[test]
-#[serial(env)]
-fn dispatch_routes_collect_with_spec() {
-    let _env = EnvUnsetGuard::unset(&[
-        "TEAM_AGENT_WORKSPACE",
-        "TEAM_AGENT_TEAM_ID",
-        "TEAM_AGENT_OWNER_TEAM_ID",
-        "TEAM_AGENT_ACTIVE_TEAM",
-        "TEAM_AGENT_ID",
-        "TEAM_AGENT_LEADER_PANE_ID",
-        "TEAM_AGENT_LEADER_SESSION_UUID",
-        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
-        "TEAM_AGENT_LEADER_PROVIDER",
-        "TMUX",
-        "TMUX_PANE",
-    ]);
-    let ws = tmp_workspace();
-    let _cleanup = WorkspaceCleanup(ws.clone());
-    seed_team_spec(&ws);
-    seed_collect_runtime_state(&ws);
-    let code = run(
-        &cli_argv(&["collect", "--workspace", &ws.to_string_lossy(), "--json"]),
-        &ws,
-    );
-    assert_eq!(
-            code,
-            ExitCode::Ok,
-            "`collect` must ROUTE to cmd_collect (parser.py:292); with a valid spec golden exits 0 \
-             {{collected,collected_results,coordinator,delivered_messages,invalid_results,ok,results,state_file}}; \
-             today -> unknown-subcommand Error"
-        );
 }
 
 // ── diagnose ── attached is host-registry authority, not state.json self-sign.

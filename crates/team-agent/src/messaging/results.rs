@@ -1,5 +1,5 @@
 //!
-//! results.py — collect + report_result + envelope 校验编排 (card §66/§67)。
+//! results.py — report_result + envelope 校验编排 (card §66/§67)。
 
 use std::path::{Path, PathBuf};
 
@@ -7,12 +7,11 @@ use rusqlite::params;
 
 use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
+use crate::model::ids::TaskId;
 
 use super::helpers::{next_result_id, required_str, validate_result_envelope};
 use super::types::SEND_RETRY_MAX_ATTEMPTS;
-use super::watchers::retry_result_deliveries;
 use super::MessagingError;
-use crate::model::ids::TaskId;
 use crate::state::projection::OwnerTeamResolution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,6 +659,14 @@ fn task_exists(state: &serde_json::Value, task_id: &str) -> bool {
         })
 }
 
+fn task_exists_for_owner(state: &serde_json::Value, owner_team: &str, task_id: &str) -> bool {
+    state
+        .get("teams")
+        .and_then(|teams| teams.get(owner_team))
+        .is_some_and(|team| task_exists(team, task_id))
+        || task_exists(state, task_id)
+}
+
 fn is_message_scoped_result(
     conn: &rusqlite::Connection,
     task_id: &str,
@@ -752,8 +759,7 @@ fn count_results(
     }
 }
 
-/// `report_result` (`results.py:191`):worker 报结果 —— 校验 envelope、存 result、ack 任务消息、
-/// **排队** send 事件通知 leader、推进 orchestrator (软依赖,失败仅记 `orchestrator.advance_skipped`)。
+/// `report_result` (`results.py:191`): worker 报结果 —— 校验 envelope、持久化并自动结案。
 /// MCP `report_result` 工具调。
 pub fn report_result(
     workspace: &Path,
@@ -788,7 +794,7 @@ fn report_result_for_owner_team_inner(
     workspace: &Path,
     envelope: &serde_json::Value,
     explicit_owner_team: Option<&str>,
-    fallback_primary_error: Option<&str>,
+    _fallback_primary_error: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
     if envelope.get("result_route").is_some() {
         return Err(MessagingError::Validation(
@@ -865,327 +871,95 @@ fn report_result_for_owner_team_inner(
         status,
         Some(&owner_team),
     )?;
-    if !inserted {
-        let log = EventLog::new(workspace);
-        log.write(
+    let event_log = EventLog::new(workspace);
+    let finalized_scope = auto_finalize_result(
+        workspace,
+        &conn,
+        &state_for_owner,
+        &owner_team,
+        &result_id,
+        task_id,
+        agent_id,
+    )?;
+    if inserted {
+        super::watchers::notify_fifo_result_watchers(&conn, &event_log, task_id, &result_id)?;
+    } else {
+        event_log.write(
             "mcp.report_result_duplicate_ignored",
             serde_json::json!({
-                "notification_status": "duplicate_ignored",
                 "owner_team_id": owner_team,
                 "result_id": result_id,
             }),
         )?;
-        let mut out = serde_json::Map::new();
-        out.insert("ok".to_string(), serde_json::Value::Bool(true));
-        out.insert(
-            "status".to_string(),
-            serde_json::Value::String("duplicate_ignored".to_string()),
-        );
-        out.insert(
-            "result_id".to_string(),
-            serde_json::Value::String(result_id),
-        );
-        out.insert(
-            "task_id".to_string(),
-            serde_json::Value::String(task_id.to_string()),
-        );
-        copy_report_attribution_fields(envelope, &mut out);
-        out.insert(
-            "agent_id".to_string(),
-            serde_json::Value::String(agent_id.to_string()),
-        );
-        out.insert("acknowledged_messages".to_string(), serde_json::json!([]));
-        out.insert(
-            "leader_notified".to_string(),
-            serde_json::Value::Bool(false),
-        );
-        out.insert(
-            "notification_message_id".to_string(),
-            serde_json::Value::Null,
-        );
-        out.insert(
-            "notification_status".to_string(),
-            serde_json::Value::String("duplicate_ignored".to_string()),
-        );
-        out.insert(
-            "notification_channel".to_string(),
-            serde_json::Value::String("coordinator".to_string()),
-        );
-        out.insert("notification_event_id".to_string(), serde_json::Value::Null);
-        return Ok(serde_json::Value::Object(out));
     }
-    let event_log = EventLog::new(workspace);
-    super::watchers::notify_fifo_result_watchers(&conn, &event_log, task_id, &result_id)?;
-    if presentation.effective_sink != super::presentation::PresentationSink::Leader {
-        event_log.write(
-            "presentation.stored_without_live_inject",
-            serde_json::json!({
-                "result_id": result_id,
-                "owner_team_id": owner_team,
-                "requested_sink": presentation.requested_sink,
-                "effective_sink": presentation.effective_sink,
-                "class": presentation.class,
-                "policy_reason": presentation.policy_reason,
-            }),
-        )?;
-        event_log.write(
-            "mcp.report_result",
-            serde_json::json!({
-                "leader_notified": false,
-                "notification_channel": presentation.effective_sink,
-                "notification_message_id": serde_json::Value::Null,
-                "notification_status": "stored_not_presented",
-                "owner_team_id": owner_team,
-                "result_id": result_id,
-            }),
-        )?;
-        let mut out = serde_json::Map::new();
-        out.insert("ok".to_string(), serde_json::Value::Bool(true));
-        out.insert(
-            "result_id".to_string(),
-            serde_json::Value::String(result_id),
-        );
-        out.insert(
-            "task_id".to_string(),
-            serde_json::Value::String(task_id.to_string()),
-        );
-        copy_report_attribution_fields(envelope, &mut out);
-        out.insert(
-            "agent_id".to_string(),
-            serde_json::Value::String(agent_id.to_string()),
-        );
-        out.insert("acknowledged_messages".to_string(), serde_json::json!([]));
-        out.insert(
-            "leader_notified".to_string(),
-            serde_json::Value::Bool(false),
-        );
-        out.insert(
-            "notification_message_id".to_string(),
-            serde_json::Value::Null,
-        );
-        out.insert(
-            "notification_status".to_string(),
-            serde_json::Value::String("stored_not_presented".to_string()),
-        );
-        out.insert(
-            "notification_channel".to_string(),
-            serde_json::Value::String(presentation.effective_sink.as_str().to_string()),
-        );
-        out.insert("notification_event_id".to_string(), serde_json::Value::Null);
-        if let Some(warnings) = report_result_array(envelope, "warnings") {
-            out.insert(
-                "warnings".to_string(),
-                serde_json::Value::Array(warnings.clone()),
-            );
-        }
-        return Ok(serde_json::Value::Object(out));
-    }
-    // #230 N31/N32 funnel: report_result must go through the shared leader-delivery
-    // primitive synchronously, NOT via a parallel queued scheduled_events row. The
-    // legacy path was MUST-8 / I-3 violating (the deferred notification status was returned
-    // to the caller as "success" while leader actually never saw the result text).
-    let content =
-        format_report_result_notification(&result_id, task_id, agent_id, status, envelope);
-    let state = report_owner_state(&state_for_owner, &owner_team);
-    let mut outcome = match super::leader_receiver::send_to_leader_receiver_with_presentation(
-        workspace,
-        &state,
-        "leader",
-        &content,
-        Some(&TaskId::new(task_id.to_string())),
-        agent_id,
-        false,
-        Some(&result_id),
-        None,
-        &presentation,
-        &event_log,
-    ) {
-        Ok(outcome) => outcome,
-        Err(error) if report_state_has_app_server_receiver(&state) => {
-            let message_id = format!("fallback:{result_id}");
-            crate::messaging::DeliveryOutcome {
-                ok: false,
-                status: crate::messaging::DeliveryStatus::Failed,
-                message_status: super::helpers::MessageStatusShadow("failed".to_string()),
-                message_id: Some(message_id),
-                verification: Some(format!("leader_funnel_error:{error}")),
-                stage: None,
-                reason: Some(crate::messaging::DeliveryRefusal::LeaderNotAttached),
-                channel: Some("codex_app_server".to_string()),
-                ack_forced_off: false,
-                turn_verification: None,
-            }
-        }
-        Err(error) => {
-            let message_id = format!("fallback:{result_id}");
-            let fallback_error = fallback_primary_error_text(
-                fallback_primary_error,
-                format!("leader_funnel_error:{error}"),
-            );
-            super::leader_receiver::deliver_to_leader_fallback_pane(
-                workspace,
-                &state,
-                &message_id,
-                Some(&result_id),
-                &content,
-                false,
-                Some(&fallback_error),
-                &event_log,
-            )?
-        }
-    };
-    if let Some(message_id) = outcome.message_id.clone() {
-        let store = MessageStore::open(workspace)?;
-        // 0.5.x Phase 1d Batch 4: report_result retry uses the runtime
-        // factory transport so a conpty team's report notification
-        // goes to the shim (design §Batch 4). Previously we always
-        // built `TmuxBackend::for_workspace`, which for a conpty team
-        // silently no-op'd the retry. Factory refusal falls back to
-        // tmux workspace (byte-equivalent tmux teams; honest failure
-        // for conpty teams without a resolvable factory input).
-        let delivery_state_raw = crate::state::persist::load_runtime_state(workspace)
-            .unwrap_or_else(|_| state_for_owner.clone());
-        let delivery_state = report_owner_state(&delivery_state_raw, &owner_team);
-        let transport: Box<dyn crate::transport::Transport> =
-            match crate::transport_factory::resolve_read_only_transport(
-                workspace,
-                Some(&delivery_state),
-                crate::transport_factory::TransportPurpose::MessageDelivery,
-            ) {
-                Ok(r) => r.backend,
-                Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(workspace)),
-            };
-        let mut primary_error: Option<String> = None;
-        for attempt in 0..3 {
-            let _ = store.mark(&message_id, "accepted", None);
-            match super::delivery::deliver_pending_message(
-                workspace,
-                &store,
-                transport.as_ref(),
-                &message_id,
-                &event_log,
-                &delivery_state,
-            ) {
-                Ok(next) => outcome = next,
-                Err(error) => {
-                    primary_error = Some(format!("primary_delivery_error:{error}"));
-                    outcome = crate::messaging::DeliveryOutcome {
-                        ok: false,
-                        status: crate::messaging::DeliveryStatus::Failed,
-                        message_status: super::helpers::MessageStatusShadow("failed".to_string()),
-                        message_id: Some(message_id.clone()),
-                        verification: Some(error.to_string()),
-                        stage: None,
-                        reason: None,
-                        channel: Some("leader_receiver".to_string()),
-                        ack_forced_off: false,
-                        turn_verification: None,
-                    };
-                    break;
-                }
-            }
-            if outcome.ok {
-                break;
-            }
-            match super::delivery::deliver_pending_messages(
-                workspace,
-                &delivery_state,
-                transport.as_ref(),
-                &event_log,
-            ) {
-                Ok(delivered)
-                    if delivered
-                        .iter()
-                        .any(|delivered_id| delivered_id == &message_id) =>
-                {
-                    outcome = crate::messaging::DeliveryOutcome {
-                        ok: true,
-                        status: crate::messaging::DeliveryStatus::Delivered,
-                        message_status: super::helpers::MessageStatusShadow(
-                            "delivered".to_string(),
-                        ),
-                        message_id: Some(message_id.clone()),
-                        verification: None,
-                        stage: None,
-                        reason: None,
-                        channel: Some("leader_receiver".to_string()),
-                        ack_forced_off: false,
-                        turn_verification: None,
-                    };
-                    break;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    primary_error = Some(format!("primary_delivery_error:{error}"));
-                    outcome = crate::messaging::DeliveryOutcome {
-                        ok: false,
-                        status: crate::messaging::DeliveryStatus::Failed,
-                        message_status: super::helpers::MessageStatusShadow("failed".to_string()),
-                        message_id: Some(message_id.clone()),
-                        verification: Some(error.to_string()),
-                        stage: None,
-                        reason: None,
-                        channel: Some("leader_receiver".to_string()),
-                        ack_forced_off: false,
-                        turn_verification: None,
-                    };
-                    break;
-                }
-            }
-            if attempt < 2 {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-        if !outcome.ok {
-            if outcome.channel.as_deref() != Some("leader_acceptance_pending")
-                && !report_state_has_app_server_receiver(&delivery_state)
-            {
-                let fallback_error = primary_error.unwrap_or_else(|| {
-                    format!(
-                        "leader_notification_primary_failed:{}",
-                        super::helpers::status_wire(outcome.status)
-                    )
-                });
-                let fallback_error =
-                    fallback_primary_error_text(fallback_primary_error, fallback_error);
-                outcome = super::leader_receiver::deliver_to_leader_fallback_pane(
-                    workspace,
-                    &delivery_state,
-                    &message_id,
-                    Some(&result_id),
-                    &content,
-                    false,
-                    Some(&fallback_error),
-                    &event_log,
-                )?;
-            }
-        }
-    }
-    let leader_notified = matches!(outcome.status, crate::messaging::DeliveryStatus::Delivered);
-    let notification_status_wire = if leader_notified {
-        "delivered"
-    } else if outcome.channel.as_deref() == Some("leader_receipt_source_unavailable") {
-        "injected_awaiting_receipt"
-    } else if outcome.channel.as_deref() == Some("leader_acceptance_pending") {
-        "submitted_pending_acceptance"
-    } else if outcome.channel.as_deref() == Some("rebind_required")
-        || matches!(outcome.status, crate::messaging::DeliveryStatus::Blocked)
-    {
-        "rebind_required"
+    let mut leader_notified = false;
+    let mut notification_message_id = None;
+    let mut notification_channel = "none".to_string();
+    let mut notification_status = if finalized_scope.is_some() {
+        "auto_finalized".to_string()
     } else {
-        "refused"
+        "already_finalized".to_string()
     };
-    let channel = outcome
-        .channel
-        .clone()
-        .unwrap_or_else(|| "leader_receiver".to_string());
+    if inserted && presentation.effective_sink == super::presentation::PresentationSink::Leader {
+        let content = format_report_result_leader_summary(&result_id, task_id, agent_id, status, envelope);
+        let leader_state = report_owner_state(&state_for_owner, &owner_team);
+        let leader_presentation = leader_result_presentation(task_id);
+        match super::leader_receiver::send_to_leader_receiver_with_presentation(
+            workspace,
+            &leader_state,
+            "leader",
+            &content,
+            Some(&TaskId::new(task_id.to_string())),
+            agent_id,
+            false,
+            Some(&result_id),
+            None,
+            &leader_presentation,
+            &event_log,
+        ) {
+            Ok(outcome) => {
+                leader_notified = matches!(
+                    outcome.status,
+                    super::DeliveryStatus::Delivered
+                );
+                notification_message_id = outcome.message_id;
+                notification_channel = outcome
+                    .channel
+                    .unwrap_or_else(|| "leader_receiver".to_string());
+                notification_status = if leader_notified {
+                    "delivered".to_string()
+                } else if outcome.ok {
+                    "queued".to_string()
+                } else {
+                    "refused".to_string()
+                };
+            }
+            Err(error) => {
+                event_log.write(
+                    "leader_receiver.result_notification_failed",
+                    serde_json::json!({
+                        "owner_team_id": owner_team,
+                        "result_id": result_id,
+                        "error": error.to_string(),
+                    }),
+                )?;
+                notification_channel = "leader_receiver".to_string();
+                notification_status = "refused".to_string();
+            }
+        }
+    }
     event_log.write(
         "mcp.report_result",
         serde_json::json!({
             "leader_notified": leader_notified,
-            "notification_channel": channel,
-            "notification_message_id": outcome.message_id,
-            "notification_status": notification_status_wire,
+            "notification_channel": notification_channel.clone(),
+            "notification_message_id": notification_message_id.clone(),
+            "notification_status": notification_status,
+            "finalization_status": if finalized_scope.is_some() {
+                "auto_finalized"
+            } else {
+                "already_finalized"
+            },
             "owner_team_id": owner_team,
             "result_id": result_id,
         }),
@@ -1213,26 +987,28 @@ fn report_result_for_owner_team_inner(
     );
     out.insert(
         "notification_message_id".to_string(),
-        outcome
-            .message_id
-            .map_or(serde_json::Value::Null, serde_json::Value::String),
+        notification_message_id.map_or(serde_json::Value::Null, serde_json::Value::String),
     );
     out.insert(
         "notification_status".to_string(),
-        serde_json::Value::String(notification_status_wire.to_string()),
+        serde_json::Value::String(if inserted {
+            notification_status
+        } else {
+            "duplicate_ignored".to_string()
+        }),
+    );
+    out.insert(
+        "finalization_status".to_string(),
+        serde_json::Value::String(if finalized_scope.is_some() {
+            "auto_finalized".to_string()
+        } else {
+            "already_finalized".to_string()
+        }),
     );
     out.insert(
         "notification_channel".to_string(),
-        serde_json::Value::String(channel.clone()),
+        serde_json::Value::String(notification_channel),
     );
-    if channel == "rebind_required" {
-        out.insert(
-            "notification_action".to_string(),
-            serde_json::Value::String(
-                "run team-agent claim-leader or team-agent takeover".to_string(),
-            ),
-        );
-    }
     out.insert("notification_event_id".to_string(), serde_json::Value::Null);
     if let Some(warnings) = report_result_array(envelope, "warnings") {
         out.insert(
@@ -1241,6 +1017,122 @@ fn report_result_for_owner_team_inner(
         );
     }
     Ok(serde_json::Value::Object(out))
+}
+
+fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
+    let mut state = match crate::state::projection::resolve_owner_team_id(state, owner_team)
+        .canonical_key()
+    {
+        Some(team) => crate::state::projection::project_top_level_view(state, team),
+        None => state.clone(),
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "active_team_key".to_string(),
+            serde_json::Value::String(owner_team.to_string()),
+        );
+    }
+    state
+}
+
+fn leader_result_presentation(task_id: &str) -> super::presentation::PresentationDecision {
+    super::presentation::decide_presentation(
+        &super::presentation::PresentationRequest {
+            sink: super::presentation::PresentationSink::Leader,
+            class: super::presentation::PresentationClass::StageResult,
+            case_id: Some(task_id.to_string()),
+        },
+        super::presentation::PresentationSource::ReportResult,
+    )
+}
+
+const LEADER_NOTIFICATION_LIMIT_BYTES: usize = 160;
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let suffix = "...";
+    let budget = max_bytes.saturating_sub(suffix.len());
+    let mut end = 0;
+    for (index, ch) in text.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}{}", &text[..end], suffix)
+}
+
+fn format_report_result_leader_summary(
+    result_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    status: &str,
+    envelope: &serde_json::Value,
+) -> String {
+    let summary = envelope
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    truncate_utf8(
+        &format!(
+            "Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}"
+        ),
+        LEADER_NOTIFICATION_LIMIT_BYTES,
+    )
+}
+
+fn auto_finalize_result(
+    workspace: &Path,
+    conn: &rusqlite::Connection,
+    state: &serde_json::Value,
+    owner_team: &str,
+    result_id: &str,
+    task_id: &str,
+    agent_id: &str,
+) -> Result<Option<&'static str>, MessagingError> {
+    let message_scoped = is_message_scoped_result(conn, task_id, agent_id, Some(owner_team))?;
+    let scope = if message_scoped { "message" } else { "task" };
+    let projected_task_id = if message_scoped {
+        crate::mcp_server::latest_task_for_assignee(workspace, agent_id, Some(owner_team))
+    } else if task_exists_for_owner(state, owner_team, task_id) {
+        Some(task_id.to_string())
+    } else {
+        None
+    };
+    if let Some(projected_task_id) = projected_task_id {
+        crate::state::repository::StateRepository::new(workspace).commit(
+            crate::state::repository::StateWriteIntent::ResultCollection {
+                owner_team_id: Some(owner_team),
+            },
+            |latest| mark_task_done(latest, &projected_task_id, result_id),
+        )?;
+    }
+    let finalized = conn.execute(
+        "update results set status = 'collected' where result_id = ?1 and owner_team_id = ?2 and status not in ('collected', 'invalid')",
+        params![result_id, owner_team],
+    )?;
+    if finalized == 0 {
+        return Ok(None);
+    }
+    EventLog::new(workspace).write(
+        "collect.result",
+        serde_json::json!({
+            "result_id": result_id,
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "scope": scope,
+        }),
+    )?;
+    Ok(Some(scope))
 }
 
 fn task_result_route(
@@ -1289,55 +1181,6 @@ fn copy_report_attribution_fields(
             out.insert(key.to_string(), value.clone());
         }
     }
-}
-
-fn fallback_primary_error_text(cli_primary_error: Option<&str>, observed: String) -> String {
-    match cli_primary_error.filter(|error| !error.trim().is_empty()) {
-        Some(error) => format!("{error}; {observed}"),
-        None => observed,
-    }
-}
-
-fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
-    let mut state =
-        match crate::state::projection::resolve_owner_team_id(state, owner_team).canonical_key() {
-            Some(team) => crate::state::projection::project_top_level_view(state, team),
-            None => state.clone(),
-        };
-    if let Some(obj) = state.as_object_mut() {
-        obj.insert(
-            "active_team_key".to_string(),
-            serde_json::Value::String(owner_team.to_string()),
-        );
-    }
-    state
-}
-
-fn report_state_has_app_server_receiver(state: &serde_json::Value) -> bool {
-    report_leader_receiver_value(state).is_some_and(crate::codex_app_server::receiver_is_app_server)
-}
-
-fn report_leader_receiver_value(state: &serde_json::Value) -> Option<&serde_json::Value> {
-    state
-        .get("leader_receiver")
-        .or_else(|| {
-            state
-                .get("active_team_key")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|team| state.get("teams").and_then(|teams| teams.get(team)))
-                .and_then(|team| team.get("leader_receiver"))
-        })
-        .or_else(|| {
-            let teams = state.get("teams").and_then(serde_json::Value::as_object)?;
-            if teams.len() == 1 {
-                teams
-                    .values()
-                    .next()
-                    .and_then(|team| team.get("leader_receiver"))
-            } else {
-                None
-            }
-        })
 }
 
 fn insert_result_if_absent(
@@ -1543,20 +1386,6 @@ fn format_report_result_next_actions(envelope: &serde_json::Value) -> Option<Str
     }
 }
 
-/// `_collect_results_and_notify_watchers` (`results.py:430`):coordinator tick 调用 —— collect +
-/// notify_result_watchers 编排。daemon-path → Result。
-pub fn collect_results_and_notify_watchers(
-    workspace: &Path,
-    event_log: &EventLog,
-) -> Result<serde_json::Value, MessagingError> {
-    let notified = retry_result_deliveries(workspace, event_log)?;
-    Ok(serde_json::json!({
-        "ok": true,
-        "collected": 0,
-        "notified": notified
-    }))
-}
-
 #[cfg(test)]
 mod collection_tests;
 
@@ -1612,6 +1441,21 @@ mod tests {
     }
 
     #[test]
+    fn leader_result_summary_is_single_line_and_byte_bounded() {
+        let envelope = serde_json::json!({"summary": "中".repeat(4096)});
+        let summary = super::format_report_result_leader_summary(
+            "res-1",
+            "task-1",
+            "worker",
+            "success",
+            &envelope,
+        );
+        assert!(summary.len() <= 160);
+        assert!(!summary.contains('\n'));
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
     fn casefile_result_is_stored_without_a_leader_notification_row() {
         let workspace = std::env::temp_dir().join(format!(
             "ta-casefile-result-{}-{}",
@@ -1640,7 +1484,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(out["notification_status"], "stored_not_presented");
+        assert_eq!(out["notification_status"], "auto_finalized");
         assert_eq!(out["leader_notified"], false);
         let store = MessageStore::open(&workspace).unwrap();
         let conn = crate::db::schema::open_db(store.db_path()).unwrap();
@@ -1650,7 +1494,11 @@ mod tests {
         let message_count: i64 = conn
             .query_row("select count(*) from messages", [], |row| row.get(0))
             .unwrap();
+        let status: String = conn
+            .query_row("select status from results", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(result_count, 1);
+        assert_eq!(status, "collected");
         assert_eq!(message_count, 0);
     }
 }

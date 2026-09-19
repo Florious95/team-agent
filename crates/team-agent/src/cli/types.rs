@@ -44,10 +44,10 @@ pub enum CliError {
     /// state 解析失败(歧义/未找到 team 等)。透传 step 5。
     #[error("{0}")]
     State(#[from] crate::state::StateError),
-    /// messaging 委派失败(send/collect/stuck)。透传 step 11。
+    /// messaging 委派失败(send/stuck)。透传 step 11。
     #[error("{0}")]
     Messaging(crate::messaging::MessagingError),
-    /// I/O(cli-error 落盘、inbox 游标读写)。bug-084:写路径降级,不裸 panic。
+    /// I/O(cli-error 落盘)。bug-084:写路径降级,不裸 panic。
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     /// JSON 解析。
@@ -407,13 +407,12 @@ pub struct ApprovalsArgs {
     pub team: Option<String>,
 }
 
-/// `inbox`(`parser.py:217`)。`--since` ISO8601(claim-leader inbox_hint 复用)。
+/// `inbox`(`parser.py:217`)。极简消息兜底查看器。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxArgs {
     pub agent: String,
     pub workspace: PathBuf,
     pub limit: usize,
-    pub since: Option<String>,
     pub json: bool,
     /// Stage 4: explicit `--team` scope.
     pub team: Option<String>,
@@ -680,18 +679,6 @@ pub struct ProfileArgs {
     pub auth_mode: Option<String>,
     pub proxy_mode: Option<String>,
     pub json: bool,
-}
-
-/// `collect`(`parser.py:292`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollectArgs {
-    pub workspace: PathBuf,
-    pub result_file: Option<PathBuf>,
-    pub json: bool,
-    /// Stage 4: explicit `--team` scope. Destructive (consumes result
-    /// envelopes); CLI dispatch refuses bare invocation in a
-    /// multi-alive-team workspace.
-    pub team: Option<String>,
 }
 
 /// Read-only lookup of all stored result envelopes for one case.

@@ -429,83 +429,6 @@ pub fn cmd_sessions(args: &SessionsArgs) -> Result<CmdResult, CliError> {
     ))
 }
 
-/// `cmd_collect`(`parser.py:292`)。
-#[cfg(test)]
-pub(crate) fn cmd_collect(args: &CollectArgs) -> Result<CmdResult, CliError> {
-    cmd_collect_for_team(args, args.team.as_deref())
-}
-
-pub fn cmd_collect_for_team(args: &CollectArgs, team: Option<&str>) -> Result<CmdResult, CliError> {
-    let selected = match crate::state::selector::resolve_active_team(
-        &args.workspace,
-        team,
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    ) {
-        Ok(selected) => selected,
-        Err(error) => {
-            return Ok(CmdResult::from_json(
-                json!({
-                    "ok": false,
-                    "error": error.to_string(),
-                    "workspace": args.workspace.to_string_lossy().to_string(),
-                }),
-                args.json,
-            ));
-        }
-    };
-    let value = match if team.is_some() {
-        messaging::collect_for_team(
-            &selected.run_workspace,
-            args.result_file.as_deref(),
-            false,
-            Some(&selected.team_key),
-        )
-    } else {
-        messaging::collect(&selected.run_workspace, args.result_file.as_deref(), false)
-    } {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(CmdResult::from_json(
-                json!({
-                    "ok": false,
-                    "error": error.to_string(),
-                    "workspace": selected.run_workspace.to_string_lossy().to_string(),
-                }),
-                args.json,
-            ));
-        }
-    };
-    let results = value.get("results").cloned().unwrap_or_else(|| json!({}));
-    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(true);
-    Ok(CmdResult::from_json(
-        json!({
-            "collected": [],
-            "collected_results": value.get("collected_results").cloned().unwrap_or_else(|| json!([])),
-            "coordinator": {
-                "ok": false,
-                "status": "not_required",
-            },
-            "delivered_messages": value.get("delivered_messages").cloned().unwrap_or_else(|| json!([])),
-            "invalid_results": value.get("invalid_results").cloned().unwrap_or_else(|| json!([])),
-            "ok": ok,
-            "results": results,
-            "state_file": value
-                .get("state_file")
-                .cloned()
-                .unwrap_or_else(|| {
-                    json!(selected
-                        .spec_workspace
-                        .as_deref()
-                        .unwrap_or(&selected.run_workspace)
-                        .join("team_state.md")
-                        .to_string_lossy()
-                        .to_string())
-                }),
-        }),
-        args.json,
-    ))
-}
-
 pub fn cmd_results(args: &ResultsArgs) -> Result<CmdResult, CliError> {
     let selected = match crate::state::selector::resolve_active_team(
         &args.workspace,
@@ -846,14 +769,14 @@ fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
                 .mark(message_id, "delivered", None)
                 .map_err(crate::messaging::MessagingError::from)?;
         }
-        let _ = messaging::report_result(
+        let report = messaging::report_result(
             workspace,
             &json!({
                 "schema_version": "result_envelope_v1",
                 "task_id": "task_impl",
                 "agent_id": "fake_impl",
                 "status": "success",
-                "summary": "fake result collected",
+                "summary": "fake result finalized",
                 "changes": [],
                 "tests": [],
                 "risks": [],
@@ -861,25 +784,29 @@ fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
                 "next_actions": [],
             }),
         )?;
-    }
-    let mut collect = messaging::collect(workspace, None, false)?;
-    let collected = collect
-        .get("collected_results")
-        .and_then(Value::as_array)
-        .is_some_and(|items| !items.is_empty());
-    if let Some(obj) = collect.as_object_mut() {
-        obj.insert("collected".to_string(), Value::Bool(collected));
+        let auto_finalized = report
+            .get("finalization_status")
+            .and_then(Value::as_str)
+            == Some("auto_finalized");
+        let shutdown = fake_shutdown(workspace)?;
+        let ok = launch.get("ok").and_then(Value::as_bool) == Some(true)
+            && send.ok
+            && auto_finalized
+            && shutdown.get("ok").and_then(Value::as_bool) == Some(true);
+        return Ok(json!({
+            "ok": ok,
+            "launch": launch,
+            "send": send_value,
+            "report": report,
+            "shutdown": shutdown,
+        }));
     }
     let shutdown = fake_shutdown(workspace)?;
-    let ok = launch.get("ok").and_then(Value::as_bool) == Some(true)
-        && send.ok
-        && collected
-        && shutdown.get("ok").and_then(Value::as_bool) == Some(true);
     Ok(json!({
-        "ok": ok,
+        "ok": false,
         "launch": launch,
         "send": send_value,
-        "collect": collect,
+        "report": null,
         "shutdown": shutdown,
     }))
 }
@@ -1286,89 +1213,82 @@ pub fn cmd_inbox(args: &InboxArgs) -> Result<CmdResult, CliError> {
         &selected.run_workspace,
         &args.agent,
         args.limit,
-        args.since.as_deref(),
-        args.json,
         Some(&selected.team_key),
     )?;
     if args.json {
         Ok(CmdResult::from_json(value, true))
     } else {
-        Ok(CmdResult::human(format_inbox_human(
-            &selected.run_workspace,
-            &args.agent,
-            args.since.as_deref(),
-            &value,
-            Some(&selected.team_key),
-        )?))
+        Ok(CmdResult::human(format_inbox_human(&args.agent, &value)))
     }
 }
 
-fn format_inbox_human(
-    workspace: &Path,
-    agent: &str,
-    since: Option<&str>,
-    value: &Value,
-    owner_team_id: Option<&str>,
-) -> Result<String, CliError> {
+const INBOX_LINE_LIMIT_BYTES: usize = 160;
+
+fn clean_inbox_field(value: &str) -> String {
+    value.chars().filter(|ch| !ch.is_control()).collect()
+}
+
+fn truncate_inbox_line(line: &str) -> String {
+    if line.len() <= INBOX_LINE_LIMIT_BYTES {
+        return line.to_string();
+    }
+    let budget = INBOX_LINE_LIMIT_BYTES.saturating_sub("…".len());
+    let mut end = 0;
+    for (index, ch) in line.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}…", &line[..end])
+}
+
+fn format_inbox_human(agent: &str, value: &Value) -> String {
     let messages = value
         .get("messages")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut lines = Vec::new();
     if messages.is_empty() {
-        let mut line = format!("{agent}: no messages");
-        if let Some(since) = since {
-            line.push_str(" since ");
-            line.push_str(since);
-        }
-        lines.push(line);
-    } else {
-        lines.push(format!("{agent}: {} message(s)", messages.len()));
-        for message in messages {
-            let sender = message.get("sender").and_then(Value::as_str).unwrap_or("-");
-            let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-            let status = message.get("status").and_then(Value::as_str).unwrap_or("-");
-            let attempts = message
-                .get("delivery_attempts")
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            let error = message.get("error").and_then(Value::as_str).unwrap_or("-");
-            lines.push(format!(
-                "- {sender}: {content} [status={status} attempts={attempts} error={error}]"
-            ));
-        }
+        return format!("{agent}: no messages");
     }
-    let pending = uncollected_result_count(workspace, owner_team_id)?;
-    let mut note = "final results are not in inbox; use team-agent collect".to_string();
-    if pending > 0 {
-        note.push_str(&format!(" ({pending} uncollected result(s) pending)"));
-    }
-    lines.push(note);
-    Ok(lines.join("\n"))
-}
-
-fn uncollected_result_count(
-    workspace: &Path,
-    owner_team_id: Option<&str>,
-) -> Result<i64, CliError> {
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let conn = crate::db::schema::open_db(store.db_path())
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-    match owner_team_id {
-        Some(team) => conn.query_row(
-            "select count(*) from results where status not in ('collected', 'invalid') and owner_team_id = ?1",
-            [team],
-            |row| row.get::<_, i64>(0),
-        ),
-        None => conn.query_row(
-            "select count(*) from results where status not in ('collected', 'invalid')",
-            [],
-            |row| row.get::<_, i64>(0),
-        ),
-    }
-    .map_err(|e| CliError::Runtime(e.to_string()))
+    messages
+        .iter()
+        .map(|message| {
+            let id = clean_inbox_field(
+                message
+                    .get("message_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let sender = clean_inbox_field(
+                message.get("sender").and_then(Value::as_str).unwrap_or("-"),
+            );
+            let recipient = clean_inbox_field(
+                message
+                    .get("recipient")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let status = clean_inbox_field(
+                message.get("status").and_then(Value::as_str).unwrap_or("-"),
+            );
+            let time = clean_inbox_field(
+                message
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let summary = clean_inbox_field(
+                message.get("summary").and_then(Value::as_str).unwrap_or(""),
+            );
+            truncate_inbox_line(&format!(
+                "[{id}] [{sender} -> {recipient}] [{status}] [{time}] [{summary}]"
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `cmd_takeover`(`commands.py:152`)。
@@ -1629,10 +1549,30 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        agent_pane_id, append_send_guidance, quickstart_human, send_command, split_shell_argv,
+        agent_pane_id, append_send_guidance, format_inbox_human, quickstart_human, send_command,
+        split_shell_argv,
     };
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn inbox_human_output_sanitizes_controls_and_caps_each_line() {
+        let value = json!({
+            "messages": [{
+                "message_id": "msg-\u{001b}[31m".repeat(20),
+                "sender": "sender\t\u{001b}[2J".repeat(20),
+                "recipient": "worker".repeat(20),
+                "status": "delivered",
+                "created_at": "2026-09-19T00:00:00Z",
+                "summary": "中".repeat(120)
+            }]
+        });
+        let output = format_inbox_human("worker", &value);
+        for line in output.lines() {
+            assert!(line.len() <= 160, "line is {} bytes: {line:?}", line.len());
+            assert!(!line.chars().any(char::is_control), "controls leaked: {line:?}");
+        }
+    }
 
     // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
     #[test]

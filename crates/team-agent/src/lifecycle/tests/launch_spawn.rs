@@ -410,16 +410,6 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
         "status should normalize teamdir to project-root runtime state: {status:?}"
     );
 
-    let collect = crate::cli::cmd_collect(&crate::cli::CollectArgs {
-        result_file: None,
-        workspace: team.clone(),
-        json: true,
-        team: None,
-    });
-    assert!(
-        collect.is_ok(),
-        "collect should normalize teamdir to the same project-root state/spec: {collect:?}"
-    );
 }
 
 #[test]

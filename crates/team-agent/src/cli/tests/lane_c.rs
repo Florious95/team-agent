@@ -211,36 +211,44 @@ fn approvals_golden_shape_has_waiting_count_and_scan_not_agent() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// ── inbox: golden {ok,agent_id,messages,since} (status/inbox.py:35-38) — key is `agent_id`, carries
-// `since` (not `agent`/`limit`). RUST mod.rs:136-144 stub {ok,agent,limit,messages}. RED. ──────────
+// ── inbox: compact fallback projection ───────────────────────────────────────────────
 #[test]
-fn inbox_golden_shape_is_agent_id_and_since_not_agent_limit() {
+fn inbox_golden_shape_is_compact_and_scoped_to_agent() {
     let ws = tmp_workspace();
-    let v = status_port::inbox(&ws, "alpha", 20, None, true, None).expect("inbox");
+    let v = status_port::inbox(&ws, "alpha", 3, None).expect("inbox");
     let obj = v.as_object().expect("inbox dict");
+    assert_eq!(v["agent_id"], json!("alpha"));
     let order: Vec<&str> = obj.keys().map(String::as_str).collect();
-    assert_eq!(
-            order,
-            vec!["ok", "agent_id", "messages", "since"],
-            "golden inbox 4-key order {{ok,agent_id,messages,since}} (inbox.py:38); Rust stub uses agent/limit. got {order:?}"
-        );
-    assert_eq!(
-        v["agent_id"],
-        json!("alpha"),
-        "golden key is `agent_id` (not `agent`)"
-    );
-    assert!(
-        obj.contains_key("since"),
-        "golden inbox carries `since` (echoed, null here)"
-    );
-    assert!(
-        !obj.contains_key("agent"),
-        "golden inbox has NO bare `agent` key"
-    );
-    assert!(
-        !obj.contains_key("limit"),
-        "golden inbox has NO `limit` key in the result dict"
-    );
+    assert_eq!(order, vec!["ok", "agent_id", "messages"]);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn inbox_excludes_leader_stage_result_notifications() {
+    let ws = tmp_workspace();
+    let store = crate::message_store::MessageStore::open(&ws).unwrap();
+    let message_id = store
+        .create_message(
+            None,
+            "leader",
+            "worker",
+            "Task t reported success; Result id: res-1",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    conn.execute(
+        "update messages set presentation = ?1 where message_id = ?2",
+        rusqlite::params![
+            json!({"sink": "leader", "class": "stage_result"}).to_string(),
+            message_id,
+        ],
+    )
+    .unwrap();
+    let value = status_port::inbox(&ws, "leader", 3, None).expect("inbox");
+    assert!(value["messages"].as_array().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&ws);
 }
 
