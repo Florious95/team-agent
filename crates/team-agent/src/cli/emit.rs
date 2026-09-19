@@ -1069,17 +1069,29 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         ));
     }
     let parsed = parse_args(args);
-    let workspace = workspace(&parsed, cwd);
-    let agents_dir = parsed
-        .positionals
-        .first()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.clone());
-    let agents_dir = if agents_dir.is_absolute() {
-        agents_dir
-    } else {
-        workspace.join(agents_dir)
-    };
+    let positional_agents_dir = parsed.positionals.first().map(PathBuf::from).map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    });
+    let workspace = parsed
+        .workspace
+        .as_ref()
+        .map(|_| workspace(&parsed, cwd))
+        .or_else(|| {
+            positional_agents_dir
+                .as_ref()
+                .filter(|path| path.join("TEAM.md").is_file())
+                .cloned()
+        })
+        .unwrap_or_else(|| cwd.to_path_buf());
+    // A positional team directory containing TEAM.md is a complete standalone
+    // workspace. Use it as the runtime workspace unless --workspace explicitly
+    // selects another root; this prevents host owner context/state leaking into
+    // an independent quick-start target.
+    let agents_dir = positional_agents_dir.unwrap_or_else(|| workspace.clone());
     // 0.5.x Phase 1d Batch 2: validate the `--backend` literal up-front
     // so users get a fast, actionable error instead of a downstream
     // factory refusal. Accept the same literals as the factory
