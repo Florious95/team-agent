@@ -32,8 +32,8 @@ use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
 use crate::model::{paths, spec, yaml, ModelError};
 use crate::provider::wire::{
-    builtin_provider_model as wire_builtin_provider_model, is_claude_family,
-    parse_canonical_provider, provider_model_keys,
+    builtin_provider_model as wire_builtin_provider_model, parse_canonical_provider,
+    provider_model_keys,
 };
 
 pub const IGNORED_OWNER_TEAM_ID_FIELD: &str = "owner_team_id";
@@ -602,12 +602,9 @@ fn compile_role_agent_with_mode(
             })
             .unwrap_or("");
         let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
-        if effort.is_claude_only()
-            && !is_claude_family(provider_enum)
-            && provider_enum != Provider::Pi
-        {
+        if let Err(reason) = effort.resolve_for_provider(provider_enum) {
             return Err(ModelError::Validation(format!(
-                "{}: effort '{}' is only supported by claude/claude_code (provider: {provider_str})",
+                "{}: {reason} (effort: {}; provider: {provider_str})",
                 role_path.display(),
                 effort.as_str()
             )));

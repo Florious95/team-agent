@@ -1,38 +1,66 @@
-//! Seven-field, read-only status projection backed by one bounded nodeprobe sample.
+//! Seven-field, read-only status projection backed by native tmux and process samples.
 //!
 //! This intentionally does not reuse RuntimeSnapshot: the legacy snapshot reads
 //! coordinator/db/history and carries diagnostic fields that are outside the
 //! status brief contract.
 
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
+
+#[cfg(test)]
+use serde::Deserialize;
+#[cfg(test)]
+use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::fs::{File, OpenOptions};
+#[cfg(test)]
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::process::{Child, ExitStatus, Stdio};
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
 use std::sync::mpsc;
 #[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use std::thread;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 const NODEPROBE_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
 const NODEPROBE_OUTPUT_LIMIT: u64 = 1024 * 1024;
+#[cfg(test)]
 const NODEPROBE_KILL_GRACE: Duration = Duration::from_millis(100);
+#[cfg(test)]
 const NODEPROBE_RECEIPT_LIMIT: u64 = 64 * 1024;
+#[cfg(test)]
 const NODEPROBE_BINARY_LIMIT: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
 const NODEPROBE_READ_CHUNK: usize = 64 * 1024;
+#[cfg(test)]
 const NODEPROBE_NAME: &str = "nodeprobe";
+#[cfg(test)]
 const NODEPROBE_RECEIPT_SUFFIX: &str = ".capability.json";
+#[cfg(test)]
 const NODEPROBE_RECEIPT_SCHEMA: &str = "nodeprobe-capability-v1";
+#[cfg(test)]
 const NODEPROBE_SOURCE_REPO: &str = "Florious95/team-agent-scratch/nodeprobe";
+#[cfg(test)]
 const NODEPROBE_SOURCE_COMMIT: &str = "ff316dc0afe8ab280e61d30934e7624579be6224";
+#[cfg(test)]
 const NODEPROBE_SOURCE_TREE: &str = "5217a41aa914ddcb72c27f39f1b4af9ead68b1b6";
+#[cfg(test)]
 const NODEPROBE_REPORT_SCHEMA: u64 = 1;
+#[cfg(test)]
 const NODEPROBE_CAPABILITIES: &[&str] = &["tmux.list-panes", "ps.pid_ppid_stat_comm"];
+#[cfg(test)]
 const NODEPROBE_FORBIDDEN: &[&str] = &[
     "tmux.capture-pane",
     "tmux.attach",
@@ -47,6 +75,7 @@ thread_local! {
     static TEST_RESOLVER_DELAY: std::cell::RefCell<Option<TestResolverDelay>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 static NODEPROBE_RESOLVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +119,7 @@ struct ProbeResult {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg(test)]
 struct NodeprobeCapabilityReceipt {
     schema: String,
     binary: String,
@@ -383,6 +413,126 @@ fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Option<ProbeResult>> {
+    #[cfg(test)]
+    {
+        // Keep the legacy fixture seam for existing hermetic tests; production
+        // status never searches for or executes nodeprobe.
+        if TEST_NODEPROBE.with(|slot| slot.borrow().is_some()) {
+            return probe_registered_endpoints_with_test_nodeprobe(nodes);
+        }
+    }
+    let mut endpoints = BTreeMap::new();
+    for endpoint in nodes.iter().filter_map(|node| node.endpoint.as_deref()) {
+        if endpoints.contains_key(endpoint) {
+            continue;
+        }
+        endpoints.insert(
+            endpoint.to_string(),
+            sample_native_endpoint(endpoint, nodes),
+        );
+    }
+    endpoints
+}
+
+fn sample_native_endpoint(
+    endpoint: &str,
+    registered: &[RegisteredNode],
+) -> Option<ProbeResult> {
+    let output = run_native_tmux_list_panes(endpoint)?;
+    let nodes = output
+        .lines()
+        .filter_map(|line| parse_native_pane(line, endpoint, registered))
+        .collect::<Vec<_>>();
+    Some(ProbeResult { nodes })
+}
+
+fn run_native_tmux_list_panes(endpoint: &str) -> Option<String> {
+    const FORMAT: &str = "#{session_name}\\t#{window_name}\\t#{pane_id}\\t#{pane_pid}\\t#{pane_current_command}";
+    let flag = if Path::new(endpoint).is_absolute() { "-S" } else { "-L" };
+    let output = Command::new("tmux")
+        .arg(flag)
+        .arg(endpoint)
+        .args(["list-panes", "-a", "-F", FORMAT])
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8(output.stdout).ok())?
+}
+
+fn parse_native_pane(
+    line: &str,
+    endpoint: &str,
+    registered: &[RegisteredNode],
+) -> Option<ProbeNode> {
+    let mut fields = line.split('\t');
+    let session = fields.next()?.to_string();
+    let window = fields.next()?.to_string();
+    let pane = fields.next()?.to_string();
+    let pid = fields.next().filter(|value| !value.is_empty());
+    let command = fields.next().unwrap_or_default();
+    if session.is_empty() || window.is_empty() || pane.is_empty() {
+        return None;
+    }
+    let matched = registered.iter().find(|node| {
+        node.endpoint.as_deref() == Some(endpoint)
+            && node.session.as_deref() == Some(session.as_str())
+            && node.window.as_deref().is_none_or(|value| value == window)
+            && node.pane.as_deref() == Some(pane.as_str())
+    });
+    if let Some(pid) = pid {
+        let snapshot = process_snapshot(pid)?;
+        if snapshot.zombie {
+            return None;
+        }
+    }
+    let provider = matched
+        .map(|node| node.provider.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let activity = if command.is_empty() {
+        "unknown"
+    } else if matches!(command, "bash" | "fish" | "sh" | "zsh" | "-bash" | "-zsh") {
+        "idle"
+    } else {
+        "working"
+    };
+    Some(ProbeNode {
+        socket: endpoint.to_string(),
+        session: session.clone(),
+        window: window.clone(),
+        pane,
+        provider,
+        activity: activity.to_string(),
+        health: "normal".to_string(),
+        session_name: Some(session),
+        evidence_method: Some("native_tmux".to_string()),
+    })
+}
+
+struct ProcessSnapshot {
+    zombie: bool,
+}
+
+fn process_snapshot(pid: &str) -> Option<ProcessSnapshot> {
+    let output = Command::new("ps")
+        .args(["-o", "pid=,ppid=,stat=,comm=", "-p", pid])
+        .output()
+        .ok()?;
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+        return None;
+    }
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    let stat = output_text
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or_default();
+    Some(ProcessSnapshot {
+        zombie: stat.contains('Z'),
+    })
+}
+
+#[cfg(test)]
+fn probe_registered_endpoints_with_test_nodeprobe(
+    nodes: &[RegisteredNode],
+) -> BTreeMap<String, Option<ProbeResult>> {
     let deadline = Instant::now() + NODEPROBE_TIMEOUT;
     let candidates = nodeprobe_candidates();
     let resolver_options = resolver_options();
@@ -410,6 +560,7 @@ fn probe_registered_endpoints(nodes: &[RegisteredNode]) -> BTreeMap<String, Opti
     endpoints
 }
 
+#[cfg(test)]
 fn run_nodeprobe(binary: &Path, endpoint: &str, deadline: Instant) -> Option<Vec<u8>> {
     if Instant::now() >= deadline {
         return None;
@@ -476,6 +627,7 @@ fn run_nodeprobe(binary: &Path, endpoint: &str, deadline: Instant) -> Option<Vec
     }
 }
 
+#[cfg(test)]
 fn wait_child_bounded(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     loop {
         match child.try_wait() {
@@ -493,6 +645,7 @@ fn wait_child_bounded(child: &mut Child, deadline: Instant) -> Option<ExitStatus
     }
 }
 
+#[cfg(test)]
 fn terminate_nodeprobe(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -509,6 +662,7 @@ fn terminate_nodeprobe(child: &mut Child) {
     }
 }
 
+#[cfg(test)]
 fn spawn_nodeprobe(binary: &Path, endpoint: &str) -> Option<Child> {
     let flag = if Path::new(endpoint).is_absolute() {
         "-S"
@@ -522,11 +676,13 @@ fn spawn_nodeprobe(binary: &Path, endpoint: &str) -> Option<Child> {
 }
 
 #[derive(Clone, Default)]
+#[cfg(test)]
 struct ResolverOptions {
     #[cfg(test)]
     delay_after_selection: Option<TestResolverDelay>,
 }
 
+#[cfg(test)]
 fn resolver_options() -> ResolverOptions {
     #[cfg(test)]
     {
@@ -543,11 +699,13 @@ fn resolver_options() -> ResolverOptions {
 // A resolver that is stuck in an uninterruptible filesystem syscall may outlive
 // the caller deadline. It owns only its candidate work; the active gate prevents
 // repeated status calls from accumulating more detached resolver threads.
+#[cfg(test)]
 struct ResolverActiveGuard {
     #[cfg(test)]
     finished_signal: Option<ResolverDelaySignal>,
 }
 
+#[cfg(test)]
 impl Drop for ResolverActiveGuard {
     fn drop(&mut self) {
         NODEPROBE_RESOLVER_ACTIVE.store(false, Ordering::Release);
@@ -558,6 +716,7 @@ impl Drop for ResolverActiveGuard {
     }
 }
 
+#[cfg(test)]
 fn resolve_nodeprobe_binary(
     candidates: Vec<PathBuf>,
     deadline: Instant,
@@ -606,6 +765,7 @@ fn resolve_nodeprobe_binary(
     }
 }
 
+#[cfg(test)]
 fn select_nodeprobe_binary(
     candidates: Vec<PathBuf>,
     deadline: Instant,
@@ -621,6 +781,7 @@ fn select_nodeprobe_binary(
     None
 }
 
+#[cfg(test)]
 fn nodeprobe_candidates() -> Vec<PathBuf> {
     #[cfg(test)]
     {
@@ -642,6 +803,7 @@ fn nodeprobe_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(test)]
 fn validate_nodeprobe_candidate(path: &Path, deadline: Instant) -> Option<PathBuf> {
     if Instant::now() >= deadline {
         return None;
@@ -669,6 +831,7 @@ fn validate_nodeprobe_candidate(path: &Path, deadline: Instant) -> Option<PathBu
     (digest == receipt.binary_sha256).then_some(path.to_path_buf())
 }
 
+#[cfg(test)]
 fn valid_nodeprobe_receipt(receipt: &NodeprobeCapabilityReceipt, binary: &Path) -> bool {
     receipt.schema == NODEPROBE_RECEIPT_SCHEMA
         && binary.file_name().and_then(|name| name.to_str()) == Some(NODEPROBE_NAME)
@@ -683,10 +846,12 @@ fn valid_nodeprobe_receipt(receipt: &NodeprobeCapabilityReceipt, binary: &Path) 
         && same_string_set(&receipt.forbidden, NODEPROBE_FORBIDDEN)
 }
 
+#[cfg(test)]
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
 fn same_string_set(actual: &[String], expected: &[&str]) -> bool {
     let mut actual = actual.to_vec();
     actual.sort_unstable();
@@ -698,6 +863,7 @@ fn same_string_set(actual: &[String], expected: &[&str]) -> bool {
     actual == expected
 }
 
+#[cfg(test)]
 fn nodeprobe_receipt_path(binary: &Path) -> PathBuf {
     let name = binary
         .file_name()
@@ -706,6 +872,7 @@ fn nodeprobe_receipt_path(binary: &Path) -> PathBuf {
     binary.with_file_name(format!("{name}{NODEPROBE_RECEIPT_SUFFIX}"))
 }
 
+#[cfg(test)]
 fn read_bounded_file(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u8>> {
     let metadata = std::fs::metadata(path).ok()?;
     if !metadata.is_file() || metadata.len() > limit {
@@ -729,6 +896,7 @@ fn read_bounded_file(path: &Path, limit: u64, deadline: Instant) -> Option<Vec<u
     }
 }
 
+#[cfg(test)]
 fn sha256_file(path: &Path, deadline: Instant) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     if !metadata.is_file() || metadata.len() > NODEPROBE_BINARY_LIMIT {
@@ -754,6 +922,7 @@ fn sha256_file(path: &Path, deadline: Instant) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn open_readonly_nonblocking(path: &Path) -> Option<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -765,6 +934,7 @@ fn open_readonly_nonblocking(path: &Path) -> Option<File> {
     options.open(path).ok()
 }
 
+#[cfg(test)]
 fn is_executable(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -778,6 +948,7 @@ fn is_executable(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
+#[cfg(test)]
 fn current_nodeprobe_target() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
@@ -789,6 +960,7 @@ fn current_nodeprobe_target() -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn configure_nodeprobe_command(command: &mut Command) {
     command
         .stdin(Stdio::null())
@@ -801,6 +973,7 @@ fn configure_nodeprobe_command(command: &mut Command) {
     }
 }
 
+#[cfg(test)]
 fn parse_probe(bytes: &[u8], requested_endpoint: &str) -> Result<ProbeResult, ()> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| ())?;
     if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
@@ -823,6 +996,7 @@ fn parse_probe(bytes: &[u8], requested_endpoint: &str) -> Result<ProbeResult, ()
     Ok(ProbeResult { nodes })
 }
 
+#[cfg(test)]
 fn probe_has_error(value: &Value) -> bool {
     match value.get("error") {
         None | Some(Value::Null) => false,
@@ -833,6 +1007,7 @@ fn probe_has_error(value: &Value) -> bool {
     }
 }
 
+#[cfg(test)]
 fn parse_probe_node(value: &Value, report_socket: &str) -> Option<ProbeNode> {
     Some(ProbeNode {
         // The accepted producer binds the socket once at the report envelope
@@ -857,6 +1032,7 @@ fn parse_probe_node(value: &Value, report_socket: &str) -> Option<ProbeNode> {
     })
 }
 
+#[cfg(test)]
 fn non_empty(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -895,12 +1071,16 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
     }
     let pi_channel = observed.provider.eq_ignore_ascii_case("pi")
         && observed.evidence_method.as_deref() == Some("pi_activity_channel");
-    let activity = if observed.provider.eq_ignore_ascii_case("pi") && !pi_channel {
+    let native_tmux = observed.evidence_method.as_deref() == Some("native_tmux");
+    let activity = if observed.provider.eq_ignore_ascii_case("pi")
+        && !pi_channel
+        && !native_tmux
+    {
         "unknown"
     } else {
         valid_activity(&observed.activity)
     };
-    let health = if observed.provider.eq_ignore_ascii_case("pi") && !pi_channel {
+    let health = if observed.provider.eq_ignore_ascii_case("pi") && !pi_channel && !native_tmux {
         "unknown"
     } else {
         valid_health(&observed.health)

@@ -314,7 +314,7 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
 }
 
 /// `cmd_status`(`commands.py:90`)。CLI status 统一为只读七字段 brief；
-/// `--json` 与人读路径共享 nodeprobe-backed projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
+/// `--json` 与人读路径共享 native tmux/process projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
 #[cfg(test)]
 pub(crate) fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
     cmd_status_for_team(args, args.team.as_deref())
@@ -357,7 +357,7 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         }
     }
     // Status brief is deliberately independent of the legacy RuntimeSnapshot:
-    // it performs one bounded nodeprobe sample and exposes exactly seven
+    // it performs one native tmux/process sample and exposes exactly seven
     // fields. `--summary` and `--detail` remain parser-compatible but do not
     // re-enable history, runtime diagnostics, or reminder text.
     if args.json {

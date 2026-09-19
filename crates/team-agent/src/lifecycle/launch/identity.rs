@@ -9,7 +9,7 @@
 //!     - name: transport_has_session
 //!       what: 探测 tmux session 是否存在，探测本身出错一律当不存在
 //!     - name: provider_effort_from_raw
-//!       what: 解析 effort 并要求该 provider 支持，否则 None
+//!       what: 解析 effort，保留兼容忽略项并拒绝非法 provider 组合
 //!     - name: quick_start_depth_guard
 //!       what: 定出本次 quick-start 的父团队与层级，推不出父团队时拒绝
 //!     - name: annotate_persisted_team_depth
@@ -135,24 +135,24 @@ pub(super) fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
 /// purpose: 从原始字符串解析 effort，并要求当前 provider 支持它
 /// params:
 ///   raw: effort 原文，None 或空白返回 None
-/// returns: 解析成功且该 provider 支持时返回该档位，否则 None
+/// returns: 支持的档位或兼容忽略的 None；已知非法 provider/effort 组合返回错误
 /// ---
 /// 0.4.x provider effort MVP step 4: low-level from a raw string. Returns
-/// `Some(effort)` when the level parses AND the provider supports it.
+/// `Some(effort)` for supported levels, None for legacy ignored values,
+/// and an error for provider/effort combinations rejected by configuration.
 pub(crate) fn provider_effort_from_raw(
     raw: Option<&str>,
     provider: Provider,
-) -> Option<ProviderEffort> {
-    let raw = raw?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let effort = ProviderEffort::parse(raw)?;
-    if effort.is_supported_by(provider) {
-        Some(effort)
-    } else {
-        None
-    }
+) -> Result<Option<ProviderEffort>, LifecycleError> {
+    let Some(effort) = raw.and_then(ProviderEffort::parse) else {
+        return Ok(None);
+    };
+    effort.resolve_for_provider(provider).map_err(|reason| {
+        LifecycleError::RequirementUnmet(format!(
+            "{reason} (effort: {}; provider: {provider:?})",
+            effort.as_str()
+        ))
+    })
 }
 
 /// ---
@@ -171,7 +171,7 @@ pub(crate) fn provider_effort_event_payload(
         return None;
     }
     let effort = ProviderEffort::parse(raw)?;
-    if effort.is_supported_by(provider) {
+    if !matches!(effort.resolve_for_provider(provider), Ok(None)) {
         return None;
     }
     Some(serde_json::json!({
@@ -221,7 +221,7 @@ pub(crate) fn extend_worker_env_unset_for_effort(
 pub(crate) fn provider_effort_for_spawn(
     agent: &crate::model::yaml::Value,
     provider: Provider,
-) -> Option<ProviderEffort> {
+) -> Result<Option<ProviderEffort>, LifecycleError> {
     provider_effort_from_raw(agent.get("effort").and_then(|v| v.as_str()), provider)
 }
 
@@ -252,7 +252,7 @@ pub(crate) fn provider_effort_event_if_dropped(
 pub(crate) fn provider_effort_for_spawn_json(
     agent: &serde_json::Value,
     provider: Provider,
-) -> Option<ProviderEffort> {
+) -> Result<Option<ProviderEffort>, LifecycleError> {
     provider_effort_from_raw(
         agent.get("effort").and_then(serde_json::Value::as_str),
         provider,
