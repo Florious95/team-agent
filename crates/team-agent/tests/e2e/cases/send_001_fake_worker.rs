@@ -121,42 +121,29 @@ fn send_001_delivers_to_fake_worker() {
     let report_summary = format!("worker a MCP received {message_id}: {canary}");
     run_worker_mcp_report_result(ws.path(), "a", &owner_team_id, &report_summary);
 
-    let collect = run_ta(
-        &ws,
-        &[
-            "collect",
-            "--workspace",
-            ws.path().to_str().unwrap(),
-            "--json",
-        ],
+    let conn = Connection::open(ws.path().join(".team/runtime/team.db"))
+        .expect("open durable result store");
+    let stored_status: String = conn
+        .query_row(
+            "select status from results where result_id = ?1",
+            [&fake_worker_result.result_id],
+            |row| row.get(0),
+        )
+        .expect("spawned fake worker result remains durable");
+    assert_eq!(
+        stored_status, "collected",
+        "report_result auto-finalization must close the spawned fake worker result"
     );
-    assert!(
-        collect.is_success(),
-        "collect exit {}; stdout={} stderr={}",
-        collect.exit_code,
-        collect.stdout,
-        collect.stderr
-    );
-    let collected = collect.json();
-    let rows = collected["collected_results"]
-        .as_array()
-        .expect("collect must expose collected_results");
-    assert!(
-        rows.iter().any(|row| {
-            row["result_id"] == Value::String(fake_worker_result.result_id.clone())
-                && row["task_id"] == Value::String(message_id.to_string())
-                && row["agent_id"] == Value::String("a".to_string())
-                && row["scope"] == Value::String("message".to_string())
-                && row["summary"] == Value::String(fake_worker_summary.clone())
-        }),
-        "collect did not return spawned fake worker a's result: {collected}"
-    );
-    assert!(
-        rows.iter().any(|row| {
-            row["agent_id"] == Value::String("a".to_string())
-                && row["summary"] == Value::String(report_summary.clone())
-        }),
-        "collect did not return worker a's explicit stdio MCP result: {collected}"
+    let supplemental_count: i64 = conn
+        .query_row(
+            "select count(*) from results where envelope like ?1",
+            [format!("%{report_summary}%")],
+            |row| row.get(0),
+        )
+        .expect("count explicit MCP result");
+    assert_eq!(
+        supplemental_count, 1,
+        "explicit stdio MCP report must remain a durable auto-finalized result"
     );
 
     // cleanup

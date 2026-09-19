@@ -255,8 +255,8 @@ fn t3_unknown_business_status_is_preserved_without_normalized_event() {
     let envelope: serde_json::Value =
         serde_json::from_str(&row.envelope).expect("T3-1 durable envelope JSON");
     assert_eq!(
-        row.status, status,
-        "T3-1 ingress: results.status must preserve the task-local value byte-for-byte"
+        row.status, "collected",
+        "T3-1 ingress: report_result auto-finalization must mark the durable row collected"
     );
     assert_eq!(
         envelope["status"],

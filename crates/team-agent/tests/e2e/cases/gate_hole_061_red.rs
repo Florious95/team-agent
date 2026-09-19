@@ -8,8 +8,8 @@
 //! - F10 requirement-to-RED and anti-vacuous controls
 //!
 //! Reanchor:
-//! - `collect` must contain both the spawned fake-worker's original message-scoped result and
-//!   the independent stdio MCP supplemental result; the latter cannot mask loss of the former.
+//! - auto-finalization must close both the spawned fake-worker's original message-scoped result
+//!   and the independent stdio MCP supplemental result; the latter cannot mask loss of the former.
 //! - command coverage is an honest A-covered / B-declared-gap / C-last-resort-exemption catalog.
 //!   Each A entry explicitly declares one source/test function, literal invocation, binding,
 //!   literal assertion node, behavior operand, and executable negative twin. The authority
@@ -178,12 +178,12 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         "recipient",
         "delivered_at",
         "report_result",
-        "\"collect\"",
-        "collected_results",
+        "auto-finalization",
+        "collected",
         "result_id",
         "task_id",
         "agent_id",
-        "\"scope\"",
+        "auto-finalized",
         "Fake worker handled message",
     ] {
         assert!(
@@ -265,40 +265,29 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
     let report_summary = format!("worker a MCP received {message_id}: {canary}");
     run_worker_mcp_report_result(ws.path(), "a", &owner_team_id, &report_summary);
 
-    let collect = run_ta(
-        &ws,
-        &[
-            "collect",
-            "--workspace",
-            ws.path().to_str().expect("workspace utf8"),
-            "--json",
-        ],
+    let conn = Connection::open(ws.path().join(".team/runtime/team.db"))
+        .expect("TOOTH-2 open durable result store");
+    let stored_status: String = conn
+        .query_row(
+            "select status from results where result_id = ?1",
+            [&fake_worker_result.result_id],
+            |row| row.get(0),
+        )
+        .expect("TOOTH-2 spawned fake-worker result remains durable");
+    assert_eq!(
+        stored_status, "collected",
+        "TOOTH-2 auto-finalization must close the spawned fake-worker result"
     );
-    assert!(
-        collect.is_success(),
-        "TOOTH-2 collect failed: stdout={} stderr={}",
-        collect.stdout,
-        collect.stderr
-    );
-    let collected = collect.json();
-    let rows = collected["collected_results"]
-        .as_array()
-        .expect("TOOTH-2 collect must expose collected_results");
-    assert!(
-        collected_rows_include(rows, &fake_worker_result, "message"),
-        "TOOTH-2 RED: collect omitted the spawned fake-worker result or changed its \
-         result_id/task_id/agent_id/scope/exact summary; expected={fake_worker_result:?} \
-         output={collected}"
-    );
-    assert!(
-        rows.iter().any(|row| {
-            row["agent_id"] == Value::String("a".to_string())
-                && row["summary"]
-                    .as_str()
-                    .is_some_and(|summary| summary == report_summary)
-        }),
-        "TOOTH-2: collect did not return the result produced after worker `a` received \
-         message_id={message_id}; output={collected}"
+    let supplemental_count: i64 = conn
+        .query_row(
+            "select count(*) from results where envelope like ?1",
+            [format!("%{report_summary}%")],
+            |row| row.get(0),
+        )
+        .expect("TOOTH-2 count supplemental MCP result");
+    assert_eq!(
+        supplemental_count, 1,
+        "TOOTH-2 explicit MCP report must remain a separate durable auto-finalized result"
     );
 
     shutdown(&ws);

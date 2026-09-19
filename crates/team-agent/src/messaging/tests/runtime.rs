@@ -2856,27 +2856,19 @@ fn r8_attach_requeue_exhausted_to_notify_failed_golden_attach_event() {
     );
 }
 
-// E15/E23 双投守卫:report_result 的 pane fallback 必须被 `if !outcome.ok` 守为
-// deliver 失败时的真兜底,绝不在 deliver 成功后无条件再投一次(=用户看到两条同内容回复)。
+// E15/E23 single-funnel guard: report_result presents a compact result through
+// the shared leader receiver and does not carry a private direct-inject retry.
 #[test]
-fn e15_direct_inject_is_gated_by_deliver_failure_not_unconditional() {
+fn e15_report_result_uses_shared_leader_receiver_without_private_retry() {
     let src = include_str!("../results.rs");
-    // E23:旧 private direct inject 已合并到 shared deliver_to_leader_fallback_pane primitive。
-    let gate = "if !outcome.ok {";
-    let fallback_call = "deliver_to_leader_fallback_pane(";
-    let gate_pos = src.find(gate);
     assert!(
-        gate_pos.is_some(),
-        "E15/E23: pane fallback must be gated by `if !outcome.ok` (deliver-fail fallback)"
-    );
-    let fallback_after_gate = src[gate_pos.unwrap()..].find(fallback_call);
-    assert!(
-        fallback_after_gate.is_some(),
-        "E15/E23: report_result fallback must call the shared fallback pane primitive after the failure gate"
+        src.contains("send_to_leader_receiver_with_presentation"),
+        "E15/E23: report_result must use the shared leader receiver presentation funnel"
     );
     assert!(
-        !src.contains("inject_leader_notification_direct"),
-        "E23: private direct inject must stay deleted; all callers use deliver_to_leader_fallback_pane"
+        !src.contains("inject_leader_notification_direct")
+            && !src.contains("deliver_to_leader_fallback_pane"),
+        "E23: private direct and removed fallback inject paths must stay deleted"
     );
 }
 

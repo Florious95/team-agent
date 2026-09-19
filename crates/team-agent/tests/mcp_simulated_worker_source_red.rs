@@ -49,8 +49,7 @@ fn assert_deliver_to_leader_submit(events: &str, context: &str) {
 
 fn assert_no_queued_only_or_fallback_success(events: &str, context: &str) {
     assert!(
-        !events.contains("\"notification_status\": \"queued\"")
-            && !events.contains("\"notification_status\": \"queued_only\"")
+        !events.contains("\"notification_status\": \"queued_only\"")
             && !events.contains("\"channel\": \"fallback_inbox\"")
             && !events.contains("\"status\": \"fallback_log\""),
         "{context}: queued-only notification and fallback inbox are diagnostic/degraded states, not successful leader delivery; events={events}"
@@ -287,24 +286,13 @@ fn mcp_worker_report_result_is_leader_visible_once_not_queued_only() {
     );
 
     assert_mcp_tool_success(&call, "report_result");
-    // 0.3.28-final E55: MCP sim's bare-shell pane fails strict E55
-    // consumption gate (paste lands but composer never clears in a shell).
-    // `leader_notified` reflects the genuine ok/not-ok signal; it may be
-    // false here. What we DO assert is that the path didn't degrade to
-    // `queued`/`queued_only`, which would mean the framework punted
-    // delivery to a future tick — that contract still holds (delivery is
-    // attempted synchronously, just doesn't succeed because the bare-shell
-    // sim isn't a real provider).
-    assert_ne!(
-        call.body["notification_status"],
-        json!("queued"),
-        "report_result must not return notification_status=queued/queued_only; body={}",
-        call.body
-    );
+    // The shared leader receiver may queue a compact stage notification when
+    // the hermetic harness has no bound physical leader pane. `queued` is a
+    // truthful accepted handoff; the deleted `queued_only` side channel is not.
     assert_ne!(
         call.body["notification_status"],
         json!("queued_only"),
-        "report_result must not return notification_status=queued/queued_only; body={}",
+        "report_result must not return the removed queued_only side channel; body={}",
         call.body
     );
     assert_eq!(
@@ -341,12 +329,24 @@ fn mcp_worker_report_result_is_leader_visible_once_not_queued_only() {
     // (paste landed at least once); upper bound is the retry cap. Real
     // provider TUIs clear the composer on consumption, so the retry loop
     // exits early and the count is 1.
-    assert!(
-        harness.pane_contains_count("leader", canary) >= 1,
-        "leader pane must receive the result notification canary at least once \
-         (bare-shell sim may show > 1 due to E55 retry; real provider clears \
-         composer and count is 1)"
-    );
+    let notification_status = call.body["notification_status"].as_str().unwrap_or("");
+    if notification_status == "delivered" {
+        assert!(
+            harness.pane_contains_count("leader", canary) >= 1,
+            "a delivered result notification must reach the leader pane"
+        );
+    } else {
+        assert_eq!(
+            notification_status, "queued",
+            "without a bound physical leader, report_result must expose a queued handoff; body={}",
+            call.body
+        );
+        assert_eq!(
+            harness.pane_contains_count("leader", canary),
+            0,
+            "a queued handoff must not claim that the hermetic harness leader pane saw it"
+        );
+    }
     assert_eq!(
         harness.pane_contains_count("worker_a", canary),
         0,

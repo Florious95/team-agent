@@ -23,7 +23,6 @@ const DEFAULT_COMMANDS: &[&str] = &[
     "quick-start",
     "send",
     "status",
-    "collect",
     "results",
     "restart",
     "shutdown",

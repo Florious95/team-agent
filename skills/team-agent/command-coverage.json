@@ -97,13 +97,6 @@
       "plan": "Use a per-call hermetic codex PATH shim and assert the exact dangerous flag argv log plus the bound CLI exit/output without invoking a real provider."
     },
     {
-      "command": "team-agent collect",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:results",
-      "plan": "Execute the exact human collect argv after a worker result and bind assertions to presentation and consumption of that same result."
-    },
-    {
       "command": "team-agent doctor",
       "bucket": "declared_gap",
       "covered": false,
@@ -118,14 +111,14 @@
       "plan": "Use an isolated provider/session fixture or authorized subscription gate and bind assertions to fork success or its exact rollback refusal."
     },
     {
-      "command": "team-agent inbox",
+      "command": "team-agent inbox <agent_id> -n 3",
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:messaging",
       "plan": "Execute the exact default inbox argv and bind assertions to its selected recipient and message or empty-state output."
     },
     {
-      "command": "team-agent inbox coder",
+      "command": "team-agent inbox coder -n 3",
       "bucket": "declared_gap",
       "covered": false,
       "owner": "runtime-owner:messaging",

@@ -388,7 +388,9 @@ fn ds01_duplicate_result_id_does_not_wake_a_late_manual_waiter() {
 
     let duplicate = report(ws.path(), task_id, result_id);
     assert_eq!(
-        duplicate.get("status").and_then(Value::as_str),
+        duplicate
+            .get("notification_status")
+            .and_then(Value::as_str),
         Some("duplicate_ignored")
     );
     let mut bytes = [0_u8; 128];

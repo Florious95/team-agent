@@ -220,8 +220,8 @@ mod tests {
         let (task_id, agent_id, status, env) = stored_result(ws);
         assert_eq!(
             (task_id.as_str(), agent_id.as_str(), status.as_str()),
-            ("t1", "w1", "success"),
-            "stored result row must be task_id=t1 agent_id=w1 status=success"
+            ("t1", "w1", "collected"),
+            "stored result row must be task_id=t1 agent_id=w1 status=collected"
         );
         assert_eq!(
             env["schema_version"],
@@ -291,8 +291,8 @@ mod tests {
         let (task_id, agent_id, status, envelope) = stored_result(&ws);
         assert_eq!(
             (task_id.as_str(), agent_id.as_str(), status.as_str()),
-            ("m1", "w1", "success"),
-            "a direct-message result must use its message id for message-scope collection"
+            ("m1", "w1", "collected"),
+            "a direct-message result must use its message id for message-scope auto-finalization"
         );
         assert_ne!(
             envelope["task_id"],

@@ -108,46 +108,17 @@ fn batch4_leader_channel_uses_factory_helpers_not_direct_tmux_backend() {
 }
 
 #[test]
-fn batch4_results_report_retry_uses_factory_transport() {
+fn batch4_results_report_uses_the_single_leader_notification_funnel() {
     let body = read("messaging/results.rs");
     let code = non_comment_body(&body);
-    // Factory-routed retry marker must be present.
     assert!(
-        code.contains("resolve_read_only_transport"),
-        "`results.rs` report_result retry must resolve the transport via \
-         `transport_factory::resolve_read_only_transport` so a conpty team's \
-         retry writes to the shim (design §Batch 4)."
+        code.contains("send_to_leader_receiver_with_presentation"),
+        "report_result must use the shared leader receiver notification funnel"
     );
-    // The old unconditional workspace-tmux retry must be gone at
-    // the retry site. There is still a fallback branch that uses
-    // `TmuxBackend::for_workspace` — that is INTENTIONAL (honest
-    // fallback for tmux teams when the factory refuses). Check the
-    // fallback is inside a `match ... Err(_) =>` arm.
-    let retry_ctx_start = code
-        .find("if let Some(message_id) = outcome.message_id.clone()")
-        .expect("retry block must exist");
-    let retry_ctx = &code[retry_ctx_start..];
-    let retry_end = retry_ctx
-        .find("\n    let outcome_json")
-        .unwrap_or(retry_ctx.len().min(3000));
-    let retry_body = &retry_ctx[..retry_end];
-    // Inside the retry block, `TmuxBackend::for_workspace` must only
-    // appear on a fallback arm.
-    let count_direct = retry_body
-        .matches("TmuxBackend::for_workspace(workspace)")
-        .count();
-    let count_factory = retry_body.matches("resolve_read_only_transport").count();
     assert!(
-        count_factory >= 1,
-        "retry block must call resolve_read_only_transport at least once"
-    );
-    // The direct call may still appear once — as the fallback. If it
-    // appears more than once the migration is incomplete.
-    assert!(
-        count_direct <= 1,
-        "retry block has {count_direct} direct `TmuxBackend::for_workspace(workspace)` \
-         calls; Batch 4 should have exactly ONE (the honest fallback for factory \
-         refusal)."
+        !code.contains("resolve_read_only_transport")
+            && !code.contains("if let Some(message_id) = outcome.message_id.clone()"),
+        "the removed collect-era retry block must not reintroduce a second transport path"
     );
 }
 

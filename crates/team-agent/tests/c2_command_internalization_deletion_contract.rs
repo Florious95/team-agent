@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rusqlite::params;
 use serde_json::{json, Value};
 use team_agent::message_store::MessageStore;
+use team_agent::messaging::report_result;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const DELETED_COMMANDS: &[&str] = &[
@@ -38,7 +39,6 @@ const RESIGN_PLUS_RESULTS: &[&str] = &[
     "quick-start",
     "send",
     "status",
-    "collect",
     "results",
     "restart",
     "shutdown",
@@ -236,55 +236,34 @@ fn red3_normal_send_and_report_paths_replace_fallback_commands() {
 }
 
 #[test]
-fn red4_collect_replaces_settle() {
-    let case = Case::new("red4-collect");
+fn red4_collect_is_removed_and_status_is_the_observation_path() {
+    let case = Case::new("red4-no-collect");
     case.seed_collect_workspace();
 
     let collect = case.run_ta(&["collect", "--workspace", case.workspace_str(), "--json"]);
-    let collect_json = json_stdout("collect --json", &collect);
-    let status = case.run_ta(&["status", "--workspace", case.workspace_str(), "--json"]);
-    let status_text = output_text(&status);
-    let settle = case.run_ta(&["settle", "--workspace", case.workspace_str(), "--json"]);
-    let mut failures = Vec::new();
-
-    if collect_json
-        .get("collected_results")
-        .and_then(Value::as_array)
-        .is_none()
-    {
-        failures.push(format!(
-            "collect --json must expose collected_results; output={collect_json}"
-        ));
-    }
-    if collect_json.get("results").is_none() {
-        failures.push(format!(
-            "collect --json must expose result counts; output={collect_json}"
-        ));
-    }
-    if !status.status.success() || !status_text.contains("worker") {
-        failures.push(format!(
-            "status --json must remain the observation half that replaces settle; status={} text={status_text}",
-            status.status
-        ));
-    }
-    if settle.status.success() || output_text(&settle).contains("details_log") {
-        failures.push(format!(
-            "`settle` must be removed; collect/status are the normal path. status={} text={}",
-            settle.status,
-            output_text(&settle)
-        ));
-    }
-    let settle_logs = glob_log_names(case.workspace(), "settle-");
-    if !settle_logs.is_empty() {
-        failures.push(format!(
-            "normal collect/status success must not require settle-*.json artifacts; found={settle_logs:?}"
-        ));
-    }
-
     assert!(
-        failures.is_empty(),
-        "RED4: C2 replaces settle with collect + status and removes the settle command/artifact contract.\n{}",
-        failures.join("\n")
+        !collect.status.success(),
+        "collect must be absent from the public CLI; status={} text={}",
+        collect.status,
+        output_text(&collect)
+    );
+    let status = case.run_ta(&["status", "--workspace", case.workspace_str(), "--json"]);
+    assert!(
+        status.status.success() && output_text(&status).contains("worker"),
+        "status remains the observation path after collect removal; status={} text={}",
+        status.status,
+        output_text(&status)
+    );
+    let settle = case.run_ta(&["settle", "--workspace", case.workspace_str(), "--json"]);
+    assert!(
+        !settle.status.success(),
+        "settle must remain absent; status={} text={}",
+        settle.status,
+        output_text(&settle)
+    );
+    assert!(
+        glob_log_names(case.workspace(), "settle-").is_empty(),
+        "removed commands must not create settle artifacts"
     );
 }
 
@@ -316,58 +295,38 @@ fn red5_result_validation_is_in_normal_ingestion() {
         ));
     }
 
-    case.insert_result_row(
-        "res_c2_invalid",
-        "task_c2",
-        "worker",
-        json!({
+    let invalid = report_result(
+        case.workspace(),
+        &json!({
             "schema_version": "result_envelope_v1",
             "result_id": "res_c2_invalid",
             "task_id": "task_c2",
             "agent_id": "worker",
             "summary": "missing status is invalid"
         }),
-        "success",
     );
-    let collect = case.run_ta(&["collect", "--workspace", case.workspace_str(), "--json"]);
-    let collected = json_output("collect invalid stored row", &collect);
-    if !collected["invalid_results"].as_array().is_some_and(|rows| {
-        rows.iter()
-            .any(|row| row["result_id"] == json!("res_c2_invalid"))
-    }) {
-        failures.push(format!(
-            "collect must surface invalid stored envelopes through invalid_results; output={collected}"
-        ));
+    if invalid.is_ok() {
+        failures.push("report_result must reject an envelope missing status".to_string());
     }
 
-    case.insert_result_row(
-        "res_c2_valid",
-        "task_c2",
-        "worker",
-        json!({
+    let valid = report_result(
+        case.workspace(),
+        &json!({
             "schema_version": "result_envelope_v1",
             "result_id": "res_c2_valid",
             "task_id": "task_c2",
             "agent_id": "worker",
             "status": "success",
-            "summary": "valid result still collects",
+            "summary": "valid result auto-finalizes",
             "changes": [],
             "tests": [{"command": "cargo test", "status": "passed"}],
             "risks": [],
             "artifacts": [],
             "next_actions": []
         }),
-        "success",
     );
-    let collect_valid = case.run_ta(&["collect", "--workspace", case.workspace_str(), "--json"]);
-    let valid = json_stdout("collect valid stored row", &collect_valid);
-    if !valid["collected_results"].as_array().is_some_and(|rows| {
-        rows.iter()
-            .any(|row| row["result_id"] == json!("res_c2_valid"))
-    }) {
-        failures.push(format!(
-            "valid envelopes must still collect through the normal result path; output={valid}"
-        ));
+    if valid.is_err() {
+        failures.push(format!("valid report_result must be accepted: {valid:?}"));
     }
 
     assert!(
