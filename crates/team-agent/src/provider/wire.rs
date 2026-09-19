@@ -231,7 +231,7 @@ mod tests {
         );
         assert!(
             model_spec_rs.contains("parse_canonical_provider")
-                && model_spec_rs.contains("is_claude_family"),
+                && model_spec_rs.contains("resolve_for_provider"),
             "model spec must validate providers through typed helpers"
         );
         assert!(

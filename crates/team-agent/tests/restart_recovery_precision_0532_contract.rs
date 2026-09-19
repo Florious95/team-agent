@@ -105,15 +105,13 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         case.tmux_log()
     );
 
-    let _probe = brief_probe::install_trusted_nodeprobe_with_activity(
+    let _tmux = brief_probe::install_native_tmux(
         &case.fake_bin,
         &case.new_socket(),
         TEAM_SESSION,
         WORKER,
         WORKER_PANE,
-        "fake",
-        "working",
-        "normal",
+        "team-agent",
     );
     let status = case.run_ta(&[
         "status",

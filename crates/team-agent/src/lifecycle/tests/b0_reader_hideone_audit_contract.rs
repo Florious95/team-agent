@@ -99,17 +99,17 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
     let case = B0HideOneCase::new("status-diagnose-hide-one");
     let root = case.current_state();
     save_runtime_state(&case.workspace, &root).expect("seed current root state");
-    let probe = brief_probe::install_trusted_nodeprobe(
+    let tmux = brief_probe::install_native_tmux(
         &case.workspace.join("probe"),
         NEW_ENDPOINT,
         SESSION,
         WORKER,
         "%new",
-        "fake",
+        "bash",
     );
     let _path = case.env.with_env(
         "PATH",
-        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
+        &brief_probe::path_with_probe(&tmux, std::env::var_os("PATH").as_deref()),
     );
 
     let status_before = case.run_json(&[

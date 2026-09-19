@@ -1084,10 +1084,15 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
     });
     let workspace = explicit_workspace
         .or_else(|| {
-            positional_agents_dir
-                .as_ref()
-                .filter(|path| path.join("TEAM.md").is_file())
-                .cloned()
+            let path = positional_agents_dir.as_ref()?;
+            if let Some(run_workspace) = path
+                .ancestors()
+                .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".team"))
+                .and_then(Path::parent)
+            {
+                return Some(run_workspace.to_path_buf());
+            }
+            path.join("TEAM.md").is_file().then(|| path.to_path_buf())
         })
         .unwrap_or_else(|| cwd.to_path_buf());
     // A positional team directory containing TEAM.md is a complete standalone
@@ -2590,6 +2595,18 @@ mod tests {
         assert_eq!(args.agents_dir, ws);
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn ux_quick_start_team_dir_under_dot_team_uses_project_workspace() {
+        let cwd = tmp_workspace();
+        let team_dir = cwd.join(".team/current");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        std::fs::write(team_dir.join("TEAM.md"), "# team\n").unwrap();
+        let args = quick_start_args(&cli_argv(&[".team/current"]), &cwd).unwrap();
+        assert_eq!(args.workspace, cwd);
+        assert_eq!(args.agents_dir, team_dir);
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     // ── E8 (N38): 未知子命令 → 最近似建议(additive,不破坏 golden invalid-choice 行) ──

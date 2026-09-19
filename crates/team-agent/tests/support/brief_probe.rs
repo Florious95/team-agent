@@ -89,6 +89,29 @@ pub fn install_trusted_nodeprobe_with_activity(
     binary
 }
 
+pub fn install_native_tmux(
+    dir: &Path,
+    endpoint: &str,
+    session: &str,
+    window: &str,
+    pane: &str,
+    command: &str,
+) -> PathBuf {
+    let binary = dir.join("tmux");
+    std::fs::create_dir_all(dir).expect("create native tmux fixture dir");
+    let script = format!(
+        "#!/bin/sh\nendpoint=\"\"\nprevious=\"\"\nfor arg in \"$@\"; do\n  if [ \"$previous\" = \"-S\" ] || [ \"$previous\" = \"-L\" ]; then endpoint=\"$arg\"; fi\n  previous=\"$arg\"\ndone\ncase \" $* \" in\n  *\" list-panes \"*)\n    if [ \"$endpoint\" = '{endpoint}' ]; then\n      printf '%s\\t%s\\t%s\\t\\t%s\\n' '{session}' '{window}' '{pane}' '{command}'\n    fi\n    ;;\nesac\nexit 0\n",
+        endpoint = endpoint.replace('\'', "'\\''"),
+        session = session.replace('\'', "'\\''"),
+        window = window.replace('\'', "'\\''"),
+        pane = pane.replace('\'', "'\\''"),
+        command = command.replace('\'', "'\\''"),
+    );
+    std::fs::write(&binary, script).expect("write native tmux fixture");
+    set_executable(&binary);
+    binary
+}
+
 pub fn path_with_probe(binary: &Path, existing: Option<&std::ffi::OsStr>) -> String {
     let prefix = binary.parent().expect("nodeprobe parent").to_string_lossy();
     let suffix = existing
