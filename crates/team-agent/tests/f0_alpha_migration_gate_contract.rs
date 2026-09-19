@@ -41,17 +41,17 @@ fn legacy_05_workspace_loads_without_b1_destructive_conversion() {
     let case = AlphaCase::new("legacy-05-load");
     case.write_raw_root_state(&case.legacy_05_state());
     case.write_raw_stale_snapshot(false);
-    let probe = brief_probe::install_trusted_nodeprobe(
+    let tmux = brief_probe::install_native_tmux(
         &case.workspace.join("probe"),
         NEW_ENDPOINT,
         SESSION,
         WORKER,
         "%new",
-        "fake",
+        "bash",
     );
     let _path = case._env.with_env(
         "PATH",
-        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
+        &brief_probe::path_with_probe(&tmux, std::env::var_os("PATH").as_deref()),
     );
 
     let status = case.run_json(&[
@@ -114,17 +114,17 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
     let case = AlphaCase::new("stale-snapshot-observability");
     save_runtime_state(&case.workspace, &case.legacy_05_state()).expect("seed root state");
     case.write_raw_stale_snapshot(false);
-    let probe = brief_probe::install_trusted_nodeprobe(
+    let tmux = brief_probe::install_native_tmux(
         &case.workspace.join("probe"),
         NEW_ENDPOINT,
         SESSION,
         WORKER,
         "%new",
-        "fake",
+        "bash",
     );
     let _path = case._env.with_env(
         "PATH",
-        &brief_probe::path_with_probe(&probe, std::env::var_os("PATH").as_deref()),
+        &brief_probe::path_with_probe(&tmux, std::env::var_os("PATH").as_deref()),
     );
 
     let status = case.run_json(&[

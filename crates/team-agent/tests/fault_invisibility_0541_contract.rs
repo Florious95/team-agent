@@ -283,17 +283,15 @@ fn wrapper_worker_provider_exit_marker_beats_pane_liveness_and_cached_working_he
     let live = WatchCase::new("red4-live-provider-guard");
     live.seed_state(live_provider_worker());
     live.seed_agent_health("WORKING");
-    let probe = brief_probe::install_trusted_nodeprobe_with_activity(
+    let tmux = brief_probe::install_native_tmux(
         &live.env.root().join("probe-bin"),
         TMUX_ENDPOINT,
         TEAM_SESSION,
         WORKER,
         WORKER_PANE,
-        "codex",
-        "working",
-        "normal",
+        "team-agent",
     );
-    let probe_path = brief_probe::path_with_probe(&probe, None);
+    let probe_path = brief_probe::path_with_probe(&tmux, None);
     let live_status = live.status_brief_json(&probe_path);
     let live_node = brief_node(&live_status, WORKER).expect("live status brief worker");
     assert_eq!(live_node.get("name").and_then(Value::as_str), Some(WORKER));

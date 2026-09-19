@@ -94,7 +94,11 @@ fn dirty_005_cross_team_binding_pollution_keeps_explicit_team_scope() {
     assert_eq!(nodes[0].get("name").and_then(|v| v.as_str()), Some("a"));
     assert_eq!(nodes[0].get("provider").and_then(Value::as_str), Some("fake"));
     assert_eq!(nodes[0].get("runtime_status").and_then(Value::as_str), Some("running"));
-    assert_eq!(nodes[0].get("activity").and_then(Value::as_str), Some("idle"));
+    assert_eq!(
+        nodes[0].get("activity").and_then(Value::as_str),
+        Some("working"),
+        "native tmux sampling reports the live fake worker command as working"
+    );
     assert_eq!(nodes[0].get("health").and_then(Value::as_str), Some("normal"));
     assert_eq!(nodes[0].get("session_name").and_then(Value::as_str), Some(session));
     assert!(
