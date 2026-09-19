@@ -307,10 +307,16 @@ pub(super) fn quick_start_depth_guard(
     requested_team: Option<&str>,
     _strict_real_runtime: bool,
 ) -> Result<QuickStartDepth, LifecycleError> {
-    let env_parent = std::env::var("TEAM_AGENT_OWNER_TEAM_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    // OWNER_TEAM_ID is injected into every worker process. It is parent
+    // context only when the target quick-start workspace is the same workspace
+    // that produced the environment; otherwise a worker launching a fresh
+    // external workspace would inherit a false nesting parent.
+    let env_parent = owner_context_matches_workspace(workspace).then(|| {
+        std::env::var("TEAM_AGENT_OWNER_TEAM_ID")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }).flatten();
     let parent = env_parent;
     let Some(parent) = parent else {
         let state = crate::state::persist::load_runtime_state(workspace)
@@ -365,6 +371,18 @@ pub(super) fn quick_start_depth_guard(
 /// purpose: 从 runtime state 推断父团队键
 /// returns: 活跃团队键，且该团队确有 running 席位时返回它，否则 None
 /// ---
+fn owner_context_matches_workspace(workspace: &Path) -> bool {
+    let Some(env_workspace) = std::env::var_os("TEAM_AGENT_WORKSPACE") else {
+        return false;
+    };
+    let env_workspace = PathBuf::from(env_workspace);
+    env_workspace == workspace
+        || std::fs::canonicalize(&env_workspace)
+            .ok()
+            .zip(std::fs::canonicalize(workspace).ok())
+            .is_some_and(|(env_path, target_path)| env_path == target_path)
+}
+
 pub(super) fn infer_parent_team_from_active_state(state: &serde_json::Value) -> Option<String> {
     let active = explicit_active_team_key(state)?;
     let team = state
