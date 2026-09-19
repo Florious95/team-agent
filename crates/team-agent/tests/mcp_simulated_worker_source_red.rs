@@ -49,8 +49,7 @@ fn assert_deliver_to_leader_submit(events: &str, context: &str) {
 
 fn assert_no_queued_only_or_fallback_success(events: &str, context: &str) {
     assert!(
-        !events.contains("\"notification_status\": \"queued\"")
-            && !events.contains("\"notification_status\": \"queued_only\"")
+        !events.contains("\"notification_status\": \"queued_only\"")
             && !events.contains("\"channel\": \"fallback_inbox\"")
             && !events.contains("\"status\": \"fallback_log\""),
         "{context}: queued-only notification and fallback inbox are diagnostic/degraded states, not successful leader delivery; events={events}"

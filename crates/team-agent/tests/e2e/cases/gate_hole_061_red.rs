@@ -183,7 +183,7 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         "result_id",
         "task_id",
         "agent_id",
-        "\"scope\"",
+        "auto-finalized",
         "Fake worker handled message",
     ] {
         assert!(
