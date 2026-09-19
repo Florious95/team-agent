@@ -417,7 +417,7 @@ fn command_help(command: Option<&str>) -> String {
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或 nodeprobe 证据时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或原生 tmux/process 采样时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models [--provider pi|cursor_agent] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, and display name. Cursor uses the local `agent --list-models` catalog.".to_string(),
         Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
@@ -1069,17 +1069,29 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         ));
     }
     let parsed = parse_args(args);
-    let workspace = workspace(&parsed, cwd);
-    let agents_dir = parsed
-        .positionals
-        .first()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.clone());
-    let agents_dir = if agents_dir.is_absolute() {
-        agents_dir
-    } else {
-        workspace.join(agents_dir)
-    };
+    let positional_agents_dir = parsed.positionals.first().map(PathBuf::from).map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    });
+    let workspace = parsed
+        .workspace
+        .as_ref()
+        .map(|_| workspace(&parsed, cwd))
+        .or_else(|| {
+            positional_agents_dir
+                .as_ref()
+                .filter(|path| path.join("TEAM.md").is_file())
+                .cloned()
+        })
+        .unwrap_or_else(|| cwd.to_path_buf());
+    // A positional team directory containing TEAM.md is a complete standalone
+    // workspace. Use it as the runtime workspace unless --workspace explicitly
+    // selects another root; this prevents host owner context/state leaking into
+    // an independent quick-start target.
+    let agents_dir = positional_agents_dir.unwrap_or_else(|| workspace.clone());
     // 0.5.x Phase 1d Batch 2: validate the `--backend` literal up-front
     // so users get a fast, actionable error instead of a downstream
     // factory refusal. Accept the same literals as the factory
