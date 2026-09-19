@@ -208,7 +208,7 @@ fn inbox_returns_stored_message_for_recipient() {
     let mid = store
         .create_message(None, "leader", "w1", "hello w1", None, true, None)
         .unwrap();
-    let v = status_port::inbox(&ws, "w1", 20, None, true, None).expect("inbox");
+    let v = status_port::inbox(&ws, "w1", 20, None).expect("inbox");
     let messages = v["messages"].as_array().expect("messages array");
     assert_eq!(
             messages.len(),
@@ -223,29 +223,11 @@ fn inbox_returns_stored_message_for_recipient() {
     );
     assert_eq!(m["recipient"], json!("w1"));
     assert_eq!(m["sender"], json!("leader"));
-    assert_eq!(m["content"], json!("hello w1"));
+    assert_eq!(m["summary"], json!("hello w1"));
     assert_eq!(
         m["status"],
         json!("accepted"),
         "create_message persists status='accepted'"
-    );
-    // NULL owner_team_id semantics: status.inbox() calls MessageStore.inbox(agent) with
-    // owner_team_id=None (no team clause), so a NULL-owner message MUST surface for its recipient.
-    assert_eq!(
-        m["owner_team_id"],
-        json!(null),
-        "the stored message's owner_team_id is NULL and still returned"
-    );
-    // byte-faithful raw-row columns: requires_ack is the 0/1 INT; artifact_refs the literal text "[]".
-    assert_eq!(
-        m["requires_ack"],
-        json!(1),
-        "requires_ack is the 0/1 int, not a bool"
-    );
-    assert_eq!(
-        m["artifact_refs"],
-        json!("[]"),
-        "artifact_refs is the raw text column, not parsed"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
@@ -265,11 +247,11 @@ fn inbox_matches_sender_or_recipient_and_excludes_others() {
     store
         .create_message(None, "leader", "w2", "unrelated to w2", None, true, None)
         .unwrap();
-    let v = status_port::inbox(&ws, "w1", 20, None, true, None).expect("inbox");
+    let v = status_port::inbox(&ws, "w1", 20, None).expect("inbox");
     let messages = v["messages"].as_array().expect("messages array");
     let mut contents: Vec<String> = messages
         .iter()
-        .map(|m| m["content"].as_str().unwrap().to_string())
+        .map(|m| m["summary"].as_str().unwrap().to_string())
         .collect();
     contents.sort();
     assert_eq!(
@@ -688,54 +670,6 @@ fn remove_agent_from_spec_refusal_is_not_success_envelope() {
     assert!(
         state["agents"].get("fake_impl").is_some(),
         "refused remove-agent must not delete the spec-defined agent"
-    );
-}
-#[test]
-fn collect_uncollected_result_marks_db_and_outputs_result() {
-    let ws = tmp_workspace();
-    seed_collect_state(&ws);
-    seed_uncollected_result(&ws, "res_collect_red");
-    let out = json_output(
-        cmd_collect(&CollectArgs {
-            workspace: ws.clone(),
-            result_file: None,
-            json: true,
-            team: None,
-        })
-        .unwrap(),
-    );
-    assert_eq!(out["ok"], json!(true));
-    assert_eq!(
-        out["collected_results"][0]["result_id"],
-        json!("res_collect_red")
-    );
-    assert_eq!(out["collected_results"][0]["scope"], json!("task"));
-    assert_eq!(
-        out["results"],
-        json!({"total": 1, "uncollected": 0, "collected": 1, "invalid": 0, "by_status": {}})
-    );
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let status: String = conn
-        .query_row(
-            "select status from results where result_id = 'res_collect_red'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "collected");
-    let state = read_state(&ws);
-    assert_eq!(state["tasks"][0]["status"], json!("done"));
-    assert_eq!(
-        state["tasks"][0]["accepted_result_id"],
-        json!("res_collect_red")
-    );
-    assert!(
-        read_events(&ws)
-            .iter()
-            .any(|e| e["event"] == json!("collect.result")
-                && e["result_id"] == json!("res_collect_red")),
-        "collect must emit collect.result for the stored result"
     );
 }
 #[test]

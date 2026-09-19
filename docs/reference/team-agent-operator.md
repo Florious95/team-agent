@@ -422,7 +422,7 @@ Observed stderr (exit is the send result, here 1 because the probe dir had no ru
 warning: --watch-result is deprecated; sunset: next compatibility release; action: use positional logical TO and the returned message id
 ```
 
-**New write:** positional logical TO, then use the returned `message_id` (and `team-agent results --case` / coordinator notify). Do not poll `sleep` / `status` / `inbox` / `collect` after a successful send unless the user asked for diagnosis.
+**New write:** positional logical TO, then use the returned `message_id` (and `team-agent results --case` / coordinator notify). Do not poll `sleep` / `status` / `inbox` after a successful send unless the user asked for diagnosis.
 
 ```text
 team-agent send coder "Do the bounded task"
@@ -451,12 +451,12 @@ On success, `send --json` includes `message_id`. The deprecation warning itself 
 - `team-agent send coder "Do the bounded task"` persists a message for positional logical TO and returns. Prefer this over `--watch-result`.
 - Positional `TO` has two co-equal forms: an in-team short name, for example `team-agent send reviewer "Review this change"`, and a fully-qualified logical name, `<workspace>::<team>/<agent>`. Use the fully-qualified form across workspaces or when the local team scope is ambiguous.
 - Advanced orchestration callers may add `--presentation-sink leader|casefile|silent --message-class CLASS [--case-id CASE]`. All sinks remain durable and pullable; `casefile`/`silent` suppress only live leader injection. Missing presentation metadata preserves the normal leader-visible behavior.
-- After `send` succeeds, do not run `sleep`, `status`, `inbox`, or `collect` polling loops unless the user explicitly asks for diagnosis; the coordinator will notify the leader when a result arrives.
+- After `send` succeeds, do not run `sleep`, `status`, or `inbox` polling loops unless the user explicitly asks for diagnosis; results finalize automatically and the coordinator notifies the leader when a result arrives.
 - `team-agent send --task task_initial "Start"` still parses but `--task` is a deprecated delivery flag (same warning family as `--watch-result`).
 - `team-agent status` shows team, worker health, result-store counts, `session_id`, `captured_via`, and attribution confidence. `team-agent status --json` is compact and context-safe by default; use `team-agent status --detail --json` only for raw runtime-state diagnostics.
 - `team-agent status coder` shows one worker.
 - `team-agent approvals [coder]` shows structured pending approval prompts without copying worker terminal pages.
-- `team-agent inbox coder` shows message history only. Final results are not in inbox.
+- `team-agent inbox coder -n 3` shows only compact message summaries. Final results are not in inbox.
 - `team-agent shutdown --workspace . --keep-logs` stops the tmux session after a final session capture attempt.
 - `team-agent restart .` restarts a stopped team from stored worker sessions. If one workspace has multiple restartable teams, use `team-agent restart . --team <session_name_or_team_name>`.
 - `team-agent start-agent coder --workspace .` repairs one missing worker window without interrupting other workers.
@@ -484,11 +484,10 @@ team-agent claude
 team-agent clone-agent <source> --as <new>
 team-agent codex
 team-agent codex --dangerously-bypass-approvals-and-sandbox
-team-agent collect
 team-agent doctor
 team-agent fork-agent <source> --as <new>
-team-agent inbox
-team-agent inbox coder
+team-agent inbox <agent_id> -n 3
+team-agent inbox coder -n 3
 team-agent profile doctor <name> --workspace . --json
 team-agent profile init <name> --auth-mode subscription --workspace .
 team-agent profile init claude-default --auth-mode subscription --workspace .
@@ -609,7 +608,7 @@ Do not pass `sender`, `task_id`, `requires_ack`, `schema_version`, or `agent_id`
 
 Message targets are team-scoped. Use `leader`, another teammate agent id, or `*` for all other team members. The runtime excludes the sender from `*` broadcasts and never scans unrelated terminal windows for recipients.
 
-`report_result` stores final completion and immediately attempts a leader notification through the verified/fallback delivery path. `team-agent collect` remains the authoritative state-update path. Do not wait for final results through `team-agent inbox`, message ack counts, or repeated plain status polling. `acknowledged_count` only means prior task messages were acknowledged by the worker; it is not a missing-result signal.
+`report_result` stores and finalizes completion atomically: the result row is closed, the task is marked done with its accepted result id, and the `collect.result` event is recorded. It does not create a LeaderNotification message; use `team-agent results --case` for final results and `team-agent inbox AGENT -n 3` only as a compact transport fallback. `acknowledged_count` only means prior task messages were acknowledged by the worker; it is not a missing-result signal.
 
 For normal leader dispatch, prefer positional `team-agent send <TO> "..."` and the returned message id; do not use `--watch-result`.
 
@@ -650,13 +649,13 @@ Known Team Agent control-plane MCP prompts such as `team_orchestrator.report_res
 
 When `status` still shows `AWAITING_APPROVAL`, run `team-agent approvals <agent_id>`, show the structured prompt summary and choices, ask the user to decide, and wait.
 
-Do not inspect raw worker terminal output during normal operation. Use `team-agent status`, `team-agent approvals`, `team-agent inbox`, `team-agent collect`, and event logs instead. Raw-screen diagnostics are outside this skill's normal workflow, require explicit user authorization, and are guarded by the CLI; use them only as a one-shot bounded diagnostic, never as a routine workflow step.
+Do not inspect raw worker terminal output during normal operation. Use `team-agent status`, `team-agent approvals`, `team-agent inbox AGENT -n 3`, `team-agent results --case`, and event logs instead. Raw-screen diagnostics are outside this skill's normal workflow, require explicit user authorization, and are guarded by the CLI; use them only as a one-shot bounded diagnostic, never as a routine workflow step.
 
 Then stop and wait for the user **after** you have executed a provided `action` (or reported that it cannot be run from this pane).
 
 For "worker reported but leader cannot see completion":
 
-1. Run `team-agent collect` once; this is the final-result intake path.
-2. If no result is collected, inspect `team-agent status --json` field `results`. `uncollected > 0` means the result is already accepted by MCP and waiting in the result store.
-3. Check `.team/logs/events.jsonl` for `mcp.report_result` and `collect.result` before sending another prompt to the worker.
-4. Do not loop on `team-agent inbox` or ack/status counts; that burns context and cannot consume final results.
+1. Inspect `team-agent status --json` and `team-agent results --case` for the finalized result.
+2. If the result is absent, check `.team/logs/events.jsonl` for `mcp.report_result` and `collect.result` before sending another prompt to the worker.
+3. Use `team-agent inbox AGENT -n 3` only to inspect transport messages; it does not consume result rows.
+4. Do not loop on `team-agent inbox <agent_id> -n 3` or ack/status counts; that burns context and cannot consume final results.

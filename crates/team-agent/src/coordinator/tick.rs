@@ -104,7 +104,7 @@ pub struct TickReport {
     pub session_drift: Vec<SessionDriftResult>,
     /// `detect_leader_api_errors`(`lifecycle.py:344`)——cross-dep step 11。
     pub api_errors: Vec<LeaderApiError>,
-    /// `_collect_results_and_notify_watchers`(`lifecycle.py:364`)——degraded 时为空(未走到)。
+    /// Reserved result projection slot; report_result now finalizes directly.
     pub results: Vec<CollectedResult>,
 }
 
@@ -528,12 +528,6 @@ impl Coordinator {
                 collections,
             ));
         }
-        self.record_step(TickStepGroup::Delivery, "collect_results");
-        collections.results =
-            collect_results(crate::messaging::collect_results_and_notify_watchers(
-                self.workspace.as_path(),
-                &event_log,
-            )?);
         self.record_step(TickStepGroup::Persist, "prune_dedupe_log");
         Ok(base_tick_report(true, false, None, Some(true), collections))
     }
@@ -1552,15 +1546,6 @@ fn empty_tick_report(
     persisted: Option<bool>,
 ) -> TickReport {
     base_tick_report(ok, stop, reason, persisted, TickCollections::default())
-}
-
-fn collect_results(value: Value) -> Vec<CollectedResult> {
-    let Some(result_id) = value.get("result_id").and_then(Value::as_str) else {
-        return Vec::new();
-    };
-    vec![CollectedResult {
-        result_id: result_id.to_string(),
-    }]
 }
 
 struct ProviderTurnClassifier;

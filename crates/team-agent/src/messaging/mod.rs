@@ -102,8 +102,8 @@ pub use persist::{
     LogicalRecipient, PersistResolution, PersistedSend, ResolvedSendIntent, SendOrigin,
 };
 pub use results::{
-    collect, collect_for_team, collect_results_and_notify_watchers, report_result,
-    report_result_for_owner_team, report_result_for_owner_team_with_primary_error,
+    collect, collect_for_team, report_result, report_result_for_owner_team,
+    report_result_for_owner_team_with_primary_error,
 };
 pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel, stuck_list};
 pub use selftest::{run_comms_selftest, CommsSelftestDriver};

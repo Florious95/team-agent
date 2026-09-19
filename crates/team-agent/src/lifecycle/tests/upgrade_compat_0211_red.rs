@@ -19,9 +19,7 @@ use std::sync::Mutex;
 use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::{
-    cmd_collect_for_team, cmd_status_for_team, CmdOutput, CollectArgs, StatusArgs,
-};
+use team_agent::cli::{cmd_status_for_team, CmdOutput, StatusArgs};
 use team_agent::db::schema::{initialize_schema, open_db, table_layout, SCHEMA_VERSION};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::restart::classify_restart_plan;
@@ -239,29 +237,6 @@ fn upgrade_status_collect_scope_by_selected_team_key() {
         "status --team upgrade-key must not expose sibling rows; status={status}"
     );
 
-    let collect = json_output(cmd_collect_for_team(
-        &CollectArgs {
-            workspace: fixture.workspace.clone(),
-            result_file: None,
-            json: true,
-            team: None,
-        },
-        Some(TEAM_KEY),
-    ));
-    let empty = Vec::new();
-    let collected_ids = collect
-        .get("collected_results")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|item| item.get("result_id").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    assert!(
-        collected_ids.contains(&"res-existing-upgrade")
-            && collected_ids.contains(&"res-upgrade")
-            && !collected_ids.contains(&"res-sibling"),
-        "collect --team upgrade-key must collect only selected runtime-key rows; collect={collect}"
-    );
 }
 
 #[test]
