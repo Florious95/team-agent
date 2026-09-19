@@ -447,7 +447,7 @@ fn sample_native_endpoint(
 }
 
 fn run_native_tmux_list_panes(endpoint: &str) -> Option<String> {
-    const FORMAT: &str = "#{session_name}\\t#{window_name}\\t#{pane_id}\\t#{pane_pid}\\t#{pane_current_command}";
+    const FORMAT: &str = "#{session_name}\t#{window_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}";
     let flag = if Path::new(endpoint).is_absolute() { "-S" } else { "-L" };
     let output = Command::new("tmux")
         .arg(flag)
