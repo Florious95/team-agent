@@ -8,8 +8,8 @@
 //! - F10 requirement-to-RED and anti-vacuous controls
 //!
 //! Reanchor:
-//! - `collect` must contain both the spawned fake-worker's original message-scoped result and
-//!   the independent stdio MCP supplemental result; the latter cannot mask loss of the former.
+//! - auto-finalization must close both the spawned fake-worker's original message-scoped result
+//!   and the independent stdio MCP supplemental result; the latter cannot mask loss of the former.
 //! - command coverage is an honest A-covered / B-declared-gap / C-last-resort-exemption catalog.
 //!   Each A entry explicitly declares one source/test function, literal invocation, binding,
 //!   literal assertion node, behavior operand, and executable negative twin. The authority
@@ -178,8 +178,8 @@ fn tooth_2_existing_send_smoke_proves_worker_receive_report_and_collect() {
         "recipient",
         "delivered_at",
         "report_result",
-        "\"collect\"",
-        "collected_results",
+        "auto-finalization",
+        "collected",
         "result_id",
         "task_id",
         "agent_id",

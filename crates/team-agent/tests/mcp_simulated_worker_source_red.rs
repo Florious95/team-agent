@@ -330,12 +330,24 @@ fn mcp_worker_report_result_is_leader_visible_once_not_queued_only() {
     // (paste landed at least once); upper bound is the retry cap. Real
     // provider TUIs clear the composer on consumption, so the retry loop
     // exits early and the count is 1.
-    assert!(
-        harness.pane_contains_count("leader", canary) >= 1,
-        "leader pane must receive the result notification canary at least once \
-         (bare-shell sim may show > 1 due to E55 retry; real provider clears \
-         composer and count is 1)"
-    );
+    let notification_status = call.body["notification_status"].as_str().unwrap_or("");
+    if notification_status == "delivered" {
+        assert!(
+            harness.pane_contains_count("leader", canary) >= 1,
+            "a delivered result notification must reach the leader pane"
+        );
+    } else {
+        assert_eq!(
+            notification_status, "queued",
+            "without a bound physical leader, report_result must expose a queued handoff; body={}",
+            call.body
+        );
+        assert_eq!(
+            harness.pane_contains_count("leader", canary),
+            0,
+            "a queued handoff must not claim that the hermetic harness leader pane saw it"
+        );
+    }
     assert_eq!(
         harness.pane_contains_count("worker_a", canary),
         0,

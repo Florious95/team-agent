@@ -97,13 +97,6 @@
       "plan": "Use a per-call hermetic codex PATH shim and assert the exact dangerous flag argv log plus the bound CLI exit/output without invoking a real provider."
     },
     {
-      "command": "team-agent collect",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:results",
-      "plan": "Execute the exact human collect argv after a worker result and bind assertions to presentation and consumption of that same result."
-    },
-    {
       "command": "team-agent doctor",
       "bucket": "declared_gap",
       "covered": false,
