@@ -3,6 +3,17 @@ use super::*;
 
 const SUMMARY_LIMIT: usize = 120;
 
+fn clean_text(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_control()).collect()
+}
+
+fn compact_field(value: Option<&Value>) -> Value {
+    value
+        .and_then(Value::as_str)
+        .map(|text| Value::String(clean_text(text)))
+        .unwrap_or(Value::Null)
+}
+
 pub fn inbox(
     workspace: &Path,
     agent: &str,
@@ -26,11 +37,11 @@ pub fn inbox(
 
 fn compact_message(message: Value) -> Value {
     json!({
-        "message_id": message.get("message_id").cloned().unwrap_or(Value::Null),
-        "sender": message.get("sender").cloned().unwrap_or(Value::Null),
-        "recipient": message.get("recipient").cloned().unwrap_or(Value::Null),
-        "status": message.get("status").cloned().unwrap_or(Value::Null),
-        "created_at": message.get("created_at").cloned().unwrap_or(Value::Null),
+        "message_id": compact_field(message.get("message_id")),
+        "sender": compact_field(message.get("sender")),
+        "recipient": compact_field(message.get("recipient")),
+        "status": compact_field(message.get("status")),
+        "created_at": compact_field(message.get("created_at")),
         "summary": compact_summary(message.get("content").and_then(Value::as_str).unwrap_or("")),
     })
 }
@@ -38,10 +49,9 @@ fn compact_message(message: Value) -> Value {
 fn compact_summary(content: &str) -> String {
     let summary = content
         .lines()
-        .map(str::trim)
+        .map(|line| clean_text(line).trim().to_string())
         .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or_default();
     let mut chars = summary.chars();
     let truncated = chars.by_ref().take(SUMMARY_LIMIT).collect::<String>();
     if chars.next().is_some() {

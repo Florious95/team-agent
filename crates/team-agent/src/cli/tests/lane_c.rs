@@ -223,6 +223,35 @@ fn inbox_golden_shape_is_compact_and_scoped_to_agent() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+#[test]
+fn inbox_excludes_leader_stage_result_notifications() {
+    let ws = tmp_workspace();
+    let store = crate::message_store::MessageStore::open(&ws).unwrap();
+    let message_id = store
+        .create_message(
+            None,
+            "leader",
+            "worker",
+            "Task t reported success; Result id: res-1",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    conn.execute(
+        "update messages set presentation = ?1 where message_id = ?2",
+        rusqlite::params![
+            json!({"sink": "leader", "class": "stage_result"}).to_string(),
+            message_id,
+        ],
+    )
+    .unwrap();
+    let value = status_port::inbox(&ws, "leader", 3, None).expect("inbox");
+    assert!(value["messages"].as_array().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 // ── comms_selftest: golden {ok,status,run_id,scope,boundary,checks} (diagnose/comms.py:40-47) ─────
 // RUST mod.rs:525-527 stub {ok,team,gate,provider_sdk_calls:int}. RED. Locks COMMS_BOUNDARY_TEXT +
 // the deterministic check sub-shapes (run_id is a random uuid; not value-locked). ────────────────

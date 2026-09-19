@@ -7,6 +7,7 @@ use rusqlite::params;
 
 use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
+use crate::model::ids::TaskId;
 
 use super::helpers::{next_result_id, required_str, validate_result_envelope};
 use super::types::SEND_RETRY_MAX_ATTEMPTS;
@@ -891,13 +892,70 @@ fn report_result_for_owner_team_inner(
             }),
         )?;
     }
+    let mut leader_notified = false;
+    let mut notification_message_id = None;
+    let mut notification_channel = "none".to_string();
+    let mut notification_status = if finalized_scope.is_some() {
+        "auto_finalized".to_string()
+    } else {
+        "already_finalized".to_string()
+    };
+    if inserted && presentation.effective_sink == super::presentation::PresentationSink::Leader {
+        let content = format_report_result_leader_summary(&result_id, task_id, agent_id, status, envelope);
+        let leader_state = report_owner_state(&state_for_owner, &owner_team);
+        let leader_presentation = leader_result_presentation(task_id);
+        match super::leader_receiver::send_to_leader_receiver_with_presentation(
+            workspace,
+            &leader_state,
+            "leader",
+            &content,
+            Some(&TaskId::new(task_id.to_string())),
+            agent_id,
+            false,
+            Some(&result_id),
+            None,
+            &leader_presentation,
+            &event_log,
+        ) {
+            Ok(outcome) => {
+                leader_notified = matches!(
+                    outcome.status,
+                    super::DeliveryStatus::Delivered
+                );
+                notification_message_id = outcome.message_id;
+                notification_channel = outcome
+                    .channel
+                    .unwrap_or_else(|| "leader_receiver".to_string());
+                notification_status = if leader_notified {
+                    "delivered".to_string()
+                } else if outcome.ok {
+                    "queued".to_string()
+                } else {
+                    "refused".to_string()
+                };
+            }
+            Err(error) => {
+                event_log.write(
+                    "leader_receiver.result_notification_failed",
+                    serde_json::json!({
+                        "owner_team_id": owner_team,
+                        "result_id": result_id,
+                        "error": error.to_string(),
+                    }),
+                )?;
+                notification_channel = "leader_receiver".to_string();
+                notification_status = "refused".to_string();
+            }
+        }
+    }
     event_log.write(
         "mcp.report_result",
         serde_json::json!({
-            "leader_notified": false,
-            "notification_channel": "none",
-            "notification_message_id": serde_json::Value::Null,
-            "notification_status": if finalized_scope.is_some() {
+            "leader_notified": leader_notified,
+            "notification_channel": notification_channel.clone(),
+            "notification_message_id": notification_message_id.clone(),
+            "notification_status": notification_status,
+            "finalization_status": if finalized_scope.is_some() {
                 "auto_finalized"
             } else {
                 "already_finalized"
@@ -923,29 +981,33 @@ fn report_result_for_owner_team_inner(
         serde_json::Value::String(agent_id.to_string()),
     );
     out.insert("acknowledged_messages".to_string(), serde_json::json!([]));
-    out.insert("leader_notified".to_string(), serde_json::Value::Bool(false));
+    out.insert(
+        "leader_notified".to_string(),
+        serde_json::Value::Bool(leader_notified),
+    );
     out.insert(
         "notification_message_id".to_string(),
-        serde_json::Value::Null,
+        notification_message_id.map_or(serde_json::Value::Null, serde_json::Value::String),
     );
     out.insert(
         "notification_status".to_string(),
-        serde_json::Value::String(
-            if inserted {
-                if finalized_scope.is_some() {
-                    "auto_finalized"
-                } else {
-                    "already_finalized"
-                }
-            } else {
-                "duplicate_ignored"
-            }
-            .to_string(),
-        ),
+        serde_json::Value::String(if inserted {
+            notification_status
+        } else {
+            "duplicate_ignored".to_string()
+        }),
+    );
+    out.insert(
+        "finalization_status".to_string(),
+        serde_json::Value::String(if finalized_scope.is_some() {
+            "auto_finalized".to_string()
+        } else {
+            "already_finalized".to_string()
+        }),
     );
     out.insert(
         "notification_channel".to_string(),
-        serde_json::Value::String("none".to_string()),
+        serde_json::Value::String(notification_channel),
     );
     out.insert("notification_event_id".to_string(), serde_json::Value::Null);
     if let Some(warnings) = report_result_array(envelope, "warnings") {
@@ -955,6 +1017,55 @@ fn report_result_for_owner_team_inner(
         );
     }
     Ok(serde_json::Value::Object(out))
+}
+
+fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
+    let mut state = match crate::state::projection::resolve_owner_team_id(state, owner_team)
+        .canonical_key()
+    {
+        Some(team) => crate::state::projection::project_top_level_view(state, team),
+        None => state.clone(),
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "active_team_key".to_string(),
+            serde_json::Value::String(owner_team.to_string()),
+        );
+    }
+    state
+}
+
+fn leader_result_presentation(task_id: &str) -> super::presentation::PresentationDecision {
+    super::presentation::decide_presentation(
+        &super::presentation::PresentationRequest {
+            sink: super::presentation::PresentationSink::Leader,
+            class: super::presentation::PresentationClass::StageResult,
+            case_id: Some(task_id.to_string()),
+        },
+        super::presentation::PresentationSource::ReportResult,
+    )
+}
+
+fn format_report_result_leader_summary(
+    result_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    status: &str,
+    envelope: &serde_json::Value,
+) -> String {
+    let summary = envelope
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    format!(
+        "Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}"
+    )
 }
 
 fn auto_finalize_result(

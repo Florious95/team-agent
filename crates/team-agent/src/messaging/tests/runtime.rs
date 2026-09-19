@@ -595,7 +595,7 @@ fn report_result_valid_envelope_returns_ok_with_result_id() {
 }
 
 #[test]
-fn report_result_auto_finalizes_without_leader_notification_row() {
+fn report_result_auto_finalizes_and_queues_compact_leader_notification() {
     let ws = tmp_ws("reportauto");
     crate::state::persist::save_runtime_state(
         &ws,
@@ -619,7 +619,8 @@ fn report_result_auto_finalizes_without_leader_notification_row() {
     }));
 
     let out = report_result(&ws, &envelope).unwrap();
-    assert_eq!(out["notification_status"], "auto_finalized");
+    assert_eq!(out["finalization_status"], "auto_finalized");
+    assert_eq!(out["notification_status"], "queued");
     assert_eq!(out["leader_notified"], false);
 
     let store = store_for(&ws);
@@ -631,7 +632,19 @@ fn report_result_auto_finalizes_without_leader_notification_row() {
         .query_row("select count(*) from messages", [], |row| row.get(0))
         .unwrap();
     assert_eq!(result_status, "collected");
-    assert_eq!(message_count, 0);
+    assert_eq!(message_count, 1);
+    let (presentation, content): (String, String) = conn
+        .query_row(
+            "select presentation, content from messages",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&presentation).unwrap()["class"],
+        "stage_result"
+    );
+    assert!(content.len() < 320, "leader notification must stay compact");
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_eq!(state["tasks"][0]["status"], "done");
     assert_eq!(
@@ -690,7 +703,8 @@ fn report_result_message_scope_finalizes_latest_assigned_task() {
     }));
 
     let out = report_result(&ws, &envelope).unwrap();
-    assert_eq!(out["notification_status"], "auto_finalized");
+    assert_eq!(out["finalization_status"], "auto_finalized");
+    assert_eq!(out["notification_status"], "queued");
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_eq!(state["teams"]["team-a"]["tasks"][0]["status"], "done");
     assert!(state["teams"]["team-a"]["tasks"][0]["accepted_result_id"]

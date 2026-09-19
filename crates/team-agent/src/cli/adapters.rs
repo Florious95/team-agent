@@ -784,7 +784,9 @@ fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
                 "next_actions": [],
             }),
         )?;
-        let auto_finalized = report.get("notification_status").and_then(Value::as_str)
+        let auto_finalized = report
+            .get("finalization_status")
+            .and_then(Value::as_str)
             == Some("auto_finalized");
         let shutdown = fake_shutdown(workspace)?;
         let ok = launch.get("ok").and_then(Value::as_bool) == Some(true)
@@ -1220,6 +1222,28 @@ pub fn cmd_inbox(args: &InboxArgs) -> Result<CmdResult, CliError> {
     }
 }
 
+const INBOX_LINE_LIMIT_BYTES: usize = 160;
+
+fn clean_inbox_field(value: &str) -> String {
+    value.chars().filter(|ch| !ch.is_control()).collect()
+}
+
+fn truncate_inbox_line(line: &str) -> String {
+    if line.len() <= INBOX_LINE_LIMIT_BYTES {
+        return line.to_string();
+    }
+    let budget = INBOX_LINE_LIMIT_BYTES.saturating_sub("…".len());
+    let mut end = 0;
+    for (index, ch) in line.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}…", &line[..end])
+}
+
 fn format_inbox_human(agent: &str, value: &Value) -> String {
     let messages = value
         .get("messages")
@@ -1232,19 +1256,36 @@ fn format_inbox_human(agent: &str, value: &Value) -> String {
     messages
         .iter()
         .map(|message| {
-            let id = message.get("message_id").and_then(Value::as_str).unwrap_or("-");
-            let sender = message.get("sender").and_then(Value::as_str).unwrap_or("-");
-            let recipient = message
-                .get("recipient")
-                .and_then(Value::as_str)
-                .unwrap_or("-");
-            let status = message.get("status").and_then(Value::as_str).unwrap_or("-");
-            let time = message
-                .get("created_at")
-                .and_then(Value::as_str)
-                .unwrap_or("-");
-            let summary = message.get("summary").and_then(Value::as_str).unwrap_or("");
-            format!("[{id}] [{sender} -> {recipient}] [{status}] [{time}] [{summary}]")
+            let id = clean_inbox_field(
+                message
+                    .get("message_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let sender = clean_inbox_field(
+                message.get("sender").and_then(Value::as_str).unwrap_or("-"),
+            );
+            let recipient = clean_inbox_field(
+                message
+                    .get("recipient")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let status = clean_inbox_field(
+                message.get("status").and_then(Value::as_str).unwrap_or("-"),
+            );
+            let time = clean_inbox_field(
+                message
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("-"),
+            );
+            let summary = clean_inbox_field(
+                message.get("summary").and_then(Value::as_str).unwrap_or(""),
+            );
+            truncate_inbox_line(&format!(
+                "[{id}] [{sender} -> {recipient}] [{status}] [{time}] [{summary}]"
+            ))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1508,10 +1549,30 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        agent_pane_id, append_send_guidance, quickstart_human, send_command, split_shell_argv,
+        agent_pane_id, append_send_guidance, format_inbox_human, quickstart_human, send_command,
+        split_shell_argv,
     };
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn inbox_human_output_sanitizes_controls_and_caps_each_line() {
+        let value = json!({
+            "messages": [{
+                "message_id": "msg-\u{001b}[31m".repeat(20),
+                "sender": "sender\t\u{001b}[2J".repeat(20),
+                "recipient": "worker".repeat(20),
+                "status": "delivered",
+                "created_at": "2026-09-19T00:00:00Z",
+                "summary": "中".repeat(120)
+            }]
+        });
+        let output = format_inbox_human("worker", &value);
+        for line in output.lines() {
+            assert!(line.len() <= 160, "line is {} bytes: {line:?}", line.len());
+            assert!(!line.chars().any(char::is_control), "controls leaked: {line:?}");
+        }
+    }
 
     // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
     #[test]

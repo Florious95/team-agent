@@ -727,9 +727,11 @@ impl MessageStore {
         Ok(changed == 1)
     }
 
-    /// Read inbox rows for an agent. This projection intentionally has no owner-team
-    /// filter when the caller does not provide one: legacy/CLI inbox must surface
-    /// NULL-owner messages stored for the agent.
+    /// Read ordinary inbox rows for an agent. Leader stage-result notifications are
+    /// delivered through the leader receiver, not exposed as mailbox fallback rows.
+    /// This projection intentionally has no owner-team filter when the caller does
+    /// not provide one: legacy/CLI inbox must surface NULL-owner messages stored for
+    /// the agent.
     pub fn inbox(
         &self,
         agent_id: &str,
@@ -744,7 +746,9 @@ impl MessageStore {
                         status, content, artifact_refs, created_at, updated_at, delivered_at,
                         acknowledged_at, error, delivery_attempts
                  from messages
-                 where (sender = ?1 or recipient = ?1) and owner_team_id = ?3
+                 where (sender = ?1 or recipient = ?1)
+                   and owner_team_id = ?3
+                   and coalesce(json_extract(presentation, '$.class'), 'message') != 'stage_result'
                  order by created_at desc
                  limit ?2"
             }
@@ -753,7 +757,8 @@ impl MessageStore {
                         status, content, artifact_refs, created_at, updated_at, delivered_at,
                         acknowledged_at, error, delivery_attempts
                  from messages
-                 where sender = ?1 or recipient = ?1
+                 where (sender = ?1 or recipient = ?1)
+                   and coalesce(json_extract(presentation, '$.class'), 'message') != 'stage_result'
                  order by created_at desc
                  limit ?2"
             }

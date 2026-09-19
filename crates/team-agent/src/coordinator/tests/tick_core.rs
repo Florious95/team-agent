@@ -82,7 +82,7 @@ fn tick_side_effect_order_is_the_fixed_sequence() {
     //   startup_prompts -> runtime_prompts -> sync_health -> deliver_pending ->
     //   fire_scheduled -> detect_stuck -> record_unknown_idle -> evaluate_takeover ->
     //   detect_deadlocks -> detect_compaction -> detect_drift -> detect_api_errors ->
-    //   ATOMIC_save (bug-084 wrap) -> collect_results -> prune_dedupe_log.
+    //   ATOMIC_save (bug-084 wrap) -> prune_dedupe_log.
     // The porter must push each step name into the injected recorder at its call site.
     let recorder: OrderRecorder = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (coord, _calls) = coord_for_test(true, None, Some(std::sync::Arc::clone(&recorder)));
@@ -106,19 +106,18 @@ fn tick_side_effect_order_is_the_fixed_sequence() {
         "detect_drift",
         "detect_api_errors",
         "atomic_save",
-        "collect_results",
         "prune_dedupe_log",
     ];
     assert_eq!(
         order, expected,
         "tick side-effect ORDER must match the fixed sequence"
     );
-    // ATOMIC save is the LAST mutation before read-only collect/prune (bug-084 wrap point).
+    // ATOMIC save is the LAST mutation before the read-only prune (bug-084 wrap point).
     let save_idx = order.iter().position(|s| *s == "atomic_save").unwrap();
-    let collect_idx = order.iter().position(|s| *s == "collect_results").unwrap();
+    let prune_idx = order.iter().position(|s| *s == "prune_dedupe_log").unwrap();
     assert!(
-        save_idx < collect_idx,
-        "save precedes collect (bug-084 wrap is the last mutation)"
+        save_idx < prune_idx,
+        "save precedes prune (bug-084 wrap is the last mutation)"
     );
 }
 
