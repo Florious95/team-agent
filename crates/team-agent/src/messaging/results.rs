@@ -1046,6 +1046,25 @@ fn leader_result_presentation(task_id: &str) -> super::presentation::Presentatio
     )
 }
 
+const LEADER_NOTIFICATION_LIMIT_BYTES: usize = 160;
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let suffix = "...";
+    let budget = max_bytes.saturating_sub(suffix.len());
+    let mut end = 0;
+    for (index, ch) in text.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > budget {
+            break;
+        }
+        end = next;
+    }
+    format!("{}{}", &text[..end], suffix)
+}
+
 fn format_report_result_leader_summary(
     result_id: &str,
     task_id: &str,
@@ -1063,8 +1082,11 @@ fn format_report_result_leader_summary(
         .chars()
         .filter(|ch| !ch.is_control())
         .collect::<String>();
-    format!(
-        "Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}"
+    truncate_utf8(
+        &format!(
+            "Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}"
+        ),
+        LEADER_NOTIFICATION_LIMIT_BYTES,
     )
 }
 
@@ -1416,6 +1438,21 @@ mod tests {
         assert!(notification.contains("Artifacts: .team/artifacts/evidence.md: evidence"));
         assert!(notification.contains("Next actions: ship after review"));
         assert!(notification.contains("Result id: res_1"));
+    }
+
+    #[test]
+    fn leader_result_summary_is_single_line_and_byte_bounded() {
+        let envelope = serde_json::json!({"summary": "中".repeat(4096)});
+        let summary = super::format_report_result_leader_summary(
+            "res-1",
+            "task-1",
+            "worker",
+            "success",
+            &envelope,
+        );
+        assert!(summary.len() <= 160);
+        assert!(!summary.contains('\n'));
+        assert!(summary.ends_with("..."));
     }
 
     #[test]
