@@ -646,6 +646,59 @@ fn report_result_auto_finalizes_without_leader_notification_row() {
 }
 
 #[test]
+fn report_result_message_scope_finalizes_latest_assigned_task() {
+    let ws = tmp_ws("reportauto-message");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({
+            "active_team_key": "team-a",
+            "teams": {
+                "team-a": {
+                    "agents": {"worker": {"status": "running"}},
+                    "tasks": [{"id": "task_initial", "status": "pending", "assignee": "worker"}]
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let store = store_for(&ws);
+    let conn = seed_conn(&store);
+    conn.execute(
+        "insert into messages(message_id, owner_team_id, sender, recipient, status, content, created_at) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            "msg_turn",
+            "team-a",
+            "leader",
+            "worker",
+            "delivered",
+            "complete the task",
+            "2026-09-19T00:00:00Z",
+        ],
+    )
+    .unwrap();
+    let envelope = json(serde_json::json!({
+        "schema_version": "result_envelope_v1",
+        "task_id": "msg_turn",
+        "agent_id": "worker",
+        "status": "success",
+        "summary": "done",
+        "changes": [],
+        "tests": [],
+        "risks": [],
+        "artifacts": [],
+        "next_actions": []
+    }));
+
+    let out = report_result(&ws, &envelope).unwrap();
+    assert_eq!(out["notification_status"], "auto_finalized");
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(state["teams"]["team-a"]["tasks"][0]["status"], "done");
+    assert!(state["teams"]["team-a"]["tasks"][0]["accepted_result_id"]
+        .as_str()
+        .is_some());
+}
+
+#[test]
 fn report_result_invalid_envelope_errors_validation() {
     // validate_result_envelope raises ValidationError → MessagingError::Validation.
     let ws = tmp_ws("reportbad");

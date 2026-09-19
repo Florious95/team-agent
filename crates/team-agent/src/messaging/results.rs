@@ -968,12 +968,19 @@ fn auto_finalize_result(
 ) -> Result<Option<&'static str>, MessagingError> {
     let message_scoped = is_message_scoped_result(conn, task_id, agent_id, Some(owner_team))?;
     let scope = if message_scoped { "message" } else { "task" };
-    if !message_scoped && task_exists_for_owner(state, owner_team, task_id) {
+    let projected_task_id = if message_scoped {
+        crate::mcp_server::latest_task_for_assignee(workspace, agent_id, Some(owner_team))
+    } else if task_exists_for_owner(state, owner_team, task_id) {
+        Some(task_id.to_string())
+    } else {
+        None
+    };
+    if let Some(projected_task_id) = projected_task_id {
         crate::state::repository::StateRepository::new(workspace).commit(
             crate::state::repository::StateWriteIntent::ResultCollection {
                 owner_team_id: Some(owner_team),
             },
-            |latest| mark_task_done(latest, task_id, result_id),
+            |latest| mark_task_done(latest, &projected_task_id, result_id),
         )?;
     }
     let finalized = conn.execute(
