@@ -399,9 +399,11 @@ fn p10_kill_set_is_monotone_under_foreign_population_and_enumeration_order() {
         } else {
             expected = Some(killed);
         }
-        assert!(
+        let foreign_expected = seed % 5 != 0;
+        assert_eq!(
             transport.sessions().iter().any(|name| name.starts_with("foreign-")),
-            "P10 seed={seed}: foreign sessions must remain; out={out}"
+            foreign_expected,
+            "P10 seed={seed}: foreign sessions must remain when generated; out={out}"
         );
     }
 }
