@@ -1161,6 +1161,7 @@ pub mod lifecycle_port {
                 kill_error.get_or_insert(error);
             }
         }
+        spared_sessions.retain(|session| transport.has_session(session).unwrap_or(true));
         deadline.check("session_residuals")?;
         let (session_residuals, session_residual_error) = session_residuals_after_reap_many(
             transport,

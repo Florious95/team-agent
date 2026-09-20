@@ -400,7 +400,7 @@ fn p10_kill_set_is_monotone_under_foreign_population_and_enumeration_order() {
             expected = Some(killed);
         }
         assert!(
-            !transport.sessions().iter().any(|name| name.starts_with("foreign-")),
+            transport.sessions().iter().any(|name| name.starts_with("foreign-")),
             "P10 seed={seed}: foreign sessions must remain; out={out}"
         );
     }
