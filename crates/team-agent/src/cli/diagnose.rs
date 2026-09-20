@@ -640,7 +640,15 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     repairs.push(recovery_hint(&team_key, issue_id, repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
-    if class != crate::lifecycle::launch::LeaderBindingClass::Unbound {
+    let is_healthy_unattached_host =
+        class == crate::lifecycle::launch::LeaderBindingClass::Unbound
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object
+                .get("profile_smoke")
+                .and_then(|profile| profile.get("checks"))
+                .and_then(Value::as_array)
+                .is_some_and(|checks| !checks.is_empty());
+    if !is_healthy_unattached_host {
         object.insert("ok".to_string(), Value::Bool(false));
     }
 }
