@@ -124,11 +124,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 
     fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
-        self.transport
-            .query(&Target::Pane(pane.clone()), PaneField::PaneCurrentCommand)
-            .ok()
-            .flatten()
-            .filter(|command| !command.trim().is_empty())
+        query_caller_pane_command(self.transport, pane)
     }
 
     fn attach(
@@ -875,6 +871,20 @@ fn existing_runtime_identity_view(
     state.clone()
 }
 
+fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option<String> {
+    let caller_transport = crate::tmux_backend::socket_name_from_tmux_env()
+        .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint));
+    let query_transport: &dyn Transport = caller_transport
+        .as_ref()
+        .map(|transport| transport as &dyn Transport)
+        .unwrap_or(transport);
+    query_transport
+        .query(&Target::Pane(pane.clone()), PaneField::PaneCurrentCommand)
+        .ok()
+        .flatten()
+        .filter(|command| !command.trim().is_empty())
+}
+
 fn preflight_fresh_leader_identity(
     transport: &dyn Transport,
 ) -> Option<(String, Vec<String>, Vec<String>)> {
@@ -900,13 +910,7 @@ fn preflight_fresh_leader_identity(
             let Some(pane) = pane else {
                 return None;
             };
-            let command = transport
-                .query(
-                    &Target::Pane(PaneId::new(pane)),
-                    PaneField::PaneCurrentCommand,
-                )
-                .ok()
-                .flatten()
+            let command = query_caller_pane_command(transport, &PaneId::new(pane))
                 .unwrap_or_default();
             let explicit = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
                 .ok()
