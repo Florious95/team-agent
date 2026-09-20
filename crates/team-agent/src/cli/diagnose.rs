@@ -640,7 +640,9 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     repairs.push(recovery_hint(&team_key, issue_id, repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
-    object.insert("ok".to_string(), Value::Bool(false));
+    if class != crate::lifecycle::launch::LeaderBindingClass::Unbound {
+        object.insert("ok".to_string(), Value::Bool(false));
+    }
 }
 
 pub(crate) fn append_selected_live_leader_workspace_mismatch(
