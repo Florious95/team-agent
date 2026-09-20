@@ -722,14 +722,16 @@ pub mod lifecycle_port {
         if owner.workspace != canonical {
             return SessionOwnership::Foreign;
         }
-        let expected_team = state
+        let Some(expected_team) = state
             .get("team_key")
             .or_else(|| state.get("active_team_key"))
-            .and_then(Value::as_str);
-        if let Some(expected_team) = expected_team {
-            if owner.team != expected_team && owner.team != session.as_str() {
-                return SessionOwnership::Foreign;
-            }
+            .and_then(Value::as_str)
+            .filter(|team| !team.is_empty())
+        else {
+            return SessionOwnership::Unknown;
+        };
+        if owner.team != expected_team {
+            return SessionOwnership::Foreign;
         }
         if session_targets.iter().any(|target| {
             target.current_path.as_ref().map_or(true, |path| {
