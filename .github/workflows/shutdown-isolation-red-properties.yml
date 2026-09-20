@@ -1,0 +1,68 @@
+name: Shutdown isolation red properties (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact 40-character commit SHA to test"
+        required: true
+        type: string
+      expected_tree:
+        description: "Exact 40-character tree SHA expected at source_sha"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  red-properties:
+    name: shutdown isolation property suite
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+      EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
+      RUST_TOOLCHAIN: "1.95.0"
+
+    steps:
+      - name: Validate dispatch inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for value in "$SOURCE_SHA_INPUT" "$EXPECTED_TREE_INPUT"; do
+            [[ "$value" =~ ^[0-9a-fA-F]{40}$ ]]
+          done
+
+      - name: Check out requested source
+        uses: actions/checkout@v5
+        with:
+          repository: Florious95/team-agent
+          ref: ${{ env.SOURCE_SHA_INPUT }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Verify source identity and clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha="$(printf '%s' "$SOURCE_SHA_INPUT" | tr '[:upper:]' '[:lower:]')"
+          expected_tree="$(printf '%s' "$EXPECTED_TREE_INPUT" | tr '[:upper:]' '[:lower:]')"
+          [[ "$(git rev-parse --verify HEAD)" == "$source_sha" ]]
+          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "$expected_tree" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+
+      - name: Install and verify Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version | grep -F "rustc ${RUST_TOOLCHAIN}"
+          cargo --version
+
+      - name: Run shutdown isolation property suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p team-agent --locked --test shutdown_isolation_property_red -- --test-threads=1
