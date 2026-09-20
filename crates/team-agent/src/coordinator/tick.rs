@@ -160,6 +160,40 @@ fn coordinator_team_scoped_state(
     crate::state::projection::select_runtime_state(workspace, Some(selected)).ok()
 }
 
+fn live_sibling_team_state(
+    state: &Value,
+    missing_session: &str,
+    transport: &dyn crate::transport::Transport,
+) -> Result<Option<(String, Value)>, crate::transport::TransportError> {
+    let Some(teams) = state.get("teams").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    for (team_key, team_state) in teams {
+        let status = team_state
+            .get("status")
+            .and_then(Value::as_str)
+            .map(|status| status.to_ascii_lowercase());
+        if status.is_some_and(|status| status != "alive" && status != "running") {
+            continue;
+        }
+        let Some(session_name) = team_state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .filter(|session| !session.is_empty() && *session != missing_session)
+        else {
+            continue;
+        };
+        let session = crate::transport::SessionName::new(session_name);
+        if transport.has_session(&session)? {
+            return Ok(Some((
+                team_key.clone(),
+                crate::state::projection::project_top_level_view(state, team_key),
+            )));
+        }
+    }
+    Ok(None)
+}
+
 // ===========================================================================
 // Coordinator struct(daemon lifecycle + tick orchestration)
 // ===========================================================================
@@ -330,20 +364,40 @@ impl Coordinator {
             .get("session_name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
+            .map(str::to_owned)
         {
-            let session = crate::transport::SessionName::new(session_name);
+            let session = crate::transport::SessionName::new(&session_name);
             if !self.transport.has_session(&session)? {
                 event_log.write(
                     "coordinator.session_missing",
                     serde_json::json!({"session": session_name}),
                 )?;
-                notify_session_missing(self.workspace.as_path(), &state, &event_log, session_name)?;
-                return Ok(empty_tick_report(
-                    false,
-                    true,
-                    Some(TickStopReason::TmuxSessionMissing),
-                    None,
-                ));
+                if let Some((sibling_team, sibling_state)) =
+                    live_sibling_team_state(&state, &session_name, self.transport.as_ref())?
+                {
+                    event_log.write(
+                        "coordinator.session_missing_sibling_alive",
+                        serde_json::json!({
+                            "session": session_name,
+                            "sibling_team": sibling_team,
+                            "action": "continue_with_sibling_team",
+                        }),
+                    )?;
+                    state = sibling_state;
+                } else {
+                    notify_session_missing(
+                        self.workspace.as_path(),
+                        &state,
+                        &event_log,
+                        &session_name,
+                    )?;
+                    return Ok(empty_tick_report(
+                        false,
+                        true,
+                        Some(TickStopReason::TmuxSessionMissing),
+                        None,
+                    ));
+                }
             }
         }
 
