@@ -34,7 +34,11 @@ static CASE_ID: AtomicU64 = AtomicU64::new(0);
 fn p1_same_socket_shutdown_a_never_touches_team_b_for_bounded_generated_topologies() {
     for seed in 0..8u64 {
         let case = Case::new(&format!("p1-{seed}"));
-        let socket = case.path.join(format!("socket-{seed}"));
+        let socket = case
+            .path
+            .join(format!("socket-{seed}"))
+            .display()
+            .to_string();
         let mut targets = vec![pane("%a", "team-a", "worker-a", 10 + seed as u32)];
         if seed % 2 == 0 {
             targets.push(pane("%a2", "team-a", "worker-a-2", 11 + seed as u32));
@@ -120,8 +124,8 @@ fn p2_shared_pgid_foreign_coordinator_survives_team_a_shutdown() {
 fn p3_nested_tmux_host_endpoint_is_never_a_shutdown_authority() {
     for seed in 0..4u64 {
         let case = Case::new(&format!("p3-nested-{seed}"));
-        let host_socket = case.path.join("host.sock");
-        let worker_socket = case.path.join("worker.sock");
+        let host_socket = case.path.join("host.sock").display().to_string();
+        let worker_socket = case.path.join("worker.sock").display().to_string();
         let targets = vec![
             pane("%a", "team-a", "worker-a", 10),
             pane("%host", "host-team", "shell", 11),
@@ -184,7 +188,7 @@ fn p4_destructive_actions_require_exact_positive_identity_and_no_pgid_broadcast(
             "schema_version": 1,
             "team_key": "team-a",
             "session_name": "team-a",
-            "tmux_socket": case.path.join("a.sock"),
+            "tmux_socket": case.path.join("a.sock").display().to_string(),
             "agents": {}
         }),
     );
@@ -214,7 +218,7 @@ fn p5_probe_failure_is_refusal_not_empty_success_or_destructive_cleanup() {
             "schema_version": 1,
             "team_key": "team-a",
             "session_name": "team-a",
-            "tmux_socket": case.path.join("a.sock"),
+            "tmux_socket": case.path.join("a.sock").display().to_string(),
             "agents": {}
         }),
     );
@@ -240,7 +244,7 @@ fn p6_protected_leader_pane_survives_same_session_worker_shutdown() {
             "schema_version": 1,
             "team_key": "team-a",
             "session_name": "team-a",
-            "tmux_socket": case.path.join("a.sock"),
+            "tmux_socket": case.path.join("a.sock").display().to_string(),
             "team_owner": { "pane_id": "%leader" },
             "agents": {
                 "worker": { "status": "running", "provider": "fake", "window": "worker", "pane_id": "%worker" }
@@ -297,7 +301,7 @@ fn p7_missing_or_unbound_coordinator_metadata_is_fail_closed() {
 fn p8_scoped_sibling_and_generation_are_preserved() {
     for seed in 0..6u64 {
         let case = Case::new(&format!("p8-sibling-{seed}"));
-        let socket = case.path.join("shared.sock");
+        let socket = case.path.join("shared.sock").display().to_string();
         let mut targets = vec![pane("%a", "team-a", "worker", 1), pane("%b", "team-b", "worker", 2)];
         if seed % 2 == 0 {
             targets.push(pane("%b2", "team-b", "worker-2", 3));
@@ -339,7 +343,7 @@ fn p9_normal_owned_team_is_not_a_noop_and_second_shutdown_is_idempotent() {
             "schema_version": 1,
             "team_key": "team-a",
             "session_name": "team-a",
-            "tmux_socket": case.path.join("a.sock"),
+            "tmux_socket": case.path.join("a.sock").display().to_string(),
             "agents": {}
         }),
     );
@@ -380,7 +384,7 @@ fn p10_kill_set_is_monotone_under_foreign_population_and_enumeration_order() {
                 "schema_version": 1,
                 "team_key": "team-a",
                 "session_name": "team-a",
-                "tmux_socket": case.path.join("a.sock"),
+                "tmux_socket": case.path.join("a.sock").display().to_string(),
                 "agents": {}
             }),
         );
