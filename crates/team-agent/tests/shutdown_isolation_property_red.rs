@@ -24,7 +24,7 @@ use team_agent::state::persist::save_runtime_state;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    SessionOwner, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
     TurnVerification, WindowName,
 };
 
@@ -407,12 +407,30 @@ fn p10_kill_set_is_monotone_under_foreign_population_and_enumeration_order() {
 }
 
 fn shutdown(case: &Case, team: Option<&str>, transport: &RecordingTransport) -> Value {
+    transport.bind_workspace(&case.path);
     team_agent::cli::lifecycle_port::shutdown_with_transport(&case.path, true, team, transport)
         .unwrap_or_else(|error| panic!("shutdown returned an unexpected API error: {error}"))
 }
 
-fn save_state(case: &Case, value: Value) {
+fn save_state(case: &Case, mut value: Value) {
+    add_fixture_generations(&mut value);
     save_runtime_state(&case.path, &value).expect("save fixture runtime state");
+}
+
+fn add_fixture_generations(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(session) = object.get("session_name").and_then(Value::as_str) {
+        object
+            .entry("generation")
+            .or_insert_with(|| Value::String(session.to_string()));
+    }
+    if let Some(teams) = object.get_mut("teams").and_then(Value::as_object_mut) {
+        for team in teams.values_mut() {
+            add_fixture_generations(team);
+        }
+    }
 }
 
 fn pane(id: &str, session: &str, window: &str, _pid: u32) -> PaneInfo {
@@ -460,6 +478,7 @@ struct RecordingTransport {
     killed_sessions: Arc<Mutex<Vec<String>>>,
     killed_windows: Arc<Mutex<Vec<String>>>,
     kill_server: Arc<Mutex<bool>>,
+    owner_workspace: Arc<Mutex<Option<PathBuf>>>,
     list_targets_failure: bool,
 }
 
@@ -474,6 +493,14 @@ impl RecordingTransport {
     fn with_list_targets_failure(mut self) -> Self {
         self.list_targets_failure = true;
         self
+    }
+
+    fn bind_workspace(&self, workspace: &Path) {
+        *self.owner_workspace.lock().unwrap() = Some(
+            workspace
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.to_path_buf()),
+        );
     }
 
     fn sessions(&self) -> BTreeSet<String> {
@@ -582,7 +609,34 @@ impl Transport for RecordingTransport {
                 stderr: "injected probe failure".to_string(),
             });
         }
-        Ok(self.targets.lock().unwrap().clone())
+        let workspace = self.owner_workspace.lock().unwrap().clone();
+        Ok(self
+            .targets
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(|mut pane| {
+                if let Some(workspace) = workspace.as_ref() {
+                    pane.current_path = Some(workspace.clone());
+                }
+                pane
+            })
+            .collect())
+    }
+
+    fn session_owner(
+        &self,
+        session: &SessionName,
+    ) -> Result<Option<SessionOwner>, TransportError> {
+        let Some(workspace) = self.owner_workspace.lock().unwrap().clone() else {
+            return Ok(None);
+        };
+        Ok(Some(SessionOwner {
+            workspace: workspace.to_string_lossy().into_owned(),
+            team: session.as_str().to_string(),
+            generation: session.as_str().to_string(),
+        }))
     }
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {

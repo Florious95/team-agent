@@ -1037,18 +1037,24 @@ pub mod lifecycle_port {
             // gate; topology only decides whether a verified session is reduced
             // to worker panes or removed as a whole.
             let leader_anchor_ids = collect_state_leader_anchor_pane_ids(&state);
-            let live_targets_now = match transport.list_targets() {
-                Ok(targets) => targets,
+            let (live_targets_now, live_targets_known) = match transport.list_targets() {
+                Ok(targets) => (targets, true),
                 Err(error) => {
                     push_unique_session(&mut spared_sessions, session.clone());
                     kill_error.get_or_insert_with(|| format!("session ownership probe failed: {error}"));
-                    Vec::new()
+                    (Vec::new(), false)
                 }
             };
-            let ownership = if live_targets_now.is_empty() {
-                SessionOwnership::Unknown
+            let ownership = if live_targets_known {
+                session_ownership(
+                    &run_workspace,
+                    &state,
+                    transport,
+                    session,
+                    &live_targets_now,
+                )
             } else {
-                session_ownership(&run_workspace, &state, transport, session, &live_targets_now)
+                SessionOwnership::Unknown
             };
             if ownership != SessionOwnership::Owned {
                 push_unique_session(&mut spared_sessions, session.clone());
