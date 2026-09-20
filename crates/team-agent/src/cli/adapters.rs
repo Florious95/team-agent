@@ -1569,11 +1569,21 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
                         && issue.get("id").and_then(Value::as_str) != Some("leader_not_attached")
                 })
             });
+        let fresh_team_is_healthy = value
+            .pointer("/coordinator/ok")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && value
+                .pointer("/profile_smoke/checks")
+                .and_then(Value::as_array)
+                .is_some_and(|checks| !checks.is_empty());
+        let final_ok = if has_leader_not_attached && !has_blocking_issues {
+            fresh_team_is_healthy
+        } else {
+            base_ok && !has_blocking_issues
+        };
         if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "ok".to_string(),
-                Value::Bool((base_ok || has_leader_not_attached) && !has_blocking_issues),
-            );
+            object.insert("ok".to_string(), Value::Bool(final_ok));
         }
     }
     let result = CmdResult::from_json(value, args.json);
