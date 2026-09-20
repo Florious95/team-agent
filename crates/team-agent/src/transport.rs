@@ -326,6 +326,12 @@ pub struct SpawnResult {
 /// 全局枚举的一行(身份地基)。`leader_env` 在 tmux 后端靠反向读进程 env,在
 /// WezTerm/ConPTY 后端靠正向登记表投影(§4a)。
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOwner {
+    pub workspace: String,
+    pub team: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneInfo {
     pub pane_id: PaneId,
     pub session: SessionName,
@@ -999,6 +1005,27 @@ pub trait Transport: Send + Sync {
     /// 全局枚举所有 pane + 每 pane 的 leader_env。tmux=`list-panes -a` + 读进程 env;
     /// wezterm=`cli list --format json` + 正向登记表;conpty=daemon 内存表(仅自有,§4a)。
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError>;
+
+    /// Write an owner marker at the session scope after a new session is created.
+    /// Backends without a session-local metadata primitive may no-op, but then
+    /// shutdown must treat the missing marker as unknown and refuse destructive work.
+    fn set_session_owner(
+        &self,
+        _session: &SessionName,
+        _workspace: &Path,
+        _team: &str,
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    /// Read the session-local owner marker. `None` is an unknown/legacy session,
+    /// never proof that the caller owns it.
+    fn session_owner(
+        &self,
+        _session: &SessionName,
+    ) -> Result<Option<SessionOwner>, TransportError> {
+        Ok(None)
+    }
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError>;
 

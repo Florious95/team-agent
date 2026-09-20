@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: quick_start_tmux_backend
-//!       what: 优先复用调用方所在 tmux socket，否则按 workspace 派生
+//!       what: 按 workspace 派生私有 socket；调用方 tmux 只用于 leader receiver 绑定
 //!     - name: annotate_runtime_transport
 //!       what: 把 transport 种类与来源写进 state，tmux 时再写 endpoint 三字段
 //!     - name: attach_commands_for_runtime_windows
@@ -37,15 +37,11 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 use super::*;
 
 /// ---
-/// purpose: 定出 quick-start 使用的 tmux 后端
-/// returns: 调用方环境里有 socket 就复用它，否则按 workspace 派生一个
+/// purpose: 定出 quick-start 使用的私有 tmux 后端
+/// returns: 始终按 workspace 派生 endpoint；调用方 $TMUX 仅供 leader receiver 身份绑定
 /// ---
 pub(crate) fn quick_start_tmux_backend(workspace: &Path) -> crate::tmux_backend::TmuxBackend {
-    if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
-        crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint)
-    } else {
-        crate::tmux_backend::TmuxBackend::for_workspace(workspace)
-    }
+    crate::tmux_backend::TmuxBackend::for_workspace(workspace)
 }
 
 /// ---

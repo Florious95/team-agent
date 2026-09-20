@@ -146,6 +146,9 @@ pub fn launch_with_transport_in_workspace(
             transport,
             &started,
         )?;
+        transport
+            .set_session_owner(&session_name, workspace, session_name.as_str())
+            .map_err(|error| LifecycleError::Transport(error.to_string()))?;
         // 0.5.38: per-worker timing tags (source="launch") so operators can
         // trace which worker's spawn dominates wall time. Zeros for now on
         // the sub-timings — Step 1 first enables shape assertion; a later
