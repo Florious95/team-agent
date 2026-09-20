@@ -1007,6 +1007,7 @@ pub mod lifecycle_port {
         root_pids.sort_unstable();
         root_pids.dedup();
         deadline.check("reap_process_tree")?;
+        let process_event_log = crate::event_log::EventLog::new(&run_workspace);
         reap_process_tree(
             &run_workspace,
             &state,
@@ -1014,6 +1015,7 @@ pub mod lifecycle_port {
             &root_pids,
             &protected,
             &entry_table,
+            &process_event_log,
         );
 
         let mut kill_error: Option<String> = None;
@@ -1822,6 +1824,7 @@ pub mod lifecycle_port {
         root_pids: &[u32],
         protected: &ShutdownProtection,
         table: &[ProcessInfo],
+        event_log: &crate::event_log::EventLog,
     ) {
         let mut pids = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -1838,6 +1841,28 @@ pub mod lifecycle_port {
             }
         }
         if pids.is_empty() {
+            return;
+        }
+        let audit_targets = pids.iter().map(u32::to_string).collect::<Vec<_>>();
+        if event_log
+            .write(
+                "transport.pre_kill_audit",
+                json!({
+                    "phase": "pre_call",
+                    "caller": "shutdown.process_tree",
+                    "caller_pid": std::process::id(),
+                    "action": "signal-pid",
+                    "endpoint": Value::Null,
+                    "targets": audit_targets,
+                    "workspace": workspace.to_string_lossy(),
+                    "team": Value::Null,
+                    "generation": Value::Null,
+                    "owner_evidence": "argv+cwd+state_pid_tree",
+                    "reason": "positive per-pid process ownership",
+                }),
+            )
+            .is_err()
+        {
             return;
         }
         for pid in pids.iter().rev() {
@@ -1909,6 +1934,7 @@ pub mod lifecycle_port {
                 &residual_pids,
                 &protected,
                 &round_table,
+                &crate::event_log::EventLog::new(workspace),
             );
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
