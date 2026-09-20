@@ -332,6 +332,7 @@ pub fn start_coordinator_with_team(
         }
     }
     command
+        .current_dir(workspace.as_path())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -540,8 +541,7 @@ fn coordinator_pid_owned_by_workspace(workspace: &WorkspacePath, pid: Pid) -> bo
                 .map(|path| path == workspace)
                 .unwrap_or(false)
     });
-    is_team_agent && is_coordinator && has_workspace && process_cwd(pid.get())
-        .is_some_and(|cwd| path_is_under(&cwd, &workspace))
+    is_team_agent && is_coordinator && has_workspace
 }
 
 fn terminate_pid_for_workspace(pid: Pid, workspace: &Path) -> bool {
@@ -588,8 +588,7 @@ fn coordinator_pid_owned_by_path(workspace: &Path, pid: Pid) -> bool {
                 .map(|path| path == workspace)
                 .unwrap_or(false)
     });
-    is_team_agent && is_coordinator && has_workspace && process_cwd(pid.get())
-        .is_some_and(|cwd| path_is_under(&cwd, &workspace))
+    is_team_agent && is_coordinator && has_workspace
 }
 
 fn is_team_agent_binary(token: &str) -> bool {
@@ -597,30 +596,6 @@ fn is_team_agent_binary(token: &str) -> bool {
         return false;
     };
     name == "team-agent" || name == "team_agent" || name.starts_with("team-agent-")
-}
-
-fn process_cwd(pid: u32) -> Option<PathBuf> {
-    if let Ok(path) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
-        return Some(path);
-    }
-    let output = crate::os_probe::bounded_command_output_with_probe(
-        Command::new("lsof").args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]),
-        "lsof_cwd",
-        Some(pid),
-    )
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix('n').map(PathBuf::from))
-}
-
-fn path_is_under(path: &Path, root: &Path) -> bool {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    path == root || path.starts_with(root)
 }
 
 fn parse_ps_command_line(line: &str) -> Option<(u32, &str)> {
