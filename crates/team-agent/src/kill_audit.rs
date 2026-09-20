@@ -96,7 +96,7 @@ fn destructive_argv(
         vec![format!("{kind:?}").to_ascii_lowercase()]
     };
     argv.push(action.to_string());
-    if action == KILL_SESSION {
+    if action == KILL_SESSION || action == "kill-pane" {
         for target in targets {
             argv.push("-t".to_string());
             argv.push(target.clone());

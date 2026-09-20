@@ -820,7 +820,7 @@ pub mod lifecycle_port {
             assert!(cleanup
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("pre-kill audit failed")));
+                .is_some_and(|error| error.contains("ownership is unknown")));
             let _ = std::fs::remove_dir_all(root);
         }
     }
@@ -1062,7 +1062,25 @@ pub mod lifecycle_port {
                         &leader_anchor_ids,
                         &live_targets_now,
                     );
+                    let event_log = crate::event_log::EventLog::new(&run_workspace);
                     for pane in &worker_panes {
+                        let pane_target = vec![pane.as_str().to_string()];
+                        let audit = crate::kill_audit::pre_kill_audit_scoped(
+                            &event_log,
+                            transport,
+                            "shutdown.managed_worker_pane",
+                            "kill-pane",
+                            &pane_target,
+                            &run_workspace,
+                            state.get("team_key").and_then(Value::as_str),
+                            state.get("generation").and_then(Value::as_str),
+                            "session_marker+state_worker_pane+pane_path",
+                            "positive workspace/team ownership",
+                        );
+                        if let Err(error) = audit {
+                            kill_error.get_or_insert_with(|| format!("pre-kill audit failed: {error}"));
+                            continue;
+                        }
                         if let Err(error) = transport.kill_pane(pane) {
                             if !tmux_absent_error(&error.to_string()) {
                                 kill_error.get_or_insert_with(|| error.to_string());
