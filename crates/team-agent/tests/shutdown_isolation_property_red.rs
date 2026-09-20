@@ -415,7 +415,7 @@ fn save_state(case: &Case, value: Value) {
     save_runtime_state(&case.path, &value).expect("save fixture runtime state");
 }
 
-fn pane(id: &str, session: &str, window: &str, pid: u32) -> PaneInfo {
+fn pane(id: &str, session: &str, window: &str, _pid: u32) -> PaneInfo {
     PaneInfo {
         pane_id: PaneId::new(id),
         session: SessionName::new(session),
@@ -426,7 +426,7 @@ fn pane(id: &str, session: &str, window: &str, pid: u32) -> PaneInfo {
         current_command: Some("fake-worker".to_string()),
         current_path: None,
         active: true,
-        pane_pid: Some(pid),
+        pane_pid: None,
         leader_env: BTreeMap::new(),
     }
 }
