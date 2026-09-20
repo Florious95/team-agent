@@ -12,8 +12,8 @@
 //!   `GetExitCodeProcess`, `TerminateProcess`, Toolhelp snapshot,
 //!   Job Objects for shim-owned worker teardown)
 //!
-//! CR C-6: `terminate_pid` / `terminate_group` return
-//! `TerminationOutcome` so a caller that requested `TerminateGraceful`
+//! CR C-6: `terminate_pid` returns `TerminationOutcome` so a caller
+//! that requested `TerminateGraceful`
 //! can see that Windows downgraded to `TerminateForce` and emit a
 //! `platform.terminate_force_only` event (N38 交底).
 //!
@@ -41,7 +41,7 @@ pub enum SignalKind {
     TerminateForce,
 }
 
-/// Result of a `terminate_pid` / `terminate_group` call. `Graceful`
+/// Result of a `terminate_pid` call. `Graceful`
 /// means the OS honored the request kind; `ForceOnly` means Windows
 /// downgraded a `TerminateGraceful` to `TerminateProcess` (CR C-6
 /// N38 交底 — caller must emit a `platform.terminate_force_only`
@@ -55,7 +55,7 @@ pub enum TerminationOutcome {
     /// (no grace period). Includes a machine-readable reason so
     /// callers can log it in the audit event.
     ForceOnly { reason: &'static str },
-    /// The pid/group was already gone by the time the call resolved.
+    /// The pid was already gone by the time the call resolved.
     /// Not an error.
     AlreadyGone,
 }
@@ -206,34 +206,6 @@ mod unix_impl {
             Err(_) => return Ok(TerminationOutcome::AlreadyGone),
         };
         let rc = unsafe { libc::kill(pid_t, signal) };
-        if rc == 0 {
-            return Ok(TerminationOutcome::Requested);
-        }
-        let err = io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(code) if code == libc::ESRCH => Ok(TerminationOutcome::AlreadyGone),
-            _ => Err(err),
-        }
-    }
-
-    /// Send a signal to a process group (`kill(-pgid, ...)`).
-    /// Byte-equivalent to `cli/mod.rs:1854` (`libc::kill(-pgid, signal)`)
-    /// used by `send_process_signal_group`.
-    pub fn terminate_group(
-        group_id: u32,
-        kind: SignalKind,
-    ) -> Result<TerminationOutcome, io::Error> {
-        let signal = match kind {
-            SignalKind::TerminateGraceful => libc::SIGTERM,
-            SignalKind::TerminateForce => libc::SIGKILL,
-        };
-        let pgid_t = match libc::pid_t::try_from(group_id) {
-            Ok(p) => p,
-            Err(_) => return Ok(TerminationOutcome::AlreadyGone),
-        };
-        // `-pgid` targets every process in that group. Preserves the
-        // existing shutdown semantics inline in cli/mod.rs.
-        let rc = unsafe { libc::kill(-pgid_t, signal) };
         if rc == 0 {
             return Ok(TerminationOutcome::Requested);
         }
@@ -432,19 +404,6 @@ mod windows_impl {
             },
             SignalKind::TerminateForce => TerminationOutcome::Requested,
         })
-    }
-
-    pub fn terminate_group(
-        _group_id: u32,
-        _kind: SignalKind,
-    ) -> Result<TerminationOutcome, io::Error> {
-        // Windows has no `-pgid` sentinel. Design §Route B: "owned
-        // worker teardown: prefer Job Objects in the ConPTY shim".
-        // Job-object teardown is a shim-side concern, not a top-level
-        // API. Return AlreadyGone honestly here so shutdown code
-        // falls back to per-pid termination (the caller's outer
-        // loop retries per-pid after the group attempt is a no-op).
-        Ok(TerminationOutcome::AlreadyGone)
     }
 
     pub fn reap_child_if_possible(_pid: u32) {
