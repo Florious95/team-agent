@@ -151,8 +151,17 @@ pub fn launch_with_transport_in_workspace(
             .map(|state| crate::state::projection::team_state_key(&state))
             .filter(|team| !team.is_empty())
             .unwrap_or_else(|| session_name.as_str().to_string());
+        let generation = started
+            .first()
+            .map(|agent| agent.spawned_at.as_str())
+            .unwrap_or(session_name.as_str());
         transport
-            .set_session_owner(&session_name, workspace, &owner_team)
+            .set_session_owner_with_generation(
+                &session_name,
+                workspace,
+                &owner_team,
+                generation,
+            )
             .map_err(|error| LifecycleError::Transport(error.to_string()))?;
         // 0.5.38: per-worker timing tags (source="launch") so operators can
         // trace which worker's spawn dominates wall time. Zeros for now on

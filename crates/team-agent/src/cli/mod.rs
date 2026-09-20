@@ -733,6 +733,23 @@ pub mod lifecycle_port {
         if owner.team != expected_team {
             return SessionOwnership::Foreign;
         }
+        let expected_generation = state
+            .get("generation")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                state
+                    .get("agents")
+                    .and_then(Value::as_object)
+                    .and_then(|agents| agents.values().find_map(|agent| {
+                        agent.get("spawned_at").and_then(Value::as_str)
+                    }))
+            });
+        let Some(expected_generation) = expected_generation.filter(|generation| !generation.is_empty()) else {
+            return SessionOwnership::Unknown;
+        };
+        if owner.generation != expected_generation {
+            return SessionOwnership::Foreign;
+        }
         if session_targets.iter().any(|target| {
             target.current_path.as_ref().map_or(true, |path| {
                 !path_is_under(path.as_path(), workspace)

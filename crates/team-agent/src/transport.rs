@@ -329,6 +329,7 @@ pub struct SpawnResult {
 pub struct SessionOwner {
     pub workspace: String,
     pub team: String,
+    pub generation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1016,6 +1017,19 @@ pub trait Transport: Send + Sync {
         _team: &str,
     ) -> Result<(), TransportError> {
         Ok(())
+    }
+
+    /// Write owner metadata including the launch generation when the backend
+    /// can persist one.  The default preserves compatibility for non-tmux
+    /// transports, which remain Unknown on reads.
+    fn set_session_owner_with_generation(
+        &self,
+        session: &SessionName,
+        workspace: &Path,
+        team: &str,
+        _generation: &str,
+    ) -> Result<(), TransportError> {
+        self.set_session_owner(session, workspace, team)
     }
 
     /// Read the session-local owner marker. `None` is an unknown/legacy session,

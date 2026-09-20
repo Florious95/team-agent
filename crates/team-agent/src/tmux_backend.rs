@@ -77,6 +77,7 @@ pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE
 const TMUX_PANE_BINDING_NONCE_OPTION: &str = "@team_agent_pane_binding_nonce";
 const TMUX_SESSION_OWNER_WORKSPACE_OPTION: &str = "@team_agent_owner_workspace";
 const TMUX_SESSION_OWNER_TEAM_OPTION: &str = "@team_agent_owner_team";
+const TMUX_SESSION_OWNER_GENERATION_OPTION: &str = "@team_agent_owner_generation";
 
 /// Result of running an external command — the typed output of the OS edge.
 #[derive(Debug, Clone)]
@@ -358,6 +359,7 @@ impl TmuxBackend {
         session: &SessionName,
         workspace: &Path,
         team: &str,
+        generation: &str,
     ) -> Result<(), TransportError> {
         let workspace = workspace
             .canonicalize()
@@ -367,6 +369,7 @@ impl TmuxBackend {
         for (option, value) in [
             (TMUX_SESSION_OWNER_WORKSPACE_OPTION, workspace),
             (TMUX_SESSION_OWNER_TEAM_OPTION, team.to_string()),
+            (TMUX_SESSION_OWNER_GENERATION_OPTION, generation.to_string()),
         ] {
             let argv = self.tmux_argv(&[
                 "tmux".to_string(),
@@ -419,7 +422,17 @@ impl TmuxBackend {
         else {
             return Ok(None);
         };
-        Ok(Some(SessionOwner { workspace, team }))
+        let Some(generation) = self.read_session_owner_option(
+            session,
+            TMUX_SESSION_OWNER_GENERATION_OPTION,
+        )? else {
+            return Ok(None);
+        };
+        Ok(Some(SessionOwner {
+            workspace,
+            team,
+            generation,
+        }))
     }
 
     /// ---
@@ -3063,7 +3076,17 @@ impl Transport for TmuxBackend {
         workspace: &Path,
         team: &str,
     ) -> Result<(), TransportError> {
-        self.set_session_owner_marker(session, workspace, team)
+        self.set_session_owner_marker(session, workspace, team, session.as_str())
+    }
+
+    fn set_session_owner_with_generation(
+        &self,
+        session: &SessionName,
+        workspace: &Path,
+        team: &str,
+        generation: &str,
+    ) -> Result<(), TransportError> {
+        self.set_session_owner_marker(session, workspace, team, generation)
     }
 
     fn session_owner(
