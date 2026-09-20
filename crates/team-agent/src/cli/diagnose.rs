@@ -96,12 +96,6 @@ pub(crate) fn classify_tmux_server_error(error_text: &str) -> &'static str {
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
     let mut issues = Vec::new();
     let mut repairs = Vec::new();
-    for issue in crate::topology::diagnose_topology_issues(state, backend) {
-        if let Some(id) = crate::topology::issue_id(&issue) {
-            repairs.push(topology_repair_hint(id));
-        }
-        issues.push(issue);
-    }
 
     if state
         .get("leader_receiver")
@@ -118,41 +112,54 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         ));
     }
 
-    if let Some(session_name) = state
+    // Probe the session before any topology enumeration. A missing session is
+    // terminal for all window/pane/socket probes; repeating those tmux calls
+    // only pays the dead-socket timeout again on every layer.
+    let session_unavailable = state
         .get("session_name")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-    {
-        match backend.has_session(&crate::transport::SessionName::new(
-            session_name.to_string(),
-        )) {
-            Ok(true) => {}
-            Ok(false) => {
-                issues.push(json!("tmux_session_missing"));
-                repairs.push(recovery_hint(
-                    session_name,
-                    "tmux_session_missing",
-                    "team-agent restart",
-                ));
-            }
-            Err(error) => {
-                // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B):
-                // when the transport error stderr matches "server exited
-                // unexpectedly", the physical layer that disappeared is
-                // the tmux server itself — not just this team's session.
-                // Surface `tmux_server_crashed` so the user's next
-                // action is a coordinator/host-level recovery, not a
-                // per-agent `restart <agent>`.
-                let error_str = error.to_string();
-                let issue_id = classify_tmux_server_error(&error_str);
-                issues.push(json!(issue_id));
-                let mut hint = recovery_hint(session_name, issue_id, "team-agent diagnose");
-                if let Some(obj) = hint.as_object_mut() {
-                    obj.insert("reason".to_string(), Value::String(error_str));
+        .is_some_and(|session_name| {
+            match backend.has_session(&crate::transport::SessionName::new(
+                session_name.to_string(),
+            )) {
+                Ok(true) => false,
+                Ok(false) => {
+                    issues.push(json!("tmux_session_missing"));
+                    repairs.push(recovery_hint(
+                        session_name,
+                        "tmux_session_missing",
+                        "team-agent restart",
+                    ));
+                    true
                 }
-                repairs.push(hint);
+                Err(error) => {
+                    // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B):
+                    // when the transport error stderr matches "server exited
+                    // unexpectedly", the physical layer that disappeared is
+                    // the tmux server itself — not just this team's session.
+                    let error_str = error.to_string();
+                    let issue_id = classify_tmux_server_error(&error_str);
+                    issues.push(json!(issue_id));
+                    let mut hint = recovery_hint(session_name, issue_id, "team-agent diagnose");
+                    if let Some(obj) = hint.as_object_mut() {
+                        obj.insert("reason".to_string(), Value::String(error_str));
+                    }
+                    repairs.push(hint);
+                    true
+                }
             }
+        });
+
+    if session_unavailable {
+        return (Value::Array(issues), Value::Array(repairs));
+    }
+
+    for issue in crate::topology::diagnose_topology_issues(state, backend) {
+        if let Some(id) = crate::topology::issue_id(&issue) {
+            repairs.push(topology_repair_hint(id));
         }
+        issues.push(issue);
     }
 
     if leader_receiver_attached(state) {
@@ -275,20 +282,30 @@ pub(crate) fn diagnose_runtime_for_workspace(
     selected_team_key: Option<&str>,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
-    append_live_leader_workspace_mismatch_issue(
-        workspace,
-        state,
-        backend,
-        &mut issues,
-        &mut repairs,
-    );
-    append_registry_channel_unbound_issue(
-        workspace,
-        state,
-        selected_team_key,
-        &mut issues,
-        &mut repairs,
-    );
+    let session_unavailable = issues.as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            matches!(
+                item.as_str(),
+                Some("tmux_session_missing" | "tmux_server_crashed")
+            )
+        })
+    });
+    if !session_unavailable {
+        append_live_leader_workspace_mismatch_issue(
+            workspace,
+            state,
+            backend,
+            &mut issues,
+            &mut repairs,
+        );
+        append_registry_channel_unbound_issue(
+            workspace,
+            state,
+            selected_team_key,
+            &mut issues,
+            &mut repairs,
+        );
+    }
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
