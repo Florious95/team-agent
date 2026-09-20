@@ -96,12 +96,6 @@ pub(crate) fn classify_tmux_server_error(error_text: &str) -> &'static str {
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
     let mut issues = Vec::new();
     let mut repairs = Vec::new();
-    for issue in crate::topology::diagnose_topology_issues(state, backend) {
-        if let Some(id) = crate::topology::issue_id(&issue) {
-            repairs.push(topology_repair_hint(id));
-        }
-        issues.push(issue);
-    }
 
     if state
         .get("leader_receiver")
@@ -118,41 +112,63 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         ));
     }
 
-    if let Some(session_name) = state
+    // Probe the session before any topology enumeration. A missing session is
+    // terminal for all window/pane/socket probes; repeating those tmux calls
+    // only pays the dead-socket timeout again on every layer. The persisted
+    // endpoint/socket split is state-only, so preserve that fact before the
+    // short-circuit without probing either dead endpoint.
+    let persisted_socket_conflict = crate::topology::endpoint_socket_conflict(state);
+    let session_unavailable = state
         .get("session_name")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-    {
-        match backend.has_session(&crate::transport::SessionName::new(
-            session_name.to_string(),
-        )) {
-            Ok(true) => {}
-            Ok(false) => {
-                issues.push(json!("tmux_session_missing"));
-                repairs.push(recovery_hint(
-                    session_name,
-                    "tmux_session_missing",
-                    "team-agent restart",
-                ));
-            }
-            Err(error) => {
-                // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B):
-                // when the transport error stderr matches "server exited
-                // unexpectedly", the physical layer that disappeared is
-                // the tmux server itself — not just this team's session.
-                // Surface `tmux_server_crashed` so the user's next
-                // action is a coordinator/host-level recovery, not a
-                // per-agent `restart <agent>`.
-                let error_str = error.to_string();
-                let issue_id = classify_tmux_server_error(&error_str);
-                issues.push(json!(issue_id));
-                let mut hint = recovery_hint(session_name, issue_id, "team-agent diagnose");
-                if let Some(obj) = hint.as_object_mut() {
-                    obj.insert("reason".to_string(), Value::String(error_str));
+        .is_some_and(|session_name| {
+            match backend.has_session(&crate::transport::SessionName::new(
+                session_name.to_string(),
+            )) {
+                Ok(true) => false,
+                Ok(false) => {
+                    issues.push(json!("tmux_session_missing"));
+                    repairs.push(recovery_hint(
+                        session_name,
+                        "tmux_session_missing",
+                        "team-agent restart",
+                    ));
+                    true
                 }
-                repairs.push(hint);
+                Err(error) => {
+                    // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B):
+                    // when the transport error stderr matches "server exited
+                    // unexpectedly", the physical layer that disappeared is
+                    // the tmux server itself — not just this team's session.
+                    let error_str = error.to_string();
+                    let issue_id = classify_tmux_server_error(&error_str);
+                    issues.push(json!(issue_id));
+                    let mut hint = recovery_hint(session_name, issue_id, "team-agent diagnose");
+                    if let Some(obj) = hint.as_object_mut() {
+                        obj.insert("reason".to_string(), Value::String(error_str));
+                    }
+                    repairs.push(hint);
+                    true
+                }
             }
+        });
+
+    if session_unavailable {
+        if let Some(issue) = persisted_socket_conflict {
+            if let Some(id) = crate::topology::issue_id(&issue) {
+                repairs.push(topology_repair_hint(id));
+            }
+            issues.push(issue);
         }
+        return (Value::Array(issues), Value::Array(repairs));
+    }
+
+    for issue in crate::topology::diagnose_topology_issues(state, backend) {
+        if let Some(id) = crate::topology::issue_id(&issue) {
+            repairs.push(topology_repair_hint(id));
+        }
+        issues.push(issue);
     }
 
     if leader_receiver_attached(state) {
@@ -624,6 +640,17 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     repairs.push(recovery_hint(&team_key, issue_id, repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
+    let is_healthy_unattached_host =
+        class == crate::lifecycle::launch::LeaderBindingClass::Unbound
+            && object.get("ok").and_then(Value::as_bool) == Some(true)
+            && object
+                .get("profile_smoke")
+                .and_then(|profile| profile.get("checks"))
+                .and_then(Value::as_array)
+                .is_some_and(|checks| !checks.is_empty());
+    if !is_healthy_unattached_host {
+        object.insert("ok".to_string(), Value::Bool(false));
+    }
 }
 
 pub(crate) fn append_selected_live_leader_workspace_mismatch(
@@ -652,7 +679,7 @@ fn selected_live_leader_workspace_mismatch(
     workspace: &std::path::Path,
     team: Option<&str>,
 ) -> Option<(Value, Value)> {
-    let selected = crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         workspace,
         team,
         crate::state::selector::SelectorMode::RuntimeOnly,
@@ -766,8 +793,10 @@ fn append_coordinator_health_issue(
     issues: &mut Value,
     repairs: &mut Value,
 ) {
+    // Diagnose must observe coordinator state without initializing or rewriting
+    // `.team/runtime/team.db`, including when the file is missing or empty.
     let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let health = crate::coordinator::coordinator_health(&workspace);
+    let health = crate::coordinator::coordinator_health_read_only(&workspace);
     let Some(id) = coordinator_issue_id(state, &health) else {
         return;
     };
@@ -1910,14 +1939,24 @@ pub(crate) fn provider_doctor_checks() -> Value {
     ] {
         let adapter = crate::provider::get_adapter(provider);
         let name = provider_wire(provider);
-        let version = adapter.version().unwrap_or_else(|error| error.to_string());
+        let fake = matches!(provider, crate::provider::Provider::Fake);
+        let (auth, version) = if fake {
+            (crate::provider::AuthHintStatus::Present, "fake".to_string())
+        } else {
+            (
+                crate::provider::AuthHintStatus::Unknown,
+                "unknown".to_string(),
+            )
+        };
         providers.insert(
             name.to_string(),
             json!({
-                "auth": adapter.auth_hint(crate::provider::AuthMode::Subscription),
+                "auth": auth,
                 "command": provider_command(provider),
                 "installed": adapter.is_installed(),
                 "version": version,
+                "probe_status": "not_run",
+                "provider_probe_status": "not_run",
             }),
         );
     }

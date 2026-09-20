@@ -74,7 +74,19 @@ use super::types::{
 /// returns: HealthReport。ok = 进程在跑 ∧ metadata 三元全等 ∧ 二进制身份一致 ∧ schema 兼容；service_available 刻意排除二进制身份，表示「这个 daemon 还能处理本队队列」；status 区分 Missing / InvalidPid / Running / Stale
 /// ---
 pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
-    let schema = message_store_schema_health(workspace);
+    coordinator_health_with_schema(workspace, message_store_schema_health(workspace))
+}
+
+/// Read-only coordinator health for diagnose. Unlike the lifecycle path, this
+/// never opens MessageStore and therefore cannot initialize or rewrite team.db.
+pub fn coordinator_health_read_only(workspace: &WorkspacePath) -> HealthReport {
+    coordinator_health_with_schema(workspace, message_store_schema_health_read_only(workspace))
+}
+
+fn coordinator_health_with_schema(
+    workspace: &WorkspacePath,
+    schema: SchemaHealth,
+) -> HealthReport {
     let current_binary_identity = current_coordinator_binary_identity();
     let pid_path = coordinator_pid_path(workspace);
     let pid = read_pid_file(&pid_path);
@@ -1000,6 +1012,34 @@ pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHe
                 message: e.to_string(),
             }),
             action: Some("run team-agent doctor --fix-schema --json".to_string()),
+        },
+    }
+}
+
+fn message_store_schema_health_read_only(workspace: &WorkspacePath) -> SchemaHealth {
+    let action = Some("run team-agent doctor --fix-schema --json".to_string());
+    match crate::db::migration::schema_diagnosis_workspace_read_only(workspace.as_path()) {
+        Ok(diagnosis) if diagnosis.ok && diagnosis.status == "ok" => SchemaHealth {
+            ok: true,
+            schema_version: crate::db::schema::SCHEMA_VERSION,
+            error: None,
+            action: None,
+        },
+        Ok(diagnosis) => SchemaHealth {
+            ok: false,
+            schema_version: crate::db::schema::SCHEMA_VERSION,
+            error: Some(SchemaError::InitFailed {
+                message: format!("team.db status: {}", diagnosis.status),
+            }),
+            action,
+        },
+        Err(error) => SchemaHealth {
+            ok: false,
+            schema_version: crate::db::schema::SCHEMA_VERSION,
+            error: Some(SchemaError::InitFailed {
+                message: error.to_string(),
+            }),
+            action,
         },
     }
 }

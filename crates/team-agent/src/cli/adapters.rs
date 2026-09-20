@@ -500,7 +500,7 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
             .join(".team")
             .join("logs")
             .join("events.jsonl");
-        return Ok(CmdResult::from_json(
+        return Ok(crate::cli::triage::report(
             json!({
                 "event_log": event_log.to_string_lossy().to_string(),
                 "issues": issues,
@@ -518,9 +518,10 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
                 "suggested_repairs": suggested_repairs,
             }),
             args.json,
+            "diagnose",
         ));
     }
-    let selected = crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
         args.team.as_deref(),
         crate::state::selector::SelectorMode::RuntimeOnly,
@@ -555,7 +556,7 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
             Some(selected.team_key.as_str()),
         );
     let ok = issues.as_array().is_some_and(Vec::is_empty);
-    Ok(CmdResult::from_json(
+    Ok(crate::cli::triage::report(
         json!({
             "event_log": event_log.to_string_lossy().to_string(),
             "issues": issues,
@@ -573,6 +574,7 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
             "suggested_repairs": suggested_repairs,
         }),
         args.json,
+        "diagnose",
     ))
 }
 
@@ -1513,15 +1515,21 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
             args.team.as_deref(),
             Some("comms"),
         )?;
+        let result = CmdResult::from_json(value, args.json);
         if !args.json {
-            let json_tail = serde_json::to_string_pretty(&sort_json(&value))?;
-            return Ok(CmdResult::human(format!(
-                "{COMMS_BOUNDARY_TEXT}\n{json_tail}"
-            )));
+            let json_tail = match &result.output {
+                CmdOutput::Json(value) => serde_json::to_string_pretty(&sort_json(value))?,
+                _ => String::new(),
+            };
+            return Ok(CmdResult {
+                output: CmdOutput::Human(format!("{COMMS_BOUNDARY_TEXT}\n{json_tail}")),
+                ..result
+            });
         }
-        return Ok(CmdResult::from_json(value, true));
+        return Ok(result);
     }
-    let value = if matches!(args.gate, Some(DoctorGate::Orphans)) {
+    let default_report = args.gate.is_none() && !args.cleanup_orphans && !args.fix_schema;
+    let mut value = if matches!(args.gate, Some(DoctorGate::Orphans)) {
         crate::diagnose::orphans::orphan_gate_json(&args.workspace, args.fix, args.confirm)?
     } else if args.cleanup_orphans {
         crate::diagnose::orphans::cleanup_orphans_json(&args.workspace, args.confirm)?
@@ -1541,7 +1549,32 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         );
         value
     };
-    Ok(CmdResult::from_json(value, args.json))
+    if default_report {
+        let base_ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let has_blocking_issues = value
+            .get("issues")
+            .and_then(Value::as_array)
+            .is_some_and(|issues| {
+                issues.iter().any(|issue| {
+                    let id = issue
+                        .as_str()
+                        .or_else(|| issue.get("id").and_then(Value::as_str));
+                    id != Some("leader_not_attached")
+                })
+            });
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "ok".to_string(),
+                Value::Bool(base_ok && !has_blocking_issues),
+            );
+        }
+    }
+    let result = CmdResult::from_json(value, args.json);
+    Ok(if default_report && !args.json {
+        crate::cli::triage::human_result(result, "doctor")
+    } else {
+        result
+    })
 }
 
 #[cfg(test)]

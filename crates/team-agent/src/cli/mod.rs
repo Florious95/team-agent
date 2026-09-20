@@ -66,6 +66,7 @@ pub mod profile;
 pub mod send;
 pub(crate) mod spec;
 pub mod status;
+pub(crate) mod triage;
 pub mod types;
 
 pub use adapters::*;
@@ -5050,16 +5051,43 @@ pub mod diagnose_port {
             return;
         }
         for (idx, line) in text.lines().enumerate() {
-            if line.contains("OPENAI_API_KEY=") || line.contains("ANTHROPIC_API_KEY=") {
-                let rel = path.strip_prefix(root).unwrap_or(path);
-                findings.push(json!({
-                    "path": rel.to_string_lossy().to_string(),
-                    "line": idx.saturating_add(1),
-                    "rule": "api_key_assignment",
-                    "match_excerpt": line.trim(),
-                }));
-            }
+            let Some(key) = secret_assignment_key(line) else {
+                continue;
+            };
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            findings.push(json!({
+                "path": rel.to_string_lossy().to_string(),
+                "line": idx.saturating_add(1),
+                "rule": "api_key_assignment",
+                "match_excerpt": format!("{key}=<redacted>"),
+            }));
         }
+    }
+
+    fn secret_assignment_key(line: &str) -> Option<&'static str> {
+        let line = line.trim_start();
+        let line = match line.strip_prefix("export") {
+            Some(rest) if rest.chars().next().is_some_and(char::is_whitespace) => rest.trim_start(),
+            _ => line,
+        };
+        ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+            .into_iter()
+            .find(|key| {
+                line.strip_prefix(*key)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .is_some_and(|rhs| {
+                        let rhs = rhs.trim();
+                        let rhs = rhs
+                            .strip_prefix('"')
+                            .and_then(|value| value.strip_suffix('"'))
+                            .or_else(|| {
+                                rhs.strip_prefix('\'')
+                                    .and_then(|value| value.strip_suffix('\''))
+                            })
+                            .unwrap_or(rhs);
+                        !rhs.is_empty()
+                    })
+            })
     }
     ///
     /// `run_comms_selftest`(`--comms`/`--gate comms`)。**纯 state-read,零 token**(MUST-NOT-13)。
