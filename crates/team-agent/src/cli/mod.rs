@@ -661,8 +661,9 @@ pub mod lifecycle_port {
                         crate::kill_audit::KILL_SESSION,
                         &target,
                         workspace,
-                        state.get("team_key").and_then(Value::as_str),
-                        state.get("generation").and_then(Value::as_str),
+                        state_for_session(state, session.as_str())
+                            .and_then(|identity| identity.get("team_key").and_then(Value::as_str)),
+                        state_for_session(state, session.as_str()).and_then(state_generation),
                         "session_marker+state_session+pane_path",
                         "positive workspace/team ownership",
                     ) {
@@ -694,6 +695,22 @@ pub mod lifecycle_port {
         Foreign,
         Unknown,
         Gone,
+    }
+
+    fn state_generation(state: &Value) -> Option<&str> {
+        state
+            .get("generation")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                state
+                    .get("agents")
+                    .and_then(Value::as_object)
+                    .and_then(|agents| {
+                        agents.values().find_map(|agent| {
+                            agent.get("spawned_at").and_then(Value::as_str)
+                        })
+                    })
+            })
     }
 
     fn state_for_session<'a>(state: &'a Value, session: &str) -> Option<&'a Value> {
@@ -744,18 +761,8 @@ pub mod lifecycle_port {
         if owner.team != expected_team {
             return SessionOwnership::Foreign;
         }
-        let expected_generation = identity_state
-            .get("generation")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                identity_state
-                    .get("agents")
-                    .and_then(Value::as_object)
-                    .and_then(|agents| agents.values().find_map(|agent| {
-                        agent.get("spawned_at").and_then(Value::as_str)
-                    }))
-            });
-        let Some(expected_generation) = expected_generation.filter(|generation| !generation.is_empty()) else {
+        let Some(expected_generation) = state_generation(identity_state)
+            .filter(|generation| !generation.is_empty()) else {
             return SessionOwnership::Unknown;
         };
         if owner.generation != expected_generation {
@@ -1024,9 +1031,9 @@ pub mod lifecycle_port {
             // session per `list_targets`. When managed-leader, switch to per-pane
             // cleanup: kill the workers individually and SPARE the leader's pane.
             //
-            // External leader (is_external_leader=true) keeps the unconditional
-            // kill_session — the team session is a disposable worker session in
-            // that topology, the leader pane lives elsewhere.
+            // External and managed leaders both pass the same positive ownership
+            // gate; topology only decides whether a verified session is reduced
+            // to worker panes or removed as a whole.
             let leader_anchor_ids = collect_state_leader_anchor_pane_ids(&state);
             let live_targets_now = match transport.list_targets() {
                 Ok(targets) => targets,
@@ -1063,6 +1070,7 @@ pub mod lifecycle_port {
                         &live_targets_now,
                     );
                     let event_log = crate::event_log::EventLog::new(&run_workspace);
+                    let identity_state = state_for_session(&state, session.as_str()).unwrap_or(&state);
                     for pane in &worker_panes {
                         let pane_target = vec![pane.as_str().to_string()];
                         let audit = crate::kill_audit::pre_kill_audit_scoped(
@@ -1072,8 +1080,8 @@ pub mod lifecycle_port {
                             "kill-pane",
                             &pane_target,
                             &run_workspace,
-                            state.get("team_key").and_then(Value::as_str),
-                            state.get("generation").and_then(Value::as_str),
+                            identity_state.get("team_key").and_then(Value::as_str),
+                            state_generation(identity_state),
                             "session_marker+state_worker_pane+pane_path",
                             "positive workspace/team ownership",
                         );
@@ -1101,8 +1109,9 @@ pub mod lifecycle_port {
                         crate::kill_audit::KILL_SESSION,
                         &targets,
                         &run_workspace,
-                        state.get("team_key").and_then(Value::as_str),
-                        state.get("generation").and_then(Value::as_str),
+                        state_for_session(&state, session.as_str())
+                            .and_then(|identity| identity.get("team_key").and_then(Value::as_str)),
+                        state_for_session(&state, session.as_str()).and_then(state_generation),
                         "session_marker+state_session+pane_path",
                         "positive workspace/team ownership",
                     ) {
