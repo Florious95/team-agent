@@ -32,6 +32,19 @@ pub fn issue_id(issue: &Value) -> Option<&str> {
     issue.get("id").and_then(Value::as_str)
 }
 
+pub fn endpoint_socket_conflict(state: &Value) -> Option<Value> {
+    let endpoint = non_empty_str(state, "tmux_endpoint")?;
+    let socket = non_empty_str(state, "tmux_socket")?;
+    if same_endpoint(endpoint, socket) {
+        return None;
+    }
+    Some(json!({
+        "id": TMUX_ENDPOINT_SOCKET_CONFLICT,
+        "tmux_endpoint": endpoint,
+        "tmux_socket": socket,
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointConvergenceDecision {
     NoConflict,
@@ -338,21 +351,14 @@ fn classify_agents_for_observed_pane(
 }
 
 fn append_socket_split_issues(state: &Value, issues: &mut Vec<Value>, include_readiness: bool) {
-    let endpoint = non_empty_str(state, "tmux_endpoint");
-    let socket = non_empty_str(state, "tmux_socket");
-    let (Some(endpoint), Some(socket)) = (endpoint, socket) else {
+    let Some(conflict) = endpoint_socket_conflict(state) else {
         return;
     };
-    if same_endpoint(endpoint, socket) {
-        return;
-    }
+    let endpoint = non_empty_str(state, "tmux_endpoint").unwrap_or_default();
+    let socket = non_empty_str(state, "tmux_socket").unwrap_or_default();
 
     let session = non_empty_str(state, "session_name").unwrap_or_default();
-    issues.push(json!({
-        "id": TMUX_ENDPOINT_SOCKET_CONFLICT,
-        "tmux_endpoint": endpoint,
-        "tmux_socket": socket,
-    }));
+    issues.push(conflict);
 
     if state
         .get("leader_receiver")

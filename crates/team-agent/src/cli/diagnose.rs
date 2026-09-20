@@ -114,7 +114,10 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
 
     // Probe the session before any topology enumeration. A missing session is
     // terminal for all window/pane/socket probes; repeating those tmux calls
-    // only pays the dead-socket timeout again on every layer.
+    // only pays the dead-socket timeout again on every layer. The persisted
+    // endpoint/socket split is state-only, so preserve that fact before the
+    // short-circuit without probing either dead endpoint.
+    let persisted_socket_conflict = crate::topology::endpoint_socket_conflict(state);
     let session_unavailable = state
         .get("session_name")
         .and_then(Value::as_str)
@@ -152,6 +155,12 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         });
 
     if session_unavailable {
+        if let Some(issue) = persisted_socket_conflict {
+            if let Some(id) = crate::topology::issue_id(&issue) {
+                repairs.push(topology_repair_hint(id));
+            }
+            issues.push(issue);
+        }
         return (Value::Array(issues), Value::Array(repairs));
     }
 
@@ -784,13 +793,10 @@ fn append_coordinator_health_issue(
     issues: &mut Value,
     repairs: &mut Value,
 ) {
-    // `coordinator_health` opens the message store and may initialize `.team/runtime/team.db`.
-    // Diagnose is a read-only command, so do not probe a store that does not already exist.
-    if !workspace.join(".team").join("runtime").join("team.db").is_file() {
-        return;
-    }
+    // Diagnose must observe coordinator state without initializing or rewriting
+    // `.team/runtime/team.db`, including when the file is missing or empty.
     let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let health = crate::coordinator::coordinator_health(&workspace);
+    let health = crate::coordinator::coordinator_health_read_only(&workspace);
     let Some(id) = coordinator_issue_id(state, &health) else {
         return;
     };

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::db::schema::{ensure_schema_indexes, table_layout, SCHEMA_VERSION};
 use crate::db::DbError;
@@ -423,22 +423,33 @@ pub fn ensure_table_layout(
 /// `schema_migration.py:schema_diagnosis`:只读判定(不变更 DB)。
 fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis, DbError> {
     if !db_path.exists() {
-        // T3-3 cr verdict (A parity lock, 2026-06-10): a missing db is the LEGAL
-        // first-use state — ok:true is layered with the explicit status axis and the
-        // recommended_action guidance (Python schema_migration.py:180-190 verbatim),
-        // never a silent fake-green.
-        return Ok(Diagnosis {
-            ok: true,
-            status: "missing".to_string(),
-            user_version: 0,
-            layout_diffs: vec![],
-            recommended_action:
-                "No team.db exists yet; initialize_schema will create it on first use.".to_string(),
-        });
+        return Ok(missing_schema_diagnosis());
     }
     let conn = Connection::open(db_path)?;
-    let uv = pragma_user_version(&conn)?;
-    let diffs = layout_diffs(&conn)?;
+    schema_diagnosis_from_connection(&conn, schema_version)
+}
+
+fn missing_schema_diagnosis() -> Diagnosis {
+    // T3-3 cr verdict (A parity lock, 2026-06-10): a missing db is the LEGAL
+    // first-use state — ok:true is layered with the explicit status axis and the
+    // recommended_action guidance (Python schema_migration.py:180-190 verbatim),
+    // never a silent fake-green.
+    Diagnosis {
+        ok: true,
+        status: "missing".to_string(),
+        user_version: 0,
+        layout_diffs: vec![],
+        recommended_action:
+            "No team.db exists yet; initialize_schema will create it on first use.".to_string(),
+    }
+}
+
+fn schema_diagnosis_from_connection(
+    conn: &Connection,
+    schema_version: i64,
+) -> Result<Diagnosis, DbError> {
+    let uv = pragma_user_version(conn)?;
+    let diffs = layout_diffs(conn)?;
     let diff_tables: Vec<String> = diffs.iter().map(|d| d.table.to_string()).collect();
     let ok = diffs.is_empty() && uv == schema_version;
     Ok(Diagnosis {
@@ -464,6 +475,16 @@ pub fn schema_diagnosis_workspace(workspace: &Path) -> Result<Diagnosis, DbError
         &workspace.join(".team").join("runtime").join("team.db"),
         SCHEMA_VERSION,
     )
+}
+
+/// 对 workspace 的 team.db 执行严格只读 diagnosis，不创建或初始化缺失/空文件。
+pub fn schema_diagnosis_workspace_read_only(workspace: &Path) -> Result<Diagnosis, DbError> {
+    let db_path = workspace.join(".team").join("runtime").join("team.db");
+    if !db_path.exists() {
+        return Ok(missing_schema_diagnosis());
+    }
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    schema_diagnosis_from_connection(&conn, SCHEMA_VERSION)
 }
 
 /// `schema_migration.py:_workspace_from_db_path`:`<ws>/.team/runtime/team.db` → `<ws>`。

@@ -40,6 +40,26 @@ pub(crate) fn render(command: &str, report: &Value) -> String {
         if ok { "ok" } else { "needs attention" }
     ))];
 
+    if command == "doctor" {
+        for finding in array_items(
+            report
+                .get("secret_scan")
+                .and_then(|scan| scan.get("findings")),
+        ) {
+            let Some(object) = finding.as_object() else {
+                continue;
+            };
+            let (Some(rule), Some(path), Some(line)) = (
+                object.get("rule").and_then(Value::as_str),
+                object.get("path").and_then(Value::as_str),
+                object.get("line").and_then(Value::as_u64),
+            ) else {
+                continue;
+            };
+            lines.push(bounded(format!("warn: {rule} in {path}:{line}")));
+        }
+    }
+
     for issue in array_items(report.get("issues")) {
         lines.push(bounded(format!("issue: {}", summarize(issue, false))));
     }
@@ -140,5 +160,24 @@ mod tests {
             assert!(line.len() <= LINE_LIMIT_BYTES);
             assert!(!line.chars().any(char::is_control));
         }
+    }
+
+    #[test]
+    fn renderer_projects_secret_findings_without_values() {
+        let report = json!({
+            "ok": false,
+            "secret_scan": {
+                "findings": [{
+                    "rule": "api_key_assignment",
+                    "path": "leaky-role.md",
+                    "line": 7,
+                    "match_excerpt": "OPENAI_API_KEY=secret"
+                }]
+            }
+        });
+        let output = render("doctor", &report);
+        assert!(output.contains("warn: api_key_assignment in leaky-role.md:7"));
+        assert!(!output.contains("match_excerpt"));
+        assert!(!output.contains("OPENAI_API_KEY=secret"));
     }
 }
