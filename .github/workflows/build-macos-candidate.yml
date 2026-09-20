@@ -13,11 +13,6 @@ on:
         description: "Exact 40-character tree SHA expected at source_sha"
         required: true
         type: string
-      run_shutdown_red_properties:
-        description: "Temporarily run the shutdown isolation property suite"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -260,47 +255,3 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
-
-  shutdown-red-properties:
-    if: ${{ inputs.run_shutdown_red_properties == true }}
-    name: shutdown isolation property suite (temporary)
-    runs-on: ubuntu-latest
-    env:
-      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
-      EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
-      RUST_TOOLCHAIN: "1.95.0"
-
-    steps:
-      - name: Check out requested source
-        uses: actions/checkout@v5
-        with:
-          repository: Florious95/team-agent
-          ref: ${{ env.SOURCE_SHA_INPUT }}
-          fetch-depth: 1
-          clean: true
-          persist-credentials: false
-
-      - name: Verify source identity and clean checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_sha="$(printf '%s' "$SOURCE_SHA_INPUT" | tr '[:upper:]' '[:lower:]')"
-          expected_tree="$(printf '%s' "$EXPECTED_TREE_INPUT" | tr '[:upper:]' '[:lower:]')"
-          [[ "$(git rev-parse --verify HEAD)" == "$source_sha" ]]
-          [[ "$(git rev-parse --verify 'HEAD^{tree}')" == "$expected_tree" ]]
-          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
-
-      - name: Install and verify Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          rustup default "$RUST_TOOLCHAIN"
-          rustc --version | grep -F "rustc ${RUST_TOOLCHAIN}"
-          cargo --version
-
-      - name: Run shutdown isolation property suite
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test -p team-agent --locked --test shutdown_isolation_property_red -- --test-threads=1
