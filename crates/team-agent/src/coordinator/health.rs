@@ -432,7 +432,10 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
             pid: Some(pid),
         });
     }
-    if !coordinator_pid_owned_by_workspace(workspace, pid) {
+    let metadata_owned = read_coordinator_metadata(workspace)
+        .as_ref()
+        .is_some_and(|metadata| metadata.pid == pid);
+    if !metadata_owned || !coordinator_pid_owned_by_workspace(workspace, pid) {
         return Ok(StopReport {
             ok: false,
             status: StopOutcome::NotOwned,
@@ -508,10 +511,12 @@ fn discover_coordinator_pids(workspace: &WorkspacePath) -> Vec<Pid> {
         _ => return Vec::new(),
     };
     let text = String::from_utf8_lossy(&output.stdout);
+    let metadata_pid = read_coordinator_metadata(workspace).map(|metadata| metadata.pid.get());
     text.lines()
         .filter_map(|line| parse_ps_command_line(line))
         .filter(|(pid, _command)| {
-            *pid != std::process::id()
+            metadata_pid == Some(*pid)
+                && *pid != std::process::id()
                 && coordinator_pid_owned_by_workspace(workspace, Pid::new(*pid))
         })
         .map(|(pid, _)| Pid::new(pid))
