@@ -1,3 +1,4 @@
+// real-machine isolation: HOME, TMUX, TEAM_AGENT_WORKSPACE
 //! Property-oriented black-box RED contracts for the doctor/diagnose refactor taskbook.
 //!
 //! These tests intentionally exercise only the public CLI.  Inputs are deterministic,

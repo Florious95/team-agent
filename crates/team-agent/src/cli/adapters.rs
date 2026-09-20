@@ -1551,12 +1551,20 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     };
     if default_report {
         let base_ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        let has_issues = value
+        let has_blocking_issues = value
             .get("issues")
             .and_then(Value::as_array)
-            .is_some_and(|issues| !issues.is_empty());
+            .is_some_and(|issues| {
+                issues.iter().any(|issue| {
+                    issue.as_str() != Some("leader_not_attached")
+                        && issue.get("id").and_then(Value::as_str) != Some("leader_not_attached")
+                })
+            });
         if let Some(object) = value.as_object_mut() {
-            object.insert("ok".to_string(), Value::Bool(base_ok && !has_issues));
+            object.insert(
+                "ok".to_string(),
+                Value::Bool(base_ok && !has_blocking_issues),
+            );
         }
     }
     let result = CmdResult::from_json(value, args.json);

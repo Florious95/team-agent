@@ -291,30 +291,20 @@ pub(crate) fn diagnose_runtime_for_workspace(
     selected_team_key: Option<&str>,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
-    let session_unavailable = issues.as_array().is_some_and(|items| {
-        items.iter().any(|item| {
-            matches!(
-                item.as_str(),
-                Some("tmux_session_missing" | "tmux_server_crashed")
-            )
-        })
-    });
-    if !session_unavailable {
-        append_live_leader_workspace_mismatch_issue(
-            workspace,
-            state,
-            backend,
-            &mut issues,
-            &mut repairs,
-        );
-        append_registry_channel_unbound_issue(
-            workspace,
-            state,
-            selected_team_key,
-            &mut issues,
-            &mut repairs,
-        );
-    }
+    append_live_leader_workspace_mismatch_issue(
+        workspace,
+        state,
+        backend,
+        &mut issues,
+        &mut repairs,
+    );
+    append_registry_channel_unbound_issue(
+        workspace,
+        state,
+        selected_team_key,
+        &mut issues,
+        &mut repairs,
+    );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
