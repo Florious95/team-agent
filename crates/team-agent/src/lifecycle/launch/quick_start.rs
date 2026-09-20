@@ -892,7 +892,7 @@ fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option
 fn list_caller_targets(
     transport: &dyn Transport,
 ) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
-    if let Some(caller_transport) = caller_read_transport(transport) {
+    if let Some(caller_transport) = caller_read_transport() {
         caller_transport.list_targets()
     } else {
         transport.list_targets()
