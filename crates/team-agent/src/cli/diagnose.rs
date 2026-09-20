@@ -767,6 +767,11 @@ fn append_coordinator_health_issue(
     issues: &mut Value,
     repairs: &mut Value,
 ) {
+    // `coordinator_health` opens the message store and may initialize `.team/runtime/team.db`.
+    // Diagnose is a read-only command, so do not probe a store that does not already exist.
+    if !workspace.join(".team").join("runtime").join("team.db").is_file() {
+        return;
+    }
     let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let health = crate::coordinator::coordinator_health(&workspace);
     let Some(id) = coordinator_issue_id(state, &health) else {
