@@ -624,6 +624,7 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     repairs.push(recovery_hint(&team_key, issue_id, repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
+    object.insert("ok".to_string(), Value::Bool(false));
 }
 
 pub(crate) fn append_selected_live_leader_workspace_mismatch(
@@ -1910,14 +1911,23 @@ pub(crate) fn provider_doctor_checks() -> Value {
     ] {
         let adapter = crate::provider::get_adapter(provider);
         let name = provider_wire(provider);
-        let version = adapter.version().unwrap_or_else(|error| error.to_string());
+        let fake = matches!(provider, crate::provider::Provider::Fake);
+        let (auth, version) = if fake {
+            (crate::provider::AuthHintStatus::Present, "fake".to_string())
+        } else {
+            (
+                crate::provider::AuthHintStatus::Unknown,
+                "unknown".to_string(),
+            )
+        };
         providers.insert(
             name.to_string(),
             json!({
-                "auth": adapter.auth_hint(crate::provider::AuthMode::Subscription),
+                "auth": auth,
                 "command": provider_command(provider),
                 "installed": adapter.is_installed(),
                 "version": version,
+                "provider_probe_status": "not_run",
             }),
         );
     }
