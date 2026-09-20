@@ -653,7 +653,7 @@ fn selected_live_leader_workspace_mismatch(
     workspace: &std::path::Path,
     team: Option<&str>,
 ) -> Option<(Value, Value)> {
-    let selected = crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         workspace,
         team,
         crate::state::selector::SelectorMode::RuntimeOnly,
@@ -1927,6 +1927,7 @@ pub(crate) fn provider_doctor_checks() -> Value {
                 "command": provider_command(provider),
                 "installed": adapter.is_installed(),
                 "version": version,
+                "probe_status": "not_run",
                 "provider_probe_status": "not_run",
             }),
         );

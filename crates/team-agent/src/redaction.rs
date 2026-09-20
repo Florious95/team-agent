@@ -55,7 +55,11 @@ pub(crate) fn redact_external_value(value: &serde_json::Value) -> serde_json::Va
             object
                 .iter()
                 .map(|(key, value)| {
-                    let value = if is_sensitive_env_key(key) {
+                    let value = if key.eq_ignore_ascii_case("auth")
+                        && value.as_str() == Some("unknown")
+                    {
+                        value.clone()
+                    } else if is_sensitive_env_key(key) {
                         Value::String(REDACTED.to_string())
                     } else if is_argument_array_key(key) {
                         redact_argument_array(value)

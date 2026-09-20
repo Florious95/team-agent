@@ -521,7 +521,7 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
             "diagnose",
         ));
     }
-    let selected = crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
         args.team.as_deref(),
         crate::state::selector::SelectorMode::RuntimeOnly,
