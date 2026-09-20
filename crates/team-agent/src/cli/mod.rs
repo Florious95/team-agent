@@ -696,6 +696,16 @@ pub mod lifecycle_port {
         Gone,
     }
 
+    fn state_for_session<'a>(state: &'a Value, session: &str) -> Option<&'a Value> {
+        if state.get("session_name").and_then(Value::as_str) == Some(session) {
+            return Some(state);
+        }
+        state
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.values().find_map(|team| state_for_session(team, session)))
+    }
+
     fn session_ownership(
         workspace: &Path,
         state: &Value,
@@ -703,6 +713,7 @@ pub mod lifecycle_port {
         session: &crate::transport::SessionName,
         targets: &[crate::transport::PaneInfo],
     ) -> SessionOwnership {
+        let identity_state = state_for_session(state, session.as_str()).unwrap_or(state);
         let session_targets = targets
             .iter()
             .filter(|target| target.session.as_str() == session.as_str())
@@ -722,9 +733,9 @@ pub mod lifecycle_port {
         if owner.workspace != canonical {
             return SessionOwnership::Foreign;
         }
-        let Some(expected_team) = state
+        let Some(expected_team) = identity_state
             .get("team_key")
-            .or_else(|| state.get("active_team_key"))
+            .or_else(|| identity_state.get("active_team_key"))
             .and_then(Value::as_str)
             .filter(|team| !team.is_empty())
         else {
@@ -733,11 +744,11 @@ pub mod lifecycle_port {
         if owner.team != expected_team {
             return SessionOwnership::Foreign;
         }
-        let expected_generation = state
+        let expected_generation = identity_state
             .get("generation")
             .and_then(Value::as_str)
             .or_else(|| {
-                state
+                identity_state
                     .get("agents")
                     .and_then(Value::as_object)
                     .and_then(|agents| agents.values().find_map(|agent| {
