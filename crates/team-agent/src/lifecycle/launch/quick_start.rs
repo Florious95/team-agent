@@ -138,7 +138,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
         self.applied_grant = None;
         self.registry_receipt = None;
         let event_log = crate::event_log::EventLog::new(workspace);
-        let targets = match self.transport.list_targets() {
+        let targets = match list_caller_targets(self.transport) {
             Ok(targets) => targets,
             Err(_) => {
                 self.last_failure_reason = Some("caller_pane_unobservable");
@@ -871,9 +871,13 @@ fn existing_runtime_identity_view(
     state.clone()
 }
 
+fn caller_read_transport() -> Option<crate::tmux_backend::TmuxBackend> {
+    crate::tmux_backend::socket_name_from_tmux_env()
+        .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint))
+}
+
 fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option<String> {
-    let caller_transport = crate::tmux_backend::socket_name_from_tmux_env()
-        .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint));
+    let caller_transport = caller_read_transport();
     let query_transport: &dyn Transport = caller_transport
         .as_ref()
         .map(|transport| transport as &dyn Transport)
@@ -883,6 +887,16 @@ fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option
         .ok()
         .flatten()
         .filter(|command| !command.trim().is_empty())
+}
+
+fn list_caller_targets(
+    transport: &dyn Transport,
+) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
+    if let Some(caller_transport) = caller_read_transport(transport) {
+        caller_transport.list_targets()
+    } else {
+        transport.list_targets()
+    }
 }
 
 fn preflight_fresh_leader_identity(
