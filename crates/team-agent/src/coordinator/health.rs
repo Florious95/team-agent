@@ -531,9 +531,7 @@ fn coordinator_pid_owned_by_workspace(workspace: &WorkspacePath, pid: Pid) -> bo
     let Some(tokens) = crate::platform::argv::argv_tokens(pid.get()) else {
         return false;
     };
-    let is_team_agent = tokens.first().is_some_and(|token| {
-        token == "team-agent" || token.ends_with("/team-agent")
-    });
+    let is_team_agent = tokens.first().is_some_and(|token| is_team_agent_binary(token));
     let is_coordinator = tokens.iter().any(|token| token == "coordinator");
     let has_workspace = tokens.windows(2).any(|pair| {
         pair[0] == "--workspace"
@@ -581,9 +579,7 @@ fn coordinator_pid_owned_by_path(workspace: &Path, pid: Pid) -> bool {
     let Some(tokens) = crate::platform::argv::argv_tokens(pid.get()) else {
         return false;
     };
-    let is_team_agent = tokens.first().is_some_and(|token| {
-        token == "team-agent" || token.ends_with("/team-agent")
-    });
+    let is_team_agent = tokens.first().is_some_and(|token| is_team_agent_binary(token));
     let is_coordinator = tokens.iter().any(|token| token == "coordinator");
     let has_workspace = tokens.windows(2).any(|pair| {
         pair[0] == "--workspace"
@@ -594,6 +590,13 @@ fn coordinator_pid_owned_by_path(workspace: &Path, pid: Pid) -> bool {
     });
     is_team_agent && is_coordinator && has_workspace && process_cwd(pid.get())
         .is_some_and(|cwd| path_is_under(&cwd, &workspace))
+}
+
+fn is_team_agent_binary(token: &str) -> bool {
+    let Some(name) = Path::new(token).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "team-agent" || name == "team_agent" || name.starts_with("team-agent-")
 }
 
 fn process_cwd(pid: u32) -> Option<PathBuf> {
