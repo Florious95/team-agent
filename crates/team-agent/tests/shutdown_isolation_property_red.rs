@@ -421,10 +421,14 @@ fn add_fixture_generations(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
-    if let Some(session) = object.get("session_name").and_then(Value::as_str) {
+    let session = object
+        .get("session_name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(session) = session {
         object
             .entry("generation")
-            .or_insert_with(|| Value::String(session.to_string()));
+            .or_insert(Value::String(session));
     }
     if let Some(teams) = object.get_mut("teams").and_then(Value::as_object_mut) {
         for team in teams.values_mut() {
