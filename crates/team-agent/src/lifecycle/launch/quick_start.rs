@@ -286,11 +286,19 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             self.last_failure_reason = Some("receiver_missing");
             return false;
         };
+        let leader_transport = receiver
+            .get("tmux_socket")
+            .and_then(serde_json::Value::as_str)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(crate::transport_factory::leader_endpoint_transport);
+        let live_channel_transport: &dyn Transport = leader_transport
+            .as_deref()
+            .unwrap_or(self.transport);
         if !matches!(
             crate::messaging::resolve_live_leader_channel(
                 workspace,
                 receiver,
-                self.transport,
+                live_channel_transport,
             ),
             crate::messaging::LeaderChannelResolution::Live(_)
         ) {
