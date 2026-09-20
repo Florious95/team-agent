@@ -549,9 +549,7 @@ pub mod lifecycle_port {
     /// E12 下沉纯函数:bare-shutdown socket 拆除决策。
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum KillDecision {
-        /// socket 独享(无 spare、无外来 session)→ 可整 server 拆除。
-        KillServerExclusive,
-        /// 有 spare(leader 锚/前缀)或非独享 → 逐 session kill,绝不 kill-server。
+        /// Ownership-gated cleanup always uses per-session kills; never whole-server teardown.
         KillIndividually {
             to_kill: Vec<crate::transport::SessionName>,
             spared: Vec<crate::transport::SessionName>,
@@ -560,8 +558,7 @@ pub mod lifecycle_port {
 
     ///
     /// E12 纯决策(单测下沉):spare = `anchor_sessions` ∪ `team-agent-leader-*` 前缀(并集,锚优先)。
-    /// 全部 session 都不 spare 且非空 → `KillServerExclusive`(独享 socket 兜底);否则逐 session
-    /// kill 非 spare 的(共享 socket / leader 在 → 绝不整 server 拆)。空 session 集 → 逐 kill(no-op)。
+    /// Always returns a per-session plan; ownership markers are checked by the caller.
     pub(crate) fn sessions_to_kill(
         sessions: &[crate::transport::SessionName],
         anchor_sessions: &std::collections::BTreeSet<String>,
@@ -572,12 +569,9 @@ pub mod lifecycle_port {
         };
         let spared: Vec<_> = sessions.iter().filter(|s| is_spared(s)).cloned().collect();
         let to_kill: Vec<_> = sessions.iter().filter(|s| !is_spared(s)).cloned().collect();
-        // 独享 = 非空 + 无 spare(socket 上每个 session 都是要 kill 的我方 session)。
-        if spared.is_empty() && !sessions.is_empty() {
-            KillDecision::KillServerExclusive
-        } else {
-            KillDecision::KillIndividually { to_kill, spared }
-        }
+        // Fail closed: even an apparently exclusive socket is not proof of
+        // ownership, so whole-server teardown is never selected.
+        KillDecision::KillIndividually { to_kill, spared }
     }
 
     #[derive(Debug, Default)]

@@ -1,7 +1,7 @@
 //! E12 (P0) · `sessions_to_kill` 纯决策单测(kill 决策下沉)。
 //!
 //! spare = state 锚 session(anchor_sessions) ∪ `team-agent-leader-` 命名前缀(并集,锚优先)。
-//! 独享 socket(无 spare)才允许整 server 拆;共享/leader 在 → 逐 session kill。
+//! Cleanup is always per-session and ownership-gated; a socket is never sufficient authority for kill-server.
 //! 集成面由 tests/b5_leader_terminal_kill_red.rs 的真 tmux 契约覆盖,此处锁纯决策 + 4 反向 case。
 
 use crate::cli::lifecycle_port::{sessions_to_kill, KillDecision};
@@ -23,12 +23,15 @@ fn anchors(raw: &[&str]) -> BTreeSet<String> {
     raw.iter().map(|s| s.to_string()).collect()
 }
 
-// RC-4(独享 socket):仅目标 session(无 spare)→ 整 server 拆。
+// RC-4: even an apparently exclusive socket uses per-session cleanup.
 #[test]
-fn rc4_exclusive_socket_kills_server() {
+fn rc4_exclusive_socket_is_fail_closed() {
     assert_eq!(
         sessions_to_kill(&names(&["team-x", "team-y"]), &BTreeSet::new()),
-        KillDecision::KillServerExclusive
+        KillDecision::KillIndividually {
+            to_kill: names(&["team-x", "team-y"]),
+            spared: vec![]
+        }
     );
     // 空 session 集 → 逐 kill(no-op),不整 server 拆(没东西可拆)。
     assert_eq!(
@@ -87,10 +90,13 @@ fn rc2_no_anchor_falls_back_to_naming() {
         &BTreeSet::new(),
     );
     assert!(matches!(with_leader, KillDecision::KillIndividually { .. }));
-    // 无锚 + 无前缀(真损坏且 in_tmux 无前缀)→ 无 spare → 独享拆(退化兜底,与历史一致)。
+    // 无锚 + 无前缀仍只能逐 session 返回，实际 shutdown 会因 marker 缺失拒绝杀灭。
     assert_eq!(
         sessions_to_kill(&names(&["team-x"]), &BTreeSet::new()),
-        KillDecision::KillServerExclusive
+        KillDecision::KillIndividually {
+            to_kill: names(&["team-x"]),
+            spared: vec![]
+        }
     );
 }
 
