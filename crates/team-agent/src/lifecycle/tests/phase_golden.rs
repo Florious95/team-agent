@@ -768,7 +768,24 @@ fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
         out = out.replace(alias, "<TMP>");
     }
     out = normalize_tmux_socket_dir(&out);
+    out = normalize_hermetic_root(&out);
     normalize_socket_token(&out)
+}
+
+fn normalize_hermetic_root(text: &str) -> String {
+    let marker = "ta-phase-golden-";
+    let Some(start) = text.find(marker) else {
+        return text.to_string();
+    };
+    let end = text[start..]
+        .find('/')
+        .map(|offset| start + offset)
+        .unwrap_or(text.len());
+    let segment = &text[start..end];
+    let Some(phase) = text[start + marker.len()..end].split('-').next() else {
+        return text.to_string();
+    };
+    text.replacen(segment, &format!("{marker}{phase}"), 1)
 }
 
 fn value_looks_like_endpoint_path(text: &str) -> bool {
