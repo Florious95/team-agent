@@ -260,7 +260,8 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         active: true,
         pane_pid: None,
         leader_env: BTreeMap::new(),
-    }]);
+    }])
+    .with_pane_current_command("%caller", "codex");
     let quick_start = quick_start_with_transport_in_workspace_with_display(
         &workspace,
         &team,
