@@ -229,7 +229,20 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
     let team = two_worker_team_dir(&hermetic);
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let _caller_pane = EnvVarGuard::set("TMUX_PANE", "%caller");
+    let launch_transport = codex_ready_transport().with_targets(vec![PaneInfo {
+        pane_id: PaneId::new("%caller"),
+        session: SessionName::new("caller"),
+        window_index: Some(0),
+        window_name: Some(WindowName::new("caller")),
+        pane_index: Some(0),
+        tty: None,
+        current_command: Some("codex".to_string()),
+        current_path: Some(workspace.clone()),
+        active: true,
+        pane_pid: None,
+        leader_env: BTreeMap::new(),
+    }]);
     let quick_start = quick_start_with_transport_in_workspace_with_display(
         &workspace,
         &team,
@@ -275,9 +288,39 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         to_name: None,
         to_leader: None,
     });
+    let runtime_state = crate::state::persist::load_runtime_state(&workspace)
+        .expect("quick-start state written before shutdown fixture");
+    let generation = runtime_state
+        .get("generation")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            runtime_state
+                .get("agents")
+                .and_then(Value::as_object)
+                .and_then(|agents| {
+                    agents.values().find_map(|agent| {
+                        agent.get("spawned_at").and_then(Value::as_str)
+                    })
+                })
+        })
+        .expect("quick-start fixture must carry generation evidence");
     let lifecycle_transport = codex_ready_transport()
         .with_session_present(true)
-        .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")]);
+        .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")])
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%w1"),
+            session: SessionName::new("team-phasegolden"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("w1")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: Some(workspace.clone()),
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_session_owner(&workspace, "teamdir", generation);
     let lifecycle = (spec.lifecycle_op)(&workspace, &lifecycle_transport, spec.team_key);
     let shutdown = lifecycle_port::shutdown_with_transport(
         &workspace,

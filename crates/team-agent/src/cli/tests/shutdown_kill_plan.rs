@@ -175,6 +175,8 @@ fn owned_empty_endpoint_cleanup_removes_socket_file_before_reporting_ok() {
         &ws,
         &json!({
             "session_name": "team-owned-clean",
+            "team_key": "team-owned-clean",
+            "generation": "team-owned-clean",
             "tmux_endpoint": socket.to_string_lossy(),
             "tmux_socket": socket.to_string_lossy(),
             "tmux_socket_source": "workspace",
@@ -183,7 +185,12 @@ fn owned_empty_endpoint_cleanup_removes_socket_file_before_reporting_ok() {
         }),
     )
     .unwrap();
-    let transport = CleanShutdownTransport::new();
+    let transport = CleanShutdownTransport::new().with_owned_session(
+        &ws,
+        "team-owned-clean",
+        "team-owned-clean",
+        "team-owned-clean",
+    );
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
@@ -241,6 +248,8 @@ fn owned_file_residual_makes_shutdown_failed_not_partial() {
         &ws,
         &json!({
             "session_name": "team-owned-residual",
+            "team_key": "team-owned-residual",
+            "generation": "team-owned-residual",
             "tmux_endpoint": socket_dir.to_string_lossy(),
             "tmux_socket": socket_dir.to_string_lossy(),
             "tmux_socket_source": "workspace",
@@ -249,7 +258,12 @@ fn owned_file_residual_makes_shutdown_failed_not_partial() {
         }),
     )
     .unwrap();
-    let transport = CleanShutdownTransport::new();
+    let transport = CleanShutdownTransport::new().with_owned_session(
+        &ws,
+        "team-owned-residual",
+        "team-owned-residual",
+        "team-owned-residual",
+    );
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
@@ -346,6 +360,7 @@ fn scoped_clean_shutdown_persists_team_shutdown_status_after_disk_roundtrip() {
             "schema_version": 1,
             "active_team_key": "current",
             "team_key": "current",
+            "generation": "current",
             "session_name": "team-current",
             "team_dir": ws.display().to_string(),
             "workspace": ws.display().to_string(),
@@ -360,6 +375,7 @@ fn scoped_clean_shutdown_persists_team_shutdown_status_after_disk_roundtrip() {
             "teams": {
                 "current": {
                     "team_key": "current",
+                    "generation": "current",
                     "session_name": "team-current",
                     "team_dir": ws.display().to_string(),
                     "workspace": ws.display().to_string(),
@@ -381,7 +397,12 @@ fn scoped_clean_shutdown_persists_team_shutdown_status_after_disk_roundtrip() {
         &ws,
         true,
         Some("current"),
-        &CleanShutdownTransport::new(),
+        &CleanShutdownTransport::new().with_owned_session(
+            &ws,
+            "team-current",
+            "current",
+            "current",
+        ),
     )
     .expect("shutdown should complete");
 
@@ -420,6 +441,7 @@ fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
             "schema_version": 1,
             "active_team_key": "current",
             "team_key": "current",
+            "generation": "current",
             "session_name": "team-current",
             "agents": {
                 "adminweb": {
@@ -432,6 +454,7 @@ fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
             "teams": {
                 "current": {
                     "team_key": "current",
+                    "generation": "current",
                     "session_name": "team-current",
                     "agents": {
                         "adminweb": {
@@ -451,7 +474,9 @@ fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
         &ws,
         true,
         Some("current"),
-        &CleanShutdownTransport::new().with_probe_timeout("ps_table"),
+        &CleanShutdownTransport::new()
+            .with_owned_session(&ws, "team-current", "current", "current")
+            .with_probe_timeout("ps_table"),
     )
     .expect("shutdown should complete");
 
@@ -525,6 +550,8 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
             &ws,
             &json!({
                 "session_name": "team-owned-loop",
+                "team_key": "team-owned-loop",
+                "generation": "team-owned-loop",
                 "tmux_endpoint": socket.to_string_lossy(),
                 "tmux_socket": socket.to_string_lossy(),
                 "tmux_socket_source": "workspace",
@@ -541,7 +568,12 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
             &ws,
             true,
             None,
-            &CleanShutdownTransport::new(),
+            &CleanShutdownTransport::new().with_owned_session(
+                &ws,
+                "team-owned-loop",
+                "team-owned-loop",
+                "team-owned-loop",
+            ),
         );
         let out = match &result {
             Ok(out) if !shutdown_result_is_degraded(out) => out,
@@ -799,6 +831,7 @@ struct CleanShutdownTransport {
     probe_timeout_kind: Option<&'static str>,
     targets_persist_after_kill: bool,
     kill_session_error: Option<String>,
+    owner: Option<crate::transport::SessionOwner>,
     // E49 (0.3.24 P0, shutdown kills leader CLI): record per-pane / per-window /
     // per-session kill targets so RED contracts can assert (a) the leader pane is
     // never killed and (b) worker panes ARE killed via the new per-pane path.
@@ -816,6 +849,7 @@ impl CleanShutdownTransport {
             probe_timeout_kind: None,
             targets_persist_after_kill: false,
             kill_session_error: None,
+            owner: None,
             killed_panes: Mutex::new(Vec::new()),
             killed_window_targets: Mutex::new(Vec::new()),
             killed_sessions: Mutex::new(Vec::new()),
@@ -824,6 +858,46 @@ impl CleanShutdownTransport {
 
     fn with_targets(mut self, targets: Vec<PaneInfo>) -> Self {
         self.targets = targets;
+        self
+    }
+
+    fn with_owned_session(
+        mut self,
+        workspace: &Path,
+        session: &str,
+        team: &str,
+        generation: &str,
+    ) -> Self {
+        self.owner = Some(crate::transport::SessionOwner {
+            workspace: workspace
+                .canonicalize()
+                .unwrap_or_else(|_| workspace.to_path_buf())
+                .to_string_lossy()
+                .into_owned(),
+            team: team.to_string(),
+            generation: generation.to_string(),
+        });
+        if self.targets.is_empty() {
+            self.targets.push(PaneInfo {
+                pane_id: PaneId::new("%owned"),
+                session: SessionName::new(session),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("owned")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: Some(workspace.to_path_buf()),
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            });
+        } else {
+            for target in &mut self.targets {
+                if target.current_path.is_none() {
+                    target.current_path = Some(workspace.to_path_buf());
+                }
+            }
+        }
         self
     }
 
@@ -935,6 +1009,13 @@ impl Transport for CleanShutdownTransport {
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
         Ok(*self.session_present.lock().unwrap())
+    }
+
+    fn session_owner(
+        &self,
+        _session: &SessionName,
+    ) -> Result<Option<crate::transport::SessionOwner>, TransportError> {
+        Ok(self.owner.clone())
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
@@ -1175,6 +1256,9 @@ fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive()
         &ws,
         &json!({
             "is_external_leader": true,
+            "team_key": "team-layout",
+            "generation": "team-layout",
+            "session_name": "team-layout",
             "tmux_socket_source": "leader_env",
             "agents": {
                 "fake_impl": {
@@ -1199,6 +1283,7 @@ fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive()
         pane_pid: None,
         leader_env: BTreeMap::new(),
     }]);
+    let transport = transport.with_owned_session(&ws, "team-layout", "team-layout", "team-layout");
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
@@ -1245,6 +1330,8 @@ fn e49_managed_leader_shutdown_spares_leader_session_and_kills_workers_per_pane(
         &ws,
         &json!({
             "session_name": "team-current",
+            "team_key": "current",
+            "generation": "current",
             "is_external_leader": false,
             "leader_receiver": {"pane_id": "%leader"},
             "team_owner": {"pane_id": "%leader"},
@@ -1300,7 +1387,8 @@ fn e49_managed_leader_shutdown_spares_leader_session_and_kills_workers_per_pane(
                 leader_env: BTreeMap::new(),
             },
         ])
-        .with_targets_persist_after_kill();
+        .with_targets_persist_after_kill()
+        .with_owned_session(&ws, "team-current", "current", "current");
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
@@ -1387,6 +1475,8 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
         &ws,
         &json!({
             "session_name": "team-external",
+            "team_key": "team-external",
+            "generation": "team-external",
             "is_external_leader": true,
             "leader_receiver": {"pane_id": "%leaderelsewhere"},
             "agents": {
@@ -1426,7 +1516,8 @@ fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
                 leader_env: BTreeMap::new(),
             },
         ])
-        .with_targets_persist_after_kill();
+        .with_targets_persist_after_kill()
+        .with_owned_session(&ws, "team-external", "team-external", "team-external");
 
     let event_log = crate::event_log::EventLog::new(&ws);
     let event_start = event_log.tail(0).expect("events before shutdown").len();
@@ -1461,6 +1552,8 @@ fn e49_external_leader_non_clean_diagnostic_is_bounded_and_still_kills() {
         &ws,
         &json!({
             "session_name": "team-external",
+            "team_key": "team-external",
+            "generation": "team-external",
             "is_external_leader": true,
             "leader_receiver": {"pane_id": "%leaderelsewhere"},
             "agents": {
@@ -1483,7 +1576,8 @@ fn e49_external_leader_non_clean_diagnostic_is_bounded_and_still_kills() {
             pane_pid: None,
             leader_env: BTreeMap::new(),
         }])
-        .with_kill_session_error("deterministic E49 kill-session failure");
+        .with_kill_session_error("deterministic E49 kill-session failure")
+        .with_owned_session(&ws, "team-external", "team-external", "team-external");
 
     let event_log = crate::event_log::EventLog::new(&ws);
     let event_start = event_log.tail(0).expect("events before shutdown").len();
@@ -1543,6 +1637,8 @@ fn e49_managed_leader_without_anchor_in_session_still_kills_session() {
         &ws,
         &json!({
             "session_name": "team-orphan",
+            "team_key": "team-orphan",
+            "generation": "team-orphan",
             "is_external_leader": false,
             "agents": {
                 "w1": {"status": "running", "provider": "codex", "window": "w1", "pane_id": "%w1"}
@@ -1564,7 +1660,8 @@ fn e49_managed_leader_without_anchor_in_session_still_kills_session() {
             pane_pid: None,
             leader_env: BTreeMap::new(),
         }])
-        .with_targets_persist_after_kill();
+        .with_targets_persist_after_kill()
+        .with_owned_session(&ws, "team-orphan", "team-orphan", "team-orphan");
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
@@ -1586,6 +1683,8 @@ fn shutdown_missing_topology_marker_defaults_to_managed_cleanup() {
         &ws,
         &json!({
             "session_name": "team-current",
+            "team_key": "team-current",
+            "generation": "team-current",
             "agents": {}
         }),
     )
@@ -1604,7 +1703,8 @@ fn shutdown_missing_topology_marker_defaults_to_managed_cleanup() {
             pane_pid: None,
             leader_env: BTreeMap::new(),
         }])
-        .with_targets_persist_after_kill();
+        .with_targets_persist_after_kill()
+        .with_owned_session(&ws, "team-current", "team-current", "team-current");
 
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
