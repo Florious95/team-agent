@@ -1817,7 +1817,7 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
     if matches!(team_id, "shut001" | "shut002" | "shut003" | "shut004") {
         ensure_shutdown_fixture_session(ws);
     }
-    seed_fake_session_owner_marker(ws, team_id);
+    seed_fake_session_owner_marker(ws);
     result
 }
 
@@ -1864,7 +1864,7 @@ fn ensure_shutdown_fixture_session(ws: &TestWorkspace) {
 /// contract. The CLI launch normally writes these tmux options; this explicit
 /// test fixture write makes the evidence deterministic when no leader pane is
 /// bound in the hermetic E2E environment.
-fn seed_fake_session_owner_marker(ws: &TestWorkspace, team_id: &str) {
+fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
     if !ws.state_json_path().exists() {
         return;
     }
@@ -1904,9 +1904,14 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace, team_id: &str) {
         .unwrap_or_else(|_| ws.path().to_path_buf())
         .to_string_lossy()
         .into_owned();
+    let owner_team = state
+        .get("team_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(session);
     for (option, value) in [
         ("@team_agent_owner_workspace", workspace.as_str()),
-        ("@team_agent_owner_team", team_id),
+        ("@team_agent_owner_team", owner_team),
         ("@team_agent_owner_generation", generation),
     ] {
         let status = Command::new("tmux")
