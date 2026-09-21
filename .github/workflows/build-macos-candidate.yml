@@ -31,10 +31,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Run aligned regression groups
-        run: |
-          cargo test -p team-agent --lib cli::models::tests::command_boundary_connects_runner_parser_search_and_contract --locked -- --test-threads=1
-          cargo test -p team-agent --test b5_leader_terminal_kill_red --locked -- --test-threads=1
+      - name: Run full Rust test suite
+        run: cargo test --workspace --all-targets --locked
 
   build:
     name: Build team-agent (macOS arm64)
