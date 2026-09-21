@@ -56,8 +56,31 @@ fn doctor_empty_workspace_without_spec_or_runtime_passes_static_checks() {
     );
     assert_eq!(body["runtime"]["status"], "not_present", "{body}");
     assert_eq!(body["issues"], serde_json::json!([]), "{body}");
-    assert!(!workspace.join(".team/runtime/state.json").exists());
-    assert!(!workspace.join(".team/runtime/team.db").exists());
+    assert!(!workspace.join(".team").exists());
+}
+
+#[test]
+fn doctor_missing_workspace_and_invalid_configuration_still_fail_readonly() {
+    let root = tmp_dir("invalid-workspaces");
+    let home = tmp_dir("invalid-home");
+    let missing = root.join("missing");
+    let invalid = root.join("invalid");
+    std::fs::create_dir(&invalid).unwrap();
+    std::fs::write(invalid.join("team.spec.yaml"), "invalid: [\n").unwrap();
+
+    for workspace in [&missing, &invalid] {
+        let output = run(
+            &["doctor", "--workspace", workspace.to_str().unwrap(), "--json"],
+            &root,
+            &home,
+        );
+        let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{body}");
+        assert_eq!(body["ok"], false, "{body}");
+        assert!(!workspace.join(".team").exists());
+    }
+    assert!(!missing.exists());
+    assert_eq!(std::fs::read_to_string(invalid.join("team.spec.yaml")).unwrap(), "invalid: [\n");
 }
 
 fn run(args: &[&str], cwd: &Path, home: &Path) -> Output {
