@@ -1868,7 +1868,7 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
     if !ws.state_json_path().exists() {
         return;
     }
-    let state = ws.read_state();
+    let mut state = ws.read_state();
     let Some(socket) = state.get("tmux_socket").and_then(Value::as_str) else {
         return;
     };
@@ -1889,7 +1889,8 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
                     .filter(|value| !value.is_empty())
             })
         })
-        .unwrap_or(session);
+        .map(str::to_owned)
+        .unwrap_or_else(|| session.to_owned());
     let remain_on_exit = Command::new("tmux")
         .args(["-S", socket, "set-option", "-t", session, "remain-on-exit", "on"])
         .status()
@@ -1908,11 +1909,15 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
         .get("team_key")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or(session);
+        .unwrap_or(session)
+        .to_string();
+    state["team_key"] = Value::String(owner_team.clone());
+    state["generation"] = Value::String(generation.clone());
+    ws.write_state_value(state);
     for (option, value) in [
         ("@team_agent_owner_workspace", workspace.as_str()),
-        ("@team_agent_owner_team", owner_team),
-        ("@team_agent_owner_generation", generation),
+        ("@team_agent_owner_team", owner_team.as_str()),
+        ("@team_agent_owner_generation", generation.as_str()),
     ] {
         let status = Command::new("tmux")
             .args(["-S", socket, "set-option", "-t", session, option, value])
