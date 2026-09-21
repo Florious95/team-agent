@@ -13,50 +13,12 @@ on:
         description: "Exact 40-character tree SHA expected at source_sha"
         required: true
         type: string
-      test_filter:
-        description: "Optional cargo test arguments, e.g. '--test e2e cases::shut'"
-        required: false
-        default: ""
-        type: string
-      run_candidate_build:
-        description: "Build the macOS arm64 candidate in addition to tests"
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  test-fixtures:
-    name: Test fixture alignment (temporary)
-    if: github.ref == 'refs/heads/fix/align-ci-test-fixtures-with-shutdown-isolation'
-    runs-on: ubuntu-latest
-    env:
-      TEST_FILTER: ${{ inputs.test_filter }}
-    steps:
-      - name: Check out requested source
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@v2
-      - name: Run selected Rust tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "$TEST_FILTER" ]]; then
-            cargo test --locked $TEST_FILTER -- --test-threads=1
-          else
-            cargo test --workspace --all-targets --locked --no-fail-fast
-          fi
-
   build:
-    if: inputs.run_candidate_build
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
     env:
