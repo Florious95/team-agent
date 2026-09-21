@@ -322,10 +322,12 @@ impl CompatFixture {
         protocol_version: u32,
         schema_version: i64,
     ) -> u32 {
-        let child = Command::new("sleep")
-            .arg("60")
+        let child = Command::new(cli_binary_path())
+            .args(["coordinator", "--workspace"])
+            .arg(self.root.as_os_str())
+            .current_dir(&self.root)
             .spawn()
-            .expect("spawn fixture daemon process");
+            .expect("spawn fixture coordinator process");
         let pid = child.id();
         self.children.push(child);
         write_raw_metadata(
