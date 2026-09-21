@@ -150,7 +150,7 @@ fn perf6_grace_window_slow_cleanup_not_killed() {
     let pid = spawn_detached_trap_loop(
         &ws,
         &format!(
-            "trap 'sleep 0.1; echo graceful > {}; exit 0' TERM; while :; do sleep 0.05; done",
+            "sleep 0.1; echo graceful > {}; exit 0",
             marker.to_string_lossy()
         ),
     );
@@ -176,11 +176,11 @@ fn perf6_mixed_fast_slow_kill_semantics() {
     let fast = spawn_detached_trap_loop(
         &ws,
         &format!(
-            "trap 'echo fast > {}; exit 0' TERM; while :; do sleep 0.02; done",
+            "echo fast > {}; exit 0",
             fast_marker.to_string_lossy()
         ),
     );
-    let stubborn = spawn_detached_trap_loop(&ws, "trap '' TERM; while :; do sleep 0.05; done");
+    let stubborn = spawn_detached_trap_loop(&ws, "");
     seed_state_with_pids(&ws, &[fast, stubborn]);
 
     lifecycle_port::shutdown(&ws, false, None).expect("bare shutdown should succeed");
@@ -370,17 +370,29 @@ fn install_failing_ps_shim(ws: &Path) -> PathGuard {
 /// Double-hop detach (`sh -c '... & echo $!'`): the loop process is NOT a child of the
 /// test process, so the in-process shutdown cannot reap it. On Linux its terminated
 /// zombie may remain visible to `kill -0` until the adopting parent reaps it.
-fn spawn_detached_trap_loop(ws: &Path, body: &str) -> u32 {
-    let line = format!("sh -c '{body}' >/dev/null 2>&1 & echo $!");
+fn spawn_detached_trap_loop(ws: &Path, term_handler: &str) -> u32 {
+    let ready = ws.join("loop-ready");
+    let _ = std::fs::remove_file(&ready);
+    // Positional arguments preserve handler quoting and expose the same explicit
+    // --workspace ownership proof required of production process roots.
     let out = std::process::Command::new("sh")
-        .args(["-c", &line])
+        .args([
+            "-c",
+            "sh -c 'trap \"$1\" TERM; : > \"$4\"; while :; do sleep 0.02; done' fixture-loop \"$1\" --workspace \"$2\" \"$3\" >/dev/null 2>&1 & echo $!",
+            "sh",
+            term_handler,
+        ])
+        .arg(ws)
+        .arg(&ready)
         .current_dir(ws)
         .output()
         .expect("spawn detached loop");
-    String::from_utf8_lossy(&out.stdout)
+    let pid = String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse::<u32>()
-        .expect("pid")
+        .expect("pid");
+    assert!(wait_until(3_000, || ready.exists()), "fixture trap not ready");
+    pid
 }
 
 fn pid_alive(pid: u32) -> bool {

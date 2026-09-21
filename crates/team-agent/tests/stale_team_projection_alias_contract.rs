@@ -23,7 +23,7 @@ use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
 use serial_test::serial;
-use team_agent::state::persist::load_runtime_state;
+use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{SessionName, Transport, WindowName};
 
@@ -178,7 +178,7 @@ impl SupermarketCase {
     fn shutdown(&self, team: &str) {
         // Fake workers can exit before shutdown. Keep an owned fixture pane alive
         // so this exercises the shutdown tombstone save, not the already-gone path.
-        let state = self.state();
+        let mut state = self.state();
         let selected = &state["teams"][team];
         let session = SessionName::new(selected["session_name"].as_str().expect("team session"));
         let generation = selected["agents"]
@@ -201,6 +201,13 @@ impl SupermarketCase {
         transport
             .set_session_owner_with_generation(&session, &self.workspace, team, generation)
             .expect("mark shutdown fixture ownership");
+        state["teams"][team]["status"] = "alive".into();
+        for agent in state["teams"][team]["agents"].as_object_mut().unwrap().values_mut() {
+            agent["status"] = "running".into();
+        }
+        state["status"] = "alive".into();
+        state["agents"] = state["teams"][team]["agents"].clone();
+        save_runtime_state(&self.workspace, &state).expect("seed live shutdown fixture state");
         let out = self.run([
             "shutdown",
             "--workspace",

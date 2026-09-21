@@ -186,7 +186,9 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
     );
     assert_json_strings_include(&report["killed_sessions"], primary.as_str());
     assert_json_strings_include(&report["killed_sessions"], tail.as_str());
-    assert_json_strings_include(&report["spared_sessions"], leader.as_str());
+    // Unregistered leader sessions are outside the cleanup candidate set, so
+    // survival (not inclusion in the scoped report) is the protection contract.
+    assert!(transport.has_session(&leader).unwrap(), "leader must survive: {report}");
     assert_eq!(
         report
             .pointer("/coordinator/status")
