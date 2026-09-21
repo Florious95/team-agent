@@ -39,6 +39,8 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
+use team_agent::tmux_backend::TmuxBackend;
+use team_agent::transport::SessionName;
 
 use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 
@@ -140,6 +142,14 @@ fn e7_shutdown_unregisters_matching_registry_entry_only_after_canonical_success(
     let case = RuntimeCase::new(&env, "shutdown-unregister", "alpha");
     let _pane = case.start_leader_pane("worker-placeholder");
     case.seed_state_without_receiver("alpha");
+    TmuxBackend::for_tmux_endpoint(case.tmux_socket.to_str().expect("tmux socket utf8"))
+        .set_session_owner_with_generation(
+            &SessionName::new(case.session_name.clone()),
+            &case.workspace,
+            "alpha",
+            &case.session_name,
+        )
+        .expect("mark worker session ownership before canonical shutdown");
     let stale_path = write_registry_entry(
         &case.home,
         &case.workspace,
@@ -1413,6 +1423,7 @@ impl<'a> RuntimeCase<'a> {
         });
         let mut team = json!({
             "team_key": team_key,
+            "generation": self.session_name,
             "status": status,
             "session_name": self.session_name,
             "team_dir": self.workspace_arg(),
@@ -1437,6 +1448,7 @@ impl<'a> RuntimeCase<'a> {
         let mut state = json!({
             "active_team_key": team_key,
             "team_key": team_key,
+            "generation": self.session_name,
             "status": status,
             "session_name": self.session_name,
             "team_dir": self.workspace_arg(),
