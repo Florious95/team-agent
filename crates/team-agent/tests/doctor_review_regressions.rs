@@ -94,6 +94,42 @@ fn r1_explicit_missing_team_fails_and_nested_team_resolves_runtime() {
 }
 
 #[test]
+fn r1_selected_team_status_is_independent_of_the_top_level_sibling() {
+    let f = Fixture::new("selected-team-status");
+    let runtime = f.workspace.join(".team/runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    for top_status in ["stopped", "alive"] {
+        for selected_status in ["alive", "stopped"] {
+            let state = json!({
+                "team_key": "alpha", "active_team_key": "alpha",
+                "status": top_status, "session_name": "review-alpha", "agents": {},
+                "teams": {
+                    "alpha": {"team_key": "alpha", "status": top_status, "agents": {}},
+                    "beta": {
+                        "team_key": "beta", "status": selected_status,
+                        "session_name": "review-disconnected-beta",
+                        "tmux_socket": f.workspace.join("never-started-beta.sock"),
+                        "agents": {"beta-worker": {"provider": "pi", "status": "missing", "window": "beta-worker"}},
+                        "leader_receiver": {"status": "unbound"}
+                    }
+                }
+            }).to_string();
+            fs::write(runtime.join("state.json"), &state).unwrap();
+            for command in ["doctor", "diagnose"] {
+                let out = f.run(command, &f.workspace, &["--team", "beta", "--json"]);
+                let value = report(&out);
+                let alive = selected_status == "alive";
+                assert_eq!(out.status.code(), Some(if alive { 1 } else { 0 }), "{value}");
+                assert_eq!(value["ok"], !alive, "{value}");
+                assert_eq!(value["runtime"]["status"], if alive { "present" } else { "not_present" }, "{value}");
+                assert_eq!(value["runtime"]["team_key"], "beta", "{value}");
+                assert_eq!(fs::read_to_string(runtime.join("state.json")).unwrap(), state);
+            }
+        }
+    }
+}
+
+#[test]
 fn r2_existing_bad_database_is_checked_without_state_and_never_rewritten() {
     for command in ["doctor", "diagnose"] {
         let f = Fixture::new("bad-db");

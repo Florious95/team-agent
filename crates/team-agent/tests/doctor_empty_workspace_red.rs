@@ -1,8 +1,7 @@
-//! Doctor must fail honestly for an existing but empty workspace.
+//! Doctor performs read-only static checks for an existing but empty workspace.
 //!
-//! User-visible contract: an installer or operator pointing `team-agent doctor --json` at an
-//! existing directory with no Team Agent spec and no runtime must get a nonzero command and
-//! `ok:false`, not a fabricated healthy result.
+//! Without a spec or runtime, an otherwise healthy workspace succeeds with
+//! `ok:true` and `runtime.status:not_present`, without creating runtime state.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -22,7 +21,7 @@ fn bin() -> &'static str {
 }
 
 #[test]
-fn doctor_bogus_empty_workspace_without_spec_or_runtime_exits_nonzero() {
+fn doctor_empty_workspace_without_spec_or_runtime_passes_static_checks() {
     let workspace = tmp_dir("empty-workspace");
     let home = tmp_dir("home");
 
@@ -45,16 +44,20 @@ fn doctor_bogus_empty_workspace_without_spec_or_runtime_exits_nonzero() {
     });
 
     assert!(
-        !output.status.success(),
-        "doctor on an existing empty workspace must exit nonzero when no TEAM.md/team.spec.yaml/runtime exists; stdout={} stderr={}",
+        output.status.success(),
+        "doctor on an existing empty workspace must pass static checks without requiring a spec/runtime; stdout={} stderr={}",
         stdout(&output),
         stderr(&output)
     );
     assert_eq!(
         body.get("ok").and_then(Value::as_bool),
-        Some(false),
-        "doctor JSON must be honest ok:false for an empty workspace with no spec/runtime; body={body}"
+        Some(true),
+        "doctor JSON must report successful static checks for an empty workspace; body={body}"
     );
+    assert_eq!(body["runtime"]["status"], "not_present", "{body}");
+    assert_eq!(body["issues"], serde_json::json!([]), "{body}");
+    assert!(!workspace.join(".team/runtime/state.json").exists());
+    assert!(!workspace.join(".team/runtime/team.db").exists());
 }
 
 fn run(args: &[&str], cwd: &Path, home: &Path) -> Output {

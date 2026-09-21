@@ -341,7 +341,14 @@ pub(crate) fn workspace_has_existing_team_runtime(
     // applicable; an empty workspace therefore remains a healthy no-runtime
     // report instead of a fabricated missing-session issue.
     if let Ok(state) = crate::state::persist::load_runtime_state_without_migrations(workspace) {
-        let terminal = state
+        // The workspace's top-level view may describe a stopped sibling.
+        // Preserve the top-level fallback for legacy single-team state only
+        // when there is no selected team entry.
+        let team_state = state
+            .get("teams")
+            .and_then(|teams| teams.get(team_key))
+            .unwrap_or(&state);
+        let terminal = team_state
             .get("status")
             .and_then(Value::as_str)
             .is_some_and(|status| matches!(status, "stopped" | "shutdown" | "archived" | "terminal"));
