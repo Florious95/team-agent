@@ -5,7 +5,7 @@ use crate::cli::{
     SendArgs, StatusArgs,
 };
 use crate::transport::test_support::OfflineTransport;
-use crate::transport::WindowName;
+use crate::transport::{PaneId, PaneInfo, SessionName, WindowName};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

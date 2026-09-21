@@ -2,6 +2,7 @@
 mod hermetic_guard;
 
 use super::*;
+use crate::tmux_backend::TmuxBackend;
 use crate::transport::test_support::OfflineTransport;
 use serde_json::json;
 use serial_test::serial;
