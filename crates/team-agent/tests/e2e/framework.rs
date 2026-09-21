@@ -1814,7 +1814,60 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--json",
         ],
     );
+    seed_fake_session_owner_marker(ws, team_id);
     result
+}
+
+/// Keep the worker-only fake fixture aligned with the production ownership
+/// contract. The CLI launch normally writes these tmux options; this explicit
+/// test fixture write makes the evidence deterministic when no leader pane is
+/// bound in the hermetic E2E environment.
+fn seed_fake_session_owner_marker(ws: &TestWorkspace, team_id: &str) {
+    if !ws.state_json_path().exists() {
+        return;
+    }
+    let state = ws.read_state();
+    let Some(socket) = state.get("tmux_socket").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(session) = state.get("session_name").and_then(Value::as_str) else {
+        return;
+    };
+    if socket.is_empty() || session.is_empty() {
+        return;
+    }
+    let generation = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| {
+            agents.values().find_map(|agent| {
+                agent
+                    .get("spawned_at")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .unwrap_or(session);
+    let workspace = ws
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| ws.path().to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    for (option, value) in [
+        ("@team_agent_owner_workspace", workspace.as_str()),
+        ("@team_agent_owner_team", team_id),
+        ("@team_agent_owner_generation", generation),
+    ] {
+        let status = Command::new("tmux")
+            .args(["-S", socket, "set-option", "-t", session, option, value])
+            .status()
+            .unwrap_or_else(|error| panic!("set fake session owner {option}: {error}"));
+        assert!(
+            status.success(),
+            "set fake session owner {option} failed: status={status}"
+        );
+    }
 }
 
 #[cfg(unix)]
