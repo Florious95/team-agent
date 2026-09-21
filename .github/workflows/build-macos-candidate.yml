@@ -18,56 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  focused-tests:
-    name: PR223 diagnostic review regressions (temporary)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.source_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify source identity
-        env:
-          SOURCE: ${{ inputs.source_sha }}
-          TREE: ${{ inputs.expected_tree }}
-        run: |
-          test "$(git rev-parse HEAD)" = "$SOURCE"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.95.0'
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tmux
-        run: |
-          if ! command -v tmux; then
-            sudo apt-get update
-            sudo apt-get install -y tmux
-          fi
-      - name: Prove all five review regressions on prior candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          sources=(crates/team-agent/src/cli/{adapters.rs,diagnose.rs,mod.rs,triage.rs,tests/divergence.rs})
-          for source in "${sources[@]}"; do
-            git show 0f16e3ce2292b81411d269ad9a6fdd166e0efeab:"$source" > "$source"
-          done
-          set +e
-          cargo test -p team-agent --test doctor_review_regressions --locked -- --nocapture > /tmp/pr223-review-red.log 2>&1
-          result=$?
-          set -e
-          git restore "${sources[@]}"
-          cat /tmp/pr223-review-red.log
-          test "$result" -ne 0
-          grep -F '1 passed; 5 failed;' /tmp/pr223-review-red.log
-      - name: Verify diagnostic review fixes and public contracts
-        run: |
-          cargo test -p team-agent --test doctor_review_regressions --test doctor_diagnose_unification_property_red --test diagnose_coordinator_health_contract --locked
-          cargo test -p team-agent --lib cli::triage::tests --locked
-          cargo test -p team-agent --lib cmd_doctor_comms_human_is_compact_triage_without_boundary_prefix --locked
-          git diff --exit-code
   build:
-    if: false
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
     env:
