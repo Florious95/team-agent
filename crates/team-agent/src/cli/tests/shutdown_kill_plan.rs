@@ -23,6 +23,49 @@ fn anchors(raw: &[&str]) -> BTreeSet<String> {
     raw.iter().map(|s| s.to_string()).collect()
 }
 
+#[test]
+fn leader_anchors_are_endpoint_scoped_and_unknown_anchors_stay_protected() {
+    use crate::cli::lifecycle_port::collect_state_leader_anchor_pane_ids as collect;
+    let state = json!({
+        "team_owner": {"pane_id": "%2"},
+        "leader_receiver": {"pane_id": "%2", "tmux_socket": "/tmp/s4-host.sock"},
+        "teams": {
+            "local": {
+                "team_owner": {"pane_id": "%3", "tmux_socket": "/tmp/s4-worker.sock"},
+                "leader_receiver": {"pane_id": "%3"}
+            },
+            "legacy": {"team_owner": {"pane_id": "%4"}}
+        }
+    });
+    assert_eq!(collect(&state, Some("/tmp/s4-worker.sock")), anchors(&["%3", "%4"]));
+    assert_eq!(collect(&state, Some("/tmp/s4-host.sock")), anchors(&["%2", "%4"]));
+    assert_eq!(collect(&state, None), anchors(&["%2", "%3", "%4"]));
+
+    // An unrelated receiver's socket is not evidence about the owner's pane.
+    let different_panes = json!({
+        "team_owner": {"pane_id": "%5"},
+        "leader_receiver": {"pane_id": "%2", "tmux_socket": "/tmp/s4-host.sock"}
+    });
+    assert_eq!(collect(&different_panes, Some("/tmp/s4-worker.sock")), anchors(&["%5"]));
+}
+
+#[test]
+#[cfg(unix)]
+fn leader_anchor_endpoint_aliases_preserve_same_server_protection() {
+    use crate::cli::lifecycle_port::collect_state_leader_anchor_pane_ids as collect;
+    let ws = tmp_shutdown_workspace("anchor-endpoint-alias");
+    let socket = ws.join("server.sock");
+    let alias = ws.join("alias.sock");
+    std::fs::write(&socket, b"fixture").unwrap();
+    std::os::unix::fs::symlink(&socket, &alias).unwrap();
+    let state = json!({"leader_receiver": {"pane_id": "%2", "tmux_socket": alias}});
+    assert_eq!(collect(&state, socket.to_str()), anchors(&["%2"]));
+    let short_name = format!("s4-anchor-{}", std::process::id());
+    let full_path = crate::tmux_backend::socket_path_for_name(&short_name).unwrap();
+    let state = json!({"leader_receiver": {"pane_id": "%2", "tmux_socket": short_name}});
+    assert_eq!(collect(&state, full_path.to_str()), anchors(&["%2"]));
+}
+
 // RC-4: even an apparently exclusive socket uses per-session cleanup.
 #[test]
 fn rc4_exclusive_socket_is_fail_closed() {

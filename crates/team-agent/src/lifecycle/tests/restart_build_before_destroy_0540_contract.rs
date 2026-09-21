@@ -142,6 +142,14 @@ fn scoped_shutdown_after_restart_refreshes_owner_and_preserves_sibling() {
     let session = SessionName::new(TEAM_SESSION);
     let sibling_session = SessionName::new("team-sibling");
     let mut state = case.read_state();
+    // Host and worker tmux servers may allocate the same pane ID. The host
+    // receiver must not protect the replacement worker on this transport.
+    state["leader_receiver"] = json!({
+        "pane_id": "%new-1", "tmux_socket": "/tmp/s4-host-only.sock"
+    });
+    state["team_owner"] = json!({"pane_id": "%new-1"});
+    state["teams"][TEAM]["leader_receiver"] = state["leader_receiver"].clone();
+    state["teams"][TEAM]["team_owner"] = state["team_owner"].clone();
     state["teams"]["sibling"] = json!({
         "team_key": "sibling",
         "session_name": sibling_session.as_str(),

@@ -516,10 +516,11 @@ pub mod lifecycle_port {
     /// (经同一帧 list_targets pane→session)。state 无任何锚 → 退命名判据 + spare_fallback event。
     fn anchor_sessions_from_state(
         state: &Value,
+        endpoint: Option<&str>,
         pane_targets: &[crate::transport::PaneInfo],
         event_log: &crate::event_log::EventLog,
     ) -> std::collections::BTreeSet<String> {
-        let anchor_pane_ids = collect_state_leader_anchor_pane_ids(state);
+        let anchor_pane_ids = collect_state_leader_anchor_pane_ids(state, endpoint);
         if anchor_pane_ids.is_empty() {
             // 无锚(state 损坏/未记)→ 退纯命名前缀判据(下游 sessions_to_kill 仍 spare 前缀)。
             let _ = event_log.write(
@@ -649,7 +650,12 @@ pub mod lifecycle_port {
                 }
             }
         };
-        let protected_sessions = anchor_sessions_from_state(state, &targets, event_log);
+        let protected_sessions = anchor_sessions_from_state(
+            state,
+            transport.tmux_endpoint().as_deref(),
+            &targets,
+            event_log,
+        );
         let mut result = ShutdownSocketCleanup::default();
         for session in candidates {
             if protected_sessions.contains(session.as_str()) {
@@ -790,6 +796,43 @@ pub mod lifecycle_port {
         use super::*;
         use crate::transport::test_support::OfflineTransport;
         use crate::transport::{PaneId, PaneInfo, SessionName};
+
+        #[test]
+        fn leader_process_protection_does_not_alias_panes_across_endpoints() {
+            let state = json!({
+                "team_owner": {"pane_id": "%2"},
+                "leader_receiver": {"pane_id": "%2", "tmux_socket": "/tmp/s4-host-only.sock"}
+            });
+            let table = [(10, 1), (20, 10), (30, 10), (31, 30)]
+                .into_iter()
+                .map(|(pid, ppid)| ProcessInfo { pid, ppid, pgid: None, session: None, command: String::new() })
+                .collect::<Vec<_>>();
+            for (endpoint, pane_pid, should_protect) in [
+                ("/tmp/s4-worker-only.sock", 20, false),
+                ("/tmp/s4-host-only.sock", 30, true),
+            ] {
+                let transport = OfflineTransport::new()
+                    .with_tmux_endpoint(endpoint)
+                    .with_targets(vec![PaneInfo {
+                        pane_id: PaneId::new("%2"),
+                        session: SessionName::new("ordinary-session"),
+                        window_index: None,
+                        window_name: None,
+                        pane_index: None,
+                        tty: None,
+                        current_command: None,
+                        current_path: None,
+                        active: true,
+                        pane_pid: Some(pane_pid),
+                        leader_env: BTreeMap::new(),
+                    }]);
+                let mut protected = ShutdownProtection::default();
+                extend_protection_with_leader_panes(&mut protected, &transport, &state, &table);
+                assert_eq!(protected.pids.contains(&pane_pid), should_protect);
+                assert_eq!(protected.pids.contains(&31), should_protect, "leader descendants");
+                assert_eq!(protected.pids.contains(&10), should_protect, "leader's server");
+            }
+        }
 
         #[test]
         fn audit_write_failure_skips_destructive_kill() {
@@ -1042,7 +1085,10 @@ pub mod lifecycle_port {
             // External and managed leaders both pass the same positive ownership
             // gate; topology only decides whether a verified session is reduced
             // to worker panes or removed as a whole.
-            let leader_anchor_ids = collect_state_leader_anchor_pane_ids(&state);
+            let leader_anchor_ids = collect_state_leader_anchor_pane_ids(
+                &state,
+                transport.tmux_endpoint().as_deref(),
+            );
             let (live_targets_now, live_targets_known) = match transport.list_targets() {
                 Ok(targets) => (targets, true),
                 Err(error) => {
@@ -2059,12 +2105,13 @@ pub mod lifecycle_port {
     ///   → 任一 team 的 shutdown 都不杀任何 team 的 leader 锚 pane
     pub fn collect_state_leader_anchor_pane_ids(
         state: &Value,
+        endpoint: Option<&str>,
     ) -> std::collections::BTreeSet<String> {
         let mut out = std::collections::BTreeSet::new();
-        push_anchor_pane_id(state, &mut out);
+        push_anchor_pane_id(state, endpoint, &mut out);
         if let Some(teams) = state.get("teams").and_then(Value::as_object) {
             for (_, team_state) in teams {
-                push_anchor_pane_id(team_state, &mut out);
+                push_anchor_pane_id(team_state, endpoint, &mut out);
             }
         }
         out
@@ -2184,17 +2231,40 @@ pub mod lifecycle_port {
         Ok(())
     }
 
-    /// 单帧扫 team_owner.pane_id + leader_receiver.pane_id → BTreeSet 累加。
-    fn push_anchor_pane_id(state: &Value, out: &mut std::collections::BTreeSet<String>) {
-        for key in &["team_owner", "leader_receiver"] {
-            if let Some(pane_id) = state
-                .get(*key)
-                .and_then(|v| v.get("pane_id"))
-                .and_then(Value::as_str)
+    /// Pane IDs are server-local. Exclude proven foreign-endpoint anchors, but
+    /// retain legacy anchors when their endpoint (or the transport's) is unknown.
+    fn push_anchor_pane_id(
+        state: &Value,
+        endpoint: Option<&str>,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
+        for (key, peer_key) in [("team_owner", "leader_receiver"), ("leader_receiver", "team_owner")] {
+            let Some(anchor) = state.get(key) else { continue };
+            let Some(pane_id) = anchor.get("pane_id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            // team_owner often records only a pane ID; its receiver supplies
+            // the endpoint only when it describes that exact same anchor.
+            let anchor_endpoint = anchor.get("tmux_socket").and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-            {
-                out.insert(pane_id.to_string());
+                .or_else(|| {
+                    state.get(peer_key)
+                        .filter(|peer| peer.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+                        .and_then(|peer| peer.get("tmux_socket"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                });
+            if let (Some(anchor_path), Some(transport_path)) = (
+                anchor_endpoint.and_then(socket_file_for_endpoint),
+                endpoint.filter(|s| !s.is_empty()).and_then(socket_file_for_endpoint),
+            ) {
+                let anchor_path = anchor_path.canonicalize().unwrap_or(anchor_path);
+                let transport_path = transport_path.canonicalize().unwrap_or(transport_path);
+                if anchor_path != transport_path {
+                    continue;
+                }
             }
+            out.insert(pane_id.to_string());
         }
     }
 
@@ -2305,8 +2375,10 @@ pub mod lifecycle_port {
         );
         // Source 2: state.json team_owner / leader_receiver 真锚 pane_id(top-level +
         // teams[*]),per-workspace socket 命中。
-        let anchor_pane_ids: std::collections::BTreeSet<String> =
-            collect_state_leader_anchor_pane_ids(state);
+        let anchor_pane_ids = collect_state_leader_anchor_pane_ids(
+            state,
+            transport.tmux_endpoint().as_deref(),
+        );
         leader_pane_pids.extend(
             pane_targets
                 .iter()
@@ -2322,6 +2394,7 @@ pub mod lifecycle_port {
         // 的 list_targets 找 anchor pane_id → pane_pid → 进入 process_tree 保护。
         // 不在 state 中的 socket 不查(MUST-17 不撒宽 / 不主动枚举全机器 sockets)。
         for socket_endpoint in collect_state_recorded_tmux_sockets(state) {
+            let anchor_pane_ids = collect_state_leader_anchor_pane_ids(state, Some(&socket_endpoint));
             let cross_backend =
                 crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket_endpoint);
             let cross_panes =
