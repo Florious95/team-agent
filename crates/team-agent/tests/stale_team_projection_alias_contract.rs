@@ -24,6 +24,8 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 use serial_test::serial;
 use team_agent::state::persist::load_runtime_state;
+use team_agent::tmux_backend::TmuxBackend;
+use team_agent::transport::{SessionName, Transport, WindowName};
 
 const CURRENT: &str = "current";
 const RESEARCH: &str = "research";
@@ -174,6 +176,31 @@ impl SupermarketCase {
     }
 
     fn shutdown(&self, team: &str) {
+        // Fake workers can exit before shutdown. Keep an owned fixture pane alive
+        // so this exercises the shutdown tombstone save, not the already-gone path.
+        let state = self.state();
+        let selected = &state["teams"][team];
+        let session = SessionName::new(selected["session_name"].as_str().expect("team session"));
+        let generation = selected["agents"]
+            .as_object()
+            .and_then(|agents| agents.values().find_map(|agent| agent["spawned_at"].as_str()))
+            .expect("worker generation");
+        let transport = TmuxBackend::for_workspace(&self.workspace);
+        if transport.has_session(&session).expect("probe fixture session") {
+            transport.kill_session(&session).expect("replace fake fixture session");
+        }
+        transport
+            .spawn_first(
+                &session,
+                &WindowName::new("worker-placeholder"),
+                &["/bin/cat".to_string()],
+                &self.workspace,
+                &Default::default(),
+            )
+            .expect("start persistent shutdown fixture pane");
+        transport
+            .set_session_owner_with_generation(&session, &self.workspace, team, generation)
+            .expect("mark shutdown fixture ownership");
         let out = self.run([
             "shutdown",
             "--workspace",
@@ -340,14 +367,12 @@ fn assert_current_tombstone(state: &Value, label: &str) {
         Some(CURRENT),
         "{label}: teams.current must keep its own payload identity; state={state}"
     );
-    // Fake workers may have exited before shutdown; both outcomes are retained
-    // terminal history, never a live sibling's copied projection.
-    assert!(
-        matches!(
-            state.pointer("/teams/current/status").and_then(Value::as_str),
-            Some("shutdown" | "already_stopped")
-        ),
-        "{label}: teams.current.status must remain terminal; state={state}"
+    assert_eq!(
+        state
+            .pointer("/teams/current/status")
+            .and_then(Value::as_str),
+        Some("shutdown"),
+        "{label}: teams.current.status must remain shutdown; state={state}"
     );
     assert_eq!(
         state

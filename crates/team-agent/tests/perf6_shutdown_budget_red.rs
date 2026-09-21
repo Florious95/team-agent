@@ -368,8 +368,8 @@ fn install_failing_ps_shim(ws: &Path) -> PathGuard {
 }
 
 /// Double-hop detach (`sh -c '... & echo $!'`): the loop process is NOT a child of the
-/// test process, so the in-process shutdown's waitpid cannot consume its status and
-/// `kill -0` observation stays valid.
+/// test process, so the in-process shutdown cannot reap it. On Linux its terminated
+/// zombie may remain visible to `kill -0` until the adopting parent reaps it.
 fn spawn_detached_trap_loop(ws: &Path, body: &str) -> u32 {
     let line = format!("sh -c '{body}' >/dev/null 2>&1 & echo $!");
     let out = std::process::Command::new("sh")
@@ -384,11 +384,15 @@ fn spawn_detached_trap_loop(ws: &Path, body: &str) -> u32 {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .expect("inspect detached fixture process state");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|state| state != 'Z')
 }
 
 fn wait_until(timeout_ms: u64, mut check: impl FnMut() -> bool) -> bool {
