@@ -18,34 +18,6 @@ permissions:
   contents: read
 
 jobs:
-  test-fixtures:
-    name: Test fixture alignment (temporary)
-    if: github.ref == 'refs/heads/fix/align-ci-test-fixtures-with-shutdown-isolation'
-    runs-on: ubuntu-latest
-    env:
-      TEAM_AGENT_PHASE_GOLDEN_DUMP_DIR: /tmp/team-agent-phase-golden
-    steps:
-      - name: Check out requested source
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Run aligned Rust test groups
-        run: |
-          cargo test -p team-agent --lib cli::tests::shutdown_kill_plan --locked -- --test-threads=1
-          cargo test -p team-agent --lib lifecycle::tests::phase_golden --locked -- --test-threads=1
-          cargo test -p team-agent --lib lifecycle::tests::verify_rs031_window_consistency_red --locked -- --test-threads=1
-      - name: Upload phase golden dumps
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: phase-golden-dumps
-          path: /tmp/team-agent-phase-golden
-          if-no-files-found: ignore
-
   build:
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
