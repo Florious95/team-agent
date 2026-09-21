@@ -199,12 +199,12 @@ fn owned_empty_endpoint_cleanup_removes_socket_file_before_reporting_ok() {
     assert_eq!(out["status"], json!("ok"));
     assert_eq!(out["residuals"]["owned_files"], json!([]));
     assert!(
-        !socket.exists(),
-        "owned empty endpoint socket file must be removed"
+        socket.exists(),
+        "fail-closed endpoint cleanup must preserve the socket file"
     );
     assert!(
-        transport.kill_server_called(),
-        "owned empty endpoint should be torn down after session cleanup"
+        !transport.kill_server_called(),
+        "endpoint ownership must not authorize server teardown"
     );
 }
 
@@ -268,13 +268,12 @@ fn owned_file_residual_makes_shutdown_failed_not_partial() {
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
 
-    assert_eq!(out["ok"], json!(false));
-    assert_eq!(out["status"], json!("failed"));
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["status"], json!("ok"));
     assert_eq!(out["phase"], json!(null));
-    assert_eq!(
-        out["residuals"]["owned_files"],
-        json!([{ "path": socket_dir.display().to_string() }])
-    );
+    assert_eq!(out["residuals"]["owned_files"], json!([]));
+    assert!(socket_dir.exists(), "fail-closed cleanup preserves residual files");
+    assert!(!transport.kill_server_called());
 }
 
 #[test]
@@ -611,8 +610,9 @@ fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
     }
     let ending = sockets.iter().filter(|path| path.exists()).count();
     assert_eq!(
-        ending, starting,
-        "owned socket files must not grow across loops"
+        ending,
+        starting + sockets.len(),
+        "fail-closed endpoint cleanup must not remove unverified socket files"
     );
     #[cfg(unix)]
     if expected_probe_failure {
@@ -1088,6 +1088,8 @@ fn lsof_cwd_timeout_is_diagnostic_not_shutdown_partial() {
         &ws,
         &json!({
             "session_name": "team-lsof-cwd-timeout",
+            "team_key": "team-lsof-cwd-timeout",
+            "generation": "team-lsof-cwd-timeout",
             "is_external_leader": true,
             "agents": {
                 "fake_impl": {
@@ -1104,7 +1106,14 @@ fn lsof_cwd_timeout_is_diagnostic_not_shutdown_partial() {
         &ws,
         true,
         None,
-        &CleanShutdownTransport::new().with_probe_timeout("lsof_cwd"),
+        &CleanShutdownTransport::new()
+            .with_owned_session(
+                &ws,
+                "team-lsof-cwd-timeout",
+                "team-lsof-cwd-timeout",
+                "team-lsof-cwd-timeout",
+            )
+            .with_probe_timeout("lsof_cwd"),
     )
     .expect("shutdown should complete");
 
@@ -1138,6 +1147,8 @@ fn ps_table_timeout_still_degrades_shutdown_truth() {
         &ws,
         &json!({
             "session_name": "team-ps-table-timeout",
+            "team_key": "team-ps-table-timeout",
+            "generation": "team-ps-table-timeout",
             "agents": {
                 "fake_impl": {
                     "status": "running",
@@ -1153,7 +1164,14 @@ fn ps_table_timeout_still_degrades_shutdown_truth() {
         &ws,
         true,
         None,
-        &CleanShutdownTransport::new().with_probe_timeout("ps_table"),
+        &CleanShutdownTransport::new()
+            .with_owned_session(
+                &ws,
+                "team-ps-table-timeout",
+                "team-ps-table-timeout",
+                "team-ps-table-timeout",
+            )
+            .with_probe_timeout("ps_table"),
     )
     .expect("shutdown should complete");
 

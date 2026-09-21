@@ -303,6 +303,16 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
                     })
                 })
         })
+        .or_else(|| {
+            runtime_state
+                .pointer("/teams/teamdir/agents")
+                .and_then(Value::as_object)
+                .and_then(|agents| {
+                    agents.values().find_map(|agent| {
+                        agent.get("spawned_at").and_then(Value::as_str)
+                    })
+                })
+        })
         .expect("quick-start fixture must carry generation evidence");
     let lifecycle_transport = codex_ready_transport()
         .with_session_present(true)
