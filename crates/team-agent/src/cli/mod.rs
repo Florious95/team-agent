@@ -649,8 +649,13 @@ pub mod lifecycle_port {
                 }
             }
         };
+        let protected_sessions = anchor_sessions_from_state(state, &targets, event_log);
         let mut result = ShutdownSocketCleanup::default();
         for session in candidates {
+            if protected_sessions.contains(session.as_str()) {
+                push_unique_session(&mut result.spared_sessions, session);
+                continue;
+            }
             match session_ownership(workspace, state, transport, &session, &targets) {
                 SessionOwnership::Owned => {
                     let target = vec![session.as_str().to_string()];
@@ -2124,9 +2129,9 @@ pub mod lifecycle_port {
                 if leader_anchor_ids.contains(pane_id) {
                     continue;
                 }
-                let in_live = live_targets
-                    .iter()
-                    .any(|info| info.pane_id.as_str() == pane_id);
+                let in_live = live_targets.iter().any(|info| {
+                    info.pane_id.as_str() == pane_id && info.session.as_str() == session
+                });
                 if in_live && seen.insert(pane_id.to_string()) {
                     out.push(crate::transport::PaneId::new(pane_id));
                     continue;
@@ -2511,55 +2516,20 @@ pub mod lifecycle_port {
     fn process_matches_workspace(
         process: &ProcessInfo,
         workspace: &Path,
-        spawn_cwds: &[PathBuf],
+        _spawn_cwds: &[PathBuf],
     ) -> bool {
         let workspace = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
-        if let Some(tokens) = crate::platform::argv::argv_tokens(process.pid) {
-            if tokens.windows(2).any(|pair| {
+        crate::platform::argv::argv_tokens(process.pid).is_some_and(|tokens| {
+            tokens.windows(2).any(|pair| {
                 pair[0] == "--workspace"
                     && Path::new(&pair[1])
                         .canonicalize()
                         .map(|path| path == workspace)
                         .unwrap_or(false)
-            }) {
-                return true;
-            }
-        }
-        process_cwd(process.pid).is_some_and(|cwd| {
-            spawn_cwds.iter().any(|spawn_cwd| path_is_under(&cwd, spawn_cwd))
-                || path_is_under(&cwd, &workspace)
+            })
         })
-    }
-
-    fn process_cwd(pid: u32) -> Option<PathBuf> {
-        let proc_cwd = PathBuf::from(format!("/proc/{pid}/cwd"));
-        if let Ok(path) = std::fs::read_link(proc_cwd) {
-            return Some(path);
-        }
-        if crate::os_probe::probe_timed_out() {
-            return None;
-        }
-        let output = crate::os_probe::bounded_command_output_with_probe(
-            std::process::Command::new("lsof").args([
-                "-a",
-                "-p",
-                &pid.to_string(),
-                "-d",
-                "cwd",
-                "-Fn",
-            ]),
-            "lsof_cwd",
-            Some(pid),
-        )
-        .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .find_map(|line| line.strip_prefix('n').map(PathBuf::from))
     }
 
     fn path_is_under(path: &Path, root: &Path) -> bool {
