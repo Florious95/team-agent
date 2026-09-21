@@ -135,6 +135,10 @@ fn server_exited_during_replacement_spawn_does_not_cascade_session_disappeared_a
 fn scoped_shutdown_after_restart_refreshes_owner_and_preserves_sibling() {
     let case = RestartCase::new("restart-shutdown-owner", worker_ids(2), ProviderShape::Fake);
     let transport = BuildBeforeDestroyTransport::recording(worker_ids(2));
+    for pane in transport.state.lock().unwrap().panes.values_mut() {
+        pane.current_path = Some(case.workspace.clone());
+        pane.pane_pid = None;
+    }
     let session = SessionName::new(TEAM_SESSION);
     let sibling_session = SessionName::new("team-sibling");
     let mut state = case.read_state();
