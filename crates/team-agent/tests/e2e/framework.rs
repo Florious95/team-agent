@@ -1814,7 +1814,15 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--json",
         ],
     );
-    if matches!(team_id, "shut001" | "shut002" | "shut003" | "shut004") {
+    if matches!(
+        team_id,
+        "shut001"
+            | "shut002"
+            | "shut003"
+            | "shut004"
+            | "dirty002"
+            | "stat002"
+    ) {
         ensure_shutdown_fixture_session(ws);
     }
     seed_fake_session_owner_marker(ws);
