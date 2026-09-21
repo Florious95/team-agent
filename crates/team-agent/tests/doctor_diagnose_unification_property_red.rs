@@ -509,7 +509,6 @@ fn p10_default_empty_check_does_not_execute_unrelated_commands() {
             &script,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' '{}' >> '{}'\nexit 0\n",
-                command,
                 script.display(),
                 marker.display()
             ),
