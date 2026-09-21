@@ -1460,6 +1460,13 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         unified_default_doctor_report(args, value)
     };
 
+    if explicit_comms {
+        if let Some(object) = value.as_object_mut() {
+            // The comms probe uses a random run id internally for its disposable
+            // fixture; the public doctor/diagnose report must be alias-stable.
+            object.insert("run_id".to_string(), Value::String("doctor".to_string()));
+        }
+    }
     if !default_report {
         finalize_doctor_report(&mut value, false);
     }
