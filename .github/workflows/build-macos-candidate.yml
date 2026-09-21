@@ -279,12 +279,13 @@ jobs:
       - name: Run doctor/diagnose Initial RED
         shell: bash
         run: |
-          set -o pipefail
+          set +e
           cargo test -p team-agent --locked \
             --test doctor_diagnose_unification_property_red \
             -- --test-threads=1 --nocapture 2>&1 | tee initial-red.log
           rc=${PIPESTATUS[0]}
-          printf 'initial_red_exit_code=%s\n' "$rc"
+          set -e
+          printf 'initial_red_exit_code=%s\n' "$rc" | tee -a initial-red.log
           exit "$rc"
 
       - name: Upload Initial RED receipt
