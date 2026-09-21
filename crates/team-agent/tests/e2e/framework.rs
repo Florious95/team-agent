@@ -1869,10 +1869,18 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
         return;
     }
     let mut state = ws.read_state();
-    let Some(socket) = state.get("tmux_socket").and_then(Value::as_str) else {
+    let Some(socket) = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         return;
     };
-    let Some(session) = state.get("session_name").and_then(Value::as_str) else {
+    let Some(session) = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
         return;
     };
     if socket.is_empty() || session.is_empty() {
@@ -1890,9 +1898,17 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
             })
         })
         .map(str::to_owned)
-        .unwrap_or_else(|| session.to_owned());
+        .unwrap_or_else(|| session.clone());
     let remain_on_exit = Command::new("tmux")
-        .args(["-S", socket, "set-option", "-t", session, "remain-on-exit", "on"])
+        .args([
+            "-S",
+            socket.as_str(),
+            "set-option",
+            "-t",
+            session.as_str(),
+            "remain-on-exit",
+            "on",
+        ])
         .status()
         .unwrap_or_else(|error| panic!("keep fake session on worker exit: {error}"));
     assert!(
@@ -1909,7 +1925,7 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
         .get("team_key")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or(session)
+        .unwrap_or(session.as_str())
         .to_string();
     state["team_key"] = Value::String(owner_team.clone());
     state["generation"] = Value::String(generation.clone());
@@ -1920,7 +1936,15 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
         ("@team_agent_owner_generation", generation.as_str()),
     ] {
         let status = Command::new("tmux")
-            .args(["-S", socket, "set-option", "-t", session, option, value])
+            .args([
+                "-S",
+                socket.as_str(),
+                "set-option",
+                "-t",
+                session.as_str(),
+                option,
+                value,
+            ])
             .status()
             .unwrap_or_else(|error| panic!("set fake session owner {option}: {error}"));
         assert!(
