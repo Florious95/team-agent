@@ -330,6 +330,17 @@ impl CompatFixture {
             .expect("spawn fixture coordinator process");
         let pid = child.id();
         self.children.push(child);
+        for _ in 0..100 {
+            let booted_pid = std::fs::read_to_string(coordinator_meta_path(&self.workspace))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|metadata| metadata.get("pid").and_then(Value::as_u64))
+                .map(|value| value as u32);
+            if booted_pid == Some(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         write_raw_metadata(
             &self.workspace,
             json!({
@@ -410,7 +421,7 @@ impl Drop for CompatFixture {
 
 fn runtime_state(root: &Path) -> Value {
     json!({
-        "session_name": "compat-session",
+        "session_name": "",
         "active_team_key": TEAM,
         "team_key": TEAM,
         "tmux_socket": null,
