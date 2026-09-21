@@ -1814,8 +1814,50 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--json",
         ],
     );
+    if matches!(team_id, "shut001" | "shut002" | "shut003" | "shut004") {
+        ensure_shutdown_fixture_session(ws);
+    }
     seed_fake_session_owner_marker(ws, team_id);
     result
+}
+
+/// Keep the shutdown fixture session alive long enough for the subsequent
+/// shutdown command to observe and positively authorize it. The built-in fake
+/// worker may exit before the black-box assertion reaches the CLI.
+fn ensure_shutdown_fixture_session(ws: &TestWorkspace) {
+    let state = ws.read_state();
+    let Some(socket) = state.get("tmux_socket").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(session) = state.get("session_name").and_then(Value::as_str) else {
+        return;
+    };
+    if socket.is_empty() || session.is_empty() {
+        return;
+    }
+    let exists = Command::new("tmux")
+        .args(["-S", socket, "has-session", "-t", session])
+        .status()
+        .unwrap_or_else(|error| panic!("probe shutdown fixture session: {error}"));
+    if exists.success() {
+        return;
+    }
+    let workspace = ws
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| ws.path().to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let created = Command::new("tmux")
+        .args(["-S", socket, "new-session", "-d", "-s", session, "-c"])
+        .arg(&workspace)
+        .args(["sleep", "60"])
+        .status()
+        .unwrap_or_else(|error| panic!("create shutdown fixture session: {error}"));
+    assert!(
+        created.success(),
+        "create shutdown fixture session failed: status={created}"
+    );
 }
 
 /// Keep the worker-only fake fixture aligned with the production ownership
