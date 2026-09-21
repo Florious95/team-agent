@@ -1418,9 +1418,6 @@ pub fn cmd_acknowledge_idle(args: &AcknowledgeIdleArgs) -> Result<CmdResult, Cli
 /// `doctor` is the single health/diagnostic pipeline. `diagnose` enters here
 /// through the compatibility wrapper above; it never gets a second facts engine.
 pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
-    if args.fix && args.gate.is_none() {
-        return Err(CliError::Runtime("--fix requires --gate".to_string()));
-    }
     if let Some(DoctorGate::Unknown(raw)) = &args.gate {
         let value = json!({
             "ok": false,
@@ -1428,6 +1425,15 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
             "suggested_repairs": [{"action": "use --gate orphans or --gate comms", "issue": "unknown_gate"}],
             "status": "unknown_gate",
             "gate": raw,
+        });
+        return Ok(crate::cli::triage::report(value, args.json, "doctor"));
+    }
+    if args.fix && args.gate.is_none() {
+        let value = json!({
+            "ok": false,
+            "error": "--fix requires --gate",
+            "issues": ["fix_requires_gate"],
+            "suggested_repairs": [{"issue": "fix_requires_gate", "action": "add --gate orphans|comms"}],
         });
         return Ok(crate::cli::triage::report(value, args.json, "doctor"));
     }
@@ -1457,6 +1463,7 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     if !default_report {
         finalize_doctor_report(&mut value, false);
     }
+    normalize_current_workspace_paths(&mut value, &args.workspace);
     let result = crate::cli::triage::report(value, args.json, "doctor");
     if explicit_comms && !args.json {
         let json_tail = match &result.output {
@@ -1470,6 +1477,28 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         });
     }
     Ok(result)
+}
+
+fn normalize_current_workspace_paths(value: &mut Value, workspace: &std::path::Path) {
+    let Ok(current) = std::env::current_dir() else {
+        return;
+    };
+    if current != workspace {
+        return;
+    }
+    let prefix = workspace.to_string_lossy().to_string();
+    fn normalize(value: &mut Value, prefix: &str) {
+        match value {
+            Value::String(text) if text == prefix => *text = ".".to_string(),
+            Value::String(text) if text.starts_with(&format!("{prefix}/")) => {
+                text.replace_range(..prefix.len(), ".");
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| normalize(item, prefix)),
+            Value::Object(object) => object.values_mut().for_each(|item| normalize(item, prefix)),
+            _ => {}
+        }
+    }
+    normalize(value, &prefix);
 }
 
 fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
@@ -1619,6 +1648,9 @@ fn report_item_identity(item: &Value) -> String {
         .collect::<Vec<_>>();
     let line = item.get("line").and_then(Value::as_u64);
     if primary.is_some() || !scope.is_empty() || line.is_some() {
+        if scope.is_empty() && line.is_none() {
+            return primary.unwrap_or("object").to_string();
+        }
         return format!(
             "{}|{}|{}",
             primary.unwrap_or("object"),

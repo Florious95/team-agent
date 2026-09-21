@@ -4978,11 +4978,12 @@ pub mod diagnose_port {
                 continue;
             };
             let rel = path.strip_prefix(root).unwrap_or(path);
+            // Keep only a locating rule/path/line tuple.  Never include even
+            // redacted assignment text in the structured report.
             findings.push(json!({
                 "path": rel.to_string_lossy().to_string(),
                 "line": idx.saturating_add(1),
                 "rule": "api_key_assignment",
-                "match_excerpt": format!("{key}=<redacted>"),
             }));
         }
     }

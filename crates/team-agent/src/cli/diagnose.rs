@@ -161,6 +161,19 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
             }
             issues.push(issue);
         }
+        // Preserve distinct worker failures even when the shared session probe
+        // short-circuits pane enumeration.  This keeps scope evidence without
+        // issuing another transport probe per worker.
+        if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+            for agent_id in agents.keys() {
+                let issue = format!("worker_window_missing:{agent_id}");
+                issues.push(json!(issue.clone()));
+                repairs.push(json!({
+                    "issue": issue,
+                    "action": "team-agent restart",
+                }));
+            }
+        }
         return (Value::Array(issues), Value::Array(repairs));
     }
 
@@ -326,6 +339,15 @@ pub(crate) fn workspace_has_existing_team_runtime(
     // live runtime.  Only persisted runtime state/specs make topology checks
     // applicable; an empty workspace therefore remains a healthy no-runtime
     // report instead of a fabricated missing-session issue.
+    if let Ok(state) = crate::state::persist::load_runtime_state_without_migrations(workspace) {
+        let terminal = state
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "stopped" | "shutdown" | "archived" | "terminal"));
+        if terminal {
+            return false;
+        }
+    }
     crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
         || crate::state::persist::runtime_state_path(workspace).is_file()
 }
