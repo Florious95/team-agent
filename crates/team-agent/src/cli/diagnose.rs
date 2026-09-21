@@ -322,8 +322,11 @@ pub(crate) fn workspace_has_existing_team_runtime(
     workspace: &std::path::Path,
     team_key: &str,
 ) -> bool {
-    workspace.join("team.spec.yaml").is_file()
-        || crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
+    // A source TEAM.md/team.spec.yaml is install/configuration context, not a
+    // live runtime.  Only persisted runtime state/specs make topology checks
+    // applicable; an empty workspace therefore remains a healthy no-runtime
+    // report instead of a fabricated missing-session issue.
+    crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
         || crate::state::persist::runtime_state_path(workspace).is_file()
 }
 

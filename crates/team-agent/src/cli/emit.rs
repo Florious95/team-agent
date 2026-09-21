@@ -225,7 +225,8 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
         "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
+        // Compatibility spelling: parse and execute the exact doctor contract.
+        "diagnose" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
         "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
         "e2e" => cmd_e2e(&e2e_args(args, cwd)).map(emit_result),

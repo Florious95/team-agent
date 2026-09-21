@@ -482,100 +482,22 @@ pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliErr
     Ok(CmdResult::from_json(value, args.json))
 }
 
-/// `cmd_diagnose`(`parser.py:298`)。
+/// `diagnose` is the permanent compatibility spelling for `doctor`.
+/// Keep this wrapper free of probing/reporting logic so direct Rust callers and
+/// the CLI both converge on the canonical handler.
 pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
-    let team_hint = args
-        .team
-        .as_deref()
-        .filter(|team| !team.is_empty())
-        .unwrap_or("current");
-    // Check the caller-supplied workspace before RuntimeOnly synthesis or
-    // transport setup, which can create `.team` paths and make an empty
-    // directory look like an unbound team.
-    if !crate::cli::diagnose::workspace_has_existing_team_runtime(&args.workspace, team_hint) {
-        let (issues, suggested_repairs) =
-            crate::cli::diagnose::missing_team_runtime_issues_and_repairs(team_hint);
-        let event_log = args
-            .workspace
-            .join(".team")
-            .join("logs")
-            .join("events.jsonl");
-        return Ok(crate::cli::triage::report(
-            json!({
-                "event_log": event_log.to_string_lossy().to_string(),
-                "issues": issues,
-                "ok": false,
-                "providers": provider_doctor_checks(),
-                "runtime": {
-                    "workspace": args.workspace.to_string_lossy().to_string(),
-                    "team_key": team_hint,
-                    "session_name": Value::Null,
-                    "leader_receiver": Value::Null,
-                    "agent_count": 0,
-                    "message_count": 0,
-                    "result_count": 0,
-                },
-                "suggested_repairs": suggested_repairs,
-            }),
-            args.json,
-            "diagnose",
-        ));
-    }
-    let selected = crate::state::selector::resolve_active_team_readonly(
-        &args.workspace,
-        args.team.as_deref(),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let state = selected.state;
-    let event_log = selected
-        .run_workspace
-        .join(".team")
-        .join("logs")
-        .join("events.jsonl");
-    // 0.5.x Phase 1d Batch 3: factory-routed diagnose backend so
-    // conpty teams get accurate `has_session` / capture from the shim
-    // rather than a workspace tmux fallback (which would always miss
-    // the ConPTY pane universe).
-    let backend: Box<dyn crate::transport::Transport> =
-        match crate::transport_factory::resolve_read_only_transport(
-            &selected.run_workspace,
-            Some(&state),
-            crate::transport_factory::TransportPurpose::Diagnose,
-        ) {
-            Ok(r) => r.backend,
-            Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
-                &selected.run_workspace,
-            )),
-        };
-    let (issues, suggested_repairs) =
-        diagnose_runtime_for_workspace(
-            &selected.run_workspace,
-            &state,
-            backend.as_ref(),
-            Some(selected.team_key.as_str()),
-        );
-    let ok = issues.as_array().is_some_and(Vec::is_empty);
-    Ok(crate::cli::triage::report(
-        json!({
-            "event_log": event_log.to_string_lossy().to_string(),
-            "issues": issues,
-            "ok": ok,
-            "providers": provider_doctor_checks(),
-            "runtime": {
-                "workspace": args.workspace.to_string_lossy().to_string(),
-                "team_key": selected.team_key,
-                "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
-                "leader_receiver": state.get("leader_receiver").cloned().unwrap_or(Value::Null),
-                "agent_count": state.get("agents").and_then(Value::as_object).map_or(0, serde_json::Map::len),
-                "message_count": count_dir_entries(&selected.run_workspace.join(".team").join("messages")),
-                "result_count": count_dir_entries(&selected.run_workspace.join(".team").join("results")),
-            },
-            "suggested_repairs": suggested_repairs,
-        }),
-        args.json,
-        "diagnose",
-    ))
+    cmd_doctor(&DoctorArgs {
+        spec: None,
+        workspace: args.workspace.clone(),
+        gate: None,
+        comms: false,
+        team: args.team.clone(),
+        fix: false,
+        fix_schema: false,
+        cleanup_orphans: false,
+        confirm: false,
+        json: args.json,
+    })
 }
 
 /// `cmd_preflight`(`parser.py:160`)。
@@ -1493,88 +1415,379 @@ pub fn cmd_acknowledge_idle(args: &AcknowledgeIdleArgs) -> Result<CmdResult, Cli
     ))
 }
 
-/// `cmd_doctor`(`commands.py:218`)。分派:`--fix` 缺 gate→Usage err;`--comms`/`gate==comms`→
-/// `diagnose_port::comms_selftest`(+ COMMS_BOUNDARY_TEXT 人读前缀);`gate==orphans`→`orphan_gate`;
-/// 非 gate:`--fix-schema`→`fix_schema`;schema drift→注入;`--cleanup-orphans`→`cleanup_orphans`;
-/// else→`diagnose_port::doctor(spec)` + schema 注入。返回 `dict | str`(comms 人读 = boundary+json)。
+/// `doctor` is the single health/diagnostic pipeline. `diagnose` enters here
+/// through the compatibility wrapper above; it never gets a second facts engine.
 pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     if args.fix && args.gate.is_none() {
         return Err(CliError::Runtime("--fix requires --gate".to_string()));
     }
-    // swallow batch 3 ①: an unknown gate refuses explicitly (Python commands.py:234-235
-    // `unknown doctor gate`), never an empty default-doctor green.
     if let Some(DoctorGate::Unknown(raw)) = &args.gate {
-        return Ok(CmdResult::from_json(
-            serde_json::json!({"ok": false, "status": "unknown_gate", "gate": raw}),
-            args.json,
-        ));
+        let value = json!({
+            "ok": false,
+            "issues": ["unknown_gate"],
+            "suggested_repairs": [{"action": "use --gate orphans or --gate comms", "issue": "unknown_gate"}],
+            "status": "unknown_gate",
+            "gate": raw,
+        });
+        return Ok(crate::cli::triage::report(value, args.json, "doctor"));
     }
-    if args.comms || matches!(args.gate, Some(DoctorGate::Comms)) {
-        let value = crate::diagnose::comms::doctor_comms_json(
+
+    let explicit_comms = args.comms || matches!(args.gate, Some(DoctorGate::Comms));
+    let default_report = !explicit_comms
+        && args.gate.is_none()
+        && !args.cleanup_orphans
+        && !args.fix_schema;
+    let mut value = if explicit_comms {
+        crate::diagnose::comms::doctor_comms_json(
             &args.workspace,
             args.team.as_deref(),
             Some("comms"),
-        )?;
-        let result = CmdResult::from_json(value, args.json);
-        if !args.json {
-            let json_tail = match &result.output {
-                CmdOutput::Json(value) => serde_json::to_string_pretty(&sort_json(value))?,
-                _ => String::new(),
-            };
-            return Ok(CmdResult {
-                output: CmdOutput::Human(format!("{COMMS_BOUNDARY_TEXT}\n{json_tail}")),
-                ..result
-            });
-        }
-        return Ok(result);
-    }
-    let default_report = args.gate.is_none() && !args.cleanup_orphans && !args.fix_schema;
-    let mut value = if matches!(args.gate, Some(DoctorGate::Orphans)) {
+        )?
+    } else if matches!(args.gate, Some(DoctorGate::Orphans)) {
         crate::diagnose::orphans::orphan_gate_json(&args.workspace, args.fix, args.confirm)?
     } else if args.cleanup_orphans {
         crate::diagnose::orphans::cleanup_orphans_json(&args.workspace, args.confirm)?
     } else if args.fix_schema {
         diagnose_port::fix_schema(&args.workspace)?
     } else {
-        let mut value = diagnose_port::doctor(&args.workspace, args.spec.as_deref())?;
-        crate::cli::diagnose::append_selected_live_leader_workspace_mismatch(
-            &args.workspace,
-            args.team.as_deref(),
-            &mut value,
-        );
-        crate::cli::diagnose::append_registry_channel_unbound_to_report(
-            &args.workspace,
-            args.team.as_deref(),
-            &mut value,
-        );
-        value
+        let value = diagnose_port::doctor(&args.workspace, args.spec.as_deref())?;
+        unified_default_doctor_report(args, value)
     };
-    if default_report {
-        let base_ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        let has_blocking_issues = value
-            .get("issues")
-            .and_then(Value::as_array)
-            .is_some_and(|issues| {
-                issues.iter().any(|issue| {
-                    let id = issue
-                        .as_str()
-                        .or_else(|| issue.get("id").and_then(Value::as_str));
-                    id != Some("leader_not_attached")
-                })
-            });
-        if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "ok".to_string(),
-                Value::Bool(base_ok && !has_blocking_issues),
+
+    if !default_report {
+        finalize_doctor_report(&mut value, false);
+    }
+    let result = crate::cli::triage::report(value, args.json, "doctor");
+    if explicit_comms && !args.json {
+        let json_tail = match &result.output {
+            CmdOutput::Human(text) => text.clone(),
+            CmdOutput::Json(value) => serde_json::to_string_pretty(&sort_json(value))?,
+            CmdOutput::None => String::new(),
+        };
+        return Ok(CmdResult {
+            output: CmdOutput::Human(format!("{COMMS_BOUNDARY_TEXT}\n{json_tail}")),
+            ..result
+        });
+    }
+    Ok(result)
+}
+
+fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
+    let team_key = args
+        .team
+        .as_deref()
+        .filter(|team| !team.is_empty())
+        .unwrap_or("current");
+    let requested_workspace = args.workspace.to_string_lossy().to_string();
+    let mut runtime = json!({
+        "status": "not_present",
+        "workspace": requested_workspace,
+        "run_workspace": Value::Null,
+        "team_key": team_key,
+        "session_name": Value::Null,
+        "leader_receiver": Value::Null,
+        "agent_count": 0,
+        "message_count": 0,
+        "result_count": 0,
+    });
+    let runtime_present = crate::cli::diagnose::workspace_has_existing_team_runtime(
+        &args.workspace,
+        team_key,
+    );
+    if runtime_present {
+        match crate::state::selector::resolve_active_team_readonly(
+            &args.workspace,
+            args.team.as_deref(),
+            crate::state::selector::SelectorMode::RuntimeOnly,
+        ) {
+            Ok(selected) => {
+                let state = selected.state;
+                let backend: Box<dyn crate::transport::Transport> =
+                    match crate::transport_factory::resolve_read_only_transport(
+                        &selected.run_workspace,
+                        Some(&state),
+                        crate::transport_factory::TransportPurpose::Diagnose,
+                    ) {
+                        Ok(resolved) => resolved.backend,
+                        Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
+                            &selected.run_workspace,
+                        )),
+                    };
+                let (issues, repairs) = crate::cli::diagnose::diagnose_runtime_for_workspace(
+                    &selected.run_workspace,
+                    &state,
+                    backend.as_ref(),
+                    Some(selected.team_key.as_str()),
+                );
+                merge_report_array(&mut value, "issues", &issues);
+                merge_report_array(&mut value, "suggested_repairs", &repairs);
+                let run_workspace = selected.run_workspace.to_string_lossy().to_string();
+                runtime = json!({
+                    "status": "present",
+                    "workspace": args.workspace.to_string_lossy().to_string(),
+                    "run_workspace": run_workspace,
+                    "team_key": selected.team_key,
+                    "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
+                    "leader_receiver": state.get("leader_receiver").cloned().unwrap_or(Value::Null),
+                    "agent_count": state.get("agents").and_then(Value::as_object).map_or(0, serde_json::Map::len),
+                    "message_count": count_dir_entries(&selected.run_workspace.join(".team").join("messages")),
+                    "result_count": count_dir_entries(&selected.run_workspace.join(".team").join("results")),
+                });
+                let health = crate::coordinator::coordinator_health_read_only(
+                    &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()),
+                );
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "coordinator".to_string(),
+                        diagnose_port::coordinator_health_value(health),
+                    );
+                    object.insert(
+                        "event_log".to_string(),
+                        Value::String(
+                            selected
+                                .run_workspace
+                                .join(".team")
+                                .join("logs")
+                                .join("events.jsonl")
+                                .to_string_lossy()
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                runtime["status"] = Value::String("unresolved".to_string());
+                append_issue_repair(
+                    &mut value,
+                    "runtime_selection_failed",
+                    format!("unable to select runtime team: {error}"),
+                );
+            }
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("runtime".to_string(), runtime);
+        object.entry("event_log".to_string()).or_insert_with(|| {
+            Value::String(
+                args.workspace
+                    .join(".team")
+                    .join("logs")
+                    .join("events.jsonl")
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        });
+    }
+    finalize_doctor_report(&mut value, true);
+    value
+}
+
+fn merge_report_array(report: &mut Value, key: &str, incoming: &Value) {
+    let Some(items) = incoming.as_array() else {
+        return;
+    };
+    let Some(object) = report.as_object_mut() else {
+        return;
+    };
+    let target = object
+        .entry(key.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let Some(target) = target.as_array_mut() else {
+        *target = Vec::new();
+        return;
+    };
+    for item in items {
+        let identity = report_item_identity(item);
+        if !target.iter().any(|existing| report_item_identity(existing) == identity) {
+            target.push(item.clone());
+        }
+    }
+}
+
+fn report_item_identity(item: &Value) -> String {
+    if let Some(text) = item.as_str() {
+        return text.to_string();
+    }
+    let primary = ["id", "code", "issue", "action", "reason", "message"]
+        .iter()
+        .find_map(|key| item.get(*key).and_then(Value::as_str));
+    let scope = ["workspace", "team", "agent", "path"]
+        .iter()
+        .filter_map(|key| item.get(*key).and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let line = item.get("line").and_then(Value::as_u64);
+    if primary.is_some() || !scope.is_empty() || line.is_some() {
+        return format!(
+            "{}|{}|{}",
+            primary.unwrap_or("object"),
+            scope.join("|"),
+            line.map_or_else(String::new, |line| line.to_string())
+        );
+    }
+    item.to_string()
+}
+
+fn append_issue_repair(report: &mut Value, issue: &str, repair: String) {
+    merge_report_array(report, "issues", &json!([issue]));
+    merge_report_array(
+        report,
+        "suggested_repairs",
+        &json!([{"issue": issue, "action": repair}]),
+    );
+}
+
+fn finalize_doctor_report(report: &mut Value, default_report: bool) {
+    let Some(object) = report.as_object_mut() else {
+        *report = json!({
+            "ok": false,
+            "issues": ["invalid_doctor_report"],
+            "suggested_repairs": [{"issue": "invalid_doctor_report"}],
+        });
+        return;
+    };
+    let runtime_status = object
+        .get("runtime")
+        .and_then(|runtime| runtime.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("not_run");
+    let mut issues = object
+        .remove("issues")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut repairs = object
+        .remove("suggested_repairs")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut add = |issue: Value, repair: Option<Value>| {
+        if !issues.iter().any(|existing| report_item_identity(existing) == report_item_identity(&issue)) {
+            issues.push(issue);
+        }
+        if let Some(repair) = repair {
+            if !repairs.iter().any(|existing| report_item_identity(existing) == report_item_identity(&repair)) {
+                repairs.push(repair);
+            }
+        }
+    };
+
+    if !default_report && object.get("ok").and_then(Value::as_bool) == Some(false) {
+        let status = object
+            .get("status")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("reason").and_then(Value::as_str))
+            .unwrap_or("doctor_failed");
+        let issue = if status == "failed" {
+            object
+                .get("gate")
+                .and_then(Value::as_str)
+                .map_or_else(|| "doctor_failed".to_string(), |gate| format!("{gate}_failed"))
+        } else if status.ends_with("_failed") || status == "refused" {
+            status.to_string()
+        } else {
+            format!("{status}_failed")
+        };
+        let repair = object
+            .get("action")
+            .or_else(|| object.get("next_action"))
+            .or_else(|| object.get("reason"))
+            .cloned();
+        add(Value::String(issue), repair.map(|value| json!({"action": value})));
+    }
+    if object
+        .get("workspace")
+        .and_then(Value::as_str)
+        .is_some_and(|workspace| !std::path::Path::new(workspace).is_dir())
+    {
+        add(
+            json!("invalid_workspace"),
+            Some(json!({"issue": "invalid_workspace", "action": "use an existing workspace"})),
+        );
+    }
+    if let Some(profile) = object.get("profile_smoke") {
+        if profile.get("ok").and_then(Value::as_bool) == Some(false)
+            && profile.get("status").and_then(Value::as_str) != Some("legacy_team_invalid")
+        {
+            add(
+                json!("profile_smoke_failed"),
+                profile
+                    .get("next_action")
+                    .cloned()
+                    .map(|action| json!({"issue": "profile_smoke_failed", "action": action})),
             );
         }
     }
-    let result = CmdResult::from_json(value, args.json);
-    Ok(if default_report && !args.json {
-        crate::cli::triage::human_result(result, "doctor")
-    } else {
-        result
-    })
+    if let Some(grok) = object.get("grok_slot") {
+        if grok.get("readable").and_then(Value::as_bool) == Some(false)
+            || grok.get("consistent").and_then(Value::as_bool) == Some(false)
+        {
+            add(
+                json!("grok_slot_mismatch"),
+                grok.get("reason").cloned().map(|reason| {
+                    json!({"issue": "grok_slot_mismatch", "action": reason})
+                }),
+            );
+        }
+    }
+    if let Some(findings) = object
+        .get("secret_scan")
+        .and_then(|scan| scan.get("findings"))
+        .and_then(Value::as_array)
+    {
+        for finding in findings {
+            let Some(finding_object) = finding.as_object() else {
+                continue;
+            };
+            let Some(rule) = finding_object.get("rule").and_then(Value::as_str) else {
+                continue;
+            };
+            let path = finding_object
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let line = finding_object
+                .get("line")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let issue = json!({
+                "id": "secret_scan_finding",
+                "rule": rule,
+                "path": path,
+                "line": line,
+            });
+            add(
+                issue,
+                Some(json!({
+                    "issue": "secret_scan_finding",
+                    "action": format!("remove secret finding at {path}:{line}"),
+                })),
+            );
+        }
+    }
+    if runtime_status == "unresolved" {
+        add(
+            json!("runtime_selection_failed"),
+            Some(json!({"issue": "runtime_selection_failed", "action": "select an existing Team runtime"})),
+        );
+    }
+    if runtime_status == "present"
+        && object
+            .get("coordinator")
+            .and_then(|coordinator| coordinator.get("ok"))
+            .and_then(Value::as_bool)
+            == Some(false)
+    {
+        let reason = object
+            .get("coordinator")
+            .and_then(|coordinator| coordinator.get("metadata_mismatch_reason"))
+            .cloned()
+            .unwrap_or_else(|| json!("coordinator unavailable"));
+        add(
+            json!("coordinator_unavailable"),
+            Some(json!({"issue": "coordinator_unavailable", "action": reason})),
+        );
+    }
+    object.insert("issues".to_string(), Value::Array(issues.clone()));
+    object.insert("suggested_repairs".to_string(), Value::Array(repairs));
+    object.insert("ok".to_string(), Value::Bool(issues.is_empty()));
 }
 
 #[cfg(test)]

@@ -35,42 +35,26 @@ pub(crate) fn render(command: &str, report: &Value) -> String {
     // generic emitter redacts again for defense in depth.
     let report = crate::redaction::redact_external_value(report);
     let ok = report.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    let mut lines = vec![bounded(format!(
+    let runtime = report
+        .get("runtime")
+        .and_then(|runtime| runtime.get("status"))
+        .and_then(Value::as_str);
+    let issues = array_items(report.get("issues"));
+    let repairs = array_items(report.get("suggested_repairs"));
+    let mut summary = format!(
         "{command}: {}",
         if ok { "ok" } else { "needs attention" }
-    ))];
-
-    if command == "doctor" {
-        for finding in array_items(
-            report
-                .get("secret_scan")
-                .and_then(|scan| scan.get("findings")),
-        ) {
-            let Some(object) = finding.as_object() else {
-                continue;
-            };
-            let (Some(rule), Some(path), Some(line)) = (
-                object.get("rule").and_then(Value::as_str),
-                object.get("path").and_then(Value::as_str),
-                object.get("line").and_then(Value::as_u64),
-            ) else {
-                continue;
-            };
-            lines.push(bounded(format!("warn: {rule} in {path}:{line}")));
-        }
+    );
+    if let Some(runtime) = runtime {
+        summary.push_str(&format!("; runtime={runtime}"));
     }
-
-    for issue in array_items(report.get("issues")) {
+    summary.push_str(&format!("; issues={}; repairs={}", issues.len(), repairs.len()));
+    let mut lines = vec![bounded(summary)];
+    for issue in issues {
         lines.push(bounded(format!("issue: {}", summarize(issue, false))));
     }
-    for repair in array_items(report.get("suggested_repairs")) {
+    for repair in repairs {
         lines.push(bounded(format!("repair: {}", summarize(repair, true))));
-    }
-    if let Some(error) = report.get("error").filter(|value| !value.is_null()) {
-        lines.push(bounded(format!("detail: {}", summarize(error, false))));
-    }
-    if lines.len() == 1 {
-        lines.push(bounded("detail: no issues detected".to_string()));
     }
     lines.join("\n")
 }
@@ -166,6 +150,13 @@ mod tests {
     fn renderer_projects_secret_findings_without_values() {
         let report = json!({
             "ok": false,
+            "issues": [{
+                "id": "secret_scan_finding",
+                "rule": "api_key_assignment",
+                "path": "leaky-role.md",
+                "line": 7,
+            }],
+            "suggested_repairs": [{"issue": "secret_scan_finding", "action": "remove secret finding at leaky-role.md:7"}],
             "secret_scan": {
                 "findings": [{
                     "rule": "api_key_assignment",
@@ -176,7 +167,7 @@ mod tests {
             }
         });
         let output = render("doctor", &report);
-        assert!(output.contains("warn: api_key_assignment in leaky-role.md:7"));
+        assert!(output.contains("issue: id=secret_scan_finding"));
         assert!(!output.contains("match_excerpt"));
         assert!(!output.contains("OPENAI_API_KEY=secret"));
     }

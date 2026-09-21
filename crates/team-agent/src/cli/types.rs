@@ -697,7 +697,9 @@ pub struct WaitArgs {
     pub json: bool,
 }
 
-/// `diagnose`(`parser.py:298`) runtime health report, distinct from `doctor`.
+/// `diagnose` compatibility spelling for the canonical `doctor` health report.
+/// The CLI normalizes it to `DoctorArgs`; this narrow type remains for direct
+/// Rust callers that used the pre-unification API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnoseArgs {
     pub workspace: PathBuf,

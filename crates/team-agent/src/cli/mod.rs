@@ -4752,17 +4752,15 @@ pub mod diagnose_port {
             && profile_smoke_value.get("status").and_then(Value::as_str)
                 == Some("legacy_team_invalid");
         let effective_smoke_ok = profile_smoke_ok || legacy_only_failure;
+        // Coordinator and runtime topology are facts of the unified pipeline,
+        // not of the static environment probe.  The caller supplies the
+        // selected runtime workspace and performs one read-only health read.
         let ok = workspace_valid && (team_context || workspace_has_entries) && effective_smoke_ok;
-        let health = crate::coordinator::coordinator_health(
-            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
-        );
-        let coordinator_ok = health.ok;
-        let coordinator_error = health.metadata_mismatch_reason.clone();
         let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(Value::Null);
         let grok_slot = crate::cli::grok_slot_report(workspace, &state).to_json();
         let grok_slot_ok = grok_slot.get("consistent").and_then(Value::as_bool) == Some(true)
             && grok_slot.get("readable").and_then(Value::as_bool) == Some(true);
-        let ok = ok && grok_slot_ok && coordinator_ok;
+        let ok = ok && grok_slot_ok;
         Ok(json!({
             "tmux": {
                 "installed": tmux_installed,
@@ -4770,14 +4768,14 @@ pub mod diagnose_port {
             },
             "workspace": workspace.to_string_lossy().to_string(),
             "workspace_is_git_repo": workspace.join(".git").exists(),
-            "providers": {},
+            "providers": crate::cli::diagnose::provider_doctor_checks(),
             "mcp": {
                 "server_command": which_path("team_orchestrator"),
                 "local_module": true,
             },
             "secret_scan": secret_scan(workspace),
             "profile_smoke": profile_smoke_value,
-            "coordinator": coordinator_health_value(health),
+            "coordinator": coordinator_not_required_value(),
             "grok_slot": grok_slot,
             "ok": ok,
             "error": if ok {
@@ -4789,10 +4787,6 @@ pub mod diagnose_port {
                     .unwrap_or_else(|| json!("grok_slot_mismatch"))
             } else if !profile_smoke_ok && !legacy_only_failure {
                 json!("profile_smoke_failed")
-            } else if !coordinator_ok {
-                coordinator_error
-                    .map(Value::String)
-                    .unwrap_or_else(|| json!("coordinator_unavailable"))
             } else if workspace_valid {
                 json!("workspace has no Team Agent spec or runtime context")
             } else {
@@ -5153,7 +5147,23 @@ pub mod diagnose_port {
         })
     }
 
-    fn coordinator_health_value(health: crate::coordinator::HealthReport) -> Value {
+    pub(crate) fn coordinator_not_required_value() -> Value {
+        json!({
+            "ok": true,
+            "status": "not_required",
+            "pid": Value::Null,
+            "metadata": Value::Null,
+            "metadata_ok": true,
+            "metadata_mismatch_reason": Value::Null,
+            "binary_path": Value::Null,
+            "binary_version": Value::Null,
+            "schema_ok": true,
+            "schema_error": Value::Null,
+            "schema": {"message_store_schema_version": Value::Null},
+        })
+    }
+
+    pub(crate) fn coordinator_health_value(health: crate::coordinator::HealthReport) -> Value {
         let expose_binary_drift = health.service_available && !health.metadata_ok;
         let binary_identity_relation = health.binary_identity_relation.as_str();
         let mut value = json!({
