@@ -1848,6 +1848,14 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace, team_id: &str) {
             })
         })
         .unwrap_or(session);
+    let remain_on_exit = Command::new("tmux")
+        .args(["-S", socket, "set-option", "-t", session, "remain-on-exit", "on"])
+        .status()
+        .unwrap_or_else(|error| panic!("keep fake session on worker exit: {error}"));
+    assert!(
+        remain_on_exit.success(),
+        "keep fake session on worker exit failed: status={remain_on_exit}"
+    );
     let workspace = ws
         .path()
         .canonicalize()
