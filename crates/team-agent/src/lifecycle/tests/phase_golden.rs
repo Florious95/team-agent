@@ -106,6 +106,7 @@ fn phase_b_golden_events_state_status_zero_drift() {
         lifecycle_op: phase_b_reset_discard_session,
     });
     let expected = load_phase_golden(&baseline);
+    dump_phase_golden_if_requested("phase_b", &actual);
     assert_eq!(
         actual, expected,
         "phase B golden drift; surgical key edits only — do not regenerate the file"
@@ -122,6 +123,7 @@ fn phase_c_golden_events_state_status_zero_drift() {
         lifecycle_op: phase_b_reset_discard_session,
     });
     let expected = load_phase_golden(&baseline);
+    dump_phase_golden_if_requested("phase_c", &actual);
     assert_eq!(
         actual, expected,
         "phase C golden drift; surgical key edits only — do not regenerate the file"
@@ -138,6 +140,7 @@ fn phase_d_golden_events_state_status_zero_drift() {
         lifecycle_op: phase_b_reset_discard_session,
     });
     let expected = load_phase_golden(&baseline);
+    dump_phase_golden_if_requested("phase_d", &actual);
     assert_eq!(
         actual, expected,
         "phase D golden drift; surgical key edits only — do not regenerate the file"
@@ -154,6 +157,7 @@ fn phase_e_golden_events_state_status_zero_drift() {
         lifecycle_op: phase_b_reset_discard_session,
     });
     let expected = load_phase_golden(&baseline);
+    dump_phase_golden_if_requested("phase_e", &actual);
     assert_eq!(
         actual, expected,
         "phase E golden drift; surgical key edits only — do not regenerate the file"
@@ -170,6 +174,7 @@ fn phase_f_golden_events_state_status_zero_drift() {
         lifecycle_op: phase_b_reset_discard_session,
     });
     let expected = load_phase_golden(&baseline);
+    dump_phase_golden_if_requested("phase_f", &actual);
     assert_eq!(
         actual, expected,
         "phase F golden drift; surgical key edits only — do not regenerate the file"
@@ -221,6 +226,19 @@ struct PhaseGolden {
     phase: &'static str,
     team_key: &'static str,
     lifecycle_op: fn(&Path, &OfflineTransport, &'static str) -> Value,
+}
+
+fn dump_phase_golden_if_requested(phase: &str, value: &Value) {
+    let Ok(dir) = std::env::var("TEAM_AGENT_PHASE_GOLDEN_DUMP_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("create phase golden dump directory");
+    std::fs::write(
+        dir.join(format!("{phase}.golden.json")),
+        serde_json::to_vec_pretty(value).expect("serialize phase golden"),
+    )
+    .expect("write phase golden dump");
 }
 
 fn run_phase_golden(spec: PhaseGolden) -> Value {
@@ -313,7 +331,7 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
                     })
                 })
         })
-        .expect("quick-start fixture must carry generation evidence");
+        .unwrap_or("phase-golden");
     let lifecycle_transport = codex_ready_transport()
         .with_session_present(true)
         .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")])

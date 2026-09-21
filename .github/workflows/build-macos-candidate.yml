@@ -22,6 +22,8 @@ jobs:
     name: Test fixture alignment (temporary)
     if: github.ref == 'refs/heads/fix/align-ci-test-fixtures-with-shutdown-isolation'
     runs-on: ubuntu-latest
+    env:
+      TEAM_AGENT_PHASE_GOLDEN_DUMP_DIR: ${{ runner.temp }}/phase-golden
     steps:
       - name: Check out requested source
         uses: actions/checkout@v5
@@ -36,6 +38,13 @@ jobs:
           cargo test -p team-agent --lib cli::tests::shutdown_kill_plan --locked -- --test-threads=1
           cargo test -p team-agent --lib lifecycle::tests::phase_golden --locked -- --test-threads=1
           cargo test -p team-agent --test verify_rs031_window_consistency_red --locked -- --test-threads=1
+      - name: Upload phase golden dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-golden-dumps
+          path: ${{ runner.temp }}/phase-golden
+          if-no-files-found: ignore
 
   build:
     name: Build team-agent (macOS arm64)
