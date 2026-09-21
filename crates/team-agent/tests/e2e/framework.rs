@@ -1951,6 +1951,23 @@ fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
             status.success(),
             "set fake session owner {option} failed: status={status}"
         );
+        let observed = Command::new("tmux")
+            .args([
+                "-S",
+                socket.as_str(),
+                "show-options",
+                "-qv",
+                "-t",
+                session.as_str(),
+                option,
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("read fake session owner {option}: {error}"));
+        assert_eq!(
+            String::from_utf8_lossy(&observed.stdout).trim(),
+            value,
+            "fake session owner {option} readback mismatch"
+        );
     }
 }
 
