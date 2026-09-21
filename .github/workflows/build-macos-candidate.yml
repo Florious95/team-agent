@@ -18,55 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  focused-tests:
-    name: S4 restart ownership regression (temporary)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.source_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify source identity
-        env:
-          SOURCE: ${{ inputs.source_sha }}
-          TREE: ${{ inputs.expected_tree }}
-        run: |
-          test "$(git rev-parse HEAD)" = "$SOURCE"
-          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.95.0'
-      - uses: Swatinem/rust-cache@v2
-      - name: Install tmux
-        run: |
-          if ! command -v tmux; then
-            sudo apt-get update
-            sudo apt-get install -y tmux
-          fi
-      - name: Prove regression against original restart
-        shell: bash
-        run: |
-          set -euo pipefail
-          source=crates/team-agent/src/lifecycle/restart/rebuild.rs
-          git show d110c82d48fc6d83dff9e873fc90f4e8f53493b1:"$source" > "$source"
-          set +e
-          cargo test -p team-agent --lib scoped_shutdown_after_restart_refreshes_owner_and_preserves_sibling --locked -- --nocapture > /tmp/s4-red.log 2>&1
-          result=$?
-          set -e
-          git restore "$source"
-          cat /tmp/s4-red.log
-          test "$result" -ne 0
-          grep -F '0 passed; 1 failed;' /tmp/s4-red.log
-          grep -F 'left: "2026-07-14T00:00:00+00:00"' /tmp/s4-red.log
-      - name: Verify fixed restart and shutdown safety contracts
-        run: |
-          cargo test -p team-agent --lib lifecycle::tests::restart_build_before_destroy_0540_contract --locked -- --nocapture
-          cargo test -p team-agent --lib cli::tests::shutdown_kill_plan --locked
-          cargo test -p team-agent --test shutdown_isolation_property_red --test shutdown_resource_reconciler_red --locked
-          git diff --exit-code
   build:
-    if: false
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
     env:
