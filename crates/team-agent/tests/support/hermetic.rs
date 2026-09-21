@@ -13,7 +13,7 @@
 //! ---
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -125,6 +125,22 @@ fn short_hash4(input: &str) -> String {
         hash = hash.wrapping_mul(0x01000193);
     }
     format!("{:04x}", hash & 0xffff)
+}
+
+/// A quiescent coordinator stand-in with real argv/cwd ownership evidence.
+/// It does not boot a daemon or overwrite the compatibility metadata under test.
+pub fn spawn_owned_coordinator(workspace: &Path) -> Child {
+    Command::new("/bin/bash")
+        .args(["-c", "exec -a \"$0\" tail -f -- /dev/null \"$@\""])
+        .arg(workspace.join("team-agent"))
+        .arg("coordinator")
+        .arg("--workspace")
+        .arg(workspace)
+        .current_dir(workspace)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn fixture coordinator process")
 }
 
 pub struct HermeticTestEnv {

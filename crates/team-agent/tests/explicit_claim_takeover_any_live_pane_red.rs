@@ -1371,6 +1371,7 @@ fn capture_fixture_pane(socket: &str, pane: &str) -> String {
             socket,
             "capture-pane",
             "-p",
+            "-J", // Join terminal soft wraps before matching canary tokens.
             "-S",
             "-2000",
             "-t",

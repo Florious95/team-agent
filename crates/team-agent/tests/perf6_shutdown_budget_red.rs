@@ -192,8 +192,13 @@ fn perf6_mixed_fast_slow_kill_semantics() {
         );
     }
     if !wait_until(3_000, || !pid_alive(stubborn)) {
+        let status = std::process::Command::new("ps")
+            .args(["-p", &stubborn.to_string(), "-o", "pid=,ppid=,etime=,stat=,comm="])
+            .output()
+            .expect("inspect stubborn fixture process");
         failures.push(format!(
-            "C-②-8: the TERM-ignoring pid {stubborn} must be escalated to SIGKILL and be gone"
+            "C-②-8: the TERM-ignoring pid {stubborn} must be escalated to SIGKILL and be gone; ps={}",
+            String::from_utf8_lossy(&status.stdout)
         ));
         let _ = std::process::Command::new("kill")
             .args(["-9", &stubborn.to_string()])

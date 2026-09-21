@@ -15,7 +15,7 @@
 mod hermetic_guard;
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -322,22 +322,7 @@ impl CompatFixture {
         protocol_version: u32,
         schema_version: i64,
     ) -> u32 {
-        // The fixture must expose the same argv/cwd ownership evidence as a
-        // coordinator without booting one and rewriting the compatibility
-        // metadata under test. Bash's exec -a gives tail a team-agent argv[0],
-        // while tail itself remains a single, easily reaped process.
-        let fake_binary = self.root.join("team-agent");
-        let child = Command::new("/bin/bash")
-            .args(["-c", "exec -a \"$0\" tail -f -- /dev/null \"$@\""])
-            .arg(fake_binary.as_os_str())
-            .arg("coordinator")
-            .arg("--workspace")
-            .arg(self.root.as_os_str())
-            .current_dir(&self.root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn fixture coordinator process");
+        let child = hermetic_guard::spawn_owned_coordinator(&self.root);
         let pid = child.id();
         self.children.push(child);
         write_raw_metadata(

@@ -534,10 +534,10 @@ fn managed_topology_source_guard_keeps_external_leader_protections_path_aware() 
     let cli_source = include_str!("../src/cli/mod.rs");
 
     assert!(
-        cli_source.contains("fn state_uses_external_leader")
-            && cli_source.contains("if !state_uses_external_leader(state)")
-            && cli_source.contains("managed_leader_socket_cleanup"),
-        "managed topology must be an explicit path branch, not a deletion of external leader handling"
+        cli_source.contains("if ownership != SessionOwnership::Owned")
+            && cli_source.contains("state_is_managed_leader(&state)")
+            && cli_source.contains("shutdown.managed_worker_pane"),
+        "managed topology must preserve its worker-pane branch behind the shared positive ownership gate"
     );
     assert!(
         cli_source.contains("extend_protection_with_leader_panes")

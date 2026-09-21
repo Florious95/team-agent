@@ -478,10 +478,7 @@ impl LoudEnsureFixture {
     }
 
     fn spawn_daemon_identity_process(&mut self, binary_version: &str) -> u32 {
-        let child = Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn fixture stale coordinator process");
+        let child = hermetic_guard::spawn_owned_coordinator(&self.root);
         let pid = child.id();
         write_raw_metadata(
             &self.workspace,

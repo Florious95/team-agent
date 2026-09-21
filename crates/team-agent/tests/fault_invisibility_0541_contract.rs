@@ -629,10 +629,7 @@ impl CoordinatorStartCase {
     }
 
     fn spawn_daemon_metadata(&self, version: &str) -> DaemonChild {
-        let child = Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn sleep daemon fixture");
+        let child = hermetic_guard::spawn_owned_coordinator(&self.root);
         let pid = Pid::new(child.id());
         self.write_metadata(pid, Some(cli_binary_path()), Some(version.to_string()));
         fs::write(coordinator_pid_path(&self.workspace), pid.to_string())

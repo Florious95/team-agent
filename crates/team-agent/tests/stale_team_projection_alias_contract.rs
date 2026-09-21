@@ -340,12 +340,14 @@ fn assert_current_tombstone(state: &Value, label: &str) {
         Some(CURRENT),
         "{label}: teams.current must keep its own payload identity; state={state}"
     );
-    assert_eq!(
-        state
-            .pointer("/teams/current/status")
-            .and_then(Value::as_str),
-        Some("shutdown"),
-        "{label}: teams.current.status must remain shutdown; state={state}"
+    // Fake workers may have exited before shutdown; both outcomes are retained
+    // terminal history, never a live sibling's copied projection.
+    assert!(
+        matches!(
+            state.pointer("/teams/current/status").and_then(Value::as_str),
+            Some("shutdown" | "already_stopped")
+        ),
+        "{label}: teams.current.status must remain terminal; state={state}"
     );
     assert_eq!(
         state
