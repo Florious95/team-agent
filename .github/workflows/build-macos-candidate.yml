@@ -19,6 +19,7 @@ permissions:
 
 jobs:
   build:
+    if: false
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
     env:
@@ -253,5 +254,44 @@ jobs:
         with:
           name: team-agent-macos-arm64-candidate
           path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  red-test:
+    name: Initial RED property suite
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+      EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@v5
+        with:
+          repository: Florious95/team-agent
+          ref: ${{ env.SOURCE_SHA_INPUT }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run doctor/diagnose Initial RED
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p team-agent --locked \
+            --test doctor_diagnose_unification_property_red \
+            -- --test-threads=1 --nocapture 2>&1 | tee initial-red.log
+          rc=${PIPESTATUS[0]}
+          printf 'initial_red_exit_code=%s\n' "$rc"
+          exit "$rc"
+
+      - name: Upload Initial RED receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctor-diagnose-initial-red
+          path: initial-red.log
           if-no-files-found: error
           retention-days: 7
