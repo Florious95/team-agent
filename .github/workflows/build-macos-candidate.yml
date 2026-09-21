@@ -18,6 +18,22 @@ permissions:
   contents: read
 
 jobs:
+  test-fixtures:
+    name: Test fixture alignment (temporary)
+    if: github.ref == 'refs/heads/fix/align-ci-test-fixtures-with-shutdown-isolation'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run full Rust test suite
+        run: cargo test --workspace --all-targets --locked
+
   build:
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
