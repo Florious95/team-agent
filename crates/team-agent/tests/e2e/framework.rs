@@ -1835,13 +1835,9 @@ fn ensure_shutdown_fixture_session(ws: &TestWorkspace) {
     if socket.is_empty() || session.is_empty() {
         return;
     }
-    let exists = Command::new("tmux")
-        .args(["-S", socket, "has-session", "-t", session])
-        .status()
-        .unwrap_or_else(|error| panic!("probe shutdown fixture session: {error}"));
-    if exists.success() {
-        return;
-    }
+    let _ = Command::new("tmux")
+        .args(["-S", socket, "kill-session", "-t", session])
+        .status();
     let workspace = ws
         .path()
         .canonicalize()
