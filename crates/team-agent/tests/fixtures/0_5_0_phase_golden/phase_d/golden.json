@@ -131,10 +131,24 @@
       "ts": "<TS>"
     },
     {
+      "event": "leader_receiver.attached",
+      "owner_epoch": 1,
+      "pane_id": "%caller",
+      "ts": "<TS>"
+    },
+    {
+      "event": "leader_registry.registered",
+      "path": "<TMP>/ta-phase-golden-phase_d-3785-4/home/.team-agent/leaders/6da5abfa6582__teamdir.json",
+      "source": "quick-start",
+      "team_key": "teamdir",
+      "ts": "<TS>",
+      "workspace_hash": "6da5abfa6582"
+    },
+    {
       "event": "quick_start.leader_bind_refused",
       "operation": "fresh_quick_start_leader_bind",
-      "reason": "caller_pane_missing",
-      "stage": "caller_pane",
+      "reason": "receiver_live_channel_unavailable",
+      "stage": "registry_readback",
       "team_key": "teamdir",
       "ts": "<TS>"
     },
@@ -181,98 +195,6 @@
       "ts": "<TS>"
     },
     {
-      "agent_id": "w1",
-      "argv": [
-        "codex",
-        "--no-alt-screen",
-        "--disable",
-        "shell_snapshot",
-        "--disable",
-        "apps",
-        "--model",
-        "gpt-5.5",
-        "-c",
-        "developer_instructions=\"You are Team Agent worker `w1` with role `w1 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a Team Agent teammate; leader cannot see terminal output.\\nAll communication must go through Team Agent MCP tools.\\n\\n## Communication:\\n\\n- Teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast: team_orchestrator.send_message(to='*', content='...')\\n- Complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\n## Rules:\\n\\n- Do not pass sender, task_id, or schema_version — MCP fills them.\\n- Do not reply to pure ACKs, greetings, or unchanged status notices (such as \\\"paused\\\" or \\\"waiting\\\"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives.\\n- On 500/529/rate limits, retry only after 1-2 minutes.\\n\\n# Team Agent communication contract: leader_centric\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n\\nRespond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it.\\n\\n\\n\\nw1 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\"",
-        "-c",
-        "mcp_servers.team_orchestrator.type=\"stdio\"",
-        "-c",
-        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
-        "-c",
-        "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
-        "-c",
-        "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
-      ],
-      "env_overlay_keys": "<ENV_KEYS>",
-      "env_unset": [],
-      "event": "provider.worker.spawn_argv",
-      "expected_session_id": null,
-      "provider": "codex",
-      "session_id_in_argv": null,
-      "source": "restart",
-      "spawn_cwd": "<WORKSPACE>",
-      "spawn_epoch": 1,
-      "spawned_at": "<TS>",
-      "tmux_endpoint": null,
-      "tmux_endpoint_source": "transport",
-      "tmux_start_mode": "new-window",
-      "ts": "<TS>"
-    },
-    {
-      "agent_id": "w1",
-      "command": [
-        "codex",
-        "--no-alt-screen",
-        "--disable",
-        "shell_snapshot",
-        "--disable",
-        "apps",
-        "--model",
-        "gpt-5.5",
-        "-c",
-        "developer_instructions=\"You are Team Agent worker `w1` with role `w1 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a Team Agent teammate; leader cannot see terminal output.\\nAll communication must go through Team Agent MCP tools.\\n\\n## Communication:\\n\\n- Teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast: team_orchestrator.send_message(to='*', content='...')\\n- Complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\n## Rules:\\n\\n- Do not pass sender, task_id, or schema_version — MCP fills them.\\n- Do not reply to pure ACKs, greetings, or unchanged status notices (such as \\\"paused\\\" or \\\"waiting\\\"); after reporting a blocker once or completing a task, remain silent until a new actionable instruction arrives.\\n- On 500/529/rate limits, retry only after 1-2 minutes.\\n\\n# Team Agent communication contract: leader_centric\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n\\nRespond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it.\\n\\n\\n\\nw1 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\"",
-        "-c",
-        "mcp_servers.team_orchestrator.type=\"stdio\"",
-        "-c",
-        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
-        "-c",
-        "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
-        "-c",
-        "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
-        "-c",
-        "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
-      ],
-      "event": "start_agent.agent_start",
-      "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
-      "provider": "codex",
-      "session": "team-phasegolden",
-      "session_id": null,
-      "start_mode": "fresh",
-      "tmux_start_mode": "new-window",
-      "ts": "<TS>",
-      "window": "w1"
-    },
-    {
-      "agent_id": "w1",
-      "event": "reset_agent.complete",
-      "started": true,
-      "stopped": true,
-      "ts": "<TS>"
-    },
-    {
       "event": "lifecycle.shutdown.started",
       "keep_logs": true,
       "team": "teamdir",
@@ -290,36 +212,25 @@
       "caller_pid": 0,
       "endpoint": null,
       "event": "transport.pre_kill_audit",
+      "generation": "2026-09-21T03:54:05.849263+00:00",
+      "owner_evidence": "session_marker+state_session+pane_path",
       "phase": "pre_call",
+      "reason": "positive workspace/team ownership",
       "targets": [
         "team-phasegolden"
       ],
-      "ts": "<TS>"
-    },
-    {
-      "action": "kill-server",
-      "argv": [
-        "tmux",
-        "kill-server"
-      ],
-      "caller": "shutdown.empty_owned_endpoint",
-      "caller_pid": 0,
-      "endpoint": null,
-      "event": "transport.pre_kill_audit",
-      "phase": "pre_call",
-      "targets": [],
-      "ts": "<TS>"
+      "team": "teamdir",
+      "ts": "<TS>",
+      "workspace": "<WORKSPACE>"
     },
     {
       "endpoint": "<SOCKET>",
-      "error": null,
-      "event": "shutdown.owned_endpoint_cleanup",
-      "removed_files": [],
-      "residual_files": [],
+      "event": "shutdown.owned_endpoint_cleanup_skipped",
+      "reason": "server_and_socket_cleanup_disabled_fail_closed",
       "ts": "<TS>"
     },
     {
-      "coordinator_status": "stopped",
+      "coordinator_status": "not_owned",
       "coordinator_stop_reason": "scoped_last_live_team",
       "event": "lifecycle.shutdown",
       "keep_logs": true,
@@ -336,7 +247,7 @@
       "session_killed": true,
       "session_name": "team-phasegolden",
       "spared_sessions": [],
-      "status": "ok",
+      "status": "partial",
       "team": "teamdir",
       "ts": "<TS>",
       "verification_degraded": false
@@ -379,20 +290,20 @@
         "output": {
           "nodes": [
             {
+              "activity": "unknown",
+              "health": "unknown",
               "name": "w1",
               "provider": "codex",
               "runtime_status": "unknown",
-              "activity": "unknown",
-              "health": "unknown",
               "session_name": null,
               "tmux_command": null
             },
             {
+              "activity": "unknown",
+              "health": "unknown",
               "name": "w2",
               "provider": "codex",
               "runtime_status": "unknown",
-              "activity": "unknown",
-              "health": "unknown",
               "session_name": null,
               "tmux_command": null
             }
@@ -407,20 +318,20 @@
         "output": {
           "nodes": [
             {
+              "activity": "unknown",
+              "health": "unknown",
               "name": "w1",
               "provider": "codex",
               "runtime_status": "unknown",
-              "activity": "unknown",
-              "health": "unknown",
               "session_name": null,
               "tmux_command": null
             },
             {
+              "activity": "unknown",
+              "health": "unknown",
               "name": "w2",
               "provider": "codex",
               "runtime_status": "unknown",
-              "activity": "unknown",
-              "health": "unknown",
               "session_name": null,
               "tmux_command": null
             }
@@ -456,13 +367,9 @@
     },
     {
       "output": {
-        "discarded_session_id": null,
-        "new_session_id": null,
-        "ok": true,
-        "operation": "reset-agent --discard-session",
-        "session_id": null,
-        "start_mode": "Fresh",
-        "status": "running"
+        "error": "agent start requirement unmet: start-agent refused: same-role cohort observation failed; w1:window=w1:pane=%w1:liveness=unknown",
+        "ok": false,
+        "operation": "reset-agent --discard-session"
       },
       "step": "phase-lifecycle-op"
     },
@@ -471,7 +378,7 @@
       "output": {
         "coordinator": {
           "pid": 0,
-          "status": "stopped",
+          "status": "not_owned",
           "stop_reason": "scoped_last_live_team"
         },
         "coordinator_stop_reason": "scoped_last_live_team",
@@ -480,7 +387,7 @@
         "killed_sessions": [
           "team-phasegolden"
         ],
-        "ok": true,
+        "ok": false,
         "phase": null,
         "probe_degraded": false,
         "probe_timeout": null,
@@ -493,7 +400,7 @@
         "session_killed": true,
         "session_name": "team-phasegolden",
         "spared_sessions": [],
-        "status": "ok",
+        "status": "partial",
         "team": "teamdir",
         "verification_degraded": false
       },
@@ -523,8 +430,6 @@
         "last_window": "w1",
         "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
         "model": "gpt-5.5",
-        "owner_team_id": "teamdir",
-        "pane_id": "<PANE:0>",
         "profile": null,
         "provider": "codex",
         "rollout_path": null,
@@ -532,8 +437,7 @@
         "spawn_cwd": "<WORKSPACE>",
         "spawn_epoch": 1,
         "spawned_at": "<TS>",
-        "status": "stopped",
-        "window": "w1"
+        "status": "stopped"
       },
       "w2": {
         "agent_id": "w2",
@@ -623,15 +527,12 @@
             "last_window": "w1",
             "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
             "model": "gpt-5.5",
-            "owner_team_id": "teamdir",
-            "pane_id": "<PANE:0>",
             "profile": null,
             "provider": "codex",
             "spawn_cwd": "<WORKSPACE>",
             "spawn_epoch": 1,
             "spawned_at": "<TS>",
-            "status": "stopped",
-            "window": "w1"
+            "status": "stopped"
           },
           "w2": {
             "agent_id": "w2",
@@ -676,6 +577,8 @@
           "provider": "codex",
           "role": "leader"
         },
+        "leader_receiver": null,
+        "owner_epoch": 1,
         "session_name": "team-phasegolden",
         "spec_path": "<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
         "status": "shutdown",
@@ -700,6 +603,7 @@
         "team_depth": 1,
         "team_dir": "<WORKSPACE>/teamdir",
         "team_key": "teamdir",
+        "team_owner": null,
         "transport": {
           "kind": "tmux",
           "source": "unknown"
@@ -714,11 +618,6 @@
     "workspace": "<WORKSPACE>"
   },
   "transport": {
-    "spawns": [
-      [
-        "spawn_into",
-        "w1"
-      ]
-    ]
+    "spawns": []
   }
 }
