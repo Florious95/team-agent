@@ -39,8 +39,6 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
-use team_agent::tmux_backend::TmuxBackend;
-use team_agent::transport::SessionName;
 
 use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 
@@ -142,14 +140,29 @@ fn e7_shutdown_unregisters_matching_registry_entry_only_after_canonical_success(
     let case = RuntimeCase::new(&env, "shutdown-unregister", "alpha");
     let _pane = case.start_leader_pane("worker-placeholder");
     case.seed_state_without_receiver("alpha");
-    TmuxBackend::for_tmux_endpoint(case.tmux_socket.to_str().expect("tmux socket utf8"))
-        .set_session_owner_with_generation(
-            &SessionName::new(case.session_name.clone()),
-            &case.workspace,
-            "alpha",
-            &case.session_name,
-        )
-        .expect("mark worker session ownership before canonical shutdown");
+    for (option, value) in [
+        ("@team_agent_owner_workspace", case.workspace_arg()),
+        ("@team_agent_owner_team", "alpha".to_string()),
+        ("@team_agent_owner_generation", case.session_name.clone()),
+    ] {
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                case.tmux_socket.to_str().expect("tmux socket utf8"),
+                "set-option",
+                "-t",
+                &case.session_name,
+                option,
+                &value,
+            ])
+            .output()
+            .expect("mark worker session ownership");
+        assert!(
+            output.status.success(),
+            "tmux ownership marker {option} failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let stale_path = write_registry_entry(
         &case.home,
         &case.workspace,
