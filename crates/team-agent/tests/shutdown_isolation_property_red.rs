@@ -823,7 +823,9 @@ fn pr218_review_f2_stale_pane_id_must_not_kill_other_session() {
 struct Pr218ReviewCanary(Child);
 impl Drop for Pr218ReviewCanary {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
+        // ECHILD may mean the product already reaped this canary. Unknown
+        // never authorizes a cleanup signal to a potentially reused PID.
+        if matches!(self.0.try_wait(), Ok(None)) {
             let _ = self.0.kill();
         }
         let _ = self.0.wait();
