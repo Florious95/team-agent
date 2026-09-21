@@ -735,6 +735,9 @@ fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> 
     if key_is_timestamp(key) || key == "generation" {
         return json!("<TS>");
     }
+    if key == "workspace_hash" {
+        return json!("<ID>");
+    }
     if text == crate::packaging::Version::current().as_str() {
         return json!("<VERSION>");
     }
@@ -769,7 +772,20 @@ fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
     }
     out = normalize_tmux_socket_dir(&out);
     out = normalize_hermetic_root(&out);
+    out = normalize_registry_hash(&out);
     normalize_socket_token(&out)
+}
+
+fn normalize_registry_hash(text: &str) -> String {
+    let Some(start) = text.rfind("/leaders/") else {
+        return text.to_string();
+    };
+    let file_start = start + "/leaders/".len();
+    let Some(separator) = text[file_start..].find("__") else {
+        return text.to_string();
+    };
+    let separator = file_start + separator;
+    text[..file_start].to_owned() + "<ID>" + &text[separator..]
 }
 
 fn normalize_hermetic_root(text: &str) -> String {
