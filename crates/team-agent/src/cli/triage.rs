@@ -79,6 +79,15 @@ fn summarize(value: &Value, repair: bool) -> String {
                     .as_slice()
             };
             let mut parts = Vec::new();
+            if let Some(path) = object.get("path").and_then(Value::as_str) {
+                let location = match object.get("line").and_then(Value::as_u64) {
+                    Some(line) => format!("{path}:{line}"),
+                    None => path.to_string(),
+                };
+                // Keep the target ahead of prose so bounded human lines retain
+                // the distinguishing location rather than only the issue id.
+                parts.push(format!("at={location}"));
+            }
             for key in keys {
                 if let Some(value) = object.get(*key).and_then(Value::as_str) {
                     parts.push(format!("{key}={value}"));
@@ -167,7 +176,7 @@ mod tests {
             }
         });
         let output = render("doctor", &report);
-        assert!(output.contains("issue: id=secret_scan_finding"));
+        assert!(output.contains("issue: at=leaky-role.md:7; id=secret_scan_finding"));
         assert!(!output.contains("match_excerpt"));
         assert!(!output.contains("OPENAI_API_KEY=secret"));
     }

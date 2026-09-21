@@ -457,14 +457,10 @@ fn red_send_target_none_is_not_broadcast() {
     assert_eq!(send_target(None, Some("*")), MessageTarget::Broadcast);
 }
 
-// ---- #23: cmd_doctor comms (human) returns COMMS_BOUNDARY_TEXT + sorted indented JSON ----
-// golden: for --comms WITHOUT --json, cmd_doctor returns the STRING
-//   f"{COMMS_BOUNDARY_TEXT}\n{json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True)}".
-// Rust always does CmdResult::from_json -> CmdOutput::Json (wrong shape).
+// Unified doctor human output is triage only, including the comms gate.
 #[test]
-fn red_cmd_doctor_comms_human_is_boundary_text_plus_sorted_json() {
-    const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
-    let args = DoctorArgs {
+fn cmd_doctor_comms_human_is_compact_triage_without_boundary_prefix() {
+    let mut args = DoctorArgs {
         spec: None,
         workspace: PathBuf::from("."),
         gate: None,
@@ -479,21 +475,16 @@ fn red_cmd_doctor_comms_human_is_boundary_text_plus_sorted_json() {
     let result = cmd_doctor(&args).expect("comms doctor returns CmdResult");
     let text = match result.output {
         CmdOutput::Human(s) => s,
-        other => panic!(
-            "comms WITHOUT --json MUST be a Human boundary-text + JSON string, got {other:?}"
-        ),
+        other => panic!("comms WITHOUT --json must be human triage, got {other:?}"),
     };
-    assert!(
-            text.starts_with(&format!("{COMMS_BOUNDARY_TEXT}\n")),
-            "comms human output MUST start with COMMS_BOUNDARY_TEXT then a newline (golden commands.py:231); got: {text:?}"
-        );
-    // the tail is the selftest result rendered as sort_keys+indent=2 JSON (parseable, sorted).
-    let json_tail = text
-        .strip_prefix(&format!("{COMMS_BOUNDARY_TEXT}\n"))
-        .unwrap();
-    let parsed: Value = serde_json::from_str(json_tail)
-        .expect("comms human tail MUST be indent=2 sort_keys JSON of the selftest result");
-    assert!(parsed.is_object(), "comms selftest JSON tail is an object");
+    args.json = true;
+    let CmdOutput::Json(report) = cmd_doctor(&args).unwrap().output else {
+        panic!("--json must preserve the structured report");
+    };
+    assert_eq!(text, crate::cli::triage::render("doctor", &report));
+    assert!(text.starts_with("doctor:"));
+    assert_eq!(text.lines().count(), 1 + report["issues"].as_array().unwrap().len()
+        + report["suggested_repairs"].as_array().unwrap().len());
 }
 
 // ---- #13 / #27 (P2): run() must NOT treat 'claude_code' as a passthrough trigger ----

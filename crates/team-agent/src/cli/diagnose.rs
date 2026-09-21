@@ -302,6 +302,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
     state: &Value,
     backend: &dyn Transport,
     selected_team_key: Option<&str>,
+    coordinator_health: &crate::coordinator::HealthReport,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
     append_live_leader_workspace_mismatch_issue(
@@ -319,7 +320,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut repairs,
     );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
-    append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
+    append_coordinator_health_issue(workspace, state, coordinator_health, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
 }
@@ -815,21 +816,18 @@ fn append_legacy_snapshot_issue(workspace: &std::path::Path, state: &Value, issu
 fn append_coordinator_health_issue(
     workspace: &std::path::Path,
     state: &Value,
+    health: &crate::coordinator::HealthReport,
     issues: &mut Value,
     repairs: &mut Value,
 ) {
-    // Diagnose must observe coordinator state without initializing or rewriting
-    // `.team/runtime/team.db`, including when the file is missing or empty.
-    let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let health = crate::coordinator::coordinator_health_read_only(&workspace);
-    let Some(id) = coordinator_issue_id(state, &health) else {
+    let Some(id) = coordinator_issue_id(state, health) else {
         return;
     };
     if let Some(items) = issues.as_array_mut() {
-        items.push(coordinator_issue_value(id, &health, workspace.as_path()));
+        items.push(coordinator_issue_value(id, health, workspace));
     }
     if let Some(items) = repairs.as_array_mut() {
-        items.push(coordinator_repair_hint(id, &health));
+        items.push(coordinator_repair_hint(id, health));
     }
 }
 

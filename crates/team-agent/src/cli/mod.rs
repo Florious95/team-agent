@@ -48,7 +48,6 @@ use thiserror::Error;
 use crate::messaging::{self, AlertType, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
-pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
 pub(crate) const QUICK_START_REMINDER: &str = "Reminder: Do not inspect raw worker terminal output during normal operation. Use team-agent status / inbox / collect instead. Wait for report_result.";
 pub(crate) const SEND_REMINDER: &str = "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.";
 pub(crate) const STATUS_REMINDER: &str = "Results are finalized automatically; use --watch-result or team-agent inbox AGENT -n 3 for transport fallback. Do not capture-pane worker terminals.";

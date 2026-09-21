@@ -1472,17 +1472,6 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     }
     normalize_current_workspace_paths(&mut value, &args.workspace);
     let result = crate::cli::triage::report(value, args.json, "doctor");
-    if explicit_comms && !args.json {
-        let json_tail = match &result.output {
-            CmdOutput::Human(text) => text.clone(),
-            CmdOutput::Json(value) => serde_json::to_string_pretty(&sort_json(value))?,
-            CmdOutput::None => String::new(),
-        };
-        return Ok(CmdResult {
-            output: CmdOutput::Human(format!("{COMMS_BOUNDARY_TEXT}\n{json_tail}")),
-            ..result
-        });
-    }
     Ok(result)
 }
 
@@ -1526,17 +1515,33 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
         "message_count": 0,
         "result_count": 0,
     });
-    let runtime_present = crate::cli::diagnose::workspace_has_existing_team_runtime(
+    // Resolve explicit selectors and nested team directories before deciding
+    // that runtime inspection is inapplicable.
+    let selected = crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
-        team_key,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
     );
-    if runtime_present {
-        match crate::state::selector::resolve_active_team_readonly(
-            &args.workspace,
-            args.team.as_deref(),
-            crate::state::selector::SelectorMode::RuntimeOnly,
-        ) {
-            Ok(selected) => {
+    let run_workspace = selected.as_ref().map(|selected| selected.run_workspace.clone())
+        .unwrap_or_else(|_| crate::model::paths::canonical_run_workspace(&args.workspace)
+            .unwrap_or_else(|_| args.workspace.clone()));
+    let runtime_present = selected.as_ref().is_ok_and(|selected| {
+        crate::cli::diagnose::workspace_has_existing_team_runtime(
+            &selected.run_workspace,
+            &selected.team_key,
+        )
+    });
+    let db_present = crate::model::paths::runtime_dir(&run_workspace).join("team.db").exists();
+    // One read-only observation supplies both issue classification and details.
+    // A physical database must be checked even before state.json is created.
+    let health = (runtime_present || db_present).then(|| {
+        crate::coordinator::coordinator_health_read_only(
+            &crate::coordinator::WorkspacePath::new(run_workspace.clone()),
+        )
+    });
+    match selected {
+        Ok(selected) => {
+            if let Some(health) = health.as_ref().filter(|_| runtime_present) {
                 let state = selected.state;
                 let backend: Box<dyn crate::transport::Transport> =
                     match crate::transport_factory::resolve_read_only_transport(
@@ -1554,6 +1559,7 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                     &state,
                     backend.as_ref(),
                     Some(selected.team_key.as_str()),
+                    health,
                 );
                 merge_report_array(&mut value, "issues", &issues);
                 merge_report_array(&mut value, "suggested_repairs", &repairs);
@@ -1569,50 +1575,33 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
                     "message_count": count_dir_entries(&selected.run_workspace.join(".team").join("messages")),
                     "result_count": count_dir_entries(&selected.run_workspace.join(".team").join("results")),
                 });
-                let health = crate::coordinator::coordinator_health_read_only(
-                    &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()),
-                );
-                if let Some(object) = value.as_object_mut() {
-                    object.insert(
-                        "coordinator".to_string(),
-                        diagnose_port::coordinator_health_value(health),
-                    );
-                    object.insert(
-                        "event_log".to_string(),
-                        Value::String(
-                            selected
-                                .run_workspace
-                                .join(".team")
-                                .join("logs")
-                                .join("events.jsonl")
-                                .to_string_lossy()
-                                .to_string(),
-                        ),
-                    );
-                }
-            }
-            Err(error) => {
-                runtime["status"] = Value::String("unresolved".to_string());
-                append_issue_repair(
-                    &mut value,
-                    "runtime_selection_failed",
-                    format!("unable to select runtime team: {error}"),
-                );
             }
         }
+        Err(error) => {
+            runtime["status"] = Value::String("unresolved".to_string());
+            append_issue_repair(
+                &mut value,
+                "runtime_selection_failed",
+                format!("unable to select runtime team: {error}"),
+            );
+        }
+    }
+    if let Some(health) = health {
+        if db_present && !health.schema.ok {
+            append_issue_repair(
+                &mut value,
+                "coordinator_schema_incompatible",
+                "team-agent doctor --fix-schema --json".to_string(),
+            );
+        }
+        value["coordinator"] = diagnose_port::coordinator_health_value(health);
     }
     if let Some(object) = value.as_object_mut() {
         object.insert("runtime".to_string(), runtime);
-        object.entry("event_log".to_string()).or_insert_with(|| {
-            Value::String(
-                args.workspace
-                    .join(".team")
-                    .join("logs")
-                    .join("events.jsonl")
-                    .to_string_lossy()
-                    .to_string(),
-            )
-        });
+        object.insert("event_log".to_string(), Value::String(
+            run_workspace.join(".team").join("logs").join("events.jsonl")
+                .to_string_lossy().to_string(),
+        ));
     }
     finalize_doctor_report(&mut value, true);
     value
@@ -1649,7 +1638,7 @@ fn report_item_identity(item: &Value) -> String {
     let primary = ["id", "code", "issue", "action", "reason", "message"]
         .iter()
         .find_map(|key| item.get(*key).and_then(Value::as_str));
-    let scope = ["workspace", "team", "agent", "path"]
+    let scope = ["workspace", "team", "agent", "path", "rule"]
         .iter()
         .filter_map(|key| item.get(*key).and_then(Value::as_str))
         .collect::<Vec<_>>();
@@ -1799,6 +1788,9 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
                 issue,
                 Some(json!({
                     "issue": "secret_scan_finding",
+                    "rule": rule,
+                    "path": path,
+                    "line": line,
                     "action": format!("remove secret finding at {path}:{line}"),
                 })),
             );
