@@ -13,6 +13,11 @@ on:
         description: "Exact 40-character tree SHA expected at source_sha"
         required: true
         type: string
+      review_only:
+        description: "Run only the PR218 Ubuntu property review job"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -20,6 +25,7 @@ permissions:
 jobs:
   build:
     name: Build team-agent (macOS arm64)
+    if: ${{ inputs.review_only != true }}
     runs-on: macos-14
     env:
       SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
@@ -253,5 +259,104 @@ jobs:
         with:
           name: team-agent-macos-arm64-candidate
           path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  pr218_review:
+    name: PR218 shutdown property review (Ubuntu)
+    if: ${{ inputs.review_only == true }}
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+      EXPECTED_TREE_INPUT: ${{ inputs.expected_tree }}
+      RUST_TOOLCHAIN: "1.95.0"
+
+    steps:
+      - name: Validate dispatch inputs and runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          validate_sha() {
+            local name="$1"
+            local value="$2"
+            if [[ ! "$value" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::${name} must be exactly 40 hexadecimal characters"
+              exit 1
+            fi
+          }
+
+          validate_sha source_sha "$SOURCE_SHA_INPUT"
+          validate_sha expected_tree "$EXPECTED_TREE_INPUT"
+          if [[ "${GITHUB_REPOSITORY:-}" != "Florious95/team-agent" ]]; then
+            echo "::error::workflow must run in Florious95/team-agent"
+            exit 1
+          fi
+          if [[ "${RUNNER_OS:-}" != "Linux" ]]; then
+            echo "::error::runner must report Linux (got ${RUNNER_OS:-unknown})"
+            exit 1
+          fi
+
+      - name: Check out requested source
+        uses: actions/checkout@v5
+        with:
+          repository: Florious95/team-agent
+          ref: ${{ env.SOURCE_SHA_INPUT }}
+          fetch-depth: 1
+          clean: true
+          persist-credentials: false
+
+      - name: Verify source identity and clean checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$(printf '%s' "$SOURCE_SHA_INPUT" | tr '[:upper:]' '[:lower:]')"
+          expected_tree="$(printf '%s' "$EXPECTED_TREE_INPUT" | tr '[:upper:]' '[:lower:]')"
+          actual_sha="$(git rev-parse --verify HEAD)"
+          actual_tree="$(git rev-parse --verify 'HEAD^{tree}')"
+          [[ "$actual_sha" == "$source_sha" ]]
+          [[ "$actual_tree" == "$expected_tree" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          printf 'SOURCE_SHA=%s\n' "$actual_sha" >> "$GITHUB_ENV"
+          printf 'SOURCE_TREE=%s\n' "$actual_tree" >> "$GITHUB_ENV"
+
+      - name: Install and verify Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+          rustc_version="$(rustc --version)"
+          cargo_version="$(cargo --version)"
+          [[ "$rustc_version" == "rustc ${RUST_TOOLCHAIN}"* ]]
+          printf 'RUSTC_VERSION=%s\n' "$rustc_version" >> "$GITHUB_ENV"
+          printf 'CARGO_VERSION=%s\n' "$cargo_version" >> "$GITHUB_ENV"
+
+      - name: Run PR218 review properties
+        shell: bash
+        run: |
+          set +e
+          export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+          cargo test -p team-agent --locked --test shutdown_isolation_property_red pr218_review_ -- --test-threads=1 --nocapture 2>&1 | tee pr218-cargo.log
+          test_rc=${PIPESTATUS[0]}
+          {
+            printf 'source_sha=%s\n' "$SOURCE_SHA"
+            printf 'source_tree=%s\n' "$SOURCE_TREE"
+            printf 'rustc_version=%s\n' "$RUSTC_VERSION"
+            printf 'cargo_version=%s\n' "$CARGO_VERSION"
+            printf 'command=cargo test -p team-agent --locked --test shutdown_isolation_property_red pr218_review_ -- --test-threads=1 --nocapture\n'
+            printf 'command_exit=%s\n' "$test_rc"
+          } > pr218-receipt.txt
+          exit "$test_rc"
+
+      - name: Upload PR218 review evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr218-review-evidence
+          path: |
+            pr218-cargo.log
+            pr218-receipt.txt
           if-no-files-found: error
           retention-days: 7
