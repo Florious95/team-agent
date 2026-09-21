@@ -18,7 +18,54 @@ permissions:
   contents: read
 
 jobs:
+  focused-tests:
+    name: PR223 selected-team and legacy contract regressions (temporary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source identity
+        env:
+          SOURCE: ${{ inputs.source_sha }}
+          TREE: ${{ inputs.expected_tree }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: |
+          if ! command -v tmux; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+      - name: Prove selected-team regression on prior candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=crates/team-agent/src/cli/diagnose.rs
+          git show 68af053b03a2aa7de8a9e65e0839e06339d24814:"$source" > "$source"
+          set +e
+          cargo test -p team-agent --test doctor_review_regressions r1_selected_team_status_is_independent_of_the_top_level_sibling --locked -- --nocapture > /tmp/pr223-selected-team-red.log 2>&1
+          result=$?
+          set -e
+          git restore "$source"
+          cat /tmp/pr223-selected-team-red.log
+          test "$result" -ne 0
+          grep -F '0 passed; 1 failed;' /tmp/pr223-selected-team-red.log
+      - name: Verify selected-team and migrated public contracts
+        run: |
+          cargo test -p team-agent --test doctor_empty_workspace_red --test c1_command_spec_contract --test doctor_review_regressions --test doctor_diagnose_unification_property_red --test diagnose_coordinator_health_contract --locked
+          cargo test -p team-agent --lib cli::triage::tests --locked
+          cargo test -p team-agent --lib cmd_doctor_comms_human_is_compact_triage_without_boundary_prefix --locked
+          git diff --exit-code
   build:
+    if: false
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
     env:
