@@ -138,11 +138,11 @@
     },
     {
       "event": "leader_registry.registered",
-      "path": "<TMP>/ta-phase-golden-phase_b-3785-0/home/.team-agent/leaders/adcedcb71c55__teamdir.json",
+      "path": "<TMP>/ta-phase-golden-phase_b/home/.team-agent/leaders/e79bd6e06f60__teamdir.json",
       "source": "quick-start",
       "team_key": "teamdir",
       "ts": "<TS>",
-      "workspace_hash": "adcedcb71c55"
+      "workspace_hash": "e79bd6e06f60"
     },
     {
       "event": "quick_start.leader_bind_refused",
