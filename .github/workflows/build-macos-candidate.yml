@@ -37,7 +37,7 @@ jobs:
         run: |
           cargo test -p team-agent --lib cli::tests::shutdown_kill_plan --locked -- --test-threads=1
           cargo test -p team-agent --lib lifecycle::tests::phase_golden --locked -- --test-threads=1
-          cargo test -p team-agent --test verify_rs031_window_consistency_red --locked -- --test-threads=1
+          cargo test -p team-agent --lib lifecycle::tests::verify_rs031_window_consistency_red --locked -- --test-threads=1
       - name: Upload phase golden dumps
         if: always()
         uses: actions/upload-artifact@v4
