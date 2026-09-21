@@ -204,7 +204,7 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
         .find(|event| event.get("event").and_then(Value::as_str) == Some("lifecycle.shutdown"))
         .unwrap_or_else(|| panic!("missing lifecycle.shutdown event: {events:?}"));
     assert_json_strings_include(&shutdown["killed_sessions"], tail.as_str());
-    assert_json_strings_include(&shutdown["spared_sessions"], leader.as_str());
+    assert_eq!(shutdown["spared_sessions"], report["spared_sessions"]);
     assert_eq!(
         shutdown.get("session_killed").and_then(Value::as_bool),
         Some(true),
