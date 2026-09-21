@@ -15,7 +15,7 @@
 mod hermetic_guard;
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -322,25 +322,24 @@ impl CompatFixture {
         protocol_version: u32,
         schema_version: i64,
     ) -> u32 {
-        let child = Command::new(cli_binary_path())
-            .args(["coordinator", "--workspace"])
+        // The fixture must expose the same argv/cwd ownership evidence as a
+        // coordinator without booting one and rewriting the compatibility
+        // metadata under test. Bash's exec -a gives tail a team-agent argv[0],
+        // while tail itself remains a single, easily reaped process.
+        let fake_binary = self.root.join("team-agent");
+        let child = Command::new("/bin/bash")
+            .args(["-c", "exec -a \"$0\" tail -f -- /dev/null \"$@\""])
+            .arg(fake_binary.as_os_str())
+            .arg("coordinator")
+            .arg("--workspace")
             .arg(self.root.as_os_str())
             .current_dir(&self.root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("spawn fixture coordinator process");
         let pid = child.id();
         self.children.push(child);
-        for _ in 0..100 {
-            let booted_pid = std::fs::read_to_string(coordinator_meta_path(&self.workspace))
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .and_then(|metadata| metadata.get("pid").and_then(Value::as_u64))
-                .map(|value| value as u32);
-            if booted_pid == Some(pid) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
         write_raw_metadata(
             &self.workspace,
             json!({
@@ -421,7 +420,7 @@ impl Drop for CompatFixture {
 
 fn runtime_state(root: &Path) -> Value {
     json!({
-        "session_name": "",
+        "session_name": "compat-session",
         "active_team_key": TEAM,
         "team_key": TEAM,
         "tmux_socket": null,
