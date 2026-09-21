@@ -23,7 +23,7 @@ jobs:
     if: github.ref == 'refs/heads/fix/align-ci-test-fixtures-with-shutdown-isolation'
     runs-on: ubuntu-latest
     env:
-      TEAM_AGENT_PHASE_GOLDEN_DUMP_DIR: ${{ runner.temp }}/phase-golden
+      TEAM_AGENT_PHASE_GOLDEN_DUMP_DIR: /tmp/team-agent-phase-golden
     steps:
       - name: Check out requested source
         uses: actions/checkout@v5
@@ -43,7 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: phase-golden-dumps
-          path: ${{ runner.temp }}/phase-golden
+          path: /tmp/team-agent-phase-golden
           if-no-files-found: ignore
 
   build:
