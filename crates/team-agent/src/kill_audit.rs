@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::event_log::{EventLog, EventLogError};
 use crate::transport::{BackendKind, Transport};
@@ -29,6 +29,45 @@ pub(crate) fn pre_kill_audit(
             "argv": argv,
             "endpoint": endpoint,
             "targets": targets,
+            "workspace": Value::Null,
+            "team": Value::Null,
+            "generation": Value::Null,
+            "owner_evidence": "legacy_unscoped",
+            "reason": "legacy_callsite",
+        }),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn pre_kill_audit_scoped(
+    event_log: &EventLog,
+    transport: &dyn Transport,
+    caller: &str,
+    action: &str,
+    targets: &[String],
+    workspace: &Path,
+    team: Option<&str>,
+    generation: Option<&str>,
+    owner_evidence: &str,
+    reason: &str,
+) -> Result<(), EventLogError> {
+    let endpoint = transport.tmux_endpoint();
+    let argv = destructive_argv(transport.kind(), endpoint.as_deref(), action, targets);
+    event_log.write(
+        "transport.pre_kill_audit",
+        json!({
+            "phase": "pre_call",
+            "caller": caller,
+            "caller_pid": std::process::id(),
+            "action": action,
+            "argv": argv,
+            "endpoint": endpoint,
+            "targets": targets,
+            "workspace": workspace.to_string_lossy(),
+            "team": team,
+            "generation": generation,
+            "owner_evidence": owner_evidence,
+            "reason": reason,
         }),
     )?;
     Ok(())
@@ -57,7 +96,7 @@ fn destructive_argv(
         vec![format!("{kind:?}").to_ascii_lowercase()]
     };
     argv.push(action.to_string());
-    if action == KILL_SESSION {
+    if action == KILL_SESSION || action == "kill-pane" {
         for target in targets {
             argv.push("-t".to_string());
             argv.push(target.clone());

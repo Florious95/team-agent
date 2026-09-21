@@ -332,6 +332,7 @@ pub fn start_coordinator_with_team(
         }
     }
     command
+        .current_dir(workspace.as_path())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -432,6 +433,16 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
             pid: Some(pid),
         });
     }
+    let metadata_owned = read_coordinator_metadata(workspace)
+        .as_ref()
+        .is_some_and(|metadata| metadata.pid == pid);
+    if !metadata_owned || !coordinator_pid_owned_by_workspace(workspace, pid) {
+        return Ok(StopReport {
+            ok: false,
+            status: StopOutcome::NotOwned,
+            pid: Some(pid),
+        });
+    }
     if pid.get() == std::process::id() {
         remove_file_if_exists(&pid_path)?;
         remove_file_if_exists(&coordinator_meta_path(workspace))?;
@@ -441,7 +452,7 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
             pid: Some(pid),
         });
     }
-    if !terminate_pid(pid) {
+    if !terminate_pid_for_workspace(pid, workspace.as_path()) {
         return Ok(StopReport {
             ok: false,
             status: StopOutcome::KillFailed,
@@ -468,7 +479,7 @@ fn stop_discovered_coordinators(
     let mut stopped = None;
     let mut failed = None;
     for pid in pids {
-        if terminate_pid(pid) {
+        if terminate_pid_for_workspace(pid, workspace.as_path()) {
             stopped.get_or_insert(pid);
         } else {
             failed.get_or_insert(pid);
@@ -501,15 +512,90 @@ fn discover_coordinator_pids(workspace: &WorkspacePath) -> Vec<Pid> {
         _ => return Vec::new(),
     };
     let text = String::from_utf8_lossy(&output.stdout);
-    let candidates = workspace_match_candidates(workspace.as_path());
+    let metadata_pid = read_coordinator_metadata(workspace).map(|metadata| metadata.pid.get());
     text.lines()
         .filter_map(|line| parse_ps_command_line(line))
-        .filter(|(pid, command)| {
-            *pid != std::process::id()
-                && coordinator_command_matches_workspace(command, &candidates)
+        .filter(|(pid, _command)| {
+            metadata_pid == Some(*pid)
+                && *pid != std::process::id()
+                && coordinator_pid_owned_by_workspace(workspace, Pid::new(*pid))
         })
         .map(|(pid, _)| Pid::new(pid))
         .collect()
+}
+
+fn coordinator_pid_owned_by_workspace(workspace: &WorkspacePath, pid: Pid) -> bool {
+    let workspace = workspace
+        .as_path()
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.as_path().to_path_buf());
+    let Some(tokens) = crate::platform::argv::argv_tokens(pid.get()) else {
+        return false;
+    };
+    let is_team_agent = tokens.first().is_some_and(|token| is_team_agent_binary(token));
+    let is_coordinator = tokens.iter().any(|token| token == "coordinator");
+    let has_workspace = tokens.windows(2).any(|pair| {
+        pair[0] == "--workspace"
+            && Path::new(&pair[1])
+                .canonicalize()
+                .map(|path| path == workspace)
+                .unwrap_or(false)
+    });
+    is_team_agent && is_coordinator && has_workspace
+}
+
+fn terminate_pid_for_workspace(pid: Pid, workspace: &Path) -> bool {
+    if !coordinator_pid_owned_by_path(workspace, pid) {
+        return false;
+    }
+    let pids = process_tree_pids(pid)
+        .into_iter()
+        .filter(|candidate| coordinator_pid_owned_by_path(workspace, *candidate))
+        .collect::<Vec<_>>();
+    if pids.is_empty() {
+        return false;
+    }
+    for child in pids.iter().rev() {
+        let _ = crate::platform::process::terminate_pid(
+            child.get(),
+            crate::platform::process::SignalKind::TerminateGraceful,
+        );
+    }
+    if !wait_until_all_not_running(&pids, Duration::from_secs(5)) {
+        for child in pids.iter().rev() {
+            let _ = crate::platform::process::terminate_pid(
+                child.get(),
+                crate::platform::process::SignalKind::TerminateForce,
+            );
+        }
+    }
+    wait_until_all_not_running(&pids, Duration::from_secs(5))
+}
+
+fn coordinator_pid_owned_by_path(workspace: &Path, pid: Pid) -> bool {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let Some(tokens) = crate::platform::argv::argv_tokens(pid.get()) else {
+        return false;
+    };
+    let is_team_agent = tokens.first().is_some_and(|token| is_team_agent_binary(token));
+    let is_coordinator = tokens.iter().any(|token| token == "coordinator");
+    let has_workspace = tokens.windows(2).any(|pair| {
+        pair[0] == "--workspace"
+            && Path::new(&pair[1])
+                .canonicalize()
+                .map(|path| path == workspace)
+                .unwrap_or(false)
+    });
+    is_team_agent && is_coordinator && has_workspace
+}
+
+fn is_team_agent_binary(token: &str) -> bool {
+    let Some(name) = Path::new(token).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "team-agent" || name == "team_agent" || name.starts_with("team-agent-")
 }
 
 fn parse_ps_command_line(line: &str) -> Option<(u32, &str)> {
@@ -518,30 +604,6 @@ fn parse_ps_command_line(line: &str) -> Option<(u32, &str)> {
     let pid = line.get(..split)?.trim().parse::<u32>().ok()?;
     let command = line.get(split..)?.trim();
     Some((pid, command))
-}
-
-fn workspace_match_candidates(workspace: &Path) -> Vec<String> {
-    let mut candidates = vec![workspace.to_string_lossy().to_string()];
-    if let Ok(canonical) = workspace.canonicalize() {
-        let text = canonical.to_string_lossy().to_string();
-        if !candidates.iter().any(|candidate| candidate == &text) {
-            candidates.push(text);
-        }
-    }
-    candidates
-}
-
-fn coordinator_command_matches_workspace(command: &str, workspaces: &[String]) -> bool {
-    command
-        .split_whitespace()
-        .any(|token| token == "team-agent" || token.ends_with("/team-agent"))
-        && command
-            .split_whitespace()
-            .any(|token| token == "coordinator")
-        && command.contains("--workspace")
-        && workspaces
-            .iter()
-            .any(|workspace| command.contains(workspace))
 }
 
 fn terminate_pid(pid: Pid) -> bool {

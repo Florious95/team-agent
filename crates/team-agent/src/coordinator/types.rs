@@ -164,6 +164,8 @@ pub enum StopOutcome {
     Missing,
     /// pid 非整数 → 清文件返回(`lifecycle.py:238`)。
     InvalidPidRemoved,
+    /// The pid file points to a live process owned by another workspace.
+    NotOwned,
     /// SIGTERM 失败(`lifecycle.py:243`)。
     KillFailed,
     /// SIGTERM + 清 pid/meta 成功(`lifecycle.py:247`)。

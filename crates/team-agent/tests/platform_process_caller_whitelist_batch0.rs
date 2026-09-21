@@ -105,7 +105,6 @@ fn platform_process_module_exports_expected_public_api() {
         "pub fn current_parent_pid",
         "pub fn pid_liveness",
         "pub fn terminate_pid",
-        "pub fn terminate_group",
         "pub fn reap_child_if_possible",
     ] {
         assert!(

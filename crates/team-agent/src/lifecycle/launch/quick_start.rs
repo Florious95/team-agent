@@ -124,11 +124,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
     }
 
     fn observe_command(&mut self, pane: &PaneId) -> Option<String> {
-        self.transport
-            .query(&Target::Pane(pane.clone()), PaneField::PaneCurrentCommand)
-            .ok()
-            .flatten()
-            .filter(|command| !command.trim().is_empty())
+        query_caller_pane_command(self.transport, pane)
     }
 
     fn attach(
@@ -142,7 +138,7 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
         self.applied_grant = None;
         self.registry_receipt = None;
         let event_log = crate::event_log::EventLog::new(workspace);
-        let targets = match self.transport.list_targets() {
+        let targets = match list_caller_targets(self.transport) {
             Ok(targets) => targets,
             Err(_) => {
                 self.last_failure_reason = Some("caller_pane_unobservable");
@@ -290,11 +286,19 @@ impl FreshQuickStartLeaderBindingOps for RuntimeFreshQuickStartLeaderBindingOps<
             self.last_failure_reason = Some("receiver_missing");
             return false;
         };
+        let leader_transport = receiver
+            .get("tmux_socket")
+            .and_then(serde_json::Value::as_str)
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(crate::transport_factory::leader_endpoint_transport);
+        let live_channel_transport: &dyn Transport = leader_transport
+            .as_deref()
+            .unwrap_or(self.transport);
         if !matches!(
             crate::messaging::resolve_live_leader_channel(
                 workspace,
                 receiver,
-                self.transport,
+                live_channel_transport,
             ),
             crate::messaging::LeaderChannelResolution::Live(_)
         ) {
@@ -875,6 +879,34 @@ fn existing_runtime_identity_view(
     state.clone()
 }
 
+fn caller_read_transport() -> Option<crate::tmux_backend::TmuxBackend> {
+    crate::tmux_backend::socket_name_from_tmux_env()
+        .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint))
+}
+
+fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option<String> {
+    let caller_transport = caller_read_transport();
+    let query_transport: &dyn Transport = caller_transport
+        .as_ref()
+        .map(|transport| transport as &dyn Transport)
+        .unwrap_or(transport);
+    query_transport
+        .query(&Target::Pane(pane.clone()), PaneField::PaneCurrentCommand)
+        .ok()
+        .flatten()
+        .filter(|command| !command.trim().is_empty())
+}
+
+fn list_caller_targets(
+    transport: &dyn Transport,
+) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
+    if let Some(caller_transport) = caller_read_transport() {
+        caller_transport.list_targets()
+    } else {
+        transport.list_targets()
+    }
+}
+
 fn preflight_fresh_leader_identity(
     transport: &dyn Transport,
 ) -> Option<(String, Vec<String>, Vec<String>)> {
@@ -900,13 +932,7 @@ fn preflight_fresh_leader_identity(
             let Some(pane) = pane else {
                 return None;
             };
-            let command = transport
-                .query(
-                    &Target::Pane(PaneId::new(pane)),
-                    PaneField::PaneCurrentCommand,
-                )
-                .ok()
-                .flatten()
+            let command = query_caller_pane_command(transport, &PaneId::new(pane))
                 .unwrap_or_default();
             let explicit = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
                 .ok()
