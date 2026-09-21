@@ -773,3 +773,93 @@ fn _map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
         .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
         .collect()
 }
+
+// Independent PR #218 review reproductions. Hermetic transport; only F3
+// creates a test-owned sleep process. Execute on isolated Linux CI/Grok.
+#[test]
+fn pr218_review_f1_bare_shutdown_must_preserve_managed_leader() {
+    let case = Case::new("pr218-review-f1");
+    save_state(&case, json!({
+        "team_key": "team-a", "active_team_key": "team-a",
+        "session_name": "team-a", "is_external_leader": false,
+        "tmux_socket": case.path.join("review.sock").display().to_string(),
+        "team_owner": {"pane_id": "%leader"},
+        "leader_receiver": {"pane_id": "%leader"}, "agents": {}
+    }));
+    let transport = RecordingTransport::with_targets(vec![
+        pane("%leader", "team-a", "leader", 1),
+    ]);
+    let out = shutdown(&case, None, &transport);
+    eprintln!("F1 shutdown={out}; killed_sessions={:?}; surviving_sessions={:?}",
+        transport.killed_sessions(), transport.sessions());
+    assert!(transport.killed_sessions().is_empty() && transport.sessions().contains("team-a"),
+        "F1: bare socket cleanup killed the managed leader after main path spared it; out={out}");
+}
+
+#[test]
+fn pr218_review_f2_stale_pane_id_must_not_kill_other_session() {
+    let case = Case::new("pr218-review-f2");
+    save_state(&case, json!({
+        "team_key": "team-a", "active_team_key": "team-a",
+        "session_name": "team-a", "is_external_leader": false,
+        "tmux_socket": case.path.join("review.sock").display().to_string(),
+        "team_owner": {"pane_id": "%leader"},
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"worker-a": {"status": "running", "provider": "fake",
+            "window": "worker-a", "pane_id": "%foreign"}}
+    }));
+    let transport = RecordingTransport::with_targets(vec![
+        pane("%leader", "team-a", "leader", 1),
+        pane("%foreign", "foreign-b", "worker-b", 2),
+    ]);
+    let out = shutdown(&case, Some("team-a"), &transport);
+    eprintln!("F2 shutdown={out}; killed_windows={:?}; surviving_sessions={:?}",
+        transport.killed_windows(), transport.sessions());
+    assert!(!transport.killed_windows().iter().any(|v| v == "pane:%foreign")
+            && transport.sessions().contains("foreign-b"),
+        "F2: stale pane ID bypassed expected session/team gate; out={out}");
+}
+
+struct Pr218ReviewCanary(Child);
+impl Drop for Pr218ReviewCanary {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn pr218_review_f3_stale_pid_and_shared_cwd_do_not_prove_process_ownership() {
+    let case = Case::new("pr218-review-f3");
+    let mut command = Command::new("/bin/sleep");
+    command.arg("120").current_dir(&case.path);
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut canary = Pr218ReviewCanary(command.spawn().expect("spawn isolated owned canary"));
+    assert!(canary.0.try_wait().expect("canary preflight").is_none());
+    let pid = canary.0.id();
+    save_state(&case, json!({
+        "team_key": "team-a", "active_team_key": "team-a",
+        "session_name": "team-a", "is_external_leader": true,
+        "tmux_socket": case.path.join("review.sock").display().to_string(),
+        "agents": {"stale-worker": {"status": "running", "provider": "fake",
+            "provider_pid": pid, "spawn_cwd": case.path.display().to_string()}}
+    }));
+    let transport = RecordingTransport::with_targets(vec![
+        pane("%owned-a", "team-a", "worker-a", 1),
+    ]);
+    let out = shutdown(&case, Some("team-a"), &transport);
+    let observed = canary.0.try_wait();
+    eprintln!("F3 shutdown={out}; canary_pid={pid}; canary_wait={observed:?}");
+    assert!(matches!(observed, Ok(None)),
+        "F3: stale PID plus same cwd authorized killing an unrelated process; out={out}; observed={observed:?}");
+}
