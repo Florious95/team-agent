@@ -902,6 +902,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(env)]
     fn command_boundary_connects_runner_parser_search_and_contract() {
         let path = fixture(
             "printf 'provider model\\nopenai-codex gpt-5.6-sol\\nopenai-codex gpt-5.6-luna\\n'",
