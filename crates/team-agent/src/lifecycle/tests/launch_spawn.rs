@@ -2,6 +2,7 @@
 mod hermetic_guard;
 
 use super::*;
+use crate::tmux_backend::TmuxBackend;
 use crate::transport::test_support::OfflineTransport;
 use serde_json::json;
 use serial_test::serial;
@@ -1428,19 +1429,21 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
 
 #[test]
 #[serial(env)]
-fn quick_start_tmux_backend_prefers_absolute_tmux_env_endpoint() {
+fn quick_start_tmux_backend_uses_workspace_private_endpoint() {
     let leader_socket = "/tmp/team-agent-layout-leader-socket";
     let _tmux = EnvVarGuard::set("TMUX", &format!("{leader_socket},123,0"));
-    let backend = quick_start_tmux_backend(std::path::Path::new("/tmp/layout-workspace"));
+    let workspace = std::path::Path::new("/tmp/layout-workspace");
+    let backend = quick_start_tmux_backend(workspace);
+    let expected = TmuxBackend::for_workspace(workspace);
 
     assert_eq!(
-        crate::transport::Transport::tmux_endpoint(&backend).as_deref(),
-        Some(leader_socket),
-        "quick-start from inside tmux must use the caller's full $TMUX socket endpoint"
+        crate::transport::Transport::tmux_endpoint(&backend),
+        crate::transport::Transport::tmux_endpoint(&expected),
+        "quick-start workers must use the workspace-private socket, not ambient $TMUX"
     );
     assert_eq!(
-        selected_tmux_socket_source(&backend, std::path::Path::new("/tmp/layout-workspace")),
-        Some("leader_env")
+        selected_tmux_socket_source(&backend, workspace),
+        Some("workspace")
     );
 }
 

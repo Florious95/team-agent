@@ -205,7 +205,7 @@ fn collect_is_absent_in_team_scoped_command_surface() {
 fn scoped_shutdown_kills_only_selected_team_session_and_preserves_sibling_state() {
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("shutdown-scope");
-    let transport = ShutdownRecordingTransport::new(["team-teamA", "team-teamB"]);
+    let transport = ShutdownRecordingTransport::new(&fixture.root, ["team-teamA", "team-teamB"]);
 
     let report = team_agent::cli::lifecycle_port::shutdown_with_transport(
         &fixture.root,
@@ -240,10 +240,10 @@ fn scoped_shutdown_kills_only_selected_team_session_and_preserves_sibling_state(
 
 #[test]
 #[serial(env)]
-fn global_shutdown_without_team_keeps_existing_global_session_contract() {
+fn global_shutdown_without_team_kills_registered_owned_sessions() {
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("shutdown-global");
-    let transport = ShutdownRecordingTransport::new(["team-teamA", "team-teamB"]);
+    let transport = ShutdownRecordingTransport::new(&fixture.root, ["team-teamA", "team-teamB"]);
 
     let report = team_agent::cli::lifecycle_port::shutdown_with_transport(
         &fixture.root,
@@ -258,10 +258,12 @@ fn global_shutdown_without_team_keeps_existing_global_session_contract() {
         Some(&Value::Null),
         "global shutdown must remain the no-team path; report={report}"
     );
+    let mut killed = transport.killed_sessions();
+    killed.sort();
     assert_eq!(
-        transport.killed_sessions(),
-        vec!["team-teamB".to_string()],
-        "no-team shutdown keeps the existing top-level/global session behavior; report={report}"
+        killed,
+        vec!["team-teamA".to_string(), "team-teamB".to_string()],
+        "no-team shutdown must clean the positively owned sessions registered in state; report={report}"
     );
 }
 
@@ -401,6 +403,8 @@ impl MultiTeamFixture {
         let team_b = write_team_dir(&root, "teamB", "worker_b");
         let state = json!({
             "active_team_key": "teamB",
+            "team_key": "teamB",
+            "generation": "teamB",
             "session_name": "team-teamB",
             "is_external_leader": true,
             "team_dir": team_b.to_string_lossy().to_string(),
@@ -437,6 +441,8 @@ fn team_state(
 ) -> Value {
     json!({
         "status": "alive",
+        "team_key": team,
+        "generation": team,
         "session_name": format!("team-{team}"),
         "team_dir": team_dir.to_string_lossy().to_string(),
         "spec_path": team_dir.join("team.spec.yaml").to_string_lossy().to_string(),
@@ -694,13 +700,15 @@ impl Drop for EnvGuard {
 
 #[derive(Debug)]
 struct ShutdownRecordingTransport {
+    workspace: PathBuf,
     sessions: Mutex<HashSet<String>>,
     killed: Mutex<Vec<String>>,
 }
 
 impl ShutdownRecordingTransport {
-    fn new<const N: usize>(sessions: [&str; N]) -> Self {
+    fn new<const N: usize>(workspace: &Path, sessions: [&str; N]) -> Self {
         Self {
+            workspace: workspace.to_path_buf(),
             sessions: Mutex::new(sessions.into_iter().map(str::to_string).collect()),
             killed: Mutex::new(Vec::new()),
         }
@@ -788,7 +796,37 @@ impl Transport for ShutdownRecordingTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|session| PaneInfo {
+                pane_id: PaneId::new(format!("%worker-{session}")),
+                session: SessionName::new(session.clone()),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("worker")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("fake".to_string()),
+                current_path: Some(self.workspace.clone()),
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            })
+            .collect())
+    }
+
+    fn session_owner(
+        &self,
+        session: &SessionName,
+    ) -> Result<Option<team_agent::transport::SessionOwner>, TransportError> {
+        let team = session.as_str().strip_prefix("team-").expect("fixture session");
+        Ok(Some(team_agent::transport::SessionOwner {
+            workspace: self.workspace.to_string_lossy().into_owned(),
+            team: team.to_string(),
+            generation: team.to_string(),
+        }))
     }
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {

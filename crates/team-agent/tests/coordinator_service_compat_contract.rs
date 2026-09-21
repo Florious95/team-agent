@@ -322,10 +322,7 @@ impl CompatFixture {
         protocol_version: u32,
         schema_version: i64,
     ) -> u32 {
-        let child = Command::new("sleep")
-            .arg("60")
-            .spawn()
-            .expect("spawn fixture daemon process");
+        let child = hermetic_guard::spawn_owned_coordinator(&self.root);
         let pid = child.id();
         self.children.push(child);
         write_raw_metadata(

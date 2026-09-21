@@ -5,7 +5,7 @@ use crate::cli::{
     SendArgs, StatusArgs,
 };
 use crate::transport::test_support::OfflineTransport;
-use crate::transport::WindowName;
+use crate::transport::{PaneId, PaneInfo, SessionName, WindowName};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -229,7 +229,21 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
     let team = two_worker_team_dir(&hermetic);
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
-    let launch_transport = codex_ready_transport();
+    let _caller_pane = EnvVarGuard::set("TMUX_PANE", "%caller");
+    let launch_transport = codex_ready_transport().with_targets(vec![PaneInfo {
+        pane_id: PaneId::new("%caller"),
+        session: SessionName::new("caller"),
+        window_index: Some(0),
+        window_name: Some(WindowName::new("caller")),
+        pane_index: Some(0),
+        tty: None,
+        current_command: Some("codex".to_string()),
+        current_path: Some(workspace.clone()),
+        active: true,
+        pane_pid: None,
+        leader_env: BTreeMap::new(),
+    }])
+    .with_pane_current_command("%caller", "codex");
     let quick_start = quick_start_with_transport_in_workspace_with_display(
         &workspace,
         &team,
@@ -275,9 +289,49 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         to_name: None,
         to_leader: None,
     });
+    let runtime_state = crate::state::persist::load_runtime_state(&workspace)
+        .expect("quick-start state written before shutdown fixture");
+    let generation = runtime_state
+        .get("generation")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            runtime_state
+                .get("agents")
+                .and_then(Value::as_object)
+                .and_then(|agents| {
+                    agents.values().find_map(|agent| {
+                        agent.get("spawned_at").and_then(Value::as_str)
+                    })
+                })
+        })
+        .or_else(|| {
+            runtime_state
+                .pointer("/teams/teamdir/agents")
+                .and_then(Value::as_object)
+                .and_then(|agents| {
+                    agents.values().find_map(|agent| {
+                        agent.get("spawned_at").and_then(Value::as_str)
+                    })
+                })
+        })
+        .unwrap_or("phase-golden");
     let lifecycle_transport = codex_ready_transport()
         .with_session_present(true)
-        .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")]);
+        .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")])
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%w1"),
+            session: SessionName::new("team-phasegolden"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("w1")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: Some(workspace.clone()),
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_session_owner(&workspace, "teamdir", generation);
     let lifecycle = (spec.lifecycle_op)(&workspace, &lifecycle_transport, spec.team_key);
     let shutdown = lifecycle_port::shutdown_with_transport(
         &workspace,
@@ -660,8 +714,11 @@ fn normalize_value(value: Value, ctx: &mut NormalizeCtx, key: Option<&str>) -> V
 
 fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> Value {
     let key = key.unwrap_or_default();
-    if key_is_timestamp(key) {
+    if key_is_timestamp(key) || key == "generation" {
         return json!("<TS>");
+    }
+    if key == "workspace_hash" {
+        return json!("<ID>");
     }
     if text == crate::packaging::Version::current().as_str() {
         return json!("<VERSION>");
@@ -696,7 +753,37 @@ fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
         out = out.replace(alias, "<TMP>");
     }
     out = normalize_tmux_socket_dir(&out);
+    out = normalize_hermetic_root(&out);
+    out = normalize_registry_hash(&out);
     normalize_socket_token(&out)
+}
+
+fn normalize_registry_hash(text: &str) -> String {
+    let Some(start) = text.rfind("/leaders/") else {
+        return text.to_string();
+    };
+    let file_start = start + "/leaders/".len();
+    let Some(separator) = text[file_start..].find("__") else {
+        return text.to_string();
+    };
+    let separator = file_start + separator;
+    text[..file_start].to_owned() + "<ID>" + &text[separator..]
+}
+
+fn normalize_hermetic_root(text: &str) -> String {
+    let marker = "ta-phase-golden-";
+    let Some(start) = text.find(marker) else {
+        return text.to_string();
+    };
+    let end = text[start..]
+        .find('/')
+        .map(|offset| start + offset)
+        .unwrap_or(text.len());
+    let segment = &text[start..end];
+    let Some(phase) = text[start + marker.len()..end].split('-').next() else {
+        return text.to_string();
+    };
+    text.replacen(segment, &format!("{marker}{phase}"), 1)
 }
 
 fn value_looks_like_endpoint_path(text: &str) -> bool {

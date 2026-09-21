@@ -1814,7 +1814,165 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
             "--json",
         ],
     );
+    if matches!(
+        team_id,
+        "shut001"
+            | "shut002"
+            | "shut003"
+            | "shut004"
+            | "dirty002"
+            | "stat002"
+    ) {
+        ensure_shutdown_fixture_session(ws);
+    }
+    seed_fake_session_owner_marker(ws);
     result
+}
+
+/// Keep the shutdown fixture session alive long enough for the subsequent
+/// shutdown command to observe and positively authorize it. The built-in fake
+/// worker may exit before the black-box assertion reaches the CLI.
+fn ensure_shutdown_fixture_session(ws: &TestWorkspace) {
+    let state = ws.read_state();
+    let Some(socket) = state.get("tmux_socket").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(session) = state.get("session_name").and_then(Value::as_str) else {
+        return;
+    };
+    if socket.is_empty() || session.is_empty() {
+        return;
+    }
+    let _ = Command::new("tmux")
+        .args(["-S", socket, "kill-session", "-t", session])
+        .status();
+    let workspace = ws
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| ws.path().to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let created = Command::new("tmux")
+        .args(["-S", socket, "new-session", "-d", "-s", session, "-c"])
+        .arg(&workspace)
+        .args(["sleep", "60"])
+        .status()
+        .unwrap_or_else(|error| panic!("create shutdown fixture session: {error}"));
+    assert!(
+        created.success(),
+        "create shutdown fixture session failed: status={created}"
+    );
+}
+
+/// Keep the worker-only fake fixture aligned with the production ownership
+/// contract. The CLI launch normally writes these tmux options; this explicit
+/// test fixture write makes the evidence deterministic when no leader pane is
+/// bound in the hermetic E2E environment.
+fn seed_fake_session_owner_marker(ws: &TestWorkspace) {
+    if !ws.state_json_path().exists() {
+        return;
+    }
+    let mut state = ws.read_state();
+    let Some(socket) = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(session) = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if socket.is_empty() || session.is_empty() {
+        return;
+    }
+    let generation = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| {
+            agents.values().find_map(|agent| {
+                agent
+                    .get("spawned_at")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| session.clone());
+    let remain_on_exit = Command::new("tmux")
+        .args([
+            "-S",
+            socket.as_str(),
+            "set-option",
+            "-t",
+            session.as_str(),
+            "remain-on-exit",
+            "on",
+        ])
+        .status()
+        .unwrap_or_else(|error| panic!("keep fake session on worker exit: {error}"));
+    assert!(
+        remain_on_exit.success(),
+        "keep fake session on worker exit failed: status={remain_on_exit}"
+    );
+    let workspace = ws
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| ws.path().to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let owner_team = state
+        .get("team_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(session.as_str())
+        .to_string();
+    state["team_key"] = Value::String(owner_team.clone());
+    state["generation"] = Value::String(generation.clone());
+    ws.write_state_value(state);
+    for (option, value) in [
+        ("@team_agent_owner_workspace", workspace.as_str()),
+        ("@team_agent_owner_team", owner_team.as_str()),
+        ("@team_agent_owner_generation", generation.as_str()),
+    ] {
+        let status = Command::new("tmux")
+            .args([
+                "-S",
+                socket.as_str(),
+                "set-option",
+                "-t",
+                session.as_str(),
+                option,
+                value,
+            ])
+            .status()
+            .unwrap_or_else(|error| panic!("set fake session owner {option}: {error}"));
+        assert!(
+            status.success(),
+            "set fake session owner {option} failed: status={status}"
+        );
+        let observed = Command::new("tmux")
+            .args([
+                "-S",
+                socket.as_str(),
+                "show-options",
+                "-qv",
+                "-t",
+                session.as_str(),
+                option,
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("read fake session owner {option}: {error}"));
+        assert_eq!(
+            String::from_utf8_lossy(&observed.stdout).trim(),
+            value,
+            "fake session owner {option} readback mismatch"
+        );
+    }
 }
 
 #[cfg(unix)]

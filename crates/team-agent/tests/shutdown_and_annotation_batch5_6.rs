@@ -5,8 +5,8 @@
 //! - `shutdown_workspace_transport` is now routed through
 //!   `resolve_read_only_transport(TransportPurpose::Shutdown)`.
 //! - `shutdown_transport_for_endpoint` stays a tmux channel helper.
-//! - `KillDecision` (:306-370) and owned-socket cleanup (:535-566)
-//!   remain unchanged (no `TransportPurpose::Shutdown` inside them).
+//! - `KillDecision` remains lifecycle policy; endpoint ownership alone must not
+//!   authorize server/socket cleanup under the fail-closed isolation contract.
 //! - `session_residuals_after_reap` short-circuits the workspace-tmux
 //!   + default-tmux probes when the primary transport is
 //!   `BackendKind::ConPty`.
@@ -90,23 +90,27 @@ fn batch5_endpoint_helper_stays_tmux_channel_helper() {
 }
 
 #[test]
-fn batch5_kill_decision_and_owned_socket_cleanup_untouched() {
-    // The design forbids putting kill policy in the factory (CR C-2).
-    // Ensure `KillDecision` is still an enum defined in cli/mod.rs and
-    // that `cleanup_owned_empty_endpoint` still calls
-    // `transport.kill_server()` (not a factory helper).
+fn batch5_kill_decision_stays_local_and_endpoint_cleanup_is_fail_closed() {
+    // Kill policy stays in lifecycle code, but an endpoint may be shared after
+    // launch. Only positively owned sessions, never the server, may be killed.
     let body = read("cli/mod.rs");
     assert!(
         body.contains("enum KillDecision") || body.contains("KillDecision {"),
         "KillDecision enum must remain in cli/mod.rs (CR C-2 hard守)"
     );
     let code = non_comment(&body);
+    let cleanup = code
+        .split("fn cleanup_owned_empty_endpoint(")
+        .nth(1)
+        .expect("owned endpoint cleanup helper")
+        .split("pub fn shutdown_with_transport(")
+        .next()
+        .unwrap();
     assert!(
-        code.contains("kill_server()")
-            || code.contains(".kill_server(")
-            || code.contains("kill_server()"),
-        "cli/mod.rs owned-socket cleanup must still call `.kill_server()` — \
-         Batch 5 does not move kill policy into the factory (CR C-2)."
+        cleanup.contains("server_and_socket_cleanup_disabled_fail_closed")
+            && !cleanup.contains("kill_server(")
+            && !cleanup.contains("remove_file("),
+        "endpoint ownership must not authorize server or socket deletion"
     );
 }
 

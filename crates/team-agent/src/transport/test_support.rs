@@ -55,6 +55,7 @@ struct OfflineState {
     /// 0.4.x (CR C-3 / CR C-5): pre-staged `query(PaneField::PaneCurrentCommand)`
     /// answer keyed by pane id. Used by leader provider health tests.
     pane_current_commands: BTreeMap<String, String>,
+    session_owner: Option<super::SessionOwner>,
 }
 
 impl Default for OfflineState {
@@ -81,6 +82,7 @@ impl Default for OfflineState {
             capture_text: BTreeMap::new(),
             capture_ranges: Vec::new(),
             pane_current_commands: BTreeMap::new(),
+            session_owner: None,
         }
     }
 }
@@ -156,6 +158,27 @@ impl OfflineTransport {
 
     pub fn with_tmux_endpoint(self, endpoint: impl Into<String>) -> Self {
         self.with_state(|state| state.tmux_endpoint = Some(endpoint.into()));
+        self
+    }
+
+    pub fn with_session_owner(
+        self,
+        workspace: &Path,
+        team: impl Into<String>,
+        generation: impl Into<String>,
+    ) -> Self {
+        let workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        self.with_state(|state| {
+            state.session_owner = Some(super::SessionOwner {
+                workspace,
+                team: team.into(),
+                generation: generation.into(),
+            });
+        });
         self
     }
 
@@ -530,6 +553,13 @@ impl Transport for OfflineTransport {
             state.calls.push("has_session");
             state.session_present
         }))
+    }
+
+    fn session_owner(
+        &self,
+        _session: &SessionName,
+    ) -> Result<Option<super::SessionOwner>, TransportError> {
+        Ok(self.with_state(|state| state.session_owner.clone()))
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {

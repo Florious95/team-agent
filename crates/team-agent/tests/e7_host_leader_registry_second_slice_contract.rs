@@ -140,6 +140,29 @@ fn e7_shutdown_unregisters_matching_registry_entry_only_after_canonical_success(
     let case = RuntimeCase::new(&env, "shutdown-unregister", "alpha");
     let _pane = case.start_leader_pane("worker-placeholder");
     case.seed_state_without_receiver("alpha");
+    for (option, value) in [
+        ("@team_agent_owner_workspace", case.workspace_arg()),
+        ("@team_agent_owner_team", "alpha".to_string()),
+        ("@team_agent_owner_generation", case.session_name.clone()),
+    ] {
+        let output = Command::new("tmux")
+            .args([
+                "-S",
+                case.tmux_socket.to_str().expect("tmux socket utf8"),
+                "set-option",
+                "-t",
+                &case.session_name,
+                option,
+                &value,
+            ])
+            .output()
+            .expect("mark worker session ownership");
+        assert!(
+            output.status.success(),
+            "tmux ownership marker {option} failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let stale_path = write_registry_entry(
         &case.home,
         &case.workspace,
@@ -1413,6 +1436,7 @@ impl<'a> RuntimeCase<'a> {
         });
         let mut team = json!({
             "team_key": team_key,
+            "generation": self.session_name,
             "status": status,
             "session_name": self.session_name,
             "team_dir": self.workspace_arg(),
@@ -1437,6 +1461,7 @@ impl<'a> RuntimeCase<'a> {
         let mut state = json!({
             "active_team_key": team_key,
             "team_key": team_key,
+            "generation": self.session_name,
             "status": status,
             "session_name": self.session_name,
             "team_dir": self.workspace_arg(),

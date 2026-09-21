@@ -43,7 +43,7 @@ fn shutdown_reports_partial_when_kill_session_ok_but_session_still_present() {
     let workspace = tmp_dir("session-still-present");
     let session = SessionName::new("team-resource-still-present");
     seed_state(&workspace, session.as_str());
-    let transport = ShutdownTransport::new([session.as_str()], false, Vec::new());
+    let transport = ShutdownTransport::new(&workspace, [session.as_str()], false, Vec::new());
 
     let report = shutdown_with_transport(&workspace, true, None, &transport)
         .expect("shutdown should return a typed report, not throw away residue evidence");
@@ -84,7 +84,7 @@ fn shutdown_reaps_pane_pid_process_tree_before_reporting_session_killed() {
     let process_tree = ProcessTree::spawn();
     let child_pid = process_tree.wait_for_child();
     let pane = pane_info("%1", &session, "w1", Some(process_tree.pid()));
-    let transport = ShutdownTransport::new([session.as_str()], true, vec![pane]);
+    let transport = ShutdownTransport::new(&workspace, [session.as_str()], true, vec![pane]);
 
     let report = shutdown_with_transport(&workspace, true, None, &transport)
         .expect("shutdown should complete after reconciling pane process trees");
@@ -139,7 +139,7 @@ fn stale_coordinator_pid_file_does_not_create_false_kill_failed_when_process_is_
     let stale_pid = nonexistent_pid();
     std::fs::write(&pid_path, format!("{stale_pid}\n")).unwrap();
 
-    let transport = ShutdownTransport::new([], true, Vec::new());
+    let transport = ShutdownTransport::new(&workspace, [], true, Vec::new());
     let report = shutdown_with_transport(&workspace, true, None, &transport)
         .expect("shutdown should surface typed coordinator status");
 
@@ -164,8 +164,9 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
     let primary = SessionName::new("team-red3-primary");
     let tail = SessionName::new("team-red3-tail");
     let leader = SessionName::new("team-agent-leader-copilot-red3");
-    seed_state_with_leader_anchor(&workspace, primary.as_str(), "%9");
+    seed_state_with_leader_anchor(&workspace, primary.as_str(), tail.as_str(), "%9");
     let transport = ShutdownTransport::new(
+        &workspace,
         [primary.as_str(), tail.as_str(), leader.as_str()],
         true,
         vec![
@@ -185,7 +186,9 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
     );
     assert_json_strings_include(&report["killed_sessions"], primary.as_str());
     assert_json_strings_include(&report["killed_sessions"], tail.as_str());
-    assert_json_strings_include(&report["spared_sessions"], leader.as_str());
+    // Unregistered leader sessions are outside the cleanup candidate set, so
+    // survival (not inclusion in the scoped report) is the protection contract.
+    assert!(transport.has_session(&leader).unwrap(), "leader must survive: {report}");
     assert_eq!(
         report
             .pointer("/coordinator/status")
@@ -201,7 +204,7 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
         .find(|event| event.get("event").and_then(Value::as_str) == Some("lifecycle.shutdown"))
         .unwrap_or_else(|| panic!("missing lifecycle.shutdown event: {events:?}"));
     assert_json_strings_include(&shutdown["killed_sessions"], tail.as_str());
-    assert_json_strings_include(&shutdown["spared_sessions"], leader.as_str());
+    assert_eq!(shutdown["spared_sessions"], report["spared_sessions"]);
     assert_eq!(
         shutdown.get("session_killed").and_then(Value::as_bool),
         Some(true),
@@ -211,6 +214,7 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
 
 #[derive(Debug)]
 struct ShutdownTransport {
+    workspace: PathBuf,
     sessions: Mutex<HashSet<String>>,
     remove_session_on_kill: bool,
     targets: Mutex<Vec<PaneInfo>>,
@@ -219,11 +223,13 @@ struct ShutdownTransport {
 
 impl ShutdownTransport {
     fn new<const N: usize>(
+        workspace: &Path,
         sessions: [&str; N],
         remove_session_on_kill: bool,
         targets: Vec<PaneInfo>,
     ) -> Self {
         Self {
+            workspace: workspace.to_path_buf(),
             sessions: Mutex::new(sessions.into_iter().map(str::to_string).collect()),
             remove_session_on_kill,
             targets: Mutex::new(targets),
@@ -322,7 +328,30 @@ impl Transport for ShutdownTransport {
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         self.record("list_targets");
-        Ok(self.targets.lock().unwrap().clone())
+        let sessions = self.sessions.lock().unwrap();
+        Ok(self
+            .targets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|pane| sessions.contains(pane.session.as_str()))
+            .cloned()
+            .map(|mut pane| {
+                pane.current_path = Some(self.workspace.clone());
+                pane
+            })
+            .collect())
+    }
+
+    fn session_owner(
+        &self,
+        session: &SessionName,
+    ) -> Result<Option<team_agent::transport::SessionOwner>, TransportError> {
+        Ok(Some(team_agent::transport::SessionOwner {
+            workspace: self.workspace.to_string_lossy().into_owned(),
+            team: session.as_str().to_string(),
+            generation: "fixture".to_string(),
+        }))
     }
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {
@@ -426,6 +455,8 @@ fn seed_state(workspace: &Path, session_name: &str) {
         workspace,
         &json!({
             "session_name": session_name,
+            "team_key": session_name,
+            "generation": "fixture",
             "agents": {
                 "w1": {
                     "agent_id": "w1",
@@ -441,12 +472,26 @@ fn seed_state(workspace: &Path, session_name: &str) {
     .unwrap();
 }
 
-fn seed_state_with_leader_anchor(workspace: &Path, session_name: &str, leader_pane: &str) {
+fn seed_state_with_leader_anchor(
+    workspace: &Path,
+    session_name: &str,
+    tail_session: &str,
+    leader_pane: &str,
+) {
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
     save_runtime_state(
         workspace,
         &json!({
             "session_name": session_name,
+            "team_key": session_name,
+            "generation": "fixture",
+            "teams": {
+                tail_session: {
+                    "session_name": tail_session,
+                    "team_key": tail_session,
+                    "generation": "fixture"
+                }
+            },
             "is_external_leader": true,
             "leader_receiver": {
                 "mode": "direct_tmux",

@@ -879,16 +879,24 @@ fn existing_runtime_identity_view(
     state.clone()
 }
 
-fn caller_read_transport() -> Option<crate::tmux_backend::TmuxBackend> {
-    crate::tmux_backend::socket_name_from_tmux_env()
-        .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint))
+fn caller_read_transport() -> Option<Box<dyn Transport>> {
+    let endpoint = crate::tmux_backend::socket_name_from_tmux_env()?;
+    // Unit tests use an injected transport even when they seed a synthetic TMUX
+    // tuple.  Never make those hermetic tests depend on a host tmux server; the
+    // production path below remains a read-only endpoint probe.
+    #[cfg(test)]
+    if !Path::new(&endpoint).exists() {
+        return None;
+    }
+    Some(Box::new(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(
+        &endpoint,
+    )))
 }
 
 fn query_caller_pane_command(transport: &dyn Transport, pane: &PaneId) -> Option<String> {
     let caller_transport = caller_read_transport();
     let query_transport: &dyn Transport = caller_transport
-        .as_ref()
-        .map(|transport| transport as &dyn Transport)
+        .as_deref()
         .unwrap_or(transport);
     query_transport
         .query(&Target::Pane(pane.clone()), PaneField::PaneCurrentCommand)

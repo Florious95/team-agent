@@ -859,16 +859,15 @@ impl E6Case {
             .output()
             .unwrap_or_else(|error| panic!("E6 apparatus fixture child/probe-exit: tmux new-window could not spawn; error={error}"));
         assert_fixture_command_success("tmux new-window leader", &output, "leader pane creation");
-        self.register_pane_pid(&String::from_utf8_lossy(&output.stdout).trim());
-        self.env.register_owned_tmux_socket(&self.tmux_socket);
+        self.register_pane_pid(tmux_socket, String::from_utf8_lossy(&output.stdout).trim());
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn register_pane_pid(&self, pane: &str) {
+    fn register_pane_pid(&self, tmux_socket: &str, pane: &str) {
         let output = Command::new("tmux")
             .args([
                 "-S",
-                self.tmux_socket.to_str().expect("tmux socket utf8"),
+                tmux_socket,
                 "display-message",
                 "-p",
                 "-t",
@@ -880,7 +879,7 @@ impl E6Case {
         assert_fixture_command_success(
             "tmux display-message pane pid",
             &output,
-            &format!("pane={pane}"),
+            &format!("socket={tmux_socket} pane={pane}"),
         );
         if let Ok(pid) = String::from_utf8_lossy(&output.stdout).trim().parse() {
             self.env.register_owned_pid(pid);
@@ -890,14 +889,16 @@ impl E6Case {
 
 impl Drop for E6Case {
     fn drop(&mut self) {
-        // 0.5.43 debt-sweep (§6.1): try `team-agent shutdown` first,
-        // then fall back to exact `tmux -S <socket> kill-server` on
-        // each workspace's persisted tmux_endpoint. Never scans host
-        // sockets — the fallback only kills the endpoint recorded in
-        // the state file THIS fixture wrote.
+        // Shutdown preserves the attached leader pane. Retire its fixture-owned
+        // server afterwards, using the persisted workspace endpoint, not the
+        // synthetic caller TMUX path (which quick-start no longer owns).
         for workspace in [&self.target_workspace, &self.sender_workspace] {
             register_persisted_pid(&self.env, workspace);
-            let shutdown = Command::new(bin())
+            let tmux_socket = std::fs::read_to_string(workspace.join(".team/runtime/state.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|state| state.get("tmux_endpoint")?.as_str().map(str::to_owned));
+            let _ = Command::new(bin())
                 .args([
                     "shutdown",
                     "--workspace",
@@ -909,13 +910,9 @@ impl Drop for E6Case {
                 .env("HOME", &self.home)
                 .env("TMUX", format!("{},12345,0", self.tmux_socket.display()))
                 .output();
-            if !matches!(&shutdown, Ok(output) if output.status.success()) {
+            if let Some(tmux_socket) = tmux_socket {
                 let _ = Command::new("tmux")
-                    .args([
-                        "-S",
-                        self.tmux_socket.to_str().expect("tmux socket utf8"),
-                        "kill-server",
-                    ])
+                    .args(["-S", &tmux_socket, "kill-server"])
                     .output();
             }
         }

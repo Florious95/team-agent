@@ -199,6 +199,9 @@ fn green_pure_worker_socket_server_still_torn_down() {
     let keepalive = ws.join("worker.keepalive");
     std::fs::write(&keepalive, "worker\n").unwrap();
     spawn_session(&backend, &worker_session, "w1", &keepalive, &ws);
+    backend
+        .set_session_owner_with_generation(&worker_session, &ws, "team-x", "team-x")
+        .expect("mark worker session ownership");
     let worker_pid = wait_pid_for_cmdline(&keepalive);
     let server_pid = parent_pid(worker_pid).expect("worker pane must have a tmux server parent");
     write_team_state(&ws, worker_pid);
@@ -254,6 +257,9 @@ impl SocketFixture {
 
         spawn_session(&backend, &leader_session, "leader", &leader_keepalive, ws);
         spawn_session(&backend, &worker_session, "w1", &worker_keepalive, ws);
+        backend
+            .set_session_owner_with_generation(&worker_session, ws, "team-x", "team-x")
+            .expect("mark worker session ownership");
         let leader_pid = wait_pid_for_cmdline(&leader_keepalive);
         let worker_pid = wait_pid_for_cmdline(&worker_keepalive);
         assert!(
@@ -343,11 +349,15 @@ fn write_team_state(ws: &Path, worker_pid: u32) {
     });
     let state = json!({
         "session_name": "team-x",
+        "team_key": "team-x",
+        "generation": "team-x",
         "active_team_key": "team-x",
         "agents": { "w1": agent_row },
         "teams": {
             "team-x": {
                 "session_name": "team-x",
+                "team_key": "team-x",
+                "generation": "team-x",
                 "active_team_key": "team-x",
                 "agents": { "w1": agent_row },
             },

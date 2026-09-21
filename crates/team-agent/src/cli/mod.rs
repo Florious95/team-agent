@@ -821,6 +821,7 @@ pub mod lifecycle_port {
                 &json!({
                     "is_external_leader": true,
                     "tmux_socket_source": "leader_env",
+                    "session_name": "team-audit-fail",
                 }),
                 &event_log,
             );
