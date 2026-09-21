@@ -1592,10 +1592,12 @@ fn merge_report_array(report: &mut Value, key: &str, incoming: &Value) {
     let target = object
         .entry(key.to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
-    let Some(target) = target.as_array_mut() else {
-        *target = Vec::new();
-        return;
-    };
+    if !target.is_array() {
+        *target = Value::Array(Vec::new());
+    }
+    let target = target
+        .as_array_mut()
+        .expect("report array normalized before merge");
     for item in items {
         let identity = report_item_identity(item);
         if !target.iter().any(|existing| report_item_identity(existing) == identity) {
@@ -1649,7 +1651,8 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
         .get("runtime")
         .and_then(|runtime| runtime.get("status"))
         .and_then(Value::as_str)
-        .unwrap_or("not_run");
+        .unwrap_or("not_run")
+        .to_string();
     let mut issues = object
         .remove("issues")
         .and_then(|value| value.as_array().cloned())
