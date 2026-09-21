@@ -212,7 +212,7 @@
       "caller_pid": 0,
       "endpoint": null,
       "event": "transport.pre_kill_audit",
-      "generation": "2026-09-21T03:54:05.596234+00:00",
+      "generation": "<TS>",
       "owner_evidence": "session_marker+state_session+pane_path",
       "phase": "pre_call",
       "reason": "positive workspace/team ownership",

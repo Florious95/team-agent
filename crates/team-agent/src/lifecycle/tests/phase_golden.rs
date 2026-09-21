@@ -732,7 +732,7 @@ fn normalize_value(value: Value, ctx: &mut NormalizeCtx, key: Option<&str>) -> V
 
 fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> Value {
     let key = key.unwrap_or_default();
-    if key_is_timestamp(key) {
+    if key_is_timestamp(key) || key == "generation" {
         return json!("<TS>");
     }
     if text == crate::packaging::Version::current().as_str() {
