@@ -1602,50 +1602,6 @@ fn attach_window_names_for_state_agents_include_managed_leader_and_layout_window
     assert_eq!(windows, vec!["leader", "team-w1", "team-w2"]);
 }
 
-#[test]
-#[serial(env)]
-fn quick_start_no_display_keeps_one_window_per_agent() {
-    let _hermetic = enter_hermetic("launch-spawn-no-display");
-    let roles = ["w1", "w2"]
-        .into_iter()
-        .map(|id| (format!("{id}.md"), role_doc(id)))
-        .collect::<Vec<_>>();
-    let role_refs = roles
-        .iter()
-        .map(|(file, doc)| (file.as_str(), doc.as_str()))
-        .collect::<Vec<_>>();
-    let team = quick_start_team_dir_with_roles(&role_refs);
-    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
-    seed_healthy_coordinator(workspace);
-    let transport = OfflineTransport::new();
-
-    let report = quick_start_with_transport_in_workspace_with_display(
-        workspace, &team, None, true, None, &transport, false,
-    )
-    .expect("quick_start_with_transport must reach Ready");
-
-    let display_backend = match report {
-        QuickStartReport::Ready {
-            display_backend, ..
-        } => display_backend,
-        other => panic!("quick_start must reach Ready; got {other:?}"),
-    };
-    assert_eq!(display_backend, "none");
-    assert_eq!(
-        transport
-            .spawn_records()
-            .iter()
-            .map(|(kind, _)| kind.as_str())
-            .collect::<Vec<_>>(),
-        vec!["spawn_first", "spawn_into"],
-        "--no-display must use the legacy one-worker-window spawn path"
-    );
-    let (_raw, state) = raw_runtime_state(workspace);
-    assert_eq!(state["display_backend"], json!("none"));
-    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("w1")));
-    assert_eq!(state.pointer("/agents/w1/layout_window"), None);
-}
-
 // REAL-MACHINE residency boundary (acceptance framework): the PUBLIC quick_start (real TmuxBackend +
 // real start_coordinator) on a fresh ws must leave a LIVE tmux session AND a ps-verifiable resident
 // coordinator daemon (start_coordinator -> live pid). The framework verifies residency via ps; here we

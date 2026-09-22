@@ -20,8 +20,6 @@
 //!   (`stop_agent`/`reset_agent`/`add_agent`/`fork_agent`)、`lifecycle/agents.py`
 //!   (`remove_agent` + `_RemoveRollback`)、`lifecycle/paste_buffer_hygiene.py`。
 //! - `restart/orchestration.py`(`restart` Route B)、`restart/selection.py`、`restart/snapshot.py`。
-//! - `display/backend.py`/`adaptive.py`/`tiling.py`/`workspace.py`/`worker_window.py`/
-//!   `ghostty.py`/`close.py`/`rebuild.py`。
 //! - `orchestrator/__init__.py`/`plan.py`/`state.py`(plan 多 stage 状态机)。
 //! - `diagnose/quick_start.py`(`quick_start`/`prepare_quick_start_team`/`wait_ready`)。
 //!

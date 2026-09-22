@@ -1165,7 +1165,6 @@ pub(super) fn stop_agent_at_paths(
         );
         let _ = write_stop_drain_event(workspace, agent_id, &target_str, &drain_evidence);
     }
-    close_agent_display(&mut state, agent_id);
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
     let team_key = restart_projection_team_key(&state, team);
     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a

@@ -43,7 +43,7 @@ team-agent codex
 team-agent claude
 ```
 
-Pass provider flags after the provider name, for example `team-agent codex --dangerously-bypass-approvals-and-sandbox`. Existing tmux layouts are valid too, including Finder/Ghostty launchers, as long as `team-agent quick-start` is invoked from the leader's current tmux pane. Do not start a real team from a naked terminal that Team Agent cannot address through tmux.
+Pass provider flags after the provider name, for example `team-agent codex --dangerously-bypass-approvals-and-sandbox`. Run `team-agent quick-start` from the leader's current tmux pane. Do not start a real team from a naked terminal that Team Agent cannot address through tmux.
 
 **0.5.66:** leader `--dangerously-*` flags no longer inherit bypass to workers. Per-worker bypass is the role field `dangerously_skip_permissions` (see Permissions).
 
@@ -98,14 +98,7 @@ team-agent quick-start .team/current
 
 YAML lists must be block style. Use `tools:\n  - fs_read`; do not use `tools: [fs_read, mcp_team]`.
 
-Display choices (set `display_backend:` in `TEAM.md` to opt in):
-
-- `none` (default): headless / no GUI window manager. The team runs entirely in the per-workspace tmux server; this is what the demo above uses.
-- `adaptive`: framework picks an available GUI layout for the local platform.
-- `ghostty_workspace`: one Ghostty window. Workers are shown in tmux tabs/windows, up to 3 side-by-side panes per tab. Four workers become `3 + 1`; eight become `3 + 3 + 2`.
-- `ghostty_window`: one Ghostty window per worker.
-
-**Omitting `display_backend` defaults to `none`** (changed in 0.3.4). Set `display_backend: adaptive` (or one of the explicit ghostty variants) in `TEAM.md` only when the user wants GUI windows.
+Workers always run headlessly in independent windows on the per-workspace tmux server. No GUI display backend is configured in `TEAM.md`.
 
 ## Private Tmux Socket
 
@@ -267,7 +260,7 @@ Observed (all exit 0):
 
 ```text
 usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]
-usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]
+usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--json]
 usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]
 ```
 

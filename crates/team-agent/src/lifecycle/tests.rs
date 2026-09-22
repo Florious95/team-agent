@@ -62,7 +62,6 @@ mod core_034_real_red;
 mod cursor_mcp_overlay;
 mod cursor_require_explicit_model_red;
 mod cursor_restart_resume_red;
-mod display_adaptive_red;
 mod f032_startup_prompt_best_effort_red;
 mod grok_effort_argv_red;
 mod grok_mcp_overlay_red;

@@ -222,7 +222,6 @@ fn cli_quick_start_invokes_real_lifecycle_compiles_spec() {
         name: None,
         team_id: None,
         yes: true,
-        no_display: false,
         backend: None,
         json: true,
         detail: false,
@@ -258,7 +257,6 @@ fn cli_quick_start_invalid_spec_surfaces_real_compile_error() {
         name: None,
         team_id: None,
         yes: false,
-        no_display: false,
         backend: None,
         json: true,
         detail: false,
@@ -324,7 +322,6 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
         team: None,
         role_file: dup_role.to_string_lossy().to_string(),
         force: false,
-        no_display: false,
         json: true,
     };
     let text = outcome_text(cmd_add_agent(&args));

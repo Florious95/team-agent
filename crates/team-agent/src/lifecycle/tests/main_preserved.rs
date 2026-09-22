@@ -350,10 +350,10 @@ fn reset_agent_discard_session_syncs_projection_epoch_inputs_for_restart_agent_c
     };
     let outcome =
         reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport)
-            .expect("reset-agent alpha --discard-session --no-display");
+            .expect("reset-agent alpha --discard-session");
     assert!(
         matches!(outcome, ResetAgentOutcome::Reset { .. }),
-        "restart-agent alpha --discard-session --no-display must complete reset; got {outcome:?}"
+        "restart-agent alpha --discard-session must complete reset; got {outcome:?}"
     );
 
     let state = crate::state::persist::load_runtime_state(&ws).expect("reload state");

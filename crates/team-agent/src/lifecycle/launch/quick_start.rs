@@ -1456,7 +1456,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         team_depth.team_depth,
     )?;
     // Fresh initialization owns this one fail-closed bind attempt. It is
-    // independent of display layout, so --no-display never suppresses receiver
+    // independent of worker layout, so receiver binding is always attempted
     // binding. Readiness receives true only after canonical registry readback.
     let _ = take_fresh_bind_refusal();
     launch.leader_receiver_attached = bind_fresh_quick_start_leader(

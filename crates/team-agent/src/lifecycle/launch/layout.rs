@@ -183,9 +183,8 @@ pub(crate) fn adaptive_placement_for_agent(
             });
         }
     }
-    // E45 (0.3.24 bug#4): when the live session has NO real adaptive layout
-    // window (the topology is effectively per-agent, even though state says
-    // display_backend=adaptive), DO NOT synthesise a fresh `team-w<N>`
+    // When the live session has no real layout window, do not synthesise
+    // a fresh `team-w<N>`
     // window — that would force the new agent into an adaptive-layout pane
     // shape the rest of the session does not actually use. Return None so
     // the caller (`start_agent_at_paths` → `spawn_agent_window`) falls back

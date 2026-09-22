@@ -2048,38 +2048,6 @@ pub(super) fn window_exists(
 }
 
 /// ---
-/// purpose: 在 state 里把该席位的显示标记为已关
-/// params:
-///   state: 就地改写；只有 ghostty 工作区后端会被改写状态与标题，其余后端不动
-/// ---
-pub(super) fn close_agent_display(state: &mut serde_json::Value, agent_id: &AgentId) {
-    let Some(display) = state
-        .get_mut("agents")
-        .and_then(|v| v.as_object_mut())
-        .and_then(|agents| agents.get_mut(agent_id.as_str()))
-        .and_then(|agent| agent.get_mut("display"))
-        .and_then(|display| display.as_object_mut())
-    else {
-        return;
-    };
-    let backend = display
-        .get("backend")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    // golden operations.py:88-92: close_ghostty_display (display/close.py:17-48) mutates NOTHING in the
-    // persisted state for a ghostty_window; only the ghostty_workspace slot is relabeled
-    // (close.py:84-85: status="stopped", pane_title=f"stopped: {agent_id}") and re-assigned back.
-    if backend == "ghostty_workspace" {
-        display.insert("status".to_string(), serde_json::json!("stopped"));
-        display.insert(
-            "pane_title".to_string(),
-            serde_json::json!(format!("stopped: {}", agent_id.as_str())),
-        );
-    }
-}
-
-/// ---
 /// purpose: 丢弃该席位的会话捕获字段并标记为已停
 /// params:
 ///   state: 就地改写；只删会话捕获相关字段，工作目录等状态字段保留
