@@ -47,14 +47,13 @@ fn concurrent_reset_discard_session_serializes() {
     seed_healthy_coordinator(&workspace);
 
     let launch_transport = codex_ready_transport();
-    let quick_start = quick_start_with_transport_in_workspace_with_display(
+    let quick_start = quick_start_with_transport_in_workspace(
         &workspace,
         &team,
         None,
         true,
         None,
         &launch_transport,
-        false,
     )
     .expect("quick-start fixture");
     assert!(
@@ -484,14 +483,13 @@ fn breal_workspace() -> (PathBuf, PathBuf) {
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
     let launch_transport = codex_ready_transport();
-    quick_start_with_transport_in_workspace_with_display(
+    quick_start_with_transport_in_workspace(
         &workspace,
         &team,
         None,
         true,
         None,
         &launch_transport,
-        false,
     )
     .expect("quick-start breal fixture");
     (workspace, team)
@@ -503,14 +501,13 @@ fn breal_one_worker_workspace() -> (PathBuf, PathBuf) {
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
     let launch_transport = codex_ready_transport();
-    quick_start_with_transport_in_workspace_with_display(
+    quick_start_with_transport_in_workspace(
         &workspace,
         &team,
         None,
         true,
         None,
         &launch_transport,
-        false,
     )
     .expect("quick-start breal one-worker fixture");
     (workspace, team)
@@ -550,14 +547,13 @@ fn add_fixture() -> (PathBuf, PathBuf, PathBuf, OfflineTransport) {
     let workspace = team.parent().expect("team workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
     let launch_transport = codex_ready_transport();
-    quick_start_with_transport_in_workspace_with_display(
+    quick_start_with_transport_in_workspace(
         &workspace,
         &team,
         Some("teamdir"),
         true,
         None,
         &launch_transport,
-        false,
     )
     .expect("quick-start add fixture");
     let role = workspace.join("w2-role.md");

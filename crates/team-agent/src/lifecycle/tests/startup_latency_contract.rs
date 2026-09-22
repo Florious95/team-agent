@@ -44,8 +44,8 @@ use serial_test::serial;
 use team_agent::coordinator::{MetadataSource, Pid, WorkspacePath};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{
-    quick_start_with_transport_in_workspace_with_display,
-    restart_with_transport_with_readiness_deadline, QuickStartReport, RestartReport,
+    quick_start_with_transport_in_workspace, restart_with_transport_with_readiness_deadline,
+    QuickStartReport, RestartReport,
 };
 use team_agent::message_store::MessageStore;
 use team_agent::model::paths::{runtime_dir, runtime_spec_path};
@@ -364,14 +364,13 @@ fn restart_and_launch_emit_structured_latency_events_without_fake_ready() {
 
     let launch_case = LaunchLatencyCase::new("events-launch", 2);
     let launch_transport = StartupLatencyTransport::new();
-    let quick_start = quick_start_with_transport_in_workspace_with_display(
+    let quick_start = quick_start_with_transport_in_workspace(
         &launch_case.workspace,
         &launch_case.team_dir,
         None,
         true,
         Some(TEAM),
         &launch_transport,
-        false,
     )
     .expect("event setup: quick-start should complete");
     assert!(

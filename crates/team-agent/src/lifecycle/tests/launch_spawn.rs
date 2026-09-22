@@ -1382,13 +1382,12 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
 
-    let (launch, attach_commands, display_backend) = match report {
+    let (launch, attach_commands) = match report {
         QuickStartReport::Ready {
             launch,
             attach_commands,
-            display_backend,
             ..
-        } => (*launch, attach_commands, display_backend),
+        } => (*launch, attach_commands),
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
     // 0.3.28 Step 4b: adaptive 3-pane tiling replaced with 1-window-per-agent
@@ -1424,7 +1423,6 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
         attach_commands.iter().any(|cmd| cmd.contains(":w1")),
         "attach commands must include the per-agent windows: {attach_commands:?}"
     );
-    let _ = display_backend; // display_backend value preserved by upstream
 }
 
 #[test]
@@ -3006,9 +3004,9 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 }
 
 // Stage A — golden launch/core.py:62-71 seeded top-level runtime state in insertion order:
-// spec_path, workspace, team_dir, team_key, session_name, leader, agents, tasks, display_backend.
+// spec_path, workspace, team_dir, team_key, session_name, leader, agents, tasks.
 //
-// OLD (Python parity): the top-level shape ended at `display_backend`.
+// The runtime state is tmux-only; no display backend is persisted.
 // NEW (Bug 1/2 — team-in-team state scope, see tests/team_in_team_state_scope_red.rs):
 //   `active_team_key` and `teams` are appended at the tail so the runtime can carry the
 //   nested team-in-team scope alongside the original flat fields. Owner-binding fields
@@ -3021,11 +3019,10 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 //   R1: topology is explicit; fresh managed teams carry `is_external_leader=false`
 //   before the team-in-team suffix. Canonical `team_key` is seeded before owner
 //   binding; the remaining order stays the golden prefix + topology marker + new
-//   suffix (active_team_key, teams). display_backend stays the resolved backend from display/backend.py:12-29
-//   (default adaptive), not the raw optional spec field.
+//   suffix (active_team_key, teams).
 #[test]
 #[serial(env)]
-fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
+fn quick_start_state_seeds_spec_path_workspace_leader() {
     let _hermetic = enter_hermetic("launch-spawn-state-seeds");
     // Bug 2 owner team-scope: top-level owner triple is dropped when the seeded
     // pane is empty; an ambient TMUX_PANE (tests run inside the dev's tmux session)
@@ -3062,7 +3059,6 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             "leader",
             "agents",
             "tasks",
-            "display_backend",
             "is_external_leader",
             // 0.5.x Phase 1d hot-path 接线 (裁决1 msg_76e1d98202b8):
             // `transport = { kind, source }` inserted here by
@@ -3110,11 +3106,6 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
         }),
         "existing tasks value must remain seeded from compiled spec; got {:?}",
         state["tasks"]
-    );
-    assert_eq!(
-        state["display_backend"],
-        json!("adaptive"),
-        "adaptive layout directive: resolve_display_backend(None, source='launch') defaults to adaptive"
     );
     assert_eq!(state["is_external_leader"], json!(false));
 }
