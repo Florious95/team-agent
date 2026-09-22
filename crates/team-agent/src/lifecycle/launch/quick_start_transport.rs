@@ -270,18 +270,12 @@ pub(super) fn attach_commands_for_runtime_windows<'a>(
 
 /// ---
 /// purpose: 由本次起的席位推出窗口名
-/// returns: 排序去重后的窗口名，席位没有布局窗口时用 agent id
+/// returns: 排序去重后的窗口名，按席位名分配独立窗口
 /// ---
 pub(super) fn started_attach_window_names(started: &[StartedAgent]) -> Vec<String> {
     let mut windows = started
         .iter()
-        .map(|started| {
-            started
-                .layout_window
-                .as_ref()
-                .map(|window| window.as_str().to_string())
-                .unwrap_or_else(|| started.agent_id.as_str().to_string())
-        })
+        .map(|started| started.agent_id.as_str().to_string())
         .collect::<Vec<_>>();
     windows.sort();
     windows.dedup();
