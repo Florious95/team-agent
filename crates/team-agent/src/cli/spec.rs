@@ -44,7 +44,6 @@ pub(crate) enum TokenUsage {
 pub(crate) enum DispatchKind {
     Init,
     QuickStart,
-    Compile,
     Send,
     AllowPeerTalk,
     Status,
@@ -90,7 +89,6 @@ pub(crate) enum DispatchKind {
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
     DispatchKind::Init,
     DispatchKind::QuickStart,
-    DispatchKind::Compile,
     DispatchKind::Send,
     DispatchKind::AllowPeerTalk,
     DispatchKind::Status,
@@ -210,7 +208,6 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec { name: "identity", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Identity), summary: "inspect identity metadata", usage: "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "watch", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Watch), summary: "watch event logs", usage: "usage: team-agent watch [--workspace WORKSPACE] [--team TEAM]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "sessions", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Sessions), summary: "inspect session inventory", usage: "usage: team-agent sessions [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
-    CommandSpec { name: "compile", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Compile), summary: "compile a team spec", usage: "usage: team-agent compile --team TEAM [--out FILE] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "validate", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Validate), summary: "validate a team spec", usage: "usage: team-agent validate [SPEC] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "preflight", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Preflight), summary: "run preflight checks", usage: "usage: team-agent preflight [TEAMDIR] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },
     CommandSpec { name: "wait-ready", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::WaitReady), summary: "wait for runtime readiness", usage: "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, alias_of: None, sunset: None, action: None, governance: None },

@@ -62,7 +62,6 @@ const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "identity",
     "watch",
     "sessions",
-    "compile",
     "validate",
     "preflight",
     "wait-ready",

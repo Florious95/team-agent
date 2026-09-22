@@ -55,7 +55,7 @@ When the user has been communicating in Chinese throughout the conversation, all
 
 ## Minimal Copy-Paste Team
 
-`dangerously_skip_permissions` is **required** on every role doc (boolean). `TEAM.md` `dangerous_auto_approve` is **not** the 0.5.66 bypass switch (see Permissions). Values under `provider_models:` below are **fill-ins for omitted role `model`**, not a validity catalog (lookup: `team-agent compile --team <dir> --out /tmp/spec.yaml --json` and read the compiled agent `model`).
+`dangerously_skip_permissions` is **required** on every role doc (boolean). `TEAM.md` `dangerous_auto_approve` is **not** the 0.5.66 bypass switch (see Permissions). Values under `provider_models:` below are **fill-ins for omitted role `model`**, not a validity catalog; the values are configuration fallbacks.
 
 ```bash
 mkdir -p .team/current/agents
@@ -179,7 +179,7 @@ codex debug models
 
 That command is the Codex catalog. This skill does **not** keep a model id list. If `codex` is not on PATH, the lookup is unavailable; do not invent slugs.
 
-Role docs may omit `model` for non-grok subscription workers; compile then fills from `TEAM.md` `provider_models` or leaves `null` when a profile is present (see compatible_api). **Do not treat those fill-ins as a validity catalog.** **Grok roles cannot omit `model`** — compile fails closed (same `compile --team` command as below).
+Role docs may omit `model` for non-grok subscription workers; compile then fills from `TEAM.md` `provider_models` or leaves `null` when a profile is present (see compatible_api). **Do not treat those fill-ins as a validity catalog.** **Grok roles cannot omit `model`** — the internal compiler fails closed.
 
 Claude: run `claude auth status`; if missing, run `claude auth login`. Team Agent stores Claude worker sessions by passing `--session-id` and resumes with `--resume`.
 Use `provider: claude` or `provider: claude_code` for Claude workers.
@@ -233,15 +233,17 @@ POST {BASE_URL}/v1/chat/completions
 
 Fail = report the HTTP/body. Success = leave the id alone. **Do not substitute a different id.**
 
-How compile currently wires role `model` vs profile `MODEL` (not a validity list):
+How role `model` and profile `MODEL` are resolved (not a validity list):
+
+The internal compiler preserves a role `model:` when present. If it is omitted, provider/team defaults may fill it; a profile-deferred role may remain `null`. A profile's `MODEL` does not override an explicit role model, and the compiler does not compare the two. Actual profile/provider readiness is checked during launch and preflight, not by a public export command.
+
+For an existing spec file at `$d`, run the retained schema check:
 
 ```bash
-team-agent compile --help
+team-agent validate "$d" --json
 ```
 
-Observed (exit 0): `usage: team-agent compile --team TEAM [--out FILE] [--json]`.
-
-Recreate: `auth_mode: compatible_api` without `profile` → compile exit 1 `profile is required when auth_mode is 'compatible_api'`. Role `model:` set + `profile:` set → compiled agent `model` is the role string; profile `MODEL` is not read at compile. Role omits `model` + `profile:` → compiled `model: null`. Compile does **not** compare the two. Whether launch refuses a mismatch was **not** spawned-verified.
+`validate` does not compile role docs or export a spec.
 
 How to check `--auth-mode` literals (the CLI does not print an allow-list on this gauge):
 
@@ -289,26 +291,19 @@ team-agent permission-modes
 
 Observed (exit 1): `invalid choice: 'permission-modes'`.
 
-`team-agent --help` does **not** list `permission_mode`, `TEAM_AGENT_LEADER_BYPASS`, or `dangerous_auto_approve`. Lookup is `team-agent compile` / `team-agent validate` on a throwaway team dir, not a flag enum.
+`team-agent --help` does **not** list `permission_mode`, `TEAM_AGENT_LEADER_BYPASS`, or `dangerous_auto_approve`. Use `team-agent validate "$d" --json` only when `$d` points to an existing spec; it does not enumerate permission modes.
 
 ### Live control: role `dangerously_skip_permissions`
 
-Required boolean on every role doc. Missing or non-bool fails compile.
+Required boolean on every role doc. Missing or non-bool fails the internal compiler; this is checked again before lifecycle launch.
 
-Recreate:
+For an existing spec file, the retained schema check is:
 
 ```bash
-d=$(mktemp -d) && mkdir -p "$d/agents"
-printf '%s\n' '---' 'name: t' 'objective: t' 'provider: fake' '---' 'x' > "$d/TEAM.md"
-printf '%s\n' '---' 'name: coder' 'role: Worker' 'provider: fake' 'model: fake' 'auth_mode: subscription' 'tools:' '  - mcp_team' '---' 'b' > "$d/agents/coder.md"
-team-agent compile --team "$d" --out /tmp/ta-compile-out.yaml --json
+team-agent validate "$d" --json
 ```
 
-Observed (exit 1): `missing front matter field dangerously_skip_permissions. This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.` JSON also includes `"action": "run \`team-agent doctor\` or inspect the log path shown here"`.
-
-Non-bool (`dangerously_skip_permissions: bypass`) observed (exit 1): `front matter field dangerously_skip_permissions must be a boolean.`
-
-Legal values reachable from that error: **boolean `true` or `false`**. No other literals are accepted.
+`validate` checks the stored spec; it does not read or compile `TEAM.md` and role front matter. The internal compiler rejects non-bool (`dangerously_skip_permissions: bypass`) and accepts only boolean **`true`** or **`false`**.
 
 `true` is the per-worker bypass opt-in. `false` is the default you should copy unless the user explicitly wants prompts skipped.
 
@@ -345,7 +340,7 @@ What the sources actually do (reader can re-open these files):
 | `required_dangerously_skip_permissions` | `crates/team-agent/src/compiler.rs` | Compile **requires** role `dangerously_skip_permissions` bool. This is the 0.5.66 worker bypass source. |
 | `resolved_tool_strings_for_command` | `crates/team-agent/src/lifecycle/worker_command_context.rs` | `true` appends tool sentinel `dangerous_auto_approve`; comment: no longer consumes team/runtime/leader `DangerousApproval`. |
 | `provider_bypass_flag` | `crates/team-agent/src/provider/bypass_flags.rs` | **唯一权威**: role `dangerously_skip_permissions: true` decides whether to add a provider bypass argv flag. Maps provider → flag string only. |
-| spec allowed key `permission_mode` | `crates/team-agent/src/model/spec.rs` | Historical; **not consumed** by compiler (comment: 0.5.66 起不再被 compiler 消费). CLI compile of `permission_mode: bypass` and `permission_mode: not-a-mode` both `ok: true` with the key absent from spec. |
+| spec allowed key `permission_mode` | `crates/team-agent/src/model/spec.rs` | Historical; **not consumed** by compiler (comment: 0.5.66 起不再被 compiler 消费); the key is absent from the compiled agent spec. |
 | `apply_mcp_auto_approval_env` | `crates/team-agent/src/lifecycle/launch/worker_env.rs` | Writes `TEAM_AGENT_LEADER_BYPASS` `1`/`0` from `DangerousApproval` when source is `LeaderProcess`. Separate from compile. |
 | `worker_spawn_env` test | `crates/team-agent/src/layout/worker_env.rs` | **Strips** inherited `TEAM_AGENT_LEADER_BYPASS` from parent env. |
 | `claude_dangerous_auto_approve` (and siblings) | `crates/team-agent/src/provider/adapters/*.rs` | Adapters look for tool name `dangerous_auto_approve`, not `TEAM.md`. |
@@ -462,7 +457,7 @@ On success, `send --json` includes `message_id`. The deprecation warning itself 
 - `team-agent start-agent coder --workspace .` repairs one missing worker window without interrupting other workers.
 - `team-agent doctor` checks local dependencies and provider auth hints.
 - `team-agent results --case CASE_ID` reads reported results for a case.
-- `team-agent compile` / `team-agent validate` are hidden from top-level `--help` but `--help` on those verbs works; use them to check role docs without launching.
+- `team-agent validate` is hidden from top-level `--help` but `--help` on the verb works; use it to check an existing spec without launching.
 
 <!-- command-coverage:normative-start -->
 ### Normative command inventory
@@ -620,16 +615,13 @@ For any non-zero `team-agent` exit, report the command, exit code, last about 20
 
 **If the error JSON/text includes a structured `action` field, run that `action` first.** This rule does not expire with skill versions.
 
-Reproduce a structured `action` (missing `dangerously_skip_permissions` → compile JSON):
+For an existing spec, use the retained schema check (it does not compile role docs):
 
 ```bash
-d=$(mktemp -d) && mkdir -p "$d/agents"
-printf '%s\n' '---' 'name: t' 'objective: t' 'provider: fake' '---' 'x' > "$d/TEAM.md"
-printf '%s\n' '---' 'name: coder' 'role: Worker' 'provider: fake' 'model: fake' 'auth_mode: subscription' 'tools:' '  - mcp_team' '---' 'b' > "$d/agents/coder.md"
-team-agent compile --team "$d" --out /tmp/ta-failure-rules-compile.yaml --json
+team-agent validate "$d" --json
 ```
 
-Observed (exit 1): JSON includes `"ok": false` and `"action": "run \`team-agent doctor\` or inspect the log path shown here"`, plus `missing front matter field dangerously_skip_permissions`. Prefer the `action` over guessing flags.
+A validation failure may include a structured `action`; prefer that action over guessing flags.
 
 `coordinator.session_missing` is a self-healing transient: run `team-agent status --json`, if `ready` is true (or workers show `running`) continue; do not shutdown and wait.
 
@@ -637,7 +629,7 @@ Observed (exit 1): JSON includes `"ok": false` and `"action": "run \`team-agent 
 
 Examples of `action` observed on this gauge:
 
-- compile/add-agent usage failure: `"action": "run \`team-agent doctor\` or inspect the log path shown here"`
+- add-agent usage failure: `"action": "run \`team-agent doctor\` or inspect the log path shown here"`
 - send with no runtime: `"action": "Run team-agent quick-start/restart in the target workspace, or choose a workspace that has .team/runtime/state.json"`
 - `claim-leader` from a worker pane: `"action": "pane %21 is registered as worker developer-d108; run claim-leader from the leader's own pane, not a worker pane"` (exit 1, `ok: false`, `reason: caller_not_leader_shaped`)
 

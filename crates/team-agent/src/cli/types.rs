@@ -321,14 +321,6 @@ pub struct InitArgs {
     pub json: bool,
 }
 
-/// `compile`(`parser.py:125`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompileArgs {
-    pub team: PathBuf,
-    pub out: PathBuf,
-    pub json: bool,
-}
-
 /// `send`(`parser.py:262`)。`target` xor `--to`(fanout);`message` 多 token join 空格。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SendArgs {
