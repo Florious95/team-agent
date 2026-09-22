@@ -14,7 +14,6 @@
 //!       what: 按 team 参数或唯一性选出重启目标
 //!   depends:
 //!     - crate::lifecycle::lock
-//!     - crate::lifecycle::display
 //!     - crate::lifecycle::restart::selection
 //!     - crate::lifecycle::restart::preflight
 //!     - crate::lifecycle::restart::remove

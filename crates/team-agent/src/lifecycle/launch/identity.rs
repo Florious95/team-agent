@@ -1,5 +1,5 @@
 //! ---
-//! purpose: team 与席位的身份取值，团队键、display 后端、auth_mode、effort 与 quick-start 层级判定
+//! purpose: team 与席位的身份取值，团队键、auth_mode、effort 与 quick-start 层级判定
 //! contract:
 //!   provides:
 //!     - name: spec_team_id
@@ -18,7 +18,6 @@
 //!     - crate::state::projection
 //!     - crate::state::persist
 //!     - crate::state::repository
-//!     - crate::lifecycle::display
 //!     - crate::provider::wire
 //! boundary:
 //!   - 只做身份判定与取值，不 spawn、不开显示

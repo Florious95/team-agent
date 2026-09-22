@@ -657,7 +657,3 @@ The strict MCP-CYCLE shape is a known baseline as of 0.4.10. The functional PASS
 - Observability (swallow batches 1-4): probe/query/exit/config failures now emit events with non-null errors instead of silent empty results; corrupt provider-config JSON fails explicitly and never rewrites the user's file; MCP scope validation fails closed when the runtime state is unreadable.
 - New provider: GitHub Copilot CLI (subscription-tier A-layer: BYOK env, auth hints, per-worker instructions overlay, sqlite session capture).
 - Internal: constitution anchors N36-N39 and MUST-17 codified.
-
-## 0.3.4
-
-- Changed the default team display backend to `none`; set `display_backend: adaptive` in `TEAM.md` to opt in to adaptive display windows.

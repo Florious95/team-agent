@@ -63,7 +63,8 @@
       "additionalProperties": false,
       "properties": {
         "backend": { "enum": ["tmux", "pty"] },
-        "session_name": { "type": "string", "minLength": 1 },
+        "display_backend": {},
+        "session_name": { "type": "string", "minLength": 1 }
         "auto_launch": { "type": "boolean" },
         "require_user_approval_before_launch": { "type": "boolean" },
         "dangerous_auto_approve": { "type": "boolean" },
