@@ -174,7 +174,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     match command {
         "init" => cmd_init(&init_args(args, cwd)).map(emit_result),
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
-        "compile" => cmd_compile(&compile_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
         "allow-peer-talk" => {
             cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result)
@@ -239,7 +238,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 const DISPATCH_COMMANDS: &[&str] = &[
     "init",
     "quick-start",
-    "compile",
     "send",
     "allow-peer-talk",
     "status",
@@ -401,7 +399,6 @@ fn command_help(command: Option<&str>) -> String {
         Some("init") => compat_hidden_help("init", "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]"),
         Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json] [--detail]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).\n\n--detail includes internal receiver/topology diagnostics in JSON output.\n\nAfter a successful start, use the returned `send_commands` (or choose an agent explicitly) with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
-        Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => concat!(
             "usage: team-agent send TO MESSAGE... ",
             "[--workspace WORKSPACE] [--team TEAM] ",
@@ -853,7 +850,6 @@ struct ParsedArgs {
     result: Option<String>,
     real: bool,
     assignee: Option<String>,
-    out: Option<PathBuf>,
     auth_mode: Option<String>,
     proxy_mode: Option<String>,
     pane: Option<String>,
@@ -950,7 +946,6 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--result" => parsed.result = next_arg(args, &mut i),
             "--real" => parsed.real = true,
             "--assignee" => parsed.assignee = next_arg(args, &mut i),
-            "--out" => parsed.out = next_arg(args, &mut i).map(PathBuf::from),
             "--auth-mode" => parsed.auth_mode = next_arg(args, &mut i),
             "--proxy-mode" => parsed.proxy_mode = next_arg(args, &mut i),
             "--pane" => parsed.pane = next_arg(args, &mut i),
@@ -1143,23 +1138,6 @@ fn init_args(args: &[String], cwd: &Path) -> InitArgs {
         force: parsed.force,
         json: parsed.json,
     }
-}
-
-fn compile_args(args: &[String], cwd: &Path) -> Result<CompileArgs, CliError> {
-    let parsed = parse_args(args);
-    let team = parsed
-        .team
-        .as_deref()
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError::Usage("missing --team".to_string()))?;
-    let out = parsed
-        .out
-        .unwrap_or_else(|| PathBuf::from("team.spec.yaml"));
-    Ok(CompileArgs {
-        team: resolve_cli_path(cwd, &team),
-        out: resolve_cli_path(cwd, &out),
-        json: parsed.json,
-    })
 }
 
 fn resolve_cli_path(cwd: &Path, path: &Path) -> PathBuf {

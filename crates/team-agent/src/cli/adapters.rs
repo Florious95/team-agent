@@ -269,50 +269,6 @@ fn append_reminder(text: String, reminder: &str) -> String {
     }
 }
 
-/// `cmd_compile`(`commands.py:42`)。
-pub fn cmd_compile(args: &CompileArgs) -> Result<CmdResult, CliError> {
-    let spec =
-        crate::compiler::compile_team(&args.team).map_err(|e| CliError::Runtime(e.to_string()))?;
-    warn_ignored_owner_team_id(&args.team);
-    std::fs::write(&args.out, crate::model::yaml::dumps(&spec))?;
-    Ok(CmdResult::from_json(
-        json!({
-            "ok": true,
-            "team_dir": args.team.to_string_lossy().to_string(),
-            "out": args.out.to_string_lossy().to_string(),
-            "agents": compiled_agent_ids_for_cli(&spec),
-        }),
-        args.json,
-    ))
-}
-
-fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
-    let Ok(Some(ignored)) = crate::compiler::ignored_owner_team_id_from_team_md(team_dir) else {
-        return;
-    };
-    let workspace = crate::model::paths::team_workspace(team_dir)
-        .unwrap_or_else(|_| team_dir.parent().unwrap_or(team_dir).to_path_buf());
-    eprintln!(
-        "Warning: ignored TEAM.md {}={}",
-        ignored.field, ignored.value
-    );
-    eprintln!("Reason: owner identity is the canonical runtime team key, not TEAM.md front matter");
-    eprintln!("Action: remove {} from TEAM.md", ignored.field);
-    let fields = json!({
-        "field": ignored.field,
-        "source": team_dir.join("TEAM.md").to_string_lossy().to_string(),
-        "value": ignored.value,
-        "warning": "ignored user-set owner_team_id",
-        "reason": "owner identity is derived from the canonical runtime team key",
-        "action": "remove owner_team_id from TEAM.md",
-    });
-    if let Err(err) =
-        crate::event_log::EventLog::new(&workspace).write("spec.field_ignored", fields)
-    {
-        eprintln!("Warning: spec.field_ignored event write failed: {err}");
-    }
-}
-
 /// `cmd_status`(`commands.py:90`)。CLI status 统一为只读七字段 brief；
 /// `--json` 与人读路径共享 native tmux/process projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
 #[cfg(test)]
@@ -966,19 +922,6 @@ fn sessions_overview(state: &Value, spec: Option<&crate::model::yaml::Value>) ->
         }
     }
     Value::Array(rows)
-}
-
-fn compiled_agent_ids_for_cli(spec: &crate::model::yaml::Value) -> Vec<String> {
-    spec.get("agents")
-        .and_then(crate::model::yaml::Value::as_list)
-        .map(|agents| {
-            agents
-                .iter()
-                .filter_map(|agent| agent.get("id").and_then(crate::model::yaml::Value::as_str))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn session_row(

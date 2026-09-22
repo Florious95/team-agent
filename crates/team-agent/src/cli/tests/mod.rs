@@ -123,7 +123,6 @@ fn outcome_text(r: Result<CmdResult, CliError>) -> String {
 }
 
 mod base;
-mod compile;
 mod divergence;
 mod lane_c;
 mod leader_watch;
