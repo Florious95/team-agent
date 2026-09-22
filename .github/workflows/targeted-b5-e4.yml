@@ -1,6 +1,9 @@
 name: Targeted B5-E4 verification
 
 on:
+  push:
+    branches:
+      - fix/b5-e4-anchor-signature
   workflow_dispatch:
     inputs:
       test_filter:
@@ -30,4 +33,5 @@ jobs:
           TEST_FILTER: ${{ inputs.test_filter }}
         run: |
           set -euo pipefail
-          cargo test -p team-agent --locked ${TEST_FILTER} -- --test-threads=1 --nocapture
+          FILTER="${TEST_FILTER:---test b5_e4_exec_provider_anchor_red}"
+          cargo test -p team-agent --locked ${FILTER} -- --test-threads=1 --nocapture
