@@ -158,6 +158,10 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    if args.iter().any(|arg| arg == "--no-display") {
+        emit_usage_error("argument '--no-display' was removed; use the default tmux backend");
+        return Ok(ExitCode::Usage);
+    }
     let Some(spec) = command_spec(command) else {
         return Ok(emit_unknown_subcommand_usage(command));
     };

@@ -111,6 +111,7 @@ fn R2_team_md_display_backend_is_ignored_and_tmux_stays_silent() {
             "R2 state must expose the owned tmux transport: {state_text}"
         );
         if value == "ghostty" || value == "terminal" {
+            eprintln!("R2_DEBUG value={value} state={state_text} stdout={} ", stdout(&output));
             assert!(
                 !state_text.contains(value) && !stdout(&output).contains(value),
                 "legacy value {value} must be ignored, not projected as an active renderer"
