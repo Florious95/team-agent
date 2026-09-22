@@ -1,0 +1,33 @@
+name: Targeted B5-E4 verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: "Cargo test target filter"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Targeted B5-E4 test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out requested source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - name: Run targeted test
+        shell: bash
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
+        run: |
+          set -euo pipefail
+          cargo test -p team-agent --locked ${TEST_FILTER} -- --test-threads=1 --nocapture
