@@ -1501,6 +1501,9 @@ pub mod lifecycle_port {
             if display.get("backend").and_then(Value::as_str) != Some("adaptive") {
                 continue;
             }
+            if display.get("status").and_then(Value::as_str) == Some("stopped") {
+                continue;
+            }
             if let Some(window) = display
                 .get("workspace_window")
                 .or_else(|| display.get("window"))
