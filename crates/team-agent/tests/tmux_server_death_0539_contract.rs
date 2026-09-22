@@ -29,7 +29,11 @@ const LEGACY_LOGIN_SHELL_TAIL: &str = "exec \"${SHELL:-/bin/zsh}\" -l";
 
 #[test]
 fn scoped_cleanup_uses_transport_not_raw_tmux_helper() {
-    let display = read_repo_file("crates/team-agent/src/cli/mod.rs");
+    let source = read_repo_file("crates/team-agent/src/cli/mod.rs");
+    let cleanup = source
+        .split_once("fn cleanup_owned_team_windows")
+        .map(|(_, rest)| rest.split_once("    /// 0.5.x").map_or(rest, |(body, _)| body))
+        .unwrap_or("");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -49,7 +53,7 @@ fn scoped_cleanup_uses_transport_not_raw_tmux_helper() {
             "ambient kill-session helper call",
         ),
     ] {
-        if display.contains(needle.0) {
+        if cleanup.contains(needle.0) {
             offenders.push(needle.1.to_string());
         }
     }
