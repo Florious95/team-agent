@@ -25,7 +25,7 @@ const RESIGN_PLUS_RESULTS: &[&str] = &[
     "start-agent",
     "stop-agent",
     "reset-agent",
-    "diagnose",
+    "doctor",
     "claim-leader",
     "takeover",
     "attach-leader",

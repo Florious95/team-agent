@@ -368,12 +368,17 @@ fn ux_doctor_secret_scan_findings_name_the_exact_trigger() {
         .pointer("/secret_scan/findings/0")
         .and_then(serde_json::Value::as_object)
         .expect("secret-scan must report the concrete trigger");
-    for key in ["path", "line", "rule", "match_excerpt"] {
+    for key in ["path", "line", "rule"] {
         assert!(
             finding.contains_key(key),
             "secret-scan finding missing `{key}`: {finding:?}"
         );
     }
+    assert_eq!(finding["path"], "leaky-role.md");
+    assert_eq!(finding["line"], 1);
+    assert_eq!(finding["rule"], "api_key_assignment");
+    assert!(!finding.contains_key("match_excerpt"));
+    assert!(!value.to_string().contains("sk-test-red-contract"));
     let _ = std::fs::remove_dir_all(&ws);
 }
 #[test]

@@ -7,6 +7,11 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs;
@@ -88,6 +93,8 @@ fn run_with_path(
         .arg(name)
         .args(args)
         .current_dir(&fixture.workspace)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", &fixture.home)
         .env("TMPDIR", std::env::temp_dir())
         .env("LANG", "C")
@@ -110,6 +117,8 @@ fn run_root(args: &[&str], fixture: &Fixture) -> Output {
     command
         .args(args)
         .current_dir(&fixture.workspace)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", &fixture.home)
         .env("TMPDIR", std::env::temp_dir())
         .env("LANG", "C")
@@ -228,8 +237,11 @@ fn p1_doctor_and_diagnose_are_byte_and_exit_equivalent() {
             text(&doctor.stdout),
             text(&diagnose.stdout)
         );
+        // The disposable fixtures have different absolute workspace identities.
+        // Normalize only that test input, never the product's identity fields.
         assert_eq!(
-            doctor.stdout, diagnose.stdout,
+            text(&doctor.stdout).replace(&path_arg(&left.workspace), "$WORKSPACE"),
+            text(&diagnose.stdout).replace(&path_arg(&right.workspace), "$WORKSPACE"),
             "P1 stdout mismatch for args={args:?}"
         );
         assert_eq!(
@@ -698,7 +710,8 @@ fn p15_explicit_gate_and_repair_modes_keep_safe_rejections_and_evidence() {
             "P15 rc mismatch: {args:?}"
         );
         assert_eq!(
-            doctor.stdout, diagnose.stdout,
+            text(&doctor.stdout).replace(&path_arg(&left.workspace), "$WORKSPACE"),
+            text(&diagnose.stdout).replace(&path_arg(&right.workspace), "$WORKSPACE"),
             "P15 stdout mismatch: {args:?}"
         );
         assert_eq!(

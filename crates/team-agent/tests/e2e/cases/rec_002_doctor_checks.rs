@@ -1,5 +1,5 @@
 //! ---
-//! purpose: Exercise default doctor host health separately from the explicit comms attachment gate
+//! purpose: Exercise unified doctor runtime health and the explicit comms attachment gate
 //! contract:
 //!   provides:
 //!     - name: rec_002_doctor_checks
@@ -32,13 +32,13 @@ fn rec_002_doctor_checks() {
         ],
     );
     assert!(
-        out.is_success(),
-        "unattached host doctor must remain healthy; stdout={} stderr={}",
+        !out.is_success(),
+        "running but unattached team must fail unified doctor; stdout={} stderr={}",
         out.stdout,
         out.stderr
     );
     let j = out.json();
-    assert_json_field_eq_bool(&j, "/ok", true);
+    assert_json_field_eq_bool(&j, "/ok", false);
     assert_json_field(&j, "/error", &serde_json::Value::Null);
     assert_json_field_eq_str(&j, "/coordinator/status", "running");
     assert_json_field_eq_bool(&j, "/coordinator/schema_ok", true);
@@ -78,7 +78,12 @@ fn rec_002_doctor_checks() {
     );
     let missing_metadata_json = missing_metadata.json();
     assert_json_field_eq_bool(&missing_metadata_json, "/ok", false);
-    assert_json_field_eq_str(&missing_metadata_json, "/error", "metadata_missing");
+    assert_json_field_eq_str(
+        &missing_metadata_json,
+        "/coordinator/metadata_mismatch_reason",
+        "metadata_missing",
+    );
+    assert_json_field_eq_bool(&missing_metadata_json, "/coordinator/ok", false);
 
     let comms = run_ta(
         &ws,

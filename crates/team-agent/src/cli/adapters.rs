@@ -1470,31 +1470,8 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     if !default_report {
         finalize_doctor_report(&mut value, false);
     }
-    normalize_current_workspace_paths(&mut value, &args.workspace);
     let result = crate::cli::triage::report(value, args.json, "doctor");
     Ok(result)
-}
-
-fn normalize_current_workspace_paths(value: &mut Value, workspace: &std::path::Path) {
-    let Ok(current) = std::env::current_dir() else {
-        return;
-    };
-    if current != workspace {
-        return;
-    }
-    let prefix = workspace.to_string_lossy().to_string();
-    fn normalize(value: &mut Value, prefix: &str) {
-        match value {
-            Value::String(text) if text == prefix => *text = ".".to_string(),
-            Value::String(text) if text.starts_with(&format!("{prefix}/")) => {
-                text.replace_range(..prefix.len(), ".");
-            }
-            Value::Array(items) => items.iter_mut().for_each(|item| normalize(item, prefix)),
-            Value::Object(object) => object.values_mut().for_each(|item| normalize(item, prefix)),
-            _ => {}
-        }
-    }
-    normalize(value, &prefix);
 }
 
 fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {

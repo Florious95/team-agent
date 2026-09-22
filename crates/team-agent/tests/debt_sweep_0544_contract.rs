@@ -51,7 +51,7 @@ const BASELINE_VISIBLE_COMMANDS: &[&str] = &[
     "start-agent",
     "stop-agent",
     "reset-agent",
-    "diagnose",
+    "doctor",
     "claim-leader",
     "takeover",
     "attach-leader",

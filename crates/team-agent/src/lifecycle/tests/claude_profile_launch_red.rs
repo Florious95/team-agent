@@ -168,8 +168,10 @@ fn launch_restart_start_add_and_fork_all_delegate_to_the_profile_launch_resolver
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
-    let ws = tmp_dir("diagnose-missing-profile");
+    let env = hermetic_guard::HermeticTestEnv::enter("diagnose-missing-profile");
+    let ws = env.workspace("missing-profile");
     let team = write_claude_profile_team(&ws, "diagteam", "clauder");
     std::fs::remove_file(
         ws.join(".team")
@@ -180,7 +182,7 @@ fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
     .unwrap();
 
     let output = Command::new(crate::lifecycle::tests::test_binary_path())
-        .args(["diagnose", "--workspace", ws.to_str().unwrap(), "--json"])
+        .args(["diagnose", team.to_str().unwrap(), "--workspace", ws.to_str().unwrap(), "--json"])
         .current_dir(&team)
         .output()
         .expect("diagnose subprocess should run");
@@ -197,10 +199,14 @@ fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
         json!(false),
         "diagnose missing profile must emit ok:false JSON; stdout={stdout} stderr={stderr}"
     );
+    assert_eq!(json["profile_smoke"]["ok"], false, "{json}");
     assert!(
-        stdout.contains("profile") || stderr.contains("profile"),
-        "diagnose missing profile must name the profile problem without invoking Claude; stdout={stdout} stderr={stderr}"
+        json["profile_smoke"].to_string().contains("profile"),
+        "diagnose missing profile must identify the scoped configuration failure: {json}"
     );
+    assert!(json["providers"].as_object().unwrap().values().all(|provider| {
+        provider["probe_status"] == "not_run"
+    }));
     assert!(
         !stdout.contains("tokens") && !stderr.contains("tokens"),
         "diagnose dry-run must not consume provider tokens or report token usage; stdout={stdout} stderr={stderr}"
