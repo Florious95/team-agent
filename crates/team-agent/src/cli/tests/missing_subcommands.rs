@@ -340,9 +340,12 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
             );
             assert_eq!(code, ExitCode::Error, "healthy binding alone cannot hide missing coordinator");
         }
-        let report = json_output(cmd_diagnose(&DiagnoseArgs {
+        let result = cmd_diagnose(&DiagnoseArgs {
             workspace: ws.clone(), json: true, team: None,
-        }).expect("diagnostic report"));
+        }).expect("diagnostic report");
+        let CmdOutput::Json(report) = result.output else {
+            panic!("expected JSON diagnostic report");
+        };
         assert_eq!(report["coordinator"]["ok"], false, "{report}");
         let issues = report["issues"].to_string();
         for binding_failure in ["leader_not_attached", "leader_receiver_unbound", "leader_workspace_mismatch"] {

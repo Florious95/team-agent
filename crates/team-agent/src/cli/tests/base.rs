@@ -699,7 +699,9 @@ fn cmd_doctor_fix_without_gate_reports_usage_failure() {
     args.json = true;
     let result = cmd_doctor(&args).expect("structured JSON usage failure");
     assert_eq!(result.exit, ExitCode::Error);
-    let value = json_output(result);
+    let CmdOutput::Json(value) = result.output else {
+        panic!("expected JSON usage failure");
+    };
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"], "--fix requires --gate");
     assert_eq!(value["issues"], json!(["fix_requires_gate"]));
