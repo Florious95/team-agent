@@ -22,14 +22,14 @@ const SOURCE: &str = "worker";
 
 #[test]
 #[serial]
-fn R1_no_display_flag_rejected() {
+fn R1_no_display_flag_is_silently_ignored() {
     let env = HermeticTestEnv::enter("excise-r1");
     let workspace = env.workspace("workspace");
     let workspace_arg = path_string(&workspace);
     let before = relative_entries(&workspace);
 
-    // `--no-display` was the old escape hatch.  The new CLI must reject it
-    // before lifecycle dispatch, so no runtime state, process, or log is made.
+    // `--no-display` is a removed compatibility flag.  It must be ignored
+    // before lifecycle dispatch so old scripts keep using the default tmux path.
     let output = env.run_cli(
         &workspace,
         &[
@@ -40,23 +40,16 @@ fn R1_no_display_flag_rejected() {
             "--json",
         ],
     );
-    let text = output_text(&output).to_ascii_lowercase();
+    let text = output_text(&output);
     assert_eq!(
         output.status.code(),
-        Some(1),
-        "--no-display must be a usage rejection: {text}"
-    );
-    assert!(
-        text.contains("no-display")
-            && ["unknown", "unsupported", "unexpected", "usage", "remove"]
-                .iter()
-                .any(|needle| text.contains(needle)),
-        "rejection must identify the removed --no-display option: {text}"
+        Some(0),
+        "--no-display must be silently ignored: {text}"
     );
     assert_eq!(
         relative_entries(&workspace),
         before,
-        "a rejected option must not write runtime state, logs, or spawn resources"
+        "an ignored option must not write runtime state, logs, or spawn resources"
     );
 }
 
