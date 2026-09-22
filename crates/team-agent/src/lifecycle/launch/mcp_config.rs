@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};

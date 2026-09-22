@@ -108,7 +108,6 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         args.name.as_deref(),
         args.team_id.as_deref(),
         args.yes,
-        !args.no_display,
         args.backend.as_deref(),
     )?;
     append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
@@ -1212,7 +1211,6 @@ pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
         &args.workspace,
         &args.agent,
         args.force,
-        !args.no_display,
         args.allow_fresh,
         args.team.as_deref(),
     )?;
@@ -1243,7 +1241,6 @@ pub fn cmd_reset_agent(args: &ResetAgentArgs) -> Result<CmdResult, CliError> {
             &args.workspace,
             &args.agent,
             args.discard_session,
-            !args.no_display,
             args.team.as_deref(),
         )?,
         args.json,
@@ -1256,7 +1253,6 @@ pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
         &args.workspace,
         &args.agent,
         &args.role_file,
-        !args.no_display,
         args.team.as_deref(),
         args.force,
     )?;
@@ -1280,7 +1276,6 @@ pub fn cmd_fork_agent(args: &ForkAgentArgs) -> Result<CmdResult, CliError> {
             &args.source_agent,
             &args.as_agent,
             args.label.as_deref(),
-            !args.no_display,
             args.team.as_deref(),
         )?,
         args.json,
@@ -1294,7 +1289,6 @@ pub fn cmd_clone_agent(args: &CloneAgentArgs) -> Result<CmdResult, CliError> {
             &args.source_agent,
             &args.as_agent,
             args.label.as_deref(),
-            !args.no_display,
             args.team.as_deref(),
         )?,
         args.json,

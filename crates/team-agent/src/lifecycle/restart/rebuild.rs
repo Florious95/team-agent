@@ -1367,14 +1367,6 @@ fn restart_with_selected_team_and_transport(
             Some(selected.team_key.as_str()),
             &state,
         );
-    if let Ok(probe) = crate::lifecycle::display::probe_display_capabilities(&selected.run_workspace)
-    {
-        let _ = crate::lifecycle::display::rebuild_adaptive_display_after_rebind(
-            &selected.run_workspace,
-            &session_name,
-            &probe,
-        );
-    }
     // 0.3.28 Step 1: topology invariant guard (warn-only). Same pattern as
     // `lifecycle::launch::launch_with_transport_in_workspace` — logs to stderr,
     // never panics. Hard error path is deferred to Step 10.

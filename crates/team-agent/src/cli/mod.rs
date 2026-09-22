@@ -133,16 +133,14 @@ pub mod lifecycle_port {
         name: Option<&str>,
         team_id: Option<&str>,
         yes: bool,
-        open_display: bool,
         backend: Option<&str>,
     ) -> Result<Value, CliError> {
-        match crate::lifecycle::quick_start_in_workspace_with_display_and_backend(
+        match crate::lifecycle::quick_start_in_workspace_with_backend(
             workspace,
             agents_dir,
             name,
             yes,
             team_id,
-            open_display,
             backend,
         ) {
             Ok(report) => Ok(quick_start_value(report)),
@@ -1155,10 +1153,7 @@ pub mod lifecycle_port {
                             }
                         }
                     }
-                    let _ = crate::lifecycle::display::close_team_display_backends(
-                        &run_workspace,
-                        session,
-                    );
+                    cleanup_owned_team_windows(&run_workspace, transport, &state, session);
                 } else {
                     let targets = vec![session.as_str().to_string()];
                     let event_log = crate::event_log::EventLog::new(&run_workspace);
@@ -1185,10 +1180,7 @@ pub mod lifecycle_port {
                     } else {
                         push_unique_session(&mut killed_sessions, session.clone());
                     }
-                    let _ = crate::lifecycle::display::close_team_display_backends(
-                        &run_workspace,
-                        session,
-                    );
+                    cleanup_owned_team_windows(&run_workspace, transport, &state, session);
                 }
             }
         }
@@ -1471,6 +1463,124 @@ pub mod lifecycle_port {
                 crate::cli::leader_port::unregister_after_shutdown_success(&run_workspace, team);
         }
         Ok(response)
+    }
+
+    /// Remove legacy adaptive display windows without reopening a display backend.
+    /// Every target is scoped to the selected transport and passes the same
+    /// ownership/protection audit as the rest of shutdown. Unknown or protected
+    /// targets are intentionally left in place.
+    fn cleanup_owned_team_windows(
+        workspace: &Path,
+        transport: &dyn crate::transport::Transport,
+        state: &Value,
+        session: &crate::transport::SessionName,
+    ) {
+        let Some(agents) = state.get("agents").and_then(Value::as_object) else {
+            return;
+        };
+        let leader_session = state
+            .get("leader_receiver")
+            .and_then(|receiver| receiver.get("session_name"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| session.as_str());
+        let leader_panes = collect_state_leader_anchor_pane_ids(
+            state,
+            transport.tmux_endpoint().as_deref(),
+        );
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let team_key = state.get("team_key").and_then(Value::as_str);
+        let generation = state_generation(state);
+        let overview_prefix = format!("team-agent:{}:overview", session.as_str());
+        let mut windows = std::collections::BTreeSet::new();
+        let mut panes = std::collections::BTreeSet::new();
+        for (_agent_id, agent) in agents {
+            let Some(display) = agent.get("display").and_then(Value::as_object) else {
+                continue;
+            };
+            if display.get("backend").and_then(Value::as_str) != Some("adaptive") {
+                continue;
+            }
+            if let Some(window) = display
+                .get("workspace_window")
+                .or_else(|| display.get("window"))
+                .or_else(|| agent.get("window"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                if window == overview_prefix || window.starts_with(&format!("{overview_prefix}-")) {
+                    windows.insert(format!("{leader_session}:{window}"));
+                }
+            }
+            if let Some(pane) = display.get("pane_id").and_then(Value::as_str) {
+                if pane.starts_with('%') && !leader_panes.contains(pane) {
+                    panes.insert(pane.to_string());
+                }
+            }
+        }
+        if let Ok(live_windows) = transport.list_windows(&crate::transport::SessionName::new(
+            leader_session.to_string(),
+        )) {
+            for window in live_windows {
+                let name = window.as_str();
+                if name == overview_prefix || name.starts_with(&format!("{overview_prefix}-")) {
+                    windows.insert(format!("{leader_session}:{name}"));
+                }
+            }
+        }
+        let live_targets = transport.list_targets().unwrap_or_default();
+        for target in &live_targets {
+            if leader_panes.contains(target.pane_id.as_str()) {
+                continue;
+            }
+            if let Some(window) = target.window_name.as_ref() {
+                if windows.contains(&format!("{}:{}", target.session.as_str(), window.as_str())) {
+                    panes.remove(target.pane_id.as_str());
+                }
+            }
+        }
+        for target in windows {
+            let Some((target_session, target_window)) = target.split_once(':') else {
+                continue;
+            };
+            let target = crate::transport::Target::SessionWindow {
+                session: crate::transport::SessionName::new(target_session.to_string()),
+                window: crate::transport::WindowName::new(target_window.to_string()),
+            };
+            let target_text = format!("{target_session}:{target_window}");
+            let audit = crate::kill_audit::pre_kill_audit_scoped(
+                &event_log,
+                transport,
+                "shutdown.legacy_display_window",
+                "kill-window",
+                std::slice::from_ref(&target_text),
+                workspace,
+                team_key,
+                generation,
+                "session_marker+state_display_window+team_tag",
+                "positive workspace/team ownership",
+            );
+            if audit.is_ok() {
+                let _ = transport.kill_window(&target);
+            }
+        }
+        for pane in panes {
+            let audit = crate::kill_audit::pre_kill_audit_scoped(
+                &event_log,
+                transport,
+                "shutdown.legacy_display_pane",
+                "kill-pane",
+                std::slice::from_ref(&pane),
+                workspace,
+                team_key,
+                generation,
+                "state_display_pane+team_session",
+                "positive workspace/team ownership",
+            );
+            if audit.is_ok() {
+                let _ = transport.kill_pane(&crate::transport::PaneId::new(pane));
+            }
+        }
     }
 
     /// 0.5.x Windows portability Batch 6 Option A: locate and
@@ -2635,7 +2745,6 @@ pub mod lifecycle_port {
         workspace: &Path,
         agent: &str,
         force: bool,
-        open_display: bool,
         allow_fresh: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
@@ -2644,7 +2753,7 @@ pub mod lifecycle_port {
             workspace,
             &agent_id,
             force,
-            open_display,
+            true,
             allow_fresh,
             team,
         ) {
@@ -2712,7 +2821,6 @@ pub mod lifecycle_port {
         workspace: &Path,
         agent: &str,
         discard_session: bool,
-        open_display: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
@@ -2720,7 +2828,7 @@ pub mod lifecycle_port {
             workspace,
             &agent_id,
             discard_session,
-            open_display,
+            true,
             team,
         ) {
             Ok(crate::lifecycle::ResetAgentOutcome::Reset {
@@ -2763,7 +2871,6 @@ pub mod lifecycle_port {
         workspace: &Path,
         agent: &str,
         role_file: &str,
-        open_display: bool,
         team: Option<&str>,
         force: bool,
     ) -> Result<Value, CliError> {
@@ -2772,7 +2879,7 @@ pub mod lifecycle_port {
             workspace,
             &agent_id,
             Path::new(role_file),
-            open_display,
+            true,
             team,
             force,
         ) {
@@ -2811,12 +2918,11 @@ pub mod lifecycle_port {
         source_agent: &str,
         as_agent_id: &str,
         label: Option<&str>,
-        open_display: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
         let source = crate::model::ids::AgentId::new(source_agent);
         let dest = crate::model::ids::AgentId::new(as_agent_id);
-        match crate::lifecycle::fork_agent(workspace, &source, &dest, label, open_display, team) {
+        match crate::lifecycle::fork_agent(workspace, &source, &dest, label, true, team) {
             Ok(report) => Ok(json!({
                 "ok": true,
                 "source_agent_id": report.source_agent_id.as_str(),
@@ -2833,12 +2939,11 @@ pub mod lifecycle_port {
         source_agent: &str,
         as_agent_id: &str,
         label: Option<&str>,
-        open_display: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
         let source = crate::model::ids::AgentId::new(source_agent);
         let dest = crate::model::ids::AgentId::new(as_agent_id);
-        match crate::lifecycle::clone_agent(workspace, &source, &dest, label, open_display, team) {
+        match crate::lifecycle::clone_agent(workspace, &source, &dest, label, true, team) {
             Ok(report) => Ok(json!({
                 "ok": true,
                 "status": "cloned",
@@ -3362,7 +3467,6 @@ pub mod lifecycle_port {
                 launch,
                 next_actions,
                 attach_commands,
-                display_backend,
                 worker_readiness,
                 team,
             } => {
@@ -3502,7 +3606,6 @@ pub mod lifecycle_port {
                     "team": team,
                     "agent_ids": launch.started.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
                     "dry_run": launch.dry_run,
-                    "display_backend": display_backend,
                     "next_actions": next_actions,
                     "attach_commands": attach_commands,
                     "reminder": crate::cli::QUICK_START_REMINDER,
@@ -3638,12 +3741,6 @@ pub mod lifecycle_port {
                         claude_config_dir: None,
                         provider_projects_root: None,
                         managed_mcp_config: false,
-                        layout_window: None,
-                        layout_index: None,
-                        pane_index: None,
-                        display: crate::lifecycle::WorkerDisplay::Blocked {
-                            reason: crate::lifecycle::AdaptiveBlockReason::AggregatorRebuildFailed,
-                        },
                     }],
                     dry_run: false,
                     tmux_endpoint: None,
@@ -3655,7 +3752,6 @@ pub mod lifecycle_port {
                 }),
                 next_actions: Vec::new(),
                 attach_commands: Vec::new(),
-                display_backend: "none".to_string(),
                 worker_readiness: crate::lifecycle::QuickStartReadiness::PendingToolLoad,
                 team: "team-demo".to_string(),
             });

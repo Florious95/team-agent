@@ -24,7 +24,6 @@
 //! ---
 //! lifecycle 数据类型:newtype / enum / data struct / error / outcome-report 集中定义。
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -32,9 +31,7 @@ use thiserror::Error;
 
 use crate::model::ids::AgentId;
 use crate::provider::{RolloutPath, SessionId};
-use crate::transport::{PaneId, SessionName, WindowName};
-
-use super::DisplayBackend;
+use crate::transport::SessionName;
 
 // ===========================================================================
 // CROSS-LANE PLACEHOLDERS(13/14/15 兄弟 lane 尚未交付;leader 集成时 reconcile)
@@ -184,22 +181,6 @@ impl std::fmt::Display for PlanId {
     }
 }
 
-/// ghostty 派生的唯一 linked-session 名(`ghostty_display_session_name`,sha1 派生,
-/// `display/ghostty.py`)。与 worker 的 `SessionName` 类型上区分,防混传(card §57)。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DisplaySessionName(pub String);
-
-impl DisplaySessionName {
-/// ---
-/// purpose: 取 ghostty 派生 display session 名的原始字符串
-/// returns: 内部保存的名字
-/// ---
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 // ===========================================================================
 // ENUM(card §3/§11:散字符串 → 穷尽 enum)
 // ===========================================================================
@@ -240,30 +221,6 @@ pub enum FirstSendAtState {
     Corrupt,
 }
 
-/// adaptive 阻塞 reason(`ADAPTIVE_BLOCK_REASONS`,6 个封闭值,`display/adaptive.py:21`)。
-/// **必须 enum**(契约 C16 封闭集);`adaptive_blocked` 对越界 reason 兜底成
-/// `AggregatorRebuildFailed`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AdaptiveBlockReason {
-    LeaderNotInTmux,
-    SplitFailed,
-    WindowCreateFailed,
-    WorkerSessionMissing,
-    NotImplementedThisPlatform,
-    AggregatorRebuildFailed,
-}
-
-/// display `status`(`agent_state["display"]["status"]`,`start.py:123`)。
-/// **应 enum**:决定 `start_agent` 是否重开显示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisplayStatus {
-    Opened,
-    Blocked,
-    Stopped,
-}
-
 /// plan `status`(`orchestrator/__init__.py`)。**应 enum**:`start_plan` 对已
 /// running/halted/completed 幂等返回。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -292,56 +249,10 @@ pub enum DangerousApprovalSource {
 /// **C13 一等公民**:分支只看 probe,不看 `cfg!(target_os)`;Windows/WSL →
 /// `NotImplementedThisPlatform`。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DisplayProbe {
-    pub in_tmux: bool,
-    pub platform: String,
-    pub leader_session: Option<SessionName>,
-    pub leader_pane: Option<PaneId>,
-    pub caps: CapsFlags,
-    /// 探测后的 adaptive 状态(可开 / 已封闭+reason)。
-    pub adaptive_status: DisplayStatus,
-    /// 封闭时填 reason(C16 封闭集)。
-    pub reason: Option<AdaptiveBlockReason>,
-}
 
 /// 平台能力位(`caps{tmux_append_windows, adaptive_display}`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct CapsFlags {
-    pub tmux_append_windows: bool,
-    pub adaptive_display: bool,
-}
 
-/// 每 worker display state(写进 `state.agents.<id>.display`)。adaptive vs ghostty_window
-/// vs ghostty_workspace 字段不同 → enum 区分(card §50)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "backend", rename_all = "snake_case")]
-pub enum WorkerDisplay {
-    Adaptive {
-        status: DisplayStatus,
-        window: Option<WindowName>,
-        workspace_window: Option<WindowName>,
-        pane_id: Option<PaneId>,
-        pane_title: Option<String>,
-        target: Option<String>,
-        target_worker_session: Option<String>,
-        linked_session: Option<String>,
-        leader_session: Option<SessionName>,
-        display_session: Option<SessionName>,
-        fallback: Option<String>,
-    },
-    GhosttyWindow {
-        status: DisplayStatus,
-        linked_session: DisplaySessionName,
-        display_session: DisplaySessionName,
-    },
-    GhosttyWorkspace {
-        status: DisplayStatus,
-        display_session: DisplaySessionName,
-    },
-    Blocked {
-        reason: AdaptiveBlockReason,
-    },
-}
 
 /// `RestartCandidate`(`restart/selection.py:27`)。`select_restart_state` 多 team 选择;
 /// `has_context` 是 resume 可行性粗判。
@@ -560,10 +471,6 @@ pub struct StartedAgent {
     pub claude_config_dir: Option<PathBuf>,
     pub provider_projects_root: Option<PathBuf>,
     pub managed_mcp_config: bool,
-    pub layout_window: Option<WindowName>,
-    pub layout_index: Option<usize>,
-    pub pane_index: Option<usize>,
-    pub display: WorkerDisplay,
 }
 
 /// 路由决策(`routing.decision` 事件 / launch `routes[]`)。
@@ -603,7 +510,6 @@ pub enum QuickStartReport {
         launch: Box<LaunchReport>,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
-        display_backend: String,
         /// BUG-7: real readiness verdict. `Ready` ⇒ the wrapper completed AND the
         /// caller already verified tool-set availability; the framework itself
         /// never emits this without an external observable confirming worker
@@ -938,32 +844,6 @@ pub struct RestartPlan {
     pub corrupt_entries: Vec<CorruptFirstSendAt>,
     /// allow_fresh=false 且 interacted-but-unresumable 的 worker(atomic_refusal 触发集)。
     pub unresumable: Vec<UnresumableWorker>,
-}
-
-/// display 解析结果(`resolve_display_backend`,`display/backend.py`)。非默认时非静默
-/// 发 `display.backend_resolved`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedBackend {
-    pub backend: DisplayBackend,
-    /// 是否非默认(默认 adaptive;非默认非静默发事件)。
-    pub non_default: bool,
-}
-
-/// `open_worker_displays` 结果(`display/worker_window.py`)。每 worker 一个
-/// `WorkerDisplay`,失败不阻塞 team readiness(C14)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenDisplaysReport {
-    pub backend: DisplayBackend,
-    pub displays: BTreeMap<String, WorkerDisplay>,
-}
-
-/// `close_team_display_backends` 结果(`display/close.py`,C9 close-by-recorded-backend)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloseDisplaysReport {
-    /// 按 state 记录的后端关掉的窗口/会话标识。
-    pub closed: Vec<String>,
-    /// orphan 清理(adaptive 只删带 team tag 的窗口,C2 leader pane 安全)。
-    pub orphans_cleaned: Vec<String>,
 }
 
 /// plan 状态机推进结果(`orchestrator/__init__.py` start_plan / handle_report_result /

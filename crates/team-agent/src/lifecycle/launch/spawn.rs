@@ -30,7 +30,7 @@ use std::process::Command;
 
 use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
@@ -73,22 +73,6 @@ pub(super) fn spawn_agents(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))
     );
-    let display_backend = spec_display_backend(spec);
-    let active_agent_ids = spec_agent_values(spec)
-        .into_iter()
-        .filter_map(|agent| {
-            if agent_is_paused(agent) {
-                None
-            } else {
-                agent.get("id").and_then(Value::as_str).map(AgentId::new)
-            }
-        })
-        .collect::<Vec<_>>();
-    let layout_plan = if display_backend == DisplayBackend::Adaptive {
-        adaptive_layout_plan(&active_agent_ids, ADAPTIVE_LAYOUT_MAX_PER_WINDOW)
-    } else {
-        Vec::new()
-    };
     let mut started = Vec::new();
     for agent in spec_agent_values(spec) {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
@@ -392,15 +376,7 @@ pub(super) fn spawn_agents(
                 );
             }
         }
-        // 0.3.28 Step 4b: replaced the `adaptive_layout_plan` 3-pane tiling
-        // with Python-parity 1-window-per-agent placement. Window name =
-        // `agent_id`; first worker creates the session via spawn_first,
-        // subsequent workers each get a new window via spawn_into. No splits
-        // in the worker session — Step 8's `assert_overlay_call_site` would
-        // catch any drift if a split call snuck back in. The `placement`
-        // variable is set to None to signal "no adaptive layout" to all
-        // downstream consumers (display dict, layout_window persistence).
-        let placement: Option<LayoutPlacement> = None;
+        // One independent tmux window per worker; no GUI/display layout.
         let window = WindowName::new(agent_id_raw);
         let spawn = if started.is_empty() {
             transport.spawn_first_with_env_unset(
@@ -436,35 +412,6 @@ pub(super) fn spawn_agents(
         if matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Dead)) {
             continue;
         }
-        if placement.is_some() {
-            configure_adaptive_pane_title(
-                workspace,
-                transport,
-                session_name,
-                &window,
-                &spawn.pane_id,
-                agent_id_raw,
-            );
-        }
-        let display = if placement.is_some() {
-            WorkerDisplay::Adaptive {
-                status: DisplayStatus::Opened,
-                window: Some(spawn.window.clone()),
-                workspace_window: None,
-                pane_id: Some(spawn.pane_id.clone()),
-                pane_title: Some(agent_id_raw.to_string()),
-                target: Some(spawn.pane_id.as_str().to_string()),
-                target_worker_session: Some(session_name.as_str().to_string()),
-                linked_session: None,
-                leader_session: Some(session_name.clone()),
-                display_session: None,
-                fallback: None,
-            }
-        } else {
-            WorkerDisplay::Blocked {
-                reason: AdaptiveBlockReason::NotImplementedThisPlatform,
-            }
-        };
         started.push(StartedAgent {
             agent_id,
             start_mode: StartMode::Fresh,
@@ -479,12 +426,6 @@ pub(super) fn spawn_agents(
                 .clone()
                 .or_else(|| profile_launch.claude_projects_root.clone()),
             managed_mcp_config: plan.managed_mcp_config || profile_launch.managed_mcp_config,
-            layout_window: placement
-                .as_ref()
-                .map(|placement| placement.layout_window.clone()),
-            layout_index: placement.as_ref().map(|placement| placement.layout_index),
-            pane_index: placement.as_ref().map(|placement| placement.pane_index),
-            display,
         });
     }
     Ok(started)

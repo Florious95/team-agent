@@ -295,7 +295,6 @@ pub struct QuickStartArgs {
     pub name: Option<String>,
     pub team_id: Option<String>,
     pub yes: bool,
-    pub no_display: bool,
     pub json: bool,
     /// Include internal receiver/topology diagnostics in the response.
     pub detail: bool,
@@ -489,7 +488,6 @@ pub struct StartAgentArgs {
     pub team: Option<String>,
     pub force: bool,
     pub allow_fresh: bool,
-    pub no_display: bool,
     pub json: bool,
 }
 
@@ -509,7 +507,6 @@ pub struct ResetAgentArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub discard_session: bool,
-    pub no_display: bool,
     pub json: bool,
 }
 
@@ -521,7 +518,6 @@ pub struct AddAgentArgs {
     pub team: Option<String>,
     pub role_file: String,
     pub force: bool,
-    pub no_display: bool,
     pub json: bool,
 }
 
@@ -533,7 +529,6 @@ pub struct ForkAgentArgs {
     pub team: Option<String>,
     pub as_agent: String,
     pub label: Option<String>,
-    pub no_display: bool,
     pub json: bool,
 }
 
@@ -544,7 +539,6 @@ pub struct CloneAgentArgs {
     pub team: Option<String>,
     pub as_agent: String,
     pub label: Option<String>,
-    pub no_display: bool,
     pub json: bool,
 }
 

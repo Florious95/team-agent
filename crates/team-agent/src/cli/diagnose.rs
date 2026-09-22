@@ -1319,22 +1319,6 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
         next_actions.push(json!("install tmux or add it to PATH"));
     }
 
-    let display_backend = compiled
-        .as_ref()
-        .and_then(|spec| yaml_path_str(spec, &["runtime", "display_backend"]))
-        .unwrap_or("none");
-    let ghostty_required = display_backend == "ghostty_window" || display_backend == "ghostty";
-    let ghostty_path = command_path("ghostty");
-    checks.push(json!({
-        "name": "ghostty",
-        "ok": !ghostty_required || ghostty_path.is_some(),
-        "path": ghostty_path,
-        "required": ghostty_required,
-    }));
-    if ghostty_required && ghostty_path.is_none() {
-        next_actions.push(json!("install Ghostty or choose another display_backend"));
-    }
-
     let workspace = crate::model::paths::team_workspace(team)
         .map_err(|error| CliError::Runtime(error.to_string()))?;
     let profile_dir_exists = workspace

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
@@ -72,31 +72,10 @@ pub(crate) fn adaptive_layout_plan(
 
 pub(crate) const ADAPTIVE_LAYOUT_MAX_PER_WINDOW: usize = 3;
 
-/// ---
-/// purpose: 判断该 state 是否在用 adaptive 布局
-/// returns: 顶层或 runtime 段的 display_backend 为 adaptive，或任一席位带非空 layout_window 时为 true
-/// ---
-pub(crate) fn state_uses_adaptive_layout(state: &serde_json::Value) -> bool {
-    state
-        .get("display_backend")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|backend| backend == "adaptive")
-        || state
-            .get("runtime")
-            .and_then(|runtime| runtime.get("display_backend"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|backend| backend == "adaptive")
-        || state
-            .get("agents")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|agents| {
-                agents.values().any(|agent| {
-                    agent
-                        .get("layout_window")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|window| !window.is_empty())
-                })
-            })
+/// Adaptive display layout was removed; existing state is always resumed in
+/// the per-agent window topology.
+pub(crate) fn state_uses_adaptive_layout(_state: &serde_json::Value) -> bool {
+    false
 }
 
 /// ---

@@ -59,11 +59,10 @@
     },
     "runtime": {
       "type": "object",
-      "required": ["backend", "display_backend", "session_name", "auto_launch", "require_user_approval_before_launch", "max_active_agents", "startup_order"],
+      "required": ["backend", "session_name", "auto_launch", "require_user_approval_before_launch", "max_active_agents", "startup_order"],
       "additionalProperties": false,
       "properties": {
         "backend": { "enum": ["tmux", "pty"] },
-        "display_backend": { "enum": ["none", "tmux_attach", "iterm", "ghostty", "ghostty_window", "ghostty_workspace"] },
         "session_name": { "type": "string", "minLength": 1 },
         "auto_launch": { "type": "boolean" },
         "require_user_approval_before_launch": { "type": "boolean" },

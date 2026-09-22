@@ -52,7 +52,6 @@
 // (unimplemented!() stub 不被拦);tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-pub mod display;
 pub mod helpers;
 pub mod launch;
 pub(crate) mod lock;
@@ -70,12 +69,7 @@ use crate::model::ids::AgentId;
 use crate::provider::{RolloutPath, SessionId};
 use crate::transport::{PaneId, SessionName, WindowName};
 
-// 复用既有 enum(model::enums)。`DisplayBackend` 已在 step2 定义并带 `has_worker_views()`。
-pub use crate::model::enums::DisplayBackend;
-
 pub use types::*;
-
-pub use display::*;
 pub use launch::*;
 pub use restart::*;
 

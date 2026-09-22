@@ -211,15 +211,6 @@ const ROOT_KEYS: &[&str] = &[
     "tasks",
 ];
 const AUTH_MODES: &[&str] = &["subscription", "official_api", "compatible_api"];
-const VALID_DISPLAY_BACKENDS: &[&str] = &[
-    "none",
-    "tmux_attach",
-    "iterm",
-    "ghostty",
-    "ghostty_window",
-    "ghostty_workspace",
-    "adaptive",
-];
 const TASK_STATUS_STRS: &[&str] = &[
     "pending",
     "ready",
@@ -613,14 +604,6 @@ fn check_runtime(runtime: Option<&Yaml>, errors: &mut Vec<String>) {
     let get = |k: &str| runtime.and_then(|r| r.get(k));
     if !matches!(get("backend").and_then(Yaml::as_str), Some("tmux" | "pty")) {
         errors.push("/runtime/backend: invalid backend".to_string());
-    }
-    if let Some(db) = get("display_backend") {
-        if !db
-            .as_str()
-            .is_some_and(|s| VALID_DISPLAY_BACKENDS.contains(&s))
-        {
-            errors.push("/runtime/display_backend: invalid display backend".to_string());
-        }
     }
     if get("auto_trust_own_workspace").is_some_and(|v| !matches!(v, Yaml::Bool(_))) {
         errors.push("/runtime/auto_trust_own_workspace: must be a boolean".to_string());
