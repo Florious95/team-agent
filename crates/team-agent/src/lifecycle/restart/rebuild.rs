@@ -1041,6 +1041,32 @@ fn restart_with_selected_team_and_transport(
             attach_commands,
         });
     }
+    // Respawn changes the generation used by shutdown's ownership check, even
+    // when build-before-destroy keeps the tmux session itself alive. Stamp only
+    // the selected session, after its replacement state is durable.
+    if let Some(generation) = state
+        .get("generation")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            state
+                .get("agents")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|agents| {
+                    agents.values().find_map(|agent| {
+                        agent.get("spawned_at").and_then(serde_json::Value::as_str)
+                    })
+                })
+        })
+    {
+        transport
+            .set_session_owner_with_generation(
+                &session_name,
+                &selected.run_workspace,
+                &selected.team_key,
+                generation,
+            )
+            .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+    }
     // RM-039-SESS-001 step 2 (architect verdict 2026-06-22): post-respawn
     // resume backing validation.
     //

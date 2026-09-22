@@ -225,7 +225,8 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
         "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
+        // Compatibility spelling: parse and execute the exact doctor contract.
+        "diagnose" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
         "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
         "e2e" => cmd_e2e(&e2e_args(args, cwd)).map(emit_result),
@@ -340,7 +341,7 @@ pub(crate) fn default_help() -> String {
             "reset-agent",
         ],
     );
-    append_help_section(&mut out, "Diagnose", &["diagnose"]);
+    append_help_section(&mut out, "Diagnose", &["doctor"]);
     append_help_section(
         &mut out,
         "Guided recovery",
@@ -444,7 +445,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]".to_string(),
         Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("wait") => "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]".to_string(),
-        Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("diagnose") => "usage: team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--gate orphans|comms] [--comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]".to_string(),
         Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
         Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]".to_string(),
         Some("e2e") => "usage: team-agent e2e [--workspace WORKSPACE] [--providers LIST] [--real] [--json]".to_string(),

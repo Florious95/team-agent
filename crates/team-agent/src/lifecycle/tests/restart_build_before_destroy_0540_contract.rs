@@ -30,7 +30,7 @@ use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    SessionOwner, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
     TurnVerification, WindowName,
 };
 
@@ -128,6 +128,95 @@ fn server_exited_during_replacement_spawn_does_not_cascade_session_disappeared_a
         Some("%old-w1"),
         "R3: failed replacement build must not overwrite the old worker pane binding; state={state}"
     );
+}
+
+#[test]
+#[serial(env)]
+fn scoped_shutdown_after_restart_refreshes_owner_and_preserves_sibling() {
+    let case = RestartCase::new("restart-shutdown-owner", worker_ids(2), ProviderShape::Fake);
+    let transport = BuildBeforeDestroyTransport::recording(worker_ids(2));
+    for pane in transport.state.lock().unwrap().panes.values_mut() {
+        pane.current_path = Some(case.workspace.clone());
+        pane.pane_pid = None;
+    }
+    let session = SessionName::new(TEAM_SESSION);
+    let sibling_session = SessionName::new("team-sibling");
+    let mut state = case.read_state();
+    // Host and worker tmux servers may allocate the same pane ID. The host
+    // receiver must not protect the replacement worker on this transport.
+    state["leader_receiver"] = json!({
+        "pane_id": "%new-1", "tmux_socket": "/tmp/s4-host-only.sock"
+    });
+    state["team_owner"] = json!({"pane_id": "%new-1"});
+    state["teams"][TEAM]["leader_receiver"] = state["leader_receiver"].clone();
+    state["teams"][TEAM]["team_owner"] = state["team_owner"].clone();
+    state["teams"]["sibling"] = json!({
+        "team_key": "sibling",
+        "session_name": sibling_session.as_str(),
+        "tmux_socket": TMUX_ENDPOINT,
+        "agents": {
+            "sibling-worker": {
+                "provider": "fake", "status": "running", "pane_id": "%sibling",
+                "spawned_at": "sibling-generation"
+            }
+        }
+    });
+    save_runtime_state(&case.workspace, &state).unwrap();
+    let sibling_before = case.read_state()["teams"]["sibling"].clone();
+    let mut sibling_pane = pane_info(
+        sibling_session.clone(), WindowName::new("sibling-worker"), PaneId::new("%sibling"),
+    );
+    sibling_pane.current_path = Some(case.workspace.clone());
+    sibling_pane.pane_pid = None;
+    transport.state.lock().unwrap().panes.insert("%sibling".to_string(), sibling_pane.clone());
+    transport.set_session_owner_with_generation(
+        &session, &case.workspace, TEAM, "2026-07-14T00:00:00+00:00",
+    ).unwrap();
+    transport.set_session_owner_with_generation(
+        &sibling_session, &case.workspace, "sibling", "sibling-generation",
+    ).unwrap();
+    let sibling_owner = transport.session_owner(&sibling_session).unwrap();
+
+    let report = restart_with_transport(&case.workspace, true, Some(TEAM), &transport).unwrap();
+    assert!(matches!(report, RestartReport::Restarted { .. }), "{report:?}");
+    let state = case.read_state();
+    let expected_generation = state["teams"][TEAM]["agents"]["w1"]["spawned_at"].as_str().unwrap();
+    assert_ne!(expected_generation, "2026-07-14T00:00:00+00:00");
+    let owner = transport.session_owner(&session).unwrap().unwrap();
+    assert_eq!(owner.workspace, case.workspace.canonicalize().unwrap().to_string_lossy());
+    assert_eq!(owner.team, TEAM);
+    assert_eq!(owner.generation, expected_generation);
+    assert_no_original_session_kill(&transport.ops(), "restart retains the session");
+
+    let out = team_agent::cli::lifecycle_port::shutdown_with_transport(
+        &case.workspace, true, Some(TEAM), &transport,
+    ).unwrap();
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["session_killed"], true, "{out}");
+    assert_eq!(out["spared_sessions"], json!([]), "{out}");
+    assert_eq!(out["coordinator_stop_reason"], "scoped_live_sibling_present", "{out}");
+    assert!(!transport.has_session(&session).unwrap());
+    assert!(transport.has_session(&sibling_session).unwrap());
+    assert_eq!(transport.session_owner(&sibling_session).unwrap(), sibling_owner);
+    assert_eq!(case.read_state()["teams"]["sibling"], sibling_before);
+    assert_eq!(transport.state.lock().unwrap().panes.get("%sibling"), Some(&sibling_pane));
+}
+
+#[test]
+#[serial(env)]
+fn failed_replacement_preserves_original_session_owner() {
+    let case = RestartCase::new("failed-restart-owner", worker_ids(1), ProviderShape::Fake);
+    let transport = BuildBeforeDestroyTransport::recording(worker_ids(1))
+        .with_spawn_failure("w1", "injected replacement spawn failure");
+    let session = SessionName::new(TEAM_SESSION);
+    transport.set_session_owner_with_generation(
+        &session, &case.workspace, TEAM, "2026-07-14T00:00:00+00:00",
+    ).unwrap();
+    let owner_before = transport.session_owner(&session).unwrap();
+    let report = restart_with_transport(&case.workspace, true, Some(TEAM), &transport).unwrap();
+    assert_restart_did_not_succeed(&report);
+    assert_eq!(transport.session_owner(&session).unwrap(), owner_before);
+    assert_eq!(transport.ops().iter().filter(|op| op.starts_with("set_session_owner:")).count(), 1);
 }
 
 struct RestartCase {
@@ -354,6 +443,7 @@ struct TransportState {
     session_present: bool,
     ops: Vec<String>,
     panes: BTreeMap<String, PaneInfo>,
+    owners: BTreeMap<String, SessionOwner>,
     next_pane: usize,
     spawns: usize,
 }
@@ -416,6 +506,7 @@ impl BuildBeforeDestroyTransport {
         kind: &'static str,
         session: &SessionName,
         window: &WindowName,
+        cwd: &Path,
     ) -> Result<SpawnResult, TransportError> {
         let mut state = self.state.lock().unwrap();
         state
@@ -434,10 +525,10 @@ impl BuildBeforeDestroyTransport {
         let pane_id = PaneId::new(format!("%new-{}", state.next_pane));
         state.next_pane += 1;
         state.session_present = true;
-        state.panes.insert(
-            pane_id.as_str().to_string(),
-            pane_info(session.clone(), window.clone(), pane_id.clone()),
-        );
+        let mut pane = pane_info(session.clone(), window.clone(), pane_id.clone());
+        pane.current_path = Some(cwd.to_path_buf());
+        pane.pane_pid = None;
+        state.panes.insert(pane_id.as_str().to_string(), pane);
         if self.server_exit_after_first_spawn && state.spawns == 1 {
             state.session_present = false;
         }
@@ -451,7 +542,12 @@ impl BuildBeforeDestroyTransport {
 
     fn real_tmux_has_session(&self, session: &SessionName) -> Result<bool, TransportError> {
         let Some(socket) = self.real_socket.as_ref() else {
-            return Ok(self.state.lock().unwrap().session_present);
+            let state = self.state.lock().unwrap();
+            return Ok(if session.as_str() == TEAM_SESSION {
+                state.session_present
+            } else {
+                state.panes.values().any(|pane| pane.session == *session)
+            });
         };
         Ok(Command::new("tmux")
             .args([
@@ -535,10 +631,10 @@ impl Transport for BuildBeforeDestroyTransport {
         session: &SessionName,
         window: &WindowName,
         _argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn("spawn_first", session, window)
+        self.spawn("spawn_first", session, window, cwd)
     }
 
     fn spawn_into(
@@ -546,10 +642,10 @@ impl Transport for BuildBeforeDestroyTransport {
         session: &SessionName,
         window: &WindowName,
         _argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn("spawn_into", session, window)
+        self.spawn("spawn_into", session, window, cwd)
     }
 
     fn inject(
@@ -648,6 +744,27 @@ impl Transport for BuildBeforeDestroyTransport {
         Ok(windows.into_iter().collect())
     }
 
+    fn set_session_owner_with_generation(
+        &self,
+        session: &SessionName,
+        workspace: &Path,
+        team: &str,
+        generation: &str,
+    ) -> Result<(), TransportError> {
+        let mut state = self.state.lock().unwrap();
+        state.ops.push(format!("set_session_owner:{}", session.as_str()));
+        state.owners.insert(session.as_str().to_string(), SessionOwner {
+            workspace: workspace.canonicalize().unwrap().to_string_lossy().into_owned(),
+            team: team.to_string(),
+            generation: generation.to_string(),
+        });
+        Ok(())
+    }
+
+    fn session_owner(&self, session: &SessionName) -> Result<Option<SessionOwner>, TransportError> {
+        Ok(self.state.lock().unwrap().owners.get(session.as_str()).cloned())
+    }
+
     fn set_session_env(
         &self,
         _session: &SessionName,
@@ -665,7 +782,7 @@ impl Transport for BuildBeforeDestroyTransport {
             .push(format!("kill_session:{}", session.as_str()));
         if session.as_str() == TEAM_SESSION {
             self.state.lock().unwrap().session_present = false;
-            self.state.lock().unwrap().panes.clear();
+            self.state.lock().unwrap().panes.retain(|_, pane| pane.session != *session);
             if let Some(socket) = self.real_socket.as_ref() {
                 let status = Command::new("tmux")
                     .args([

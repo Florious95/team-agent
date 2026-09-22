@@ -30,7 +30,7 @@ const DEFAULT_COMMANDS: &[&str] = &[
     "start-agent",
     "stop-agent",
     "reset-agent",
-    "diagnose",
+    "doctor",
     "claim-leader",
     "takeover",
     "attach-leader",
@@ -50,7 +50,7 @@ const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "acknowledge-idle",
     "repair-state",
     "leaders",
-    "doctor",
+    "diagnose",
     "attach-app-server-leader",
     "remove-agent",
     "fork-agent",
@@ -123,6 +123,17 @@ fn red1_default_help_contracts_to_core_guided_surface() {
             && lower.contains("copilot"),
         "RED1: default help must render provider launchers as a launcher group, not as counted commands; help=\n{help}"
     );
+}
+
+#[test]
+fn diagnose_compatibility_help_points_to_public_doctor_command() {
+    let case = Case::new("diagnose-alias");
+    for command in ["doctor", "diagnose"] {
+        let output = case.run_ta(&[command, "--help"]);
+        let text = output_text(&output);
+        assert!(output.status.success(), "{command} --help: {text}");
+        assert!(text.contains("usage: team-agent doctor"), "{text}");
+    }
 }
 
 #[test]

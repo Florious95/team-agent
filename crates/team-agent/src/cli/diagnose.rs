@@ -161,6 +161,19 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
             }
             issues.push(issue);
         }
+        // Preserve distinct worker failures even when the shared session probe
+        // short-circuits pane enumeration.  This keeps scope evidence without
+        // issuing another transport probe per worker.
+        if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+            for agent_id in agents.keys() {
+                let issue = format!("worker_window_missing:{agent_id}");
+                issues.push(json!(issue.clone()));
+                repairs.push(json!({
+                    "issue": issue,
+                    "action": "team-agent restart",
+                }));
+            }
+        }
         return (Value::Array(issues), Value::Array(repairs));
     }
 
@@ -289,6 +302,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
     state: &Value,
     backend: &dyn Transport,
     selected_team_key: Option<&str>,
+    coordinator_health: &crate::coordinator::HealthReport,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
     append_live_leader_workspace_mismatch_issue(
@@ -306,7 +320,7 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut repairs,
     );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
-    append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
+    append_coordinator_health_issue(workspace, state, coordinator_health, &mut issues, &mut repairs);
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
 }
@@ -322,8 +336,27 @@ pub(crate) fn workspace_has_existing_team_runtime(
     workspace: &std::path::Path,
     team_key: &str,
 ) -> bool {
-    workspace.join("team.spec.yaml").is_file()
-        || crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
+    // A source TEAM.md/team.spec.yaml is install/configuration context, not a
+    // live runtime.  Only persisted runtime state/specs make topology checks
+    // applicable; an empty workspace therefore remains a healthy no-runtime
+    // report instead of a fabricated missing-session issue.
+    if let Ok(state) = crate::state::persist::load_runtime_state_without_migrations(workspace) {
+        // The workspace's top-level view may describe a stopped sibling.
+        // Preserve the top-level fallback for legacy single-team state only
+        // when there is no selected team entry.
+        let team_state = state
+            .get("teams")
+            .and_then(|teams| teams.get(team_key))
+            .unwrap_or(&state);
+        let terminal = team_state
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "stopped" | "shutdown" | "archived" | "terminal"));
+        if terminal {
+            return false;
+        }
+    }
+    crate::model::paths::runtime_spec_path(workspace, team_key).is_file()
         || crate::state::persist::runtime_state_path(workspace).is_file()
 }
 
@@ -790,21 +823,18 @@ fn append_legacy_snapshot_issue(workspace: &std::path::Path, state: &Value, issu
 fn append_coordinator_health_issue(
     workspace: &std::path::Path,
     state: &Value,
+    health: &crate::coordinator::HealthReport,
     issues: &mut Value,
     repairs: &mut Value,
 ) {
-    // Diagnose must observe coordinator state without initializing or rewriting
-    // `.team/runtime/team.db`, including when the file is missing or empty.
-    let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    let health = crate::coordinator::coordinator_health_read_only(&workspace);
-    let Some(id) = coordinator_issue_id(state, &health) else {
+    let Some(id) = coordinator_issue_id(state, health) else {
         return;
     };
     if let Some(items) = issues.as_array_mut() {
-        items.push(coordinator_issue_value(id, &health, workspace.as_path()));
+        items.push(coordinator_issue_value(id, health, workspace));
     }
     if let Some(items) = repairs.as_array_mut() {
-        items.push(coordinator_repair_hint(id, &health));
+        items.push(coordinator_repair_hint(id, health));
     }
 }
 
