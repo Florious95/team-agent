@@ -37,7 +37,7 @@ fn e4_exec_provider_state_top_level_team_owner_pane_id_protected() {
             "coder": {"pane_id": "%1", "provider": "codex", "status": "running"}
         }
     });
-    let anchors = collect_state_leader_anchor_pane_ids(&state);
+    let anchors = collect_state_leader_anchor_pane_ids(&state, None);
     assert!(
         anchors.contains("%0"),
         "ExecProvider 模式 leader 锚 pane(state.team_owner.pane_id=%0)必须被 augmenter \
@@ -66,7 +66,7 @@ fn e4b_team_in_team_child_state_anchor_protects_parent_worker_pane() {
             "provider": "claude_code"
         }
     });
-    let anchors = collect_state_leader_anchor_pane_ids(&child_state);
+    let anchors = collect_state_leader_anchor_pane_ids(&child_state, None);
     assert!(
         anchors.contains("%7"),
         "E4b: 子 team state 的 team_owner.pane_id(指父 team worker pane %7)必须被 \
@@ -92,7 +92,7 @@ fn e4_nested_teams_map_anchor_protected_under_teams_key_per_bug2_scope() {
             }
         }
     });
-    let anchors = collect_state_leader_anchor_pane_ids(&state);
+    let anchors = collect_state_leader_anchor_pane_ids(&state, None);
     assert!(
         anchors.contains("%3") && anchors.contains("%9"),
         "嵌套 teams[<key>] 形态:augmenter 必须扫每个 team entry 的 team_owner/\
@@ -107,7 +107,7 @@ fn e4_negative_state_without_leader_anchor_yields_empty_set_must17_not_overprote
     // 这条挡住"任何 worker pane 都被错保"的退化。
     let empty = json!({});
     assert!(
-        collect_state_leader_anchor_pane_ids(&empty).is_empty(),
+        collect_state_leader_anchor_pane_ids(&empty, None).is_empty(),
         "空 state augmenter 必返空(否则保护撒太宽)"
     );
 
@@ -117,7 +117,7 @@ fn e4_negative_state_without_leader_anchor_yields_empty_set_must17_not_overprote
             "coder": {"pane_id": "%5", "provider": "codex", "status": "running"}
         }
     });
-    let anchors = collect_state_leader_anchor_pane_ids(&worker_only);
+    let anchors = collect_state_leader_anchor_pane_ids(&worker_only, None);
     assert!(
         anchors.is_empty(),
         "state 只有 agents.<id>.pane_id(worker)不应被识别为 leader 锚(MUST-17 不\
@@ -130,7 +130,7 @@ fn e4_negative_state_without_leader_anchor_yields_empty_set_must17_not_overprote
         "leader_receiver": {"pane_id": "", "provider": "codex"}
     });
     assert!(
-        collect_state_leader_anchor_pane_ids(&empty_pane).is_empty(),
+        collect_state_leader_anchor_pane_ids(&empty_pane, None).is_empty(),
         "team_owner.pane_id 空串不能算锚(state 还没绑定时的占位形态)"
     );
 }
@@ -150,7 +150,7 @@ fn e4_dedup_top_level_and_team_entry_pointing_at_same_pane() {
             }
         }
     });
-    let anchors = collect_state_leader_anchor_pane_ids(&state);
+    let anchors = collect_state_leader_anchor_pane_ids(&state, None);
     assert_eq!(
         anchors.len(),
         1,
