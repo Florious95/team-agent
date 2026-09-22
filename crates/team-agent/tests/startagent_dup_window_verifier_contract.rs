@@ -45,24 +45,19 @@ struct DupWindowCase {
 }
 
 impl DupWindowCase {
-    /// quick-start a real fake-provider team via the real binary.
-    /// `per_agent_windows=true` passes `--no-display` (one window per agent);
-    /// false keeps the default adaptive display path.
-    fn start(tag: &str, workers: &[&str], per_agent_windows: bool) -> Self {
+    /// Start a real fake-provider team through the default silent tmux path.
+    fn start(tag: &str, workers: &[&str]) -> Self {
         let env = HermeticTestEnv::enter(tag);
         env.scrub_tmux();
         let workspace = env.workspace(tag);
         write_team_docs(&workspace, workers);
-        let mut args = vec![
+        let args = vec![
             "quick-start",
             "--workspace",
             workspace.to_str().expect("workspace utf8"),
             "--yes",
             "--json",
         ];
-        if per_agent_windows {
-            args.push("--no-display");
-        }
         let output = env.run_cli(&workspace, &args);
         // A leaderless CLI quick-start reports degraded (`leader_receiver_unbound`,
         // non-zero exit) while still spawning every worker — the same state a
@@ -254,14 +249,14 @@ fn command_reported_ok(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-/// RED 1 — per-agent window layout (`--no-display`): after a single
-/// `start-agent w1 --force` against a healthy live worker, tmux must contain
+/// RED 1 — default silent tmux layout: after a single `start-agent w1 --force`
+/// against a healthy live worker, tmux must contain
 /// exactly ONE live pane in windows named `w1`, whatever the command's exit.
 /// Two live panes = the reported same-name double-window regression.
 #[test]
 #[serial(env)]
 fn force_start_on_live_worker_leaves_exactly_one_same_role_pane_per_agent_window() {
-    let case = DupWindowCase::start("sdw-red1", &["w1"], true);
+    let case = DupWindowCase::start("sdw-red1", &["w1"]);
     let before = case.live_panes_for_window("w1");
     assert_eq!(
         before.len(),
@@ -308,12 +303,12 @@ fn force_start_on_live_worker_leaves_exactly_one_same_role_pane_per_agent_window
     case.shutdown();
 }
 
-/// RED 2 — default adaptive display path (no `--no-display`), two workers:
-/// forcing w1 must neither duplicate w1 nor disturb the co-tenant w2 pane.
+/// RED 2 — default silent tmux layout with two workers: forcing w1 must
+/// neither duplicate w1 nor disturb the co-tenant w2 pane.
 #[test]
 #[serial(env)]
 fn force_start_on_adaptive_layout_does_not_duplicate_or_disturb_cotenants() {
-    let case = DupWindowCase::start("sdw-red2", &["w1", "w2"], false);
+    let case = DupWindowCase::start("sdw-red2", &["w1", "w2"]);
     let w2_before = case.live_panes_for_window("w2");
     assert_eq!(
         w2_before.len(),
@@ -349,7 +344,7 @@ fn force_start_on_adaptive_layout_does_not_duplicate_or_disturb_cotenants() {
 #[test]
 #[serial(env)]
 fn repeated_force_start_converges_to_one_pane_and_refusals_freeze_topology() {
-    let case = DupWindowCase::start("sdw-red3", &["w1"], true);
+    let case = DupWindowCase::start("sdw-red3", &["w1"]);
 
     for round in 1..=2 {
         let topology_before = case.live_panes();

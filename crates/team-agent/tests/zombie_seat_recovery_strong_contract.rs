@@ -68,7 +68,6 @@ impl SeatCase {
             "--team-id",
             team,
             "--yes",
-            "--no-display",
             "--json",
         ]);
         // quick-start may exit nonzero for leader_receiver_unbound while still
@@ -225,7 +224,6 @@ impl SeatCase {
             "--team-id",
             team,
             "--yes",
-            "--no-display",
             "--json",
         ]);
         assert!(

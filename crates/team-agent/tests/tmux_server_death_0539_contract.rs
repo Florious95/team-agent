@@ -28,8 +28,8 @@ const A37_INERT_SH_TAIL: &str = r#"exec /bin/sh -c 'trap '\'''\'' INT QUIT; stty
 const LEGACY_LOGIN_SHELL_TAIL: &str = "exec \"${SHELL:-/bin/zsh}\" -l";
 
 #[test]
-fn display_cleanup_uses_scoped_transport_not_raw_tmux_helper() {
-    let display = read_repo_file("crates/team-agent/src/lifecycle/display.rs");
+fn scoped_cleanup_uses_transport_not_raw_tmux_helper() {
+    let display = read_repo_file("crates/team-agent/src/cli/mod.rs");
     let mut offenders = Vec::new();
 
     for needle in [

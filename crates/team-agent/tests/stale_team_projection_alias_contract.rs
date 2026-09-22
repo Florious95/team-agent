@@ -138,7 +138,6 @@ impl SupermarketCase {
             "--team-id",
             team,
             "--yes",
-            "--no-display",
             "--json",
         ]);
         let json = json_output(&out);
@@ -238,7 +237,6 @@ impl SupermarketCase {
             self.ws(),
             "--team",
             team,
-            "--no-display",
             "--json",
         ]);
         let json = json_output(&out);
