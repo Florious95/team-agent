@@ -710,7 +710,8 @@ fn p15_explicit_gate_and_repair_modes_keep_safe_rejections_and_evidence() {
             "P15 rc mismatch: {args:?}"
         );
         assert_eq!(
-            doctor.stdout, diagnose.stdout,
+            text(&doctor.stdout).replace(&path_arg(&left.workspace), "$WORKSPACE"),
+            text(&diagnose.stdout).replace(&path_arg(&right.workspace), "$WORKSPACE"),
             "P15 stdout mismatch: {args:?}"
         );
         assert_eq!(

@@ -170,7 +170,7 @@ fn p3_human_diagnose_is_bounded_and_control_clean_for_generated_inputs() {
         } else {
             assert_eq!(output.status.code(), Some(1), "{human}");
             assert!(human.contains("runtime_selection_failed"), "{human}");
-            assert!(human.contains("select an existing Team runtime"), "{human}");
+            assert!(human.contains("repair: action=unable to select runtime team:"), "{human}");
         }
         assert!(
             !human.contains("providers: {")
