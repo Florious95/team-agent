@@ -163,11 +163,15 @@ fn p3_human_diagnose_is_bounded_and_control_clean_for_generated_inputs() {
                 "P3 RED: case={index} leaked control character: {line:?}"
             );
         }
-        assert!(human.contains("team_spec_or_runtime_missing"));
-        assert!(
-            human.contains("team-agent quick-start"),
-            "P3 RED: repair record was omitted from human output: {human}"
-        );
+        if team.is_empty() {
+            assert!(output.status.success(), "{human}");
+            assert!(human.contains("runtime=not_present"), "{human}");
+            assert!(!human.contains("team_spec_or_runtime_missing"), "{human}");
+        } else {
+            assert_eq!(output.status.code(), Some(1), "{human}");
+            assert!(human.contains("runtime_selection_failed"), "{human}");
+            assert!(human.contains("select an existing Team runtime"), "{human}");
+        }
         assert!(
             !human.contains("providers: {")
                 && !human.contains("runtime: {")
@@ -366,11 +370,13 @@ fn p6_secret_scan_ignores_examples_but_catches_real_line_start_assignments() {
             finding.get("rule").and_then(Value::as_str),
             Some("api_key_assignment")
         );
-        assert!(finding
-            .get("match_excerpt")
-            .and_then(Value::as_str)
-            .is_some());
+        assert!(finding.get("match_excerpt").is_none());
     }
+    assert_eq!(findings[0]["line"], 4);
+    assert_eq!(findings[1]["line"], 5);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-positive"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-export-positive"));
 }
 
 #[test]

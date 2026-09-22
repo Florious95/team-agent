@@ -671,13 +671,12 @@ fn exit_code_numeric() {
 }
 
 // =========================================================================
-// cmd_doctor 分派(commands.py:218-260):--fix 缺 gate -> Usage err
+// cmd_doctor: --fix without --gate is a structured failure in both renderers.
 // =========================================================================
 
 #[test]
-fn cmd_doctor_fix_without_gate_is_usage_error() {
-    // commands.py:220-221: --fix and not gate -> TeamAgentError("--fix requires --gate")
-    let args = DoctorArgs {
+fn cmd_doctor_fix_without_gate_reports_usage_failure() {
+    let mut args = DoctorArgs {
         spec: None,
         workspace: PathBuf::from("."),
         gate: None,
@@ -689,12 +688,21 @@ fn cmd_doctor_fix_without_gate_is_usage_error() {
         confirm: false,
         json: false,
     };
-    let err = cmd_doctor(&args).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("--fix requires --gate"),
-        "expected '--fix requires --gate', got: {msg}"
-    );
+    let human = cmd_doctor(&args).expect("structured usage failure");
+    assert_eq!(human.exit, ExitCode::Error);
+    let CmdOutput::Human(text) = human.output else {
+        panic!("expected human triage");
+    };
+    assert!(text.contains("fix_requires_gate"), "{text}");
+    assert!(text.contains("add --gate orphans|comms"), "{text}");
+
+    args.json = true;
+    let result = cmd_doctor(&args).expect("structured JSON usage failure");
+    assert_eq!(result.exit, ExitCode::Error);
+    let value = json_output(result);
+    assert_eq!(value["ok"], false);
+    assert_eq!(value["error"], "--fix requires --gate");
+    assert_eq!(value["issues"], json!(["fix_requires_gate"]));
 }
 
 // =========================================================================

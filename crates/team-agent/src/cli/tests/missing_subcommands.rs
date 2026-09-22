@@ -299,7 +299,7 @@ fn dispatch_routes_sessions_subcommand() {
 // + NO session_name + NO agents -> issues=[] -> EXIT 0.
 #[test]
 #[serial(env)]
-fn dispatch_routes_diagnose_healthy_leader() {
+fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
     let _env = EnvUnsetGuard::unset(&[
         "TMUX",
         "TMUX_PANE",
@@ -332,17 +332,23 @@ fn dispatch_routes_diagnose_healthy_leader() {
             pane_pid: None,
             leader_env: Default::default(),
         }]);
-    let code = crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
-        run(
-            &cli_argv(&["diagnose", "--workspace", &ws.to_string_lossy(), "--json"]),
-            &ws,
-        )
+    crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
+        for command in ["doctor", "diagnose"] {
+            let code = run(
+                &cli_argv(&[command, "--workspace", &ws.to_string_lossy(), "--json"]),
+                &ws,
+            );
+            assert_eq!(code, ExitCode::Error, "healthy binding alone cannot hide missing coordinator");
+        }
+        let report = json_output(cmd_diagnose(&DiagnoseArgs {
+            workspace: ws.clone(), json: true, team: None,
+        }).expect("diagnostic report"));
+        assert_eq!(report["coordinator"]["ok"], false, "{report}");
+        let issues = report["issues"].to_string();
+        for binding_failure in ["leader_not_attached", "leader_receiver_unbound", "leader_workspace_mismatch"] {
+            assert!(!issues.contains(binding_failure), "healthy binding regressed: {report}");
+        }
     });
-    assert_eq!(
-        code,
-        ExitCode::Ok,
-        "`diagnose` must be Ok when canonical owner/receiver, production registry, and live align; got {code:?}"
-    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

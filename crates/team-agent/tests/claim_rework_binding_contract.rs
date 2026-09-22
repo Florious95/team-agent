@@ -103,7 +103,7 @@ fn isolated_empty_team_is_unbound() {
 
 #[test]
 #[serial_test::serial(env)]
-fn missing_workspace_diagnose_does_not_claim() {
+fn empty_workspace_diagnose_does_not_claim() {
     let _home = IsolatedHome::enter();
     let workspace = unique_workspace();
     let diagnose = diagnose_json_team(&workspace, None);
@@ -113,23 +113,19 @@ fn missing_workspace_diagnose_does_not_claim() {
         .cloned()
         .unwrap_or(json!([]));
     let repairs_text = repairs.to_string();
-    assert!(
-        ids.iter().any(|id| id == "team_spec_or_runtime_missing"),
-        "missing workspace must surface missing-runtime, issues={ids:?}"
-    );
+    assert!(ids.is_empty(), "empty workspace has no runtime issues: {ids:?}");
+    assert_eq!(diagnose["runtime"]["status"], "not_present");
     assert!(
         !ids.iter().any(|id| id == "leader_receiver_unbound"),
         "synthetic current is not an unbound team; issues={ids:?}"
     );
-    assert!(
-        repairs_text.contains("quick-start"),
-        "repairs={repairs_text}"
-    );
+    assert_eq!(repairs, json!([]), "repairs={repairs_text}");
     assert!(
         !repairs_text.contains("claim-leader"),
         "must not induce claim on a workspace with no team; repairs={repairs_text}"
     );
-    assert_ne!(diagnose.get("ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(diagnose.get("ok").and_then(Value::as_bool), Some(true));
+    assert!(!workspace.join(".team/runtime/state.json").exists());
 }
 
 #[test]
