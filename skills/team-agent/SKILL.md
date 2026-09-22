@@ -17,7 +17,7 @@ team-agent --help
 team-agent doctor --help
 ```
 
-**Launch** from a tmux-addressable pane: `team-agent claude` or `team-agent codex`, then `team-agent quick-start .team/current`. Do not start a real team from a naked terminal. Existing tmux/Ghostty layouts are valid if `quick-start` runs from the leader pane.
+**Launch** from a tmux-addressable pane: `team-agent claude` or `team-agent codex`, then `team-agent quick-start .team/current`. Do not start a real team from a naked terminal. Workers always run in independent background windows on the workspace-scoped tmux server.
 
 **Operate**
 

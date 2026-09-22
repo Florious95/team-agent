@@ -4,9 +4,9 @@
 //!   provides:
 //!     - name: quick_start
 //!       what: 由角色目录一键起队
-//!     - name: quick_start_in_workspace_with_display_and_backend
-//!       what: 带显示开关与后端选择的起队入口
-//!     - name: quick_start_with_transport_in_workspace_with_display
+//!     - name: quick_start_in_workspace_with_backend
+//!       what: 带 transport 后端选择的起队入口
+//!     - name: quick_start_with_transport_in_workspace
 //!       what: 起队的实体实现，含 leader pane 校验、层级门与已有 runtime 的早退
 //!   depends:
 //!     - crate::compiler
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
@@ -1042,9 +1042,8 @@ pub(crate) fn quick_start_in_workspace(
 }
 
 /// ---
-/// purpose: 带显示开关与后端字面量的起队入口
+/// purpose: 带后端字面量的起队入口
 /// params:
-///   open_display: 为假时把 spec 的显示后端改成 none
 ///   backend: 未给或为 tmux 时走既有 tmux 路径，其余字面量经 transport 工厂解析
 /// returns: 起队报告
 /// errors: 后端字面量不认识时返回 TeamSelect；工厂拒绝或后端不可用时如实报错，不退回 tmux
@@ -1061,13 +1060,12 @@ pub(crate) fn quick_start_in_workspace(
 /// its spawn/inject/capture calls to `TransportError::MuxUnavailable`
 /// honestly — MUST-NOT-13 + CR C-1 ①. Users see a real "conpty
 /// unavailable" error rather than a silent tmux fallback.
-pub fn quick_start_in_workspace_with_display_and_backend(
+pub fn quick_start_in_workspace_with_backend(
     workspace: &Path,
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
     team_id: Option<&str>,
-    open_display: bool,
     backend: Option<&str>,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = explicit_quick_start_workspace(workspace);
@@ -1079,14 +1077,13 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     let is_tmux_or_default = matches!(literal, None | Some("") | Some("tmux") | Some("TMUX"));
     if is_tmux_or_default {
         let transport = quick_start_tmux_backend(&workspace);
-        return quick_start_with_transport_in_workspace_with_display(
+        return quick_start_with_transport_in_workspace(
             &workspace,
             agents_dir,
             name,
             yes,
             team_id,
             &transport,
-            open_display,
         );
     }
     // Explicit non-tmux backend: route through the factory. Parse the
@@ -1181,14 +1178,13 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     let resolved = crate::transport_factory::resolve_transport(input)
         .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     // Hand the boxed backend down as `&dyn Transport`.
-    quick_start_with_transport_in_workspace_with_display(
+    quick_start_with_transport_in_workspace(
         &workspace,
         agents_dir,
         name,
         yes,
         team_id,
         &*resolved.backend,
-        open_display,
     )
 }
 
@@ -1210,10 +1206,9 @@ pub(crate) fn quick_start_with_transport(
 }
 
 /// ---
-/// purpose: 带注入 transport 与显式 workspace 的起队入口，默认开显示
-/// returns: 起队报告
-/// errors: 透传实体实现的错误
-/// contract_id: lifecycle.quick_start.entry
+/// purpose: 起队的实体实现，校验 leader pane、编译 spec、定团队键、判层级、必要时早退，然后起队并给 attach 指引
+/// returns: 起队报告，含 session 名与 attach 命令
+/// errors: leader pane 环境无效返回 RequirementUnmet；角色目录不存在或编译失败返回 Compile；嵌套层级超限返回 RequirementUnmet；读 state 失败返回 StatePersist
 /// ---
 pub(crate) fn quick_start_with_transport_in_workspace(
     workspace: &Path,
@@ -1223,50 +1218,27 @@ pub(crate) fn quick_start_with_transport_in_workspace(
     team_id: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
-    quick_start_with_transport_in_workspace_with_display(
-        workspace, agents_dir, name, yes, team_id, transport, true,
-    )
-}
-
-/// ---
-/// purpose: 起队的实体实现，校验 leader pane、编译 spec、定团队键、判层级、必要时早退，然后起队并给 attach 指引
-/// params:
-///   open_display: 为假时把显示后端改成 none
-/// returns: 起队报告，含 session 名与 attach 命令
-/// errors: leader pane 环境无效返回 RequirementUnmet；角色目录不存在或编译失败返回 Compile；嵌套层级超限返回 RequirementUnmet；读 state 失败返回 StatePersist
-/// ---
-pub(crate) fn quick_start_with_transport_in_workspace_with_display(
-    workspace: &Path,
-    agents_dir: &Path,
-    name: Option<&str>,
-    yes: bool,
-    team_id: Option<&str>,
-    transport: &dyn Transport,
-    open_display: bool,
-) -> Result<QuickStartReport, LifecycleError> {
     let mut discover = |requested: &str| {
         crate::lifecycle::launch::pi_mcp::pi_model_candidates(requested).map_err(|_| ())
     };
-    quick_start_with_transport_in_workspace_with_display_pi_preflight(
+    quick_start_with_transport_in_workspace_pi_preflight(
         workspace,
         agents_dir,
         name,
         yes,
         team_id,
         transport,
-        open_display,
         &mut discover,
     )
 }
 
-pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
+pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     workspace: &Path,
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
     team_id: Option<&str>,
     transport: &dyn Transport,
-    open_display: bool,
     discover: &mut dyn FnMut(&str) -> Result<Vec<String>, ()>,
 ) -> Result<QuickStartReport, LifecycleError> {
     // B-7 / 036b N38 三行 fail-fast — TEAM_AGENT_LEADER_PANE_ID 主动路径在 quick-start
@@ -1288,9 +1260,6 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     override_spec_workspace(&mut spec, &workspace);
-    if !open_display {
-        override_spec_display_backend(&mut spec, "none");
-    }
     let explicit_team_key = quick_start_requested_team_key(team_id, name).map(str::to_string);
     let canonical_team_key = explicit_team_key
         .clone()
@@ -1487,7 +1456,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         team_depth.team_depth,
     )?;
     // Fresh initialization owns this one fail-closed bind attempt. It is
-    // independent of display layout, so --no-display never suppresses receiver
+    // independent of worker layout, so receiver binding is always attempted
     // binding. Readiness receives true only after canonical registry readback.
     let _ = take_fresh_bind_refusal();
     launch.leader_receiver_attached = bind_fresh_quick_start_leader(
@@ -1562,18 +1531,12 @@ pub(crate) fn quick_start_with_transport_in_workspace_with_display_pi_preflight(
         ));
     }
     next_actions.extend(attach_commands.iter().cloned());
-    let display_backend = state
-        .get("display_backend")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("none")
-        .to_string();
     quick_start_phase_timer.emit(&workspace, "launch.phase", "completed");
     Ok(QuickStartReport::Ready {
         session_name,
         launch: Box::new(launch),
         next_actions,
         attach_commands,
-        display_backend,
         worker_readiness,
         team: state_team_key,
     })

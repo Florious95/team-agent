@@ -136,7 +136,6 @@ communication:
     mirror_files: .team/messages
 runtime:
   backend: tmux
-  display_backend: none
   session_name: teamspec-full-example
   auto_launch: true
   require_user_approval_before_launch: true

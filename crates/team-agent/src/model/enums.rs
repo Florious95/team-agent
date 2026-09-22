@@ -208,30 +208,6 @@ pub enum Backend {
     Pty,
 }
 
-/// display backend(`VALID_DISPLAY_BACKENDS` `display/backend.py:7-9`)。
-/// **`adaptive` 在代码集里但不在 JSON schema enum** —— 以代码为准(陷阱 #5)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisplayBackend {
-    None,
-    TmuxAttach,
-    Iterm,
-    Ghostty,
-    GhosttyWindow,
-    GhosttyWorkspace,
-    Adaptive,
-}
-
-impl DisplayBackend {
-    /// `DISPLAY_BACKENDS_WITH_WORKER_VIEWS = GHOSTTY_* | {adaptive}`(`display/backend.py:8`)。
-    pub fn has_worker_views(self) -> bool {
-        matches!(
-            self,
-            Self::Ghostty | Self::GhosttyWindow | Self::GhosttyWorkspace | Self::Adaptive
-        )
-    }
-}
-
 /// agent permission mode(schema `agent.permission_mode`;compiler 恒发 `restricted`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -325,18 +301,6 @@ mod tests {
                 "\"mcp_inbox\"",
             ),
             (
-                serde_json::to_string(&DisplayBackend::TmuxAttach).unwrap(),
-                "\"tmux_attach\"",
-            ),
-            (
-                serde_json::to_string(&DisplayBackend::GhosttyWorkspace).unwrap(),
-                "\"ghostty_workspace\"",
-            ),
-            (
-                serde_json::to_string(&DisplayBackend::Adaptive).unwrap(),
-                "\"adaptive\"",
-            ),
-            (
                 serde_json::to_string(&PaneLiveness::Unknown).unwrap(),
                 "\"unknown\"",
             ),
@@ -377,25 +341,6 @@ mod tests {
             TaskStatus::NeedsRetry,
         ] {
             assert!(!s.is_terminal());
-        }
-    }
-
-    #[test]
-    fn display_backend_worker_views() {
-        for b in [
-            DisplayBackend::Ghostty,
-            DisplayBackend::GhosttyWindow,
-            DisplayBackend::GhosttyWorkspace,
-            DisplayBackend::Adaptive,
-        ] {
-            assert!(b.has_worker_views());
-        }
-        for b in [
-            DisplayBackend::None,
-            DisplayBackend::TmuxAttach,
-            DisplayBackend::Iterm,
-        ] {
-            assert!(!b.has_worker_views());
         }
     }
 

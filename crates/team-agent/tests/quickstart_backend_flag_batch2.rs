@@ -174,7 +174,7 @@ fn batch2_migration_anchors_present_in_source() {
     // half-checked abstraction.
     let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     assert!(
-        launch.contains("fn quick_start_in_workspace_with_display_and_backend"),
+        launch.contains("fn quick_start_in_workspace_with_backend"),
         "Batch 2 new lifecycle entrypoint symbol missing"
     );
     assert!(

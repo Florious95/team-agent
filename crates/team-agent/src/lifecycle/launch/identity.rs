@@ -1,5 +1,5 @@
 //! ---
-//! purpose: team 与席位的身份取值，团队键、display 后端、auth_mode、effort 与 quick-start 层级判定
+//! purpose: team 与席位的身份取值，团队键、auth_mode、effort 与 quick-start 层级判定
 //! contract:
 //!   provides:
 //!     - name: spec_team_id
@@ -18,7 +18,6 @@
 //!     - crate::state::projection
 //!     - crate::state::persist
 //!     - crate::state::repository
-//!     - crate::lifecycle::display
 //!     - crate::provider::wire
 //! boundary:
 //!   - 只做身份判定与取值，不 spawn、不开显示
@@ -31,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
@@ -97,21 +96,6 @@ pub(super) fn transport_has_session(transport: &dyn Transport, session_name: &Se
         Ok(Ok(live)) => live,
         Ok(Err(_)) | Err(_) => false,
     }
-}
-
-/// ---
-/// purpose: 取 spec 请求的显示后端并交给 display 解析
-/// returns: 解析后的后端，spec 未写或写了未知值时为默认 adaptive
-/// ---
-pub(super) fn spec_display_backend(spec: &Value) -> DisplayBackend {
-    let requested = spec
-        .get("runtime")
-        .and_then(|runtime| runtime.get("display_backend"))
-        .and_then(Value::as_str)
-        .and_then(|backend| {
-            serde_json::from_value::<DisplayBackend>(serde_json::json!(backend)).ok()
-        });
-    crate::lifecycle::display::resolve_display_backend(requested, None).backend
 }
 
 use crate::provider::wire::parse_provider;

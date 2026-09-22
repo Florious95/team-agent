@@ -35,11 +35,11 @@ use std::process::Command;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
-use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
+use crate::transport::{PaneId, SessionName, Target, Transport};
 
 use super::agent_state::running_agent_state;
 use super::identity::{explicit_active_team_key, runtime_team_key_for_spec};
@@ -132,11 +132,7 @@ pub(super) fn persist_spawn_agent_state(
             continue;
         }
         let started_agent = started.iter().find(|agent| agent.agent_id.as_str() == id);
-        let window = started_agent
-            .and_then(|started| started.layout_window.as_ref())
-            .map(WindowName::as_str)
-            .or_else(|| agent.get("window").and_then(Value::as_str))
-            .unwrap_or(id);
+        let window = agent.get("window").and_then(Value::as_str).unwrap_or(id);
         if !live_started_agents.contains(id)
             || (!live_windows.is_empty() && !live_windows.contains(window))
         {

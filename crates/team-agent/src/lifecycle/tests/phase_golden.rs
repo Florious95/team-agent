@@ -244,14 +244,13 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         leader_env: BTreeMap::new(),
     }])
     .with_pane_current_command("%caller", "codex");
-    let quick_start = quick_start_with_transport_in_workspace_with_display(
+    let quick_start = quick_start_with_transport_in_workspace(
         &workspace,
         &team,
         None,
         true,
         None,
         &launch_transport,
-        false,
     );
     let status_compact = cmd_status(&StatusArgs {
         agent: None,
@@ -446,7 +445,6 @@ fn quick_start_value(result: Result<QuickStartReport, LifecycleError>) -> Value 
         Ok(QuickStartReport::Ready {
             session_name,
             launch,
-            display_backend,
             worker_readiness,
             ..
         }) => {
@@ -460,7 +458,6 @@ fn quick_start_value(result: Result<QuickStartReport, LifecycleError>) -> Value 
                         "start_mode": format!("{:?}", started.start_mode),
                         "session_id": started.session_id.as_ref().map(|id| id.as_str().to_string()),
                         "rollout_path": started.rollout_path.as_ref().map(|path| path.as_path().to_string_lossy().to_string()),
-                        "layout_window": started.layout_window.as_ref().map(|window| window.as_str().to_string()),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -468,7 +465,6 @@ fn quick_start_value(result: Result<QuickStartReport, LifecycleError>) -> Value 
                 "ok": true,
                 "status": "ready",
                 "session_name": session_name.as_str(),
-                "display_backend": display_backend,
                 "worker_readiness": format!("{worker_readiness:?}"),
                 "started": agents,
             })
@@ -542,14 +538,13 @@ fn run_diagnose_after_quick_start() -> Value {
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
     let launch_transport = codex_ready_transport();
-    quick_start_with_transport_in_workspace_with_display(
+    quick_start_with_transport_in_workspace(
         &workspace,
         &team,
         None,
         true,
         None,
         &launch_transport,
-        false,
     )
     .expect("tombstone fixture must quick-start");
     let mut state = crate::state::persist::load_runtime_state(&workspace)

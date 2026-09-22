@@ -20,8 +20,6 @@
 //!   (`stop_agent`/`reset_agent`/`add_agent`/`fork_agent`)、`lifecycle/agents.py`
 //!   (`remove_agent` + `_RemoveRollback`)、`lifecycle/paste_buffer_hygiene.py`。
 //! - `restart/orchestration.py`(`restart` Route B)、`restart/selection.py`、`restart/snapshot.py`。
-//! - `display/backend.py`/`adaptive.py`/`tiling.py`/`workspace.py`/`worker_window.py`/
-//!   `ghostty.py`/`close.py`/`rebuild.py`。
 //! - `orchestrator/__init__.py`/`plan.py`/`state.py`(plan 多 stage 状态机)。
 //! - `diagnose/quick_start.py`(`quick_start`/`prepare_quick_start_team`/`wait_ready`)。
 //!
@@ -52,7 +50,6 @@
 // (unimplemented!() stub 不被拦);tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-pub mod display;
 pub mod helpers;
 pub mod launch;
 pub(crate) mod lock;
@@ -70,12 +67,7 @@ use crate::model::ids::AgentId;
 use crate::provider::{RolloutPath, SessionId};
 use crate::transport::{PaneId, SessionName, WindowName};
 
-// 复用既有 enum(model::enums)。`DisplayBackend` 已在 step2 定义并带 `has_worker_views()`。
-pub use crate::model::enums::DisplayBackend;
-
 pub use types::*;
-
-pub use display::*;
 pub use launch::*;
 pub use restart::*;
 

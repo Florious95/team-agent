@@ -184,7 +184,7 @@ fn write_team_docs(workspace: &Path) {
     std::fs::write(
         workspace.join("TEAM.md"),
         format!(
-            "---\nname: {TEAM_NAME}\nobjective: clone-agent tools preservation\nprovider: fake\ndisplay_backend: none\n---\n"
+            "---\nname: {TEAM_NAME}\nobjective: clone-agent tools preservation\nprovider: fake\n---\n"
         ),
     )
     .expect("TEAM.md");
@@ -324,7 +324,6 @@ fn clone_ok(case: &Case, source: &str, dest: &str, phase: &str) {
         case.ws(),
         "--team",
         TEAM_NAME,
-        "--no-display",
         "--json",
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);

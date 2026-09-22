@@ -272,7 +272,6 @@ fn p4_quick_start_compiles_valid_team_and_rejects_invalid_role() {
         name: None,
         team_id: Some("contract-team".into()),
         yes: false,
-        no_display: true,
         backend: None,
         json: true,
         detail: true,
@@ -287,7 +286,6 @@ fn p4_quick_start_compiles_valid_team_and_rejects_invalid_role() {
         name: None,
         team_id: None,
         yes: false,
-        no_display: true,
         backend: None,
         json: true,
         detail: true,
@@ -317,7 +315,6 @@ fn p5_restart_and_add_agent_keep_real_lifecycle_paths() {
         team: None,
         role_file: env.root().join("missing-role.md").display().to_string(),
         force: false,
-        no_display: true,
         json: true,
     });
     assert!(format!("{add:?}").contains("missing") || format!("{add:?}").contains("role"));
@@ -398,7 +395,6 @@ fn p4_quick_start_keeps_canonical_runtime_spec_location() {
         name: None,
         team_id: Some("location-team".into()),
         yes: false,
-        no_display: true,
         backend: None,
         json: true,
         detail: true,

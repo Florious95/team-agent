@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
@@ -370,10 +370,9 @@ pub(crate) use identity::{
 
 mod quick_start;
 pub(super) use quick_start::*;
-pub use quick_start::{quick_start, quick_start_in_workspace_with_display_and_backend};
+pub use quick_start::{quick_start, quick_start_in_workspace_with_backend};
 pub(crate) use quick_start::{
     quick_start_in_workspace, quick_start_with_transport, quick_start_with_transport_in_workspace,
-    quick_start_with_transport_in_workspace_with_display,
 };
 
 mod quick_start_transport;
@@ -426,7 +425,7 @@ pub(crate) use spec_state::{
 };
 use spec_state::{
     env_nonempty, has_positive_caller_leader_env, initial_runtime_state,
-    override_spec_display_backend, override_spec_runtime_str, seed_launched_owner_from_env,
+    override_spec_runtime_str, seed_launched_owner_from_env,
     spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
     spec_tasks_json, team_workspace, yaml_value_to_json,
 };

@@ -158,6 +158,10 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    if args.iter().any(|arg| arg == "--no-display") {
+        emit_usage_error("argument '--no-display' was removed; use the default tmux backend");
+        return Ok(ExitCode::Error);
+    }
     let Some(spec) = command_spec(command) else {
         return Ok(emit_unknown_subcommand_usage(command));
     };
@@ -397,7 +401,7 @@ fn command_help(command: Option<&str>) -> String {
     match command {
         None => default_help(),
         Some("init") => compat_hidden_help("init", "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]"),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json] [--detail]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).\n\n--detail includes internal receiver/topology diagnostics in JSON output.\n\nAfter a successful start, use the returned `send_commands` (or choose an agent explicitly) with `team-agent send AGENT MESSAGE`.".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--backend tmux|conpty] [--json] [--detail]\n\n--backend selects the worker transport: tmux (default on POSIX) or conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).\n\n--detail includes internal receiver/topology diagnostics in JSON output.\n\nAfter a successful start, use the returned `send_commands` (or choose an agent explicitly) with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
         Some("send") => concat!(
             "usage: team-agent send TO MESSAGE... ",
@@ -415,13 +419,13 @@ fn command_help(command: Option<&str>) -> String {
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
-        Some("restart-agent") => compat_hidden_help("restart-agent", "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]"),
-        Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
-        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]\n\nAfter a successful start, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
+        Some("restart-agent") => compat_hidden_help("restart-agent", "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]"),
+        Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]".to_string(),
+        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--json]\n\nAfter a successful start, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]\n\nAfter a successful add, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
-        Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
-        Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
+        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--json]\n\nAfter a successful add, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
+        Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
         // 0.5.26 (§7.6): removed from help; dispatch was never wired.
         Some("stuck-list") => "usage: team-agent stuck-list [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
@@ -824,7 +828,6 @@ struct ParsedArgs {
     allow_fresh: bool,
     session_converge_deadline_ms: Option<u64>,
     force: bool,
-    no_display: bool,
     discard_session: bool,
     role_file: Option<String>,
     as_agent: Option<String>,
@@ -915,7 +918,6 @@ fn parse_args(args: &[String]) -> ParsedArgs {
                     next_arg(args, &mut i).and_then(|v| parse_seconds_ms(&v));
             }
             "--force" => parsed.force = true,
-            "--no-display" => parsed.no_display = true,
             "--backend" => parsed.backend = next_arg(args, &mut i),
             "--discard-session" => parsed.discard_session = true,
             "--role-file" => parsed.role_file = next_arg(args, &mut i),
@@ -1105,7 +1107,6 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         name: parsed.name,
         team_id: parsed.team_id.or(parsed.team),
         yes: parsed.yes,
-        no_display: parsed.no_display,
         json: parsed.json,
         detail: parsed.detail,
         backend: parsed.backend,
@@ -1527,7 +1528,6 @@ fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliEr
         team: parsed.team,
         force: parsed.force,
         allow_fresh: parsed.allow_fresh,
-        no_display: parsed.no_display,
         json: parsed.json,
     })
 }
@@ -1551,7 +1551,6 @@ fn reset_agent_args(args: &[String], cwd: &Path) -> Result<ResetAgentArgs, CliEr
         workspace,
         team: parsed.team,
         discard_session: parsed.discard_session,
-        no_display: parsed.no_display,
         json: parsed.json,
     })
 }
@@ -1566,7 +1565,6 @@ fn add_agent_args(args: &[String], cwd: &Path) -> Result<AddAgentArgs, CliError>
             .role_file
             .ok_or_else(|| CliError::Usage("missing --role-file".to_string()))?,
         force: parsed.force,
-        no_display: parsed.no_display,
         json: parsed.json,
     })
 }
@@ -1581,7 +1579,6 @@ fn fork_agent_args(args: &[String], cwd: &Path) -> Result<ForkAgentArgs, CliErro
             .as_agent
             .ok_or_else(|| CliError::Usage("missing --as".to_string()))?,
         label: parsed.label,
-        no_display: parsed.no_display,
         json: parsed.json,
     })
 }
@@ -1596,7 +1593,6 @@ fn clone_agent_args(args: &[String], cwd: &Path) -> Result<CloneAgentArgs, CliEr
             .as_agent
             .ok_or_else(|| CliError::Usage("missing --as".to_string()))?,
         label: parsed.label,
-        no_display: parsed.no_display,
         json: parsed.json,
     })
 }
@@ -2245,7 +2241,6 @@ mod tests {
                     "--team",
                     "--force",
                     "--allow-fresh",
-                    "--no-display",
                     "--json",
                 ][..],
             ),
@@ -2255,7 +2250,6 @@ mod tests {
                     "--workspace",
                     "--team",
                     "--discard-session",
-                    "--no-display",
                     "--json",
                 ][..],
             ),
@@ -2265,7 +2259,6 @@ mod tests {
                     "--role-file",
                     "--workspace",
                     "--team",
-                    "--no-display",
                     "--json",
                 ][..],
             ),
@@ -2276,7 +2269,6 @@ mod tests {
                     "--label",
                     "--workspace",
                     "--team",
-                    "--no-display",
                     "--json",
                 ][..],
             ),
@@ -2716,6 +2708,5 @@ mod tests {
         assert_eq!(args.workspace, ws);
         // No `fresh` field anymore — the struct must compile and round-trip
         // without it.
-        let _ = args.no_display;
     }
 }

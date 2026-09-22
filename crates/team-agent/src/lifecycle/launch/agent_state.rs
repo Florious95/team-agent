@@ -22,11 +22,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
-use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
+use crate::transport::{PaneId, SessionName, Target, Transport};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
@@ -64,10 +64,9 @@ pub(super) fn running_agent_state(
         .get("profile")
         .map(yaml_value_to_json)
         .unwrap_or(serde_json::Value::Null);
-    let window = started_agent
-        .and_then(|started| started.layout_window.as_ref())
-        .map(WindowName::as_str)
-        .or_else(|| agent.get("window").and_then(Value::as_str))
+    let window = agent
+        .get("window")
+        .and_then(Value::as_str)
         .unwrap_or(id);
     let mcp_config = crate::provider::get_adapter(provider)
         .mcp_config(auth_mode)
@@ -129,25 +128,6 @@ pub(super) fn running_agent_state(
     );
     if let Some(started_agent) = started_agent {
         persist_started_agent_plan_state(&mut state, started_agent);
-        if let Some(layout_window) = started_agent.layout_window.as_ref() {
-            state.insert(
-                "layout_window".to_string(),
-                serde_json::json!(layout_window.as_str()),
-            );
-        }
-        if let Some(layout_index) = started_agent.layout_index {
-            state.insert("layout_index".to_string(), serde_json::json!(layout_index));
-        }
-        if let Some(pane_index) = started_agent.pane_index {
-            state.insert("pane_index".to_string(), serde_json::json!(pane_index));
-        }
-        if !matches!(started_agent.display, WorkerDisplay::Blocked { .. }) {
-            state.insert(
-                "display".to_string(),
-                serde_json::to_value(&started_agent.display)
-                    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-            );
-        }
     }
     state.insert(
         "spawn_cwd".to_string(),

@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
@@ -68,7 +68,6 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
-use super::identity::spec_display_backend;
 use super::leader_context::{caller_provider_for_seed_with_lookup, seed_unbound_launched_owner};
 use super::worker_env::spawn_timestamp;
 
@@ -77,7 +76,7 @@ use super::worker_env::spawn_timestamp;
 /// params:
 ///   team_key: 本团队的 runtime 键
 ///   scoped_endpoint: 本次起队已选中的 transport tmux endpoint，与 fresh bind 同源
-/// returns: 含 spec_path、workspace、team_dir、session_name、leader、agents、tasks 与 display_backend 的 state；随后按环境种入 launched owner，种不到则种一份 unbound owner
+/// returns: 含 spec_path、workspace、team_dir、session_name、leader、agents、tasks 的 state；随后按环境种入 launched owner，种不到则种一份 unbound owner
 /// ---
 pub(super) fn initial_runtime_state(
     spec: &Value,
@@ -113,7 +112,6 @@ pub(super) fn initial_runtime_state(
         }
         agents.insert(id.to_string(), value);
     }
-    let display_backend = spec_display_backend(spec);
     let mut state = serde_json::Map::new();
     state.insert(
         "spec_path".to_string(),
@@ -140,10 +138,6 @@ pub(super) fn initial_runtime_state(
     );
     state.insert("agents".to_string(), serde_json::Value::Object(agents));
     state.insert("tasks".to_string(), spec_tasks_json(spec));
-    state.insert(
-        "display_backend".to_string(),
-        serde_json::json!(display_backend),
-    );
     state.insert("is_external_leader".to_string(), serde_json::json!(false));
     let mut state = serde_json::Value::Object(state);
     if !seed_launched_owner_from_env(&mut state, scoped_endpoint) {
@@ -375,13 +369,6 @@ pub(crate) fn override_spec_workspace(spec: &mut Value, workspace: &Path) {
             }
         }
     }
-}
-
-/// ---
-/// purpose: 就地把 spec 的 runtime.display_backend 改成给定值
-/// ---
-pub(super) fn override_spec_display_backend(spec: &mut Value, display_backend: &str) {
-    override_spec_runtime_str(spec, "display_backend", display_backend);
 }
 
 /// ---

@@ -1382,13 +1382,12 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
 
-    let (launch, attach_commands, display_backend) = match report {
+    let (launch, attach_commands) = match report {
         QuickStartReport::Ready {
             launch,
             attach_commands,
-            display_backend,
             ..
-        } => (*launch, attach_commands, display_backend),
+        } => (*launch, attach_commands),
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
     // 0.3.28 Step 4b: adaptive 3-pane tiling replaced with 1-window-per-agent
@@ -1424,7 +1423,6 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
         attach_commands.iter().any(|cmd| cmd.contains(":w1")),
         "attach commands must include the per-agent windows: {attach_commands:?}"
     );
-    let _ = display_backend; // display_backend value preserved by upstream
 }
 
 #[test]
@@ -1600,50 +1598,6 @@ fn attach_window_names_for_state_agents_include_managed_leader_and_layout_window
     );
 
     assert_eq!(windows, vec!["leader", "team-w1", "team-w2"]);
-}
-
-#[test]
-#[serial(env)]
-fn quick_start_no_display_keeps_one_window_per_agent() {
-    let _hermetic = enter_hermetic("launch-spawn-no-display");
-    let roles = ["w1", "w2"]
-        .into_iter()
-        .map(|id| (format!("{id}.md"), role_doc(id)))
-        .collect::<Vec<_>>();
-    let role_refs = roles
-        .iter()
-        .map(|(file, doc)| (file.as_str(), doc.as_str()))
-        .collect::<Vec<_>>();
-    let team = quick_start_team_dir_with_roles(&role_refs);
-    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
-    seed_healthy_coordinator(workspace);
-    let transport = OfflineTransport::new();
-
-    let report = quick_start_with_transport_in_workspace_with_display(
-        workspace, &team, None, true, None, &transport, false,
-    )
-    .expect("quick_start_with_transport must reach Ready");
-
-    let display_backend = match report {
-        QuickStartReport::Ready {
-            display_backend, ..
-        } => display_backend,
-        other => panic!("quick_start must reach Ready; got {other:?}"),
-    };
-    assert_eq!(display_backend, "none");
-    assert_eq!(
-        transport
-            .spawn_records()
-            .iter()
-            .map(|(kind, _)| kind.as_str())
-            .collect::<Vec<_>>(),
-        vec!["spawn_first", "spawn_into"],
-        "--no-display must use the legacy one-worker-window spawn path"
-    );
-    let (_raw, state) = raw_runtime_state(workspace);
-    assert_eq!(state["display_backend"], json!("none"));
-    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("w1")));
-    assert_eq!(state.pointer("/agents/w1/layout_window"), None);
 }
 
 // REAL-MACHINE residency boundary (acceptance framework): the PUBLIC quick_start (real TmuxBackend +
@@ -2790,7 +2744,7 @@ fn add_agent_adaptive_splits_last_non_full_layout_window() {
         &team,
         &json!({
             "session_name": session,
-            "display_backend": "adaptive",
+            "legacy_display_key": "adaptive",
             "active_team_key": "teamdir",
             "agents": {
                 "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
@@ -2851,7 +2805,7 @@ fn add_agent_adaptive_creates_suffix_window_when_last_layout_full_and_name_colli
         &team,
         &json!({
             "session_name": session,
-            "display_backend": "adaptive",
+            "legacy_display_key": "adaptive",
             "active_team_key": "teamdir",
             "agents": {
                 "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
@@ -2918,7 +2872,7 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
         &team,
         &json!({
             "session_name": session,
-            "display_backend": "adaptive",
+            "legacy_display_key": "adaptive",
             "agents": {
                 "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
                 "w2": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
@@ -2960,7 +2914,7 @@ fn start_agent_adaptive_restarts_missing_pane_in_existing_layout_window() {
         &ws,
         &json!({
             "session_name": "team-layout-restart",
-            "display_backend": "adaptive",
+            "legacy_display_key": "adaptive",
             "agents": {
                 "w1": {"status": "running", "provider": "codex", "role": "w1", "model": "gpt-5.5", "auth_mode": "subscription", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
                 "w2": {"status": "running", "provider": "codex", "role": "w2", "model": "gpt-5.5", "auth_mode": "subscription", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
@@ -3050,9 +3004,9 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 }
 
 // Stage A — golden launch/core.py:62-71 seeded top-level runtime state in insertion order:
-// spec_path, workspace, team_dir, team_key, session_name, leader, agents, tasks, display_backend.
+// spec_path, workspace, team_dir, team_key, session_name, leader, agents, tasks.
 //
-// OLD (Python parity): the top-level shape ended at `display_backend`.
+// The runtime state is tmux-only; no display backend is persisted.
 // NEW (Bug 1/2 — team-in-team state scope, see tests/team_in_team_state_scope_red.rs):
 //   `active_team_key` and `teams` are appended at the tail so the runtime can carry the
 //   nested team-in-team scope alongside the original flat fields. Owner-binding fields
@@ -3065,11 +3019,10 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 //   R1: topology is explicit; fresh managed teams carry `is_external_leader=false`
 //   before the team-in-team suffix. Canonical `team_key` is seeded before owner
 //   binding; the remaining order stays the golden prefix + topology marker + new
-//   suffix (active_team_key, teams). display_backend stays the resolved backend from display/backend.py:12-29
-//   (default adaptive), not the raw optional spec field.
+//   suffix (active_team_key, teams).
 #[test]
 #[serial(env)]
-fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
+fn quick_start_state_seeds_spec_path_workspace_leader() {
     let _hermetic = enter_hermetic("launch-spawn-state-seeds");
     // Bug 2 owner team-scope: top-level owner triple is dropped when the seeded
     // pane is empty; an ambient TMUX_PANE (tests run inside the dev's tmux session)
@@ -3106,7 +3059,6 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             "leader",
             "agents",
             "tasks",
-            "display_backend",
             "is_external_leader",
             // 0.5.x Phase 1d hot-path 接线 (裁决1 msg_76e1d98202b8):
             // `transport = { kind, source }` inserted here by
@@ -3154,11 +3106,6 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
         }),
         "existing tasks value must remain seeded from compiled spec; got {:?}",
         state["tasks"]
-    );
-    assert_eq!(
-        state["display_backend"],
-        json!("adaptive"),
-        "adaptive layout directive: resolve_display_backend(None, source='launch') defaults to adaptive"
     );
     assert_eq!(state["is_external_leader"], json!(false));
 }
@@ -3602,7 +3549,7 @@ fn add_agent_reachability_gate_passes_when_spawn_pane_addressable() {
 // ═════════════════════════════════════════════════════════════════════════════
 // E43 add-agent window layout drift (0.3.24 bug#3, demo-director startup blocker).
 //
-// Root cause (architect res_f27ff9b29957): with `display_backend=adaptive` in
+// Root cause (architect res_f27ff9b29957): with `legacy_display_key=adaptive` in
 // state AND stale `agents.<id>.layout_window="team-w2"` residue, the existing
 // `adaptive_placement_for_agent` validates a layout_window claim by checking
 // whether the existing agent's `pane_id` is in `live_panes` — but it does NOT
@@ -3641,7 +3588,7 @@ fn e43_adaptive_placement_skips_existing_agent_whose_live_pane_window_name_diffe
     use crate::transport::{SessionName, WindowName};
 
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "architect": {
@@ -3704,7 +3651,7 @@ fn e43_adaptive_placement_groups_into_layout_window_when_live_pane_matches_claim
     use crate::transport::{SessionName, WindowName};
 
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "alpha": {
@@ -3756,7 +3703,7 @@ fn e43_adaptive_existing_placement_falls_back_to_agent_id_window_when_claim_miss
     use crate::transport::{SessionName, WindowName};
 
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "demo-director": {
@@ -3820,7 +3767,7 @@ fn e43_adaptive_existing_placement_keeps_starts_window_false_when_claim_in_live_
     use crate::transport::{SessionName, WindowName};
 
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "alpha": {
@@ -3861,7 +3808,7 @@ fn e43_adaptive_existing_placement_keeps_starts_window_false_when_claim_in_live_
 
 /// **RED — Fix C end-to-end**: `add_agent` end-to-end must NOT emit a
 /// spawn_split with the stale window name. With state carrying
-/// `display_backend=adaptive` + stale `layout_window=team-w2` residue and
+/// `legacy_display_key=adaptive` + stale `layout_window=team-w2` residue and
 /// live tmux windows named per-agent, the spawn must be a `spawn_into`
 /// (new window) — NOT `spawn_split` against the missing 'team-w2'.
 #[test]
@@ -3885,7 +3832,7 @@ fn e43_add_agent_does_not_split_against_phantom_layout_window() {
         &team,
         &json!({
             "session_name": "team-iso",
-            "display_backend": "adaptive",
+            "legacy_display_key": "adaptive",
             "agents": {
                 "architect": {
                     "status": "running",
@@ -3939,7 +3886,7 @@ fn e43_add_agent_does_not_split_against_phantom_layout_window() {
 // E45 per-agent window drift (0.3.24 task#326 P0).
 //
 // Surfaced AFTER E43 (c5ed576) fixed the team-w2 phantom split. New repro:
-// state has display_backend=adaptive + an existing `developer` worker whose
+// state has legacy_display_key=adaptive + an existing `developer` worker whose
 // state row carries `layout_window=developer, layout_index=0, pane_id=%519`,
 // live tmux shows `developer` window with that pane. add-agent demo-director
 // resolves placement via `adaptive_placement_for_agent`, which finds the
@@ -3971,7 +3918,7 @@ fn e45_adaptive_placement_returns_none_when_no_real_team_w_window_present_in_sta
     // literally `developer` (per-agent name, NOT team-wN), pane_id %519
     // lives under the `developer` window.
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "developer": {
@@ -4014,7 +3961,7 @@ fn e45_adaptive_placement_returns_none_when_no_real_team_w_window_present_in_sta
         "E45 (0.3.24 bug#4): placement must return None when the live \
          session has NO real `team-w<N>` adaptive window. Per-agent windows \
          like `developer` are NOT adaptive layout windows — they are \
-         per-agent topology, even if display_backend=adaptive lingers in \
+         per-agent topology, even if legacy_display_key=adaptive lingers in \
          state. With no real adaptive layout, the caller falls back to \
          opening a new per-agent window named after agent_id. Got \
          {placement:?} — must be None to prevent split-window -t :developer \
@@ -4033,7 +3980,7 @@ fn e45_adaptive_existing_placement_returns_none_when_claim_is_per_agent_window()
     use crate::transport::{SessionName, WindowName};
 
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "developer": {
@@ -4087,14 +4034,14 @@ fn e45_add_agent_opens_new_window_does_not_split_into_per_agent_window() {
     let role_file = team.join("worker2-role.md");
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
 
-    // Real-machine state: display_backend=adaptive, but the existing
+    // Real-machine state: legacy_display_key=adaptive, but the existing
     // `developer` worker carries per-agent layout_window=developer with
     // layout_index=0. macmini-equivalent state shape.
     crate::state::persist::save_runtime_state(
         &team,
         &json!({
             "session_name": "team-iso",
-            "display_backend": "adaptive",
+            "legacy_display_key": "adaptive",
             "agents": {
                 "developer": {
                     "status": "running",
@@ -4165,7 +4112,7 @@ fn e45_real_team_w_adaptive_layout_still_groups_into_layout_window() {
     use crate::transport::{SessionName, WindowName};
 
     let state = json!({
-        "display_backend": "adaptive",
+        "legacy_display_key": "adaptive",
         "session_name": "team-iso",
         "agents": {
             "alpha": {

@@ -293,7 +293,6 @@ impl Case {
             self.ws(),
             "--team",
             TEAM_NAME,
-            "--no-display",
             "--json",
         ]);
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
