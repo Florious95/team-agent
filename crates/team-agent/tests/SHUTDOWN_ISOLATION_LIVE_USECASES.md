@@ -16,7 +16,7 @@ This is the fixed black-box test book for the macOS candidate. It is a design ar
 The public commands used below are limited to the verified CLI surface:
 
 ```text
-team-agent quick-start TEAMDIR --workspace WORKSPACE --name NAME --yes --no-display --backend tmux --json --detail
+team-agent quick-start TEAMDIR --workspace WORKSPACE --name NAME --yes --backend tmux --json --detail
 team-agent send TO MESSAGE... --workspace WORKSPACE --team TEAM --json
 team-agent status --workspace WORKSPACE --team TEAM --json
 team-agent shutdown --workspace WORKSPACE --team TEAM --keep-logs --json
