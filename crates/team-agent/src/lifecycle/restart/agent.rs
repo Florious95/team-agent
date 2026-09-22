@@ -228,16 +228,19 @@ pub(crate) fn start_agent_at_paths(
     // spawn (defensive). The check itself remains a no-op on healthy
     // state — assert_topology_invariants from Step 1 catches the
     // upstream corruption.
-    let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &raw_agent);
-    if has_collision && noop_pane.is_none() {
+    let noop_pane_conflict = noop_pane.as_ref().is_some_and(|pane| {
+        pane_conflicts_with_pane_id(&state, agent_id, &raw_agent, pane.pane_id.as_str())
+    });
+    let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &raw_agent)
+        || noop_pane_conflict;
+    if has_collision {
         eprintln!(
-            "team_agent::layout e51_collision_post_step2 agent_id=`{agent_id}` \
+            "team_agent::layout pane_collision agent_id=`{agent_id}` \
              action=forcing_fresh_spawn \
-             (should be impossible after Step 2 leader/worker session separation; \
-              investigate upstream state corruption)"
+             (the persisted or discovered pane is owned by another live seat)"
         );
     }
-    let agent_live = agent_live && (!has_collision || noop_pane.is_some());
+    let agent_live = agent_live && !has_collision;
     // 0.5.66 bypass 单源 §2.6 — dangerously_skip_permissions drift 挡板:
     // Noop 路径不 spawn,若声明面(角色 md / spec)与运行面(as-launched)不一致,
     // 拒 Noop 报明,防"改了 md 却以为生效、进程仍带旧 bypass 跑着"的暗门。
@@ -678,6 +681,15 @@ fn pane_conflicts_with_leader_or_other(
     else {
         return false;
     };
+    pane_conflicts_with_pane_id(state, agent_id, agent, pane_id)
+}
+
+fn pane_conflicts_with_pane_id(
+    state: &serde_json::Value,
+    agent_id: &crate::model::ids::AgentId,
+    agent: &serde_json::Value,
+    pane_id: &str,
+) -> bool {
     let state_socket = runtime_tmux_socket(state);
     let agent_socket = tmux_socket_field(agent).or(state_socket);
     // Check leader anchor.
@@ -693,7 +705,12 @@ fn pane_conflicts_with_leader_or_other(
     // Check other agents.
     if let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) {
         for (id, other) in agents {
-            if id == agent_id.as_str() {
+            if id == agent_id.as_str()
+                || matches!(
+                    other.get("status").and_then(serde_json::Value::as_str),
+                    Some("stopped" | "paused" | "failed" | "removed")
+                )
+            {
                 continue;
             }
             let other_socket = tmux_socket_field(other).or(state_socket);
@@ -2037,6 +2054,44 @@ mod tests {
         assert!(
             !pane_conflicts_with_leader_or_other(&state, &agent_id, &agent),
             "other-agent collision checks must also include tmux_socket"
+        );
+    }
+
+    #[test]
+    fn e51_restart_rejects_discovered_peer_pane_for_stale_worker() {
+        let socket = "/private/tmp/tmux-501/ta-worker";
+        let state = serde_json::json!({
+            "tmux_endpoint": socket,
+            "agents": {
+                "worker": {"pane_id": "%1", "status": "running"},
+                "peer": {"pane_id": "%0", "status": "running"}
+            }
+        });
+        let agent_id = AgentId::new("worker");
+        let agent = state["agents"]["worker"].clone();
+
+        assert!(
+            pane_conflicts_with_pane_id(&state, &agent_id, &agent, "%0"),
+            "a discovered live pane owned by a running peer must not be rebound"
+        );
+    }
+
+    #[test]
+    fn e51_restart_ignores_stopped_peer_pane_residue() {
+        let socket = "/private/tmp/tmux-501/ta-worker";
+        let state = serde_json::json!({
+            "tmux_endpoint": socket,
+            "agents": {
+                "worker": {"pane_id": "%1", "status": "running"},
+                "peer": {"pane_id": "%0", "status": "stopped"}
+            }
+        });
+        let agent_id = AgentId::new("worker");
+        let agent = state["agents"]["worker"].clone();
+
+        assert!(
+            !pane_conflicts_with_pane_id(&state, &agent_id, &agent, "%0"),
+            "stopped peer residue must not claim a pane for a live restart"
         );
     }
 
