@@ -237,13 +237,13 @@ How role `model` and profile `MODEL` are resolved (not a validity list):
 
 The internal compiler preserves a role `model:` when present. If it is omitted, provider/team defaults may fill it; a profile-deferred role may remain `null`. A profile's `MODEL` does not override an explicit role model, and the compiler does not compare the two. Actual profile/provider readiness is checked during launch and preflight, not by a public export command.
 
-For an existing spec file at `$d`, run the retained schema check:
+For an existing spec file or team directory at `$d`, run the retained validation:
 
 ```bash
 team-agent validate "$d" --json
 ```
 
-`validate` does not compile role docs or export a spec.
+A file input runs schema structural validation. A team-directory input internally compiles `TEAM.md` and `agents/*.md` and validates role-document completeness. Neither input writes or exports a spec file.
 
 How to check `--auth-mode` literals (the CLI does not print an allow-list on this gauge):
 
@@ -303,7 +303,7 @@ For an existing spec file, the retained schema check is:
 team-agent validate "$d" --json
 ```
 
-`validate` checks the stored spec; it does not read or compile `TEAM.md` and role front matter. The internal compiler rejects non-bool (`dangerously_skip_permissions: bypass`) and accepts only boolean **`true`** or **`false`**.
+With a team-directory input, `validate` internally compiles `TEAM.md` and `agents/*.md` and validates role-document completeness; with a file input, it runs schema structural validation. Neither input writes or exports a spec file. The internal compiler rejects non-bool (`dangerously_skip_permissions: bypass`) and accepts only boolean **`true`** or **`false`**.
 
 `true` is the per-worker bypass opt-in. `false` is the default you should copy unless the user explicitly wants prompts skipped.
 
@@ -615,7 +615,7 @@ For any non-zero `team-agent` exit, report the command, exit code, last about 20
 
 **If the error JSON/text includes a structured `action` field, run that `action` first.** This rule does not expire with skill versions.
 
-For an existing spec, use the retained schema check (it does not compile role docs):
+For an existing spec file or team directory, use the retained validation:
 
 ```bash
 team-agent validate "$d" --json
