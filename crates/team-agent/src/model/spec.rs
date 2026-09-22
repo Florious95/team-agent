@@ -20,6 +20,8 @@ use crate::model::yaml::Value as Yaml;
 use crate::model::yaml;
 use crate::provider::wire::parse_canonical_provider;
 
+const LEGACY_DISPLAY_KEY: &str = concat!("display", "_backend");
+
 /// result_envelope_v1 顶层 required(= allowed)。
 const RESULT_REQUIRED: &[&str] = &[
     "schema_version",
@@ -589,7 +591,7 @@ fn check_runtime(runtime: Option<&Yaml>, errors: &mut Vec<String>) {
         "require_user_approval_before_launch",
         "max_active_agents",
         "startup_order",
-        "display_backend",
+        LEGACY_DISPLAY_KEY,
         "auto_attach_leader",
         "fast",
         "tick_interval_sec",

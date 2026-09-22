@@ -720,7 +720,7 @@ fn pi_materializer_and_worker_routes_body(hermetic: &HermeticTestEnv) {
     std::fs::create_dir_all(spec_path.parent().expect("worker Pi spec parent"))
         .expect("create worker Pi spec parent");
     let spec = crate::model::yaml::loads(
-        "team:\n  name: team-a\nruntime:\n  session_name: team-workers\n  display_backend: tmux_attach\nagents:\n  - id: worker-a\n    role: Worker A\n    provider: pi\n    model: team-agent/qwen3.8-27b\n    auth_mode: subscription\n    dangerously_skip_permissions: false\n    tools:\n      - mcp_team\n  - id: worker-b\n    role: Worker B\n    provider: pi\n    model: team-agent/qwen3.8-27b\n    auth_mode: subscription\n    dangerously_skip_permissions: false\n    tools:\n      - mcp_team\n",
+        "team:\n  name: team-a\nruntime:\n  session_name: team-workers\nagents:\n  - id: worker-a\n    role: Worker A\n    provider: pi\n    model: team-agent/qwen3.8-27b\n    auth_mode: subscription\n    dangerously_skip_permissions: false\n    tools:\n      - mcp_team\n  - id: worker-b\n    role: Worker B\n    provider: pi\n    model: team-agent/qwen3.8-27b\n    auth_mode: subscription\n    dangerously_skip_permissions: false\n    tools:\n      - mcp_team\n",
     )
     .expect("parse worker Pi spec");
     std::fs::write(&spec_path, crate::model::yaml::dumps(&spec)).expect("write worker Pi spec");

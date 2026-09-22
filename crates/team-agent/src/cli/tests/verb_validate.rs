@@ -67,7 +67,6 @@ communication:
     mirror_files: ".team/messages"
 runtime:
   backend: "tmux"
-  display_backend: "none"
   session_name: "team-agent-fake-e2e"
   auto_launch: true
   require_user_approval_before_launch: false
