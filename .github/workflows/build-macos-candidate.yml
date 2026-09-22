@@ -14,11 +14,64 @@ on:
         required: true
         type: string
 
+      test_filter:
+        description: "Temporary focused test group: cli-contracts or downstream"
+        required: true
+        type: choice
+        options:
+          - cli-contracts
+          - downstream
+
 permissions:
   contents: read
 
 jobs:
+  focused-tests:
+    name: CLI contract alignment (temporary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify source identity
+        env:
+          SOURCE: ${{ inputs.source_sha }}
+          TREE: ${{ inputs.expected_tree }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: |
+          if ! command -v tmux; then
+            sudo apt-get update
+            sudo apt-get install -y tmux
+          fi
+      - name: Build current CLI for subprocess fixtures
+        run: cargo build -p team-agent --bin team-agent --locked
+      - name: Run focused contract tests
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
+        run: |
+          set -euo pipefail
+          case "$TEST_FILTER" in
+            cli-contracts)
+              for filter in hidden_commands_not_in_default_help cmd_doctor_fix_without_gate ux_doctor_secret_scan_findings_name_the_exact_trigger dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader diagnose_missing_profile_is_rc1_ok_false_and_zero_token r6_static_guard_rejects_dangerous_tests_without_hermetic_boundary; do
+                cargo test -p team-agent --lib "$filter" --locked -- --nocapture
+              done
+              ;;
+            downstream)
+              cargo test -p team-agent --locked --test c2_command_internalization_deletion_contract --test claim_rework_binding_contract --test debt_sweep_0544_contract --test doctor_diagnose_property_red --test doctor_diagnose_unification_property_red --test e2e --test governance_g0_metrics --test leader_launcher_ambient_pane_authority_red --no-fail-fast
+              ;;
+            *) exit 2 ;;
+          esac
+          git diff --exit-code
   build:
+    if: false
     name: Build team-agent (macOS arm64)
     runs-on: macos-14
     env:
