@@ -291,7 +291,7 @@ team-agent permission-modes
 
 Observed (exit 1): `invalid choice: 'permission-modes'`.
 
-`team-agent --help` does **not** list `permission_mode`, `TEAM_AGENT_LEADER_BYPASS`, or `dangerous_auto_approve`. Use `team-agent validate "$d" --json` only when `$d` points to an existing spec; it does not enumerate permission modes.
+`team-agent --help` does **not** list `permission_mode`, `TEAM_AGENT_LEADER_BYPASS`, or `dangerous_auto_approve`. Use `team-agent validate "$d" --json` with an existing spec file or team directory; it does not enumerate permission modes.
 
 ### Live control: role `dangerously_skip_permissions`
 
