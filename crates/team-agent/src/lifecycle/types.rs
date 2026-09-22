@@ -242,17 +242,8 @@ pub enum DangerousApprovalSource {
 }
 
 // ===========================================================================
-// DATA STRUCT(每 worker display / restart 候选 / plan state / 危险审批)
+// DATA STRUCT(restart 候选 / plan state / 危险审批)
 // ===========================================================================
-
-/// adaptive 能力探测结果(`probe_display_capabilities`,`display/adaptive.py:31`)。
-/// **C13 一等公民**:分支只看 probe,不看 `cfg!(target_os)`;Windows/WSL →
-/// `NotImplementedThisPlatform`。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-
-/// 平台能力位(`caps{tmux_append_windows, adaptive_display}`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-
 
 /// `RestartCandidate`(`restart/selection.py:27`)。`select_restart_state` 多 team 选择;
 /// `has_context` 是 resume 可行性粗判。
@@ -375,8 +366,7 @@ impl PlanCondition {
 // ERROR(card §10:fallible 边界;daemon/CLI 入口返 rich Result<Report, Error>)
 // ===========================================================================
 
-/// lifecycle 子系统错误。能力性降级(adaptive blocked)**不**走这里 —— 那是 typed
-/// outcome(`DisplayStatus::Blocked` / `AdaptiveBlockReason`)。这里只装真失败:
+/// lifecycle 子系统错误。这里只装真失败:
 /// owner-gate 拒绝、session 冲突、state 写崩(bug-084)、provider/transport I/O、回滚失败。
 #[derive(Debug, Error)]
 pub enum LifecycleError {
