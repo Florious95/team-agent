@@ -2143,7 +2143,7 @@ mod tests {
                     "--json",
                 ][..],
             ),
-            ("stuck-list", &["--workspace", "--team", "--json"][..]),
+            ("stop-agent", &["--workspace", "--team", "--json"][..]),
             ("approvals", &["--workspace", "--team", "--json"][..]),
             (
                 "inbox",
