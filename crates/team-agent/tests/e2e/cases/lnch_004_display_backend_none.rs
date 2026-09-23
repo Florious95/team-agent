@@ -1,10 +1,9 @@
-//! E2E-LNCH-004 Quick-start with `display_backend: none` materializes a
-//! one-window-per-agent topology and reports it in state.json.
+//! E2E-LNCH-004 Quick-start ignores the legacy `display_backend: none` field
+//! and materializes the default one-window-per-agent silent tmux topology.
 //!
 //! Invariants:
-//! - state.display_backend == "none"
+//! - no display backend field is emitted in the quick-start/state projections
 //! - state.agents.<id>.window == "<id>" for every agent.
-//! - Quick-start JSON also reports display_backend == "none".
 
 use crate::framework::*;
 
@@ -18,10 +17,16 @@ fn lnch_004_display_backend_none_topology() {
     assert!(quick_start_workers_available(&out), "quick-start: {}", out.stdout);
 
     let j = out.json();
-    assert_json_field_eq_str(&j, "/display_backend", "none");
+    assert!(
+        j.pointer("/display_backend").is_none(),
+        "legacy display_backend must be omitted from quick-start output: {j}"
+    );
 
     let state = ws.read_state();
-    assert_json_field_eq_str(&state, "/display_backend", "none");
+    assert!(
+        state.pointer("/display_backend").is_none(),
+        "legacy display_backend must be omitted from state: {state}"
+    );
     assert_json_field_eq_str(&state, "/agents/a/window", "a");
     assert_json_field_eq_str(&state, "/agents/b/window", "b");
 

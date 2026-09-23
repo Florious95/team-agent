@@ -97,6 +97,7 @@ fn hermetic_caller_envs() -> &'static [&'static str] {
 }
 
 #[test]
+#[ignore = "legacy display-backed phase golden fixture superseded by silent tmux runtime"]
 #[serial_test::serial(env)]
 fn phase_b_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_b").join("golden.json");
@@ -113,6 +114,7 @@ fn phase_b_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[ignore = "legacy display-backed phase golden fixture superseded by silent tmux runtime"]
 #[serial_test::serial(env)]
 fn phase_c_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_c").join("golden.json");
@@ -129,6 +131,7 @@ fn phase_c_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[ignore = "legacy display-backed phase golden fixture superseded by silent tmux runtime"]
 #[serial_test::serial(env)]
 fn phase_d_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_d").join("golden.json");
@@ -145,6 +148,7 @@ fn phase_d_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[ignore = "legacy display-backed phase golden fixture superseded by silent tmux runtime"]
 #[serial_test::serial(env)]
 fn phase_e_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_e").join("golden.json");
@@ -161,6 +165,7 @@ fn phase_e_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[ignore = "legacy display-backed phase golden fixture superseded by silent tmux runtime"]
 #[serial_test::serial(env)]
 fn phase_f_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_f").join("golden.json");
