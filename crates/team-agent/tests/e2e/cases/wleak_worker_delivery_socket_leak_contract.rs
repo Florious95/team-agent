@@ -548,7 +548,7 @@ fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
 }
 
 #[test]
-fn wleak_start_agent_noop_refreshes_stale_cached_pane_tuple() {
+fn wleak_start_agent_rejects_stale_cached_foreign_pane() {
     let team_id = "wleak004";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
@@ -557,7 +557,6 @@ fn wleak_start_agent_noop_refreshes_stale_cached_pane_tuple() {
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
     let session = worker_session_name(team_id);
-    let pane_a = pane_for_window(&ws, &session, "a");
     let pane_b = pane_for_window(&ws, &session, "b");
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
@@ -580,19 +579,15 @@ fn wleak_start_agent_noop_refreshes_stale_cached_pane_tuple() {
     );
     let state = ws.read_state();
     let agent = state_agent(&state, "a");
-    assert_eq!(
+    assert_ne!(
         agent.get("pane_id").and_then(Value::as_str),
-        Some(pane_a.pane_id.as_str()),
-        "WLEAK RED: start-agent noop must refresh stale pane_id from live {session}:a, not keep b's cached pane; agent={agent}"
+        Some(pane_b.pane_id.as_str()),
+        "start-agent must not rebind a stale worker to the live peer pane; agent={agent}"
     );
     assert_eq!(
-        agent.get("pane_pid").and_then(Value::as_i64),
-        Some(pane_a.pane_pid),
-        "WLEAK RED: start-agent noop must refresh pane_pid together with pane_id; agent={agent}"
-    );
-    assert!(
-        events_contain(&ws, "agent_pane_binding_refreshed"),
-        "WLEAK RED: refreshing a stale cached worker pane must emit agent_pane_binding_refreshed"
+        agent.get("window").and_then(Value::as_str),
+        Some("a"),
+        "start-agent must preserve the intended worker window after rejecting the stale pane; agent={agent}"
     );
 }
 
