@@ -352,11 +352,12 @@ pub struct ProviderCommandContext<'a> {
     /// from role doc / TEAM.md / provider default. `None` means the
     /// framework passes no effort flag (provider default).
     ///   - Claude / ClaudeCode: low|medium|high|xhigh|max → `--effort <level>`
-    ///   - Codex: low|medium|high|xhigh → `-c model_reasoning_effort=<level>`
-    ///   - Grok: low|medium|high|xhigh (NOT max) → `--effort <level>`
-    ///   - Copilot / Gemini / CursorAgent / Fake: ignored, warning event
-    ///     emitted at the caller (lifecycle/launch.rs / lifecycle/restart)
-    ///     before construct.
+    ///   - Codex: low|medium|high|xhigh|max|ultra → `-c model_reasoning_effort=<level>`
+    ///     Ultra enables Codex client delegation on top of max reasoning.
+    ///   - Pi: low|medium|high|xhigh|max → `--thinking <level>`; ultra rejected
+    ///   - Grok: low|medium|high|xhigh → `--effort <level>`; max/ultra rejected
+    ///   - Copilot / Gemini / Fake: low..xhigh ignored with a caller warning;
+    ///     max/ultra rejected. CursorAgent rejects all effort.
     pub effort: Option<crate::model::enums::ProviderEffort>,
 }
 

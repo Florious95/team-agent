@@ -203,7 +203,7 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
             let value = raw.trim();
             let parsed = ProviderEffort::parse(value).ok_or_else(|| {
                 ModelError::Validation(format!(
-                    "{}: unknown provider_effort '{value}' (allowed: low|medium|high|xhigh|max)",
+                    "{}: unknown provider_effort '{value}' (allowed: low|medium|high|xhigh|max|ultra)",
                     team_md.display()
                 ))
             })?;
@@ -558,16 +558,15 @@ fn compile_role_agent_with_mode(
     if let Some(profile) = string_field(&meta, "profile") {
         agent_items.push(("profile", Value::Str(profile)));
     }
-    // 0.4.x provider effort MVP step 3: resolve effort with role > team > none.
-    // Validate (unknown literal) AND check provider/effort compatibility
-    // (max is Claude-only; emit hard error for max + non-Claude here so
-    // unsupported combinations fail at compile, not at runtime).
+    // 0.4.x provider effort MVP step 3: resolve effort with role > team > none
+    // (Pi uses only explicit role effort). Validate syntax and provider support
+    // here so unsupported combinations fail at compile, not at runtime.
     let role_effort = match string_field(&meta, "effort") {
         Some(raw) if !raw.trim().is_empty() => {
             let value = raw.trim();
             let parsed = ProviderEffort::parse(value).ok_or_else(|| {
                 ModelError::Validation(format!(
-                    "{}: unknown effort '{value}' (allowed: low|medium|high|xhigh|max)",
+                    "{}: unknown effort '{value}' (allowed: low|medium|high|xhigh|max|ultra)",
                     role_path.display()
                 ))
             })?;
@@ -585,7 +584,7 @@ fn compile_role_agent_with_mode(
         role_effort.or(team_effort)
     };
     if let Some(effort) = resolved_effort {
-        // Reject max + non-Claude at compile time.
+        // Apply the shared provider admission policy at compile time.
         let provider_str = agent_items
             .iter()
             .find(|(k, _)| *k == "provider")

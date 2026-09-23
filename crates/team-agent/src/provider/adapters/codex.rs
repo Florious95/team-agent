@@ -21,8 +21,8 @@ pub(crate) fn codex_base_command(
     // 0.4.x provider effort MVP step 6: when Some, inject
     // `-c model_reasoning_effort=<level>` AFTER existing profile
     // codex_config overrides — explicit launch effort wins over profile.
-    // Codex does not support `max`; the caller filters that case via
-    // `ProviderEffort::is_supported_by` before reaching this point.
+    // Preserve max/ultra verbatim: ultra enables Codex client delegation
+    // on top of max reasoning, rather than a separate model API effort.
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Vec<String> {
     let mut argv = vec!["codex".to_string()];

@@ -312,7 +312,7 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
         if let Some(raw) = team.get("provider_effort").and_then(Yaml::as_str) {
             if crate::model::enums::ProviderEffort::parse(raw).is_none() {
                 e.push(format!(
-                    "/team/provider_effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max)"
+                    "/team/provider_effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max|ultra)"
                 ));
             }
         }
@@ -453,7 +453,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         match crate::model::enums::ProviderEffort::parse(raw) {
             None => {
                 errors.push(format!(
-                    "{path}/effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max)"
+                    "{path}/effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max|ultra)"
                 ));
             }
             Some(effort) => {
