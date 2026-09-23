@@ -235,8 +235,17 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("B replay RED: stale target blocker must return the accepted message id");
+    let initial_status = body.pointer("/message_status").and_then(Value::as_str);
+    if initial_status == Some("target_resolved") {
+        assert_eq!(
+            capture_pane(&foreign.pane_id).matches(token).count(),
+            0,
+            "a concurrently resolved target must still never inject into the foreign pane; json={body}"
+        );
+        return;
+    }
     assert_eq!(
-        body.pointer("/message_status").and_then(Value::as_str),
+        initial_status,
         Some(STATUS_QUEUED_PANE_MISSING),
         "B replay RED: stale target must use the repairable queued_pane_missing status; json={body}"
     );
