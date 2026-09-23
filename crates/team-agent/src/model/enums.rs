@@ -34,15 +34,18 @@ pub enum Provider {
 
 /// 0.4.x Provider effort MVP: reasoning effort level passed to the provider.
 /// Configuration sources (resolution order):
-///   1. role doc front matter `effort: low|medium|high|xhigh|max`
-///   2. TEAM.md front matter `provider_effort: low|medium|high|xhigh|max`
+///   1. role doc front matter `effort: low|medium|high|xhigh|max|ultra`
+///   2. TEAM.md front matter `provider_effort: low|medium|high|xhigh|max|ultra` (except Pi)
 ///   3. provider default (framework passes no flag)
 ///
 /// Provider support:
 ///   - claude / claude_code: low|medium|high|xhigh|max → `--effort <level>`
-///   - codex: low|medium|high|xhigh (NOT max) → `-c model_reasoning_effort=<level>`
-///   - grok: low|medium|high|xhigh (NOT max) → `--effort <level>`
-///   - copilot / gemini_cli / cursor_agent / fake: unsupported — warning event, no flag
+///   - codex: low|medium|high|xhigh|max|ultra → `-c model_reasoning_effort=<level>`
+///     Ultra adds Codex client delegation to max reasoning; it is not an API effort.
+///   - pi: low|medium|high|xhigh|max → `--thinking <level>`
+///   - grok: low|medium|high|xhigh → `--effort <level>`; max/ultra rejected
+///   - copilot / gemini_cli / fake: low..xhigh ignored with warning; max/ultra rejected
+///   - cursor_agent: all effort rejected
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderEffort {
     #[serde(rename = "low")]
@@ -55,6 +58,8 @@ pub enum ProviderEffort {
     XHigh,
     #[serde(rename = "max")]
     Max,
+    #[serde(rename = "ultra")]
+    Ultra,
 }
 
 impl ProviderEffort {
@@ -66,6 +71,7 @@ impl ProviderEffort {
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
+            "ultra" => Some(Self::Ultra),
             _ => None,
         }
     }
@@ -78,20 +84,17 @@ impl ProviderEffort {
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
-    /// Effort levels Claude-only (Codex / others must reject `max`).
-    pub fn is_claude_only(self) -> bool {
-        matches!(self, Self::Max)
-    }
-
-    /// Native command support. Claude/Pi accept max; Codex/Grok accept
-    /// the other levels. Use resolve_for_provider for admission/ignore policy.
+    /// Native command support: Codex through ultra, Claude/Pi through max,
+    /// Grok through xhigh. Use resolve_for_provider for admission/ignore policy.
     pub fn is_supported_by(self, provider: Provider) -> bool {
         match provider {
-            Provider::Claude | Provider::ClaudeCode | Provider::Pi => true,
-            Provider::Codex | Provider::Grok => !self.is_claude_only(),
+            Provider::Codex => true,
+            Provider::Claude | Provider::ClaudeCode | Provider::Pi => self != Self::Ultra,
+            Provider::Grok => !matches!(self, Self::Max | Self::Ultra),
             Provider::Copilot | Provider::GeminiCli | Provider::CursorAgent | Provider::Fake => {
                 false
             }
@@ -106,8 +109,10 @@ impl ProviderEffort {
         }
         if self.is_supported_by(provider) {
             Ok(Some(self))
-        } else if self.is_claude_only() {
-            Err("effort 'max' is only supported by claude/claude_code/pi")
+        } else if self == Self::Ultra {
+            Err("effort 'ultra' is only supported by codex")
+        } else if self == Self::Max {
+            Err("effort 'max' is only supported by claude/claude_code/codex/pi")
         } else {
             Ok(None)
         }

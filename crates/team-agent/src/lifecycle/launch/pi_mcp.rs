@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::model::enums::ProviderEffort;
+use crate::model::enums::{Provider, ProviderEffort};
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 use crate::provider::{CommandPlan, McpConfig, ProviderError, SessionId};
 
@@ -559,12 +559,12 @@ pub(crate) fn parse_pi_leader_args(args: &[String]) -> Result<PiLeaderArgs, Prov
         match flag {
             "--model" if model.is_none() => model = Some(value.clone()),
             "--thinking" if effort.is_none() => {
-                effort = ProviderEffort::parse(value);
-                if effort.is_none() {
-                    return Err(ProviderError::Command(format!(
-                        "unknown Pi thinking effort {value:?}"
-                    )));
-                }
+                let parsed = ProviderEffort::parse(value).ok_or_else(|| {
+                    ProviderError::Command(format!("unknown Pi thinking effort {value:?}"))
+                })?;
+                effort = parsed
+                    .resolve_for_provider(Provider::Pi)
+                    .map_err(|reason| ProviderError::Command(reason.to_string()))?;
             }
             _ => {
                 return Err(ProviderError::Command(format!(
