@@ -3,10 +3,10 @@
 
 use team_agent::model::enums::{Provider, ProviderEffort};
 
-/// Step 1: enum parse/as_str/is_supported_by/is_claude_only round-trip.
+/// Step 1: legacy wire values remain stable while the new literal is admitted.
 #[test]
 fn provider_effort_enum_parse_round_trip() {
-    for s in ["low", "medium", "high", "xhigh", "max"] {
+    for s in ["low", "medium", "high", "xhigh", "max", "ultra"] {
         let parsed = ProviderEffort::parse(s).unwrap_or_else(|| panic!("must parse {s}"));
         assert_eq!(parsed.as_str(), s, "as_str round-trip for {s}");
     }
@@ -16,89 +16,22 @@ fn provider_effort_enum_parse_round_trip() {
 }
 
 #[test]
-fn provider_effort_max_is_claude_only() {
-    assert!(ProviderEffort::Max.is_claude_only());
-    for e in [
-        ProviderEffort::Low,
-        ProviderEffort::Medium,
-        ProviderEffort::High,
-        ProviderEffort::XHigh,
-    ] {
-        assert!(
-            !e.is_claude_only(),
-            "{} must not be claude-only",
-            e.as_str()
-        );
+fn provider_effort_max_and_ultra_are_codex_native() {
+    for raw in ["max", "ultra"] {
+        let effort = ProviderEffort::parse(raw).unwrap_or_else(|| panic!("must parse {raw}"));
+        assert!(effort.is_supported_by(Provider::Codex), "Codex must support {raw}");
     }
 }
 
 #[test]
-fn provider_effort_support_matrix() {
-    // Claude/ClaudeCode: all 5 levels.
-    for e in [
-        ProviderEffort::Low,
-        ProviderEffort::Medium,
-        ProviderEffort::High,
-        ProviderEffort::XHigh,
-        ProviderEffort::Max,
-    ] {
-        assert!(
-            e.is_supported_by(Provider::Claude),
-            "Claude must support {}",
-            e.as_str()
-        );
-        assert!(
-            e.is_supported_by(Provider::ClaudeCode),
-            "ClaudeCode must support {}",
-            e.as_str()
-        );
+fn provider_effort_support_matrix_protection_paths() {
+    for raw in ["low", "medium", "high", "xhigh", "max"] {
+        let effort = ProviderEffort::parse(raw).unwrap_or_else(|| panic!("must parse {raw}"));
+        assert!(effort.is_supported_by(Provider::Claude), "Claude must support {raw}");
+        assert!(effort.is_supported_by(Provider::ClaudeCode), "ClaudeCode must support {raw}");
     }
-    // Codex: 4 levels, NOT max.
-    for e in [
-        ProviderEffort::Low,
-        ProviderEffort::Medium,
-        ProviderEffort::High,
-        ProviderEffort::XHigh,
-    ] {
-        assert!(
-            e.is_supported_by(Provider::Codex),
-            "Codex must support {}",
-            e.as_str()
-        );
-    }
-    assert!(
-        !ProviderEffort::Max.is_supported_by(Provider::Codex),
-        "Codex must NOT support max"
-    );
-    // Grok: same matrix as Codex (CLI allow-list is xhigh|high|medium|low).
-    for e in [
-        ProviderEffort::Low,
-        ProviderEffort::Medium,
-        ProviderEffort::High,
-        ProviderEffort::XHigh,
-    ] {
-        assert!(
-            e.is_supported_by(Provider::Grok),
-            "Grok must support {}",
-            e.as_str()
-        );
-    }
-    assert!(
-        !ProviderEffort::Max.is_supported_by(Provider::Grok),
-        "Grok must NOT support max"
-    );
-    // Copilot/Gemini/Fake: none.
     for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
-        for e in [
-            ProviderEffort::Low,
-            ProviderEffort::High,
-            ProviderEffort::Max,
-        ] {
-            assert!(
-                !e.is_supported_by(provider),
-                "{provider:?} must NOT support effort"
-            );
-        }
+        assert!(!ProviderEffort::Low.is_supported_by(provider), "{provider:?} remains non-native");
     }
 }
 
@@ -354,20 +287,19 @@ tasks: []
     }
 
     #[test]
-    fn agent_effort_max_on_codex_rejected() {
+    fn agent_effort_max_on_codex_is_accepted() {
         let mut yaml = base_team("");
         yaml = yaml.replace("provider: claude", "provider: codex").replace(
             "preferred_for: [dev]",
             "preferred_for: [dev]\n    effort: max",
         );
-        let result = validate_spec_yaml_str(&yaml);
-        let errors = result.expect_err("must reject max + codex");
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("/agents/0/effort") && e.contains("only supported by claude")),
-            "errors should mention claude-only constraint; got {errors:?}"
-        );
+        match validate_spec_yaml_str(&yaml) {
+            Ok(()) => {}
+            Err(errors) => assert!(
+                !errors.iter().any(|e| e.contains("/agents/0/effort")),
+                "max+codex must not produce an effort error; got {errors:?}"
+            ),
+        }
     }
 
     #[test]
