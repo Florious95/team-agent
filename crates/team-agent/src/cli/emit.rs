@@ -158,10 +158,14 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
-    if args.iter().any(|arg| arg == "--no-display") {
-        emit_usage_error("argument '--no-display' was removed; use the default tmux backend");
-        return Ok(ExitCode::Error);
-    }
+    // Keep the removed flag harmless for older scripts and persisted command
+    // lines; the default tmux backend is already the only runtime path.
+    let filtered_args: Vec<String> = args
+        .iter()
+        .filter(|arg| arg.as_str() != "--no-display")
+        .cloned()
+        .collect();
+    let args = filtered_args.as_slice();
     let Some(spec) = command_spec(command) else {
         return Ok(emit_unknown_subcommand_usage(command));
     };

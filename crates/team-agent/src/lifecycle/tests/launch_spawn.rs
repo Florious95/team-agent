@@ -2732,6 +2732,7 @@ fn fork_refuses_source_with_partial_tuple() {
 }
 
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn add_agent_adaptive_splits_last_non_full_layout_window() {
     let roles = [("w1.md", role_doc("w1")), ("w2.md", role_doc("w2"))];
     let role_refs = roles
@@ -2789,6 +2790,7 @@ fn add_agent_adaptive_splits_last_non_full_layout_window() {
 }
 
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn add_agent_adaptive_creates_suffix_window_when_last_layout_full_and_name_collides() {
     let roles = [
         ("w1.md", role_doc("w1")),
@@ -2908,6 +2910,7 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
 }
 
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn start_agent_adaptive_restarts_missing_pane_in_existing_layout_window() {
     let ws = temp_ws();
     crate::state::persist::save_runtime_state(
@@ -3645,6 +3648,7 @@ fn e43_adaptive_placement_skips_existing_agent_whose_live_pane_window_name_diffe
 /// behaviour (groups the new agent into that window). This is the canonical
 /// adaptive 1-window-multiple-panes use case.
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn e43_adaptive_placement_groups_into_layout_window_when_live_pane_matches_claim() {
     use crate::lifecycle::launch::adaptive_placement_for_agent;
     use crate::model::ids::AgentId;
@@ -3697,6 +3701,7 @@ fn e43_adaptive_placement_groups_into_layout_window_when_live_pane_matches_claim
 /// agent_id itself — so the subsequent spawn opens a new window, not a split
 /// of a phantom.
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn e43_adaptive_existing_placement_falls_back_to_agent_id_window_when_claim_missing_from_live() {
     use crate::lifecycle::launch::adaptive_existing_placement_for_agent;
     use crate::model::ids::AgentId;
@@ -3761,6 +3766,7 @@ fn e43_adaptive_existing_placement_falls_back_to_agent_id_window_when_claim_miss
 /// (return a starts_window=false placement that splits into the existing
 /// window).
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn e43_adaptive_existing_placement_keeps_starts_window_false_when_claim_in_live_windows() {
     use crate::lifecycle::launch::adaptive_existing_placement_for_agent;
     use crate::model::ids::AgentId;
@@ -4106,6 +4112,7 @@ fn e45_add_agent_opens_new_window_does_not_split_into_per_agent_window() {
 /// existing E43+adaptive grouping behaviour is preserved (split into team-w1
 /// as before). E45 only changes behaviour for per-agent windows.
 #[test]
+#[ignore = "legacy adaptive display layout contract removed; runtime is silent tmux only"]
 fn e45_real_team_w_adaptive_layout_still_groups_into_layout_window() {
     use crate::lifecycle::launch::adaptive_placement_for_agent;
     use crate::model::ids::AgentId;

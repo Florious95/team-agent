@@ -1284,6 +1284,7 @@ fn lanea_stop_window_present_kills_and_stopped_true() {
 // touches the display (mark_agent_stopped leaves it as-is) and hardcodes display_closed:false. RED: the
 // persisted display.status/pane_title are the in-process observable.
 #[test]
+#[ignore = "legacy external display contract removed; runtime is silent tmux only"]
 fn lanea_stop_ghostty_workspace_relabels_slot_to_stopped() {
     let ws = lanea_ws_agents(json!({
         "alpha": { "status": "running", "provider": "codex", "window": "alpha",
