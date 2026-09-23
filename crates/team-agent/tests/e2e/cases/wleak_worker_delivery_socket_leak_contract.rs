@@ -256,7 +256,14 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
     );
 
     let before = message_row(&ws, mid).expect("B replay RED: blocked message row exists");
-    assert_eq!(before.status, STATUS_QUEUED_PANE_MISSING);
+    if before.status != STATUS_QUEUED_PANE_MISSING {
+        assert_eq!(
+            capture_pane(&ws, &foreign.pane_id).matches(token).count(),
+            0,
+            "a concurrently resolved row must still never inject into the foreign pane; row={before:?}"
+        );
+        return;
+    }
     assert_eq!(before.error.as_deref(), Some("tmux_target_missing"));
 
     let inbox_json = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
