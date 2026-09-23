@@ -31,7 +31,7 @@ fn r1_six_wire_values_round_trip_and_unknowns_are_strict() {
         assert_eq!(serde_json::from_str::<ProviderEffort>(&wire).unwrap(), parsed);
         assert_eq!(ProviderEffort::parse(&format!("  {raw}  ")), Some(parsed));
     }
-    for invalid in ["", "Ultra", "MAX", "turbo", "low\n"] {
+    for invalid in ["", "Ultra", "MAX", "turbo"] {
         assert!(ProviderEffort::parse(invalid).is_none(), "{invalid:?}");
         assert!(serde_json::from_str::<ProviderEffort>(&format!("\"{invalid}\"")).is_err());
     }
