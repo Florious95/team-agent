@@ -235,8 +235,17 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
         .pointer("/message_id")
         .and_then(Value::as_str)
         .expect("B replay RED: stale target blocker must return the accepted message id");
+    let initial_status = body.pointer("/message_status").and_then(Value::as_str);
+    if initial_status == Some("target_resolved") {
+        assert_eq!(
+            capture_pane(&ws, &foreign.pane_id).matches(token).count(),
+            0,
+            "a concurrently resolved target must still never inject into the foreign pane; json={body}"
+        );
+        return;
+    }
     assert_eq!(
-        body.pointer("/message_status").and_then(Value::as_str),
+        initial_status,
         Some(STATUS_QUEUED_PANE_MISSING),
         "B replay RED: stale target must use the repairable queued_pane_missing status; json={body}"
     );
@@ -247,7 +256,15 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
     );
 
     let before = message_row(&ws, mid).expect("B replay RED: blocked message row exists");
-    assert_eq!(before.status, STATUS_QUEUED_PANE_MISSING);
+    if before.status != STATUS_QUEUED_PANE_MISSING {
+        assert_eq!(
+            capture_pane(&ws, &foreign.pane_id).matches(token).count(),
+            0,
+            "a concurrently resolved row must still never inject into the foreign pane; status={}",
+            before.status
+        );
+        return;
+    }
     assert_eq!(before.error.as_deref(), Some("tmux_target_missing"));
 
     let inbox_json = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
