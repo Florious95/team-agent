@@ -260,7 +260,8 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
         assert_eq!(
             capture_pane(&ws, &foreign.pane_id).matches(token).count(),
             0,
-            "a concurrently resolved row must still never inject into the foreign pane; row={before:?}"
+            "a concurrently resolved row must still never inject into the foreign pane; status={}",
+            before.status
         );
         return;
     }
