@@ -122,7 +122,7 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
         "--json",
     ]);
     let diagnose_before = case.run_json(&[
-        "diagnose",
+        "doctor",
         "--workspace",
         case.workspace_str(),
         "--team",
@@ -142,7 +142,7 @@ fn stale_snapshot_cannot_flip_status_or_diagnose_ok_readiness() {
         "--json",
     ]);
     let diagnose_after = case.run_json(&[
-        "diagnose",
+        "doctor",
         "--workspace",
         case.workspace_str(),
         "--team",

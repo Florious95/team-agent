@@ -387,10 +387,10 @@ impl LoudEnsureFixture {
 
     fn diagnose_json(&self) -> Value {
         parse_json_stdout(
-            "diagnose",
+            "doctor",
             self.run_ta(
                 &[
-                    "diagnose",
+                    "doctor",
                     "--workspace",
                     self.root.to_str().expect("workspace utf8"),
                     "--json",

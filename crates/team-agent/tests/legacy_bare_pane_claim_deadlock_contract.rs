@@ -135,7 +135,7 @@ fn red3_refused_dirty_topology_next_actions_are_executable_deadlock_exits() {
     assert!(
         actions.iter().any(|action| {
             action.as_str().is_some_and(|text| {
-                text.contains("diagnose") || text.contains("restart") || contains_rebind_command(text)
+                text.contains("team-agent doctor") || text.contains("restart") || contains_rebind_command(text)
             })
         }),
         "RED3: next_actions must include an applicable diagnose/restart/rebind command for the socket split; actions={actions:?}"

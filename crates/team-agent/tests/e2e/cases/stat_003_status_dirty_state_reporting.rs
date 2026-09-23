@@ -18,7 +18,7 @@ fn stat_003_status_dirty_state_reporting() {
     let out = run_ta(
         &ws,
         &[
-            "diagnose",
+            "doctor",
             "--workspace",
             ws.path().to_str().unwrap(),
             "--json",

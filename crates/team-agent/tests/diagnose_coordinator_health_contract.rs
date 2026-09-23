@@ -312,7 +312,7 @@ impl DiagnoseFixture {
 
     fn diagnose_json(&self) -> Value {
         let output = self.run_ta(&[
-            "diagnose",
+            "doctor",
             "--workspace",
             self.root.to_str().expect("workspace utf8"),
             "--json",

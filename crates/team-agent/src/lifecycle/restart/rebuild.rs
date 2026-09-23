@@ -336,7 +336,7 @@ fn restart_with_selected_team_and_transport(
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "dirty_topology".to_string()),
-            error: "restart refused: tmux endpoint/socket topology is inconsistent; run diagnose from the intended leader socket before restarting".to_string(),
+            error: "restart refused: tmux endpoint/socket topology is inconsistent; run doctor from the intended leader socket before restarting".to_string(),
             issue_ids: topology_issue_ids,
         });
     }
@@ -1804,7 +1804,7 @@ fn restart_readiness_timeout_message(
          - tmux session created: {session}\n\
          - worker pane addressable: {pane}\n\
          - coordinator alive: {coordinator}\n\
-         Action: check coordinator log {log}, then inspect this workspace with `team-agent diagnose --workspace '{workspace}'`\n\
+         Action: check coordinator log {log}, then inspect this workspace with `team-agent doctor --workspace '{workspace}'`\n\
          Log: coordinator_log={log} state={state} pid_file={pid}",
         missing = restart_readiness_missing_summary(readiness),
         session = yes_no(readiness.session_created),
@@ -2703,7 +2703,7 @@ fn restart_failure_phase(
     // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): promote
     // spawn/readiness errors whose stderr contains "server exited
     // unexpectedly" to `tmux_server_crashed`, so downstream event
-    // classification and diagnose next_actions ("team-agent diagnose")
+    // classification and doctor next_actions ("team-agent doctor")
     // don't misattribute a whole-server death to a per-agent provider
     // failure. Restart itself does not recover from server crashes in
     // 0.5.39 (§11.1 C is Slice 3, later car); it just classifies clearly.
@@ -2776,7 +2776,7 @@ fn write_restart_agent_failed_event(
                 "phase": phase,
                 "error": error,
                 "action": format!(
-                    "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                    "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
                     decision.agent_id,
                     decision.agent_id
                 ),
@@ -3262,7 +3262,7 @@ fn restart_failure_next_actions(failed_agents: &[RestartFailedAgent]) -> Vec<Str
         .iter()
         .map(|failure| {
             format!(
-                "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
                 failure.agent_id, failure.agent_id
             )
         })
@@ -4911,7 +4911,7 @@ tasks:
             },
             std::time::Duration::from_secs(30),
         );
-        assert!(message.contains("team-agent diagnose --workspace"));
+        assert!(message.contains("team-agent doctor --workspace"));
         assert!(message.contains(workspace.to_string_lossy().as_ref()));
         assert!(!message.contains("--allow-fresh"));
         assert!(!message.contains("restart <agent>"));

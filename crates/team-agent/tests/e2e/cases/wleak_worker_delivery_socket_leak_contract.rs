@@ -621,7 +621,7 @@ fn wleak_diagnose_exposes_stale_worker_pane_binding() {
     let pane_b = pane_for_window(&ws, &session, "b");
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
-    let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
+    let out = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let body = out.json();
     assert_eq!(
         body.pointer("/ok").and_then(Value::as_bool),

@@ -105,7 +105,7 @@ fn rfs_diagnose_reports_endpoint_socket_conflict_and_canonical_readiness() {
     create_dummy_session(&new_socket, "rfs002-leader-side", ws.path().to_path_buf());
     write_split_brain_state(&ws, &old_socket, &new_socket);
 
-    let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
+    let out = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let mut body = out.json();
     assert_eq!(
         body.pointer("/ok").and_then(Value::as_bool),
@@ -135,7 +135,7 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     create_dummy_session(&new_socket, "rfs008-leader-side", ws.path().to_path_buf());
     write_split_brain_state(&ws, &old_socket, &new_socket);
 
-    let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
+    let out = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let mut body = out.json();
     reverse_issue_order(&mut body);
     assert_issue_id(
@@ -219,7 +219,7 @@ fn rfs_same_bare_pane_id_on_different_sockets_is_not_a_4_tuple_collision() {
         });
     });
 
-    let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
+    let out = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let body = out.json();
     assert!(
         !issue_ids(&body).contains(LEADER_PANE_ID_COLLIDES_WITH_AGENT),

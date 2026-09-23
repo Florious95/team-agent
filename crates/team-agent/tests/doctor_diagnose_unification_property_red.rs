@@ -215,7 +215,7 @@ fn contains_issue_fragment(value: &Value, fragment: &str) -> bool {
 }
 
 #[test]
-fn p1_doctor_and_diagnose_are_byte_and_exit_equivalent() {
+fn p1_removed_diagnose_refuses_all_former_doctor_modes() {
     let cases: &[&[&str]] = &[
         &[],
         &["--json"],
@@ -226,33 +226,17 @@ fn p1_doctor_and_diagnose_are_byte_and_exit_equivalent() {
         &["--fix-schema", "--json"],
     ];
     for (index, args) in cases.iter().enumerate() {
-        let left = Fixture::new(&format!("p1-doctor-{index}"));
-        let right = left.clone_as(&format!("p1-diagnose-{index}"));
-        let doctor = run("doctor", args, &left);
-        let diagnose = run("diagnose", args, &right);
-        assert_eq!(
-            doctor.status.code(),
-            diagnose.status.code(),
-            "P1 exit mismatch for args={args:?}; doctor={} diagnose={}",
-            text(&doctor.stdout),
-            text(&diagnose.stdout)
-        );
-        // The disposable fixtures have different absolute workspace identities.
-        // Normalize only that test input, never the product's identity fields.
-        assert_eq!(
-            text(&doctor.stdout).replace(&path_arg(&left.workspace), "$WORKSPACE"),
-            text(&diagnose.stdout).replace(&path_arg(&right.workspace), "$WORKSPACE"),
-            "P1 stdout mismatch for args={args:?}"
-        );
-        assert_eq!(
-            doctor.stderr, diagnose.stderr,
-            "P1 stderr mismatch for args={args:?}"
-        );
+        let fixture = Fixture::new(&format!("p1-removed-{index}"));
+        let output = run("diagnose", args, &fixture);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(text(&output.stderr).contains("invalid choice: 'diagnose'"));
+        assert_eq!(fs::read_dir(&fixture.workspace).expect("workspace").count(), 0);
     }
 }
 
 #[test]
-fn p2_doctor_is_the_only_discoverable_entry_and_alias_forwards_all_flags() {
+fn p2_doctor_is_the_only_discoverable_diagnostic_entry() {
     let fixture = Fixture::new("p2-help");
     let default_help = run_root(&["--help"], &fixture);
     let help_text = text(&default_help.stdout);
@@ -268,17 +252,14 @@ fn p2_doctor_is_the_only_discoverable_entry_and_alias_forwards_all_flags() {
     );
 
     let doctor_help = run("doctor", &["--help"], &fixture);
-    let diagnose_help = run("diagnose", &["--help"], &fixture);
     assert_eq!(doctor_help.status.code(), Some(0));
-    assert_eq!(diagnose_help.status.code(), Some(0));
-    assert_eq!(doctor_help.stdout, diagnose_help.stdout);
-    assert_eq!(doctor_help.stderr, diagnose_help.stderr);
-
-    let doctor = run("doctor", &["--fix", "--json"], &fixture);
-    let diagnose = run("diagnose", &["--fix", "--json"], &fixture);
-    assert_eq!(doctor.status.code(), diagnose.status.code());
-    assert_eq!(doctor.stdout, diagnose.stdout);
-    assert_eq!(doctor.stderr, diagnose.stderr);
+    assert!(text(&doctor_help.stdout).contains("usage: team-agent doctor"));
+    for flag in ["--help", "-h"] {
+        let removed = run("diagnose", &[flag], &fixture);
+        assert_eq!(removed.status.code(), Some(1));
+        assert!(removed.stdout.is_empty());
+        assert!(text(&removed.stderr).contains("invalid choice: 'diagnose'"));
+    }
 }
 
 #[test]
@@ -288,7 +269,7 @@ fn p3_empty_and_unstarted_workspaces_are_not_present_not_missing_sessions() {
         if with_team_dir {
             fs::create_dir_all(fixture.workspace.join(".team")).expect("create empty team dir");
         }
-        for name in ["doctor", "diagnose"] {
+        for name in ["doctor"] {
             let output = run(name, &["--json"], &fixture);
             let value = report(&output);
             assert_eq!(
@@ -318,7 +299,7 @@ fn p4_ok_issues_and_exit_code_are_one_truth_in_both_renderers() {
             "leader_receiver": {"status": "unbound"}
         }),
     );
-    for name in ["doctor", "diagnose"] {
+    for name in ["doctor"] {
         let json_output = run(name, &["--json"], &fixture);
         let value = report(&json_output);
         let issues = issue_values(&value);
@@ -487,8 +468,8 @@ fn p8_runtime_report_contains_one_coordinator_observation() {
 }
 
 #[test]
-fn p9_default_diagnosis_is_read_only_for_both_spellings() {
-    for name in ["doctor", "diagnose"] {
+fn p9_default_doctor_is_read_only() {
+    for name in ["doctor"] {
         let fixture = Fixture::new(&format!("p9-{name}"));
         save_state(
             &fixture,
@@ -593,7 +574,7 @@ fn p12_human_output_is_bounded_utf8_control_free_triage() {
             "leader_receiver": {"status": "unbound"}
         }),
     );
-    for name in ["doctor", "diagnose"] {
+    for name in ["doctor"] {
         let output = run(name, &[], &fixture);
         let human = text(&output.stdout);
         assert!(
@@ -694,30 +675,11 @@ fn p14_explicit_team_selection_is_isolated_and_missing_selection_fails() {
 
 #[test]
 fn p15_explicit_gate_and_repair_modes_keep_safe_rejections_and_evidence() {
-    let cases: &[&[&str]] = &[
-        &["--fix", "--json"],
-        &["--gate", "not-a-gate", "--json"],
-        &["--comms", "--json"],
-    ];
-    for args in cases {
-        let left = Fixture::new("p15-doctor");
-        let right = left.clone_as("p15-diagnose");
-        let doctor = run("doctor", args, &left);
-        let diagnose = run("diagnose", args, &right);
-        assert_eq!(
-            doctor.status.code(),
-            diagnose.status.code(),
-            "P15 rc mismatch: {args:?}"
-        );
-        assert_eq!(
-            text(&doctor.stdout).replace(&path_arg(&left.workspace), "$WORKSPACE"),
-            text(&diagnose.stdout).replace(&path_arg(&right.workspace), "$WORKSPACE"),
-            "P15 stdout mismatch: {args:?}"
-        );
-        assert_eq!(
-            doctor.stderr, diagnose.stderr,
-            "P15 stderr mismatch: {args:?}"
-        );
+    for args in [&["--fix", "--json"][..], &["--gate", "not-a-gate", "--json"][..]] {
+        let fixture = Fixture::new("p15-doctor");
+        let doctor = run("doctor", args, &fixture);
+        assert_eq!(doctor.status.code(), Some(1), "{args:?}");
+        assert_eq!(report(&doctor)["ok"], false, "{args:?}");
     }
     let fixture = Fixture::new("p15-comms-shape");
     let comms = report(&run("doctor", &["--comms", "--json"], &fixture));

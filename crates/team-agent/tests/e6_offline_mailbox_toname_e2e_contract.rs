@@ -120,7 +120,7 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
     let diagnose = case.run_cli(
         case.target_workspace(),
         vec![
-            "diagnose".into(),
+            "doctor".into(),
             "--workspace".into(),
             case.target_workspace_arg(),
             "--team".into(),

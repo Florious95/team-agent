@@ -152,7 +152,7 @@ fn tmux_server_death_is_classified_as_tmux_server_crashed() {
         (
             "restart failure output keeps an executable next action after server death",
             restart.contains("tmux_server_crashed")
-                && (restart.contains("next_actions") || restart.contains("team-agent diagnose")),
+                && (restart.contains("next_actions") || restart.contains("team-agent doctor")),
         ),
     ]);
 

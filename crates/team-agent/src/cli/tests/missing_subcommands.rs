@@ -332,15 +332,15 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
             leader_env: Default::default(),
         }]);
     crate::transport_factory::with_leader_endpoint_transport(endpoint, transport, || {
-        for command in ["doctor", "diagnose"] {
-            let code = run(
-                &cli_argv(&[command, "--workspace", &ws.to_string_lossy(), "--json"]),
-                &ws,
-            );
-            assert_eq!(code, ExitCode::Error, "healthy binding alone cannot hide missing coordinator");
-        }
-        let result = cmd_diagnose(&DiagnoseArgs {
+        let code = run(
+            &cli_argv(&["doctor", "--workspace", &ws.to_string_lossy(), "--json"]),
+            &ws,
+        );
+        assert_eq!(code, ExitCode::Error, "healthy binding alone cannot hide missing coordinator");
+        let result = cmd_doctor(&DoctorArgs {
             workspace: ws.clone(), json: true, team: None,
+            spec: None, gate: None, comms: false, fix: false,
+            fix_schema: false, cleanup_orphans: false, confirm: false,
         }).expect("diagnostic report");
         let CmdOutput::Json(report) = result.output else {
             panic!("expected JSON diagnostic report");
@@ -377,7 +377,7 @@ fn dispatch_routes_diagnose_self_signed_attached_without_registry_is_not_ok() {
     let ws = tmp_workspace();
     seed_self_signed_attached_leader(&ws);
     let code = run(
-        &cli_argv(&["diagnose", "--workspace", &ws.to_string_lossy(), "--json"]),
+        &cli_argv(&["doctor", "--workspace", &ws.to_string_lossy(), "--json"]),
         &ws,
     );
     assert_ne!(

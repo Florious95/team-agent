@@ -2,8 +2,10 @@
 //! cli · emit — `emit`(--json vs 人读 dict 逐键)+ 顶层 `run` 调度(parser.py `main`)+
 //! 人读标量/集合渲染(`human_value` / `json_dumps_like`)。
 
-use super::spec::{command_spec, CommandKind, CommandTier, ALL_DISPATCH_KINDS, COMMAND_SPECS};
 use super::models::cmd_models;
+use super::spec::{command_spec, CommandKind, COMMAND_SPECS};
+#[cfg(test)]
+use super::spec::{CommandTier, ALL_DISPATCH_KINDS};
 use super::*;
 use std::io::{ErrorKind, Write as _};
 
@@ -171,16 +173,11 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     };
     match spec.kind {
         CommandKind::Dispatch(_) => {}
-        CommandKind::SpecOnlyAlias { .. } => {
-            eprintln!("{}", command_help(Some(command)));
-            return Ok(ExitCode::Usage);
-        }
         CommandKind::LeaderPassthrough { .. } => {
             return Ok(emit_unknown_subcommand_usage(command));
         }
     }
     match command {
-        "init" => cmd_init(&init_args(args, cwd)).map(emit_result),
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
         "allow-peer-talk" => {
@@ -188,10 +185,8 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         }
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
-        "stop" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
         "restart" => cmd_restart(&restart_args(args, cwd)?).map(emit_result),
-        "restart-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?).map(emit_result),
         "start-agent" => cmd_start_agent(&start_agent_args(args, cwd)?).map(emit_result),
         "stop-agent" => cmd_stop_agent(&stop_agent_args(args, cwd)?).map(emit_result),
         "reset-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?).map(emit_result),
@@ -199,11 +194,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "clone-agent" => cmd_clone_agent(&clone_agent_args(args, cwd)?).map(emit_result),
         "fork-agent" => cmd_fork_agent(&fork_agent_args(args, cwd)?).map(emit_result),
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?).map(emit_result),
-        "stuck-list" => cmd_stuck_list(&stuck_list_args(args, cwd)).map(emit_result),
-        "stuck-cancel" => cmd_stuck_cancel(&stuck_cancel_args(args, cwd)?).map(emit_result),
-        "acknowledge-idle" => {
-            cmd_acknowledge_idle(&acknowledge_idle_args(args, cwd)).map(emit_result)
-        }
         "takeover" => cmd_takeover(&takeover_args(args, cwd)).map(emit_result),
         "claim-leader" => cmd_claim_leader(&claim_leader_args(args, cwd)).map(emit_result),
         // Real dispatch: `cmd_attach_leader` writes the `leader_receiver` binding.
@@ -232,8 +222,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
         "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        // Compatibility spelling: parse and execute the exact doctor contract.
-        "diagnose" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
         "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
         "e2e" => cmd_e2e(&e2e_args(args, cwd)).map(emit_result),
@@ -243,58 +231,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     }
 }
 
-const DISPATCH_COMMANDS: &[&str] = &[
-    "init",
-    "quick-start",
-    "send",
-    "allow-peer-talk",
-    "status",
-    "stop",
-    "shutdown",
-    "restart",
-    "restart-agent",
-    "start-agent",
-    "stop-agent",
-    "reset-agent",
-    "add-agent",
-    "fork-agent",
-    "remove-agent",
-    "stuck-list",
-    "stuck-cancel",
-    "acknowledge-idle",
-    "takeover",
-    "claim-leader",
-    "attach-leader",
-    "attach-app-server-leader",
-    "identity",
-    "approvals",
-    "inbox",
-    "doctor",
-    "watch",
-    "sessions",
-    // 0.5.9 E7: host leader discovery command surface.
-    "leaders",
-    "models",
-    "validate",
-    "install-skill",
-    "profile",
-    "results",
-    "wait",
-    "diagnose",
-    "preflight",
-    "wait-ready",
-    "e2e",
-    "peek",
-    "coordinator",
-];
-
-// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.6):
-// `purge-agent` was previously listed in help but had no dispatch arm,
-// so it read as a supported recovery command while actually failing with
-// "invalid choice". The dispatch registration remains out of scope for
-// 0.5.26 (destructive semantics deserve their own CR); keep the help
-// consistent with the dispatch table so it is no longer advertised.
-const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start"];
 // Command grammar, not provider identity parsing: these are top-level CLI
 // passthrough verbs for starting a leader under a provider executable.
 const LEADER_PASSTHROUGH_COMMANDS: &[&str] =
@@ -370,18 +306,6 @@ fn append_help_section(out: &mut String, title: &str, names: &[&str]) {
     }
 }
 
-fn compat_hidden_help(command: &str, usage: &str) -> String {
-    let Some(spec) = command_spec(command) else {
-        return usage.to_string();
-    };
-    if spec.tier != CommandTier::CompatHidden {
-        return usage.to_string();
-    }
-    let sunset = spec.sunset.unwrap_or("C2");
-    let action = spec.action.unwrap_or("use a supported command");
-    format!("{usage}\n\nstatus: hidden compatibility command\nsunset: {sunset}\naction: {action}")
-}
-
 ///
 /// Test-only public accessor for `command_help` — allows integration
 /// tests to grep the help copy without depending on internal parser
@@ -404,9 +328,7 @@ pub fn __test_quick_start_args(
 fn command_help(command: Option<&str>) -> String {
     match command {
         None => default_help(),
-        Some("init") => compat_hidden_help("init", "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]"),
         Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--backend tmux|conpty] [--json] [--detail]\n\n--backend selects the worker transport: tmux (default on POSIX) or conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).\n\n--detail includes internal receiver/topology diagnostics in JSON output.\n\nAfter a successful start, use the returned `send_commands` (or choose an agent explicitly) with `team-agent send AGENT MESSAGE`.".to_string(),
-        Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
         Some("send") => concat!(
             "usage: team-agent send TO MESSAGE... ",
             "[--workspace WORKSPACE] [--team TEAM] ",
@@ -420,10 +342,8 @@ fn command_help(command: Option<&str>) -> String {
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或原生 tmux/process 采样时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models [--provider pi|cursor_agent] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, and display name. Cursor uses the local `agent --list-models` catalog.".to_string(),
         Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
-        Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
-        Some("restart-agent") => compat_hidden_help("restart-agent", "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]"),
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]".to_string(),
         Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--json]\n\nAfter a successful start, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
@@ -432,9 +352,6 @@ fn command_help(command: Option<&str>) -> String {
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
         // 0.5.26 (§7.6): removed from help; dispatch was never wired.
-        Some("stuck-list") => "usage: team-agent stuck-list [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("stuck-cancel") => "usage: team-agent stuck-cancel AGENT [--workspace WORKSPACE] [--alert-type stuck|idle_fallback|cross_worker_deadlock|all] [--json]".to_string(),
-        Some("acknowledge-idle") => "usage: team-agent acknowledge-idle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("takeover") => "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
         Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json] [--detail]".to_string(),
         Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--pane PANE] [--provider PROVIDER] [--confirm] [--json]".to_string(),
@@ -450,7 +367,6 @@ fn command_help(command: Option<&str>) -> String {
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]".to_string(),
         Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("wait") => "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]".to_string(),
-        Some("diagnose") => "usage: team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--gate orphans|comms] [--comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]".to_string(),
         Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
         Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]".to_string(),
         Some("e2e") => "usage: team-agent e2e [--workspace WORKSPACE] [--providers LIST] [--real] [--json]".to_string(),
@@ -838,7 +754,6 @@ struct ParsedArgs {
     label: Option<String>,
     from_spec: bool,
     confirm: bool,
-    alert_type: Option<String>,
     limit: Option<usize>,
     gate: Option<String>,
     comms: bool,
@@ -929,7 +844,6 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--label" => parsed.label = next_arg(args, &mut i),
             "--from-spec" => parsed.from_spec = true,
             "--confirm" => parsed.confirm = true,
-            "--alert-type" => parsed.alert_type = next_arg(args, &mut i),
             "-n" | "--limit" => {
                 parsed.limit = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok())
             }
@@ -1134,15 +1048,6 @@ fn models_args(args: &[String]) -> Result<ModelsArgs, CliError> {
         search,
         json: parsed.json,
     })
-}
-
-fn init_args(args: &[String], cwd: &Path) -> InitArgs {
-    let parsed = parse_args(args);
-    InitArgs {
-        workspace: workspace(&parsed, cwd),
-        force: parsed.force,
-        json: parsed.json,
-    }
 }
 
 fn resolve_cli_path(cwd: &Path, path: &Path) -> PathBuf {
@@ -1616,48 +1521,6 @@ fn remove_agent_args(args: &[String], cwd: &Path) -> Result<RemoveAgentArgs, Cli
     })
 }
 
-fn stuck_list_args(args: &[String], cwd: &Path) -> StuckListArgs {
-    let parsed = parse_args(args);
-    StuckListArgs {
-        workspace: workspace(&parsed, cwd),
-        json: parsed.json,
-        team: parsed.team,
-    }
-}
-
-fn stuck_cancel_args(args: &[String], cwd: &Path) -> Result<StuckCancelArgs, CliError> {
-    let parsed = parse_args(args);
-    let workspace = workspace(&parsed, cwd);
-    refuse_if_multi_alive_team_missing_scope("stuck-cancel", &workspace, parsed.team.as_deref())?;
-    Ok(StuckCancelArgs {
-        agent: required_pos(&parsed, 0, "agent")?,
-        workspace,
-        alert_type: alert_type(parsed.alert_type.as_deref())?,
-        json: parsed.json,
-        team: parsed.team,
-    })
-}
-
-fn alert_type(raw: Option<&str>) -> Result<Option<AlertType>, CliError> {
-    match raw {
-        Some("stuck") => Ok(Some(AlertType::Stuck)),
-        Some("idle_fallback") => Ok(Some(AlertType::IdleFallback)),
-        Some("cross_worker_deadlock") => Ok(Some(AlertType::CrossWorkerDeadlock)),
-        Some("all") | None => Ok(None),
-        Some(other) => Err(CliError::Usage(format!("invalid --alert-type: {other}"))),
-    }
-}
-
-fn acknowledge_idle_args(args: &[String], cwd: &Path) -> AcknowledgeIdleArgs {
-    let parsed = parse_args(args);
-    let workspace = workspace(&parsed, cwd);
-    AcknowledgeIdleArgs {
-        team: parsed.team,
-        workspace,
-        json: parsed.json,
-    }
-}
-
 fn doctor_args(args: &[String], cwd: &Path) -> DoctorArgs {
     let parsed = parse_args(args);
     DoctorArgs {
@@ -1863,15 +1726,6 @@ fn option_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
-fn diagnose_args(args: &[String], cwd: &Path) -> DiagnoseArgs {
-    let parsed = parse_args(args);
-    DiagnoseArgs {
-        workspace: workspace(&parsed, cwd),
-        json: parsed.json,
-        team: parsed.team,
-    }
-}
-
 fn preflight_args(args: &[String], cwd: &Path) -> PreflightArgs {
     let parsed = parse_args(args);
     let team = parsed
@@ -2064,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn command_specs_have_unique_names_and_valid_aliases() {
+    fn command_specs_have_unique_names() {
         let mut names = std::collections::BTreeSet::new();
         for spec in COMMAND_SPECS {
             assert!(
@@ -2072,15 +1926,6 @@ mod tests {
                 "duplicate command spec `{}`",
                 spec.name
             );
-        }
-        for spec in COMMAND_SPECS {
-            if let Some(alias_of) = spec.alias_of {
-                assert!(
-                    names.contains(alias_of),
-                    "`{}` aliases missing command `{alias_of}`",
-                    spec.name
-                );
-            }
         }
     }
 
@@ -2152,7 +1997,7 @@ mod tests {
         let top_help = command_help(None);
         let visible = visible_help_commands(&top_help);
         assert!(visible.iter().any(|command| command == "doctor"));
-        for command in ["leaders", "diagnose", "e2e", "peek", "coordinator"] {
+        for command in ["leaders", "e2e", "peek", "coordinator"] {
             assert!(
                 !visible.iter().any(|visible| visible == command),
                 "`{command}` must stay hidden from default help"
@@ -2171,23 +2016,12 @@ mod tests {
     }
 
     #[test]
-    fn compat_hidden_help_has_sunset_action() {
-        for command in ["stop", "restart-agent", "start", "init"] {
-            let help = command_help(Some(command)).to_lowercase();
-            assert!(help.contains("status: hidden compatibility command"));
-            assert!(help.contains("sunset: c2"));
-            assert!(help.contains("action:"));
-        }
-    }
-
-    #[test]
     fn observation_a_commands_have_terminal_tiers() {
         for (command, tier) in [
             ("allow-peer-talk", CommandTier::Secondary),
             ("approvals", CommandTier::Secondary),
             ("profile", CommandTier::Secondary),
             ("install-skill", CommandTier::Secondary),
-            ("init", CommandTier::CompatHidden),
         ] {
             assert_eq!(command_spec(command).map(|spec| spec.tier), Some(tier));
         }
@@ -2316,7 +2150,6 @@ mod tests {
                 &["--workspace", "--team", "-n", "--limit", "--json"][..],
             ),
             ("sessions", &["--workspace", "--team", "--json"][..]),
-            ("diagnose", &["--workspace", "--team", "--json"][..]),
             (
                 "wait-ready",
                 &["--workspace", "--team", "--timeout", "--json"][..],
@@ -2618,18 +2451,6 @@ mod tests {
         assert!(
             refuse_if_multi_alive_team_missing_scope("stuck-cancel", &ws, None).is_ok(),
             "single-alive-team workspace must not trigger the ambiguity refusal"
-        );
-    }
-
-    #[test]
-    fn stuck_cancel_args_builder_refuses_on_multi_alive_team() {
-        let ws = tmp_workspace();
-        seed_two_alive_teams_in(&ws);
-        let argv = cli_argv(&["worker_a", "--workspace", &ws.to_string_lossy()]);
-        let err = stuck_cancel_args(&argv, &ws).expect_err("must refuse");
-        assert!(
-            err.to_string().contains("multiple alive teams"),
-            "stuck-cancel args builder must surface the refusal; got: {err}"
         );
     }
 

@@ -1,7 +1,7 @@
 use super::launch_spawn::seed_healthy_coordinator;
 use super::*;
 use crate::cli::{
-    cmd_diagnose, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult, DiagnoseArgs,
+    cmd_doctor, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult, DoctorArgs,
     SendArgs, StatusArgs,
 };
 use crate::transport::test_support::OfflineTransport;
@@ -582,10 +582,17 @@ fn run_diagnose_after_quick_start() -> Value {
             .is_some(),
         "index-missing diagnose requires a persisted seeded owner"
     );
-    let diagnose = cmd_diagnose(&DiagnoseArgs {
+    let diagnose = cmd_doctor(&DoctorArgs {
         workspace,
         json: true,
         team: Some("teamdir".to_string()),
+        spec: None,
+        gate: None,
+        comms: false,
+        fix: false,
+        fix_schema: false,
+        cleanup_orphans: false,
+        confirm: false,
     });
     match cmd_value(diagnose) {
         Value::Object(map) => map

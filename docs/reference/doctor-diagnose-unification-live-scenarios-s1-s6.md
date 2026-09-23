@@ -1,4 +1,6 @@
-# doctor / diagnose 实机盲测用例书（S1–S6）
+# 历史归档：doctor / diagnose 合并实机用例书（S1–S6）
+
+> 本文保留旧双拼写合并阶段的验收设计，不是当前操作指南。顶层 `diagnose` 已物理删除，现有诊断入口只有 `team-agent doctor`；下文旧 alias 步骤及双拼写等价判据不再适用，不应复制执行。
 
 本用例书只提供公开终端操作和用户可观察判据。测试者使用 Leader 固定的最新 macOS `team-agent` binary、隔离 HOME/workspace、Luna caller/被测 Agent 和准备者提供的 Team fixture；不自行构建、不修改 fixture、不 claim/takeover、不重发凑绿。
 

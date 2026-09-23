@@ -69,7 +69,7 @@ fn issue_id(issue: &Value) -> Option<&str> {
 
 #[test]
 fn r1_explicit_missing_team_fails_and_nested_team_resolves_runtime() {
-    for command in ["doctor", "diagnose"] {
+    for command in ["doctor"] {
         let f = Fixture::new(command);
         assert!(f.run(command, &f.workspace, &["--json"]).status.success());
         let missing = f.run(command, &f.workspace, &["--team", "absent", "--json"]);
@@ -115,7 +115,7 @@ fn r1_selected_team_status_is_independent_of_the_top_level_sibling() {
                 }
             }).to_string();
             fs::write(runtime.join("state.json"), &state).unwrap();
-            for command in ["doctor", "diagnose"] {
+            for command in ["doctor"] {
                 let out = f.run(command, &f.workspace, &["--team", "beta", "--json"]);
                 let value = report(&out);
                 let alive = selected_status == "alive";
@@ -131,7 +131,7 @@ fn r1_selected_team_status_is_independent_of_the_top_level_sibling() {
 
 #[test]
 fn r2_existing_bad_database_is_checked_without_state_and_never_rewritten() {
-    for command in ["doctor", "diagnose"] {
+    for command in ["doctor"] {
         let f = Fixture::new("bad-db");
         let runtime = f.workspace.join(".team/runtime");
         fs::create_dir_all(&runtime).unwrap();
@@ -172,7 +172,7 @@ fn r3_each_finding_keeps_its_target_in_json_repairs_and_human_lines() {
     fs::write(f.workspace.join("first.md"),
         "OPENAI_API_KEY=synthetic-test-only\nANTHROPIC_API_KEY=synthetic-test-only\n").unwrap();
     fs::write(f.workspace.join("second.md"), "OPENAI_API_KEY=synthetic-test-only\n").unwrap();
-    for command in ["doctor", "diagnose"] {
+    for command in ["doctor"] {
         let value = report(&f.run(command, &f.workspace, &["--json"]));
         let findings = value["issues"].as_array().unwrap().iter()
             .filter(|issue| issue_id(issue) == Some("secret_scan_finding")).collect::<Vec<_>>();
@@ -198,7 +198,7 @@ fn r3_each_finding_keeps_its_target_in_json_repairs_and_human_lines() {
 #[test]
 fn r4_comms_human_has_only_summary_issue_and_repair_lines() {
     let f = Fixture::new("comms");
-    for command in ["doctor", "diagnose"] {
+    for command in ["doctor"] {
         let value = report(&f.run(command, &f.workspace, &["--comms", "--json"]));
         let output = f.run(command, &f.workspace, &["--comms"]);
         let text = String::from_utf8(output.stdout).unwrap();
@@ -216,7 +216,7 @@ fn r5_coordinator_issue_and_detail_share_one_observation_during_pid_rotation() {
     use std::os::unix::fs::OpenOptionsExt;
     use std::time::{Duration, Instant};
 
-    for command in ["doctor", "diagnose"] {
+    for command in ["doctor"] {
         let f = Fixture::new("pid-rotation");
         let runtime = f.seed_runtime();
         let fifo = runtime.join("coordinator.pid");

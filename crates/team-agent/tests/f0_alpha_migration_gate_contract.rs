@@ -137,7 +137,7 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
         "--json",
     ]);
     let diagnose = case.run_json(&[
-        "diagnose",
+        "doctor",
         "--workspace",
         case.workspace_str(),
         "--team",

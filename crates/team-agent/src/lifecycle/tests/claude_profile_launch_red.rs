@@ -182,7 +182,7 @@ fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
     .unwrap();
 
     let output = Command::new(crate::lifecycle::tests::test_binary_path())
-        .args(["diagnose", team.to_str().unwrap(), "--workspace", ws.to_str().unwrap(), "--json"])
+        .args(["doctor", team.to_str().unwrap(), "--workspace", ws.to_str().unwrap(), "--json"])
         .current_dir(&team)
         .output()
         .expect("diagnose subprocess should run");

@@ -312,14 +312,6 @@ pub struct QuickStartArgs {
     // user-confirmed. quick-start is now an initial-creation-only verb.
 }
 
-/// `init`(`parser.py` bootstrap verb)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InitArgs {
-    pub workspace: PathBuf,
-    pub force: bool,
-    pub json: bool,
-}
-
 /// `send`(`parser.py:262`)。`target` xor `--to`(fanout);`message` 多 token join 空格。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SendArgs {
@@ -554,36 +546,6 @@ pub struct RemoveAgentArgs {
     pub json: bool,
 }
 
-/// `stuck-list`(`parser.py:424`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StuckListArgs {
-    pub workspace: PathBuf,
-    pub json: bool,
-    /// Stage 4: explicit `--team` scope (read-only enumeration).
-    pub team: Option<String>,
-}
-
-/// `stuck-cancel`(`parser.py:429`)。`--alert-type` ∈ {stuck, idle_fallback, all},默认 stuck。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StuckCancelArgs {
-    pub agent: String,
-    pub workspace: PathBuf,
-    /// `None` 表 `all`(展开全集);`Some(AlertType)` 表单类型。
-    pub alert_type: Option<AlertType>,
-    pub json: bool,
-    /// Parsed but rejected until stuck suppression storage grows a team-scoped
-    /// backend selector.
-    pub team: Option<String>,
-}
-
-/// `acknowledge-idle`(`parser.py:436`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcknowledgeIdleArgs {
-    pub team: Option<String>,
-    pub workspace: PathBuf,
-    pub json: bool,
-}
-
 /// `doctor`(`parser.py:318`)。`--gate` ∈ {orphans, comms};`--fix` 须配 `--gate`(`cmd_doctor` 校验)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorArgs {
@@ -681,17 +643,6 @@ pub struct WaitArgs {
     pub task_id: String,
     pub workspace: PathBuf,
     pub json: bool,
-}
-
-/// `diagnose` compatibility spelling for the canonical `doctor` health report.
-/// The CLI normalizes it to `DoctorArgs`; this narrow type remains for direct
-/// Rust callers that used the pre-unification API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiagnoseArgs {
-    pub workspace: PathBuf,
-    pub json: bool,
-    /// Stage 4: explicit `--team` scope (read-only health report).
-    pub team: Option<String>,
 }
 
 /// `preflight`(`parser.py:160`)。

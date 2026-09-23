@@ -67,9 +67,6 @@ fn red1_deleted_repair_commands_absent_from_command_surface() {
         if spec_block_for(&spec, command).is_some() {
             failures.push(format!("COMMAND_SPECS still contains `{command}`"));
         }
-        if emit_const_contains(&emit, "DISPATCH_COMMANDS", command) {
-            failures.push(format!("DISPATCH_COMMANDS still lists `{command}`"));
-        }
         if dispatch_contains_command_arm(&emit, command) {
             failures.push(format!("dispatch still has a match arm for `{command}`"));
         }
@@ -179,7 +176,7 @@ fn red3_normal_send_and_report_paths_replace_fallback_commands() {
     }
     assert_no_fallback_command_text("send leader-unavailable output", &send_text, &mut failures);
 
-    let diagnose = case.run_ta(&["diagnose", "--workspace", case.workspace_str(), "--json"]);
+    let diagnose = case.run_ta(&["doctor", "--workspace", case.workspace_str(), "--json"]);
     let diagnose_text = output_text(&diagnose);
     let diagnose_lower = diagnose_text.to_lowercase();
     if !diagnose_lower.contains("action_required") && !diagnose_lower.contains("broken_class") {
@@ -276,7 +273,6 @@ fn red5_result_validation_is_in_normal_ingestion() {
     let spec = read_repo_file("crates/team-agent/src/cli/spec.rs");
     let emit = read_repo_file("crates/team-agent/src/cli/emit.rs");
     if spec_block_for(&spec, "validate-result").is_some()
-        || emit_const_contains(&emit, "DISPATCH_COMMANDS", "validate-result")
         || dispatch_contains_command_arm(&emit, "validate-result")
     {
         failures.push(
@@ -380,8 +376,8 @@ fn red6_repair_state_daily_path_removed_and_schema_hint_points_to_doctor() {
             case.run_ta(&["collect", "--workspace", case.workspace_str(), "--json"]),
         ),
         (
-            "diagnose",
-            case.run_ta(&["diagnose", "--workspace", case.workspace_str(), "--json"]),
+            "doctor",
+            case.run_ta(&["doctor", "--workspace", case.workspace_str(), "--json"]),
         ),
     ] {
         let text = output_text(&output);
@@ -771,45 +767,13 @@ fn spec_block_for(spec: &str, command: &str) -> Option<String> {
     Some(spec[start..end].to_string())
 }
 
-fn emit_const_contains(emit: &str, const_name: &str, command: &str) -> bool {
-    parse_const_str_array(emit, const_name)
-        .iter()
-        .any(|name| name == command)
-}
-
-fn parse_const_str_array(source: &str, const_name: &str) -> Vec<String> {
-    let marker = format!("const {const_name}:");
-    let Some(start) = source.find(&marker) else {
-        return Vec::new();
-    };
-    let after = &source[start..];
-    let Some(array_start) = after.find("&[") else {
-        return Vec::new();
-    };
-    let after_array = &after[array_start..];
-    let Some(end) = after_array.find("];") else {
-        return Vec::new();
-    };
-    let array = &after_array[..end];
-    let mut values = Vec::new();
-    let mut parts = array.split('"');
-    let _ = parts.next();
-    while let Some(value) = parts.next() {
-        values.push(value.to_string());
-        let _ = parts.next();
-    }
-    values
-}
-
 fn dispatch_contains_command_arm(emit: &str, command: &str) -> bool {
-    let Some(start) = emit.find("pub(crate) fn dispatch") else {
-        return false;
-    };
-    let end = emit[start..]
-        .find("const DISPATCH_COMMANDS")
-        .map(|offset| start + offset)
-        .unwrap_or(emit.len());
-    emit[start..end].contains(&format!("\"{command}\""))
+    let dispatch = emit.split_once("fn dispatch(").expect("dispatch function").1;
+    let dispatch = dispatch.split_once("match command {").expect("command match").1;
+    let dispatch = dispatch.split_once("const LEADER_PASSTHROUGH_COMMANDS").expect("dispatch end").0;
+    dispatch.lines().any(|line| {
+        line.trim_start().starts_with(&format!("\"{command}\" =>"))
+    })
 }
 
 fn packaged_worker_reference_files() -> Vec<String> {

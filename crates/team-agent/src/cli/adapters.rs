@@ -6,100 +6,6 @@
 use super::*;
 use crate::transport::Transport;
 
-const INIT_SPEC_TEMPLATE: &str = include_str!("../model/testdata/team.spec.yaml");
-const INIT_STATE_TEMPLATE: &str = r#"# Team State
-
-Updated: not launched
-
-## Objective
-
-Pending.
-
-## Team
-
-- Name: pending
-- Runtime session: pending
-
-## Agents
-
-- Pending launch.
-
-## Task Graph
-
-- Pending task graph.
-
-## Latest Results
-
-- None.
-
-## Blockers
-
-- None.
-
-## Next Step
-
-- Run `team-agent validate team.spec.yaml`, review permissions, then run `team-agent launch team.spec.yaml --yes`.
-"#;
-
-pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
-    let team_root = args.workspace.join(".team");
-    let spec_path = team_root.join("current").join("team.spec.yaml");
-    let state_path = args.workspace.join("team_state.md");
-    let team_md_path = args.workspace.join("TEAM.md");
-    let agents_dir = args.workspace.join("agents");
-    let default_agent_path = agents_dir.join("worker.md");
-    if spec_path.exists() && !args.force {
-        return Err(CliError::Runtime(format!(
-            "{} already exists; pass --force to overwrite",
-            spec_path.display()
-        )));
-    }
-    for dir in [
-        team_root.clone(),
-        team_root.join("current"),
-        team_root.join("runtime"),
-        team_root.join("logs"),
-        team_root.join("messages"),
-        team_root.join("artifacts"),
-        agents_dir.clone(),
-    ] {
-        std::fs::create_dir_all(&dir)?;
-    }
-    std::fs::write(&spec_path, INIT_SPEC_TEMPLATE)?;
-    if args.force || !team_md_path.exists() {
-        std::fs::write(
-            &team_md_path,
-            "---\nname: current\nobjective: Pending.\nprovider: fake\n---\n\nPending.\n",
-        )?;
-    }
-    if args.force || !default_agent_path.exists() {
-        std::fs::write(
-            &default_agent_path,
-            "---\nname: worker\nrole: Worker\nprovider: fake\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nWait for instructions.\n",
-        )?;
-    }
-    if args.force || !state_path.exists() {
-        std::fs::write(&state_path, INIT_STATE_TEMPLATE)?;
-    }
-    crate::event_log::EventLog::new(&args.workspace)
-        .write(
-            "init",
-            json!({
-                "spec_path": spec_path.to_string_lossy().to_string(),
-                "state_path": state_path.to_string_lossy().to_string(),
-            }),
-        )
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-    Ok(CmdResult::from_json(
-        json!({
-            "ok": true,
-            "spec": spec_path.to_string_lossy().to_string(),
-            "state": state_path.to_string_lossy().to_string(),
-        }),
-        args.json,
-    ))
-}
-
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     let mut value = lifecycle_port::quick_start(
@@ -435,24 +341,6 @@ pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliErr
     }
     let value = messaging::allow_peer_talk(&args.workspace, &args.a, &args.b)?;
     Ok(CmdResult::from_json(value, args.json))
-}
-
-/// `diagnose` is the permanent compatibility spelling for `doctor`.
-/// Keep this wrapper free of probing/reporting logic so direct Rust callers and
-/// the CLI both converge on the canonical handler.
-pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
-    cmd_doctor(&DoctorArgs {
-        spec: None,
-        workspace: args.workspace.clone(),
-        gate: None,
-        comms: false,
-        team: args.team.clone(),
-        fix: false,
-        fix_schema: false,
-        cleanup_orphans: false,
-        confirm: false,
-        json: args.json,
-    })
 }
 
 /// `cmd_preflight`(`parser.py:160`)。
@@ -1309,50 +1197,7 @@ pub fn cmd_remove_agent(args: &RemoveAgentArgs) -> Result<CmdResult, CliError> {
     ))
 }
 
-/// `cmd_stuck_list`(`commands.py:405`)。REUSE `messaging::stuck_list`。
-pub fn cmd_stuck_list(args: &StuckListArgs) -> Result<CmdResult, CliError> {
-    let selected = crate::state::selector::resolve_active_team(
-        &args.workspace,
-        args.team.as_deref(),
-        crate::state::selector::SelectorMode::RuntimeOnly,
-    )
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let suppressed = selected
-        .state
-        .get("coordinator")
-        .and_then(|v| v.get("suppressed_idle_alerts"))
-        .and_then(|v| v.get(&selected.team_key))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    Ok(CmdResult::from_json(
-        json!({"ok": true, "suppressed_idle_alerts": suppressed}),
-        args.json,
-    ))
-}
-
-/// `cmd_stuck_cancel`(`commands.py:409`)。REUSE `messaging::stuck_cancel`(suppressed_by="leader")。
-pub fn cmd_stuck_cancel(args: &StuckCancelArgs) -> Result<CmdResult, CliError> {
-    if args.team.is_some() {
-        return Err(CliError::Usage(
-            "stuck-cancel --team is not supported yet because stuck suppression storage is not team-scoped".to_string(),
-        ));
-    }
-    Ok(CmdResult::from_json(
-        messaging::stuck_cancel(&args.workspace, &args.agent, args.alert_type, "leader")?,
-        args.json,
-    ))
-}
-
-/// `cmd_acknowledge_idle`(`commands.py:418`)。
-pub fn cmd_acknowledge_idle(args: &AcknowledgeIdleArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(
-        lifecycle_port::acknowledge_idle(&args.workspace, args.team.as_deref())?,
-        args.json,
-    ))
-}
-
-/// `doctor` is the single health/diagnostic pipeline. `diagnose` enters here
-/// through the compatibility wrapper above; it never gets a second facts engine.
+/// `doctor` is the single health/diagnostic pipeline.
 pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     if let Some(DoctorGate::Unknown(raw)) = &args.gate {
         let value = json!({

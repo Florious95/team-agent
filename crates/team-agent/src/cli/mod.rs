@@ -45,7 +45,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 // REUSE in-tree(只 import,不 redefine):
-use crate::messaging::{self, AlertType, MessageTarget, SendOptions, TrustedSender};
+use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
@@ -119,7 +119,7 @@ mod hermetic_test_support;
 pub mod status_port;
 
 /// PLACEHOLDER → step13 lifecycle(`runtime.{quick_start,start_agent,add_agent,fork_agent,
-/// remove_agent,start_agent,stop_agent,reset_agent,restart,shutdown,start_leader,acknowledge_idle}`)。
+/// remove_agent,start_agent,stop_agent,reset_agent,restart,shutdown,start_leader}`)。
 /// `quick_start.py` 物理在本子系统但实现属 step 13(card)。本层只声明委派面。
 pub mod lifecycle_port {
     use super::*;
@@ -3132,60 +3132,6 @@ pub mod lifecycle_port {
             format!("'{}'", raw.replace('\'', "'\\''"))
         }
     }
-    ///
-    /// `runtime.acknowledge_idle`(`cmd_acknowledge_idle`)。
-    pub fn acknowledge_idle(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
-        let mut state = crate::state::persist::load_runtime_state(workspace)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let team = team
-            .map(ToString::to_string)
-            .or_else(|| {
-                state
-                    .get("active_team_key")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                workspace
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-            })
-            .unwrap_or_else(|| "current".to_string());
-        let now = chrono::Utc::now().to_rfc3339();
-        let ttl_seconds = 1800;
-        let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(ttl_seconds)).to_rfc3339();
-        record_idle_acknowledged(&mut state, &team, &now, &expires_at, ttl_seconds);
-        suppress_team_idle_fallbacks(&mut state, &team, &now, &expires_at, ttl_seconds);
-        let agent_id = state
-            .get("agents")
-            .and_then(Value::as_object)
-            .and_then(|agents| agents.keys().next().cloned())
-            .map(Value::String)
-            .unwrap_or(Value::Null);
-        crate::state::repository::StateRepository::new(workspace)
-            .save(
-                crate::state::repository::StateWriteIntent::IdleAck {
-                    team_key: Some(&team),
-                },
-                &state,
-            )
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        crate::event_log::EventLog::new(workspace)
-            .write(
-                "coordinator.idle_acknowledged",
-                json!({"team": team, "ttl_seconds": ttl_seconds}),
-            )
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
-        Ok(json!({
-            "ok": true,
-            "team": team,
-            "agent_id": agent_id,
-            "acknowledged_at": now,
-            "expires_at": expires_at,
-            "ttl_seconds": ttl_seconds,
-        }))
-    }
 
     fn error_value(error: crate::lifecycle::LifecycleError) -> Value {
         let message = error.to_string();
@@ -3238,118 +3184,6 @@ pub mod lifecycle_port {
             );
         }
         None
-    }
-
-    fn record_idle_acknowledged(
-        state: &mut Value,
-        team: &str,
-        acknowledged_at: &str,
-        expires_at: &str,
-        ttl_seconds: i64,
-    ) {
-        let Some(root) = state.as_object_mut() else {
-            return;
-        };
-        let coordinator = root
-            .entry("coordinator")
-            .or_insert_with(|| json!({}))
-            .as_object_mut();
-        let Some(coordinator) = coordinator else {
-            return;
-        };
-        let idle = coordinator
-            .entry("idle_acknowledged")
-            .or_insert_with(|| json!({}))
-            .as_object_mut();
-        let Some(idle) = idle else {
-            return;
-        };
-        idle.insert(
-            team.to_string(),
-            json!({"acknowledged_at": acknowledged_at, "expires_at": expires_at, "ttl_seconds": ttl_seconds}),
-        );
-    }
-
-    fn suppress_team_idle_fallbacks(
-        state: &mut Value,
-        team: &str,
-        suppressed_at: &str,
-        expires_at: &str,
-        ttl_seconds: i64,
-    ) {
-        let agents = state
-            .get("agents")
-            .and_then(Value::as_object)
-            .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for agent in agents {
-            upsert_suppression(
-                state,
-                SuppressionRecord {
-                    team,
-                    agent_id: &agent,
-                    alert_type: "idle_fallback",
-                    suppressed_by: "manual_acknowledge",
-                    suppressed_at,
-                    expires_at,
-                    ttl_seconds,
-                },
-            );
-        }
-    }
-
-    struct SuppressionRecord<'a> {
-        team: &'a str,
-        agent_id: &'a str,
-        alert_type: &'a str,
-        suppressed_by: &'a str,
-        suppressed_at: &'a str,
-        expires_at: &'a str,
-        ttl_seconds: i64,
-    }
-
-    fn upsert_suppression(state: &mut Value, record: SuppressionRecord<'_>) {
-        let Some(root) = state.as_object_mut() else {
-            return;
-        };
-        let Some(coordinator) = root
-            .entry("coordinator")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-        else {
-            return;
-        };
-        let Some(all) = coordinator
-            .entry("suppressed_idle_alerts")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-        else {
-            return;
-        };
-        let Some(team_map) = all
-            .entry(record.team.to_string())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-        else {
-            return;
-        };
-        let Some(agent_map) = team_map
-            .entry(record.agent_id.to_string())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-        else {
-            return;
-        };
-        agent_map.insert(
-            record.alert_type.to_string(),
-            json!({
-                "suppressed_at": record.suppressed_at,
-                "suppressed_by": record.suppressed_by,
-                "manual_acknowledge": true,
-                "expires_at": record.expires_at,
-                "ttl_seconds": record.ttl_seconds,
-            }),
-        );
     }
 
     const COMPACT_READINESS_KEYS: [&str; 6] = [
@@ -3448,10 +3282,10 @@ pub mod lifecycle_port {
         {
             return vec![
                 "repair state.session_name to the worker session; it currently names the leader launcher session".to_string(),
-                format!("team-agent diagnose --team {team} --json"),
+                format!("team-agent doctor --team {team} --json"),
             ];
         }
-        let mut actions = vec![format!("team-agent diagnose --team {team} --json")];
+        let mut actions = vec![format!("team-agent doctor --team {team} --json")];
         if issue_ids
             .iter()
             .any(|id| id.contains("socket") || id.contains("endpoint"))
@@ -3872,7 +3706,7 @@ pub mod lifecycle_port {
                 "status": "partial",
                 "reason": "restart_agent_failed",
                 "failed_agents": [{"agent_id": "worker", "error": "spawn failed"}],
-                "next_actions": ["restart-agent worker"],
+                "next_actions": ["reset-agent worker --discard-session"],
                 "attach_commands": [],
                 "coordinator": {"status": "running", "transport": "default"}
             });
@@ -3880,7 +3714,7 @@ pub mod lifecycle_port {
             compact_restart_value(&mut default);
             assert_eq!(default["status"], json!("partial"));
             assert_eq!(default["reason"], json!("restart_agent_failed"));
-            assert_eq!(default["next_actions"], json!(["restart-agent worker"]));
+            assert_eq!(default["next_actions"], json!(["reset-agent worker --discard-session"]));
             assert!(default.get("coordinator").is_none());
             assert!(detail.get("coordinator").is_some());
         }
@@ -4162,7 +3996,7 @@ pub mod lifecycle_port {
                         "phase": failure.phase,
                         "error": failure.error,
                         "action": format!(
-                            "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                            "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
                             failure.agent_id,
                             failure.agent_id
                         ),
@@ -4208,7 +4042,7 @@ pub mod lifecycle_port {
                     "phase": failure.phase,
                     "error": failure.error,
                     "action": format!(
-                        "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                        "inspect worker {} output, then reset that worker with `team-agent reset-agent {} --discard-session` or rerun `team-agent restart --allow-fresh`",
                         failure.agent_id,
                         failure.agent_id
                     ),

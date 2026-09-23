@@ -35,7 +35,7 @@ fn p1_diagnose_never_executes_provider_version_or_auth_poison() {
 
     let workspace_arg = path(&workspace);
     let output = run_with_env(
-        &["diagnose", "--workspace", workspace_arg.as_str(), "--json"],
+        &["doctor", "--workspace", workspace_arg.as_str(), "--json"],
         &workspace,
         &home,
         Some(&poison_dir),
@@ -70,7 +70,7 @@ fn p2_empty_workspace_has_zero_child_processes_and_zero_disk_writes() {
         let workspace_arg = path(&workspace);
         let mut command = Command::new(bin());
         command
-            .args(["diagnose", "--workspace", workspace_arg.as_str(), "--json"])
+            .args(["doctor", "--workspace", workspace_arg.as_str(), "--json"])
             .current_dir(&workspace)
             .env("HOME", &home)
             .env("TMPDIR", std::env::temp_dir())
@@ -141,7 +141,7 @@ fn p3_human_diagnose_is_bounded_and_control_clean_for_generated_inputs() {
         let workspace_arg = path(&workspace);
         let output = run_with_env(
             &[
-                "diagnose",
+                "doctor",
                 "--workspace",
                 workspace_arg.as_str(),
                 "--team",
@@ -275,7 +275,7 @@ fn p5_json_shape_keeps_provider_keys_unknown_and_probe_not_run() {
     let home = tmp_dir("p5-home");
     let workspace_arg = path(&workspace);
     let output = run_with_env(
-        &["diagnose", "--workspace", workspace_arg.as_str(), "--json"],
+        &["doctor", "--workspace", workspace_arg.as_str(), "--json"],
         &workspace,
         &home,
         None,
@@ -413,7 +413,7 @@ fn p7_diagnose_is_read_only_and_selected_team_does_not_leak_other_team() {
         let workspace_arg = path(&workspace);
         let output = run_with_env(
             &[
-                "diagnose",
+                "doctor",
                 "--workspace",
                 workspace_arg.as_str(),
                 "--team",

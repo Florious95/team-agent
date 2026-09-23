@@ -80,7 +80,7 @@ fn quick_start_workspace_override_is_not_dropped_before_runtime_state_write() {
     let quick_start_args = source_section(
         &cli_types,
         "pub struct QuickStartArgs",
-        "pub struct InitArgs",
+        "pub struct SendArgs",
     );
     assert!(
         quick_start_args.contains("pub workspace: PathBuf"),
@@ -97,7 +97,7 @@ fn quick_start_workspace_override_is_not_dropped_before_runtime_state_write() {
 
     let emit =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/emit.rs")).unwrap();
-    let quick_start_args_fn = source_section(&emit, "fn quick_start_args", "fn init_args");
+    let quick_start_args_fn = source_section(&emit, "fn quick_start_args", "fn resolve_cli_path");
     assert!(
         quick_start_args_fn.contains("workspace: workspace.clone()")
             || quick_start_args_fn.contains("workspace,"),
