@@ -62,11 +62,6 @@ const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "coordinator",
 ];
 
-const REMOVED_COMMANDS: &[&str] = &[
-    "diagnose", "init", "start", "stop", "restart-agent", "stuck-list", "stuck-cancel",
-    "acknowledge-idle",
-];
-
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -244,25 +239,6 @@ fn red3_observation_a_commands_have_terminal_tiers_not_placeholders() {
         "RED3: observation-A commands must have exact terminal C1 tiers and no review-later placeholder.\n{}",
         failures.join("\n")
     );
-}
-
-#[test]
-fn red4_removed_commands_refuse_instead_of_exposing_compatibility_help() {
-    let case = Case::new("red4-removed");
-    let visible = visible_default_commands(&stdout(&case.run_ta(&["--help"])));
-    for command in REMOVED_COMMANDS {
-        assert!(!visible.contains(*command));
-        for flags in [&[][..], &["--json"][..], &["--help"][..], &["-h"][..]] {
-            let mut args = vec![*command];
-            args.extend_from_slice(flags);
-            let output = case.run_ta(&args);
-            let error = stderr(&output);
-            assert_eq!(output.status.code(), Some(1), "{args:?}: {error}");
-            assert!(output.stdout.is_empty(), "{args:?}");
-            assert!(error.contains(&format!("invalid choice: '{command}'")), "{error}");
-        }
-    }
-    assert_eq!(std::fs::read_dir(&case.workspace).expect("workspace").count(), 0);
 }
 
 #[test]

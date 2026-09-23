@@ -1,9 +1,7 @@
-//! P1-P18 black-box RED contracts for the doctor/diagnose unification taskbook.
+//! Black-box contracts for the canonical doctor health report.
 //!
-//! This file deliberately talks to the public CLI only.  Every fixture is disposable and
-//! every assertion is phrased as a user-visible contract, rather than an implementation
-//! detail.  It is kept in the tester worktree so the development track cannot use it as an
-//! implementation guide before the red-to-green handoff.
+//! Disposable fixtures exercise public runtime, issue, rendering, and read-only behavior.
+//! Command-removal contracts belong to the dedicated command-removal suite.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -33,7 +31,7 @@ impl Fixture {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "ta-doctor-unification-{tag}-{}-{n}",
+            "ta-doctor-health-{tag}-{}-{n}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -110,26 +108,6 @@ fn run_with_path(
         command.env("PATH", path);
     }
     command.output().expect("run team-agent command")
-}
-
-fn run_root(args: &[&str], fixture: &Fixture) -> Output {
-    let mut command = Command::new(bin());
-    command
-        .args(args)
-        .current_dir(&fixture.workspace)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", &fixture.home)
-        .env("TMPDIR", std::env::temp_dir())
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env_remove("TEAM_AGENT_ID")
-        .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
-        .env_remove("TEAM_AGENT_TEAM_ID")
-        .output()
-        .expect("run team-agent root command")
 }
 
 fn report(output: &Output) -> Value {
@@ -215,74 +193,24 @@ fn contains_issue_fragment(value: &Value, fragment: &str) -> bool {
 }
 
 #[test]
-fn p1_removed_diagnose_refuses_all_former_doctor_modes() {
-    let cases: &[&[&str]] = &[
-        &[],
-        &["--json"],
-        &["--team", "alpha", "--json"],
-        &["--comms", "--json"],
-        &["--gate", "unknown", "--json"],
-        &["--fix"],
-        &["--fix-schema", "--json"],
-    ];
-    for (index, args) in cases.iter().enumerate() {
-        let fixture = Fixture::new(&format!("p1-removed-{index}"));
-        let output = run("diagnose", args, &fixture);
-        assert_eq!(output.status.code(), Some(1), "{args:?}");
-        assert!(output.stdout.is_empty(), "{args:?}");
-        assert!(text(&output.stderr).contains("invalid choice: 'diagnose'"));
-        assert_eq!(fs::read_dir(&fixture.workspace).expect("workspace").count(), 0);
-    }
-}
-
-#[test]
-fn p2_doctor_is_the_only_discoverable_diagnostic_entry() {
-    let fixture = Fixture::new("p2-help");
-    let default_help = run_root(&["--help"], &fixture);
-    let help_text = text(&default_help.stdout);
-    assert!(
-        help_text.contains("doctor"),
-        "P2 default help must recommend doctor"
-    );
-    assert!(
-        !help_text
-            .lines()
-            .any(|line| line.trim_start().starts_with("diagnose")),
-        "P2 default help must not expose diagnose as a peer command: {help_text}"
-    );
-
-    let doctor_help = run("doctor", &["--help"], &fixture);
-    assert_eq!(doctor_help.status.code(), Some(0));
-    assert!(text(&doctor_help.stdout).contains("usage: team-agent doctor"));
-    for flag in ["--help", "-h"] {
-        let removed = run("diagnose", &[flag], &fixture);
-        assert_eq!(removed.status.code(), Some(1));
-        assert!(removed.stdout.is_empty());
-        assert!(text(&removed.stderr).contains("invalid choice: 'diagnose'"));
-    }
-}
-
-#[test]
 fn p3_empty_and_unstarted_workspaces_are_not_present_not_missing_sessions() {
     for (index, with_team_dir) in [false, true].into_iter().enumerate() {
         let fixture = Fixture::new(&format!("p3-{index}"));
         if with_team_dir {
             fs::create_dir_all(fixture.workspace.join(".team")).expect("create empty team dir");
         }
-        for name in ["doctor"] {
-            let output = run(name, &["--json"], &fixture);
-            let value = report(&output);
-            assert_eq!(
-                runtime_status(&value),
-                "not_present",
-                "P3 {name} must report no runtime for an unstarted workspace: {value}"
-            );
-            assert!(
-                !contains_issue_fragment(&value, "session_missing")
-                    && !contains_issue_fragment(&value, "missing_session"),
-                "P3 {name} fabricated a missing-session issue for no runtime: {value}"
-            );
-        }
+        let output = run("doctor", &["--json"], &fixture);
+        let value = report(&output);
+        assert_eq!(
+            runtime_status(&value),
+            "not_present",
+            "P3 doctor must report no runtime for an unstarted workspace: {value}"
+        );
+        assert!(
+            !contains_issue_fragment(&value, "session_missing")
+                && !contains_issue_fragment(&value, "missing_session"),
+            "P3 doctor fabricated a missing-session issue for no runtime: {value}"
+        );
     }
 }
 
@@ -299,30 +227,28 @@ fn p4_ok_issues_and_exit_code_are_one_truth_in_both_renderers() {
             "leader_receiver": {"status": "unbound"}
         }),
     );
-    for name in ["doctor"] {
-        let json_output = run(name, &["--json"], &fixture);
-        let value = report(&json_output);
-        let issues = issue_values(&value);
-        let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        assert!(
-            !issues.is_empty(),
-            "P4 fixture must contain an unbound issue: {value}"
-        );
-        assert_eq!(
-            ok,
-            issues.is_empty(),
-            "P4 final ok diverged from issues: {value}"
-        );
-        assert_eq!(json_output.status.code(), Some(if ok { 0 } else { 1 }));
+    let json_output = run("doctor", &["--json"], &fixture);
+    let value = report(&json_output);
+    let issues = issue_values(&value);
+    let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    assert!(
+        !issues.is_empty(),
+        "P4 fixture must contain an unbound issue: {value}"
+    );
+    assert_eq!(
+        ok,
+        issues.is_empty(),
+        "P4 final ok diverged from issues: {value}"
+    );
+    assert_eq!(json_output.status.code(), Some(if ok { 0 } else { 1 }));
 
-        let human_output = run(name, &[], &fixture);
-        assert_eq!(
-            human_output.status.code(),
-            json_output.status.code(),
-            "P4 human/JSON exit mismatch for {name}; human={}",
-            text(&human_output.stdout)
-        );
-    }
+    let human_output = run("doctor", &[], &fixture);
+    assert_eq!(
+        human_output.status.code(),
+        json_output.status.code(),
+        "P4 human/JSON exit mismatch for doctor; human={}",
+        text(&human_output.stdout)
+    );
 }
 
 #[test]
@@ -469,23 +395,21 @@ fn p8_runtime_report_contains_one_coordinator_observation() {
 
 #[test]
 fn p9_default_doctor_is_read_only() {
-    for name in ["doctor"] {
-        let fixture = Fixture::new(&format!("p9-{name}"));
-        save_state(
-            &fixture,
-            json!({
-                "team_key": "alpha",
-                "active_team_key": "alpha",
-                "session_name": "alpha-session",
-                "agents": {"worker": {"status": "missing"}},
-                "leader_receiver": {"status": "unbound"}
-            }),
-        );
-        let before = snapshot(&fixture.workspace);
-        let _ = run(name, &["--json"], &fixture);
-        let after = snapshot(&fixture.workspace);
-        assert_eq!(before, after, "P9 {name} mutated the selected workspace");
-    }
+    let fixture = Fixture::new("p9-doctor");
+    save_state(
+        &fixture,
+        json!({
+            "team_key": "alpha",
+            "active_team_key": "alpha",
+            "session_name": "alpha-session",
+            "agents": {"worker": {"status": "missing"}},
+            "leader_receiver": {"status": "unbound"}
+        }),
+    );
+    let before = snapshot(&fixture.workspace);
+    let _ = run("doctor", &["--json"], &fixture);
+    let after = snapshot(&fixture.workspace);
+    assert_eq!(before, after, "P9 doctor mutated the selected workspace");
 }
 
 #[cfg(unix)]
@@ -574,26 +498,24 @@ fn p12_human_output_is_bounded_utf8_control_free_triage() {
             "leader_receiver": {"status": "unbound"}
         }),
     );
-    for name in ["doctor"] {
-        let output = run(name, &[], &fixture);
-        let human = text(&output.stdout);
+    let output = run("doctor", &[], &fixture);
+    let human = text(&output.stdout);
+    assert!(
+        human
+            .lines()
+            .next()
+            .is_some_and(|line| line.starts_with("doctor:")),
+        "P12 doctor human output must use doctor triage prefix: {human}"
+    );
+    for (line_no, line) in human.lines().enumerate() {
         assert!(
-            human
-                .lines()
-                .next()
-                .is_some_and(|line| line.starts_with("doctor:")),
-            "P12 {name} human output must use doctor triage prefix: {human}"
+            line.as_bytes().len() <= 160,
+            "P12 doctor line {line_no} exceeds 160 bytes: {}",
+            line.as_bytes().len()
         );
-        for (line_no, line) in human.lines().enumerate() {
-            assert!(
-                line.as_bytes().len() <= 160,
-                "P12 {name} line {line_no} exceeds 160 bytes: {}",
-                line.as_bytes().len()
-            );
-            assert!(!line.chars().any(char::is_control));
-        }
-        assert!(!human.contains("issues: [") && !human.contains("runtime: {"));
+        assert!(!line.chars().any(char::is_control));
     }
+    assert!(!human.contains("issues: [") && !human.contains("runtime: {"));
 }
 
 #[test]

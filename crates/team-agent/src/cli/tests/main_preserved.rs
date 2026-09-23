@@ -627,25 +627,3 @@ fn stuck_cancel_persists_suppression_and_stuck_list_reads_state() {
         "stuck-list must read the persisted state mirror, not return a hard-coded empty list"
     );
 }
-
-#[test]
-fn removed_suppression_commands_cannot_mutate_runtime() {
-    let ws = tmp_workspace();
-    seed_collect_state(&ws);
-    let state_path = crate::state::persist::runtime_state_path(&ws);
-    let before = std::fs::read(&state_path).unwrap();
-    let events = read_events(&ws);
-    for command in ["stuck-list", "stuck-cancel", "acknowledge-idle"] {
-        let code = run(
-            &cli_argv(&[
-                command, "fake_impl", "--workspace", &ws.to_string_lossy(),
-                "--team", "current", "--alert-type", "all", "--json",
-            ]),
-            &ws,
-        );
-        assert_eq!(code, ExitCode::Error, "{command} must be removed");
-        assert_eq!(std::fs::read(&state_path).unwrap(), before);
-        assert_eq!(read_events(&ws), events);
-    }
-    let _ = std::fs::remove_dir_all(&ws);
-}

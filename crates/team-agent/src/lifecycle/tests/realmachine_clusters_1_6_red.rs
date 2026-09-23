@@ -274,46 +274,6 @@ fn c1_runtime_commands_resolve_active_team_for_status_send_and_collect() {
 
 #[test]
 #[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
-fn c2_removed_stop_refuses_without_changing_runtime_state() {
-    let ws = tmp_dir("c2-stop");
-    seed_runtime_state(&ws);
-    let state_path = team_agent::state::persist::runtime_state_path(&ws);
-    let before = std::fs::read(&state_path).unwrap();
-    let out = run(&["stop", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(out.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid choice: 'stop'"));
-    assert_eq!(std::fs::read(state_path).unwrap(), before);
-}
-
-#[test]
-#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
-fn c2_removed_verbs_refuse_even_with_help() {
-    let cwd = tmp_dir("c2-help-verbs");
-    let mut failures = Vec::new();
-    for verb in ["start", "restart-agent", "purge-agent"] {
-        let out = run(&[verb, "--help"], &cwd);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if out.status.code() != Some(1)
-            || !stderr.contains(&format!("invalid choice: '{verb}'"))
-            || !stdout.is_empty()
-        {
-            failures.push(format!(
-                "{verb}: code={:?} stdout={stdout:?} stderr={stderr:?}",
-                out.status.code()
-            ));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "CR-030/032/035/063: removed lifecycle verbs must refuse help with invalid-choice:\n{}",
-        failures.join("\n")
-    );
-}
-
-#[test]
-#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c2_quick_start_help_is_zero_token_help_only_and_does_not_compile_workspace() {
     let cwd = tmp_dir("c2-quick-help");
     let out = run(&["quick-start", "--help"], &cwd);
