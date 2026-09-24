@@ -768,9 +768,9 @@ fn source_binding(
         backing_path,
         sessions_root: canonical_root,
         spawn_cwd: canonical_cwd,
-        captured_at,
+        captured_at: captured_at.to_string(),
         captured_via,
-        spawned_at,
+        spawned_at: spawned_at.to_string(),
         spawn_epoch: source.get("spawn_epoch").and_then(JsonValue::as_u64),
         identity,
     })
@@ -1697,6 +1697,7 @@ fn write_fork_audit(
     fields["compensation"] = serde_json::json!(compensation);
     crate::event_log::EventLog::new(workspace)
         .write(crate::lifecycle::event_names::CONTEXT_FORK, fields.clone())
+        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
