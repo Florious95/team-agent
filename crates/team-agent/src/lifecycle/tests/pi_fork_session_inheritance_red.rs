@@ -11,6 +11,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate as team_agent;
 use serde_json::{Value, json};
@@ -306,6 +307,13 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn append_session_entry(path: &Path, entry: Value) {
+    let mut bytes = fs::read(path).expect("read session before append");
+    bytes.extend_from_slice(entry.to_string().as_bytes());
+    bytes.push(b'\n');
+    fs::write(path, bytes).expect("append independent session entry");
 }
 
 #[cfg(unix)]
@@ -718,6 +726,7 @@ fn r05_bad_source_tuples_and_jsonl_fail_closed_without_a_fresh_target() {
         "bad-json",
         "broken-parent",
         "truncated",
+        "truncated-json",
         "outside-root",
     ];
     #[cfg(unix)]
@@ -770,6 +779,15 @@ fn r05_bad_source_tuples_and_jsonl_fail_closed_without_a_fresh_target() {
             "truncated" => {
                 bytes.pop();
                 fs::write(&fixture.source_file, &bytes).expect("truncate final JSONL newline");
+            }
+            "truncated-json" => {
+                let last_line = bytes[..bytes.len() - 1]
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .expect("last entry begins after a newline")
+                    + 1;
+                bytes.truncate(last_line + 3);
+                fs::write(&fixture.source_file, &bytes).expect("truncate inside final JSON entry");
             }
             "outside-root" => {
                 source.insert(
@@ -891,16 +909,26 @@ fn r07_capture_observation_does_not_replace_the_inherited_target_tuple() {
         state["agents"][TARGET]["rollout_path"],
         target_before["rollout_path"]
     );
-    assert_eq!(state["agents"][SOURCE]["session_id"], SESSION_A);
+    fixture.save_state(&state);
+    let reloaded = fixture.state();
     assert_eq!(
-        state["agents"][SOURCE]["rollout_path"],
+        reloaded["agents"][TARGET]["session_id"], target_before["session_id"],
+        "persisted observation merge keeps inherited session B"
+    );
+    assert_eq!(
+        reloaded["agents"][TARGET]["rollout_path"], target_before["rollout_path"],
+        "persisted observation merge keeps backing G"
+    );
+    assert_eq!(reloaded["agents"][SOURCE]["session_id"], SESSION_A);
+    assert_eq!(
+        reloaded["agents"][SOURCE]["rollout_path"],
         fixture.source_file.to_string_lossy().as_ref()
     );
 }
 
 #[test]
 #[serial(env)]
-fn r08_state_updates_from_a_sibling_are_not_lost_by_fork_registration() {
+fn r08_sibling_observation_racing_with_target_spawn_is_not_lost() {
     let fixture = Fixture::new();
     let mut observed = fixture.state();
     observed["agents"]["sibling"] = json!({
@@ -908,15 +936,37 @@ fn r08_state_updates_from_a_sibling_are_not_lost_by_fork_registration() {
         "rollout_path":"/sibling/only.jsonl", "captured_at":"2026-09-12T10:01:00Z",
         "captured_via":"session_scan", "observation_generation":"concurrent-observation-17"
     });
-    fixture.save_state(&observed);
     let transport = fixture.transport();
-    fixture
-        .fork(TARGET, None, &transport)
-        .expect("R08: fork must reselect under the lifecycle lock and retain sibling observation");
+    let observed_transport = transport.clone();
+    let run_workspace = fixture.run_workspace.clone();
+    let updater = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !observed_transport
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("spawn"))
+        {
+            if Instant::now() >= deadline {
+                return Err("valid Pi fork never reached target spawn".to_string());
+            }
+            std::thread::yield_now();
+        }
+        team_agent::state::projection::save_team_scoped_state(&run_workspace, &observed)
+            .map_err(|error| format!("persist concurrent sibling observation: {error}"))
+    });
+    let fork_result = fixture.fork(TARGET, None, &transport);
+    let update_result = updater.join().expect("sibling observation thread");
+    assert!(
+        update_result.is_ok(),
+        "R08 concurrent state update must commit while target spawn is in flight; fork={fork_result:?} update={update_result:?}"
+    );
+    let fork_report =
+        fork_result.expect("R08 Pi fork must complete after the concurrent sibling observation");
+    assert_eq!(fork_report.new_agent_id.as_str(), TARGET);
     let after = fixture.state();
     assert_eq!(
         after["agents"]["sibling"]["observation_generation"], "concurrent-observation-17",
-        "fork must merge its target row, not roll back an independent sibling observation"
+        "fork must merge its target row, not roll back an observation concurrent with target spawn"
     );
     assert_eq!(after["agents"][SOURCE]["session_id"], SESSION_A);
     assert!(after["agents"].get(TARGET).is_some());
@@ -953,6 +1003,48 @@ fn r09_spawn_failure_is_compensated_without_an_alive_target_on_deleted_backing()
             "fully rolled-back failure leaves no wrapper"
         );
     }
+    assert_eq!(state["agents"][SOURCE]["session_id"], SESSION_A);
+    assert_eq!(
+        state["agents"][SOURCE]["rollout_path"],
+        fixture.source_file.to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+#[serial(env)]
+fn r09_pane_verification_failure_compensates_the_new_target() {
+    let fixture = Fixture::new();
+    let transport = fixture.transport().with_spawned_panes_addressable(false);
+    let result = fixture.fork(TARGET, None, &transport);
+    assert!(
+        result.is_err(),
+        "R09 pane verification failure must be reported: {result:?}"
+    );
+    assert!(
+        transport
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("spawn")),
+        "R09 setup must reach the transport spawn seam before pane verification; calls={:?}",
+        transport.calls()
+    );
+    assert!(
+        transport.calls().contains(&"kill_pane"),
+        "R09 must compensate the spawned target pane after verification fails; calls={:?}",
+        transport.calls()
+    );
+    let state = fixture.state();
+    assert!(
+        !state["agents"]
+            .get(TARGET)
+            .is_some_and(|target| target["status"] == "running"),
+        "unverified target cannot remain alive in runtime state; state={state}"
+    );
+    let target_paths = fixture.target_paths(TARGET);
+    assert!(
+        !target_paths.wrapper.exists(),
+        "failed target must not retain a runnable Pi wrapper"
+    );
     assert_eq!(state["agents"][SOURCE]["session_id"], SESSION_A);
     assert_eq!(
         state["agents"][SOURCE]["rollout_path"],
@@ -1041,8 +1133,48 @@ fn r11_source_and_target_backings_remain_independently_loadable() {
         .expect("R11 independent lifecycle requires a successful fork");
     let state = fixture.state();
     let target_file = forked_target_file(&fixture, &state, TARGET);
-    let target_before = fs::read(&target_file).expect("target backing bytes");
-    let source_before = fs::read(&fixture.source_file).expect("source backing bytes");
+    append_session_entry(
+        &fixture.source_file,
+        json!({
+            "type":"message", "id":"entry-source-live", "parentId":"entry-user",
+            "timestamp":"2026-09-12T10:02:00Z",
+            "message":{"role":"assistant","content":[{"type":"text","text":"SOURCE-only follow-up"}]}
+        }),
+    );
+    append_session_entry(
+        &target_file,
+        json!({
+            "type":"message", "id":"entry-target-live", "parentId":"entry-user",
+            "timestamp":"2026-09-12T10:03:00Z",
+            "message":{"role":"assistant","content":[{"type":"text","text":"TARGET-only follow-up"}]}
+        }),
+    );
+    let target_before =
+        fs::read(&target_file).expect("target backing bytes after target-only append");
+    let source_before =
+        fs::read(&fixture.source_file).expect("source backing after source-only append");
+    assert!(
+        source_before
+            .windows(b"SOURCE-only follow-up".len())
+            .any(|bytes| bytes == b"SOURCE-only follow-up")
+    );
+    assert!(
+        !source_before
+            .windows(b"TARGET-only follow-up".len())
+            .any(|bytes| bytes == b"TARGET-only follow-up")
+    );
+    assert!(
+        target_before
+            .windows(b"TARGET-only follow-up".len())
+            .any(|bytes| bytes == b"TARGET-only follow-up")
+    );
+    assert!(
+        !target_before
+            .windows(b"SOURCE-only follow-up".len())
+            .any(|bytes| bytes == b"SOURCE-only follow-up")
+    );
+    assert_valid_entry_tree(&body_bytes(&fixture.source_file));
+    assert_valid_entry_tree(&body_bytes(&target_file));
     fs::remove_file(&fixture.source_file).expect("simulate SOURCE backing retirement");
     assert_eq!(
         fs::read(&target_file).expect("TARGET remains offline-loadable"),
