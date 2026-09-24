@@ -23,6 +23,14 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
+#[derive(Clone, Debug)]
+pub(crate) struct ForkCaptureSeed {
+    pub source_agent_id: AgentId,
+    pub captured: crate::provider::CapturedSession,
+    pub captured_at: String,
+    pub pi_sessions_root: PathBuf,
+}
+
 use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
@@ -395,8 +403,7 @@ pub(super) use add_agent::*;
 pub use add_agent::{add_agent, add_agent_force};
 pub(crate) use add_agent::{add_agent_with_transport, add_agent_with_transport_force};
 
-mod add_agent_state;
-pub(crate) use add_agent_state::inject_agent_into_spec;
+pub(crate) mod add_agent_state;
 pub(super) use add_agent_state::*;
 
 mod fork_agent;
@@ -406,7 +413,7 @@ pub use fork_agent::{fork_agent_with_transport, in_window_fork, in_window_fork_c
 mod fork_entry;
 pub use fork_entry::fork_agent;
 
-mod role_source;
+pub(crate) mod role_source;
 pub(super) use role_source::*;
 
 mod clone_agent;

@@ -44,11 +44,24 @@ pub fn fork_agent(
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     // Fork-agent routes to the selected live team's persisted endpoint, not
     // the workspace-hash fallback socket.
-    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+    let backend = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
         &selected.run_workspace,
         Some(selected.team_key.as_str()),
-    )
-    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
+    );
+    let is_pi = selected
+        .state
+        .get("agents")
+        .and_then(|agents| agents.get(source_agent_id.as_str()))
+        .and_then(|agent| agent.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        == Some("pi");
+    let transport = if is_pi {
+        backend?
+    } else {
+        backend.unwrap_or_else(|_| {
+            crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace)
+        })
+    };
     fork_agent_with_transport(
         workspace,
         source_agent_id,

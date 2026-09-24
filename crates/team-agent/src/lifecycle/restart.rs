@@ -66,6 +66,8 @@ struct LifecyclePathRefs<'a> {
 }
 
 mod agent;
+mod avatar;
+pub(crate) use avatar::fork_pi_new_seat_locked;
 mod common;
 mod orchestrator;
 pub mod preflight;

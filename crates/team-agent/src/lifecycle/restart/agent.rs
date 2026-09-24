@@ -546,7 +546,7 @@ fn replay_worker_target_missing_messages(
     Ok(())
 }
 
-fn verify_spawned_pane_matches_target(
+pub(super) fn verify_spawned_pane_matches_target(
     transport: &dyn crate::transport::Transport,
     pane: &crate::transport::PaneId,
     session: &crate::transport::SessionName,
@@ -1244,7 +1244,7 @@ pub(super) fn resolve_team_scoped_state_or_refuse(
     })
 }
 
-fn mark_agent_started(
+pub(super) fn mark_agent_started(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
     window: &str,

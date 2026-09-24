@@ -132,6 +132,7 @@ pub enum CaptureVia {
     FsWatch,
     FsMtimeFallback,
     FsRepair,
+    ForkSnapshot,
 }
 
 /// attribution confidence(doc §56)。bug-085 fallback 固定 `Low`。

@@ -9,17 +9,17 @@
 //!   - 不读 provider session 落盘
 //! maturity: wired
 //! ---
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::lifecycle::LifecycleError;
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 
-fn set_yaml_map_value(
-    value: &mut Value,
-    key: &str,
-    next: Value,
-) -> Result<(), LifecycleError> {
+fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), LifecycleError> {
     let Value::Map(pairs) = value else {
         return Err(LifecycleError::Compile(
             "agent entry is not a map".to_string(),
@@ -33,31 +33,39 @@ fn set_yaml_map_value(
     Ok(())
 }
 
-pub(super) struct MaterializedRole {
+pub(crate) struct MaterializedRole {
     path: PathBuf,
+    device: u64,
+    inode: u64,
     keep: bool,
 }
 
 impl MaterializedRole {
-/// ---
-/// purpose: 取物化出来的角色文件路径
-/// returns: 落盘路径
-/// ---
-    pub(super) fn path(&self) -> &Path {
+    /// ---
+    /// purpose: 取物化出来的角色文件路径
+    /// returns: 落盘路径
+    /// ---
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-/// ---
-/// purpose: 标记该文件由调用方接管，Drop 时不再删除
-/// ---
-    pub(super) fn keep(&mut self) {
+    /// ---
+    /// purpose: 标记该文件由调用方接管，Drop 时不再删除
+    /// ---
+    pub(crate) fn keep(&mut self) {
         self.keep = true;
     }
 }
 
 impl Drop for MaterializedRole {
     fn drop(&mut self) {
-        if !self.keep {
+        if !self.keep
+            && std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+                metadata.file_type().is_file()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+            })
+        {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -72,7 +80,7 @@ impl Drop for MaterializedRole {
 /// returns: 物化结果，未调用 keep 时 Drop 会删掉该文件
 /// errors: 源文件缺失、未声明 name 或声明与源席不符时返回 Compile；目标已存在返回 RequirementUnmet；建目录或写盘失败返回 StatePersist
 /// ---
-pub(super) fn materialize_latest_role(
+pub(crate) fn materialize_latest_role(
     run_workspace: &Path,
     team_dir: &Path,
     state: &serde_json::Value,
@@ -112,24 +120,76 @@ pub(super) fn materialize_latest_role(
     std::fs::create_dir_all(&managed_dir)
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
     let path = managed_dir.join(format!("{}.md", as_agent_id.as_str()));
-    if path.exists() {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "managed role file already exists: {}",
-            path.display()
-        )));
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "managed role file already exists: {}",
+                path.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
     }
     let rendered = format!("---\n{}---\n\n{}", yaml::dumps(&meta), body);
-    let temp = path.with_extension(format!("md.tmp-{}", std::process::id()));
-    std::fs::write(&temp, rendered.as_bytes())
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| LifecycleError::StatePersist(error.to_string()))?
+        .as_nanos();
+    let temp = managed_dir.join(format!(
+        ".{}.md.tmp-{}-{nonce}",
+        as_agent_id.as_str(),
+        std::process::id()
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
-    if let Err(error) = std::fs::rename(&temp, &path) {
+    if let Err(error) = file
+        .write_all(rendered.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        drop(file);
         let _ = std::fs::remove_file(&temp);
         return Err(LifecycleError::StatePersist(error.to_string()));
     }
-    Ok(MaterializedRole { path, keep: false })
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(LifecycleError::StatePersist(error.to_string()));
+        }
+    };
+    let (device, inode) = (metadata.dev(), metadata.ino());
+    drop(file);
+    if let Err(error) = std::fs::hard_link(&temp, &path) {
+        let _ = std::fs::remove_file(&temp);
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "managed role file already exists: {}",
+                path.display()
+            )));
+        }
+        return Err(LifecycleError::StatePersist(error.to_string()));
+    }
+    if let Err(error) = std::fs::remove_file(&temp) {
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+            metadata.file_type().is_file() && metadata.dev() == device && metadata.ino() == inode
+        }) {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Err(LifecycleError::StatePersist(error.to_string()));
+    }
+    Ok(MaterializedRole {
+        path,
+        device,
+        inode,
+        keep: false,
+    })
 }
 
-fn resolve_role_source(
+pub(crate) fn resolve_role_source(
     run_workspace: &Path,
     team_dir: &Path,
     state: &serde_json::Value,
