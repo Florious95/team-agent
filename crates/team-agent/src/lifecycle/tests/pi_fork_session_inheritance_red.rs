@@ -41,19 +41,34 @@ struct PathEnvGuard {
 #[cfg(unix)]
 impl PathEnvGuard {
     fn with_fake_pi(root: &Path) -> Self {
-        let bin = root.join("bin");
-        fs::create_dir_all(&bin).expect("create fake provider bin");
-        let pi = bin.join("pi");
-        fs::write(
-            &pi,
-            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo 0.87.1\nexit 0\n",
-        )
-        .expect("write offline Pi executable shim");
-        let mut permissions = fs::metadata(&pi).expect("fake Pi metadata").permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&pi, permissions).expect("make fake Pi executable");
+        let wrapper_bin = root.join("bin/wrapper");
+        let real_bin = root.join("bin/real");
+        let package_root = root.join("node_modules/pi-mcp-adapter");
+        fs::create_dir_all(&wrapper_bin).expect("create fake wrapper bin");
+        fs::create_dir_all(&real_bin).expect("create fake real bin");
+        fs::create_dir_all(&package_root).expect("create fake adapter package");
+        let wrapper = wrapper_bin.join("pi");
+        let wrapper_script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n--version) echo 0.87.1 ;;\n--list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\nlist) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\nesac\nexit 0\n",
+            package_root.display()
+        );
+        fs::write(&wrapper, wrapper_script).expect("write offline Pi wrapper");
+        let real = real_bin.join("pi");
+        fs::write(&real, "#!/bin/sh\necho 0.87.1\nexit 0\n")
+            .expect("write offline Pi real-binary stand-in");
+        let package =
+            json!({"name":"pi-mcp-adapter","version":"0.1.0","pi":{"extensions":["./index.ts"]}});
+        fs::write(package_root.join("package.json"), package.to_string())
+            .expect("write offline adapter package metadata");
+        fs::write(package_root.join("index.ts"), "export {};\n")
+            .expect("write offline adapter extension entry");
+        for pi in [&wrapper, &real] {
+            let mut permissions = fs::metadata(pi).expect("fake Pi metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(pi, permissions).expect("make fake Pi executable");
+        }
         let previous = std::env::var_os("PATH");
-        let mut paths = vec![bin];
+        let mut paths = vec![wrapper_bin, real_bin];
         if let Some(existing) = previous.as_deref() {
             paths.extend(std::env::split_paths(existing));
         }
