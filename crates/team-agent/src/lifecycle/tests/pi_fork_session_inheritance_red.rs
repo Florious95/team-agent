@@ -8,6 +8,8 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate as team_agent;
@@ -31,7 +33,55 @@ const PROPERTY_SEED: u64 = 0x5eed_f0a7_1209_2026;
 const ROLE_DOC: &str = "---\nname: implementer\nrole: Session inheritance fixture\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: high\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\ncommunication_mode: orchestrated\n---\n\nKeep the complete role body: 雪だるま 🛰️.\n";
 const SOURCE_ROLE: &str = "---\nname: implementer\nrole: Dynamic source role\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: high\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\ncommunication_mode: orchestrated\nprofile: research\n---\n\nDynamic body stays exact: use Δ, 雪, and the captured tool result.\n";
 
+#[cfg(unix)]
+struct PathEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(unix)]
+impl PathEnvGuard {
+    fn with_fake_pi(root: &Path) -> Self {
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("create fake provider bin");
+        let pi = bin.join("pi");
+        fs::write(
+            &pi,
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] && echo 0.87.1\nexit 0\n",
+        )
+        .expect("write offline Pi executable shim");
+        let mut permissions = fs::metadata(&pi).expect("fake Pi metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&pi, permissions).expect("make fake Pi executable");
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![bin];
+        if let Some(existing) = previous.as_deref() {
+            paths.extend(std::env::split_paths(existing));
+        }
+        let path = std::env::join_paths(paths).expect("join fixture PATH");
+        unsafe { std::env::set_var("PATH", path) };
+        let version = std::process::Command::new("pi")
+            .arg("--version")
+            .output()
+            .expect("fake Pi must resolve through fixture PATH");
+        assert!(version.status.success(), "fake Pi must be executable");
+        Self { previous }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PathEnvGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.previous.take() {
+            unsafe { std::env::set_var("PATH", path) };
+        } else {
+            unsafe { std::env::remove_var("PATH") };
+        }
+    }
+}
+
 struct Fixture {
+    #[cfg(unix)]
+    _path_guard: PathEnvGuard,
     root: PathBuf,
     team_dir: PathBuf,
     run_workspace: PathBuf,
@@ -46,6 +96,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = super::temp_ws();
+        #[cfg(unix)]
+        let path_guard = PathEnvGuard::with_fake_pi(&root);
         let team_dir = root.join("teamdir");
         fs::create_dir_all(team_dir.join("agents")).expect("create team roles");
         fs::create_dir_all(team_dir.join("profiles")).expect("create role profiles");
@@ -140,6 +192,8 @@ impl Fixture {
         save_runtime_state(&run_workspace, &state).expect("persist valid Pi source tuple");
 
         let fixture = Self {
+            #[cfg(unix)]
+            _path_guard: path_guard,
             root,
             team_dir,
             run_workspace,
@@ -238,6 +292,11 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&fs::metadata(path).expect("file metadata"))
 }
 
 fn valid_v3_body() -> Vec<u8> {
@@ -381,7 +440,7 @@ fn role_field<'a>(role: &'a str, key: &str) -> Option<&'a str> {
 fn role_body(role: &str) -> &str {
     let first = role.find("---").expect("role front matter opener") + 3;
     let second = role[first..].find("---").expect("role front matter closer") + first + 3;
-    role[second..].trim_start_matches(['\r', '\n'])
+    role[second..].trim_start_matches(&['\r', '\n'][..])
 }
 
 fn forked_target_file(fixture: &Fixture, state: &Value, target: &str) -> PathBuf {
@@ -429,9 +488,8 @@ fn r02_r03_fork_is_an_independent_identity_with_the_exact_complete_v3_tree() {
     let fixture = Fixture::new();
     let transport = fixture.transport();
     let source_before = fs::read(&fixture.source_file).expect("source backing before fork");
-    let source_inode = std::os::unix::fs::MetadataExt::ino(
-        &fs::metadata(&fixture.source_file).expect("source metadata"),
-    );
+    #[cfg(unix)]
+    let source_inode = inode(&fixture.source_file);
     let report = fixture
         .fork(TARGET, None, &transport)
         .expect("R02/R03: valid Pi session must fork instead of injecting into SOURCE");
@@ -480,9 +538,10 @@ fn r02_r03_fork_is_an_independent_identity_with_the_exact_complete_v3_tree() {
         fs::canonicalize(&target_file).expect("canonical target file"),
         "source and target backing paths differ"
     );
+    #[cfg(unix)]
     assert_ne!(
         source_inode,
-        std::os::unix::fs::MetadataExt::ino(&fs::metadata(&target_file).expect("target metadata")),
+        inode(&target_file),
         "target backing must be a distinct inode, not a hard link"
     );
     assert_eq!(
@@ -697,6 +756,7 @@ fn r05_bad_source_tuples_and_jsonl_fail_closed_without_a_fresh_target() {
                     json!(outside.to_string_lossy().to_string()),
                 );
             }
+            #[cfg(unix)]
             "symlink" => {
                 fs::remove_file(&fixture.source_file).expect("remove source for symlink case");
                 std::os::unix::fs::symlink(&outside, &fixture.source_file)
