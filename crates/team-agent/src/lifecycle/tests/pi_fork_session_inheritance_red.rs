@@ -13,11 +13,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate as team_agent;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use serial_test::serial;
 use team_agent::lifecycle::launch::{fork_agent_with_transport, pi_mcp::pi_seat_paths};
 use team_agent::model::ids::AgentId;
-use team_agent::provider::{get_adapter, AuthMode, Provider, SessionId};
+use team_agent::provider::{AuthMode, Provider, SessionId, get_adapter};
 use team_agent::state::persist::{load_runtime_state, runtime_state_path};
 use team_agent::transport::test_support::OfflineTransport;
 
@@ -587,12 +587,16 @@ fn r02_r03_fork_is_an_independent_identity_with_the_exact_complete_v3_tree() {
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).expect("copied entry JSON"))
         .collect();
-    assert!(entries
-        .iter()
-        .any(|entry| entry["type"] == "tool_execution_end"));
-    assert!(entries
-        .iter()
-        .any(|entry| entry["customType"] == "context_edit"));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["type"] == "tool_execution_end")
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["customType"] == "context_edit")
+    );
     assert!(entries.iter().any(|entry| entry["type"] == "compaction"));
     let spawn_args = transport
         .spawn_records()
@@ -1064,8 +1068,14 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
     assert_ne!(source_paths.sessions, clone_paths.sessions);
     assert!(
         matches!(
-            get_adapter(Provider::Pi).fork(Some(&SessionId::new(SESSION_A)), AuthMode::Subscription, None),
-            Err(team_agent::provider::ProviderError::CapabilityUnsupported(_))
+            get_adapter(Provider::Pi).fork(
+                Some(&SessionId::new(SESSION_A)),
+                AuthMode::Subscription,
+                None
+            ),
+            Err(team_agent::provider::ProviderError::CapabilityUnsupported(
+                _
+            ))
         ),
         "managed fork must not be faked by changing the provider's unsupported native-fork capability"
     );
@@ -1089,8 +1099,10 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
     let fixture = Fixture::new();
     let state = fixture.state();
     assert_eq!(state["agents"][SOURCE]["session_id"], SESSION_A);
-    assert!(fixture
-        .source_paths
-        .sessions
-        .starts_with(&fixture.source_paths.runtime_root));
+    assert!(
+        fixture
+            .source_paths
+            .sessions
+            .starts_with(&fixture.source_paths.runtime_root)
+    );
 }
