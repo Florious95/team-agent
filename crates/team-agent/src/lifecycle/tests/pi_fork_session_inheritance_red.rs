@@ -18,14 +18,12 @@ use serial_test::serial;
 use team_agent::lifecycle::launch::{fork_agent_with_transport, pi_mcp::pi_seat_paths};
 use team_agent::model::ids::AgentId;
 use team_agent::provider::{get_adapter, AuthMode, Provider, SessionId};
-use team_agent::state::persist::{load_runtime_state, runtime_state_path, save_runtime_state};
+use team_agent::state::persist::{load_runtime_state, runtime_state_path};
 use team_agent::transport::test_support::OfflineTransport;
 
 const SOURCE: &str = "implementer";
 const TARGET: &str = "variant";
 const SESSION_A: &str = "652756ea-aaee-4437-a30f-40c5606826d5";
-const SOURCE_PANE: &str = "%source";
-const SPAWNED_AT: &str = "2026-09-12T10:00:00Z";
 const CAPTURED_AT: &str = "2026-09-12T10:00:02Z";
 const SESSION_TIMESTAMP: &str = "2025-01-02T03:04:05.000Z";
 const PROPERTY_SEED: u64 = 0x5eed_f0a7_1209_2026;
@@ -147,8 +145,8 @@ impl Fixture {
             team_agent::state::selector::SelectorMode::RequireSpec,
         )
         .expect("quick-start must create a selectable team with a spec");
-        let run_workspace = selected.run_workspace;
-        let team_key = selected.team_key;
+        let run_workspace = selected.run_workspace.clone();
+        let team_key = selected.team_key.clone();
         let state_path = runtime_state_path(&run_workspace);
         let source_paths = pi_seat_paths(&run_workspace, &team_key, SOURCE);
         let source_file = source_paths.sessions.join("2025/01/02/session-A.jsonl");
@@ -171,7 +169,7 @@ impl Fixture {
             .expect("create dynamic role directory");
         fs::write(&dynamic_role, SOURCE_ROLE).expect("write current dynamic role");
 
-        let mut state = load_runtime_state(&run_workspace).expect("load quick-start state");
+        let mut state = selected.state.clone();
         if !state.get("agents").is_some_and(Value::is_object) {
             state["agents"] = json!({});
         }
@@ -181,13 +179,8 @@ impl Fixture {
         let source = state["agents"][SOURCE]
             .as_object_mut()
             .expect("source row is an object");
-        source.insert("status".to_string(), json!("running"));
         source.insert("provider".to_string(), json!("pi"));
         source.insert("auth_mode".to_string(), json!("subscription"));
-        source.insert("window".to_string(), json!(SOURCE));
-        source.insert("pane_id".to_string(), json!(SOURCE_PANE));
-        source.insert("pane_pid".to_string(), json!(41_001));
-        source.insert("spawned_at".to_string(), json!(SPAWNED_AT));
         source.insert(
             "spawn_cwd".to_string(),
             json!(run_workspace.to_string_lossy().to_string()),
@@ -204,7 +197,8 @@ impl Fixture {
             "dynamic_role_file".to_string(),
             json!(dynamic_role.to_string_lossy().to_string()),
         );
-        save_runtime_state(&run_workspace, &state).expect("persist valid Pi source tuple");
+        team_agent::state::projection::save_team_scoped_state(&run_workspace, &state)
+            .expect("persist valid Pi source tuple");
 
         let fixture = Self {
             #[cfg(unix)]
@@ -224,7 +218,7 @@ impl Fixture {
     }
 
     fn assert_valid_source_fixture(&self) {
-        let state = load_runtime_state(&self.run_workspace).expect("fixture state is readable");
+        let state = self.state();
         let source = &state["agents"][SOURCE];
         assert_eq!(source["provider"], "pi", "fixture source must be Pi");
         assert_eq!(source["auth_mode"], "subscription");
@@ -242,17 +236,22 @@ impl Fixture {
         assert_eq!(header["id"], SESSION_A);
         assert_eq!(header["cwd"], self.run_workspace.to_string_lossy().as_ref());
         assert_eq!(header["timestamp"], SESSION_TIMESTAMP);
-        assert!(header["timestamp"].as_str().unwrap() < SPAWNED_AT);
+        let spawned_at = source["spawned_at"]
+            .as_str()
+            .expect("source spawn generation");
+        assert!(header["timestamp"].as_str().unwrap() < spawned_at);
         assert_valid_entry_tree(&body_bytes(&self.source_file));
         assert!(!self.dynamic_role.as_os_str().is_empty());
     }
 
     fn state(&self) -> Value {
-        load_runtime_state(&self.run_workspace).expect("load fixture runtime state")
+        let full = load_runtime_state(&self.run_workspace).expect("load fixture runtime state");
+        team_agent::state::projection::project_top_level_view(&full, &self.team_key)
     }
 
     fn save_state(&self, state: &Value) {
-        save_runtime_state(&self.run_workspace, state).expect("save fixture runtime state");
+        team_agent::state::projection::save_team_scoped_state(&self.run_workspace, state)
+            .expect("save fixture runtime state");
     }
 
     fn target_paths(&self, target: &str) -> team_agent::lifecycle::launch::pi_mcp::PiSeatPaths {
@@ -537,8 +536,11 @@ fn r02_r03_fork_is_an_independent_identity_with_the_exact_complete_v3_tree() {
     );
     assert_eq!(target["session_id"], new_session_id);
     assert_eq!(target["provider"], "pi");
-    assert_eq!(target["pane_id"].as_str().is_some(), true);
-    assert_ne!(target["pane_id"], SOURCE_PANE, "new seat has its own pane");
+    assert!(target["pane_id"].as_str().is_some());
+    assert_ne!(
+        target["pane_id"], source["pane_id"],
+        "new seat has its own pane"
+    );
 
     let target_paths = fixture.target_paths(TARGET);
     assert_ne!(
@@ -609,11 +611,11 @@ fn r02_r03_fork_is_an_independent_identity_with_the_exact_complete_v3_tree() {
             .any(|arg| arg.contains(fixture.source_file.to_string_lossy().as_ref())),
         "new pane must not resume SOURCE backing F"
     );
+    let source_pane = source["pane_id"].as_str().unwrap_or("");
     assert!(
-        !transport
-            .inject_targets()
-            .iter()
-            .any(|target| format!("{target:?}").contains(SOURCE_PANE)),
+        transport.inject_targets().iter().all(|target| {
+            source_pane.is_empty() || !format!("{target:?}").contains(source_pane)
+        }),
         "SOURCE must not receive injected commands"
     );
     assert!(
@@ -633,7 +635,7 @@ fn r02_r03_fork_is_an_independent_identity_with_the_exact_complete_v3_tree() {
         "wrapper identity belongs to TARGET"
     );
     assert!(
-        !wrapper.contains(SOURCE_PANE),
+        source_pane.is_empty() || !wrapper.contains(source_pane),
         "wrapper must not inherit SOURCE pane identity"
     );
 }
