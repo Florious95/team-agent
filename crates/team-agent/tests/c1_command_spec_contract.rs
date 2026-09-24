@@ -6,7 +6,7 @@
 //!   `inbox` because `inbox` is secondary but operationally important.
 //!
 //! User story: default help is a small user-facing command surface; surviving
-//! compatibility aliases remain exact-invocation compatible, and recovery
+//! commands retain exact-invocation help, removed aliases refuse, and recovery
 //! failures guide users to discoverable repair paths.
 
 #![allow(clippy::expect_used, clippy::panic)]
@@ -37,20 +37,12 @@ const DEFAULT_COMMANDS: &[&str] = &[
 ];
 
 const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
-    "init",
-    "start",
-    "stop",
-    "restart-agent",
     "fallback-send-leader",
     "fallback-report-result",
     "settle",
     "validate-result",
-    "stuck-list",
-    "stuck-cancel",
-    "acknowledge-idle",
     "repair-state",
     "leaders",
-    "diagnose",
     "attach-app-server-leader",
     "remove-agent",
     "fork-agent",
@@ -68,13 +60,6 @@ const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "e2e",
     "peek",
     "coordinator",
-];
-
-const COMPAT_HIDDEN_COMMANDS: &[(&str, &[&str])] = &[
-    ("stop", &["shutdown"]),
-    ("restart-agent", &["reset-agent"]),
-    ("start", &["quick-start", "restart"]),
-    ("init", &["quick-start"]),
 ];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -125,14 +110,12 @@ fn red1_default_help_contracts_to_core_guided_surface() {
 }
 
 #[test]
-fn diagnose_compatibility_help_points_to_public_doctor_command() {
-    let case = Case::new("diagnose-alias");
-    for command in ["doctor", "diagnose"] {
-        let output = case.run_ta(&[command, "--help"]);
-        let text = output_text(&output);
-        assert!(output.status.success(), "{command} --help: {text}");
-        assert!(text.contains("usage: team-agent doctor"), "{text}");
-    }
+fn doctor_help_points_to_public_doctor_command() {
+    let case = Case::new("doctor-help");
+    let output = case.run_ta(&["doctor", "--help"]);
+    let text = output_text(&output);
+    assert!(output.status.success(), "doctor --help: {text}");
+    assert!(text.contains("usage: team-agent doctor"), "{text}");
 }
 
 #[test]
@@ -144,7 +127,7 @@ fn red2_command_registry_covers_current_dispatch_and_replaces_source_scans() {
 
     if !spec_path.exists() {
         failures.push(format!(
-            "missing `src/cli/spec.rs`; registry must cover {} current dispatch/spec-only/provider names derived from emit.rs: {}",
+            "missing `src/cli/spec.rs`; registry must cover {} current dispatch/provider names derived from emit.rs: {}",
             dispatch_names.len(),
             dispatch_names.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
@@ -222,7 +205,6 @@ fn red3_observation_a_commands_have_terminal_tiers_not_placeholders() {
         ("approvals", "secondary"),
         ("profile", "secondary"),
         ("install-skill", "secondary"),
-        ("init", "compat_hidden"),
     ]);
     let mut failures = Vec::new();
     for (command, tier) in expected {
@@ -255,55 +237,6 @@ fn red3_observation_a_commands_have_terminal_tiers_not_placeholders() {
     assert!(
         failures.is_empty(),
         "RED3: observation-A commands must have exact terminal C1 tiers and no review-later placeholder.\n{}",
-        failures.join("\n")
-    );
-}
-
-#[test]
-fn red4_compat_hidden_commands_have_exact_help_with_sunset_and_action() {
-    let case = Case::new("red4-compat-help");
-    let default_help = stdout(&case.run_ta(&["--help"]));
-    let visible = visible_default_commands(&default_help);
-    let mut failures = Vec::new();
-
-    for (command, action_terms) in COMPAT_HIDDEN_COMMANDS {
-        if visible.contains(*command) {
-            failures.push(format!(
-                "`{command}` must not appear in default help; visible={visible:?}"
-            ));
-        }
-        let output = case.run_ta(&[command, "--help"]);
-        let text = output_text(&output);
-        let lower = text.to_lowercase();
-        if !output.status.success() {
-            failures.push(format!(
-                "`team-agent {command} --help` must succeed for exact compat invocation; status={} text={text}",
-                output.status
-            ));
-        }
-        if !lower.contains(&format!("usage: team-agent {command}")) {
-            failures.push(format!(
-                "`{command}` help must include exact usage; text={text}"
-            ));
-        }
-        for required in ["status: hidden compatibility command", "sunset", "action:"] {
-            if !lower.contains(required) {
-                failures.push(format!(
-                    "`{command}` help must include `{required}`; text={text}"
-                ));
-            }
-        }
-        if !action_terms.iter().any(|term| lower.contains(term)) {
-            failures.push(format!(
-                "`{command}` help action must point to one of {:?}; text={text}",
-                action_terms
-            ));
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "RED4: compat_hidden commands must be absent from default help but keep exact --help with status/sunset/action.\n{}",
         failures.join("\n")
     );
 }
@@ -343,7 +276,7 @@ fn red5_guided_failures_point_to_secondary_discovery_not_hidden_fallbacks() {
     }
 
     case.write_rebind_required_state();
-    let diagnose = case.run_ta(&["diagnose", "--workspace", case.workspace_str(), "--json"]);
+    let diagnose = case.run_ta(&["doctor", "--workspace", case.workspace_str(), "--json"]);
     let diagnose_text = output_text(&diagnose);
     let diagnose_lower = diagnose_text.to_lowercase();
     for required in ["claim-leader", "takeover", "attach-leader"] {
@@ -519,14 +452,14 @@ fn is_command_name(value: &str) -> bool {
 }
 
 fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for const_name in [
-        "DISPATCH_COMMANDS",
-        "SPEC_ONLY_HELP_COMMANDS",
-        "LEADER_PASSTHROUGH_COMMANDS",
-    ] {
-        names.extend(parse_const_str_array(emit, const_name));
-    }
+    let dispatch = emit.split_once("fn dispatch(").expect("dispatch function").1;
+    let dispatch = dispatch.split_once("match command {").expect("command match").1;
+    let dispatch = dispatch.split_once("const LEADER_PASSTHROUGH_COMMANDS").expect("dispatch end").0;
+    let mut names: BTreeSet<String> = dispatch.lines().filter_map(|line| {
+        let (name, arm) = line.trim().strip_prefix('"')?.split_once('"')?;
+        arm.trim_start().starts_with("=>").then(|| name.to_string())
+    }).collect();
+    names.extend(parse_const_str_array(emit, "LEADER_PASSTHROUGH_COMMANDS"));
     names
 }
 

@@ -330,7 +330,7 @@ fn real_machine_fault_invisibility_gate_is_declared() {
         "worker_provider_exit_marker",
         "team-agent restart",
         "status",
-        "diagnose",
+        "doctor",
     ];
     let matches = candidates
         .iter()
@@ -456,10 +456,10 @@ impl CliCase {
     fn diagnose_json_with_extra_env(&self, extra: &[(&str, &str)]) -> Value {
         parse_json_output(
             &self.run_ta(
-                &["diagnose", "--workspace", self.workspace_str(), "--json"],
+                &["doctor", "--workspace", self.workspace_str(), "--json"],
                 extra,
             ),
-            "diagnose --json",
+            "doctor --json",
         )
     }
 

@@ -12,7 +12,7 @@ fn rec_003_diagnose_output() {
     let out = run_ta(
         &ws,
         &[
-            "diagnose",
+            "doctor",
             "--workspace",
             ws.path().to_str().unwrap(),
             "--json",

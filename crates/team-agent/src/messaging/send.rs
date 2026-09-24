@@ -551,11 +551,11 @@ fn coordinator_unavailable_outcome(
     );
     let warning = if persist {
         format!(
-            "coordinator is not running; message was queued for {recipient} and will retry. Run `team-agent diagnose` or restart the team."
+            "coordinator is not running; message was queued for {recipient} and will retry. Run `team-agent doctor` or restart the team."
         )
     } else {
         format!(
-            "coordinator protocol or schema is incompatible; message was not queued for {recipient}. Run `team-agent diagnose` or upgrade the runtime."
+            "coordinator protocol or schema is incompatible; message was not queued for {recipient}. Run `team-agent doctor` or upgrade the runtime."
         )
     };
     event_log.write(

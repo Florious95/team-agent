@@ -106,92 +106,6 @@ fn seed_team_spec(ws: &std::path::Path) {
     std::fs::write(ws.join("team.spec.yaml"), spec).unwrap();
 }
 
-// ── ACK-CRACK [P1 byte-shape] — acknowledge_idle must write golden's TTL suppression shape ───────
-// golden runtime.py:680-688: manual-acknowledge persists
-//   coordinator.idle_acknowledged[team] = {acknowledged_at, expires_at, ttl_seconds}
-//   coordinator.suppressed_idle_alerts[team][worker].idle_fallback =
-//     {suppressed_at, suppressed_by:"manual_acknowledge", manual_acknowledge:true, expires_at, ttl_seconds}
-// The clear logic does datetime.fromisoformat(entry["expires_at"]); a MISSING expires_at -> ValueError
-// -> "invalid_suppression_timestamp" -> immediate self-clear (latent crack once detect_idle_fallbacks
-// is ported). So BOTH idle_acknowledged and the entry MUST carry a non-empty expires_at.
-#[test]
-fn acknowledge_idle_writes_golden_ttl_suppression_shape() {
-    let ws = tmp_workspace();
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &serde_json::json!({
-            "active_team_key": "teamX",
-            "agents": {"w1": {"status": "running", "provider": "codex"}}
-        }),
-    )
-    .unwrap();
-    let _ = lifecycle_port::acknowledge_idle(&ws, None).expect("acknowledge_idle ok");
-    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
-    let ack = &state["coordinator"]["idle_acknowledged"]["teamX"];
-    assert!(
-        ack.get("expires_at")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.is_empty()),
-        "ACK-CRACK: idle_acknowledged[team] must carry a non-empty expires_at (golden); got {ack}"
-    );
-    assert!(
-        ack.get("ttl_seconds").is_some(),
-        "idle_acknowledged[team] must carry ttl_seconds; got {ack}"
-    );
-    let entry = &state["coordinator"]["suppressed_idle_alerts"]["teamX"]["w1"]["idle_fallback"];
-    assert!(
-            entry.get("expires_at").and_then(serde_json::Value::as_str).is_some_and(|s| !s.is_empty()),
-            "ACK-CRACK: the manual-ack suppression entry must carry expires_at (else clear logic ValueErrors \
-             -> instant self-clear); got {entry}"
-        );
-    assert_eq!(
-        entry["suppressed_by"],
-        serde_json::json!("manual_acknowledge"),
-        "golden suppressed_by; got {entry}"
-    );
-    assert_eq!(
-        entry["manual_acknowledge"],
-        serde_json::json!(true),
-        "golden manual_acknowledge:true; got {entry}"
-    );
-}
-// ── ACK return-shape [P1 byte-parity] — acknowledge_idle must RETURN golden's keys ───────────────
-// golden runtime.py:691: return {ok, team, agent_id, acknowledged_at, expires_at, ttl_seconds}.
-// Rust (cli/mod.rs) returns only {ok, team, ttl_seconds} -> missing agent_id, acknowledged_at,
-// expires_at. RED. (acknowledged_at/expires_at are the same values written into idle_acknowledged.)
-#[test]
-fn acknowledge_idle_return_carries_golden_keys() {
-    let ws = tmp_workspace();
-    crate::state::persist::save_runtime_state(
-            &ws,
-            &serde_json::json!({ "active_team_key": "teamX", "agents": {"w1": {"status": "running", "provider": "codex"}} }),
-        )
-        .unwrap();
-    let r = lifecycle_port::acknowledge_idle(&ws, None).expect("acknowledge_idle ok");
-    let obj = r.as_object().expect("ack returns a dict");
-    for key in [
-        "ok",
-        "team",
-        "agent_id",
-        "acknowledged_at",
-        "expires_at",
-        "ttl_seconds",
-    ] {
-        assert!(
-            obj.contains_key(key),
-            "ACK return-shape: golden return carries `{key}` (runtime.py:691: ok/team/agent_id/\
-                 acknowledged_at/expires_at/ttl_seconds); Rust omits it. got keys {:?}",
-            obj.keys().collect::<Vec<_>>()
-        );
-    }
-    assert!(
-        obj.get("expires_at")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.is_empty()),
-        "ACK return-shape: expires_at must be a non-empty timestamp; got {r}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
 // ── BUG-2 [real bug] — inbox must RETURN the stored messages, not a hardcoded []. ────────────────
 // Golden status/inbox.py:35-38 -> MessageStore.inbox(agent_id) (core.py:242, owner_team_id=None):
 //   select <MESSAGE_SELECT> from messages where sender = ? or recipient = ? order by created_at desc
@@ -680,16 +594,7 @@ fn remove_agent_from_spec_refusal_is_not_success_envelope() {
 fn stuck_cancel_persists_suppression_and_stuck_list_reads_state() {
     let ws = tmp_workspace();
     seed_collect_state(&ws);
-    let out = json_output(
-        cmd_stuck_cancel(&StuckCancelArgs {
-            agent: "fake_impl".to_string(),
-            workspace: ws.clone(),
-            alert_type: None,
-            json: true,
-            team: None,
-        })
-        .unwrap(),
-    );
+    let out = messaging::stuck_cancel(&ws, "fake_impl", None, "leader").unwrap();
     let team_key = seeded_team_key(&ws);
     assert_eq!(out["ok"], json!(true));
     assert_eq!(
@@ -715,98 +620,10 @@ fn stuck_cancel_persists_suppression_and_stuck_list_reads_state() {
                 && e["agent_id"] == json!("fake_impl")),
         "stuck_cancel must write coordinator.idle_alert_suppressed"
     );
-    let listed = json_output(
-        cmd_stuck_list(&StuckListArgs {
-            workspace: ws.clone(),
-            json: true,
-            team: None,
-        })
-        .unwrap(),
-    );
+    let listed = messaging::stuck_list(&ws).unwrap();
     assert_eq!(
         listed["suppressed_idle_alerts"]["fake_impl"]["stuck"]["suppressed_by"],
         json!("leader"),
         "stuck-list must read the persisted state mirror, not return a hard-coded empty list"
-    );
-}
-
-#[test]
-fn stuck_cancel_explicit_team_is_rejected_until_backend_is_scoped() {
-    let ws = tmp_workspace();
-    seed_collect_state(&ws);
-    let err = cmd_stuck_cancel(&StuckCancelArgs {
-        agent: "fake_impl".to_string(),
-        workspace: ws.clone(),
-        alert_type: None,
-        json: true,
-        team: Some("current".to_string()),
-    })
-    .expect_err("explicit --team must not silently write global stuck suppression");
-    assert!(
-            err.to_string().contains("not supported yet"),
-            "stuck-cancel --team must be an explicit refusal until backend supports scoped writes; got {err}"
-        );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-#[test]
-fn stuck_cancel_invalid_alert_type_is_rejected() {
-    let ws = tmp_workspace();
-    seed_collect_state(&ws);
-    let code = run(
-        &cli_argv(&[
-            "stuck-cancel",
-            "fake_impl",
-            "--workspace",
-            &ws.to_string_lossy(),
-            "--alert-type",
-            "bogus",
-            "--json",
-        ]),
-        &ws,
-    );
-    assert_eq!(
-            code,
-            ExitCode::Error,
-            "Python rejects alert_type outside stuck/idle_fallback/cross_worker_deadlock/all; Rust must not silently coerce bogus to stuck"
-        );
-}
-#[test]
-fn acknowledge_idle_records_manual_idle_fallback_suppression_and_event() {
-    let ws = tmp_workspace();
-    seed_collect_state(&ws);
-    let out = json_output(
-        cmd_acknowledge_idle(&AcknowledgeIdleArgs {
-            team: None,
-            workspace: ws.clone(),
-            json: true,
-        })
-        .unwrap(),
-    );
-    let team_key = seeded_team_key(&ws);
-    assert_eq!(out["ok"], json!(true));
-    assert_eq!(out["team"], json!(team_key));
-    assert_eq!(out["ttl_seconds"], json!(1800));
-    let state = read_state(&ws);
-    let ack = &state["coordinator"]["idle_acknowledged"][&team_key];
-    assert_eq!(ack["ttl_seconds"], json!(1800));
-    assert!(ack["acknowledged_at"].as_str().is_some());
-    assert_eq!(
-        state["coordinator"]["suppressed_idle_alerts"][&team_key]["fake_impl"]["idle_fallback"]
-            ["suppressed_by"],
-        json!("manual_acknowledge")
-    );
-    assert_eq!(
-        state["coordinator"]["suppressed_idle_alerts"][&team_key]["fake_impl"]["idle_fallback"]
-            ["manual_acknowledge"],
-        json!(true)
-    );
-    assert!(
-        read_events(&ws)
-            .iter()
-            .any(|e| e["event"] == json!("coordinator.idle_acknowledged")
-                && e["team"] == json!(team_key)
-                && e["ttl_seconds"] == json!(1800)),
-        "acknowledge-idle must emit coordinator.idle_acknowledged"
     );
 }

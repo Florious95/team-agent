@@ -419,9 +419,6 @@ pub enum StateWriteIntent<'a> {
     SchedulerSuppression {
         owner_team_id: Option<&'a str>,
     },
-    IdleAck {
-        team_key: Option<&'a str>,
-    },
     TaskRepair {
         team_key: Option<&'a str>,
     },
@@ -650,8 +647,6 @@ fn route_direct(
         },
         // SchedulerSuppression -> root save (messaging/scheduler.rs:259).
         StateWriteIntent::SchedulerSuppression { .. } => helper_write_root(workspace, state),
-        // IdleAck -> root save (cli/mod.rs:2544).
-        StateWriteIntent::IdleAck { .. } => helper_write_root(workspace, state),
         // TaskRepair -> `save_team_scoped_state` (cli/adapters.rs:675).
         StateWriteIntent::TaskRepair { .. } => helper_write_team_scoped(workspace, state),
         // FakeE2eSeed / SelfMigration are diagnostic seams. The current

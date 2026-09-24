@@ -172,7 +172,7 @@ pub enum AuthHintStatus {
 pub enum NoPingReason {
     /// worker 从未 open 过 turn(`idle_predicate.py:61`)。
     NotArmedNoWorkerTurn,
-    /// suppress flag 置位(acknowledge-idle 后,`idle_predicate.py:63`)。
+    /// Suppress flag from a legacy idle acknowledgement (`idle_predicate.py:63`).
     Acknowledged,
     /// armed 但 elapsed < debounce(`idle_predicate.py:65`)。
     DebounceActive,

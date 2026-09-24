@@ -112,12 +112,6 @@ For an existing worker that should restart with a blank provider context, the le
 team-agent reset-agent "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --discard-session --json
 ```
 
-or the equivalent restart form:
-
-```bash
-team-agent restart-agent "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --discard-session --json
-```
-
 Use this only when the user intentionally wants a clean context. For incident recovery, follow `recovery-runbook.md`, where context-preserving repair comes first.
 
 ## Framework Gaps To Track

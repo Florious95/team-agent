@@ -10,7 +10,7 @@ use std::time::Duration;
 mod hermetic;
 
 use hermetic::HermeticTestEnv;
-use team_agent::cli::{cmd_diagnose, CmdOutput, DiagnoseArgs};
+use team_agent::cli::{cmd_doctor, CmdOutput, DoctorArgs};
 use team_agent::lifecycle::launch::{
     classify_leader_binding, launched_team_receiver_is_attached,
     seed_launched_owner_from_caller_with_provider_lookup, LeaderBindingClass,
@@ -58,12 +58,19 @@ fn diagnose_json(workspace: &Path, team: &str) -> Value {
 }
 
 fn diagnose_json_team(workspace: &Path, team: Option<&str>) -> Value {
-    let result = cmd_diagnose(&DiagnoseArgs {
+    let result = cmd_doctor(&DoctorArgs {
         workspace: workspace.to_path_buf(),
         json: true,
         team: team.map(str::to_string),
+        spec: None,
+        gate: None,
+        comms: false,
+        fix: false,
+        fix_schema: false,
+        cleanup_orphans: false,
+        confirm: false,
     })
-    .expect("cmd_diagnose");
+    .expect("cmd_doctor");
     match result.output {
         CmdOutput::Json(value) => value,
         other => panic!("diagnose must be JSON, got {other:?}"),

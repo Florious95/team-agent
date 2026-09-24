@@ -27,13 +27,13 @@ pub(super) fn dirty_topology_refusal_value(
         "status": "refused_dirty_topology",
         "reason": reason,
         "session_name": session_name,
-        "error": "send refused: tmux endpoint/socket topology is inconsistent; run diagnose from the intended leader socket before sending",
+        "error": "send refused: tmux endpoint/socket topology is inconsistent; run doctor from the intended leader socket before sending",
         "issues": issue_ids
             .iter()
             .map(|id| json!({"id": id}))
             .collect::<Vec<_>>(),
         "next_actions": [
-            "team-agent diagnose --json",
+            "team-agent doctor --json",
             format!("team-agent claim-leader --team {repair_team} --confirm --json"),
             format!("team-agent takeover --team {repair_team} --confirm --json")
         ],

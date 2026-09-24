@@ -1313,7 +1313,7 @@ fn apply_endpoint_convergence(
                 "persisted": false,
                 "checked_paths": convergence_checked_paths(team_id.as_str()),
                 "action": format!(
-                    "old tmux endpoint {old_endpoint} still has this team's session or pane tuple; run team-agent diagnose --json before retrying restart"
+                    "old tmux endpoint {old_endpoint} still has this team's session or pane tuple; run team-agent doctor --json before retrying restart"
                 ),
             })),
             false,

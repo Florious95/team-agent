@@ -255,12 +255,12 @@ impl ForensicsFixture {
 
     fn diagnose_json(&self) -> Value {
         let output = self.run_ta(&[
-            "diagnose",
+            "doctor",
             "--workspace",
             self.root.to_str().expect("workspace utf8"),
             "--json",
         ]);
-        parse_json_stdout("diagnose", output)
+        parse_json_stdout("doctor", output)
     }
 
     fn run_ta(&self, args: &[&str]) -> Output {

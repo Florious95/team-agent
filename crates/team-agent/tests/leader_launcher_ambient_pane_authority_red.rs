@@ -649,35 +649,6 @@ fn b1_send_surfaces_typed_workspace_mismatch_and_recovery_action() {
 
 #[test]
 #[serial(env)]
-fn b2_diagnose_checks_live_workspace_even_when_state_says_attached() {
-    let case = Case::new("b2-diagnose");
-    case.seed_foreign_attached_state();
-    case.set_mode("foreign");
-
-    let output = case.run(
-        &[
-            "diagnose",
-            "--workspace",
-            case.workspace_str(),
-            "--team",
-            TEAM,
-            "--json",
-        ],
-        None,
-    );
-    let value = json_stdout_even_on_error("B2 diagnose", &output);
-
-    assert_catalog_refusal_payload(
-        &value,
-        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
-        None,
-        "B2 diagnose public surface",
-    );
-    assert_workspace_mismatch_facts(&value, "B2 diagnose public surface");
-}
-
-#[test]
-#[serial(env)]
 fn b2_doctor_independently_checks_live_workspace_even_when_state_says_attached() {
     let case = Case::new("b2-doctor");
     case.seed_foreign_attached_state();
@@ -707,26 +678,8 @@ fn b2_doctor_independently_checks_live_workspace_even_when_state_says_attached()
 
 #[test]
 #[serial(env)]
-fn b2_diagnose_single_snapshot_rejects_reread_race() {
-    assert_single_snapshot_rejects_reread_race(
-        RecoverySurface::Diagnose,
-        "b2-diagnose-snapshot-race",
-    );
-}
-
-#[test]
-#[serial(env)]
 fn b2_doctor_single_snapshot_rejects_reread_race() {
     assert_single_snapshot_rejects_reread_race(RecoverySurface::Doctor, "b2-doctor-snapshot-race");
-}
-
-#[test]
-#[serial(env)]
-fn b2_diagnose_single_snapshot_survives_later_read_failure() {
-    assert_single_snapshot_survives_later_read_failure(
-        RecoverySurface::Diagnose,
-        "b2-diagnose-snapshot-failure",
-    );
 }
 
 #[test]
@@ -880,23 +833,12 @@ fn b2_single_snapshot_fixture_distinguishes_reread_race_and_later_failure() {
 
 #[test]
 #[serial(env)]
-fn b2_matching_workspace_is_not_misdiagnosed_by_diagnose_or_doctor() {
+fn b2_matching_workspace_is_not_misdiagnosed_by_doctor() {
     let case = Case::new("b2-public-positive");
     case.seed_foreign_attached_state();
     case.set_mode("matching");
 
     for (surface, args) in [
-        (
-            "diagnose",
-            vec![
-                "diagnose",
-                "--workspace",
-                case.workspace_str(),
-                "--team",
-                TEAM,
-                "--json",
-            ],
-        ),
         (
             "doctor",
             vec![
@@ -957,7 +899,7 @@ fn b3_recovery_action_removes_the_same_typed_error() {
 
     let diagnose = case.run(
         &[
-            "diagnose",
+            "doctor",
             "--workspace",
             case.workspace_str(),
             "--team",
@@ -966,7 +908,7 @@ fn b3_recovery_action_removes_the_same_typed_error() {
         ],
         Some(GOOD_PANE),
     );
-    let diagnose_value = json_stdout_even_on_error("B3 post-action diagnose", &diagnose);
+    let diagnose_value = json_stdout_even_on_error("B3 post-action doctor", &diagnose);
     assert!(
         !json_contains_string(&diagnose_value, "PaneWorkspaceMismatch"),
         "copying the suggested action must remove the original typed error; \
@@ -978,12 +920,6 @@ fn b3_recovery_action_removes_the_same_typed_error() {
 #[serial(env)]
 fn b3_per_surface_launcher_recovery_action_closes_independently() {
     assert_independent_surface_recovery_action_closes(RecoverySurface::Launcher);
-}
-
-#[test]
-#[serial(env)]
-fn b3_per_surface_diagnose_recovery_action_closes_independently() {
-    assert_independent_surface_recovery_action_closes(RecoverySurface::Diagnose);
 }
 
 #[test]
@@ -1039,7 +975,7 @@ fn close_surface_refusal(surface: RecoverySurface, case: &Case, before_value: &V
                 String::from_utf8_lossy(&attach.stderr)
             );
         }
-        RecoverySurface::Diagnose | RecoverySurface::Doctor => {
+        RecoverySurface::Doctor => {
             case.set_mode("recovery");
         }
     }
@@ -1084,7 +1020,6 @@ fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
 fn b3_each_public_surface_recovery_action_closes_its_original_refusal() {
     for surface in [
         RecoverySurface::Launcher,
-        RecoverySurface::Diagnose,
         RecoverySurface::Doctor,
     ] {
         let case = Case::new(surface.tag());
@@ -1179,7 +1114,7 @@ fn c_attach_window_failures_are_retried_or_remain_user_visible() {
     );
     let diagnose = case.run(
         &[
-            "diagnose",
+            "doctor",
             "--workspace",
             case.workspace_str(),
             "--team",
@@ -1238,17 +1173,15 @@ fn c_attach_window_failures_are_retried_or_remain_user_visible() {
 #[derive(Clone, Copy)]
 enum RecoverySurface {
     Launcher,
-    Diagnose,
     Doctor,
 }
 
 impl RecoverySurface {
-    const ALL: [Self; 3] = [Self::Launcher, Self::Diagnose, Self::Doctor];
+    const ALL: [Self; 2] = [Self::Launcher, Self::Doctor];
 
     const fn name(self) -> &'static str {
         match self {
             Self::Launcher => "launcher",
-            Self::Diagnose => "diagnose --json",
             Self::Doctor => "doctor --json",
         }
     }
@@ -1256,7 +1189,6 @@ impl RecoverySurface {
     const fn tag(self) -> &'static str {
         match self {
             Self::Launcher => "b3-launcher-action",
-            Self::Diagnose => "b3-diagnose-action",
             Self::Doctor => "b3-doctor-action",
         }
     }
@@ -1264,7 +1196,6 @@ impl RecoverySurface {
     const fn independent_tag(self) -> &'static str {
         match self {
             Self::Launcher => "b3-independent-launcher-action",
-            Self::Diagnose => "b3-independent-diagnose-action",
             Self::Doctor => "b3-independent-doctor-action",
         }
     }
@@ -1272,7 +1203,6 @@ impl RecoverySurface {
     const fn canary_key(self) -> &'static str {
         match self {
             Self::Launcher => "launcher",
-            Self::Diagnose => "diagnose",
             Self::Doctor => "doctor",
         }
     }
@@ -1288,17 +1218,6 @@ impl RecoverySurface {
                     "--contract-canary",
                 ],
                 pane,
-            ),
-            Self::Diagnose => case.run(
-                &[
-                    "diagnose",
-                    "--workspace",
-                    case.workspace_str(),
-                    "--team",
-                    TEAM,
-                    "--json",
-                ],
-                Some(pane),
             ),
             Self::Doctor => case.run(
                 &[

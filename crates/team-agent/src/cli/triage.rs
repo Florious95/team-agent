@@ -138,7 +138,7 @@ mod tests {
             "providers": {"claude": {"version": "secret"}},
             "runtime": {"workspace": "/tmp/secret"}
         });
-        let output = render("diagnose", &report);
+        let output = render("doctor", &report);
         assert!(output.contains("issue: short_issue"));
         assert!(output.contains("issue: code=object_issue"));
         assert!(output.contains("repair: action=run repair"));

@@ -1,13 +1,8 @@
-//! 0.5.19 diagnose coordinator-health RED contracts.
+//! Doctor coordinator-health contracts.
 //!
-//! References:
-//! - `.team/artifacts/diagnose-coordinator-health-locate.md` section 8.
-//! - RED1: stale coordinator pid must surface as a diagnose issue and restart hint.
-//! - RED2: healthy same-version coordinator must not produce coordinator issues.
-//! - RED3: live coordinator with stale binary identity must surface the mismatch.
-//! - RED4: incompatible message-store schema must surface a doctor --fix-schema hint.
-//! - Non-goal: `diagnose` stays read-only; it must not mutate pid/meta/state/db/events
-//!   or start/stop/rotate the coordinator.
+//! Stale PIDs, healthy same-version processes, mismatched binary identities, and
+//! incompatible schemas must produce accurate findings without mutating runtime
+//! files or starting, stopping, or rotating the coordinator.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -33,18 +28,18 @@ const COORDINATOR_ISSUES: [&str; 3] = [
 
 #[test]
 #[serial(env)]
-fn diagnose_reports_stale_coordinator_pid_without_mutating_runtime() {
-    let fixture = DiagnoseFixture::active("stale-pid");
+fn doctor_reports_stale_coordinator_pid_without_mutating_runtime() {
+    let fixture = DoctorFixture::active("stale-pid");
     let stale_pid = Pid::new(4_000_000);
     fixture.write_metadata(stale_pid, Some(cli_binary_path()), Some(current_version()));
     let before = fixture.snapshot_runtime_files();
 
-    let out = fixture.diagnose_json();
+    let out = fixture.doctor_json();
 
     assert_eq!(
         out["ok"],
         json!(false),
-        "RED1: diagnose must return ok=false when active runtime has stale coordinator pid; out={out}"
+        "RED1: doctor must return ok=false when active runtime has stale coordinator pid; out={out}"
     );
     let issue = issue(&out, "coordinator_unavailable").unwrap_or_else(|| {
         panic!(
@@ -67,17 +62,17 @@ fn diagnose_reports_stale_coordinator_pid_without_mutating_runtime() {
         }),
         "RED1: stale pid must suggest hint_action=team-agent restart; out={out}"
     );
-    fixture.assert_runtime_files_unchanged(before, "RED1 stale-pid diagnose");
+    fixture.assert_runtime_files_unchanged(before, "RED1 stale-pid doctor");
 }
 
 #[test]
 #[serial(env)]
-fn diagnose_keeps_healthy_same_version_coordinator_clean_guard() {
-    let fixture = DiagnoseFixture::quiet("healthy-same-version");
+fn doctor_keeps_healthy_same_version_coordinator_clean_guard() {
+    let fixture = DoctorFixture::quiet("healthy-same-version");
     let pid = Pid::new(std::process::id());
     fixture.write_metadata(pid, Some(cli_binary_path()), Some(current_version()));
 
-    let out = fixture.diagnose_json();
+    let out = fixture.doctor_json();
 
     assert!(
         !has_any_coordinator_issue(&out),
@@ -86,19 +81,19 @@ fn diagnose_keeps_healthy_same_version_coordinator_clean_guard() {
     assert_eq!(
         out["ok"],
         json!(true),
-        "RED2 guard: quiet healthy fixture has no topology issues, so diagnose should remain ok=true; out={out}"
+        "RED2 guard: quiet healthy fixture has no topology issues, so doctor should remain ok=true; out={out}"
     );
 }
 
 #[test]
 #[serial(env)]
-fn diagnose_reports_live_coordinator_with_stale_binary_identity() {
-    let fixture = DiagnoseFixture::active("stale-identity");
+fn doctor_reports_live_coordinator_with_stale_binary_identity() {
+    let fixture = DoctorFixture::active("stale-identity");
     let pid = Pid::new(std::process::id());
     fixture.write_metadata(pid, Some(cli_binary_path()), Some("0.5.16".to_string()));
     let before = fixture.snapshot_runtime_files();
 
-    let out = fixture.diagnose_json();
+    let out = fixture.doctor_json();
 
     let issue = issue(&out, "coordinator_stale_identity").unwrap_or_else(|| {
         panic!(
@@ -124,21 +119,21 @@ fn diagnose_reports_live_coordinator_with_stale_binary_identity() {
         repair(&out, "coordinator_stale_identity").is_some_and(|value| {
             value.get("hint_action").and_then(Value::as_str) == Some("team-agent restart")
         }),
-        "RED3: stale identity must suggest hint_action=team-agent restart without diagnose rotating; out={out}"
+        "RED3: stale identity must suggest hint_action=team-agent restart without doctor rotating; out={out}"
     );
-    fixture.assert_runtime_files_unchanged(before, "RED3 stale-identity diagnose");
+    fixture.assert_runtime_files_unchanged(before, "RED3 stale-identity doctor");
 }
 
 #[test]
 #[serial(env)]
-fn diagnose_reports_schema_incompatible_as_repair_state_hint() {
-    let fixture = DiagnoseFixture::active_without_schema("schema-incompatible");
+fn doctor_reports_schema_incompatible_as_fix_schema_hint() {
+    let fixture = DoctorFixture::active_without_schema("schema-incompatible");
     let pid = Pid::new(std::process::id());
     fixture.write_metadata(pid, Some(cli_binary_path()), Some(current_version()));
     std::fs::write(fixture.db_path(), b"not a sqlite database").expect("write corrupt team.db");
     let before = fixture.snapshot_runtime_files();
 
-    let out = fixture.diagnose_json();
+    let out = fixture.doctor_json();
 
     let issue = issue(&out, "coordinator_schema_incompatible").unwrap_or_else(|| {
         panic!(
@@ -157,16 +152,16 @@ fn diagnose_reports_schema_incompatible_as_repair_state_hint() {
         }),
         "RED4: schema incompatible must suggest hint_action=team-agent doctor --fix-schema --json; out={out}"
     );
-    fixture.assert_runtime_files_unchanged(before, "RED4 schema-incompatible diagnose");
+    fixture.assert_runtime_files_unchanged(before, "RED4 schema-incompatible doctor");
 }
 
-struct DiagnoseFixture {
+struct DoctorFixture {
     _env: hermetic_guard::HermeticTestEnv,
     root: PathBuf,
     workspace: WorkspacePath,
 }
 
-impl DiagnoseFixture {
+impl DoctorFixture {
     fn active(tag: &str) -> Self {
         Self::with_state(tag, active_runtime_state, true)
     }
@@ -310,9 +305,9 @@ impl DiagnoseFixture {
         .expect("write coordinator metadata");
     }
 
-    fn diagnose_json(&self) -> Value {
+    fn doctor_json(&self) -> Value {
         let output = self.run_ta(&[
-            "diagnose",
+            "doctor",
             "--workspace",
             self.root.to_str().expect("workspace utf8"),
             "--json",
@@ -358,7 +353,7 @@ impl DiagnoseFixture {
             assert_eq!(
                 actual,
                 expected,
-                "{label}: diagnose must be read-only; changed {}",
+                "{label}: doctor must be read-only; changed {}",
                 path.display()
             );
         }
@@ -479,13 +474,13 @@ fn attached_leader_receiver_live(pane: &str, socket: &str) -> Value {
 fn parse_json_stdout(output: Output) -> Value {
     assert!(
         !output.stdout.is_empty(),
-        "diagnose must emit JSON on stdout; status={} stderr={}",
+        "doctor must emit JSON on stdout; status={} stderr={}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
-            "parse diagnose JSON: {error}; status={} stdout={} stderr={}",
+            "parse doctor JSON: {error}; status={} stdout={} stderr={}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)

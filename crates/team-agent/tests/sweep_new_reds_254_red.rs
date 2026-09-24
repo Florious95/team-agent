@@ -25,8 +25,8 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::cli::{
-    cmd_diagnose, cmd_doctor, cmd_init, cmd_preflight, cmd_validate, cmd_wait_ready, CmdOutput,
-    DiagnoseArgs, DoctorArgs, ExitCode, InitArgs, PreflightArgs, ValidateArgs, WaitReadyArgs,
+    cmd_doctor, cmd_preflight, cmd_wait_ready, CmdOutput,
+    DoctorArgs, ExitCode, PreflightArgs, WaitReadyArgs,
 };
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
@@ -41,10 +41,17 @@ fn diagnose_live_fake_team_uses_active_team_projection() {
     seed_selected_team_state(&root, "teamA", &team, true);
 
     let out = json_result(
-        cmd_diagnose(&DiagnoseArgs {
+        cmd_doctor(&DoctorArgs {
             workspace: root.clone(),
             json: true,
             team: None,
+            spec: None,
+            gate: None,
+            comms: false,
+            fix: false,
+            fix_schema: false,
+            cleanup_orphans: false,
+            confirm: false,
         })
         .expect("diagnose should return JSON"),
     );
@@ -90,10 +97,17 @@ fn diagnose_selected_team_without_registry_is_unbound() {
     save_runtime_state(&root, &state).unwrap();
 
     let out = json_result(
-        cmd_diagnose(&DiagnoseArgs {
+        cmd_doctor(&DoctorArgs {
             workspace: root,
             json: true,
             team: None,
+            spec: None,
+            gate: None,
+            comms: false,
+            fix: false,
+            fix_schema: false,
+            cleanup_orphans: false,
+            confirm: false,
         })
         .expect("diagnose should return JSON"),
     );
@@ -135,10 +149,17 @@ fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
     write_registry_entry(&root, "teamA", "/foreign/workspace", 1);
 
     let out = json_result(
-        cmd_diagnose(&DiagnoseArgs {
+        cmd_doctor(&DoctorArgs {
             workspace: root,
             json: true,
             team: None,
+            spec: None,
+            gate: None,
+            comms: false,
+            fix: false,
+            fix_schema: false,
+            cleanup_orphans: false,
+            confirm: false,
         })
         .expect("diagnose should return JSON"),
     );
@@ -385,17 +406,14 @@ fn attach_leader_help_lists_pane_provider_and_dispatches_handler() {
     let types = source("src/cli/types.rs");
     let cli_mod = source("src/cli/mod.rs");
     let help = source_section(&emit, "Some(\"attach-leader\")", "Some(\"identity\")");
-    let dispatch = source_section(&emit, "fn dispatch", "const DISPATCH_COMMANDS");
+    let dispatch = source_section(&emit, "fn dispatch", "const LEADER_PASSTHROUGH_COMMANDS");
     let parser = source_section(&emit, "fn parse_args", "fn next_arg");
     assert!(
         help.contains("--pane") && help.contains("--provider"),
         "attach-leader help must list explicit --pane and --provider; help={help}"
     );
     assert!(
-        !emit.contains(
-            "SPEC_ONLY_HELP_COMMANDS: &[&str] = &[\"start\", \"purge-agent\", \"attach-leader\"]"
-        ) && dispatch.contains("\"attach-leader\"")
-            && dispatch.contains("cmd_attach_leader"),
+        dispatch.contains("\"attach-leader\"") && dispatch.contains("cmd_attach_leader"),
         "attach-leader must be a real dispatch arm, not help-only; dispatch={dispatch}"
     );
     assert!(
@@ -405,42 +423,6 @@ fn attach_leader_help_lists_pane_provider_and_dispatches_handler() {
     assert!(
         types.contains("pub struct AttachLeaderArgs") && cli_mod.contains("pub fn cmd_attach_leader"),
         "attach-leader must have typed args and a public handler that writes leader_receiver; types/cli missing"
-    );
-}
-
-#[test]
-fn init_workspace_output_is_usable_by_validate_or_explicitly_refuses_runtime_workspace() {
-    let root = tmp_dir("init-usable");
-    let init = cmd_init(&InitArgs {
-        workspace: root.clone(),
-        force: false,
-        json: true,
-    })
-    .expect("init returns JSON");
-    let body = json_result(init);
-    if body["ok"] == json!(false) {
-        let reason = body["reason"].as_str().unwrap_or_default();
-        let error = body["error"].as_str().unwrap_or_default();
-        assert!(
-            reason.contains("runtime_workspace") || error.contains("runtime workspace"),
-            "if init refuses this workspace shape it must say so explicitly; body={body}"
-        );
-        return;
-    }
-
-    let validate = cmd_validate(&ValidateArgs {
-        spec: root.clone(),
-        json: true,
-    });
-    assert!(
-        validate.is_ok(),
-        "after init --workspace WS succeeds, validate WS must be directly usable by the user; init_body={body} validate={validate:?}"
-    );
-    let validate_body = json_result(validate.unwrap());
-    assert_eq!(
-        validate_body["ok"],
-        json!(true),
-        "init output must be compatible with validate/quick flow, not only an internal .team/current spec path; init_body={body} validate={validate_body}"
     );
 }
 

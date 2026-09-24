@@ -157,10 +157,10 @@ Resume/repair:
 team-agent restart "$WORKSPACE" --team "$TEAM" --json
 ```
 
-For a single worker where the leader has explicitly selected that worker:
+A single-worker clean-context reset is not a resume operation. Only after the user explicitly approves discarding that worker's session, use:
 
 ```bash
-team-agent restart-agent "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --json
+team-agent reset-agent "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" --discard-session --json
 ```
 
 Validate:

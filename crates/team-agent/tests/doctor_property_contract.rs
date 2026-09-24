@@ -1,11 +1,8 @@
 // real-machine isolation: HOME, TMUX, TEAM_AGENT_WORKSPACE
-//! Property-oriented black-box RED contracts for the doctor/diagnose refactor taskbook.
+//! Black-box properties for doctor privacy, process isolation, and output contracts.
 //!
-//! These tests intentionally exercise only the public CLI.  Inputs are deterministic,
-//! bounded generators so a failing case is reproducible from the test name and fixture.
-//! The baseline is expected to fail: provider probes are still visible, human output is
-//! a compact JSON dump, and doctor does not close its final `ok` value after appending an
-//! unbound registry issue.
+//! Deterministic bounded inputs keep failures reproducible. These cases cover provider
+//! probes, child processes, generated human output, JSON evidence, and team isolation.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -24,7 +21,7 @@ fn bin() -> &'static str {
 }
 
 #[test]
-fn p1_diagnose_never_executes_provider_version_or_auth_poison() {
+fn p1_doctor_never_executes_provider_version_or_auth_poison() {
     let workspace = tmp_dir("p1-empty");
     let home = tmp_dir("p1-home");
     let poison_dir = tmp_dir("p1-poison");
@@ -35,21 +32,21 @@ fn p1_diagnose_never_executes_provider_version_or_auth_poison() {
 
     let workspace_arg = path(&workspace);
     let output = run_with_env(
-        &["diagnose", "--workspace", workspace_arg.as_str(), "--json"],
+        &["doctor", "--workspace", workspace_arg.as_str(), "--json"],
         &workspace,
         &home,
         Some(&poison_dir),
     );
     assert!(
         output.stdout.starts_with(b"{") || output.stdout.starts_with(b"["),
-        "diagnose must still emit JSON; stdout={} stderr={}",
+        "doctor must still emit JSON; stdout={} stderr={}",
         text(&output.stdout),
         text(&output.stderr)
     );
     let touched = fs::read_to_string(&marker).unwrap_or_default();
     assert!(
         touched.is_empty(),
-        "P1 RED: provider version/auth poison was executed by default diagnose: {touched:?}"
+        "P1 RED: provider version/auth poison was executed by default doctor: {touched:?}"
     );
 }
 
@@ -70,7 +67,7 @@ fn p2_empty_workspace_has_zero_child_processes_and_zero_disk_writes() {
         let workspace_arg = path(&workspace);
         let mut command = Command::new(bin());
         command
-            .args(["diagnose", "--workspace", workspace_arg.as_str(), "--json"])
+            .args(["doctor", "--workspace", workspace_arg.as_str(), "--json"])
             .current_dir(&workspace)
             .env("HOME", &home)
             .env("TMPDIR", std::env::temp_dir())
@@ -87,23 +84,23 @@ fn p2_empty_workspace_has_zero_child_processes_and_zero_disk_writes() {
         if let Some(team) = explicit_team {
             command.args(["--team", team]);
         }
-        let mut child = command.spawn().expect("spawn diagnose observer target");
+        let mut child = command.spawn().expect("spawn doctor observer target");
         let mut observed_children = Vec::new();
         loop {
             observed_children.extend(proc_descendants(child.id()));
-            if child.try_wait().expect("poll diagnose process").is_some() {
+            if child.try_wait().expect("poll doctor process").is_some() {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
         let output = child
             .wait_with_output()
-            .expect("collect diagnose observer target");
+            .expect("collect doctor observer target");
         observed_children.sort_unstable();
         observed_children.dedup();
         assert!(
             observed_children.is_empty(),
-            "P2 RED: empty diagnose created child process(es) {:?}; stdout={} stderr={}",
+            "P2 RED: empty doctor created child process(es) {:?}; stdout={} stderr={}",
             observed_children,
             text(&output.stdout),
             text(&output.stderr)
@@ -115,7 +112,7 @@ fn p2_empty_workspace_has_zero_child_processes_and_zero_disk_writes() {
         let after = snapshot(&workspace);
         assert_eq!(
             before, after,
-            "P2 RED: diagnose changed an empty workspace; before={before:?} after={after:?}"
+            "P2 RED: doctor changed an empty workspace; before={before:?} after={after:?}"
         );
         assert!(
             after.is_empty(),
@@ -125,7 +122,7 @@ fn p2_empty_workspace_has_zero_child_processes_and_zero_disk_writes() {
 }
 
 #[test]
-fn p3_human_diagnose_is_bounded_and_control_clean_for_generated_inputs() {
+fn p3_human_doctor_is_bounded_and_control_clean_for_generated_inputs() {
     let generated = [
         String::new(),
         "a".repeat(17),
@@ -141,7 +138,7 @@ fn p3_human_diagnose_is_bounded_and_control_clean_for_generated_inputs() {
         let workspace_arg = path(&workspace);
         let output = run_with_env(
             &[
-                "diagnose",
+                "doctor",
                 "--workspace",
                 workspace_arg.as_str(),
                 "--team",
@@ -275,12 +272,12 @@ fn p5_json_shape_keeps_provider_keys_unknown_and_probe_not_run() {
     let home = tmp_dir("p5-home");
     let workspace_arg = path(&workspace);
     let output = run_with_env(
-        &["diagnose", "--workspace", workspace_arg.as_str(), "--json"],
+        &["doctor", "--workspace", workspace_arg.as_str(), "--json"],
         &workspace,
         &home,
         None,
     );
-    let report: Value = serde_json::from_slice(&output.stdout).expect("diagnose JSON");
+    let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
     for key in [
         "event_log",
         "issues",
@@ -380,7 +377,7 @@ fn p6_secret_scan_ignores_examples_but_catches_real_line_start_assignments() {
 }
 
 #[test]
-fn p7_diagnose_is_read_only_and_selected_team_does_not_leak_other_team() {
+fn p7_doctor_is_read_only_and_selected_team_does_not_leak_other_team() {
     let workspace = tmp_dir("p7-two-teams");
     let home = tmp_dir("p7-home");
     let state = serde_json::json!({
@@ -413,7 +410,7 @@ fn p7_diagnose_is_read_only_and_selected_team_does_not_leak_other_team() {
         let workspace_arg = path(&workspace);
         let output = run_with_env(
             &[
-                "diagnose",
+                "doctor",
                 "--workspace",
                 workspace_arg.as_str(),
                 "--team",
@@ -447,7 +444,7 @@ fn p7_diagnose_is_read_only_and_selected_team_does_not_leak_other_team() {
     let after = snapshot(&workspace);
     assert_eq!(
         before, after,
-        "P7 RED: diagnose wrote to the multi-team fixture: before={before:?} after={after:?}"
+        "P7 RED: doctor wrote to the multi-team fixture: before={before:?} after={after:?}"
     );
 }
 
@@ -562,7 +559,7 @@ fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
 fn tmp_dir(tag: &str) -> PathBuf {
     static CTR: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "ta-doctor-diagnose-properties-{tag}-{}-{}",
+        "ta-doctor-properties-{tag}-{}-{}",
         std::process::id(),
         CTR.fetch_add(1, Ordering::Relaxed)
     ));

@@ -144,7 +144,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                     let error_str = error.to_string();
                     let issue_id = classify_tmux_server_error(&error_str);
                     issues.push(json!(issue_id));
-                    let mut hint = recovery_hint(session_name, issue_id, "team-agent diagnose");
+                    let mut hint = recovery_hint(session_name, issue_id, "team-agent doctor");
                     if let Some(obj) = hint.as_object_mut() {
                         obj.insert("reason".to_string(), Value::String(error_str));
                     }
@@ -947,7 +947,7 @@ fn topology_repair_hint(issue: &str) -> Value {
         "action_required": true,
         "advisory": true,
         "broken_class": issue,
-        "hint_action": "team-agent diagnose --json",
+        "hint_action": "team-agent doctor --json",
         "dedupe_key": issue,
         "action": "repair the tmux topology mismatch, then rerun team-agent restart",
     })
@@ -1605,7 +1605,7 @@ pub(crate) fn build_wait_ready_report(
             "workers_not_ready",
             "workers not ready before timeout",
             vec![json!(
-                "inspect team-agent diagnose output and worker terminals"
+                "inspect team-agent doctor output and worker terminals"
             )],
         )
     };

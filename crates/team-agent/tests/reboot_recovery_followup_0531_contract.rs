@@ -169,7 +169,7 @@ fn human_status_detail_renders_session_missing_restart_hint() {
         .expect("R3 selected state after status");
     assert_terminal_worker_registration(&after, "R3 after status");
     let diagnose = case.run_ta(&[
-        "diagnose",
+        "doctor",
         "--workspace",
         case.workspace_str(),
         "--team",
