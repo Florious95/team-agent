@@ -289,7 +289,9 @@ impl<'a> StateRepository<'a> {
                 }
                 return Ok(selected);
             }
-            let mut observed_team = bounded_team_view(observed, Some(team_key))?;
+            let mut observed_with_delta = observed.clone();
+            sync_team_observation_delta(before, &mut observed_with_delta, team_key);
+            let mut observed_team = bounded_team_view(&observed_with_delta, Some(team_key))?;
             let latest_team = bounded_team_view(latest, Some(team_key))?;
             preserve_latest_fork_rows(&mut observed_team, &latest_team);
             let mut checked =
@@ -379,6 +381,34 @@ fn apply_observation_delta(before: &Value, observed: &Value, latest: &mut Value)
         }
     } else {
         *latest = observed.clone();
+    }
+}
+
+// The coordinator observes a projected team view, while its nested `teams`
+// snapshot remains stale. Carry only observation deltas back to the canonical
+// team entry before `bounded_team_view` projects it again.
+fn sync_team_observation_delta(before: &Value, observed: &mut Value, team_key: &str) {
+    for field in ["agents", "coordinator"] {
+        let before_value = before.get(field).cloned().unwrap_or(Value::Null);
+        let observed_value = observed.get(field).cloned().unwrap_or(Value::Null);
+        if before_value == observed_value {
+            continue;
+        }
+        let Some(team_entry) = observed
+            .get_mut("teams")
+            .and_then(Value::as_object_mut)
+            .and_then(|teams| teams.get_mut(team_key))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        if field == "coordinator" && !team_entry.contains_key(field) {
+            continue;
+        }
+        let slot = team_entry
+            .entry(field.to_string())
+            .or_insert_with(|| before_value.clone());
+        apply_observation_delta(&before_value, &observed_value, slot);
     }
 }
 
