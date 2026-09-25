@@ -116,10 +116,11 @@ pub(crate) fn fork_pi_new_seat_locked(
                 "Pi fork requires the selected team's tmux transport".to_string(),
             ));
         }
-        let expected_transport = super::common::lifecycle_worker_tmux_backend_for_selected_state(
+        let expected_transport = super::common::lifecycle_worker_tmux_backend_selection_for_state(
             run_workspace,
-            Some(team_key),
-        )?;
+            &selected.state,
+        )?
+        .backend;
         if transport.tmux_endpoint() != expected_transport.tmux_endpoint() {
             return Err(LifecycleError::TeamSelect(
                 "selected team tmux endpoint changed while fork was acquiring its lifecycle lock"
