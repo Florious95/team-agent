@@ -490,11 +490,11 @@ pub(crate) fn fork_pi_new_seat_locked(
         )?;
 
         phase = "p4_persist";
-        let mut latest_state =
+        let mut updated_state =
             crate::state::projection::select_runtime_state(run_workspace, Some(team_key))
                 .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
         super::agent::mark_agent_started(
-            &mut latest_state,
+            &mut updated_state,
             target_agent_id,
             target_agent_id.as_str(),
             spawned_ref,
@@ -502,6 +502,21 @@ pub(crate) fn fork_pi_new_seat_locked(
             &safety,
             StartMode::Resumed,
         )?;
+        let updated_target = updated_state
+            .get("agents")
+            .and_then(|agents| agents.get(target_agent_id.as_str()))
+            .cloned()
+            .ok_or_else(|| {
+                LifecycleError::StatePersist("started Pi fork target row disappeared".to_string())
+            })?;
+        let mut latest_state =
+            crate::state::projection::select_runtime_state(run_workspace, Some(team_key))
+                .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
+        let latest_agents = latest_state
+            .get_mut("agents")
+            .and_then(JsonValue::as_object_mut)
+            .ok_or_else(|| LifecycleError::StatePersist("team agents disappeared".to_string()))?;
+        latest_agents.insert(target_agent_id.as_str().to_string(), updated_target);
         let target_ids = [target_agent_id.as_str()];
         super::common::save_restart_projected_state_with_capture_backfill_skip(
             run_workspace,
@@ -688,7 +703,7 @@ fn source_binding(
     }
     let canonical_cwd = fs::canonicalize(&spawn_cwd)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
-    if canonical_cwd != selected.run_workspace {
+    if spawn_cwd != selected.run_workspace || canonical_cwd != selected.run_workspace {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source spawn_cwd differs from the selected team workspace".to_string(),
         ));
@@ -882,7 +897,7 @@ fn validate_session_bytes(
         .and_then(JsonValue::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| LifecycleError::RequirementUnmet("Pi session cwd is missing".to_string()))?;
-    if !cwd.is_absolute() || fs::canonicalize(&cwd).ok().as_deref() != Some(expected_cwd) {
+    if !cwd.is_absolute() || cwd.as_path() != expected_cwd {
         return Err(LifecycleError::RequirementUnmet(
             "Pi session header cwd does not match the captured cohort".to_string(),
         ));

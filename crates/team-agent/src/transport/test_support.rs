@@ -365,6 +365,7 @@ impl OfflineTransport {
                 || state
                     .targets
                     .iter()
+                    .chain(state.target_snapshots.iter().flatten())
                     .any(|target| target.pane_id.as_str() == format!("%{pane_index}"))
             {
                 pane_index = pane_index.saturating_add(1);
