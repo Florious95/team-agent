@@ -12,7 +12,7 @@ use crate::lifecycle::launch::add_agent_state::{
     fork_upsert_agent_state_from_role, inject_agent_into_spec,
 };
 use crate::lifecycle::launch::role_source::{
-    materialize_latest_role, resolve_role_source, set_yaml_map_value, MaterializedRole,
+    materialize_latest_role, resolve_role_source, MaterializedRole,
 };
 use crate::lifecycle::launch::ForkCaptureSeed;
 use crate::lifecycle::{
@@ -338,14 +338,9 @@ pub(crate) fn fork_pi_new_seat_locked(
                 }
             }
         }
-        let mut compiled =
+        let compiled =
             crate::compiler::compile_role_agent(&target_role_path, &team_meta, &workspace_text)
                 .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-        set_yaml_map_value(
-            &mut compiled.agent,
-            "label",
-            YamlValue::Str(target_agent_id.as_str().to_string()),
-        )?;
         if compiled.id != target_agent_id.as_str() {
             return Err(LifecycleError::Compile(format!(
                 "materialized role id '{}' does not match target '{}'",
@@ -354,9 +349,10 @@ pub(crate) fn fork_pi_new_seat_locked(
         }
         #[cfg(test)]
         eprintln!(
-            "pi-fork role trace label={label:?} target_meta={target_meta:?} compiled.id={} compiled.role={:?}",
+            "pi-fork role trace label={label:?} target_meta={target_meta:?} compiled.id={} compiled.role={:?} compiled.label={:?}",
             compiled.id,
             compiled.agent.get("role").and_then(YamlValue::as_str),
+            compiled.agent.get("label").and_then(YamlValue::as_str),
         );
         let compiled_provider = compiled.agent.get("provider").and_then(YamlValue::as_str);
         let compiled_auth = compiled.agent.get("auth_mode").and_then(YamlValue::as_str);
@@ -556,6 +552,19 @@ pub(crate) fn fork_pi_new_seat_locked(
                 &updated_target,
             )
             .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+        #[cfg(test)]
+        {
+            let persisted =
+                crate::state::projection::select_runtime_state(run_workspace, Some(team_key)).ok();
+            eprintln!(
+                "pi-fork persisted label trace {:?}",
+                persisted
+                    .as_ref()
+                    .and_then(|state| state.get("agents"))
+                    .and_then(|agents| agents.get(target_agent_id.as_str()))
+                    .and_then(|agent| agent.get("label")),
+            );
+        }
         let _ = crate::db::agent_health_capture::clear_agent_health_observation(
             run_workspace,
             team_key,
@@ -736,11 +745,13 @@ fn source_binding(
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
     #[cfg(test)]
     eprintln!(
-        "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?} row.capture={:?}",
+        "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?} captured_session={:?} session_capture={:?} capture_tuple={:?}",
         selected.run_workspace,
         source.get("cwd"),
         source.get("working_directory"),
-        source.get("capture"),
+        source.get("captured_session"),
+        source.get("session_capture"),
+        source.get("capture_tuple"),
     );
     if spawn_cwd != selected.run_workspace || canonical_cwd != selected.run_workspace {
         return Err(LifecycleError::RequirementUnmet(

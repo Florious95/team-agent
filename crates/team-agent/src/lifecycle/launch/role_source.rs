@@ -19,11 +19,7 @@ use crate::lifecycle::LifecycleError;
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 
-pub(crate) fn set_yaml_map_value(
-    value: &mut Value,
-    key: &str,
-    next: Value,
-) -> Result<(), LifecycleError> {
+fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), LifecycleError> {
     let Value::Map(pairs) = value else {
         return Err(LifecycleError::Compile(
             "agent entry is not a map".to_string(),

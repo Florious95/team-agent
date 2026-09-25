@@ -555,6 +555,9 @@ fn compile_role_agent_with_mode(
             ]),
         ),
     ];
+    if let Some(label) = string_field(&meta, "label") {
+        agent_items.insert(1, ("label", Value::Str(label)));
+    }
     if let Some(profile) = string_field(&meta, "profile") {
         agent_items.push(("profile", Value::Str(profile)));
     }

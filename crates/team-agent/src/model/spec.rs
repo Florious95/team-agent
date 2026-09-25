@@ -406,6 +406,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
     ];
     let allowed = &[
         "id",
+        "label",
         "role",
         "provider",
         "model",
