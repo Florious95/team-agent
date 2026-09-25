@@ -661,9 +661,10 @@ fn source_binding(
             JsonValue::Null => {}
             JsonValue::String(pending) if pending.is_empty() || pending == session_id.as_str() => {}
             _ => {
-                return Err(LifecycleError::RequirementUnmet(
-                    "Pi source capture tuple conflicts with its pending session cohort".to_string(),
-                ))
+                return Err(LifecycleError::RequirementUnmet(format!(
+                    "Pi source capture tuple conflicts with its pending session cohort (session_id={}, pending={pending:?})",
+                    session_id.as_str()
+                )))
             }
         }
     }
