@@ -954,7 +954,7 @@ pub(crate) fn lifecycle_worker_transport_for_selected_state(
 /// returns: 后端与 endpoint 来源
 /// errors: state 声明后端是 conpty 时返回 TeamSelect
 /// ---
-pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
+pub(crate) fn lifecycle_worker_tmux_backend_selection_for_state(
     run_workspace: &Path,
     state: &serde_json::Value,
 ) -> Result<crate::tmux_backend::RuntimeTmuxBackendSelection, LifecycleError> {
