@@ -19,7 +19,11 @@ use crate::lifecycle::LifecycleError;
 use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value};
 
-fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), LifecycleError> {
+pub(crate) fn set_yaml_map_value(
+    value: &mut Value,
+    key: &str,
+    next: Value,
+) -> Result<(), LifecycleError> {
     let Value::Map(pairs) = value else {
         return Err(LifecycleError::Compile(
             "agent entry is not a map".to_string(),
@@ -91,6 +95,7 @@ impl Drop for MaterializedRole {
 ///   state: 用于找源席的 dynamic_role_file，找不到时退到 team 目录下的同名 md
 ///   as_agent_id: 新席位名，写进 front matter 的 name
 ///   label: 非空时覆盖 front matter 的 role
+///   agent_label: 非空时写入 front matter 的 label
 /// returns: 物化结果，未调用 keep 时 Drop 会删掉该文件
 /// errors: 源文件缺失、未声明 name 或声明与源席不符时返回 Compile；目标已存在返回 RequirementUnmet；建目录或写盘失败返回 StatePersist
 /// ---
@@ -101,6 +106,7 @@ pub(crate) fn materialize_latest_role(
     source_agent_id: &AgentId,
     as_agent_id: &AgentId,
     label: Option<&str>,
+    agent_label: Option<&str>,
 ) -> Result<MaterializedRole, LifecycleError> {
     let source_path = resolve_role_source(run_workspace, team_dir, state, source_agent_id)?;
     let (mut meta, body) = crate::compiler::read_front_matter(&source_path)
@@ -131,6 +137,12 @@ pub(crate) fn materialize_latest_role(
         .filter(|value| !value.is_empty())
     {
         set_yaml_map_value(&mut meta, "role", Value::Str(label.to_string()))?;
+    }
+    if let Some(agent_label) = agent_label
+        .map(strip_label_quotes)
+        .filter(|value| !value.is_empty())
+    {
+        set_yaml_map_value(&mut meta, "label", Value::Str(agent_label.to_string()))?;
     }
     if let Some(role) = meta.get("role").and_then(Value::as_str).map(str::to_string) {
         let role_without_quotes = strip_label_quotes(&role);

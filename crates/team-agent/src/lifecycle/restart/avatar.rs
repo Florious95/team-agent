@@ -1,7 +1,7 @@
 //! Pi 的锁内新席位 fork：稳定读取 source JSONL，写入独立 session backing 后精确 resume。
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
@@ -12,7 +12,7 @@ use crate::lifecycle::launch::add_agent_state::{
     fork_upsert_agent_state_from_role, inject_agent_into_spec,
 };
 use crate::lifecycle::launch::role_source::{
-    materialize_latest_role, resolve_role_source, MaterializedRole,
+    materialize_latest_role, resolve_role_source, set_yaml_map_value, MaterializedRole,
 };
 use crate::lifecycle::launch::ForkCaptureSeed;
 use crate::lifecycle::{
@@ -315,6 +315,7 @@ pub(crate) fn fork_pi_new_seat_locked(
             source_agent_id,
             target_agent_id,
             label,
+            Some(target_agent_id.as_str()),
         )?;
         role = Some(target_role);
         let target_role_path = role
@@ -337,9 +338,14 @@ pub(crate) fn fork_pi_new_seat_locked(
                 }
             }
         }
-        let compiled =
+        let mut compiled =
             crate::compiler::compile_role_agent(&target_role_path, &team_meta, &workspace_text)
                 .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+        set_yaml_map_value(
+            &mut compiled.agent,
+            "label",
+            YamlValue::Str(target_agent_id.as_str().to_string()),
+        )?;
         if compiled.id != target_agent_id.as_str() {
             return Err(LifecycleError::Compile(format!(
                 "materialized role id '{}' does not match target '{}'",
@@ -730,10 +736,11 @@ fn source_binding(
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
     #[cfg(test)]
     eprintln!(
-        "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?}",
+        "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?} row.capture={:?}",
         selected.run_workspace,
         source.get("cwd"),
         source.get("working_directory"),
+        source.get("capture"),
     );
     if spawn_cwd != selected.run_workspace || canonical_cwd != selected.run_workspace {
         return Err(LifecycleError::RequirementUnmet(
@@ -798,6 +805,35 @@ fn source_binding(
     if !canonical_backing.starts_with(&canonical_root) {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source backing is outside its recorded session root".to_string(),
+        ));
+    }
+    let file = fs::File::open(&backing_path)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    let mut reader = std::io::BufReader::new(file).take(64 * 1024);
+    let mut header_line = String::new();
+    let header_bytes = reader
+        .read_line(&mut header_line)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    if header_bytes == 0 || !header_line.ends_with('\n') {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source session header is incomplete".to_string(),
+        ));
+    }
+    let header: JsonValue = serde_json::from_str(header_line.trim_end())
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    let header_cwd = header
+        .get("cwd")
+        .and_then(JsonValue::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet("Pi source header cwd is missing".into())
+        })?;
+    if header_cwd != spawn_cwd
+        || header_cwd != selected.run_workspace
+        || fs::canonicalize(&header_cwd).ok().as_deref() != Some(selected.run_workspace.as_path())
+    {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source header cwd differs from its capture tuple or target workspace".into(),
         ));
     }
     crate::provider::session_scan::pi::validate_exact_backing(

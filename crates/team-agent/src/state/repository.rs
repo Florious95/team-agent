@@ -300,11 +300,11 @@ fn preserve_new_fork_rows(incoming: &mut Value, before: &Value, latest: &Value) 
         return;
     };
     for (agent_id, latest_agent) in latest_agents {
-        if !before_agents.contains_key(agent_id)
-            && latest_agent
-                .get("forked_from")
-                .and_then(Value::as_str)
-                .is_some_and(|source| !source.is_empty())
+        if latest_agent
+            .get("forked_from")
+            .and_then(Value::as_str)
+            .is_some_and(|source| !source.is_empty())
+            && before_agents.get(agent_id) == incoming_agents.get(agent_id)
         {
             incoming_agents.insert(agent_id.clone(), latest_agent.clone());
         }
