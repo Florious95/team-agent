@@ -271,9 +271,19 @@ impl Fixture {
         label: Option<&str>,
         transport: &dyn team_agent::transport::Transport,
     ) -> Result<team_agent::lifecycle::ForkAgentReport, team_agent::lifecycle::LifecycleError> {
+        self.fork_from(SOURCE, target, label, transport)
+    }
+
+    fn fork_from(
+        &self,
+        source: &str,
+        target: &str,
+        label: Option<&str>,
+        transport: &dyn team_agent::transport::Transport,
+    ) -> Result<team_agent::lifecycle::ForkAgentReport, team_agent::lifecycle::LifecycleError> {
         fork_agent_with_transport(
             &self.team_dir,
-            &AgentId::new(SOURCE),
+            &AgentId::new(source),
             &AgentId::new(target),
             label,
             false,
@@ -1238,4 +1248,146 @@ fn r12_pi_clone_and_non_pi_in_window_fork_compatibility_are_preserved() {
             .sessions
             .starts_with(&fixture.source_paths.runtime_root)
     );
+}
+
+#[test]
+#[serial(env)]
+fn r13_cascading_fork_inherits_variant1_hello_and_reply_without_aliasing_any_seat() {
+    const VARIANT1: &str = "variant1";
+    const VARIANT2: &str = "variant2";
+
+    let fixture = Fixture::new();
+    let author_before = fs::read(&fixture.source_file).expect("author session before forks");
+    let transport = fixture.transport().with_windows(vec![
+        team_agent::transport::WindowName::new(SOURCE),
+        team_agent::transport::WindowName::new(VARIANT1),
+        team_agent::transport::WindowName::new(VARIANT2),
+    ]);
+
+    let first_report = fixture
+        .fork_from(SOURCE, VARIANT1, None, &transport)
+        .expect("R13 first generation fork creates variant1");
+    let after_first = fixture.state();
+    let session_b = after_first["agents"][VARIANT1]["session_id"]
+        .as_str()
+        .expect("variant1 session B")
+        .to_string();
+    assert_eq!(
+        first_report.session_id.as_ref().map(SessionId::as_str),
+        Some(session_b.as_str())
+    );
+    assert_ne!(session_b, SESSION_A);
+    let variant1_file = forked_target_file(&fixture, &after_first, VARIANT1);
+    assert_eq!(read_header(&variant1_file)["id"], session_b);
+    assert_eq!(
+        read_header(&variant1_file)["parentSession"],
+        fixture.source_file.to_string_lossy().as_ref()
+    );
+    assert_eq!(body_bytes(&variant1_file), fixture.source_body);
+
+    append_session_entry(
+        &variant1_file,
+        json!({
+            "type":"message", "id":"entry-variant1-hello", "parentId":"entry-user",
+            "timestamp":"2026-09-12T10:10:00Z",
+            "message":{"role":"user","content":[{"type":"text","text":"HELLO"}]}
+        }),
+    );
+    append_session_entry(
+        &variant1_file,
+        json!({
+            "type":"message", "id":"entry-variant1-reply", "parentId":"entry-variant1-hello",
+            "timestamp":"2026-09-12T10:10:01Z",
+            "message":{"role":"assistant","content":[{"type":"text","text":"HELLO acknowledged by variant1"}]}
+        }),
+    );
+    let variant1_history = body_bytes(&variant1_file);
+    assert!(variant1_history.starts_with(&fixture.source_body));
+    assert!(
+        variant1_history
+            .windows(b"HELLO".len())
+            .any(|bytes| bytes == b"HELLO")
+    );
+    assert!(
+        variant1_history
+            .windows(b"HELLO acknowledged by variant1".len())
+            .any(|bytes| bytes == b"HELLO acknowledged by variant1")
+    );
+    assert_valid_entry_tree(&variant1_history);
+    let variant1_before_second_fork =
+        fs::read(&variant1_file).expect("variant1 session with its new dialogue");
+
+    let second_report = fixture
+        .fork_from(VARIANT1, VARIANT2, None, &transport)
+        .expect("R13 second generation fork creates variant2 from variant1");
+    let after_second = fixture.state();
+    let session_c = after_second["agents"][VARIANT2]["session_id"]
+        .as_str()
+        .expect("variant2 session C");
+    assert_ne!(session_c, SESSION_A);
+    assert_ne!(session_c, session_b);
+    assert_eq!(
+        second_report.session_id.as_ref().map(SessionId::as_str),
+        Some(session_c)
+    );
+    assert_eq!(after_second["agents"][SOURCE]["session_id"], SESSION_A);
+    assert_eq!(after_second["agents"][VARIANT1]["session_id"], session_b);
+
+    let variant2_file = forked_target_file(&fixture, &after_second, VARIANT2);
+    let variant1_header = read_header(&variant1_file);
+    let variant2_header = read_header(&variant2_file);
+    assert_eq!(variant1_header["id"], session_b);
+    assert_eq!(variant2_header["id"], session_c);
+    assert_eq!(
+        variant2_header["parentSession"],
+        variant1_file.to_string_lossy().as_ref(),
+        "variant2 parentSession must identify its immediate source, variant1"
+    );
+    assert_eq!(
+        body_bytes(&variant2_file),
+        variant1_history,
+        "variant2 keeps the complete original history and variant1's HELLO/reply bytes"
+    );
+    assert_eq!(
+        fs::read(&fixture.source_file).expect("author history remains unchanged"),
+        author_before
+    );
+    assert_eq!(
+        fs::read(&variant1_file).expect("variant1 history remains unchanged by second fork"),
+        variant1_before_second_fork
+    );
+    assert_valid_entry_tree(&body_bytes(&variant2_file));
+
+    let variant1_paths = fixture.target_paths(VARIANT1);
+    let variant2_paths = fixture.target_paths(VARIANT2);
+    let seat_roots = [
+        fs::canonicalize(&fixture.source_paths.runtime_root).expect("author seat root"),
+        fs::canonicalize(&variant1_paths.runtime_root).expect("variant1 seat root"),
+        fs::canonicalize(&variant2_paths.runtime_root).expect("variant2 seat root"),
+    ];
+    assert_ne!(seat_roots[0], seat_roots[1]);
+    assert_ne!(seat_roots[0], seat_roots[2]);
+    assert_ne!(seat_roots[1], seat_roots[2]);
+    let session_paths = [
+        fs::canonicalize(&fixture.source_file).expect("author session path"),
+        fs::canonicalize(&variant1_file).expect("variant1 session path"),
+        fs::canonicalize(&variant2_file).expect("variant2 session path"),
+    ];
+    assert_ne!(session_paths[0], session_paths[1]);
+    assert_ne!(session_paths[0], session_paths[2]);
+    assert_ne!(session_paths[1], session_paths[2]);
+    #[cfg(unix)]
+    {
+        let inodes = [
+            inode(&fixture.source_file),
+            inode(&variant1_file),
+            inode(&variant2_file),
+        ];
+        assert_ne!(inodes[0], inodes[1]);
+        assert_ne!(inodes[0], inodes[2]);
+        assert_ne!(inodes[1], inodes[2]);
+    }
+    assert_ne!(variant1_paths.wrapper, variant2_paths.wrapper);
+    assert!(variant1_paths.wrapper.is_file());
+    assert!(variant2_paths.wrapper.is_file());
 }
