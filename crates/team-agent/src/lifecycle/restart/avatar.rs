@@ -659,13 +659,15 @@ fn source_binding(
     let attribution_confidence = source
         .get("attribution_confidence")
         .and_then(JsonValue::as_str);
-    let attribution_ambiguous = source
-        .get("attribution_ambiguous")
-        .and_then(JsonValue::as_bool);
-    if attribution_confidence != Some("high") || attribution_ambiguous == Some(true) {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "Pi source capture attribution is not high confidence (confidence={attribution_confidence:?}, ambiguous={attribution_ambiguous:?})"
-        )));
+    if attribution_confidence.is_some_and(|confidence| confidence != "high")
+        || source
+            .get("attribution_ambiguous")
+            .and_then(JsonValue::as_bool)
+            == Some(true)
+    {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source capture attribution is explicitly low-confidence or ambiguous".to_string(),
+        ));
     }
     let captured_at = required_state_string(source, "captured_at")?;
     let captured_via: CaptureVia = serde_json::from_value(serde_json::json!(
