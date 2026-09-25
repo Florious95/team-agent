@@ -347,13 +347,6 @@ pub(crate) fn fork_pi_new_seat_locked(
                 compiled.id, target_agent_id
             )));
         }
-        #[cfg(test)]
-        eprintln!(
-            "pi-fork role trace label={label:?} target_meta={target_meta:?} compiled.id={} compiled.role={:?} compiled.label={:?}",
-            compiled.id,
-            compiled.agent.get("role").and_then(YamlValue::as_str),
-            compiled.agent.get("label").and_then(YamlValue::as_str),
-        );
         let compiled_provider = compiled.agent.get("provider").and_then(YamlValue::as_str);
         let compiled_auth = compiled.agent.get("auth_mode").and_then(YamlValue::as_str);
         if compiled_provider != Some("pi") || compiled_auth != Some("subscription") {
@@ -417,21 +410,6 @@ pub(crate) fn fork_pi_new_seat_locked(
             compiled.agent.clone(),
             target_agent_id.as_str(),
         )?;
-        #[cfg(test)]
-        eprintln!(
-            "pi-fork team.spec.yaml label trace {:?}",
-            latest_spec
-                .get("agents")
-                .and_then(YamlValue::as_list)
-                .and_then(|agents| {
-                    agents.iter().find(|agent| {
-                        agent.get("id").and_then(YamlValue::as_str)
-                            == Some(target_agent_id.as_str())
-                    })
-                })
-                .and_then(|agent| agent.get("label"))
-                .and_then(YamlValue::as_str),
-        );
         let written_bytes = yaml::dumps(&latest_spec).into_bytes();
         if read_optional_bytes(&spec_path)? != current_spec_bytes {
             return Err(LifecycleError::RequirementUnmet(
@@ -556,8 +534,6 @@ pub(crate) fn fork_pi_new_seat_locked(
             .ok_or_else(|| {
                 LifecycleError::StatePersist("started Pi fork target row disappeared".to_string())
             })?;
-        #[cfg(test)]
-        eprintln!("pi-fork target row trace {updated_target:?}");
         crate::state::repository::StateRepository::new(run_workspace)
             .commit_fork_agent(
                 crate::state::repository::StateWriteIntent::ForkAgent {
@@ -567,19 +543,6 @@ pub(crate) fn fork_pi_new_seat_locked(
                 &updated_target,
             )
             .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
-        #[cfg(test)]
-        {
-            let persisted =
-                crate::state::projection::select_runtime_state(run_workspace, Some(team_key)).ok();
-            eprintln!(
-                "pi-fork persisted label trace {:?}",
-                persisted
-                    .as_ref()
-                    .and_then(|state| state.get("agents"))
-                    .and_then(|agents| agents.get(target_agent_id.as_str()))
-                    .and_then(|agent| agent.get("label")),
-            );
-        }
         let _ = crate::db::agent_health_capture::clear_agent_health_observation(
             run_workspace,
             team_key,
@@ -760,16 +723,6 @@ fn source_binding(
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
     let canonical_workspace = fs::canonicalize(&selected.run_workspace)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
-    #[cfg(test)]
-    eprintln!(
-        "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?} captured_session={:?} session_capture={:?} capture_tuple={:?}",
-        selected.run_workspace,
-        source.get("cwd"),
-        source.get("working_directory"),
-        source.get("captured_session"),
-        source.get("session_capture"),
-        source.get("capture_tuple"),
-    );
     if canonical_cwd != canonical_workspace {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source spawn_cwd differs from the selected team workspace".to_string(),
@@ -858,11 +811,6 @@ fn source_binding(
         })?;
     let canonical_header_cwd = fs::canonicalize(&header_cwd)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
-    #[cfg(test)]
-    eprintln!(
-        "pi-fork source header binding backing={backing_path:?} header_cwd={header_cwd:?} spawn_cwd={spawn_cwd:?} selected_workspace={:?} canonical_header={canonical_header_cwd:?}",
-        selected.run_workspace,
-    );
     if canonical_header_cwd != canonical_cwd || canonical_header_cwd != canonical_workspace {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source header cwd differs from its capture tuple or target workspace".into(),
@@ -1018,10 +966,6 @@ fn validate_session_bytes(
         .and_then(JsonValue::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| LifecycleError::RequirementUnmet("Pi session cwd is missing".to_string()))?;
-    #[cfg(test)]
-    if expected_parent.is_none() {
-        eprintln!("pi-fork header cwd trace header={cwd:?} source_tuple={expected_cwd:?}");
-    }
     let canonical_cwd = fs::canonicalize(&cwd)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
     let canonical_expected_cwd = fs::canonicalize(expected_cwd)
