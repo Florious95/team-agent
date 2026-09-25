@@ -210,7 +210,7 @@ impl<'a> StateRepository<'a> {
                     .and_then(Value::as_object_mut)
                     .and_then(|agents| agents.get_mut(agent_id))
                 {
-                    for field in ["pane_id", "window", "spawned_at", "spawn_epoch"] {
+                    for field in ["status", "pane_id", "window", "spawned_at", "spawn_epoch"] {
                         if let Some(value) = row.get(field).cloned() {
                             if let Some(staged) = staged_row.as_object_mut() {
                                 staged.insert(field.to_string(), value);

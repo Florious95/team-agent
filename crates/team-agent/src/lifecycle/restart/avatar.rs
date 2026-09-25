@@ -346,6 +346,12 @@ pub(crate) fn fork_pi_new_seat_locked(
                 compiled.id, target_agent_id
             )));
         }
+        #[cfg(test)]
+        eprintln!(
+            "pi-fork role trace label={label:?} meta.role={:?} compiled.role={:?}",
+            target_meta.get("role").and_then(YamlValue::as_str),
+            compiled.agent.get("role").and_then(YamlValue::as_str),
+        );
         let compiled_provider = compiled.agent.get("provider").and_then(YamlValue::as_str);
         let compiled_auth = compiled.agent.get("auth_mode").and_then(YamlValue::as_str);
         if compiled_provider != Some("pi") || compiled_auth != Some("subscription") {
@@ -724,6 +730,17 @@ fn source_binding(
         return Err(LifecycleError::RequirementUnmet(
             "Pi source spawn_cwd differs from the selected team workspace".to_string(),
         ));
+    }
+    for field in ["cwd", "working_directory"] {
+        if let Some(cwd) = source.get(field).and_then(JsonValue::as_str) {
+            if Path::new(cwd).canonicalize().ok().as_deref()
+                != Some(selected.run_workspace.as_path())
+            {
+                return Err(LifecycleError::RequirementUnmet(format!(
+                    "Pi source {field} differs from the selected target working directory"
+                )));
+            }
+        }
     }
     let backing_path = PathBuf::from(required_state_string(source, "rollout_path")?);
     if backing_path
@@ -1448,7 +1465,7 @@ fn verify_no_target_writer(
     });
     if !exact {
         let still_present = targets.iter().any(|pane| pane.pane_id == pane_id);
-        if still_present && !panes_before.contains(pane_id.as_str()) {
+        if !panes_before.contains(pane_id.as_str()) {
             transport
                 .kill_pane(&pane_id)
                 .map_err(|error| format!("could not stop newly spawned pane: {error}"))?;
