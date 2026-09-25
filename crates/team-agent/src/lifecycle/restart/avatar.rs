@@ -326,15 +326,15 @@ pub(crate) fn fork_pi_new_seat_locked(
             .to_path_buf();
         let (target_meta, _) = crate::compiler::read_front_matter(&target_role_path)
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-        if let Some(cwd) = target_meta
-            .get("working_directory")
-            .and_then(YamlValue::as_str)
-        {
-            if Path::new(cwd).canonicalize().ok().as_deref() != Some(binding.spawn_cwd.as_path()) {
-                return Err(LifecycleError::Compile(
-                    "Pi fork source role working_directory differs from the source cohort cwd"
-                        .to_string(),
-                ));
+        for field in ["working_directory", "cwd"] {
+            if let Some(cwd) = target_meta.get(field).and_then(YamlValue::as_str) {
+                if Path::new(cwd).canonicalize().ok().as_deref()
+                    != Some(binding.spawn_cwd.as_path())
+                {
+                    return Err(LifecycleError::Compile(format!(
+                        "Pi fork target role {field} differs from the source cohort cwd"
+                    )));
+                }
             }
         }
         let compiled =
@@ -348,10 +348,7 @@ pub(crate) fn fork_pi_new_seat_locked(
         }
         #[cfg(test)]
         eprintln!(
-            "pi-fork role trace label={label:?} meta.name={:?} meta.role={:?} meta.label={:?} compiled.id={} compiled.role={:?}",
-            target_meta.get("name").and_then(YamlValue::as_str),
-            target_meta.get("role").and_then(YamlValue::as_str),
-            target_meta.get("label").and_then(YamlValue::as_str),
+            "pi-fork role trace label={label:?} target_meta={target_meta:?} compiled.id={} compiled.role={:?}",
             compiled.id,
             compiled.agent.get("role").and_then(YamlValue::as_str),
         );
@@ -542,6 +539,8 @@ pub(crate) fn fork_pi_new_seat_locked(
             .ok_or_else(|| {
                 LifecycleError::StatePersist("started Pi fork target row disappeared".to_string())
             })?;
+        #[cfg(test)]
+        eprintln!("pi-fork target row trace {updated_target:?}");
         crate::state::repository::StateRepository::new(run_workspace)
             .commit_fork_agent(
                 crate::state::repository::StateWriteIntent::ForkAgent {
