@@ -656,18 +656,16 @@ fn source_binding(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet("Pi source session_id is missing".to_string())
         })?;
-    if source
+    let attribution_confidence = source
         .get("attribution_confidence")
-        .and_then(JsonValue::as_str)
-        != Some("high")
-        || source
-            .get("attribution_ambiguous")
-            .and_then(JsonValue::as_bool)
-            == Some(true)
-    {
-        return Err(LifecycleError::RequirementUnmet(
-            "Pi source capture attribution is not high confidence".to_string(),
-        ));
+        .and_then(JsonValue::as_str);
+    let attribution_ambiguous = source
+        .get("attribution_ambiguous")
+        .and_then(JsonValue::as_bool);
+    if attribution_confidence != Some("high") || attribution_ambiguous == Some(true) {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "Pi source capture attribution is not high confidence (confidence={attribution_confidence:?}, ambiguous={attribution_ambiguous:?})"
+        )));
     }
     let captured_at = required_state_string(source, "captured_at")?;
     let captured_via: CaptureVia = serde_json::from_value(serde_json::json!(
