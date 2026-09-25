@@ -29,6 +29,7 @@ pub(crate) struct ForkCaptureSeed {
     pub captured: crate::provider::CapturedSession,
     pub captured_at: String,
     pub pi_sessions_root: PathBuf,
+    pub profile_dir: PathBuf,
 }
 
 use super::*;

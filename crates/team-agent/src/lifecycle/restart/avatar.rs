@@ -356,6 +356,7 @@ pub(crate) fn fork_pi_new_seat_locked(
             },
             captured_at: staged_file.captured_at.clone(),
             pi_sessions_root: target_paths.sessions.clone(),
+            profile_dir: selected.team_dir.join("profiles"),
         };
 
         phase = "p2_register";
