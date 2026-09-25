@@ -267,6 +267,7 @@ impl<'a> StateRepository<'a> {
                     ));
                 }
                 let mut checked = observed.clone();
+                preserve_new_fork_rows(&mut checked, before, latest);
                 super::persist::merge_ordinary_state(&mut checked, latest)?;
                 if !legacy_single_team_state(&checked)
                     || sampled_identity != legacy_team_identity(&checked)
@@ -288,7 +289,12 @@ impl<'a> StateRepository<'a> {
                 }
                 return Ok(selected);
             }
-            let mut checked = super::projection::merge_committed_team(latest, observed, team_key);
+            let mut observed_team = bounded_team_view(observed, Some(team_key))?;
+            let before_team = bounded_team_view(before, Some(team_key))?;
+            let latest_team = bounded_team_view(latest, Some(team_key))?;
+            preserve_new_fork_rows(&mut observed_team, &before_team, &latest_team);
+            let mut checked =
+                super::projection::merge_committed_team(latest, &observed_team, team_key);
             super::persist::merge_ordinary_state(&mut checked, latest)?;
             let checked = bounded_team_view(&checked, Some(team_key))?;
             let mut selected = bounded_team_view(latest, Some(team_key))?;
@@ -300,6 +306,28 @@ impl<'a> StateRepository<'a> {
             Ok(super::projection::merge_committed_team(latest, &selected, team_key))
         })?;
         Ok(())
+    }
+}
+
+fn preserve_new_fork_rows(incoming: &mut Value, before: &Value, latest: &Value) {
+    let Some(before_agents) = before.get("agents").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(latest_agents) = latest.get("agents").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(incoming_agents) = incoming.get_mut("agents").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (agent_id, latest_agent) in latest_agents {
+        if !before_agents.contains_key(agent_id)
+            && latest_agent
+                .get("forked_from")
+                .and_then(Value::as_str)
+                .is_some_and(|source| !source.is_empty())
+        {
+            incoming_agents.insert(agent_id.clone(), latest_agent.clone());
+        }
     }
 }
 

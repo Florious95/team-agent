@@ -182,15 +182,15 @@ pub(crate) fn fork_pi_new_seat_locked(
         )?;
         let (source_role_meta, _) = crate::compiler::read_front_matter(&source_role_path)
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
-        if let Some(cwd) = source_role_meta
-            .get("working_directory")
-            .and_then(YamlValue::as_str)
-        {
-            if Path::new(cwd).canonicalize().ok().as_deref() != Some(binding.spawn_cwd.as_path()) {
-                return Err(LifecycleError::Compile(
-                    "Pi source role working_directory differs from the captured source cwd"
-                        .to_string(),
-                ));
+        for field in ["working_directory", "cwd"] {
+            if let Some(cwd) = source_role_meta.get(field).and_then(YamlValue::as_str) {
+                if Path::new(cwd).canonicalize().ok().as_deref()
+                    != Some(binding.spawn_cwd.as_path())
+                {
+                    return Err(LifecycleError::Compile(format!(
+                        "Pi source role {field} differs from the captured source cwd"
+                    )));
+                }
             }
         }
         let team_meta = crate::compiler::read_front_matter(&selected.team_dir.join("TEAM.md"))
@@ -348,8 +348,11 @@ pub(crate) fn fork_pi_new_seat_locked(
         }
         #[cfg(test)]
         eprintln!(
-            "pi-fork role trace label={label:?} meta.role={:?} compiled.role={:?}",
+            "pi-fork role trace label={label:?} meta.name={:?} meta.role={:?} meta.label={:?} compiled.id={} compiled.role={:?}",
+            target_meta.get("name").and_then(YamlValue::as_str),
             target_meta.get("role").and_then(YamlValue::as_str),
+            target_meta.get("label").and_then(YamlValue::as_str),
+            compiled.id,
             compiled.agent.get("role").and_then(YamlValue::as_str),
         );
         let compiled_provider = compiled.agent.get("provider").and_then(YamlValue::as_str);

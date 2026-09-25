@@ -25,9 +25,14 @@ fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), L
             "agent entry is not a map".to_string(),
         ));
     };
-    if let Some((_, existing)) = pairs.iter_mut().find(|(k, _)| k == key) {
-        *existing = next;
-    } else {
+    let mut found = false;
+    for (existing_key, existing_value) in pairs.iter_mut() {
+        if existing_key == key {
+            *existing_value = next.clone();
+            found = true;
+        }
+    }
+    if !found {
         pairs.push((key.to_string(), next));
     }
     Ok(())
