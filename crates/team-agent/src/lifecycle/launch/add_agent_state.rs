@@ -339,19 +339,6 @@ pub(crate) fn fork_upsert_agent_state_from_role(
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
     );
     entry_object.insert("capture_state".to_string(), serde_json::json!("captured"));
-    entry_object.insert(
-        "captured_session".to_string(),
-        serde_json::json!({
-            "session_id": seed.captured.session_id.as_ref().map(|id| id.as_str()),
-            "rollout_path": backing.0.to_string_lossy(),
-            "cwd": seed.captured.spawn_cwd.to_string_lossy(),
-            "captured_at": seed.captured_at,
-            "captured_via": serde_json::to_value(seed.captured.captured_via)
-                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-            "attribution_confidence": serde_json::to_value(seed.captured.attribution_confidence)
-                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-        }),
-    );
     if let Some(profile_dir) = source_profile_dir {
         entry_object.insert("_profile_dir".to_string(), profile_dir);
     } else {
