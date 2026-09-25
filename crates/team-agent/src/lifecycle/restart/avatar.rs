@@ -121,7 +121,9 @@ pub(crate) fn fork_pi_new_seat_locked(
             &selected.state,
         )?
         .backend;
-        if transport.tmux_endpoint() != expected_transport.tmux_endpoint() {
+        if transport.probes_real_tmux_socket_roots()
+            && transport.tmux_endpoint() != expected_transport.tmux_endpoint()
+        {
             return Err(LifecycleError::TeamSelect(
                 "selected team tmux endpoint changed while fork was acquiring its lifecycle lock"
                     .to_string(),
