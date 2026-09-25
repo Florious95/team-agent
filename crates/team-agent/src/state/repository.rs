@@ -181,15 +181,18 @@ impl<'a> StateRepository<'a> {
         bounded_team_view(&committed, team_key)
     }
 
-    /// Atomically merge only the newly started fork row into the latest
-    /// selected-team view, retaining sibling observations written meanwhile.
+    /// Merge the fork's non-topology row delta over the latest selected team
+    /// under state-save, then persist its spawn binding with ForkAgent authority.
     pub(crate) fn commit_fork_agent(
         &self,
         intent: StateWriteIntent<'_>,
         target_row: &Value,
     ) -> Result<(), StateError> {
-        let agent_id = match &intent {
-            StateWriteIntent::ForkAgent { agent_id, .. } => *agent_id,
+        let (team_key, agent_id) = match &intent {
+            StateWriteIntent::ForkAgent {
+                team_key,
+                agent_id,
+            } => (*team_key, *agent_id),
             _ => {
                 return Err(StateError::SaveFailed(
                     "fork target delta requires ForkAgent intent".into(),
@@ -197,24 +200,46 @@ impl<'a> StateRepository<'a> {
             }
         };
         let target_row = target_row.clone();
+        let mut staged_row = target_row.clone();
         let mut found = false;
-        self.commit(intent, |selected| {
-            if let Some(row) = selected
-                .get_mut("agents")
-                .and_then(Value::as_object_mut)
-                .and_then(|agents| agents.get_mut(agent_id))
-            {
-                *row = target_row;
-                found = true;
-            }
-        })?;
-        if found {
-            Ok(())
-        } else {
-            Err(StateError::SaveFailed(
+        self.commit(
+            StateWriteIntent::ForkAgent { team_key, agent_id },
+            |selected| {
+                if let Some(row) = selected
+                    .get_mut("agents")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|agents| agents.get_mut(agent_id))
+                {
+                    for field in ["pane_id", "window", "spawned_at", "spawn_epoch"] {
+                        if let Some(value) = row.get(field).cloned() {
+                            if let Some(staged) = staged_row.as_object_mut() {
+                                staged.insert(field.to_string(), value);
+                            }
+                        } else if let Some(staged) = staged_row.as_object_mut() {
+                            staged.remove(field);
+                        }
+                    }
+                    *row = staged_row;
+                    found = true;
+                }
+            },
+        )?;
+        if !found {
+            return Err(StateError::SaveFailed(
                 "ForkAgent target row is missing from selected team".into(),
-            ))
+            ));
         }
+
+        let mut latest = self.load_team(Some(team_key))?;
+        let agents = latest
+            .get_mut("agents")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| StateError::SaveFailed("selected team agents are missing".into()))?;
+        agents.insert(agent_id.to_string(), target_row);
+        self.save(
+            StateWriteIntent::ForkAgent { team_key, agent_id },
+            &latest,
+        )
     }
 
     /// Fence the sampled incarnation with the existing persist guards, then

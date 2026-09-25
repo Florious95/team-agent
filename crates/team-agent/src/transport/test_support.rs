@@ -361,6 +361,10 @@ impl OfflineTransport {
                 state.session_present = true;
             }
             let mut pane_index = state.spawns.len().saturating_sub(1);
+            // Existing sessions reserve `%0` for the already-running pane.
+            if kind == "spawn_into" {
+                pane_index = pane_index.max(1);
+            }
             while state.pane_presence.contains_key(&format!("%{pane_index}"))
                 || state
                     .targets

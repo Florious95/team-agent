@@ -180,6 +180,19 @@ pub(crate) fn fork_pi_new_seat_locked(
             &selected.state,
             source_agent_id,
         )?;
+        let (source_role_meta, _) = crate::compiler::read_front_matter(&source_role_path)
+            .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+        if let Some(cwd) = source_role_meta
+            .get("working_directory")
+            .and_then(YamlValue::as_str)
+        {
+            if Path::new(cwd).canonicalize().ok().as_deref() != Some(binding.spawn_cwd.as_path()) {
+                return Err(LifecycleError::Compile(
+                    "Pi source role working_directory differs from the captured source cwd"
+                        .to_string(),
+                ));
+            }
+        }
         let team_meta = crate::compiler::read_front_matter(&selected.team_dir.join("TEAM.md"))
             .map(|(meta, _)| meta)
             .unwrap_or(YamlValue::Null);
