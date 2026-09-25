@@ -132,6 +132,7 @@ pub enum CaptureVia {
     FsWatch,
     FsMtimeFallback,
     FsRepair,
+    SessionScan,
     ForkSnapshot,
 }
 
