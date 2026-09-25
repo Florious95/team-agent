@@ -126,8 +126,8 @@ pub(crate) fn materialize_latest_role(
         .filter(|value| !value.is_empty())
     {
         set_yaml_map_value(&mut meta, "role", Value::Str(label.to_string()))?;
-    } else if let Some(role) = meta.get("role").and_then(Value::as_str) {
-        let role_without_quotes = strip_label_quotes(role);
+    } else if let Some(role) = meta.get("role").and_then(Value::as_str).map(str::to_string) {
+        let role_without_quotes = strip_label_quotes(&role);
         if !role_without_quotes.is_empty() && role_without_quotes != role {
             set_yaml_map_value(
                 &mut meta,
