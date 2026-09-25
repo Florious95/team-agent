@@ -128,6 +128,9 @@ impl<'a> StateRepository<'a> {
     /// forward call to the same legacy helper family that the caller used
     /// before S1a; the intent selects the family, not the merge semantics.
     pub fn save(&self, intent: StateWriteIntent<'_>, state: &Value) -> Result<(), StateError> {
+        if let StateWriteIntent::CoordinatorTick { team_key } = &intent {
+            return self.save_coordinator_tick(team_key, state);
+        }
         route_direct(self.workspace, intent, state)
     }
 
@@ -220,6 +223,23 @@ impl<'a> StateRepository<'a> {
                 "ForkAgent target row is missing from selected team".into(),
             ))
         }
+    }
+
+    fn save_coordinator_tick(&self, team_key: &str, state: &Value) -> Result<(), StateError> {
+        let incoming = state.clone();
+        super::persist::update_runtime_state(self.workspace, |latest| {
+            let mut incoming_team = bounded_team_view(&incoming, Some(team_key))?;
+            let latest_team = bounded_team_view(latest, Some(team_key))?;
+            preserve_latest_fork_rows(&mut incoming_team, &latest_team);
+            let mut checked =
+                super::projection::merge_committed_team(latest, &incoming_team, team_key);
+            super::persist::merge_ordinary_state(&mut checked, latest)?;
+            let checked = bounded_team_view(&checked, Some(team_key))?;
+            Ok(super::projection::merge_committed_team(
+                latest, &checked, team_key,
+            ))
+        })?;
+        Ok(())
     }
 
     /// Fence the sampled incarnation with the existing persist guards, then

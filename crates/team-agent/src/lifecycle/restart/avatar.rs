@@ -417,6 +417,21 @@ pub(crate) fn fork_pi_new_seat_locked(
             compiled.agent.clone(),
             target_agent_id.as_str(),
         )?;
+        #[cfg(test)]
+        eprintln!(
+            "pi-fork team.spec.yaml label trace {:?}",
+            latest_spec
+                .get("agents")
+                .and_then(YamlValue::as_list)
+                .and_then(|agents| {
+                    agents.iter().find(|agent| {
+                        agent.get("id").and_then(YamlValue::as_str)
+                            == Some(target_agent_id.as_str())
+                    })
+                })
+                .and_then(|agent| agent.get("label"))
+                .and_then(YamlValue::as_str),
+        );
         let written_bytes = yaml::dumps(&latest_spec).into_bytes();
         if read_optional_bytes(&spec_path)? != current_spec_bytes {
             return Err(LifecycleError::RequirementUnmet(
@@ -712,10 +727,77 @@ fn source_binding(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet("Pi source session_id is missing".to_string())
         })?;
+    let captured_session = source
+        .get("captured_session")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi source captured_session tuple is missing".to_string(),
+            )
+        })?;
+    let captured_session_id = captured_session
+        .get("session_id")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .map(SessionId::new)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi source captured_session session_id is missing".to_string(),
+            )
+        })?;
+    if captured_session_id != session_id {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source captured_session id differs from the top-level tuple".to_string(),
+        ));
+    }
+    let captured_cwd = captured_session
+        .get("cwd")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi source captured_session cwd is missing".to_string(),
+            )
+        })?;
+    let captured_rollout_path = captured_session
+        .get("rollout_path")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi source captured_session rollout_path is missing".to_string(),
+            )
+        })?;
+    let captured_tuple_at = captured_session
+        .get("captured_at")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            LifecycleError::RequirementUnmet(
+                "Pi source captured_session captured_at is missing".to_string(),
+            )
+        })?;
+    let captured_tuple_via: CaptureVia = serde_json::from_value(
+        captured_session
+            .get("captured_via")
+            .cloned()
+            .ok_or_else(|| {
+                LifecycleError::RequirementUnmet(
+                    "Pi source captured_session captured_via is missing".to_string(),
+                )
+            })?,
+    )
+    .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    let captured_tuple_confidence = captured_session
+        .get("attribution_confidence")
+        .and_then(JsonValue::as_str);
     let attribution_confidence = source
         .get("attribution_confidence")
         .and_then(JsonValue::as_str);
-    if attribution_confidence.is_some_and(|confidence| confidence != "high")
+    if attribution_confidence != Some("high")
+        || captured_tuple_confidence != Some("high")
         || source
             .get("attribution_ambiguous")
             .and_then(JsonValue::as_bool)
@@ -726,10 +808,20 @@ fn source_binding(
         ));
     }
     let captured_at = required_state_string(source, "captured_at")?;
+    if captured_tuple_at != captured_at {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source captured_session timestamp differs from the top-level tuple".to_string(),
+        ));
+    }
     let captured_via: CaptureVia = serde_json::from_value(serde_json::json!(
         required_state_string(source, "captured_via")?
     ))
     .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    if captured_tuple_via != captured_via {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source captured_session via differs from the top-level tuple".to_string(),
+        ));
+    }
     let spawned_at = required_state_string(source, "spawned_at")?;
     chrono::DateTime::parse_from_rfc3339(&captured_at)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
@@ -753,7 +845,11 @@ fn source_binding(
         source.get("session_capture"),
         source.get("capture_tuple"),
     );
-    if spawn_cwd != selected.run_workspace || canonical_cwd != selected.run_workspace {
+    if spawn_cwd != captured_cwd
+        || captured_cwd != selected.run_workspace
+        || spawn_cwd != selected.run_workspace
+        || canonical_cwd != selected.run_workspace
+    {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source spawn_cwd differs from the selected team workspace".to_string(),
         ));
@@ -770,6 +866,11 @@ fn source_binding(
         }
     }
     let backing_path = PathBuf::from(required_state_string(source, "rollout_path")?);
+    if captured_rollout_path != backing_path {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source captured_session backing differs from the top-level tuple".to_string(),
+        ));
+    }
     if backing_path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -839,7 +940,8 @@ fn source_binding(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet("Pi source header cwd is missing".into())
         })?;
-    if header_cwd != spawn_cwd
+    if header_cwd != captured_cwd
+        || header_cwd != spawn_cwd
         || header_cwd != selected.run_workspace
         || fs::canonicalize(&header_cwd).ok().as_deref() != Some(selected.run_workspace.as_path())
     {

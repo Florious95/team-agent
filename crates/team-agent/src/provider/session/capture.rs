@@ -1316,18 +1316,29 @@ fn apply_captured_session(
         "rollout_path".to_string(),
         serde_json::json!(rollout_path.as_path().to_string_lossy()),
     );
-    agent_obj.insert(
-        "captured_at".to_string(),
-        serde_json::json!(chrono::Utc::now().to_rfc3339()),
-    );
-    agent_obj.insert(
-        "captured_via".to_string(),
-        serde_json::to_value(captured.captured_via).unwrap_or(Value::Null),
-    );
+    let captured_at = chrono::Utc::now().to_rfc3339();
+    let captured_via = serde_json::to_value(captured.captured_via).unwrap_or(Value::Null);
+    let attribution_confidence =
+        serde_json::to_value(captured.attribution_confidence).unwrap_or(Value::Null);
+    agent_obj.insert("captured_at".to_string(), serde_json::json!(captured_at));
+    agent_obj.insert("captured_via".to_string(), captured_via.clone());
     agent_obj.insert(
         "attribution_confidence".to_string(),
-        serde_json::to_value(captured.attribution_confidence).unwrap_or(Value::Null),
+        attribution_confidence.clone(),
     );
+    if agent_obj.get("provider").and_then(Value::as_str) == Some("pi") {
+        agent_obj.insert(
+            "captured_session".to_string(),
+            serde_json::json!({
+                "session_id": session_id.as_str(),
+                "rollout_path": rollout_path.as_path().to_string_lossy(),
+                "cwd": captured.spawn_cwd.to_string_lossy(),
+                "captured_at": captured_at,
+                "captured_via": captured_via,
+                "attribution_confidence": attribution_confidence,
+            }),
+        );
+    }
     agent_obj.remove("attribution_ambiguous");
     // S1-CAPTURE-001 (0.4.8): after writing the authoritative tuple, the
     // `_pending_session_id` placeholder is no longer needed — remove it so
