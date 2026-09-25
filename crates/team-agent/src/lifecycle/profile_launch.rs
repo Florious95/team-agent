@@ -217,7 +217,13 @@ fn prepare_profile_launch(
     let Some(profile) = agent.profile.as_deref() else {
         return Ok(ProviderProfileLaunch::default());
     };
-    let loaded = load_profile(workspace, profile, agent.profile_dir.as_deref())?;
+    let Some(path) = find_profile_file(workspace, profile, agent.profile_dir.as_deref()) else {
+        if agent.provider == Provider::Pi && agent.auth_mode == AuthMode::Subscription {
+            return Ok(ProviderProfileLaunch::default());
+        }
+        return Err(profile_not_found(profile));
+    };
+    let loaded = read_profile_file(path)?;
     validate_profile(&agent, profile, &loaded)?;
 
     let mut env_overlay = provider_env_exports(agent.provider, agent.auth_mode, &loaded.values);
@@ -290,9 +296,14 @@ pub(crate) fn load_profile(
     name: &str,
     profile_dir: Option<&Path>,
 ) -> Result<ProfileValues, LifecycleError> {
+    let path =
+        find_profile_file(workspace, name, profile_dir).ok_or_else(|| profile_not_found(name))?;
+    read_profile_file(path)
+}
+
+fn find_profile_file(workspace: &Path, name: &str, profile_dir: Option<&Path>) -> Option<PathBuf> {
     let dirs = profile_lookup_dirs(workspace, profile_dir);
-    let path = dirs
-        .iter()
+    dirs.iter()
         .map(|directory| directory.join(format!("{name}.env")))
         .find(|path| path.exists())
         .or_else(|| {
@@ -300,11 +311,15 @@ pub(crate) fn load_profile(
                 .map(|directory| directory.join(format!("{name}.example.env")))
                 .find(|path| path.exists())
         })
-        .ok_or_else(|| {
-            LifecycleError::RequirementUnmet(format!(
-                "profile {name} not found; run team-agent profile init {name} --auth-mode subscription"
-            ))
-        })?;
+}
+
+fn profile_not_found(name: &str) -> LifecycleError {
+    LifecycleError::RequirementUnmet(format!(
+        "profile {name} not found; run team-agent profile init {name} --auth-mode subscription"
+    ))
+}
+
+fn read_profile_file(path: PathBuf) -> Result<ProfileValues, LifecycleError> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
     Ok(ProfileValues {

@@ -260,6 +260,13 @@ pub(crate) fn fork_upsert_agent_state_from_role(
         )));
     }
 
+    let source_profile_dir = agent_map
+        .get(seed.source_agent_id.as_str())
+        .and_then(serde_json::Value::as_object)
+        .and_then(|source| source.get("_profile_dir"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(|path| serde_json::json!(path));
     let mut entry = starting_agent_entry(workspace, agent_id, meta, dynamic_role_file);
     let entry_object = entry.as_object_mut().ok_or_else(|| {
         LifecycleError::StatePersist("fork target entry is not an object".to_string())
@@ -331,10 +338,14 @@ pub(crate) fn fork_upsert_agent_state_from_role(
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
     );
     entry_object.insert("capture_state".to_string(), serde_json::json!("captured"));
-    entry_object.insert(
-        "_profile_dir".to_string(),
-        serde_json::json!(seed.profile_dir.to_string_lossy().to_string()),
-    );
+    if let Some(profile_dir) = source_profile_dir {
+        entry_object.insert("_profile_dir".to_string(), profile_dir);
+    } else {
+        entry_object.insert(
+            "_profile_dir".to_string(),
+            serde_json::json!(seed.profile_dir.to_string_lossy().to_string()),
+        );
+    }
     agent_map.insert(agent_id.as_str().to_string(), entry);
     crate::lifecycle::restart::remove::clear_agent_retirement_in_state(&mut state, agent_id);
     crate::state::repository::StateRepository::new(workspace)
