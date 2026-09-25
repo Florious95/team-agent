@@ -296,6 +296,7 @@ pub(crate) fn fork_upsert_agent_state_from_role(
         entry_object.insert("model_source".to_string(), serde_json::json!("team"));
     }
     entry_object.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
+    entry_object.insert("label".to_string(), serde_json::json!(agent_id.as_str()));
     entry_object.insert(
         "owner_team_id".to_string(),
         serde_json::json!(canonical_team_key),

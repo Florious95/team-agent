@@ -728,6 +728,13 @@ fn source_binding(
     }
     let canonical_cwd = fs::canonicalize(&spawn_cwd)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    #[cfg(test)]
+    eprintln!(
+        "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?}",
+        selected.run_workspace,
+        source.get("cwd"),
+        source.get("working_directory"),
+    );
     if spawn_cwd != selected.run_workspace || canonical_cwd != selected.run_workspace {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source spawn_cwd differs from the selected team workspace".to_string(),
@@ -933,6 +940,10 @@ fn validate_session_bytes(
         .and_then(JsonValue::as_str)
         .map(PathBuf::from)
         .ok_or_else(|| LifecycleError::RequirementUnmet("Pi session cwd is missing".to_string()))?;
+    #[cfg(test)]
+    if expected_parent.is_none() {
+        eprintln!("pi-fork header cwd trace header={cwd:?} source_tuple={expected_cwd:?}");
+    }
     if !cwd.is_absolute() || cwd.as_path() != expected_cwd {
         return Err(LifecycleError::RequirementUnmet(
             "Pi session header cwd does not match the captured cohort".to_string(),
