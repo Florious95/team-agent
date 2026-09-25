@@ -171,7 +171,26 @@ pub(crate) fn materialize_latest_role(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
     }
-    let rendered = format!("---\n{}---\n\n{}", yaml::dumps(&meta), body);
+    let mut rendered_meta = yaml::dumps(&meta);
+    let role_name = as_agent_id.as_str();
+    let bare_name = !role_name.is_empty()
+        && role_name
+            .chars()
+            .any(|character| character.is_ascii_alphabetic() || character == '_')
+        && role_name.chars().enumerate().all(|(index, character)| {
+            character.is_ascii_alphanumeric() || character == '_' || (index > 0 && character == '-')
+        })
+        && !matches!(
+            role_name.to_ascii_lowercase().as_str(),
+            "true" | "false" | "null" | "yes" | "no" | "on" | "off"
+        );
+    if bare_name {
+        rendered_meta = rendered_meta.replace(
+            &format!("name: \"{role_name}\"\n"),
+            &format!("name: {role_name}\n"),
+        );
+    }
+    let rendered = format!("---\n{}---\n\n{}", rendered_meta, body);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))?
