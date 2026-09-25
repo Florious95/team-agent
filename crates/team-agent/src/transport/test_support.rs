@@ -550,10 +550,17 @@ impl Transport for OfflineTransport {
             });
         }
         Ok(self.with_state(|state| {
-            state
+            let targets = state
                 .target_snapshots
                 .pop_front()
-                .unwrap_or_else(|| state.targets.clone())
+                .unwrap_or_else(|| state.targets.clone());
+            for target in &targets {
+                state
+                    .pane_presence
+                    .entry(target.pane_id.as_str().to_string())
+                    .or_insert(true);
+            }
+            targets
         }))
     }
 

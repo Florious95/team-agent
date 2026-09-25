@@ -313,6 +313,17 @@ pub(crate) fn fork_pi_new_seat_locked(
             .to_path_buf();
         let (target_meta, _) = crate::compiler::read_front_matter(&target_role_path)
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
+        if let Some(cwd) = target_meta
+            .get("working_directory")
+            .and_then(YamlValue::as_str)
+        {
+            if Path::new(cwd).canonicalize().ok().as_deref() != Some(binding.spawn_cwd.as_path()) {
+                return Err(LifecycleError::Compile(
+                    "Pi fork source role working_directory differs from the source cohort cwd"
+                        .to_string(),
+                ));
+            }
+        }
         let compiled =
             crate::compiler::compile_role_agent(&target_role_path, &team_meta, &workspace_text)
                 .map_err(|error| LifecycleError::Compile(error.to_string()))?;
@@ -509,22 +520,15 @@ pub(crate) fn fork_pi_new_seat_locked(
             .ok_or_else(|| {
                 LifecycleError::StatePersist("started Pi fork target row disappeared".to_string())
             })?;
-        let mut latest_state =
-            crate::state::projection::select_runtime_state(run_workspace, Some(team_key))
-                .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
-        let latest_agents = latest_state
-            .get_mut("agents")
-            .and_then(JsonValue::as_object_mut)
-            .ok_or_else(|| LifecycleError::StatePersist("team agents disappeared".to_string()))?;
-        latest_agents.insert(target_agent_id.as_str().to_string(), updated_target);
-        let target_ids = [target_agent_id.as_str()];
-        super::common::save_restart_projected_state_with_capture_backfill_skip(
-            run_workspace,
-            &mut latest_state,
-            team_key,
-            &target_ids,
-            &target_ids,
-        )?;
+        crate::state::repository::StateRepository::new(run_workspace)
+            .commit_fork_agent(
+                crate::state::repository::StateWriteIntent::ForkAgent {
+                    team_key,
+                    agent_id: target_agent_id.as_str(),
+                },
+                &updated_target,
+            )
+            .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
         let _ = crate::db::agent_health_capture::clear_agent_health_observation(
             run_workspace,
             team_key,

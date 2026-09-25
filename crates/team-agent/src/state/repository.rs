@@ -149,8 +149,8 @@ impl<'a> StateRepository<'a> {
         route_reapply(self.workspace, intent, state, reapply)
     }
 
-    /// Commit a task/note delta once against latest under state-save. Return
-    /// the committed Team view for callers that produce Markdown afterwards.
+    /// Commit a bounded Team delta once against latest under state-save.
+    /// Return the committed Team view for callers that produce Markdown afterwards.
     pub fn commit<F>(&self, intent: StateWriteIntent<'_>, update: F) -> Result<Value, StateError>
     where
         F: FnOnce(&mut Value),
@@ -163,7 +163,12 @@ impl<'a> StateRepository<'a> {
             StateWriteIntent::McpAssignTask { .. } => None,
             StateWriteIntent::McpUpdateStateNote { team_key } => team_key,
             StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
-            _ => return Err(StateError::SaveFailed("intent does not accept a task/note delta".into())),
+            StateWriteIntent::ForkAgent { team_key, .. } => Some(team_key),
+            _ => {
+                return Err(StateError::SaveFailed(
+                    "intent does not accept a bounded Team delta".into(),
+                ))
+            }
         };
         let committed = super::persist::update_runtime_state(self.workspace, |latest| {
             let mut selected = bounded_team_view(latest, team_key)?;
@@ -174,6 +179,42 @@ impl<'a> StateRepository<'a> {
             })
         })?;
         bounded_team_view(&committed, team_key)
+    }
+
+    /// Atomically merge only the newly started fork row into the latest
+    /// selected-team view, retaining sibling observations written meanwhile.
+    pub(crate) fn commit_fork_agent(
+        &self,
+        intent: StateWriteIntent<'_>,
+        target_row: &Value,
+    ) -> Result<(), StateError> {
+        let agent_id = match &intent {
+            StateWriteIntent::ForkAgent { agent_id, .. } => *agent_id,
+            _ => {
+                return Err(StateError::SaveFailed(
+                    "fork target delta requires ForkAgent intent".into(),
+                ))
+            }
+        };
+        let target_row = target_row.clone();
+        let mut found = false;
+        self.commit(intent, |selected| {
+            if let Some(row) = selected
+                .get_mut("agents")
+                .and_then(Value::as_object_mut)
+                .and_then(|agents| agents.get_mut(agent_id))
+            {
+                *row = target_row;
+                found = true;
+            }
+        })?;
+        if found {
+            Ok(())
+        } else {
+            Err(StateError::SaveFailed(
+                "ForkAgent target row is missing from selected team".into(),
+            ))
+        }
     }
 
     /// Fence the sampled incarnation with the existing persist guards, then

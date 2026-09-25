@@ -33,12 +33,17 @@ fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), L
     Ok(())
 }
 
-fn strip_label_quotes(label: &str) -> &str {
-    let bytes = label.as_bytes();
-    if bytes.len() >= 2 && matches!(bytes[0], b'\'' | b'"') && bytes[0] == bytes[bytes.len() - 1] {
-        &label[1..label.len() - 1]
-    } else {
-        label
+fn strip_label_quotes(mut label: &str) -> &str {
+    loop {
+        let bytes = label.as_bytes();
+        if bytes.len() >= 2
+            && matches!(bytes[0], b'\'' | b'"')
+            && bytes[0] == bytes[bytes.len() - 1]
+        {
+            label = &label[1..label.len() - 1];
+        } else {
+            return label;
+        }
     }
 }
 
@@ -126,7 +131,8 @@ pub(crate) fn materialize_latest_role(
         .filter(|value| !value.is_empty())
     {
         set_yaml_map_value(&mut meta, "role", Value::Str(label.to_string()))?;
-    } else if let Some(role) = meta.get("role").and_then(Value::as_str).map(str::to_string) {
+    }
+    if let Some(role) = meta.get("role").and_then(Value::as_str).map(str::to_string) {
         let role_without_quotes = strip_label_quotes(&role);
         if !role_without_quotes.is_empty() && role_without_quotes != role {
             set_yaml_map_value(
