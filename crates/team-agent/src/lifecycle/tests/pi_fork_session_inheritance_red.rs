@@ -749,10 +749,11 @@ fn r05_bad_source_tuples_and_jsonl_fail_closed_without_a_fresh_target() {
                 );
             }
             "wrong-cwd" => {
+                let wrong_cwd = fixture.root.join("wrong-cwd");
                 write_session(
                     &fixture.source_file,
                     SESSION_A,
-                    &fixture.root,
+                    &wrong_cwd,
                     SESSION_TIMESTAMP,
                     &fixture.source_body,
                 );
