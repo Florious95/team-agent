@@ -284,7 +284,7 @@ pub(crate) fn fork_pi_new_seat_locked(
             &target_paths,
             &target_session_id,
             &captured_at,
-            run_workspace,
+            &binding.spawn_cwd,
             &binding.backing_path,
             &snapshot.body,
         )?;
@@ -336,7 +336,7 @@ pub(crate) fn fork_pi_new_seat_locked(
             .ok_or_else(|| {
                 LifecycleError::Compile("Pi target role has no working_directory".to_string())
             })?;
-        if Path::new(cwd).canonicalize().ok().as_deref() != Some(run_workspace.as_path()) {
+        if Path::new(cwd).canonicalize().ok().as_deref() != Some(binding.spawn_cwd.as_path()) {
             return Err(LifecycleError::Compile(
                 "Pi fork target role working_directory differs from the source cohort cwd"
                     .to_string(),
@@ -352,7 +352,7 @@ pub(crate) fn fork_pi_new_seat_locked(
                 rollout_path: Some(RolloutPath::new(staged_file.backing_path.clone())),
                 captured_via: CaptureVia::ForkSnapshot,
                 attribution_confidence: Confidence::High,
-                spawn_cwd: run_workspace.to_path_buf(),
+                spawn_cwd: binding.spawn_cwd.clone(),
             },
             captured_at: staged_file.captured_at.clone(),
             pi_sessions_root: target_paths.sessions.clone(),
@@ -1416,6 +1416,20 @@ fn verify_no_target_writer(
     });
     if !exact {
         let still_present = targets.iter().any(|pane| pane.pane_id == pane_id);
+        if still_present && !panes_before.contains(pane_id.as_str()) {
+            transport
+                .kill_pane(&pane_id)
+                .map_err(|error| format!("could not stop newly spawned pane: {error}"))?;
+            let remaining = transport
+                .list_targets()
+                .map_err(|error| error.to_string())?;
+            if remaining.iter().any(|pane| pane.pane_id == pane_id) {
+                return Err(
+                    "newly spawned pane remains after kill; resources preserved".to_string()
+                );
+            }
+            return Ok(());
+        }
         if still_present {
             return Err(
                 "spawned pane is not owned by the target window; resources preserved".to_string(),

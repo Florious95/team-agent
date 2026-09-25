@@ -33,6 +33,15 @@ fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), L
     Ok(())
 }
 
+fn strip_label_quotes(label: &str) -> &str {
+    let bytes = label.as_bytes();
+    if bytes.len() >= 2 && matches!(bytes[0], b'\'' | b'"') && bytes[0] == bytes[bytes.len() - 1] {
+        &label[1..label.len() - 1]
+    } else {
+        label
+    }
+}
+
 pub(crate) struct MaterializedRole {
     path: PathBuf,
     device: u64,
@@ -112,7 +121,10 @@ pub(crate) fn materialize_latest_role(
         "name",
         Value::Str(as_agent_id.as_str().to_string()),
     )?;
-    if let Some(label) = label.filter(|value| !value.is_empty()) {
+    if let Some(label) = label
+        .map(strip_label_quotes)
+        .filter(|value| !value.is_empty())
+    {
         set_yaml_map_value(&mut meta, "role", Value::Str(label.to_string()))?;
     }
 

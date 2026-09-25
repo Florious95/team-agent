@@ -360,7 +360,15 @@ impl OfflineTransport {
             if kind == "spawn_first" && !state.session_absent_after_spawn_first {
                 state.session_present = true;
             }
-            let pane_index = state.spawns.len().saturating_sub(1);
+            let mut pane_index = state.spawns.len().saturating_sub(1);
+            while state.pane_presence.contains_key(&format!("%{pane_index}"))
+                || state
+                    .targets
+                    .iter()
+                    .any(|target| target.pane_id.as_str() == format!("%{pane_index}"))
+            {
+                pane_index = pane_index.saturating_add(1);
+            }
             state
                 .pane_presence
                 .insert(format!("%{pane_index}"), state.spawned_panes_addressable);
