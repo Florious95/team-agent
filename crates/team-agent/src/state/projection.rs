@@ -17,7 +17,7 @@ use serde_json::{json, Map, Value};
 use super::StateError;
 use crate::state::persist::{
     load_runtime_state, load_runtime_state_without_migrations,
-    save_runtime_state_with_deleted_agents,
+    save_runtime_state_preserving_fork_target_rows,
     save_runtime_state_with_lifecycle_topology_authority,
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority,
@@ -972,7 +972,11 @@ fn save_team_scoped_state_with_merge_options(
             );
         }
         if tombstoned_agent_ids.is_empty() {
-            return save_runtime_state_with_deleted_agents(workspace, &merged, deleted_agent_ids);
+            return save_runtime_state_preserving_fork_target_rows(
+                workspace,
+                &merged,
+                deleted_agent_ids,
+            );
         }
         return save_runtime_state_with_team_tombstoned_agents(
             workspace,
@@ -1030,7 +1034,7 @@ fn save_team_scoped_state_with_merge_options(
                 &[],
             )
         } else {
-            save_runtime_state_with_deleted_agents(
+            save_runtime_state_preserving_fork_target_rows(
                 workspace,
                 &Value::Object(merged),
                 deleted_agent_ids,

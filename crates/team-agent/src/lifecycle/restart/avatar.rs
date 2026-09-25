@@ -279,7 +279,7 @@ pub(crate) fn fork_pi_new_seat_locked(
         );
 
         phase = "p1_snapshot";
-        let snapshot = read_stable_source_snapshot(&binding)?;
+        let snapshot = read_stable_source_snapshot(&binding, run_workspace)?;
         revalidate_source_binding(selected, source_agent_id, &binding)?;
         let target_session_id = crate::lifecycle::launch::pi_mcp::new_pi_session_id();
         let full_state = crate::state::persist::load_runtime_state(run_workspace)
@@ -758,6 +758,8 @@ fn source_binding(
     }
     let canonical_cwd = fs::canonicalize(&spawn_cwd)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    let canonical_workspace = fs::canonicalize(&selected.run_workspace)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
     #[cfg(test)]
     eprintln!(
         "pi-fork cwd trace tuple.spawn_cwd={spawn_cwd:?} target={:?} row.cwd={:?} row.working_directory={:?} captured_session={:?} session_capture={:?} capture_tuple={:?}",
@@ -768,7 +770,7 @@ fn source_binding(
         source.get("session_capture"),
         source.get("capture_tuple"),
     );
-    if spawn_cwd != selected.run_workspace || canonical_cwd != selected.run_workspace {
+    if canonical_cwd != canonical_workspace {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source spawn_cwd differs from the selected team workspace".to_string(),
         ));
@@ -854,10 +856,14 @@ fn source_binding(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet("Pi source header cwd is missing".into())
         })?;
-    if header_cwd != spawn_cwd
-        || header_cwd != selected.run_workspace
-        || fs::canonicalize(&header_cwd).ok().as_deref() != Some(selected.run_workspace.as_path())
-    {
+    let canonical_header_cwd = fs::canonicalize(&header_cwd)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    #[cfg(test)]
+    eprintln!(
+        "pi-fork source header binding backing={backing_path:?} header_cwd={header_cwd:?} spawn_cwd={spawn_cwd:?} selected_workspace={:?} canonical_header={canonical_header_cwd:?}",
+        selected.run_workspace,
+    );
+    if canonical_header_cwd != canonical_cwd || canonical_header_cwd != canonical_workspace {
         return Err(LifecycleError::RequirementUnmet(
             "Pi source header cwd differs from its capture tuple or target workspace".into(),
         ));
@@ -920,7 +926,10 @@ fn source_binding_from_state(
     source_binding(&snapshot, source_agent_id)
 }
 
-fn read_stable_source_snapshot(binding: &SourceBinding) -> Result<SourceSnapshot, LifecycleError> {
+fn read_stable_source_snapshot(
+    binding: &SourceBinding,
+    run_workspace: &Path,
+) -> Result<SourceSnapshot, LifecycleError> {
     ensure_no_symlink_components(&binding.backing_path, false)?;
     let before_path = fs::symlink_metadata(&binding.backing_path)
         .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
@@ -970,7 +979,14 @@ fn read_stable_source_snapshot(binding: &SourceBinding) -> Result<SourceSnapshot
             "Pi source JSONL changed during stable snapshot read".to_string(),
         ));
     }
-    let body = validate_session_bytes(&first, &binding.session_id, &binding.spawn_cwd, None)?;
+    let canonical_workspace = fs::canonicalize(run_workspace)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    if canonical_workspace != binding.spawn_cwd {
+        return Err(LifecycleError::RequirementUnmet(
+            "Pi source capture cwd differs from the selected target workspace".into(),
+        ));
+    }
+    let body = validate_session_bytes(&first, &binding.session_id, &canonical_workspace, None)?;
     Ok(SourceSnapshot { body })
 }
 
@@ -1006,7 +1022,11 @@ fn validate_session_bytes(
     if expected_parent.is_none() {
         eprintln!("pi-fork header cwd trace header={cwd:?} source_tuple={expected_cwd:?}");
     }
-    if !cwd.is_absolute() || cwd.as_path() != expected_cwd {
+    let canonical_cwd = fs::canonicalize(&cwd)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    let canonical_expected_cwd = fs::canonicalize(expected_cwd)
+        .map_err(|error| LifecycleError::RequirementUnmet(error.to_string()))?;
+    if !cwd.is_absolute() || canonical_cwd != canonical_expected_cwd {
         return Err(LifecycleError::RequirementUnmet(
             "Pi session header cwd does not match the captured cohort".to_string(),
         ));
