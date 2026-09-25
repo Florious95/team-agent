@@ -25,7 +25,7 @@ use crate::provider::{CaptureVia, CapturedSession, Confidence, Provider, Rollout
 use crate::state::selector::SelectedTeam;
 use crate::transport::{BackendKind, SessionName, Transport, WindowName};
 
-use super::common::{session_live_or_default, state_session_name};
+use super::common::state_session_name;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileIdentity {
@@ -149,13 +149,6 @@ pub(crate) fn fork_pi_new_seat_locked(
                 "selected team has no persisted tmux session name".to_string(),
             ));
         }
-        if !session_live_or_default(transport, &session_name, false) {
-            return Err(LifecycleError::TeamSelect(format!(
-                "selected team session is not running: {}",
-                session_name.as_str()
-            )));
-        }
-
         let source_agent = selected
             .state
             .get("agents")
@@ -666,7 +659,7 @@ fn source_binding(
     if let Some(pending) = source.get("_pending_session_id") {
         match pending {
             JsonValue::Null => {}
-            JsonValue::String(pending) if pending == session_id.as_str() => {}
+            JsonValue::String(pending) if pending.is_empty() || pending == session_id.as_str() => {}
             _ => {
                 return Err(LifecycleError::RequirementUnmet(
                     "Pi source capture tuple conflicts with its pending session cohort".to_string(),
