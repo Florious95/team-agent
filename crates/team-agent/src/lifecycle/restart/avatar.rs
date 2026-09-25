@@ -656,18 +656,6 @@ fn source_binding(
         .ok_or_else(|| {
             LifecycleError::RequirementUnmet("Pi source session_id is missing".to_string())
         })?;
-    if let Some(pending) = source.get("_pending_session_id") {
-        match pending {
-            JsonValue::Null => {}
-            JsonValue::String(pending) if pending.is_empty() || pending == session_id.as_str() => {}
-            _ => {
-                return Err(LifecycleError::RequirementUnmet(format!(
-                    "Pi source capture tuple conflicts with its pending session cohort (session_id={}, pending={pending:?})",
-                    session_id.as_str()
-                )))
-            }
-        }
-    }
     if source
         .get("attribution_confidence")
         .and_then(JsonValue::as_str)
