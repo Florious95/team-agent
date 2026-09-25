@@ -39,6 +39,43 @@ fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), L
     Ok(())
 }
 
+fn dump_role_frontmatter(meta: &Value) -> String {
+    let Value::Map(pairs) = meta else {
+        return yaml::dumps(meta);
+    };
+    let mut rendered = String::new();
+    for (key, value) in pairs {
+        if matches!(key.as_str(), "name" | "role" | "label")
+            && value.as_str().is_some_and(is_plain_role_scalar)
+        {
+            if let Some(value) = value.as_str() {
+                rendered.push_str(&format!("{key}: {value}\n"));
+            }
+        } else {
+            rendered.push_str(&yaml::dumps(&Value::Map(vec![(
+                key.clone(),
+                value.clone(),
+            )])));
+        }
+    }
+    rendered
+}
+
+fn is_plain_role_scalar(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value
+            .chars()
+            .any(|character| character.is_ascii_alphabetic() || character == '_')
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ' ')
+        })
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "false" | "null" | "yes" | "no" | "on" | "off"
+        )
+}
+
 fn strip_label_quotes(mut label: &str) -> &str {
     loop {
         let bytes = label.as_bytes();
@@ -171,26 +208,7 @@ pub(crate) fn materialize_latest_role(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(LifecycleError::StatePersist(error.to_string())),
     }
-    let mut rendered_meta = yaml::dumps(&meta);
-    let role_name = as_agent_id.as_str();
-    let bare_name = !role_name.is_empty()
-        && role_name
-            .chars()
-            .any(|character| character.is_ascii_alphabetic() || character == '_')
-        && role_name.chars().enumerate().all(|(index, character)| {
-            character.is_ascii_alphanumeric() || character == '_' || (index > 0 && character == '-')
-        })
-        && !matches!(
-            role_name.to_ascii_lowercase().as_str(),
-            "true" | "false" | "null" | "yes" | "no" | "on" | "off"
-        );
-    if bare_name {
-        rendered_meta = rendered_meta.replace(
-            &format!("name: \"{role_name}\"\n"),
-            &format!("name: {role_name}\n"),
-        );
-    }
-    let rendered = format!("---\n{}---\n\n{}", rendered_meta, body);
+    let rendered = format!("---\n{}---\n\n{}", dump_role_frontmatter(&meta), body);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| LifecycleError::StatePersist(error.to_string()))?
