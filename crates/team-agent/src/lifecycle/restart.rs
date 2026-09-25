@@ -84,7 +84,9 @@ pub(crate) use agent::{
 };
 pub(crate) use common::refresh_missing_provider_sessions;
 pub(crate) use common::restart_required_missing_session_agent_ids;
-pub(crate) use common::session_identity_probe_for_agent;
+pub(crate) use common::{
+    session_identity_probe_for_agent, session_identity_probe_for_agent_with_fork_ancestry,
+};
 // 0.3.24 add-agent socket drift fix: state-aware tmux resolver shared with
 // `lifecycle::launch::add_agent` / `fork_agent` so all three (restart / add / fork)
 // route to the SAME tmux socket the live team uses.

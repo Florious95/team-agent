@@ -349,8 +349,20 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                 }
                 _ => (true, Vec::new()),
             };
-        let identity_probe =
-            session_identity_probe_for_agent(&agent_id, provider, rollout_path.as_ref());
+        let identity_probe = workspace
+            .map(|workspace| {
+                session_identity_probe_for_agent_with_fork_ancestry(
+                    workspace,
+                    state,
+                    &agent_id,
+                    agent,
+                    provider,
+                    rollout_path.as_ref(),
+                )
+            })
+            .unwrap_or_else(|| {
+                session_identity_probe_for_agent(&agent_id, provider, rollout_path.as_ref())
+            });
         let session_identity_mismatch = session_id.is_some()
             && provider_can_resume
             && resume_backing_exists

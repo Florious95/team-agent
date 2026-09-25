@@ -1133,8 +1133,11 @@ fn restart_with_selected_team_and_transport(
                 &session_id,
                 agent_rollout_path(&agent).as_ref(),
             );
-            let identity_probe = session_identity_probe_for_agent(
+            let identity_probe = session_identity_probe_for_agent_with_fork_ancestry(
+                &selected.run_workspace,
+                &state,
                 &decision.agent_id,
+                &agent,
                 provider,
                 agent_rollout_path(&agent).as_ref(),
             );
@@ -1221,8 +1224,11 @@ fn restart_with_selected_team_and_transport(
                 &session_id,
                 agent_rollout_path(&agent_after).as_ref(),
             );
-            let identity_probe_after = session_identity_probe_for_agent(
+            let identity_probe_after = session_identity_probe_for_agent_with_fork_ancestry(
+                &selected.run_workspace,
+                &state,
                 &decision.agent_id,
+                &agent_after,
                 provider,
                 agent_rollout_path(&agent_after).as_ref(),
             );
