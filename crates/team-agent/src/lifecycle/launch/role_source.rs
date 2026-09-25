@@ -45,9 +45,7 @@ fn dump_role_frontmatter(meta: &Value) -> String {
     };
     let mut rendered = String::new();
     for (key, value) in pairs {
-        if matches!(key.as_str(), "name" | "role" | "label")
-            && value.as_str().is_some_and(is_plain_role_scalar)
-        {
+        if value.as_str().is_some_and(is_plain_frontmatter_scalar) {
             if let Some(value) = value.as_str() {
                 rendered.push_str(&format!("{key}: {value}\n"));
             }
@@ -61,14 +59,14 @@ fn dump_role_frontmatter(meta: &Value) -> String {
     rendered
 }
 
-fn is_plain_role_scalar(value: &str) -> bool {
+fn is_plain_frontmatter_scalar(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value
             .chars()
             .any(|character| character.is_ascii_alphabetic() || character == '_')
         && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ' ')
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ' ' | '/')
         })
         && !matches!(
             value.to_ascii_lowercase().as_str(),
