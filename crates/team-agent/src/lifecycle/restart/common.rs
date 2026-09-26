@@ -954,7 +954,7 @@ pub(crate) fn lifecycle_worker_transport_for_selected_state(
 /// returns: 后端与 endpoint 来源
 /// errors: state 声明后端是 conpty 时返回 TeamSelect
 /// ---
-pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
+pub(crate) fn lifecycle_worker_tmux_backend_selection_for_state(
     run_workspace: &Path,
     state: &serde_json::Value,
 ) -> Result<crate::tmux_backend::RuntimeTmuxBackendSelection, LifecycleError> {
@@ -1342,6 +1342,119 @@ pub(crate) fn session_identity_probe_for_agent(
         embedded_agent_id,
         rollout_path: Some(path.to_path_buf()),
     }
+}
+
+/// ---
+/// purpose: 将合法 Pi fork 血统纳入共享会话身份判定
+/// params:
+///   workspace/state/agent: 当前被验证席位及同队来源记录
+///   rollout_path: 当前席位的精确 backing
+/// returns: 字面身份一致，或经独立 Pi backing 与 fork 血统验证后合法继承时为 true
+/// ---
+pub(crate) fn session_identity_probe_for_agent_with_fork_ancestry(
+    workspace: &Path,
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    provider: Provider,
+    rollout_path: Option<&RolloutPath>,
+) -> SessionIdentityProbeResult {
+    let mut probe = session_identity_probe_for_agent(agent_id, provider, rollout_path);
+    if probe.identity_ok != Some(false)
+        || !pi_fork_ancestor_identity_is_valid(
+            workspace,
+            state,
+            agent_id,
+            agent,
+            provider,
+            rollout_path,
+            probe.embedded_agent_id.as_deref(),
+        )
+    {
+        return probe;
+    }
+    probe.identity_ok = Some(true);
+    probe
+}
+
+fn pi_fork_ancestor_identity_is_valid(
+    workspace: &Path,
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    provider: Provider,
+    rollout_path: Option<&RolloutPath>,
+    embedded_agent_id: Option<&str>,
+) -> bool {
+    if provider != Provider::Pi
+        || agent.get("attribution_ambiguous").and_then(serde_json::Value::as_bool) == Some(true)
+        || agent.get("capture_state").and_then(serde_json::Value::as_str)
+            == Some("attribution_ambiguous")
+        || !matches!(
+            agent
+                .get("attribution_confidence")
+                .and_then(serde_json::Value::as_str),
+            Some("high" | "medium")
+        )
+    {
+        return false;
+    }
+    let (Some(embedded_agent_id), Some(forked_from), Some(target_path)) = (
+        embedded_agent_id,
+        agent
+            .get("forked_from")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty()),
+        rollout_path.map(RolloutPath::as_path),
+    ) else {
+        return false;
+    };
+    if forked_from != embedded_agent_id || forked_from == agent_id.as_str() {
+        return false;
+    }
+    let Some(source_agent) = state
+        .get("agents")
+        .and_then(|agents| agents.get(forked_from))
+        .filter(|source| agent_provider(source) == Provider::Pi)
+    else {
+        return false;
+    };
+    let Some(source_path) = agent_rollout_path(source_agent) else {
+        return false;
+    };
+    if source_path.as_path() == target_path {
+        return false;
+    }
+    let (Some(session_id), Ok(target_path), Some(target_root)) = (
+        agent_session_id(agent),
+        std::fs::canonicalize(target_path),
+        agent
+            .get("claude_projects_root")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from),
+    ) else {
+        return false;
+    };
+    let Ok(target_root) = std::fs::canonicalize(target_root) else {
+        return false;
+    };
+    if !target_path.starts_with(target_root)
+        || std::fs::canonicalize(source_path.as_path())
+            .is_ok_and(|source_path| source_path == target_path)
+        || !resume_backing_probe_for_agent(
+            workspace,
+            agent_id,
+            agent,
+            provider,
+            &session_id,
+            rollout_path,
+        )
+        .exists
+    {
+        return false;
+    }
+    true
 }
 
 /// ---

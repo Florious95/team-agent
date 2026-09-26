@@ -605,8 +605,8 @@ pub struct AddAgentReport {
     pub role_file: PathBuf,
 }
 
-/// `fork_agent(...)` 结果(`operations.py:402`)。native session fork(provider 须
-/// supports_session_fork ∧ auth_mode!=compatible_api)。
+/// `fork_agent(...)` 结果。Pi 的 snapshot fork 附带可审计的 source/target backing 细节；
+/// 已支持的其他 provider 保持既有报告字段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkAgentReport {
     pub source_agent_id: AgentId,
@@ -614,6 +614,14 @@ pub struct ForkAgentReport {
     pub env: AgentActionEnvelope,
     pub session_id: Option<SessionId>,
     pub backing_state: ForkBackingState,
+    pub pi_fork: Option<PiForkDetails>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiForkDetails {
+    pub source_session_id: SessionId,
+    pub session_id: SessionId,
+    pub backing_path: RolloutPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

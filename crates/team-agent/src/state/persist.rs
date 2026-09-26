@@ -392,6 +392,30 @@ fn save_runtime_state_with_merge_options(
         None,
         None,
         None,
+        false,
+    )
+}
+
+/// Preserve latest fork target rows when committing an ordinary team-scoped observation.
+pub(crate) fn save_runtime_state_preserving_fork_target_rows(
+    workspace: &Path,
+    state: &Value,
+    deleted_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    persist_runtime_state_with_merge_options_and_expected(
+        workspace,
+        state,
+        deleted_agent_ids,
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        true,
     )
 }
 
@@ -415,6 +439,7 @@ pub(crate) fn save_runtime_state_with_receiver_authority_and_expected(
         Some((expected_owner, expected_receiver)),
         None,
         None,
+        false,
     )
 }
 
@@ -438,6 +463,7 @@ pub(crate) fn save_runtime_state_with_exact_owner_receiver_cleanup(
         None,
         Some((team_key, expected_owner, expected_receiver)),
         None,
+        false,
     )
 }
 
@@ -469,6 +495,7 @@ pub(crate) fn save_runtime_state_with_exact_owner_receiver_restore(
             previous_owner,
             previous_receiver,
         )),
+        false,
     )
 }
 
@@ -485,6 +512,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
     expected_owner_receiver: Option<(&Value, &Value)>,
     exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
     exact_owner_receiver_to_restore: Option<(&str, &Value, &Value, &Value, &Value)>,
+    preserve_latest_fork_targets: bool,
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
@@ -585,7 +613,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
             .filter(|team_key| !team_key.is_empty())
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
-        apply_persist_merge_contract(
+        apply_persist_merge_contract_with_fork_target_preservation(
             &mut migrated,
             latest,
             &deleted,
@@ -596,6 +624,7 @@ fn persist_runtime_state_with_merge_options_and_expected(
             receiver_update_team_key.zip(exact_owner_seed_to_clear),
             exact_owner_receiver_to_clear,
             exact_owner_receiver_to_restore,
+            preserve_latest_fork_targets,
         )?;
     }
     super::abnormal_watch::compact_after_merge(&mut migrated, latest.as_ref(), deleted_agent_ids);
@@ -708,6 +737,34 @@ fn apply_persist_merge_contract(
     exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
     exact_owner_receiver_to_restore: Option<(&str, &Value, &Value, &Value, &Value)>,
 ) -> Result<(), StateError> {
+    apply_persist_merge_contract_with_fork_target_preservation(
+        incoming,
+        latest,
+        deleted_agent_ids,
+        skip_capture_backfill_team_key,
+        skip_capture_backfill_agent_ids,
+        topology_updates,
+        receiver_updates,
+        exact_owner_seed_to_clear,
+        exact_owner_receiver_to_clear,
+        exact_owner_receiver_to_restore,
+        false,
+    )
+}
+
+fn apply_persist_merge_contract_with_fork_target_preservation(
+    incoming: &mut Value,
+    latest: &Value,
+    deleted_agent_ids: &BTreeSet<String>,
+    skip_capture_backfill_team_key: Option<&str>,
+    skip_capture_backfill_agent_ids: &BTreeSet<String>,
+    topology_updates: &BTreeSet<(String, String)>,
+    receiver_updates: &BTreeSet<String>,
+    exact_owner_seed_to_clear: Option<(&str, &Value)>,
+    exact_owner_receiver_to_clear: Option<(&str, &Value, &Value)>,
+    exact_owner_receiver_to_restore: Option<(&str, &Value, &Value, &Value, &Value)>,
+    preserve_latest_fork_targets: bool,
+) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
     // per-team `teams.<k>.agents` merge below is team-key self-identifying and must run
@@ -740,6 +797,7 @@ fn apply_persist_merge_contract(
             skip_capture_backfill_agent_ids,
             &topology_update_agent_ids,
             None,
+            preserve_latest_fork_targets,
         )?;
         // Stage 3c (identity-boundary unified plan, architect direction
         // 2026-06-23): top-level owner copy-back removed. Pre-3c this
@@ -818,6 +876,7 @@ fn apply_persist_merge_contract(
                 skip_capture_backfill_agent_ids,
                 &topology_update_agent_ids,
                 team_alive,
+                preserve_latest_fork_targets,
             )?;
             preserve_latest_ownership_fields(
                 incoming_entry,
@@ -1196,6 +1255,7 @@ fn merge_agent_projection(
     //   the merge must NOT protect stale topology so a live sibling's write
     //   can go through.
     team_alive: Option<bool>,
+    preserve_latest_fork_targets: bool,
 ) -> Result<(), StateError> {
     let Some(incoming_agents) = incoming_agents else {
         return Ok(());
@@ -1212,8 +1272,17 @@ fn merge_agent_projection(
         }
         let tombstoned_for_projection =
             skip_capture_backfill && skip_capture_backfill_agent_ids.contains(agent_id);
+        let fork_target = preserve_latest_fork_targets
+            && latest_agent
+                .get("forked_from")
+                .and_then(Value::as_str)
+                .is_some_and(|source| !source.is_empty());
         match incoming_map.entry(agent_id.clone()) {
             serde_json::map::Entry::Vacant(slot) => {
+                if fork_target {
+                    slot.insert(latest_agent.clone());
+                    continue;
+                }
                 if topology_update_agent_ids.contains(agent_id) {
                     continue;
                 }
@@ -1244,7 +1313,9 @@ fn merge_agent_projection(
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
                     let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
-                        if !topology_update_agent_ids.is_empty()
+                        if fork_target {
+                            preserve_latest_topology(existing.get_mut(), latest_agent);
+                        } else if !topology_update_agent_ids.is_empty()
                             && lifecycle_peer_snapshot_is_stale(existing.get(), latest_agent)
                         {
                             // A lifecycle writer may have loaded a complete

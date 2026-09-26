@@ -128,6 +128,9 @@ impl<'a> StateRepository<'a> {
     /// forward call to the same legacy helper family that the caller used
     /// before S1a; the intent selects the family, not the merge semantics.
     pub fn save(&self, intent: StateWriteIntent<'_>, state: &Value) -> Result<(), StateError> {
+        if let StateWriteIntent::CoordinatorTick { team_key } = &intent {
+            return self.save_coordinator_tick(team_key, state);
+        }
         route_direct(self.workspace, intent, state)
     }
 
@@ -149,8 +152,8 @@ impl<'a> StateRepository<'a> {
         route_reapply(self.workspace, intent, state, reapply)
     }
 
-    /// Commit a task/note delta once against latest under state-save. Return
-    /// the committed Team view for callers that produce Markdown afterwards.
+    /// Commit a bounded Team delta once against latest under state-save.
+    /// Return the committed Team view for callers that produce Markdown afterwards.
     pub fn commit<F>(&self, intent: StateWriteIntent<'_>, update: F) -> Result<Value, StateError>
     where
         F: FnOnce(&mut Value),
@@ -163,7 +166,12 @@ impl<'a> StateRepository<'a> {
             StateWriteIntent::McpAssignTask { .. } => None,
             StateWriteIntent::McpUpdateStateNote { team_key } => team_key,
             StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
-            _ => return Err(StateError::SaveFailed("intent does not accept a task/note delta".into())),
+            StateWriteIntent::ForkAgent { team_key, .. } => Some(team_key),
+            _ => {
+                return Err(StateError::SaveFailed(
+                    "intent does not accept a bounded Team delta".into(),
+                ))
+            }
         };
         let committed = super::persist::update_runtime_state(self.workspace, |latest| {
             let mut selected = bounded_team_view(latest, team_key)?;
@@ -174,6 +182,64 @@ impl<'a> StateRepository<'a> {
             })
         })?;
         bounded_team_view(&committed, team_key)
+    }
+
+    /// Atomically replace only the fork target row in the selected team.
+    pub(crate) fn commit_fork_agent(
+        &self,
+        intent: StateWriteIntent<'_>,
+        target_row: &Value,
+    ) -> Result<(), StateError> {
+        let (team_key, agent_id) = match &intent {
+            StateWriteIntent::ForkAgent {
+                team_key,
+                agent_id,
+            } => (*team_key, *agent_id),
+            _ => {
+                return Err(StateError::SaveFailed(
+                    "fork target delta requires ForkAgent intent".into(),
+                ))
+            }
+        };
+        let target_row = target_row.clone();
+        let mut found = false;
+        self.commit(
+            StateWriteIntent::ForkAgent { team_key, agent_id },
+            |selected| {
+                if let Some(row) = selected
+                    .get_mut("agents")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|agents| agents.get_mut(agent_id))
+                {
+                    *row = target_row;
+                    found = true;
+                }
+            },
+        )?;
+        if found {
+            Ok(())
+        } else {
+            Err(StateError::SaveFailed(
+                "ForkAgent target row is missing from selected team".into(),
+            ))
+        }
+    }
+
+    fn save_coordinator_tick(&self, team_key: &str, state: &Value) -> Result<(), StateError> {
+        let incoming = state.clone();
+        super::persist::update_runtime_state(self.workspace, |latest| {
+            let mut incoming_team = bounded_team_view(&incoming, Some(team_key))?;
+            let latest_team = bounded_team_view(latest, Some(team_key))?;
+            preserve_latest_fork_rows(&mut incoming_team, &latest_team);
+            let mut checked =
+                super::projection::merge_committed_team(latest, &incoming_team, team_key);
+            super::persist::merge_ordinary_state(&mut checked, latest)?;
+            let checked = bounded_team_view(&checked, Some(team_key))?;
+            Ok(super::projection::merge_committed_team(
+                latest, &checked, team_key,
+            ))
+        })?;
+        Ok(())
     }
 
     /// Fence the sampled incarnation with the existing persist guards, then
@@ -201,6 +267,7 @@ impl<'a> StateRepository<'a> {
                     ));
                 }
                 let mut checked = observed.clone();
+                preserve_latest_fork_rows(&mut checked, latest);
                 super::persist::merge_ordinary_state(&mut checked, latest)?;
                 if !legacy_single_team_state(&checked)
                     || sampled_identity != legacy_team_identity(&checked)
@@ -222,7 +289,13 @@ impl<'a> StateRepository<'a> {
                 }
                 return Ok(selected);
             }
-            let mut checked = super::projection::merge_committed_team(latest, observed, team_key);
+            let mut observed_with_delta = observed.clone();
+            sync_team_observation_delta(before, &mut observed_with_delta, team_key);
+            let mut observed_team = bounded_team_view(&observed_with_delta, Some(team_key))?;
+            let latest_team = bounded_team_view(latest, Some(team_key))?;
+            preserve_latest_fork_rows(&mut observed_team, &latest_team);
+            let mut checked =
+                super::projection::merge_committed_team(latest, &observed_team, team_key);
             super::persist::merge_ordinary_state(&mut checked, latest)?;
             let checked = bounded_team_view(&checked, Some(team_key))?;
             let mut selected = bounded_team_view(latest, Some(team_key))?;
@@ -234,6 +307,25 @@ impl<'a> StateRepository<'a> {
             Ok(super::projection::merge_committed_team(latest, &selected, team_key))
         })?;
         Ok(())
+    }
+}
+
+// Coordinator observations do not own fork-target lifecycle rows.
+fn preserve_latest_fork_rows(incoming: &mut Value, latest: &Value) {
+    let Some(latest_agents) = latest.get("agents").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(incoming_agents) = incoming.get_mut("agents").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (agent_id, latest_agent) in latest_agents {
+        if latest_agent
+            .get("forked_from")
+            .and_then(Value::as_str)
+            .is_some_and(|source| !source.is_empty())
+        {
+            incoming_agents.insert(agent_id.clone(), latest_agent.clone());
+        }
     }
 }
 
@@ -289,6 +381,34 @@ fn apply_observation_delta(before: &Value, observed: &Value, latest: &mut Value)
         }
     } else {
         *latest = observed.clone();
+    }
+}
+
+// The coordinator observes a projected team view, while its nested `teams`
+// snapshot remains stale. Carry only observation deltas back to the canonical
+// team entry before `bounded_team_view` projects it again.
+fn sync_team_observation_delta(before: &Value, observed: &mut Value, team_key: &str) {
+    for field in ["agents", "coordinator"] {
+        let before_value = before.get(field).cloned().unwrap_or(Value::Null);
+        let observed_value = observed.get(field).cloned().unwrap_or(Value::Null);
+        if before_value == observed_value {
+            continue;
+        }
+        let Some(team_entry) = observed
+            .get_mut("teams")
+            .and_then(Value::as_object_mut)
+            .and_then(|teams| teams.get_mut(team_key))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        if field == "coordinator" && !team_entry.contains_key(field) {
+            continue;
+        }
+        let slot = team_entry
+            .entry(field.to_string())
+            .or_insert_with(|| before_value.clone());
+        apply_observation_delta(&before_value, &observed_value, slot);
     }
 }
 

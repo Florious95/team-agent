@@ -360,7 +360,20 @@ impl OfflineTransport {
             if kind == "spawn_first" && !state.session_absent_after_spawn_first {
                 state.session_present = true;
             }
-            let pane_index = state.spawns.len().saturating_sub(1);
+            let mut pane_index = state.spawns.len().saturating_sub(1);
+            // Existing sessions reserve `%0` for the already-running pane.
+            if kind == "spawn_into" {
+                pane_index = pane_index.max(1);
+            }
+            while state.pane_presence.contains_key(&format!("%{pane_index}"))
+                || state
+                    .targets
+                    .iter()
+                    .chain(state.target_snapshots.iter().flatten())
+                    .any(|target| target.pane_id.as_str() == format!("%{pane_index}"))
+            {
+                pane_index = pane_index.saturating_add(1);
+            }
             state
                 .pane_presence
                 .insert(format!("%{pane_index}"), state.spawned_panes_addressable);
@@ -541,10 +554,17 @@ impl Transport for OfflineTransport {
             });
         }
         Ok(self.with_state(|state| {
-            state
+            let targets = state
                 .target_snapshots
                 .pop_front()
-                .unwrap_or_else(|| state.targets.clone())
+                .unwrap_or_else(|| state.targets.clone());
+            for target in &targets {
+                state
+                    .pane_presence
+                    .entry(target.pane_id.as_str().to_string())
+                    .or_insert(true);
+            }
+            targets
         }))
     }
 

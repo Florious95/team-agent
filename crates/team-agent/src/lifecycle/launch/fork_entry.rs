@@ -44,11 +44,45 @@ pub fn fork_agent(
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     // Fork-agent routes to the selected live team's persisted endpoint, not
     // the workspace-hash fallback socket.
-    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-        &selected.run_workspace,
-        Some(selected.team_key.as_str()),
-    )
-    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
+    let is_pi = selected
+        .state
+        .get("agents")
+        .and_then(|agents| agents.get(source_agent_id.as_str()))
+        .and_then(|agent| agent.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        == Some("pi");
+    let transport: Box<dyn crate::transport::Transport> = if is_pi {
+        #[cfg(test)]
+        {
+            test_fork_transport(&selected, source_agent_id).unwrap_or(Box::new(
+                crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
+                    &selected.run_workspace,
+                    &selected.state,
+                )?
+                .backend,
+            ))
+        }
+        #[cfg(not(test))]
+        {
+            Box::new(
+                crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
+                    &selected.run_workspace,
+                    &selected.state,
+                )?
+                .backend,
+            )
+        }
+    } else {
+        Box::new(
+            crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+                &selected.run_workspace,
+                Some(selected.team_key.as_str()),
+            )
+            .unwrap_or_else(|_| {
+                crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace)
+            }),
+        )
+    };
     fork_agent_with_transport(
         workspace,
         source_agent_id,
@@ -56,6 +90,61 @@ pub fn fork_agent(
         label,
         open_display,
         team,
-        &transport,
+        transport.as_ref(),
     )
+}
+
+#[cfg(test)]
+fn test_fork_transport(
+    selected: &crate::state::selector::SelectedTeam,
+    source_agent_id: &AgentId,
+) -> Option<Box<dyn crate::transport::Transport>> {
+    let marker = std::env::var_os("TEST_TMUX_TRANSPORT")?;
+    let state = &selected.state;
+    let session = state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(crate::transport::SessionName::new)?;
+    let source = state
+        .get("agents")
+        .and_then(|agents| agents.get(source_agent_id.as_str()));
+    let targets = source
+        .and_then(|agent| agent.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())
+        .map(|pane| {
+            let window = source
+                .and_then(|agent| agent.get("window"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(source_agent_id.as_str());
+            vec![crate::transport::PaneInfo {
+                pane_id: crate::transport::PaneId::new(pane),
+                session: session.clone(),
+                window_index: None,
+                window_name: Some(crate::transport::WindowName::new(window)),
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: false,
+                pane_pid: None,
+                leader_env: std::collections::BTreeMap::new(),
+            }]
+        })
+        .unwrap_or_default();
+    let endpoint = state
+        .get("tmux_endpoint")
+        .or_else(|| state.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| marker.to_string_lossy().into_owned());
+    Some(Box::new(
+        crate::transport::test_support::OfflineTransport::new()
+            .with_session_present(true)
+            .with_targets(targets)
+            .with_tmux_endpoint(endpoint),
+    ))
 }

@@ -94,6 +94,14 @@ pub(crate) fn classify_tmux_server_error(error_text: &str) -> &'static str {
 }
 
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
+    diagnose_runtime_with_workspace(None, state, backend)
+}
+
+fn diagnose_runtime_with_workspace(
+    workspace: Option<&std::path::Path>,
+    state: &Value,
+    backend: &dyn Transport,
+) -> (Value, Value) {
     let mut issues = Vec::new();
     let mut repairs = Vec::new();
 
@@ -248,12 +256,25 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                         .and_then(Value::as_str)
                         .filter(|path| !path.is_empty())
                         .map(crate::provider::RolloutPath::new);
-                    let identity_probe =
-                        crate::lifecycle::restart::session_identity_probe_for_agent(
-                            &crate::model::ids::AgentId::new(agent_id.clone()),
-                            provider,
-                            rollout_path.as_ref(),
-                        );
+                    let agent_identity = crate::model::ids::AgentId::new(agent_id.clone());
+                    let identity_probe = workspace
+                        .map(|workspace| {
+                            crate::lifecycle::restart::session_identity_probe_for_agent_with_fork_ancestry(
+                                workspace,
+                                state,
+                                &agent_identity,
+                                agent_state,
+                                provider,
+                                rollout_path.as_ref(),
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            crate::lifecycle::restart::session_identity_probe_for_agent(
+                                &agent_identity,
+                                provider,
+                                rollout_path.as_ref(),
+                            )
+                        });
                     if identity_probe.identity_ok == Some(false) {
                         let issue = format!("session_identity_mismatch:{agent_id}");
                         issues.push(json!(issue));
@@ -304,7 +325,8 @@ pub(crate) fn diagnose_runtime_for_workspace(
     selected_team_key: Option<&str>,
     coordinator_health: &crate::coordinator::HealthReport,
 ) -> (Value, Value) {
-    let (mut issues, mut repairs) = diagnose_runtime(state, backend);
+    let (mut issues, mut repairs) =
+        diagnose_runtime_with_workspace(Some(workspace), state, backend);
     append_live_leader_workspace_mismatch_issue(
         workspace,
         state,

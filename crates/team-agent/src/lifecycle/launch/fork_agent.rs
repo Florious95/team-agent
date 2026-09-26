@@ -1,9 +1,9 @@
 //! ---
-//! purpose: 在当前席位窗口注入官方斜杠命令完成就地分身，不读 provider session 落盘
+//! purpose: Pi 以完整会话快照创建独立席位；已验证的其他 provider 保持窗口内分身
 //! contract:
 //!   provides:
 //!     - name: fork_agent_with_transport
-//!       what: grok/claude subscription 注入纯净斜杠命令；屏幕出现该 provider 的实测标记才算成功
+//!       what: Pi 走锁内快照新席位；已验证的其他 provider 保持窗口内斜杠 fork
 //!     - name: in_window_fork
 //!       what: 已验证的 provider+subscription 给出 command+screen_mark；未验证返回 None
 //!   depends:
@@ -12,8 +12,8 @@
 //!     - crate::lifecycle::profile_launch
 //!     - crate::transport::Transport
 //! boundary:
-//!   - 不 spawn 新 pane，不改 TEAM_AGENT_ID / MCP / 席位名
-//!   - 不读 provider 会话落盘文件取会话身份
+//!   - 仅 Pi 的锁内专用管道读取 exact backing、注册并启动新席位
+//!   - 非 Pi 不 spawn 新 pane，不改 TEAM_AGENT_ID / MCP / 席位名
 //!   - 重试只重按回车，不重粘 /fork
 //!   - 不把 pane 锁超时从 200ms 调大
 //!   - 未验证的 provider 不猜斜杠命令
@@ -99,7 +99,7 @@ pub fn fork_agent_with_transport(
     workspace: &Path,
     source_agent_id: &AgentId,
     as_agent_id: &AgentId,
-    _label: Option<&str>,
+    label: Option<&str>,
     _open_display: bool,
     team: Option<&str>,
     transport: &dyn Transport,
@@ -142,6 +142,15 @@ pub fn fork_agent_with_transport(
         .unwrap_or("subscription");
     let provider = parse_provider(provider_raw).unwrap_or(Provider::Grok);
     let auth = parse_auth_mode(auth_raw).unwrap_or(AuthMode::Subscription);
+    if provider == Provider::Pi {
+        return crate::lifecycle::restart::fork_pi_new_seat_locked(
+            &selected,
+            source_agent_id,
+            as_agent_id,
+            label,
+            transport,
+        );
+    }
     let Some(spec) = in_window_fork(provider, auth) else {
         return Err(refuse_missing_in_window_fork(provider, provider_raw));
     };
@@ -201,6 +210,7 @@ pub fn fork_agent_with_transport(
         },
         session_id: None,
         backing_state: ForkBackingState::Verified,
+        pi_fork: None,
     })
 }
 

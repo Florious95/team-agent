@@ -122,11 +122,12 @@ Run `claim-leader` only from the **leader** pane. From a worker pane it refuses 
 
 ## Provider Capability Matrix
 
-| Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
+| Provider | Resume | Turn-state detection | Per-worker model override | Team Agent fork |
 |---|---|---|---|---|
 | `claude` / `claude_code` | yes (`--resume <id>`, transcript-verified) | yes (JSONL stream) | yes (role `model` overrides `provider_models`) | yes (snapshot copy + only `--resume <snapshot-id>`) |
 | `codex` | yes (`codex resume <id>`, session-store-verified) | yes (turn JSONL) | yes (role `model`) | yes (`codex fork`) |
 | `copilot` | yes (`copilot --resume <id|name>`, sqlite `sessions` row) | not yet (phase 1: `provider.classify.unsupported` event) | yes (role `model`) | yes (isolated `COPILOT_HOME` store fork) |
+| `pi` | yes (exact `--session <backing-path>`, not selector/continue) | Unknown (no JSONL turn-state reader) | yes (role `model` / `effort`, catalog-validated) | yes (full snapshot into separate seat/session; exact backing resume) |
 | `gemini_cli` | no | no | yes | no |
 | `fake` (testing only) | no | no | n/a | no |
 
@@ -134,6 +135,7 @@ Notes:
 - Per-worker model override means a role-doc `model:` value wins over `TEAM.md` `provider_models.<provider>` at **compile** time; subscription defaults still fill blanks when there is no profile-deferred null.
 - Copilot fork copies the source session into an isolated `COPILOT_HOME` and rekeys its SQLite session references atomically. Missing or incomplete backing fails closed; it never falls back to a fresh spawn.
 - Copilot phase-1 idle/turn detection is intentionally Unknown; tick emits a single explicit `provider.classify.unsupported` event per state change (P4 dedup), never a silent default.
+- `pi` `fork-agent SOURCE --as TARGET` requires a captured Pi subscription source. It copies the complete JSONL history into a distinct target session with a new id and exact `--session <path>` resume; it does not alter the source file or fall back to a fresh session.
 
 ## Provider Prep
 
@@ -567,7 +569,7 @@ Semantic distinction:
 - `team-agent add-agent <agent> --role-file <file>` — add a **new** worker not yet in team state.
 - `team-agent add-agent <agent> --role-file <file> --force` — force-recreate that worker from the role file.
 - `team-agent clone-agent <source> --as <new>` — reread the source worker's latest role file and start a fresh provider seat. It never copies conversation context. Success is initially honest `capture_state: pending_first_turn` with `session_id`, `new_session_id`, and `backing_path` all null; after the first turn, canonical capture changes the state to `captured` and fills the backing tuple.
-- `team-agent fork-agent <source> --as <new>` — reread the same latest role file and create a distinct, verified provider session that forks the source context. If the provider backing cannot be verified, the command fails and rolls back instead of silently cloning fresh.
+- `team-agent fork-agent <source> --as <new>` — reread the source's latest role file and create a distinct provider session carrying its context. Pi subscription forks a verified full snapshot into a separate target seat/backing and reports source id, target id, and backing path; supported non-Pi providers keep their existing fork behavior. Unverified backing fails closed instead of silently cloning fresh.
 - `team-agent start-agent <agent>` — (re)launch a worker that **already exists** in team state but whose window is missing.
 - `team-agent reset-agent <agent> --discard-session` — keep the same seat and deliberately start it with fresh context.
 - `team-agent restart .` — resume a fully **stopped** team from stored worker sessions.

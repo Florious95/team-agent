@@ -59,6 +59,7 @@ pub fn clone_agent(
         source_agent_id,
         as_agent_id,
         label,
+        None,
     )?;
     // The materialized role carries the source role's DECLARED tools verbatim —
     // a clone must preserve the source seat's full tools set (add-agent does
