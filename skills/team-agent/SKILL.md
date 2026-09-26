@@ -14,7 +14,7 @@ team-agent doctor --help
 ```
 **Launch** from a tmux-addressable pane: `team-agent claude` or `team-agent codex`, then `team-agent quick-start .team/current`. Do not start a real team from a naked terminal; workers use independent background windows on the workspace-scoped tmux server.
 **Operate**
-- Dispatch: `team-agent send TO MESSAGE` (example: `team-agent send reviewer MESSAGE`; `--watch-result` is deprecated). After success, do not poll with `sleep` / `status` / `inbox` / `collect`. TO may be an in-team short name or fully qualified `<workspace>::<team>/<agent>`; use qualified across workspaces.
+- Dispatch: `team-agent send TO MESSAGE` (positional TO; `--watch-result` is deprecated). After success, do not poll with `sleep` / `status` / `inbox` / `collect`. TO has two co-equal logical forms: an in-team short name (`team-agent send reviewer "..."`) and a fully qualified `<workspace>::<team>/<agent>`. Use the qualified form across workspaces.
 - Inspect: `team-agent status` / `status --json`; `ok: true` plus `ready: false` is not a crash.
 - Lifecycle: `restart .` resumes a stopped team; `add-agent NAME --role-file FILE` adds or `--force` recreates one worker; `shutdown --workspace .` stops. Do not shutdown the team to add a worker.
 - Roles: every `agents/*.md` must declare boolean `dangerously_skip_permissions`. Never rewrite user-supplied model ids or read `.env` files.
