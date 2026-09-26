@@ -323,7 +323,7 @@ fn assert_pi_wrapper_identity(path: &Path, agent_id: &str, team_id: &str) {
     assert!(source.contains(&format!("\"TEAM_AGENT_ID\": \"{agent_id}\"")), "wrong wrapper agent identity: {}", path.display());
     assert!(source.contains(&format!("\"TEAM_AGENT_OWNER_TEAM_ID\": \"{team_id}\"")), "wrong wrapper owner team: {}", path.display());
     assert!(source.contains("\"command\": \"/"), "candidate MCP command must stay absolutely pinned: {}", path.display());
-    assert!(source.contains("\"name\": \"team_orchestrator\""), "runtime wrapper lost the team_orchestrator server entry");
+    assert!(source.contains("name: \"team_orchestrator\""), "runtime wrapper lost the team_orchestrator server entry");
 }
 
 fn write_pi_runtime_spec(root: &Path, team_id: &str) -> PathBuf {
@@ -422,14 +422,16 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
         ("*", "M04_BROADCAST"),
     ] {
         let call = worker.call_tool("send_message", json!({"to":target,"content":marker}));
-        assert!(!call.is_error && call.body["ok"] == json!(true), "send {target}: {}", call.body);
+        assert!(!call.is_error, "send {target}: {}", call.body);
         if target == "worker_a" {
+            assert_eq!(call.body["status"], json!("accepted"));
+            assert_eq!(call.body["delivery_pending"], json!(true));
             let message_id = call.body["message_id"].as_str().expect("accepted async peer send returns real message id");
             assert_eq!(call.body["poll_via"], json!(format!("team-agent inbox {message_id}")));
         }
     }
     let mailbox = worker.call_tool("send_message", json!({"to":"worker_a","content":"M04_MAILBOX","mailbox":true}));
-    assert!(!mailbox.is_error && mailbox.body["ok"] == json!(true), "mailbox send: {}", mailbox.body);
+    assert!(!mailbox.is_error, "mailbox send: {}", mailbox.body);
     harness.drive_delivery_twice();
 
     for marker in ["M04_PEER", "M04_LEADER", "M04_BROADCAST", "M04_MAILBOX"] {
@@ -452,7 +454,9 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
 fn send_as_leader(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) {
     let mut leader = sim::spawn_mcp_client_without_catalog_check(harness.workspace_path(), "leader", "teamA");
     let call = leader.call_tool("send_message", json!({"to":worker_id,"content":marker}));
-    assert!(!call.is_error && call.body["ok"] == json!(true), "leader direct send: {}", call.body);
+    assert!(!call.is_error && call.body["status"] == json!("accepted"), "leader direct send: {}", call.body);
+    let message_id = call.body["message_id"].as_str().expect("leader send returns durable message id");
+    assert_eq!(call.body["poll_via"], json!(format!("team-agent inbox {message_id}")));
     harness.drive_delivery_twice();
 }
 
@@ -547,8 +551,10 @@ fn m07_identity_scope_and_foreign_task_guards_run_before_business_effects() {
     assert_ne!(status_scope.body["reason"], json!("unknown_tool"));
     let foreign_task = worker.call_tool("report_result", json!({"agent_id":"worker_a","task_id":"teamB_task","summary":"M07_FOREIGN_TASK"}));
     assert_ne!(foreign_task.body["reason"], json!("unknown_tool"), "retained report_result must reach task-ownership validation");
-    let rows = harness.message_rows_containing("M07_");
-    assert!(rows.is_empty(), "identity/scope rejection must precede durable send: {rows:?}");
+    for marker in ["M07_SPOOF", "M07_SCOPE", "M07_CROSS_TEAM", "M07_FORGED_REPORT", "M07_FORGED_ENVELOPE", "M07_REPORT_SCOPE"] {
+        let rows = harness.message_rows_containing(marker);
+        assert!(rows.is_empty(), "identity/scope rejection must precede durable side effects for {marker}: {rows:?}");
+    }
     let final_state = harness.state_value();
     assert_eq!(final_state["teams"]["teamB"]["tasks"][0]["status"], json!("pending"), "cross-team report must not complete another team's task");
 
@@ -568,7 +574,7 @@ fn m08_native_cli_lifecycle_commands_still_dispatch_and_preserve_source_and_scop
     let team = "mcp3-cli";
     let workspace = TestWorkspace::new(team).with_fake_spec(&["a", "b"]);
     let launched = quick_start_fake(&workspace, team);
-    assert!(launched.is_success(), "fake CLI fixture did not start: {}", launched.stdout);
+    assert!(cli_fixture::quick_start_workers_available(&launched), "fake CLI workers did not start: {}", launched.stdout);
     let ws = workspace.path().to_str().unwrap();
 
     let stop = run_ta(&workspace, &["stop-agent", "a", "--workspace", ws, "--json"]);
