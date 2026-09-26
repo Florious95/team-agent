@@ -232,6 +232,7 @@ pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateEr
         &[],
         None,
         None,
+        false,
     )
 }
 
@@ -251,6 +252,7 @@ pub(crate) fn save_runtime_state_with_receiver_authority(
         &[],
         Some(receiver_team_key),
         exact_owner_seed_to_clear,
+        false,
     )
 }
 
@@ -289,6 +291,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
         agent_ids,
         None,
         None,
+        false,
     )
 }
 
@@ -309,6 +312,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority_and_capture_b
         topology_agent_ids,
         None,
         None,
+        false,
     )
 }
 
@@ -317,7 +321,7 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
     state: &Value,
     deleted_agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    persist_runtime_state_with_merge_options_and_expected(
+    save_runtime_state_with_merge_options(
         workspace,
         state,
         deleted_agent_ids,
@@ -325,9 +329,6 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
         &[],
         None,
         &[],
-        None,
-        None,
-        None,
         None,
         None,
         true,
@@ -350,6 +351,7 @@ pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
         &[],
         None,
         None,
+        false,
     )
 }
 
@@ -369,6 +371,7 @@ pub(crate) fn save_runtime_state_with_team_tombstone_lifecycle_topology_authorit
         agent_ids,
         None,
         None,
+        false,
     )
 }
 
@@ -382,6 +385,7 @@ fn save_runtime_state_with_merge_options(
     topology_update_agent_ids: &[&str],
     receiver_update_team_key: Option<&str>,
     exact_owner_seed_to_clear: Option<&Value>,
+    preserve_latest_fork_targets: bool,
 ) -> Result<(), StateError> {
     persist_runtime_state_with_merge_options_and_expected(
         workspace,
@@ -396,7 +400,7 @@ fn save_runtime_state_with_merge_options(
         None,
         None,
         None,
-        false,
+        preserve_latest_fork_targets,
     )
 }
 
