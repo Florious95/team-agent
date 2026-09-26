@@ -317,7 +317,7 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
     state: &Value,
     deleted_agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(
+    persist_runtime_state_with_merge_options_and_expected(
         workspace,
         state,
         deleted_agent_ids,
@@ -327,6 +327,10 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
         &[],
         None,
         None,
+        None,
+        None,
+        None,
+        true,
     )
 }
 
@@ -393,29 +397,6 @@ fn save_runtime_state_with_merge_options(
         None,
         None,
         false,
-    )
-}
-
-/// Preserve latest fork target rows when committing an ordinary team-scoped observation.
-pub(crate) fn save_runtime_state_preserving_fork_target_rows(
-    workspace: &Path,
-    state: &Value,
-    deleted_agent_ids: &[&str],
-) -> Result<(), StateError> {
-    persist_runtime_state_with_merge_options_and_expected(
-        workspace,
-        state,
-        deleted_agent_ids,
-        None,
-        &[],
-        None,
-        &[],
-        None,
-        None,
-        None,
-        None,
-        None,
-        true,
     )
 }
 

@@ -304,6 +304,7 @@ impl<'a> StateRepository<'a> {
                     apply_observation_delta(&before[field], &checked[field], &mut selected[field]);
                 }
             }
+            sync_team_observation_delta(before, &mut selected, team_key);
             Ok(super::projection::merge_committed_team(latest, &selected, team_key))
         })?;
         Ok(())
@@ -403,7 +404,7 @@ fn sync_team_observation_delta(before: &Value, observed: &mut Value, team_key: &
             continue;
         };
         if field == "coordinator" && !team_entry.contains_key(field) {
-            continue;
+            team_entry.insert(field.to_string(), serde_json::json!({}));
         }
         let slot = team_entry
             .entry(field.to_string())
