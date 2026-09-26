@@ -98,7 +98,8 @@ fn test_fork_transport(
         .get("session_name")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(crate::transport::SessionName::new)?;
+        .map(crate::transport::SessionName::new)
+        .unwrap_or_else(|| crate::transport::SessionName::new("offline"));
     let source = state
         .get("agents")
         .and_then(|agents| agents.get(source_agent_id.as_str()));
