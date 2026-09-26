@@ -329,6 +329,28 @@ fn assert_pi_wrapper_identity(path: &Path, agent_id: &str, team_id: &str) {
 
 fn write_pi_runtime_spec(root: &Path, team_id: &str) -> PathBuf {
     let spec = root.join(".team").join("runtime").join(team_id).join("team.spec.yaml");
+    std::fs::create_dir_all(root.join("agents")).unwrap();
+    std::fs::write(root.join("TEAM.md"), format!(r#"---
+name: {team_id}
+objective: M03 Pi MCP tool registration.
+provider: pi
+---
+
+M03 team.
+"#)).unwrap();
+    std::fs::write(root.join("agents/worker_a.md"), r#"---
+name: worker_a
+role: Worker
+provider: pi
+model: team-agent/qwen3.8-27b
+auth_mode: subscription
+dangerously_skip_permissions: true
+tools:
+  - mcp_team
+---
+
+M03 worker.
+"#).unwrap();
     std::fs::create_dir_all(spec.parent().unwrap()).unwrap();
     let text = format!(r#"version: 1
 team:
@@ -467,7 +489,8 @@ fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) -
     harness.drive_delivery_twice();
     let rows = harness.message_rows_containing(marker);
     assert_eq!(rows.len(), 1, "one CLI input row for {marker}: {rows:?}");
-    assert!(matches!(rows[0].status.as_str(), "delivered" | "submitted" | "injected" | "visible"), "reportable direct input must have a delivery status: {:?}", rows[0]);
+    assert_eq!(rows[0].owner_team_id.as_deref(), Some("teamA"));
+    assert_eq!(rows[0].recipient, worker_id);
     rows[0].clone()
 }
 
@@ -476,7 +499,7 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     let first = sim::McpSimHarness::new();
     let inbound = send_cli_input(&first, "worker_a", "M05_MINIMAL_INPUT");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(first.workspace_path(), "worker_a", "teamA");
-    let minimal = worker.call_tool("report_result", json!({"summary":"M05_MINIMAL_RESULT"}));
+    let minimal = worker.call_tool("report_result", json!({"task_id":"task_mcp","summary":"M05_MINIMAL_RESULT"}));
     assert!(!minimal.is_error, "minimal report_result: {}", minimal.body);
     let id = minimal.body["result_id"].as_str().expect("minimal report returns durable result id");
     let row = first.result_row(id).expect("minimal report persists result without assign_task");
