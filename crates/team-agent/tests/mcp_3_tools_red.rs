@@ -9,6 +9,7 @@ mod cli_fixture;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
@@ -451,21 +452,29 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
     assert_ne!(mailbox_row.status, "delivered", "mailbox message must not be injected: {mailbox_row:?}");
 }
 
-fn send_as_leader(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) {
-    let mut leader = sim::spawn_mcp_client_without_catalog_check(harness.workspace_path(), "leader", "teamA");
-    let call = leader.call_tool("send_message", json!({"to":worker_id,"content":marker}));
-    assert!(!call.is_error && call.body["status"] == json!("accepted"), "leader direct send: {}", call.body);
-    let message_id = call.body["message_id"].as_str().expect("leader send returns durable message id");
-    assert_eq!(call.body["poll_via"], json!(format!("team-agent inbox {message_id}")));
+fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) -> sim::MessageRow {
+    let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
+        .args(["send", worker_id, marker, "--workspace"])
+        .arg(harness.workspace_path())
+        .args(["--team", "teamA", "--json"])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .expect("run existing CLI send to create attributable worker input");
+    assert!(output.status.success(), "CLI send failed: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let response: Value = serde_json::from_slice(&output.stdout).expect("CLI send returns JSON");
+    assert_eq!(response["ok"], json!(true), "CLI send must persist/deliver input: {response}");
     harness.drive_delivery_twice();
+    let rows = harness.message_rows_containing(marker);
+    assert_eq!(rows.len(), 1, "one CLI input row for {marker}: {rows:?}");
+    assert!(matches!(rows[0].status.as_str(), "delivered" | "submitted" | "injected" | "visible"), "reportable direct input must have a delivery status: {:?}", rows[0]);
+    rows[0].clone()
 }
 
 #[test]
 fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_without_assignment() {
     let first = sim::McpSimHarness::new();
-    send_as_leader(&first, "worker_a", "M05_MINIMAL_INPUT");
-    let inbound = first.message_rows_containing("M05_MINIMAL_INPUT");
-    assert_eq!(inbound.len(), 1, "direct input must be durably attributable");
+    let inbound = send_cli_input(&first, "worker_a", "M05_MINIMAL_INPUT");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(first.workspace_path(), "worker_a", "teamA");
     let minimal = worker.call_tool("report_result", json!({"summary":"M05_MINIMAL_RESULT"}));
     assert!(!minimal.is_error, "minimal report_result: {}", minimal.body);
@@ -473,13 +482,12 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     let row = first.result_row(id).expect("minimal report persists result without assign_task");
     assert_eq!(row.owner_team_id.as_deref(), Some("teamA"));
     assert_eq!(row.agent_id, "worker_a");
-    assert_eq!(row.task_id, inbound[0].message_id, "minimal result must be tied to the current direct-message input");
+    assert_eq!(row.task_id, inbound.message_id, "minimal result must be tied to the current direct-message input");
     assert!(row.envelope.contains("M05_MINIMAL_RESULT"));
     assert!(first.pane_text("leader").contains("M05_MINIMAL_RESULT"), "result delivery must reach attached leader");
 
     let second = sim::McpSimHarness::new();
-    send_as_leader(&second, "worker_a", "M05_ENVELOPE_INPUT");
-    assert_eq!(second.message_rows_containing("M05_ENVELOPE_INPUT").len(), 1, "full-envelope fixture has its own direct input");
+    let _envelope_input = send_cli_input(&second, "worker_a", "M05_ENVELOPE_INPUT");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(second.workspace_path(), "worker_a", "teamA");
     let envelope = json!({
         "schema_version":"result_envelope_v1", "task_id":"task_mcp", "agent_id":"worker_a",
