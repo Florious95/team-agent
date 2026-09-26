@@ -78,7 +78,7 @@ fn rpc_tools_list(tools: &TeamOrchestratorTools, id: u64) -> Value {
     .unwrap();
     let frame = serde_json::to_value(response).unwrap();
     assert_eq!(frame["id"], json!(id));
-    frame["result"]["tools"].clone()
+    frame["result"]["tools"].as_array().unwrap().clone()
 }
 
 fn contract_names(tools: &[Value]) -> BTreeSet<String> {
@@ -375,7 +375,7 @@ runtime:
   dangerously_skip_permissions: false
 tasks: []
 "#, root.display(), root.display());
-    std::fs::write(&spec, text).unwrap();
+    std::fs::write(&spec, &text).unwrap();
     std::fs::write(root.join("team.spec.yaml"), text).unwrap();
     spec
 }
