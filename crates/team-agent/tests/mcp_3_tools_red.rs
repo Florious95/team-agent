@@ -69,7 +69,7 @@ fn tools_at(path: &Path, agent: &str, team: &str) -> TeamOrchestratorTools {
     )
 }
 
-fn rpc_tools_list(tools: &TeamOrchestratorTools, id: u64) -> Value {
+fn rpc_tools_list(tools: &TeamOrchestratorTools, id: u64) -> Vec<Value> {
     let response = handle_mcp(
         tools,
         &json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":{}}),
