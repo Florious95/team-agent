@@ -54,13 +54,7 @@ pub fn fork_agent(
     let transport: Box<dyn crate::transport::Transport> = if is_pi {
         #[cfg(test)]
         {
-            test_fork_transport(&selected, source_agent_id).unwrap_or(Box::new(
-                crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
-                    &selected.run_workspace,
-                    &selected.state,
-                )?
-                .backend,
-            ))
+            test_fork_transport(&selected, source_agent_id)
         }
         #[cfg(not(test))]
         {
@@ -98,14 +92,14 @@ pub fn fork_agent(
 fn test_fork_transport(
     selected: &crate::state::selector::SelectedTeam,
     source_agent_id: &AgentId,
-) -> Option<Box<dyn crate::transport::Transport>> {
-    let marker = std::env::var_os("TEST_TMUX_TRANSPORT")?;
+) -> Box<dyn crate::transport::Transport> {
     let state = &selected.state;
     let session = state
         .get("session_name")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(crate::transport::SessionName::new)?;
+        .map(crate::transport::SessionName::new)
+        .unwrap_or_else(|| crate::transport::SessionName::new("offline"));
     let source = state
         .get("agents")
         .and_then(|agents| agents.get(source_agent_id.as_str()));
@@ -140,11 +134,11 @@ fn test_fork_transport(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| marker.to_string_lossy().into_owned());
-    Some(Box::new(
+        .unwrap_or_else(|| "offline".to_string());
+    Box::new(
         crate::transport::test_support::OfflineTransport::new()
             .with_session_present(true)
             .with_targets(targets)
             .with_tmux_endpoint(endpoint),
-    ))
+    )
 }
