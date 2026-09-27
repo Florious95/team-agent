@@ -432,8 +432,11 @@ fn m03_initial_resume_and_pi_leader_materialization_all_consume_three_tools() {
     let leader = include_tools_from_wrapper(&leader_path);
     assert_pi_wrapper_identity(&leader_path, "leader", "teamA");
     let expected = BTreeSet::from(RETAINED.map(str::to_string));
+    assert!(
+        initial.len() == 3 && resumed.len() == 3 && leader.len() == 3,
+        "M03 all consumers must have exactly three includeTools: initial={initial:?}; restart/resume={resumed:?}; leader={leader:?}"
+    );
     for (consumer, tools) in [("initial worker", initial), ("restart/resume worker", resumed), ("Pi leader", leader)] {
-        assert_eq!(tools.len(), 3, "M03 {consumer} includeTools: {tools:?}");
         assert_eq!(tools.into_iter().collect::<BTreeSet<_>>(), expected, "M03 {consumer} exact tools");
     }
 }
