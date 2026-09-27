@@ -1046,25 +1046,6 @@ fn leader_result_presentation(task_id: &str) -> super::presentation::Presentatio
     )
 }
 
-const LEADER_NOTIFICATION_LIMIT_BYTES: usize = 160;
-
-fn truncate_utf8(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let suffix = "...";
-    let budget = max_bytes.saturating_sub(suffix.len());
-    let mut end = 0;
-    for (index, ch) in text.char_indices() {
-        let next = index + ch.len_utf8();
-        if next > budget {
-            break;
-        }
-        end = next;
-    }
-    format!("{}{}", &text[..end], suffix)
-}
-
 fn format_report_result_leader_summary(
     result_id: &str,
     task_id: &str,
@@ -1075,19 +1056,8 @@ fn format_report_result_leader_summary(
     let summary = envelope
         .get("summary")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .lines()
-        .next()
-        .unwrap_or("")
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect::<String>();
-    truncate_utf8(
-        &format!(
-            "Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}"
-        ),
-        LEADER_NOTIFICATION_LIMIT_BYTES,
-    )
+        .unwrap_or("");
+    format!("Task {task_id} reported {status} from {agent_id}: {summary}; Result id: {result_id}")
 }
 
 fn auto_finalize_result(
@@ -1441,18 +1411,17 @@ mod tests {
     }
 
     #[test]
-    fn leader_result_summary_is_single_line_and_byte_bounded() {
-        let envelope = serde_json::json!({"summary": "中".repeat(4096)});
+    fn leader_result_summary_preserves_long_multiline_text_verbatim() {
+        let source = format!("首行\nbranch: fix/keyboard-receive-and-compose\ncommit: {}", "a1b2c3d4e5f67890".repeat(24));
+        let envelope = serde_json::json!({"summary": source});
         let summary = super::format_report_result_leader_summary(
-            "res-1",
-            "task-1",
-            "worker",
-            "success",
-            &envelope,
+            "res-1", "task-1", "worker", "success", &envelope,
         );
-        assert!(summary.len() <= 160);
-        assert!(!summary.contains('\n'));
-        assert!(summary.ends_with("..."));
+        let source = envelope["summary"].as_str().unwrap();
+        assert_eq!(summary, format!("Task task-1 reported success from worker: {source}; Result id: res-1"));
+        assert!(summary.len() > 160);
+        assert!(summary.contains("\nbranch: fix/keyboard-receive-and-compose\ncommit: "));
+        assert!(summary.contains("a1b2c3d4e5f67890".repeat(24).as_str()));
     }
 
     #[test]
