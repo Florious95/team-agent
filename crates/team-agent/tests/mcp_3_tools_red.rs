@@ -511,7 +511,8 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     assert_eq!(inbound.sender, "leader", "the direct input must retain its trusted sender");
     assert_eq!(row.task_id, "task_mcp", "minimal result must remain associated with the existing task");
     assert!(row.envelope.contains("M05_MINIMAL_RESULT"));
-    assert!(first.pane_text("leader").contains("M05_MINIMAL_RESULT"), "result delivery must reach attached leader");
+    first.drive_delivery_twice();
+    assert!(first.pane_text("leader").contains("M05_MINIMAL_RESULT"), "result delivery must reach attached leader; call={} events={}", minimal.body, first.events_text());
 
     let second = sim::McpSimHarness::new();
     let _envelope_input = send_cli_input(&second, "worker_a", "M05_ENVELOPE_INPUT");
@@ -534,7 +535,8 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     assert_eq!(row.owner_team_id.as_deref(), Some("teamA"));
     assert_eq!(row.agent_id, "worker_a");
     assert_eq!(row.task_id, "task_mcp");
-    assert!(second.pane_text("leader").contains("M05_FULL_ENVELOPE"));
+    second.drive_delivery_twice();
+    assert!(second.pane_text("leader").contains("M05_FULL_ENVELOPE"), "full report delivery must reach attached leader: {}", full.body);
 }
 
 #[test]
