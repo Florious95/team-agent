@@ -194,9 +194,12 @@ exit "${FAKE_EXIT_CODE:-0}"
 
         fn argv(&self, executable: &str) -> Vec<String> {
             let bytes = fs::read(self.trace.join(format!("{executable}.argv"))).unwrap_or_default();
-            bytes
-                .split(|byte| *byte == 0)
-                .filter(|part| !part.is_empty())
+            let mut parts = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+            if parts.last().is_some_and(|part| part.is_empty()) {
+                parts.pop();
+            }
+            parts
+                .into_iter()
                 .map(|part| String::from_utf8_lossy(part).into_owned())
                 .collect()
         }
@@ -579,7 +582,7 @@ exit "${FAKE_EXIT_CODE:-0}"
             codex_ids(&broad),
             VISIBLE_CODEX_ROWS
                 .iter()
-                .filter(|(id, _)| id.contains("gpt-5.6"))
+                .filter(|(id, _)| id.to_lowercase().contains("gpt-5.6"))
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>()
         );
