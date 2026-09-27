@@ -477,6 +477,20 @@ fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loo
     assert_ne!(mailbox_row.status, "delivered", "mailbox message must not be injected: {mailbox_row:?}");
 }
 
+fn assert_report_delivery_state(harness: &sim::McpSimHarness, body: &Value, marker: &str) {
+    let status = body["notification_status"].as_str().expect("report_result exposes notification status");
+    assert!(matches!(status, "delivered" | "queued"), "report notification must report a live delivery or truthful queue state: {body}");
+    assert!(body["notification_message_id"].as_str().is_some(), "leader handoff must retain its message id: {body}");
+    match status {
+        "delivered" => {
+            assert_eq!(body["leader_notified"], json!(true));
+            assert!(harness.pane_text("leader").contains(marker), "delivered result notification missing on leader pane");
+        }
+        "queued" => assert_eq!(body["leader_notified"], json!(false), "queued status must not claim leader delivery"),
+        _ => unreachable!(),
+    }
+}
+
 fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) -> sim::MessageRow {
     let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .args(["send", worker_id, marker, "--workspace"])
@@ -512,7 +526,7 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     assert_eq!(row.task_id, "task_mcp", "minimal result must remain associated with the existing task");
     assert!(row.envelope.contains("M05_MINIMAL_RESULT"));
     first.drive_delivery_twice();
-    assert!(first.pane_text("leader").contains("M05_MINIMAL_RESULT"), "result delivery must reach attached leader; call={} events={}", minimal.body, first.events_text());
+    assert_report_delivery_state(&first, &minimal.body, "M05_MINIMAL_RESULT");
 
     let second = sim::McpSimHarness::new();
     let _envelope_input = send_cli_input(&second, "worker_a", "M05_ENVELOPE_INPUT");
@@ -536,7 +550,7 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
     assert_eq!(row.agent_id, "worker_a");
     assert_eq!(row.task_id, "task_mcp");
     second.drive_delivery_twice();
-    assert!(second.pane_text("leader").contains("M05_FULL_ENVELOPE"), "full report delivery must reach attached leader: {}", full.body);
+    assert_report_delivery_state(&second, &full.body, "M05_FULL_ENVELOPE");
 }
 
 #[test]
