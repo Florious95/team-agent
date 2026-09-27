@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 fn report_result_notification_preserves_long_multiline_summary_verbatim() {
     let _hermetic = HermeticTestEnv::enter("report-summary-lossless");
     let harness = sim::McpSimHarness::new();
+    harness.bind_leader_receiver_to_team("teamA");
     let long_commit = "0123456789abcdef".repeat(16);
     let summary = [
         format!("Commit: {long_commit}"),
