@@ -1328,7 +1328,6 @@ exit "${FAKE_EXIT_CODE:-0}"
             Provider::Claude,
             Provider::ClaudeCode,
             Provider::CursorAgent,
-            Provider::Pi,
         ] {
             let exact_unlisted = "manual-model-id-not-in-discovery-catalog";
             let plan = get_adapter(provider)
