@@ -71,6 +71,9 @@ exit "${FAKE_EXIT_CODE:-0}"
         ("GPT-5.6-Astra+Case", "Case-preserving Astra"),
     ];
 
+    // HermeticTestEnv-equivalent boundary: each fixture owns a process-unique root; CLI
+    // children receive env_clear plus fixture-owned HOME/PATH/TMPDIR/workspace, providers
+    // are local stubs, and Drop removes only this exact root (no tmux/coordinator access).
     struct Fixture {
         root: PathBuf,
         bin: PathBuf,
