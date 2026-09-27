@@ -171,7 +171,7 @@ fn send_message_worker_recipient_returns_accepted_with_poll_hint() {
 }
 
 #[test]
-fn ordinary_send_assign_shape_has_no_recovery_marker() {
+fn ordinary_send_shape_has_no_recovery_marker() {
     let ws = seed_current_worker_state("ordinary-no-recovery");
     let tools = TeamOrchestratorTools::with_identity(
         &ws,
@@ -198,46 +198,6 @@ fn ordinary_send_assign_shape_has_no_recovery_marker() {
         "ordinary send must not carry acceptance marker: {sent}"
     );
 
-    let assigned = tools
-        .assign_task(
-            &json!({"id": "ordinary-task", "assignee": "worker-1", "title": "ordinary"}),
-            None,
-        )
-        .expect("ordinary assign ok");
-    let assigned_value = serde_json::to_value(&assigned).expect("serialize ordinary assign");
-    assert!(
-        !assigned_value.as_object().unwrap().contains_key("recovery"),
-        "ordinary assign must not carry recovery marker: {assigned_value}"
-    );
-    assert!(
-        assigned_value.get("acceptance_marker").is_none(),
-        "ordinary assign must not carry acceptance marker: {assigned_value}"
-    );
-
-    let recovery_false_assigned = tools
-        .assign_task(
-            &json!({
-                "id": "ordinary-recovery-false-task",
-                "assignee": "worker-1",
-                "title": "ordinary recovery false",
-                "recovery": false,
-            }),
-            None,
-        )
-        .expect("recovery=false assign ok");
-    let recovery_false_value =
-        serde_json::to_value(&recovery_false_assigned).expect("serialize recovery=false assign");
-    assert!(
-        !recovery_false_value
-            .as_object()
-            .unwrap()
-            .contains_key("recovery"),
-        "recovery=false assign must not carry recovery marker: {recovery_false_value}"
-    );
-    assert!(
-        recovery_false_value.get("acceptance_marker").is_none(),
-        "recovery=false assign must not carry acceptance marker: {recovery_false_value}"
-    );
 }
 
 #[test]
@@ -254,33 +214,6 @@ fn send_message_without_framework_identity_fails_closed() {
         )
         .expect_err("missing framework identity must fail before persistence");
     assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
-}
-
-#[test]
-fn recovery_assign_shape_has_structured_marker() {
-    let ws = seed_current_worker_state("recovery-marker");
-    let tools = TeamOrchestratorTools::with_identity(
-        &ws,
-        Some(AgentId::new("leader")),
-        Some(TeamKey::new("current")),
-    );
-
-    let assigned = tools
-        .assign_task(
-            &json!({
-                "id": "recovery-task",
-                "assignee": "worker-1",
-                "title": "recover",
-                "recovery": true,
-            }),
-            None,
-        )
-        .expect("recovery assign ok");
-    assert_eq!(assigned.fields.get("recovery"), Some(&json!(true)));
-    assert_eq!(
-        assigned.fields.get("acceptance_marker"),
-        Some(&json!("recovery"))
-    );
 }
 
 #[test]

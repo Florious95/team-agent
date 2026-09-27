@@ -291,67 +291,6 @@
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // CONTROL-PLANE: request_human creates a requires_ack leader message → needs_human
-    // (tools.py:342-346). sender = explicit > env > "unknown" (never leader).
-    //
-    // Post-#230 N31/N32 funnel (cr-approved I-3): request_human routes through the
-    // shared leader-delivery primitive (`send_to_leader_receiver`) instead of doing a
-    // raw `store.create_message` bypass. Return shape from the caller's perspective is
-    // unchanged: `status="needs_human"` + a populated `message_id`. With no leader
-    // pane bound in this fixture, the primitive's I-4 rebind_required path STILL
-    // persists the message row and returns its `message_id` — audit + rebind replay
-    // both depend on it.
-    // ════════════════════════════════════════════════════════════════════════
-    #[test]
-    fn request_human_returns_needs_human_with_message_id() {
-        let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("request-human"),
-            Some(AgentId::new("worker-3")),
-            Some(TeamKey::new("teamA")),
-        );
-        let ok = tools.request_human("need approval", Some("task-1"), None)
-            .expect("request_human ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(v.get("status"), Some(&json!("needs_human")));
-        assert!(v.get("message_id").and_then(Value::as_str).is_some(),
-            "request_human must return the created leader message_id (persisted for rebind audit even on I-4 rebind_required)");
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // CONTROL-PLANE: update_state appends a note + returns state_file (tools.py:316-325)
-    // ════════════════════════════════════════════════════════════════════════
-    #[test]
-    fn update_state_returns_ok_and_state_file_path() {
-        let ws = seed_state_ws(
-            "update-state",
-            &json!({
-                "active_team_key": "teamA",
-                "team_key": "teamA",
-                "session_name": "teamA",
-                "status": "alive",
-                "teams": {
-                    "teamA": {
-                        "team_key": "teamA",
-                        "session_name": "teamA",
-                        "status": "alive",
-                        "agents": {}
-                    }
-                }
-            }),
-        );
-        let tools = TeamOrchestratorTools::with_identity(
-            &ws,
-            Some(AgentId::new("leader")),
-            Some(TeamKey::new("teamA")),
-        );
-        let ok = tools.update_state("checkpoint note").expect("update_state ok");
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(v.get("ok"), Some(&json!(true)));
-        assert!(v.get("state_file").and_then(Value::as_str).is_some(),
-            "update_state returns the rewritten team_state.md path");
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
     // RpcId / RpcResponse byte-stability — null id echoed, error frame shape.
     // ════════════════════════════════════════════════════════════════════════
     #[test]

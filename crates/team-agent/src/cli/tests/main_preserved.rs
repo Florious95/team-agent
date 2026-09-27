@@ -414,31 +414,6 @@ fn valid_result_envelope() -> serde_json::Value {
         "next_actions": []
     })
 }
-fn seed_collect_state(ws: &std::path::Path) {
-    seed_team_spec(ws);
-    crate::state::persist::save_runtime_state(
-        ws,
-        &json!({
-            "agents": {"fake_impl": {"status": "idle"}},
-            "tasks": [{
-                "id": "task_impl",
-                "title": "Fake implementation",
-                "type": "implementation",
-                "assignee": "fake_impl",
-                "deps": [],
-                "acceptance": ["fake result collected"],
-                "status": "pending",
-                "requires_tools": [],
-                "files": [],
-                "risk": "low"
-            }],
-            "session_name": Value::Null,
-            "active_team_key": Value::Null,
-            "spec_path": ws.join("team.spec.yaml").to_string_lossy()
-        }),
-    )
-    .unwrap();
-}
 fn seed_uncollected_result(ws: &std::path::Path, result_id: &str) {
     let store = crate::message_store::MessageStore::open(ws).unwrap();
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
@@ -449,18 +424,6 @@ fn seed_uncollected_result(ws: &std::path::Path, result_id: &str) {
             rusqlite::params![result_id, valid_result_envelope().to_string()],
         )
         .unwrap();
-}
-fn read_state(ws: &std::path::Path) -> serde_json::Value {
-    serde_json::from_str(
-        &std::fs::read_to_string(crate::state::persist::runtime_state_path(ws)).unwrap(),
-    )
-    .unwrap()
-}
-fn read_events(ws: &std::path::Path) -> Vec<serde_json::Value> {
-    crate::event_log::EventLog::new(ws).tail(50).unwrap()
-}
-fn seeded_team_key(ws: &std::path::Path) -> String {
-    ws.file_name().unwrap().to_string_lossy().to_string()
 }
 fn json_output(result: CmdResult) -> serde_json::Value {
     match result.output {
@@ -588,42 +551,5 @@ fn remove_agent_from_spec_refusal_is_not_success_envelope() {
     assert!(
         state["agents"].get("fake_impl").is_some(),
         "refused remove-agent must not delete the spec-defined agent"
-    );
-}
-#[test]
-fn stuck_cancel_persists_suppression_and_stuck_list_reads_state() {
-    let ws = tmp_workspace();
-    seed_collect_state(&ws);
-    let out = messaging::stuck_cancel(&ws, "fake_impl", None, "leader").unwrap();
-    let team_key = seeded_team_key(&ws);
-    assert_eq!(out["ok"], json!(true));
-    assert_eq!(
-        out["alert_types"],
-        json!(["cross_worker_deadlock", "idle_fallback", "stuck"])
-    );
-    assert!(
-        out["suppressed"]["idle_fallback"]["snapshot"]["assigned_task_ids"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("task_impl"))
-    );
-    let state = read_state(&ws);
-    assert_eq!(
-        state["coordinator"]["suppressed_idle_alerts"][&team_key]["fake_impl"]["idle_fallback"]
-            ["suppressed_by"],
-        json!("leader")
-    );
-    assert!(
-        read_events(&ws)
-            .iter()
-            .any(|e| e["event"] == json!("coordinator.idle_alert_suppressed")
-                && e["agent_id"] == json!("fake_impl")),
-        "stuck_cancel must write coordinator.idle_alert_suppressed"
-    );
-    let listed = messaging::stuck_list(&ws).unwrap();
-    assert_eq!(
-        listed["suppressed_idle_alerts"]["fake_impl"]["stuck"]["suppressed_by"],
-        json!("leader"),
-        "stuck-list must read the persisted state mirror, not return a hard-coded empty list"
     );
 }

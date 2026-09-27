@@ -1,19 +1,9 @@
 #[test]
 fn mcp_tool_wire_names_and_parse_roundtrip() {
     let names = [
-        (McpTool::AssignTask, "assign_task"),
         (McpTool::SendMessage, "send_message"),
         (McpTool::ReportResult, "report_result"),
-        (McpTool::UpdateState, "update_state"),
         (McpTool::GetTeamStatus, "get_team_status"),
-        (McpTool::StopAgent, "stop_agent"),
-        (McpTool::ResetAgent, "reset_agent"),
-        (McpTool::AddAgent, "add_agent"),
-        (McpTool::CloneAgent, "clone_agent"),
-        (McpTool::ForkAgent, "fork_agent"),
-        (McpTool::RequestHuman, "request_human"),
-        (McpTool::StuckList, "stuck_list"),
-        (McpTool::StuckCancel, "stuck_cancel"),
     ];
     for (tool, name) in names {
         assert_eq!(tool.wire_name(), name);
@@ -45,27 +35,13 @@ fn rpc_method_classify() {
 // tools_contract — TOOLS wire list, exact names+order
 // ════════════════════════════════════════════════════════════════════════
 #[test]
-fn tools_contract_has_thirteen_tools_in_order() {
+fn tools_contract_has_three_tools_in_order() {
     let tools = tools_contract();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 3);
     let got: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         got,
-        vec![
-            "assign_task",
-            "send_message",
-            "report_result",
-            "update_state",
-            "get_team_status",
-            "stop_agent",
-            "reset_agent",
-            "add_agent",
-            "clone_agent",
-            "fork_agent",
-            "request_human",
-            "stuck_list",
-            "stuck_cancel",
-        ]
+        vec!["send_message", "report_result", "get_team_status"]
     );
     // each carries description + inputSchema
     for t in &tools {
@@ -89,32 +65,11 @@ fn tools_contract_has_thirteen_tools_in_order() {
             "{internal} is framework-owned, not caller-supplied"
         );
     }
-    let clone = tools
+    let status = tools
         .iter()
-        .find(|tool| tool["name"] == json!("clone_agent"))
+        .find(|tool| tool["name"] == json!("get_team_status"))
         .unwrap();
-    assert_eq!(
-        clone["description"],
-        json!("Clone a worker role into a fresh provider session.")
-    );
-    assert_eq!(clone["inputSchema"]["additionalProperties"], json!(false));
-    assert_eq!(
-        clone["inputSchema"]["required"],
-        json!(["source_agent_id", "as_agent_id"])
-    );
-    assert_eq!(
-        clone["inputSchema"]["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "as_agent_id".to_string(),
-            "label".to_string(),
-            "source_agent_id".to_string(),
-        ])
-    );
+    assert_eq!(status["description"], json!("Return machine-readable team status."));
 }
 
 #[test]

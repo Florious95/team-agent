@@ -105,12 +105,7 @@ fn s3_process_worker() {
             assert_eq!(line.trim(), "commit");
         });
     }
-    let tools = crate::mcp_server::TeamOrchestratorTools::with_identity(
-        &dir, Some(crate::model::ids::AgentId::new("leader")), team.map(crate::model::ids::TeamKey::new),
-    );
     match action.as_str() {
-        "assign" => { tools.assign_task(&payload, Some("bounded contract")).unwrap(); }
-        "note" => { println!("S3 note={:?}", tools.update_state(payload.as_str().unwrap()).unwrap()); }
         "collect" => {
             let output = crate::messaging::results::collect_for_team(&dir, Some(&dir.join("result.json")), false, team).unwrap();
             assert_eq!(output["ok"], true);
@@ -152,10 +147,7 @@ fn s3_tick_preserves_tasks_notes_and_siblings() {
         seed(dir, false);
         let hook: SaveHook = Box::new(|ws, observed| {
             assert_eq!(observed["agents"]["w1"]["worker_state"], "DEAD", "tick must produce a real observation delta");
-            write(ws.as_path(), "assign", Some("T1"), task("new-task"));
-            write(ws.as_path(), "note", Some("T1"), json!("concurrent note"));
             write(ws.as_path(), "collect", Some("T1"), Value::Null);
-            write(ws.as_path(), "note", Some("T2"), json!("sibling note"));
             write(ws.as_path(), "sibling", None, Value::Null);
             let latest = disk(ws.as_path());
             assert_eq!(latest["teams"]["T1"]["agents"]["w1"]["pane_id"], observed["agents"]["w1"]["pane_id"]);
@@ -166,11 +158,11 @@ fn s3_tick_preserves_tasks_notes_and_siblings() {
         assert!(report.ok, "tick must save its observation: {report:?}");
         let state = disk(dir);
         let team = &state["teams"]["T1"];
+        assert_eq!(team["tasks"][0]["id"], "original");
         assert_eq!(team["tasks"][0]["accepted_result_id"], "result-original");
-        assert!(team["tasks"].as_array().unwrap().iter().any(|row| row["id"] == "new-task"));
-        assert_eq!(team["notes"], json!(["original note", "concurrent note"]));
+        assert_eq!(team["notes"], json!(["original note"]));
         assert_eq!(team["agents"]["w1"]["worker_state"], "DEAD");
-        assert_eq!(state["teams"]["T2"]["notes"], json!(["original note", "sibling note"]));
+        assert_eq!(state["teams"]["T2"]["notes"], json!(["original note"]));
         assert_eq!(state["teams"]["T3"]["notes"], json!(["third"]));
         assert_eq!(state["tasks"], team["tasks"]);
         assert_eq!(StateRepository::new(dir).load_team(Some("T1")).unwrap()["tasks"], team["tasks"]);
@@ -179,50 +171,26 @@ fn s3_tick_preserves_tasks_notes_and_siblings() {
 }
 
 #[test]
-fn s3_business_writers_commit_once_on_latest() {
-    isolated("s3_business_writers_commit_once_on_latest", |root| {
-        for (i, (left, right)) in [
-            (("assign", task("left")), ("assign", task("right"))),
-            (("note", json!("same note")), ("note", json!("same note"))),
-            (("note", json!("same note")), ("assign", task("right"))),
-            (("collect", Value::Null), ("assign", task("right"))),
-            (("collect", Value::Null), ("note", json!("same note"))),
-        ].into_iter().enumerate() {
-            let dir = root.join(i.to_string());
-            seed(&dir, false);
-            let waiting = start_writer(&dir, left.0, Some("T1"), left.1, true);
-            write(&dir, right.0, Some("T1"), right.1);
-            finish(waiting, true);
-            let state = disk(&dir);
-            let team = &state["teams"]["T1"];
-            if left.0 == "assign" { assert!(team["tasks"].as_array().unwrap().iter().any(|task| task["id"] == "left")); }
-            if right.0 == "assign" { assert!(team["tasks"].as_array().unwrap().iter().any(|task| task["id"] == "right")); }
-            if left.0 == "collect" { assert_eq!(team["tasks"][0]["accepted_result_id"], "result-original"); }
-            let notes = usize::from(left.0 == "note") + usize::from(right.0 == "note");
-            assert_eq!(team["notes"].as_array().unwrap().len(), 1 + notes);
-            if left.0 == "note" && right.0 == "assign" {
-                let markdown = std::fs::read_to_string(dir.join(".team/runtime/T1/team_state.md")).unwrap();
-                assert!(markdown.contains("right"), "note must render the committed task view: {markdown}");
-            }
-            if left.0 == "collect" {
-                write(&dir, "assign", Some("T1"), json!({"id": "original", "assignee": "w1", "title": "edited"}));
-                assert_eq!(disk(&dir)["teams"]["T1"]["tasks"][0]["accepted_result_id"], "result-original");
-            }
-            println!("S3 pair {i} canonical={team}");
-        }
+fn s3_result_collection_commit_preserves_concurrent_sibling() {
+    isolated("s3_result_collection_commit_preserves_concurrent_sibling", |dir| {
+        seed(dir, false);
+        let waiting = start_writer(&dir, "collect", Some("T1"), Value::Null, true);
+        write(&dir, "sibling", None, Value::Null);
+        finish(waiting, true);
+        let state = disk(&dir);
+        assert_eq!(state["teams"]["T1"]["tasks"][0]["accepted_result_id"], "result-original");
+        assert_eq!(state["teams"]["T3"]["notes"], json!(["third"]));
+        assert_eq!(state["teams"]["T2"]["notes"], json!(["original note"]));
     });
 }
 
 #[test]
-fn s3_legacy_note_and_collection_keep_independent_updates() {
-    isolated("s3_legacy_note_and_collection_keep_independent_updates", |dir| {
+fn s3_legacy_result_collection_preserves_root_shape() {
+    isolated("s3_legacy_result_collection_preserves_root_shape", |dir| {
         seed(dir, true);
-        let waiting = start_writer(dir, "collect", None, Value::Null, true);
-        write(dir, "note", None, json!("legacy note"));
-        finish(waiting, true);
+        write(dir, "collect", None, Value::Null);
         let state = disk(dir);
         assert_eq!(state["tasks"][0]["accepted_result_id"], "result-original");
-        assert_eq!(state["notes"], json!(["original note", "legacy note"]));
         assert!(state.get("teams").is_none(), "legacy single Team shape remains valid");
     });
 }

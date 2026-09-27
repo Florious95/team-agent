@@ -1,20 +1,5 @@
 
-use super::{reapply_scope, ReapplyScope, StateWriteIntent};
-
-#[test]
-fn mcp_reapply_scope_matches_legacy_helpers() {
-    assert!(
-        reapply_scope(&StateWriteIntent::McpUpdateStateNote {
-            team_key: Some("team-a"),
-        }) == ReapplyScope::Team
-    );
-    assert!(
-        reapply_scope(&StateWriteIntent::McpAssignTask {
-            team_key: Some("team-a"),
-            task_id: "task-a",
-        }) == ReapplyScope::Root
-    );
-}
+use super::StateWriteIntent;
 
 #[test]
 fn optional_unmigrated_read_preserves_missing_corrupt_and_valid_shapes(

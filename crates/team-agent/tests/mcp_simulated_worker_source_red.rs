@@ -23,7 +23,7 @@ use team_agent::model::ids::TaskId;
 // leader-delivery callers.
 // NEW (leader裁决, #236 N35): idle/stuck/deadlock reminders are deleted nag paths; push_idle_reminder
 // is intentionally no-op and must not be a leader delivery caller. Keep funnel coverage for
-// report_result / send_to_leader / request_human / broadcast-to-leader / peer_mirror below.
+// report_result / send_to_leader / broadcast-to-leader / peer_mirror below.
 
 fn assert_mcp_tool_success(call: &McpToolCall, context: &str) {
     assert!(
@@ -419,32 +419,6 @@ fn mcp_worker_broadcast_fans_out_to_team_peers_and_leader_excluding_sender() {
     );
     assert_scope_resolved_event(&harness.events_text(), "send_message(to=*) broadcast");
     assert_deliver_to_leader_submit(&harness.events_text(), "send_message(to=*) broadcast");
-}
-
-#[test]
-fn mcp_worker_request_human_uses_same_leader_delivery_funnel() {
-    let harness = McpSimHarness::new();
-    let mut worker_a = harness.spawn_mcp_client("worker_a", "teamA");
-    let canary = "MCP_SIM_REQUEST_HUMAN_CANARY";
-
-    let call = worker_a.call_tool(
-        "request_human",
-        json!({
-            "question": canary,
-            "task_id": "task_mcp"
-        }),
-    );
-
-    assert_mcp_tool_success(&call, "request_human");
-    assert_no_queued_only_or_fallback_success(&harness.events_text(), "request_human");
-    harness.drive_delivery_twice();
-
-    // 0.3.28-final E55: bare-shell pane retries on unverified → >=1.
-    assert!(
-        harness.pane_contains_count("leader", canary) >= 1,
-        "request_human must be leader-visible at least once through N31/N32"
-    );
-    assert_deliver_to_leader_submit(&harness.events_text(), "request_human");
 }
 
 #[test]

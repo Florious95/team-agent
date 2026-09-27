@@ -21,12 +21,10 @@ use team_agent::provider::{
     Provider, RuntimeApprovalDecision, SessionId,
 };
 
-const TEAM_ORCHESTRATOR_MCP_TOOLS: [&str; 5] = [
+const TEAM_ORCHESTRATOR_MCP_TOOLS: [&str; 3] = [
     "send_message",
     "report_result",
     "get_team_status",
-    "request_human",
-    "assign_task",
 ];
 const CLAUDE_DANGEROUS: &str = "--dangerously-skip-permissions";
 const CLAUDE_PERMISSION_MODE: &str = "--permission-mode";
@@ -508,7 +506,7 @@ fn coordinator_auto_approval_reads_state_not_process_ancestry_and_emits_audit_pa
 fn worker_mcp_rpc_arguments_cannot_widen_team_scope_or_bypass_owner_gate() {
     let wire = source("src/mcp_server/wire.rs");
     let tools = source("src/mcp_server/tools.rs");
-    let send_schema = source_section(&wire, "McpTool::SendMessage =>", "McpTool::AssignTask =>");
+    let send_schema = source_section(&wire, "McpTool::SendMessage =>", "McpTool::ReportResult =>");
     let send_dispatch =
         source_section(&wire, "McpTool::SendMessage =>", "McpTool::ReportResult =>");
     let mut failures = Vec::new();
