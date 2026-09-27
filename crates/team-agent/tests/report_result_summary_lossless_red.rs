@@ -13,7 +13,7 @@ mod hermetic;
 mod sim;
 
 use hermetic::HermeticTestEnv;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 #[serial_test::serial(env)]
@@ -98,11 +98,10 @@ fn report_result_notification_preserves_long_multiline_summary_verbatim() {
             .contains("Verification: the full summary must survive report_result formatting and leader delivery.\nDetails: preserve this second paragraph"),
         "multi-line descriptive paragraphs must remain separated"
     );
+    let leader_pane = harness.pane_text("leader");
     assert!(
-        harness
-            .pane_text("leader")
-            .contains("FULL_SUMMARY_END_fef4a83e21d54829b5d0dcd43d6aa1c1"),
-        "the complete summary notification must reach the leader pane"
+        leader_pane.contains("FULL_SUMMARY_END_fef4a83e21d54829b5d0dcd43d6aa1c1"),
+        "the complete summary notification must reach the leader pane; actual={leader_pane:?}"
     );
     assert_eq!(notification.status, "delivered");
 }
