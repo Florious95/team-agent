@@ -51,6 +51,7 @@ pub(crate) mod adapters;
 pub mod approvals;
 pub mod classify;
 pub mod faults;
+pub mod model_catalog;
 pub mod session;
 pub mod session_scan;
 pub mod startup_prompt;

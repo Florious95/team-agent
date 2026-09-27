@@ -15,14 +15,13 @@
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -132,62 +131,9 @@ pub(crate) fn new_pi_session_id() -> SessionId {
 /// errors: 非 UTF-8、header/row 异常、重复或空 catalog 时返回 ProviderError
 /// ---
 pub(crate) fn parse_pi_list_models_table(bytes: &[u8]) -> Result<Vec<String>, ProviderError> {
-    let text = std::str::from_utf8(bytes).map_err(|error| {
-        ProviderError::Command(format!("Pi model catalog is not UTF-8: {error}"))
-    })?;
-    let mut lines = text.lines();
-    let header = lines
-        .next()
-        .ok_or_else(|| ProviderError::Command("Pi model catalog is empty".to_string()))?;
-    let header_columns = header.split_whitespace().collect::<Vec<_>>();
-    if header_columns.get(0) != Some(&"provider") || header_columns.get(1) != Some(&"model") {
-        return Err(ProviderError::Command(
-            "Pi model catalog has an unexpected header".to_string(),
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    let mut models = Vec::new();
-    for (index, line) in lines.enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let malformed = || {
-            ProviderError::Command(format!(
-                "Pi model catalog row {} is malformed",
-                index + 2
-            ))
-        };
-        let (provider, model) = line
-            .trim()
-            .split_once(char::is_whitespace)
-            .ok_or_else(malformed)?;
-        let mut model = model.trim();
-        // Pi prints the raw model id, which may contain spaces. Only the
-        // capability columns following it are single whitespace-free values.
-        for _ in 2..header_columns.len() {
-            model = model
-                .rsplit_once(char::is_whitespace)
-                .ok_or_else(malformed)?
-                .0
-                .trim_end();
-        }
-        if model.is_empty() {
-            return Err(malformed());
-        }
-        let exact = format!("{provider}/{model}");
-        if !seen.insert(exact.clone()) {
-            return Err(ProviderError::Command(format!(
-                "Pi model catalog contains duplicate exact id {exact:?}"
-            )));
-        }
-        models.push(exact);
-    }
-    if models.is_empty() {
-        return Err(ProviderError::Command(
-            "Pi model catalog contains no models".to_string(),
-        ));
-    }
-    Ok(models)
+    crate::provider::model_catalog::parse_pi_catalog(bytes)
+        .map(|records| records.into_iter().map(|record| record.id).collect())
+        .map_err(|error| ProviderError::Command(error.pi_legacy_message()))
 }
 
 /// ---
@@ -658,43 +604,6 @@ fn observe_pi_catalog_test(f: impl FnOnce(&mut PiCatalogTestContext)) {
     });
 }
 
-fn spawn_catalog_reader(
-    stdout: std::process::ChildStdout,
-    max_bytes: u64,
-) -> mpsc::Receiver<(std::io::Result<usize>, Vec<u8>)> {
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(max_bytes + 1).read_to_end(&mut bytes);
-        let _ = sender.send((result, bytes));
-    });
-    receiver
-}
-
-fn finish_catalog_reader(
-    receiver: mpsc::Receiver<(std::io::Result<usize>, Vec<u8>)>,
-    status: std::process::ExitStatus,
-    timeout: Duration,
-    max_bytes: u64,
-) -> Result<Vec<u8>, String> {
-    let (result, bytes) = match receiver.recv_timeout(timeout) {
-        Ok(value) => value,
-        Err(_) => {
-            #[cfg(test)]
-            observe_pi_catalog_test(|context| context.observation.reader_timeout = true);
-            return Err("Pi model catalog command timed out".to_string());
-        }
-    };
-    if !status.success() {
-        return Err("Pi model catalog command failed".into());
-    }
-    result.map_err(|_| "Pi model catalog could not be read".to_string())?;
-    if bytes.len() as u64 > max_bytes {
-        return Err("Pi model catalog exceeds the bounded output limit".into());
-    }
-    Ok(bytes)
-}
-
 #[cfg(test)]
 pub(crate) fn run_pi_catalog_after_parent_exit_for_test(
     stdout: std::process::ChildStdout,
@@ -708,86 +617,53 @@ pub(crate) fn run_pi_catalog_after_parent_exit_for_test(
         context.observation.parent_exit_success = Some(status.success());
         context.observation.parent_exit_code = status.code();
     });
-    finish_catalog_reader(
-        spawn_catalog_reader(stdout, max_bytes),
-        status,
-        timeout,
-        max_bytes,
+    crate::provider::model_catalog::finish_stdout_after_exit(
+        stdout, status, timeout, max_bytes, &mut PiCatalogObserver,
     )
+    .map_err(|error| error.pi_legacy_message())
 }
 
-/// Discover candidates with one PATH-first catalog observation. This deliberately
-/// does not resolve adapters or scan wrapper chains; callers use it only for
-/// rejecting an unqualified role model before lifecycle mutation.
+/// Shared bounded native-command runner; launch preflight keeps its exact model gate.
 pub(crate) fn run_pi_catalog(
     executable: &Path,
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(executable);
-    command.arg("--list-models");
+    let mut extra_env = Vec::new();
     #[cfg(test)]
     observe_pi_catalog_test(|context| {
         context.observation.spawn_count += 1;
         context.observation.argv.push("--list-models".to_string());
-        command.env("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT", &context.receipt);
+        extra_env.push(("TEAM_AGENT_MODELS_TIMEOUT_RECEIPT".into(), context.receipt.as_os_str().into()));
         if let Some(mode) = context.helper_mode.as_deref() {
-            command.env("TEAM_AGENT_MODELS_TIMEOUT_MODE", mode);
+            extra_env.push(("TEAM_AGENT_MODELS_TIMEOUT_MODE".into(), mode.into()));
         }
     });
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            #[cfg(test)]
-            {
-                eprintln!(
-                    "run_pi_catalog spawn failed kind={:?} raw_os_error={:?}",
-                    error.kind(),
-                    error.raw_os_error()
-                );
-            }
-            let _ = error;
-            "Pi executable is unavailable on PATH".to_string()
-        })?;
+    crate::provider::model_catalog::run_command(
+        executable, &["--list-models"], None, None, &[], &extra_env, timeout, max_bytes,
+        &mut PiCatalogObserver,
+    )
+    .map_err(|error| error.pi_legacy_message())
+}
+
+struct PiCatalogObserver;
+impl crate::provider::model_catalog::CatalogObserver for PiCatalogObserver {
     #[cfg(test)]
-    observe_pi_catalog_test(|context| context.observation.parent_pid = Some(child.id()));
-    let stdout = child.stdout.take().ok_or_else(|| {
-        let _ = child.kill();
-        let _ = child.wait();
-        "Pi model catalog output unavailable".to_string()
-    })?;
-    let receiver = spawn_catalog_reader(stdout, max_bytes);
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                #[cfg(test)]
-                observe_pi_catalog_test(|context| {
-                    context.observation.parent_exit_success = Some(status.success());
-                    context.observation.parent_exit_code = status.code();
-                });
-                return finish_catalog_reader(
-                    receiver,
-                    status,
-                    timeout.saturating_sub(start.elapsed()),
-                    max_bytes,
-                );
-            }
-            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Pi model catalog command timed out".into());
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Pi model catalog command could not be observed".into());
-            }
-        }
+    fn spawned(&mut self, pid: u32) {
+        observe_pi_catalog_test(|context| context.observation.parent_pid = Some(pid));
+    }
+
+    #[cfg(test)]
+    fn exited(&mut self, status: &std::process::ExitStatus) {
+        observe_pi_catalog_test(|context| {
+            context.observation.parent_exit_success = Some(status.success());
+            context.observation.parent_exit_code = status.code();
+        });
+    }
+
+    #[cfg(test)]
+    fn output_timeout(&mut self) {
+        observe_pi_catalog_test(|context| context.observation.reader_timeout = true);
     }
 }
 

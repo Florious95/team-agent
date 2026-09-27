@@ -158,6 +158,22 @@ impl McpSimHarness {
         team_agent::state::persist::save_runtime_state(&self.workspace, &state).unwrap();
     }
 
+    pub fn bind_leader_receiver_to_team(&self, team_key: &str) {
+        let mut state = team_agent::state::persist::load_runtime_state(&self.workspace).unwrap();
+        let receiver = state
+            .get("leader_receiver")
+            .cloned()
+            .expect("seeded top-level leader receiver");
+        state
+            .get_mut("teams")
+            .and_then(Value::as_object_mut)
+            .and_then(|teams| teams.get_mut(team_key))
+            .and_then(Value::as_object_mut)
+            .expect("seeded owner team entry")
+            .insert("leader_receiver".to_string(), receiver);
+        team_agent::state::persist::save_runtime_state(&self.workspace, &state).unwrap();
+    }
+
     pub fn message_rows_containing(&self, needle: &str) -> Vec<MessageRow> {
         let store = MessageStore::open(&self.workspace).unwrap();
         let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();

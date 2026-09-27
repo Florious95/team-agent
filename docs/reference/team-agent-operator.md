@@ -145,12 +145,12 @@ Use exact provider model ids, not display names. **Codex slug lookup is Codex-on
 codex debug models
 ```
 
-That command is the Codex catalog. This skill does **not** keep a model id list. If `codex` is not on PATH, the lookup is unavailable; do not invent slugs.
+That command is the Codex catalog. This skill does **not** keep a model id list. If `codex` is not on PATH, the lookup is unavailable; do not invent slugs. Discover copyable IDs with `team-agent models --provider codex [--search QUERY]`; search is informational and does not add launch-time model validation.
 
 A plain-text/default role compiles as provider `pi` with model `openai-codex/gpt-6-luna` and effort `max`. If valid optional frontmatter selects another provider, its established provider-specific model/profile resolution applies; Grok and Cursor roles retain their explicit model requirements. **Do not treat provider/team fill-ins as a validity catalog.**
 
 Claude: run `claude auth status`; if missing, run `claude auth login`. Team Agent stores Claude worker sessions by passing `--session-id` and resumes with `--resume`.
-Use `provider: claude` or `provider: claude_code` for Claude workers.
+Use `provider: claude` or `provider: claude_code` for Claude workers. Discover copyable canonical IDs with `team-agent models --provider claude [--search QUERY]` (or `claude_code` to preserve that provider label in output); see [Provider model discovery](provider-model-discovery.md) for catalog and search behavior.
 
 Role `profile` values are secret-safe references. Do not put API keys in role docs or `TEAM.md`.
 Never read raw provider profile files into model context. Do not use `Read`, `cat`, `sed`, `grep`, editors, or screenshots on `.team/current/profiles/*.env` or `.team/runtime/provider-env/*.env`. Those files may contain live API keys. Use only `team-agent profile show <name> --workspace . --json` or `team-agent profile doctor <name> --workspace . --json` for redacted diagnostics; if a value is missing, ask the human user to edit the local profile file.
