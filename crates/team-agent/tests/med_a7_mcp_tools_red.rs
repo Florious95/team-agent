@@ -6,14 +6,18 @@
 #[path = "support/mcp_sim_harness.rs"]
 #[allow(dead_code)]
 mod mcp_sim_harness;
+#[path = "support/hermetic.rs"]
+mod hermetic;
 
+use hermetic::HermeticTestEnv;
 use mcp_sim_harness::McpSimHarness;
 use serde_json::{json, Value};
 use serial_test::serial;
 
 #[test]
-#[serial(a7_mcp)]
+#[serial(env)]
 fn a7_send_must_not_fabricate_message_id() {
+    let _hermetic = HermeticTestEnv::enter("med-a7-mcp-tools");
     let harness = McpSimHarness::new();
     let _coordinator_guard = CoordinatorStopGuard {
         ws: harness.workspace_path().to_path_buf(),

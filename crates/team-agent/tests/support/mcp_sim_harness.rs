@@ -16,21 +16,7 @@ use team_agent::messaging::{deliver_pending_messages, fire_due_scheduled_events}
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{CaptureRange, PaneId, SessionName, Target, Transport, WindowName};
 
-const EXPECTED_TOOLS: &[&str] = &[
-    "assign_task",
-    "send_message",
-    "report_result",
-    "update_state",
-    "get_team_status",
-    "stop_agent",
-    "reset_agent",
-    "add_agent",
-    "clone_agent",
-    "fork_agent",
-    "request_human",
-    "stuck_list",
-    "stuck_cancel",
-];
+const EXPECTED_TOOLS: &[&str] = &["send_message", "report_result", "get_team_status"];
 
 fn test_binary_path() -> PathBuf {
     let path = if let Ok(path) = std::env::var("CARGO_BIN_EXE_team-agent") {
@@ -538,7 +524,7 @@ impl McpClient {
         let expected = EXPECTED_TOOLS.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(
             tools, expected,
-            "MCP tools/list must expose the 12 canonical Team Agent tools; listed={listed}"
+            "MCP tools/list must expose only the three retained Team Agent tools; listed={listed}"
         );
     }
 

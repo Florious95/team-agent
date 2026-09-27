@@ -245,22 +245,6 @@ fn cli_add_agent_without_explicit_team_persists_to_active_team() {
     );
 }
 
-#[test]
-fn mcp_add_agent_is_not_placeholder() {
-    let mcp_tools = source("src/mcp_server/tools.rs");
-    let mcp_mod = source("src/mcp_server/mod.rs");
-    let add_section = source_section(&mcp_tools, "pub fn add_agent", "/// `fork_agent`");
-    assert!(
-        !add_section.contains("lifecycle_placeholder::add_agent"),
-        "MCP add_agent must call the real lifecycle add-agent path under spawn-time owner scope, not the placeholder. source={add_section}"
-    );
-    assert!(
-        !mcp_mod.contains(r#"{"ok": true, "status": "added""#),
-        "placeholder add_agent returning ok/status without state/spec/spawn side effects must be removed. source excerpt={}",
-        source_section(&mcp_mod, "pub mod lifecycle_placeholder", "/// `runtime.fork_agent")
-    );
-}
-
 #[ignore = "red-by-design: pending contract, tracked in private backlog"]
 #[test]
 fn quick_start_grandchild_depth_limit_refuses_before_state_or_spawn() {

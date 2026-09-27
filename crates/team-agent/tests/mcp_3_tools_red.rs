@@ -6,7 +6,10 @@ mod sim;
 #[path = "e2e/framework.rs"]
 #[allow(dead_code)]
 mod cli_fixture;
+#[path = "support/hermetic.rs"]
+mod hermetic;
 
+use hermetic::HermeticTestEnv;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -90,7 +93,9 @@ fn contract_names(tools: &[Value]) -> BTreeSet<String> {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m01_tools_list_wire_exposes_exactly_three_tools_for_all_service_scopes() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m01");
     let cases = [
         ("worker_a", "teamA"),
         ("leader", "teamA"),
@@ -198,7 +203,9 @@ fn assert_unknown_tool_frame(frame: &Value, expected_id: u64) -> bool {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m02_all_retired_wire_and_legacy_dispatch_names_fail_closed_without_business_effects() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m02");
     let mut violations = Vec::new();
     let mut id = 1_u64;
     for name in RETIRED {
@@ -406,6 +413,7 @@ tasks: []
 #[test]
 #[serial_test::serial(env)]
 fn m03_initial_resume_and_pi_leader_materialization_all_consume_three_tools() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m03");
     let case = TempCase::new("m03");
     let (_bin, path) = write_fake_pi(case.path());
     let _path_guard = PathGuard::install(&path);
@@ -442,7 +450,9 @@ fn m03_initial_resume_and_pi_leader_materialization_all_consume_three_tools() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m04_send_message_single_leader_broadcast_and_mailbox_close_the_team_scope_loop() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m04");
     let harness = sim::McpSimHarness::new();
     let mut worker = sim::spawn_mcp_client_without_catalog_check(harness.workspace_path(), "worker_b", "teamA");
     for (target, marker) in [
@@ -515,7 +525,9 @@ fn send_cli_input(harness: &sim::McpSimHarness, worker_id: &str, marker: &str) -
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_without_assignment() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m05");
     let first = sim::McpSimHarness::new();
     let inbound = send_cli_input(&first, "worker_a", "M05_MINIMAL_INPUT");
     let mut worker = sim::spawn_mcp_client_without_catalog_check(first.workspace_path(), "worker_a", "teamA");
@@ -557,7 +569,9 @@ fn m05_direct_input_and_full_envelope_reports_persist_and_reach_the_leader_witho
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m06_get_team_status_is_read_only_and_anchored_to_captured_owner_team() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m06");
     let harness = sim::McpSimHarness::new();
     let mut switched = harness.state_value();
     switched["active_team_key"] = json!("teamB");
@@ -575,7 +589,9 @@ fn m06_get_team_status_is_read_only_and_anchored_to_captured_owner_team() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m07_identity_scope_and_foreign_task_guards_run_before_business_effects() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m07");
     let harness = sim::McpSimHarness::new();
     let mut state = harness.state_value();
     state["teams"]["teamB"]["tasks"] = json!([{"id":"teamB_task","assignee":"worker_x","status":"pending"}]);
@@ -622,7 +638,9 @@ fn m07_identity_scope_and_foreign_task_guards_run_before_business_effects() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m08_native_cli_lifecycle_commands_still_dispatch_and_preserve_source_and_scope() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m08");
     use cli_fixture::{quick_start_fake, run_ta, state_agent, state_has_agent, TestWorkspace};
 
     let team = "mcp3-cli";
@@ -673,7 +691,9 @@ fn m08_native_cli_lifecycle_commands_still_dispatch_and_preserve_source_and_scop
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m09_due_scheduler_idle_suppression_and_retained_rpc_stream_remain_live() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m09");
     let case = TempCase::new("m09-scheduler");
     let store = MessageStore::open(case.path()).unwrap();
     let conn = db::schema::open_db(store.db_path()).unwrap();
@@ -717,7 +737,9 @@ fn m09_due_scheduler_idle_suppression_and_retained_rpc_stream_remain_live() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn m10_retired_mcp_facades_helpers_intents_and_agent_ops_are_physically_absent() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-m10");
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let read = |relative: &str| std::fs::read_to_string(src.join(relative)).unwrap_or_default();
     let forbidden = [
@@ -777,7 +799,9 @@ fn m10_retired_mcp_facades_helpers_intents_and_agent_ops_are_physically_absent()
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn retained_wire_tool_enum_has_only_the_public_three_tool_contract() {
+    let _hermetic = HermeticTestEnv::enter("mcp-3-wire-enum");
     // Independent enum-to-wire check prevents a hidden parser alias from keeping a
     // retired tool reachable after tools/list is reduced.
     let parsed = RETAINED.iter().filter(|name| McpTool::parse(name).is_some()).count();
