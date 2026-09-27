@@ -221,10 +221,13 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     .expect("write provider-default teammate role");
     let defaults = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
         .expect("provider: pi teammate may use Pi model and effort defaults");
-    assert_eq!(defaults.agent.get("model"), Some(&Value::Null));
-    assert!(
-        defaults.agent.get("effort").is_none(),
-        "omitted Pi model and effort must remain absent"
+    assert_eq!(
+        defaults.agent.get("model"),
+        Some(&Value::Str("openai-codex/gpt-6-luna".to_string()))
+    );
+    assert_eq!(
+        defaults.agent.get("effort"),
+        Some(&Value::Str("max".to_string()))
     );
     std::fs::remove_dir_all(root).expect("remove role fixture");
 

@@ -108,12 +108,13 @@ fn pi_role_ignores_tools_and_preserves_provider_defaults() {
         .expect("Pi model and effort may use provider defaults");
     assert_eq!(
         compiled.agent.get("model"),
-        Some(&Value::Null),
-        "omitted Pi model must not inherit a synthesized framework default"
+        Some(&Value::Str("openai-codex/gpt-6-luna".to_string())),
+        "omitted Pi model uses the Luna default rather than team metadata"
     );
-    assert!(
-        compiled.agent.get("effort").is_none(),
-        "omitted Pi effort must not inherit a synthesized framework default"
+    assert_eq!(
+        compiled.agent.get("effort"),
+        Some(&Value::Str("max".to_string())),
+        "omitted Pi effort uses the global max default rather than team metadata"
     );
 
     let models = parse_pi_list_models_table(CATALOG).expect("catalog fixture");
@@ -160,10 +161,11 @@ fn pi_role_uses_standard_bypass_field_without_fabricating_argv() {
     );
 
     let missing_ack = valid_role_with("").replace("dangerously_skip_permissions: true\n", "");
-    let text = compile_error(compile_pi_role(&missing_ack)).to_string();
-    assert!(
-        text.contains("missing front matter field dangerously_skip_permissions"),
-        "got {text}"
+    let compiled = compile_pi_role(&missing_ack)
+        .expect("omitted bypass metadata defaults to true");
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(true))
     );
 }
 

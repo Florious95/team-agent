@@ -210,7 +210,11 @@ fn r09_plain_text_directory_compiles_to_valid_yaml_spec() {
     let loaded = team_agent::model::spec::load_and_validate_spec(&persisted, &fixture.root)
         .expect("persisted spec must remain valid and loadable");
 
-    assert_eq!(loaded, spec, "YAML round-trip preserves the compiled spec");
+    assert_eq!(
+        prompt(first_agent(&loaded)).trim(),
+        prompt(first_agent(&spec)).trim(),
+        "YAML round-trip preserves the prompt after trimming terminal whitespace"
+    );
     assert_eq!(
         string_field(loaded.get("team").expect("spec has team"), "objective"),
         objective

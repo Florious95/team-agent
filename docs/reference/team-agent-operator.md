@@ -406,6 +406,7 @@ team-agent quick-start ./roles --team-id alpha
 team-agent quick-start .team/alpha
 team-agent quick-start .team/current
 team-agent quick-start <dir>
+team-agent quick-start <plain-text-team-dir>
 team-agent remove-agent <agent> --workspace . --confirm
 team-agent reset-agent <agent> --discard-session
 team-agent restart
