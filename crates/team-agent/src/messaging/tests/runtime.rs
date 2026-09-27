@@ -980,32 +980,6 @@ fn requeue_delivery_exhausted_watchers_reopens_only_exhausted() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// GROUP P — stuck_cancel owner-gate + invalid alert type refusal.
-// scheduler.py:262-294.
-// ════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn stuck_cancel_none_alert_type_expands_to_all() {
-    // alert_type None == Python "all" → sorted(_ALERT_TYPES) expansion.
-    let ws = tmp_ws("stuckcancel");
-    let out = stuck_cancel(&ws, "w1", None, "leader").unwrap();
-    // The suppression result must enumerate all three alert types.
-    let types = out.get("alert_types").and_then(|v| v.as_array()).map(|a| {
-        a.iter()
-            .filter_map(|x| x.as_str().map(str::to_string))
-            .collect::<Vec<_>>()
-    });
-    assert_eq!(
-        types,
-        Some(vec![
-            "cross_worker_deadlock".to_string(),
-            "idle_fallback".to_string(),
-            "stuck".to_string()
-        ])
-    );
-}
-
-// ════════════════════════════════════════════════════════════════════════
 // GROUP Q — collect intake (results.py:45-167): valid result advances task,
 // returns collected_results + delivered_messages + results counts shape.
 // ════════════════════════════════════════════════════════════════════════

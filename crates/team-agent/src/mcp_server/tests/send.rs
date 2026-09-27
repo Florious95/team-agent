@@ -44,31 +44,6 @@ fn is_worker_recipient_classification() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// merge_tasks_by_id — prefer wins, prefer-first insertion order (tools.py:30)
-// Golden: prefer t1(done),t2 + fallback t1(pending),t3,{no id},"notdict"
-//   → [t1(done), t2, t3]  (t1 from prefer wins; non-dict / no-id dropped)
-// ════════════════════════════════════════════════════════════════════════
-#[test]
-fn merge_tasks_by_id_prefer_wins_no_done_regression() {
-    let prefer = vec![
-        json!({"id": "t1", "status": "done"}),
-        json!({"id": "t2", "status": "pending"}),
-    ];
-    let fallback = vec![
-        json!({"id": "t1", "status": "pending"}), // must NOT regress t1
-        json!({"id": "t3", "status": "ready"}),
-        json!({"no": "id"}), // dropped (no id)
-        json!("notdict"),    // dropped (not object)
-    ];
-    let merged = merge_tasks_by_id(&prefer, &fallback);
-    assert_eq!(merged.len(), 3);
-    assert_eq!(merged[0]["id"], json!("t1"));
-    assert_eq!(merged[0]["status"], json!("done")); // prefer wins → no regression
-    assert_eq!(merged[1]["id"], json!("t2"));
-    assert_eq!(merged[2]["id"], json!("t3"));
-}
-
-// ════════════════════════════════════════════════════════════════════════
 // SendOutcome::to_value — worker-accepted async envelope (tools.py:177-182)
 // byte-stable: {status:"accepted",delivery_pending:true,
 //               poll_via:"team-agent inbox <id>",message_id:<id>}

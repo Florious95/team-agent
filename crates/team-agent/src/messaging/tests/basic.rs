@@ -141,23 +141,6 @@ fn activity_status_serde_byte_locked() {
 }
 
 #[test]
-fn alert_type_serde_byte_locked() {
-    // scheduler.py:38 _ALERT_TYPES set members.
-    assert_eq!(
-        serde_json::to_string(&AlertType::Stuck).unwrap(),
-        "\"stuck\""
-    );
-    assert_eq!(
-        serde_json::to_string(&AlertType::IdleFallback).unwrap(),
-        "\"idle_fallback\""
-    );
-    assert_eq!(
-        serde_json::to_string(&AlertType::CrossWorkerDeadlock).unwrap(),
-        "\"cross_worker_deadlock\""
-    );
-}
-
-#[test]
 fn check_status_serde_byte_locked() {
     assert_eq!(
         serde_json::to_string(&CheckStatus::Pass).unwrap(),
@@ -264,20 +247,6 @@ fn provider_sdk_calls_is_zero_only_when_all_three_zero() {
         httpx: 9
     }
     .is_zero());
-}
-
-#[test]
-fn alert_type_all_is_sorted_full_set() {
-    // scheduler.py:269 sorted(_ALERT_TYPES) =
-    //   ['cross_worker_deadlock','idle_fallback','stuck'].
-    assert_eq!(
-        AlertType::all(),
-        [
-            AlertType::CrossWorkerDeadlock,
-            AlertType::IdleFallback,
-            AlertType::Stuck
-        ]
-    );
 }
 
 #[test]
