@@ -40,22 +40,6 @@ pub fn is_worker_recipient(to: &MessageTarget) -> bool {
     }
 }
 
-/// `_merge_tasks_by_id` (`tools.py:30-49`): dedupe a task list keyed by `id`,
-/// `prefer` entries winning on duplicates (so an earlier `done` is not regressed).
-pub fn merge_tasks_by_id(prefer: &[Value], fallback: &[Value]) -> Vec<Value> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for item in prefer.iter().chain(fallback.iter()) {
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if seen.insert(id.to_string()) && item.is_object() {
-            out.push(item.clone());
-        }
-    }
-    out
-}
-
 pub(crate) fn tool_error_reason_wire(reason: ToolErrorReason) -> &'static str {
     match reason {
         ToolErrorReason::UnknownTool => "unknown_tool",

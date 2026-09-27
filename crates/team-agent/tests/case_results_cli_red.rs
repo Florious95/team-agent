@@ -415,7 +415,7 @@ fn r6_all_case_rows_are_returned_in_created_at_result_id_order() {
 
 #[test]
 #[serial(case_results_cli)]
-fn r7_results_is_cli_only_and_real_tools_list_stays_at_thirteen() {
+fn r7_results_is_cli_only_and_real_tools_list_stays_at_three() {
     let case = Case::new("case-results-r7", &[]);
     let mut client = spawn_mcp_client_without_catalog_check(&case.workspace, WORKER, TEAM);
     let tools = client.tools_list();
@@ -424,8 +424,8 @@ fn r7_results_is_cli_only_and_real_tools_list_stays_at_thirteen() {
         .unwrap_or_else(|| panic!("R7 RED tools_list_not_array: real stdio tools/list={tools}"));
     assert_eq!(
         listed.len(),
-        13,
-        "R7 RED mcp_surface_grew: case result reads are CLI-only; real tools/list={tools}"
+        3,
+        "R7: case result reads are CLI-only and MCP exposes only its retained tools; real tools/list={tools}"
     );
 
     let help = case.env.run_cli(&case.workspace, &["results", "--help"]);

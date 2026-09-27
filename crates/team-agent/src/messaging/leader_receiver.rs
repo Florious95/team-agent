@@ -22,7 +22,7 @@ use super::{
 };
 
 /// `_send_to_leader_receiver` (`leader.py:69`) — **N31/N32 funnel primitive**:所有 leader-bound
-/// caller(send_message(to=leader) / report_result / request_human / idle reminder /
+/// caller(send_message(to=leader) / report_result / idle reminder /
 /// broadcast-to-leader / peer-mirror / worker.abnormal_exit)统一经过这里。
 ///
 /// 职责 = create_message + leader_notification_log dedup(result_id 时)+ audit + emit

@@ -45,7 +45,7 @@ team-agent claude
 
 Pass provider flags after the provider name, for example `team-agent codex --dangerously-bypass-approvals-and-sandbox`. Run `team-agent quick-start` from the leader's current tmux pane. Do not start a real team from a naked terminal that Team Agent cannot address through tmux.
 
-**0.5.66:** leader `--dangerously-*` flags no longer inherit bypass to workers. Per-worker bypass is the role field `dangerously_skip_permissions` (see Permissions).
+Leader `--dangerously-*` flags do not determine worker bypass. Worker bypass defaults to enabled in compiled role specs; no bypass field needs to be written (see Document Format and Permissions).
 
 ## Leader Role
 
@@ -55,48 +55,22 @@ When the user has been communicating in Chinese throughout the conversation, all
 
 ## Minimal Copy-Paste Team
 
-`dangerously_skip_permissions` is **required** on every role doc (boolean). `TEAM.md` `dangerous_auto_approve` is **not** the 0.5.66 bypass switch (see Permissions). Values under `provider_models:` below are **fill-ins for omitted role `model`**, not a validity catalog; the values are configuration fallbacks.
+`TEAM.md` and `agents/*.md` are plain text/Markdown; YAML frontmatter is optional. The whole `TEAM.md` body becomes the team objective, and the whole role body becomes the worker prompt. A default role uses its filename stem as its id, provider `pi`, model `openai-codex/gpt-6-luna`, effort `max`, and bypass enabled. Valid optional frontmatter may still override supported metadata.
 
 ```bash
 mkdir -p .team/current/agents
-team-agent profile init codex-default --auth-mode subscription --workspace .
 cat > .team/current/TEAM.md <<'EOF'
----
-name: demo-team
-objective: One worker handles bounded tasks and reports through Team Agent MCP.
-dangerous_auto_approve: false
-fast: false
-provider_models:
-  codex: gpt-5.5
-  claude: claude-sonnet-4-6
-  claude_code: claude-sonnet-4-6
----
-
-Team config only. This is not a worker role.
+A small team for bounded implementation tasks. Workers report progress to the leader and return a concise result.
 EOF
 cat > .team/current/agents/coder.md <<'EOF'
----
-name: coder
-role: Implementation Worker
-provider: codex
-auth_mode: subscription
-profile: codex-default
-dangerously_skip_permissions: false
-tools:
-  - fs_read
-  - fs_list
-  - fs_write
-  - execute_bash
-  - mcp_team
-  - provider_builtin
----
+# Implementation Worker
 
-Handle one bounded task at a time. Send progress to leader only when needed. Final completion must call report_result exactly once; MCP fills task ids and result envelope fields.
+Handle one bounded task at a time. Send progress or blockers to the leader with `send_message`, and report completion exactly once with `report_result`.
 EOF
 team-agent quick-start .team/current
 ```
 
-YAML lists must be block style. Use `tools:\n  - fs_read`; do not use `tools: [fs_read, mcp_team]`.
+The MCP surface is exactly `send_message`, `report_result`, and `get_team_status`; status is optional, not a prerequisite. Agent/team lifecycle management remains on the separately authorized native CLI.
 
 Workers always run headlessly in independent windows on the per-workspace tmux server. No GUI display backend is configured in `TEAM.md`.
 
@@ -127,11 +101,12 @@ Run `claim-leader` only from the **leader** pane. From a worker pane it refuses 
 | `claude` / `claude_code` | yes (`--resume <id>`, transcript-verified) | yes (JSONL stream) | yes (role `model` overrides `provider_models`) | yes (snapshot copy + only `--resume <snapshot-id>`) |
 | `codex` | yes (`codex resume <id>`, session-store-verified) | yes (turn JSONL) | yes (role `model`) | yes (`codex fork`) |
 | `copilot` | yes (`copilot --resume <id|name>`, sqlite `sessions` row) | not yet (phase 1: `provider.classify.unsupported` event) | yes (role `model`) | yes (isolated `COPILOT_HOME` store fork) |
+| `pi` | yes (exact `--session <backing-path>`, not selector/continue) | Unknown (no JSONL turn-state reader) | yes (role `model` / `effort`, catalog-validated) | yes (full snapshot into separate seat/session; exact backing resume) |
 | `gemini_cli` | no | no | yes | no |
 | `fake` (testing only) | no | no | n/a | no |
 
 Notes:
-- Per-worker model override means a role-doc `model:` value wins over `TEAM.md` `provider_models.<provider>` at **compile** time; subscription defaults still fill blanks when there is no profile-deferred null.
+- A plain-text/default role uses Pi with `openai-codex/gpt-6-luna` and `max` effort; valid optional role frontmatter can select a provider and override supported model settings. For provider paths using `provider_models`, an explicit role `model:` takes precedence.
 - Copilot fork copies the source session into an isolated `COPILOT_HOME` and rekeys its SQLite session references atomically. Missing or incomplete backing fails closed; it never falls back to a fresh spawn.
 - Copilot phase-1 idle/turn detection is intentionally Unknown; tick emits a single explicit `provider.classify.unsupported` event per state change (P4 dedup), never a silent default.
 
@@ -139,7 +114,7 @@ Notes:
 
 ### Subscription auth (Codex / Claude account login)
 
-Before workers can use a subscription provider, create a named subscription profile in the workspace and reference it from role docs:
+To opt a worker into Codex or Claude subscription providers, create a named subscription profile in the workspace and reference it from optional role frontmatter:
 
 ```bash
 team-agent profile init codex-default --auth-mode subscription --workspace .
@@ -172,7 +147,7 @@ codex debug models
 
 That command is the Codex catalog. This skill does **not** keep a model id list. If `codex` is not on PATH, the lookup is unavailable; do not invent slugs.
 
-Role docs may omit `model` for non-grok subscription workers; compile then fills from `TEAM.md` `provider_models` or leaves `null` when a profile is present (see compatible_api). **Do not treat those fill-ins as a validity catalog.** **Grok roles cannot omit `model`** — the internal compiler fails closed.
+A plain-text/default role compiles as provider `pi` with model `openai-codex/gpt-6-luna` and effort `max`. If valid optional frontmatter selects another provider, its established provider-specific model/profile resolution applies; Grok and Cursor roles retain their explicit model requirements. **Do not treat provider/team fill-ins as a validity catalog.**
 
 Claude: run `claude auth status`; if missing, run `claude auth login`. Team Agent stores Claude worker sessions by passing `--session-id` and resumes with `--resume`.
 Use `provider: claude` or `provider: claude_code` for Claude workers.
@@ -248,7 +223,7 @@ Observed (exit 1): `usage error: invalid --auth-mode: not-a-mode`. That is the l
 
 Team Agent loads the profile during quick-start, launch, restart, and start-agent. Compatible API workers inherit the current shell proxy/CA environment by default. Claude compatible API workers use Team Agent managed `CLAUDE_CONFIG_DIR` so user-level Claude subscription settings cannot re-inject Anthropic proxy variables into third-party API sessions. If quick-start reports an ambient proxy blocker, do not silently unset proxy for the whole team; tell the user to choose one path: fix that proxy for `BASE_URL`, put `HTTPS_PROXY=`/`HTTP_PROXY=` in the profile, or put `PROXY_MODE=direct` in the profile to bypass proxy only for that worker. Subscription workers keep their native provider settings and environment. Startup runs a redacted smoke check for compatible API profiles before worker windows are created, so a bad URL/key/model or proxy/base URL connectivity failure is reported to the leader command instead of producing idle workers.
 
-## How role-doc frontmatter becomes live
+## How role documents become live
 
 ```bash
 team-agent restart --help
@@ -274,72 +249,15 @@ To apply a changed role file to an **existing** worker name, use `add-agent --fo
 
 Do **not** shutdown/restart the whole team just to add a **new** worker (that drops other workers' resumable sessions). Use `add-agent` without `--force` for a new name.
 
-## Permissions (0.5.66)
+## Document Format and Permissions
 
-There is **no** `team-agent permission-modes` command.
+`TEAM.md` and `agents/*.md` accept ordinary text/Markdown without required YAML frontmatter. A valid optional frontmatter map may set supported metadata; absent, malformed, unterminated, or non-object frontmatter is treated as part of the document body, not a compile error. The entire TEAM body becomes `objective`; the role body is injected as the prompt.
 
-```bash
-team-agent permission-modes
-```
+For a role with no overrides, the filename stem supplies its id, and defaults are provider `pi`, model `openai-codex/gpt-6-luna`, effort `max`, and `dangerously_skip_permissions: true`. A valid `agent_id` (or legacy `name`) may override the filename-derived id. Supported valid frontmatter overrides remain available for existing roles; no permission field needs to be written. TEAM defaults are the workspace directory name, a 2-second tick, `leader_centric` communication, and `team-<workspace-name>` session.
 
-Observed (exit 1): `invalid choice: 'permission-modes'`.
+The generated spec still carries a boolean bypass value. Missing or malformed role metadata defaults to `true`; an explicit valid boolean is preserved. Provider adapters translate that value using the provider's own mechanism. Do not copy a Codex-only bypass flag into Pi or another provider's launch command.
 
-`team-agent --help` does **not** list `permission_mode`, `TEAM_AGENT_LEADER_BYPASS`, or `dangerous_auto_approve`. Use `team-agent validate "$d" --json` with an existing spec file or team directory; it does not enumerate permission modes.
-
-### Live control: role `dangerously_skip_permissions`
-
-Required boolean on every role doc. Missing or non-bool fails the internal compiler; this is checked again before lifecycle launch.
-
-For an existing spec file, the retained schema check is:
-
-```bash
-team-agent validate "$d" --json
-```
-
-With a team-directory input, `validate` internally compiles `TEAM.md` and `agents/*.md` and validates role-document completeness; with a file input, it runs schema structural validation. Neither input writes or exports a spec file. The internal compiler rejects non-bool (`dangerously_skip_permissions: bypass`) and accepts only boolean **`true`** or **`false`**.
-
-`true` is the per-worker bypass opt-in. `false` is the default you should copy unless the user explicitly wants prompts skipped.
-
-### `permission_mode` (historical, not consumed)
-
-A role may still contain `permission_mode`. Compile **does not** validate it and **does not** copy it into the compiled spec.
-
-Observed: `permission_mode: bypass` and `permission_mode: not-a-mode` both compiled `ok: true` (exit 0); the spec agent block had `dangerously_skip_permissions: false` and **no** `permission_mode` key.
-
-Do not set `permission_mode: bypass` expecting 0.5.66 bypass. Use `dangerously_skip_permissions: true`.
-
-### `TEAM.md` `dangerous_auto_approve`
-
-The demo `TEAM.md` still shows `dangerous_auto_approve: false`. Compile of a team with `dangerous_auto_approve: true` produced a spec **without** that key on the agent (only `dangerously_skip_permissions`). Treat it as leftover team YAML, not the bypass switch.
-
-`dangerous_auto_approve` as a **tool sentinel** is internal (adapters). Operators do not configure it as a tools list item.
-
-### `TEAM_AGENT_LEADER_BYPASS`
-
-Not in `team-agent --help`. Not a user-facing config key. Do not export it by hand. Worker env injection was **not** live-spawned on this gauge.
-
-### Leader argv bypass
-
-Leader `--dangerously-*` is detected only as a **warning**, not as worker bypass (`detect_bypass_flag_in_argv` — "只做检测,不做行为决策"). Declare `dangerously_skip_permissions` per role.
-
-### Priority — 未找到单一裁决点
-
-An external report ranked `permission_mode` > `TEAM_AGENT_LEADER_BYPASS` > `TEAM.md` `dangerous_auto_approve`. **That ranking is not in this tree.** Grep of `crates/` found **no** function that takes those three keys and picks a winner (search: `permission_mode.*TEAM_AGENT_LEADER_BYPASS` and the reverse: zero hits).
-
-What the sources actually do (reader can re-open these files):
-
-| Symbol | File | What it does |
-|---|---|---|
-| `required_dangerously_skip_permissions` | `crates/team-agent/src/compiler.rs` | Compile **requires** role `dangerously_skip_permissions` bool. This is the 0.5.66 worker bypass source. |
-| `resolved_tool_strings_for_command` | `crates/team-agent/src/lifecycle/worker_command_context.rs` | `true` appends tool sentinel `dangerous_auto_approve`; comment: no longer consumes team/runtime/leader `DangerousApproval`. |
-| `provider_bypass_flag` | `crates/team-agent/src/provider/bypass_flags.rs` | **唯一权威**: role `dangerously_skip_permissions: true` decides whether to add a provider bypass argv flag. Maps provider → flag string only. |
-| spec allowed key `permission_mode` | `crates/team-agent/src/model/spec.rs` | Historical; **not consumed** by compiler (comment: 0.5.66 起不再被 compiler 消费); the key is absent from the compiled agent spec. |
-| `apply_mcp_auto_approval_env` | `crates/team-agent/src/lifecycle/launch/worker_env.rs` | Writes `TEAM_AGENT_LEADER_BYPASS` `1`/`0` from `DangerousApproval` when source is `LeaderProcess`. Separate from compile. |
-| `worker_spawn_env` test | `crates/team-agent/src/layout/worker_env.rs` | **Strips** inherited `TEAM_AGENT_LEADER_BYPASS` from parent env. |
-| `claude_dangerous_auto_approve` (and siblings) | `crates/team-agent/src/provider/adapters/*.rs` | Adapters look for tool name `dangerous_auto_approve`, not `TEAM.md`. |
-
-**Do not copy a three-row priority table.** The live operator knob on this gauge is role `dangerously_skip_permissions`. The three names from the report still exist as strings; they are not one ranked merge.
-
+`permission_mode`, `dangerous_auto_approve`, and leader environment switches are not required document fields. Keep provider-native bypass behavior inside the adapter; do not ask users to add a bypass toggle to `TEAM.md` or a plain-text role.
 ## Ignore vs handle (status / alerts)
 
 ```bash
@@ -488,6 +406,7 @@ team-agent quick-start ./roles --team-id alpha
 team-agent quick-start .team/alpha
 team-agent quick-start .team/current
 team-agent quick-start <dir>
+team-agent quick-start <plain-text-team-dir>
 team-agent remove-agent <agent> --workspace . --confirm
 team-agent reset-agent <agent> --discard-session
 team-agent restart
@@ -522,7 +441,7 @@ provider or treats a diagnostic example as a command approval.
 
 `restart` takes one workspace argument. It preserves each worker's original provider. If a verified provider session exists, the worker resumes (`codex resume <id>` or `claude --resume <id>`). Claude sessions are considered resumable only after the provider has written a project transcript for that session; a freshly opened blank Claude window is not recorded as recovered context. If the stored id is stale, the runtime first tries to repair it from verified transcript history. If a stored session cannot be verified or repaired, restart fails closed instead of silently losing context; use `team-agent restart . --allow-fresh` only when the user explicitly accepts a fresh worker context. If multiple stopped teams in the same workspace have restart context, plain `team-agent restart .` fails and lists candidates; rerun with `--team <session_name_or_team_name>`. If no prior session id exists, that worker starts fresh and the event log records `restart.fresh_spawn`. Claude resume must run from the original cwd and the same provider transcript root; Team Agent stores `spawn_cwd` and compatible-API `claude_projects_root` for that.
 
-`restart` `--help` does not mention rereading `agents/*.md`. See **How role-doc frontmatter becomes live**.
+`restart` `--help` does not mention rereading `agents/*.md`. See **How role documents become live**.
 
 Startup trust prompts are handled by the runtime/coordinator with bounded probes; do not wait on raw worker screens or manually press Enter for routine startup trust prompts.
 
@@ -534,20 +453,9 @@ To add a new worker to a running team, write the role doc and run **one command*
 
 ```bash
 cat > .team/current/agents/reviewer.md <<'EOF'
----
-name: reviewer
-role: Code Reviewer
-provider: codex
-auth_mode: subscription
-profile: codex-default
-dangerously_skip_permissions: false
-tools:
-  - fs_read
-  - fs_list
-  - mcp_team
----
+# Code Reviewer
 
-Review changed files and report findings to leader.
+Review changed files and report findings to the leader. Use `send_message` for progress and `report_result` exactly once for completion.
 EOF
 team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .
 ```
@@ -579,6 +487,8 @@ Removing a worker at runtime is the symmetric `team-agent remove-agent <agent> -
 
 ## Worker Protocol
 
+The Team Agent MCP surface is exactly `send_message`, `report_result`, and optional `get_team_status`. Status is self-inspection only, never a prerequisite; lifecycle management remains on the authorized native CLI.
+
 Workers normally do not run nested Team Agent teams. When the user or leader explicitly asks for a child team, follow `references/team-in-team.md`; otherwise workers only provide the target and content for progress, and a short completion summary at the end:
 
 ```text
@@ -592,7 +502,7 @@ team_orchestrator.report_result(summary="short completion", status="success", te
 
 For typed orchestration traffic, both `send_message` and `report_result` accept `presentation={"sink":"leader|casefile|silent","class":"message|progress|stage_result|stage_pass|bounce|blocking|final_review|timeout","case_id":"optional-case"}`. If the object is present, `sink` and `class` are required and unknown values fail closed. `casefile` and `silent` are durable-only, not deletion. The fixed critical classes `stage_pass`, `bounce`, `blocking`, `final_review`, and `timeout` always appear on the leader screen even when another sink is requested. Routing uses the typed class, never words in the content or summary.
 
-Do not pass `sender`, `task_id`, `requires_ack`, `schema_version`, or `agent_id` unless doing a low-level compatibility diagnostic. The MCP runtime fills those fields and keeps delivery metadata in runtime state and event logs. If provider env loses the worker id, MCP infers it from active task/message state and falls back to an explicit `unknown` sender instead of treating the worker as leader.
+Do not pass `sender`, `task_id`, `schema_version`, or `agent_id` unless doing a low-level compatibility diagnostic. The MCP runtime fills those fields and keeps delivery metadata in runtime state and event logs. If provider env loses the worker id, MCP infers it from active task/message state and falls back to an explicit `unknown` sender instead of treating the worker as leader.
 
 Message targets are team-scoped. Use `leader`, another teammate agent id, or `*` for all other team members. The runtime excludes the sender from `*` broadcasts and never scans unrelated terminal windows for recipients.
 
@@ -628,7 +538,7 @@ Examples of `action` observed on this gauge:
 
 Do not retry with changed flags. Do not inspect source code or private runtime state. Do not operate tmux directly except when the user asks for a manual diagnostic. Do not answer provider approval prompts for the user.
 
-If `quick-start` reports `tmux session already exists`, treat it as a team-name collision. The existing session may be an active team; do not terminate it and do not suggest `shutdown` as the normal fix. Change `name:` in `TEAM.md` so the next launch uses a different tmux session name, then run `team-agent quick-start .team/current` again.
+If `quick-start` reports `tmux session already exists`, treat it as a team-name collision. The existing session may be an active team; do not terminate it and do not suggest `shutdown` as the normal fix. Choose a distinct workspace folder name or set an optional `name:` override in valid `TEAM.md` frontmatter, then retry `team-agent quick-start .team/current`.
 
 Known Team Agent control-plane MCP prompts such as `team_orchestrator.report_result` and `team_orchestrator.send_message` are handled by the coordinator. It uses session-scoped approval, verifies the prompt cleared, retries boundedly, and logs the result. Do not ask the user to approve those routine internal prompts.
 

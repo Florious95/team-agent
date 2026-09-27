@@ -1135,19 +1135,10 @@ mod tests {
         );
     }
 
-    // 0.5.66 bypass 单源 §4.1:7 触发面共用同一 spec 校验层——compile_team 是它们的共同
-    // 必经点(quick-start/restart/add/fork 都调用),缺字段一律 fail-loud。此处验证
-    // compile 级校验确实 fail-loud,即各触发面(经 compile_team)都被覆盖。
+    // 0.5.66 bypass 单源 §4.1:7 个生命周期入口共享编译后的 spec。
+    // 缺失 role frontmatter 值时由编译器注入 true；此处锁定公共编译入口的默认结果。
     #[test]
-    fn test_all_7_triggers_run_field_check() {
-        // compile_team 是 7 触发面的 spec 校验必经点:
-        //   quick-start(quick_start.rs:233 compile_team)
-        //   restart(rebuild.rs:3245 rebuild_runtime_spec_from_roles → compile_team)
-        //   add-agent(add_agent.rs:331 compile_role_agent)
-        //   clone-agent(clone_agent.rs:62 → add_agent)
-        //   fork-agent(fork_agent.rs:96 validate_spec)
-        //   start-agent / reset-agent(操作已编译 spec,团队创建时经 compile_team 校验)
-        // 验证 compile_team 对缺字段的角色文档 fail-loud。
+    fn test_all_7_triggers_use_compiled_default_bypass() {
         let team = std::env::temp_dir().join(format!(
             "ta-spec-7trigger-{}",
             std::process::id()
@@ -1159,17 +1150,22 @@ mod tests {
             "---\nname: t7\nobjective: 7 trigger.\nprovider: codex\n---\n\nteam.\n",
         )
         .unwrap();
-        // 角色文档故意缺 dangerously_skip_permissions
+        // 角色文档故意省略该字段；纯文本默认必须写入 compiled spec。
         std::fs::write(
             team.join("agents").join("w.md"),
             "---\nname: w\nrole: Worker\nprovider: codex\ntools:\n  - mcp_team\n---\n\nw.\n",
         )
         .unwrap();
-        let err = crate::compiler::compile_team(&team).unwrap_err().to_string();
-        assert!(
-            err.contains("missing front matter field dangerously_skip_permissions")
-                && err.contains("This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed."),
-            "compile_team must fail-loud on missing field (shared by all 7 triggers); got {err}"
+        let spec = crate::compiler::compile_team(&team)
+            .expect("compile_team must materialize the default bypass value");
+        let agent = spec
+            .get("agents")
+            .and_then(Yaml::as_list)
+            .and_then(|agents| agents.first())
+            .expect("compiled spec has a worker");
+        assert_eq!(
+            agent.get("dangerously_skip_permissions"),
+            Some(&Yaml::Bool(true))
         );
         let _ = std::fs::remove_dir_all(&team);
     }

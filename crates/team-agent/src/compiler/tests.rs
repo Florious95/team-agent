@@ -163,25 +163,21 @@ fn front_matter_body_lstrip_strips_only_newlines() {
 }
 
 #[test]
-fn front_matter_unterminated_errors() {
-    let p = write_tmp("unterminated.md", "---\nname: x\n");
-    let err = read_front_matter(&p).unwrap_err();
-    assert!(
-        err.to_string().contains("unterminated front matter"),
-        "got: {err}"
-    );
+fn front_matter_unterminated_falls_back_to_plain_text() {
+    let text = "---\nname: x\n";
+    let p = write_tmp("unterminated.md", text);
+    let (meta, body) = read_front_matter(&p).expect("unterminated front matter is plain text");
+    assert_eq!(meta, Value::Map(Vec::new()));
+    assert_eq!(body, text);
 }
 
 #[test]
-fn front_matter_non_object_errors() {
-    // A YAML list in the block → "front matter must be a YAML object" (compiler.py:183-184).
-    let p = write_tmp("list.md", "---\n- a\n- b\n---\nbody\n");
-    let err = read_front_matter(&p).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("front matter must be a YAML object"),
-        "got: {err}"
-    );
+fn front_matter_non_object_falls_back_to_plain_text() {
+    let text = "---\n- a\n- b\n---\nbody\n";
+    let p = write_tmp("list.md", text);
+    let (meta, body) = read_front_matter(&p).expect("non-object front matter is plain text");
+    assert_eq!(meta, Value::Map(Vec::new()));
+    assert_eq!(body, text);
 }
 
 // ───────────────────────────── compile_team: full dict parity ─────────────────────────────
@@ -395,7 +391,7 @@ const ROLE_MISSING_PROVIDER: &str = "\
 ---
 name: implementer
 role: Implementation Engineer
-model: gpt-5.5
+model: team-agent/qwen3.8-27b
 auth_mode: subscription
 dangerously_skip_permissions: false
 tools:
@@ -406,13 +402,14 @@ Implement bounded tasks.
 ";
 
 #[test]
-fn compile_missing_required_provider_field_errors() {
+fn compile_missing_provider_defaults_to_pi() {
     let team = build_team(TEAM_BASE, &[("implementer.md", ROLE_MISSING_PROVIDER)], &[]);
-    let err = compile_team(&team).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("missing front matter field provider"),
-        "got: {err}"
+    let spec = compile_team(&team).expect("an omitted provider defaults to Pi");
+    let agent = agent0(&spec);
+    assert_eq!(agent.get("provider"), Some(&Value::Str("pi".to_string())));
+    assert_eq!(
+        agent.get("model"),
+        Some(&Value::Str("team-agent/qwen3.8-27b".to_string()))
     );
 }
 

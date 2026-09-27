@@ -6,7 +6,7 @@
 //!   must queue work and emit binary-drift diagnostics, not `coordinator_unavailable`.
 //! - RED2: protocol/schema incompatibility remains fail-closed with no row and
 //!   no coordinator start/stop side effect.
-//! - RED3/RED5: old start/lifecycle callers must not downgrade a newer daemon.
+//! - RED3: old start callers must not downgrade a newer daemon.
 //! - RED4: current/newer callers still rotate older daemons loudly.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -197,49 +197,6 @@ fn new_caller_start_coordinator_still_rotates_older_daemon_guard() {
     assert!(
         !fixture.pid_alive(old_pid),
         "RED4 guard: old daemon pid must be stopped by the authorized newer caller"
-    );
-}
-
-#[test]
-#[serial(env)]
-fn mcp_lifecycle_reset_cannot_rotate_newer_daemon_down() {
-    let mut fixture = CompatFixture::old_mcp_caller("red5-lifecycle-no-downgrade");
-    let daemon_pid = fixture.spawn_daemon_metadata(
-        CURRENT_DAEMON_VERSION,
-        PROTOCOL_VERSION,
-        team_agent::db::schema::SCHEMA_VERSION,
-    );
-
-    let reset = fixture
-        .tools()
-        .reset_agent(WORKER, true)
-        .map(|ok| Value::Object(ok.fields))
-        .unwrap_or_else(|error| error.to_envelope());
-
-    assert_eq!(
-        fixture.pid_file_value(),
-        Some(daemon_pid),
-        "RED5: MCP reset/fork lifecycle path from old caller must not downgrade newer daemon; reset={reset} events={:?}",
-        fixture.events_tail()
-    );
-    assert!(
-        fixture.pid_alive(daemon_pid),
-        "RED5: newer daemon process must remain alive after old MCP lifecycle call; reset={reset}"
-    );
-    assert!(
-        !fixture.has_event("coordinator.rotation_required")
-            && !fixture.has_event("coordinator.ensure_restarted"),
-        "RED5: old MCP lifecycle call must not enter rotation/ensure path for a newer daemon; reset={reset} events={:?}",
-        fixture.events_tail()
-    );
-    assert!(
-        fixture.has_event("coordinator.newer_daemon_preserved")
-            || reset
-                .pointer("/coordinator_binary_relation")
-                .and_then(Value::as_str)
-                == Some("daemon_newer_than_caller"),
-        "RED5: lifecycle tool result/event must expose daemon_newer_than_caller instead of silently continuing; reset={reset} events={:?}",
-        fixture.events_tail()
     );
 }
 

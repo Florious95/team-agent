@@ -262,6 +262,13 @@
       }
     },
     {
+      "command": "team-agent quick-start <plain-text-team-dir>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Run exact argv team-agent quick-start <plain-text-team-dir> in an isolated workspace with plain-text TEAM.md and agents/<stem>.md; bind successful compilation, objective, filename-derived id, and default provider/model/effort/bypass in the generated spec."
+    },
+    {
       "command": "team-agent remove-agent <agent> --workspace . --confirm",
       "bucket": "declared_gap",
       "covered": false,

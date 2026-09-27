@@ -1,8 +1,8 @@
 //! #236 notification redesign negative/retention contracts.
 //!
 //! User-facing invariant: deterministic notifications replace idle/stuck/deadlock nag. Product
-//! delivery notifications for report_result / send-to-leader / request_human / broadcast-to-leader
-//! remain on the N31/N32 funnel.
+//! delivery notifications for report_result / send-to-leader / broadcast-to-leader remain on the
+//! N31/N32 funnel.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -78,9 +78,14 @@ fn product_delivery_notifications_stay_on_n31_n32_funnel() {
         failures
             .push("report_result notification must remain on send_to_leader_receiver".to_string());
     }
-    if !tools.contains("request_human") || !tools.contains("send_to_leader_receiver") {
-        failures
-            .push("request_human must remain on the same leader-delivery primitive".to_string());
+    if !tools.contains("messaging::send_message(")
+        || !tools.contains("messaging::report_result_for_owner_team(")
+        || !send.contains("send_to_leader_receiver_with_presentation")
+        || !results.contains("send_to_leader_receiver_with_presentation")
+    {
+        failures.push(
+            "retained MCP send/report_result facades must delegate to messaging paths that share the leader-delivery primitive".to_string(),
+        );
     }
     if !send.contains("send_to_leader_receiver") || !send.contains("MessageTarget::Broadcast") {
         failures.push(

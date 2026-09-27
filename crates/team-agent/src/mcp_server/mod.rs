@@ -4,8 +4,8 @@
 //! Card: `docs/phase0/subsystems/14-mcp_cli.md` (MCP half).
 //! Truth source (READ-ONLY) `team-agent-public` @ v0.2.11 / `439bef8`:
 //!   - `mcp_server/server.py`    — stdio loop + JSON-RPC route (`dispatch`/`handle_mcp`/`main`)
-//!   - `mcp_server/tools.py`     — `TeamOrchestratorTools`: the 12 typed tool handlers
-//!   - `mcp_server/contracts.py` — `TOOLS`: name/description/inputSchema (wire single-truth)
+//!   - `mcp_server/tools.py`     — `TeamOrchestratorTools`: the three retained handlers
+//!   - `mcp_server/contracts.py` — retained tool names/descriptions/inputSchema
 //!   - `mcp_server/normalize.py` — result envelope / compact-result regularization
 //!   - `mcp_server/__init__.py`  — package re-export surface locked by boundary tests
 //!
@@ -17,13 +17,9 @@
 //! `unimplemented!("step14 port: …")`.
 //!
 //! REUSE (do NOT redefine):
-//!   - [`MessageStore`] (step 7) — `request_human` creates the leader message row.
-//!   - [`EventLog`] (step 4) — `mcp.scope_resolved` / `mcp.send_message_refused` /
-//!     `mcp.identity_inference_failed` / `mcp.task_inference_failed` audit events.
-//!   - [`load_runtime_state`] / [`save_runtime_state`] (step 5 persist) — `assign_task`
-//!     / `update_state` read-modify-write; `get_visible_peers` reads team scope.
-//!   - [`messaging`] (step 11) — `send_message` / auto-finalizing `report_result` /
-//!     `stuck_list` / `stuck_cancel` delegated by the tool handlers.
+//!   - [`EventLog`] (step 4) — retained message/result audit events.
+//!   - [`load_runtime_state`] (step 5 persist) — message scope and peer checks.
+//!   - [`messaging`] (step 11) — `send_message` and durable `report_result` delegation.
 //!   - [`crate::model::enums`] (step 2) — [`ResultStatus`] / [`ChangeKind`] /
 //!     [`TestStatus`] / [`RiskSeverity`] are the normalized result-envelope value
 //!     enums; this layer ONLY does string-alias regularization onto them.
@@ -43,9 +39,8 @@
 //!     a frame here would corrupt the stdout JSON-RPC stream.
 //!   - **stdout 是传输通道** (server.py:135): every error is surfaced ON stdout as a
 //!     JSON-RPC frame; logs/warnings MUST go to stderr/file, never stdout.
-//!   - **worker-recipient 异步 accepted** (tools.py:176-183): a worker recipient with
-//!     a message_id → [`SendOutcome::WorkerAccepted`] carrying the byte-stable
-//!     `poll_via = "team-agent inbox <id>"`; leader/`*` → [`SendOutcome::Direct`].
+//!   - **worker-recipient 异步 accepted**: a worker recipient with a message_id →
+//!     [`SendOutcome::WorkerAccepted`]; leader/`*` → [`SendOutcome::Direct`].
 //!   - **兜底字符串字节级保留** (bug-085): `_infer_task_id` failure → `"manual"` (not
 //!     None); `_infer_agent_id` failure → `None` → caller routes to `"unknown"`.
 //!

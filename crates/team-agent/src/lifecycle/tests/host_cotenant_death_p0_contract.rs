@@ -533,22 +533,6 @@ fn reset_stopped_true_still_rechecks_same_role_residue_before_start() {
 }
 
 #[test]
-fn mcp_reset_output_exposes_capture_outcome_and_weak_reset_proof() {
-    let src = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/mcp_server/lifecycle_tools/agent_ops.rs"
-    ));
-    let reset = source_section(src, "pub(crate) fn reset_agent", "pub(crate) fn fork_agent");
-    let json_object = reset_success_json_object(reset);
-    let missing = ["\"capture_state\":", "\"reset_proof\":", "\"transcript_missing\"", "\"attribution_ambiguous\"", "\"weak\""]
-        .into_iter().filter(|needle| !json_object.contains(needle)).collect::<Vec<_>>();
-    assert!(
-        missing.is_empty(),
-        "P0 MCP reset: ok=true/status=reset must expose additive capture_state and reset_proof=weak inside the ResetAgentOutcome::Reset serde_json::json! object; missing={missing:?}; reset_json={json_object}"
-    );
-}
-
-#[test]
 #[serial(env)]
 fn abnormal_shell_pane_with_live_delivery_is_not_dead_and_dedupe_ignores_size() {
     let env = hermetic_guard::HermeticTestEnv::enter("p0-abnormal");
@@ -971,16 +955,4 @@ impl ProviderRegistry for RealAdapterRegistry {
     fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
         get_adapter(provider)
     }
-}
-
-fn source_section<'a>(src: &'a str, start: &str, end: &str) -> &'a str { let start = src.find(start).unwrap_or(0); let rest = &src[start..]; &rest[..rest.find(end).unwrap_or(rest.len())] }
-
-fn reset_success_json_object(reset_src: &str) -> &str {
-    let success = source_section(reset_src, "ResetAgentOutcome::Reset", "ResetAgentOutcome::Refused");
-    let macro_start = success.find("serde_json::json!({").expect("reset success json object"); let object_start = macro_start + success[macro_start..].find('{').unwrap(); let mut depth = 0_i32;
-    for (offset, ch) in success[object_start..].char_indices() {
-        if ch == '{' { depth += 1; } if ch == '}' { depth -= 1; }
-        if depth == 0 { return &success[object_start..object_start + offset + 1]; }
-    }
-    panic!("unterminated reset success json object")
 }

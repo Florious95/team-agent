@@ -372,7 +372,7 @@ fn pi_leader_wrapper_materializes_from_empty_unicode_wsl_workspace() {
         team_id: "current",
         agent_id: "leader",
         workspace: &workspace,
-        include_tools: &["assign_task", "send_message"],
+        include_tools: &["send_message", "report_result", "get_team_status"],
     })
     .expect("materialize Pi leader wrapper from an empty Unicode workspace");
 
@@ -437,7 +437,7 @@ fn pi_wrapper_publish_needs_no_final_path_metadata_lookup() {
             team_id: "current",
             agent_id: "leader",
             workspace: &workspace,
-            include_tools: &["assign_task", "send_message"],
+            include_tools: &["send_message", "report_result", "get_team_status"],
         },
         |temp, destination| {
             std::fs::rename(temp, destination)?;

@@ -25,19 +25,9 @@ use super::types::{
 /// schema cannot drift from the enum. Returned verbatim by `tools/list`.
 pub fn tools_contract() -> Vec<Value> {
     let tools = [
-        McpTool::AssignTask,
         McpTool::SendMessage,
         McpTool::ReportResult,
-        McpTool::UpdateState,
         McpTool::GetTeamStatus,
-        McpTool::StopAgent,
-        McpTool::ResetAgent,
-        McpTool::AddAgent,
-        McpTool::CloneAgent,
-        McpTool::ForkAgent,
-        McpTool::RequestHuman,
-        McpTool::StuckList,
-        McpTool::StuckCancel,
     ];
     tools.into_iter().map(tool_contract).collect()
 }
@@ -397,21 +387,11 @@ fn tool_contract(tool: McpTool) -> Value {
             "Send a message to a teammate, the leader, or '*' for all other team members. mailbox=true stores durably without live injection; the default is live delivery.",
             vec!["to", "content"],
         ),
-        McpTool::AssignTask => ("Assign or update a task in the team graph and deliver it to its assignee.", vec!["task"]),
         McpTool::ReportResult => (
             "Report task completion with a durable result envelope. Optional presentation routing controls live leader display, not persistence.",
             Vec::new(),
         ),
-        McpTool::UpdateState => ("Append a note to team state and rewrite team_state.md.", vec!["note"]),
         McpTool::GetTeamStatus => ("Return machine-readable team status.", Vec::new()),
-        McpTool::StopAgent => ("Stop a running worker.", vec!["agent_id"]),
-        McpTool::ResetAgent => ("Reset one worker to a fresh session.", vec!["agent_id", "discard_session"]),
-        McpTool::AddAgent => ("Add a first-class worker from a role file.", vec!["new_agent_id", "role_file_path"]),
-        McpTool::CloneAgent => ("Clone a worker role into a fresh provider session.", vec!["source_agent_id", "as_agent_id"]),
-        McpTool::ForkAgent => ("Fork a running worker.", vec!["source_agent_id", "as_agent_id"]),
-        McpTool::RequestHuman => ("Ask the leader or user for human input.", vec!["question"]),
-        McpTool::StuckList => ("List manually suppressed idle alerts.", Vec::new()),
-        McpTool::StuckCancel => ("Suppress repeated stuck or idle alerts.", vec!["agent_id"]),
     };
     serde_json::json!({
         "name": tool.wire_name(),
@@ -428,14 +408,6 @@ fn tool_contract(tool: McpTool) -> Value {
 fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
     let mut properties = serde_json::Map::new();
     match tool {
-        McpTool::AssignTask => {
-            insert_property(&mut properties, "task", task_property());
-            insert_property(
-                &mut properties,
-                "message",
-                string_property("Optional message to deliver with the task."),
-            );
-        }
         McpTool::SendMessage => {
             insert_property(
                 &mut properties,
@@ -506,108 +478,7 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
                 presentation_property("Optional durable presentation routing."),
             );
         }
-        McpTool::UpdateState => {
-            insert_property(
-                &mut properties,
-                "note",
-                string_property("Note to append to team state."),
-            );
-        }
-        McpTool::GetTeamStatus | McpTool::StuckList => {}
-        McpTool::StopAgent => {
-            insert_property(
-                &mut properties,
-                "agent_id",
-                string_property("Agent id to stop."),
-            );
-        }
-        McpTool::ResetAgent => {
-            insert_property(
-                &mut properties,
-                "agent_id",
-                string_property("Agent id to reset."),
-            );
-            insert_property(
-                &mut properties,
-                "discard_session",
-                boolean_property("Whether to discard the existing provider session."),
-            );
-        }
-        McpTool::AddAgent => {
-            insert_property(
-                &mut properties,
-                "new_agent_id",
-                string_property("New agent id."),
-            );
-            insert_property(
-                &mut properties,
-                "role_file_path",
-                string_property("Workspace-relative role file path."),
-            );
-        }
-        McpTool::ForkAgent => {
-            insert_property(
-                &mut properties,
-                "source_agent_id",
-                string_property("Agent id to fork from."),
-            );
-            insert_property(
-                &mut properties,
-                "as_agent_id",
-                string_property("Agent id for the forked worker."),
-            );
-            insert_property(
-                &mut properties,
-                "label",
-                string_property("Optional display label."),
-            );
-        }
-        McpTool::CloneAgent => {
-            insert_property(
-                &mut properties,
-                "source_agent_id",
-                string_property("Agent id to clone from."),
-            );
-            insert_property(
-                &mut properties,
-                "as_agent_id",
-                string_property("Agent id for the cloned worker."),
-            );
-            insert_property(
-                &mut properties,
-                "label",
-                string_property("Optional display label."),
-            );
-        }
-        McpTool::RequestHuman => {
-            insert_property(
-                &mut properties,
-                "question",
-                string_property("Question to ask the human."),
-            );
-            insert_property(
-                &mut properties,
-                "task_id",
-                string_property("Optional related task id."),
-            );
-            insert_property(
-                &mut properties,
-                "agent_id",
-                string_property("Optional requesting agent id."),
-            );
-        }
-        McpTool::StuckCancel => {
-            insert_property(
-                &mut properties,
-                "agent_id",
-                string_property("Agent id whose stuck alerts should be suppressed."),
-            );
-            insert_property(
-                &mut properties,
-                "alert_type",
-                string_property("Alert type to suppress, or all."),
-            );
-        }
+        McpTool::GetTeamStatus => {}
     }
     properties
 }
@@ -626,25 +497,6 @@ fn boolean_property(description: &str) -> Value {
 
 fn object_property(description: &str) -> Value {
     serde_json::json!({"type": "object", "description": description, "additionalProperties": true})
-}
-
-fn task_property() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Task object to add or update.",
-        "properties": {
-            "result_route": {
-                "type": "string",
-                "enum": crate::messaging::results::ResultRoute::ALL
-                    .iter()
-                    .map(|route| route.as_str())
-                    .collect::<Vec<_>>(),
-                "default": crate::messaging::results::ResultRoute::default().as_str(),
-                "description": "Result destination chosen by the task assigner."
-            }
-        },
-        "additionalProperties": true
-    })
 }
 
 fn presentation_property(description: &str) -> Value {
@@ -690,14 +542,8 @@ pub(crate) fn dispatch_tool(
         }
         _ => {}
     }
-    if scope_ceiling_tool(tool) {
-        tools.validate_rpc_scope_args(tool.wire_name(), args)?;
-    }
+    tools.validate_rpc_scope_args(tool.wire_name(), args)?;
     match tool {
-        McpTool::AssignTask => tools.assign_task(
-            args.get("task").unwrap_or(args),
-            args.get("message").and_then(Value::as_str),
-        ),
         McpTool::SendMessage => {
             let target = message_target_from_value(args.get("to"));
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
@@ -740,75 +586,8 @@ pub(crate) fn dispatch_tool(
             args.get("agent_id").and_then(Value::as_str),
             args.get("presentation"),
         ),
-        McpTool::UpdateState => {
-            tools.update_state(args.get("note").and_then(Value::as_str).unwrap_or(""))
-        }
         McpTool::GetTeamStatus => tools.get_team_status(),
-        McpTool::StopAgent => {
-            tools.stop_agent(args.get("agent_id").and_then(Value::as_str).unwrap_or(""))
-        }
-        McpTool::ResetAgent => tools.reset_agent(
-            args.get("agent_id").and_then(Value::as_str).unwrap_or(""),
-            args.get("discard_session")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        ),
-        McpTool::AddAgent => tools.add_agent(
-            args.get("new_agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            args.get("role_file_path")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        ),
-        McpTool::ForkAgent => tools.fork_agent(
-            args.get("source_agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            args.get("as_agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            args.get("label").and_then(Value::as_str),
-        ),
-        McpTool::CloneAgent => tools.clone_agent(
-            args.get("source_agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            args.get("as_agent_id")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            args.get("label").and_then(Value::as_str),
-        ),
-        McpTool::RequestHuman => tools.request_human(
-            args.get("question").and_then(Value::as_str).unwrap_or(""),
-            args.get("task_id").and_then(Value::as_str),
-            args.get("agent_id").and_then(Value::as_str),
-        ),
-        McpTool::StuckList => tools.stuck_list(),
-        McpTool::StuckCancel => tools.stuck_cancel(
-            args.get("agent_id").and_then(Value::as_str).unwrap_or(""),
-            // tools.py:351 — the MCP default alert_type is "stuck", not "all".
-            args.get("alert_type")
-                .and_then(Value::as_str)
-                .unwrap_or("stuck"),
-        ),
     }
-}
-
-fn scope_ceiling_tool(tool: McpTool) -> bool {
-    matches!(
-        tool,
-        McpTool::SendMessage
-            | McpTool::ReportResult
-            | McpTool::RequestHuman
-            | McpTool::AssignTask
-            | McpTool::UpdateState
-            | McpTool::GetTeamStatus
-            | McpTool::StopAgent
-            | McpTool::ResetAgent
-            | McpTool::CloneAgent
-            | McpTool::ForkAgent
-    )
 }
 
 fn message_target_from_value(value: Option<&Value>) -> MessageTarget {

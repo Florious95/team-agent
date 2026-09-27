@@ -44,48 +44,38 @@ pub struct IgnoredTeamField {
     pub value: String,
 }
 
-/// `compiler._read_front_matter` (compiler.py:173-185).
-///
-/// Reads `path` (UTF-8). If the text does not start with `"---\n"`, returns
-/// `({}, full_text)`. Otherwise splits on the first `"\n---"` after byte 4:
-/// unterminated (no closing marker) → `ValidationError "{path}: unterminated
-/// front matter"`; the front-matter block is parsed via `simple_yaml.loads`
-/// (empty block → `{}`); a non-dict block → `ValidationError "{path}: front
-/// matter must be a YAML object"`. The body is everything after the closing
-/// marker, `lstrip("\n")` (leading NEWLINES only — not other whitespace).
+/// Read optional YAML front matter; malformed or non-object headers are plain text.
 pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     let text = fs::read_to_string(path)
         .map_err(|e| ModelError::Runtime(format!("{}: {e}", path.display())))?;
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let empty_meta = || Value::Map(Vec::new());
     let Some(rest) = text.strip_prefix("---\n") else {
-        return Ok((Value::Map(Vec::new()), text));
+        return Ok((empty_meta(), text));
     };
-    let Some(close) = rest.find("\n---") else {
-        return Err(ModelError::Validation(format!(
-            "{}: unterminated front matter",
-            path.display()
-        )));
-    };
-    let raw_meta = rest.get(..close).ok_or_else(|| {
-        ModelError::Validation(format!("{}: unterminated front matter", path.display()))
-    })?;
-    let after_meta = rest.get(close..).ok_or_else(|| {
-        ModelError::Validation(format!("{}: unterminated front matter", path.display()))
-    })?;
-    let after_marker = after_meta.strip_prefix("\n---").ok_or_else(|| {
-        ModelError::Validation(format!("{}: unterminated front matter", path.display()))
-    })?;
-    let meta = if raw_meta.trim().is_empty() {
-        Value::Map(Vec::new())
-    } else {
-        yaml::loads(raw_meta)?
-    };
-    if !meta.is_map() {
-        return Err(ModelError::Validation(format!(
-            "{}: front matter must be a YAML object",
-            path.display()
-        )));
+
+    let mut offset = 0;
+    let mut close = None;
+    for line in rest.split_inclusive('\n') {
+        if line.strip_suffix('\n').unwrap_or(line) == "---" {
+            close = Some(offset);
+            break;
+        }
+        offset += line.len();
     }
+    let Some(close) = close else {
+        return Ok((empty_meta(), text));
+    };
+    let raw_meta = &rest[..close];
+    let meta = if raw_meta.trim().is_empty() {
+        empty_meta()
+    } else {
+        match yaml::loads(raw_meta) {
+            Ok(meta) if meta.is_map() => meta,
+            _ => return Ok((empty_meta(), text)),
+        }
+    };
+    let after_marker = &rest[close + 3..];
     Ok((meta, after_marker.trim_start_matches('\n').to_string()))
 }
 
@@ -161,7 +151,7 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
     let workspace = paths::team_workspace(team_dir)?;
     let workspace_s = workspace.display().to_string();
     let team_name =
-        string_field(&team_meta, "name").unwrap_or_else(|| team_dir_parent_name(team_dir));
+        string_field(&team_meta, "name").unwrap_or_else(|| workspace_dir_name(&workspace));
     let objective = string_field(&team_meta, "objective")
         .or_else(|| non_empty_trimmed(&team_body))
         .unwrap_or_else(|| "Team Agent document-driven team.".to_string());
@@ -487,9 +477,23 @@ fn compile_role_agent_with_mode(
     let (meta, body) = read_front_matter(role_path)?;
     let communication_mode =
         communication_mode_field(&meta, role_path)?.unwrap_or(team_communication_mode);
-    let id = required_string(&meta, role_path, "name")?;
-    let role = required_string(&meta, role_path, "role")?;
-    let provider = required_string(&meta, role_path, "provider")?;
+    let id = string_field(&meta, "agent_id")
+        .or_else(|| string_field(&meta, "name"))
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            role_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "worker".to_string());
+    let role = string_field(&meta, "role")
+        .filter(|role| !role.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
+    let provider = string_field(&meta, "provider")
+        .filter(|provider| !provider.trim().is_empty())
+        .unwrap_or_else(|| "pi".to_string());
     require_explicit_grok_role_model(&meta, role_path, &provider)?;
     require_explicit_cursor_role_model(&meta, role_path, &provider)?;
     validate_pi_role_fields(&meta, role_path, &provider)?;
@@ -498,7 +502,7 @@ fn compile_role_agent_with_mode(
         string_field(&meta, "model")
             .filter(|value| !value.trim().is_empty())
             .map(Value::Str)
-            .unwrap_or(Value::Null)
+            .unwrap_or_else(|| Value::Str("openai-codex/gpt-6-luna".to_string()))
     } else {
         resolve_model(&meta, team_meta, &provider)
     };
@@ -532,11 +536,9 @@ fn compile_role_agent_with_mode(
                 ("file", Value::Null),
             ]),
         ),
-        // 0.5.66 bypass 单源:compiler 透传角色 md 的 `dangerously_skip_permissions`
-        // (必填 bool,spec 校验保证存在)。取代旧"恒发 permission_mode: restricted"。
         (
             "dangerously_skip_permissions",
-            Value::Bool(required_dangerously_skip_permissions(&meta, role_path)?),
+            Value::Bool(optional_dangerously_skip_permissions(&meta)),
         ),
         (
             "communication_mode",
@@ -575,6 +577,7 @@ fn compile_role_agent_with_mode(
             })?;
             Some(parsed)
         }
+        _ if is_pi => Some(ProviderEffort::Max),
         _ => None,
     };
     let team_effort = match string_field(team_meta, "provider_effort") {
@@ -671,15 +674,6 @@ fn string_field(meta: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn required_string(meta: &Value, path: &Path, key: &str) -> Result<String, ModelError> {
-    string_field(meta, key).ok_or_else(|| {
-        ModelError::Validation(format!(
-            "{}: missing front matter field {key}",
-            path.display()
-        ))
-    })
-}
-
 /// 缺 model 时框架会填内建默认（grok 上是 grok-4），席位因此静默拿到
 /// 与角色文件无关的模型和上下文窗口，而 argv 看起来完全正常。
 /// 角色文件必须自己写死；内建默认、team 级默认、CLI 全局默认都是隐式来源。
@@ -749,19 +743,10 @@ fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<
     Ok(())
 }
 
-/// 0.5.66 bypass 单源:角色 md 的 `dangerously_skip_permissions` 必填 bool。
-/// 缺 = 编译失败(消息含硬串);非 bool = 同 fail-loud。
-fn required_dangerously_skip_permissions(meta: &Value, path: &Path) -> Result<bool, ModelError> {
+fn optional_dangerously_skip_permissions(meta: &Value) -> bool {
     match meta.get("dangerously_skip_permissions") {
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(_) => Err(ModelError::Validation(format!(
-            "{}: front matter field dangerously_skip_permissions must be a boolean. This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.",
-            path.display()
-        ))),
-        None => Err(ModelError::Validation(format!(
-            "{}: missing front matter field dangerously_skip_permissions. This field must be declared explicitly; it controls whether the agent launches with permission prompts bypassed.",
-            path.display()
-        ))),
+        Some(Value::Bool(value)) => *value,
+        _ => true,
     }
 }
 
@@ -883,10 +868,9 @@ fn non_empty_trimmed(text: &str) -> Option<String> {
     }
 }
 
-fn team_dir_parent_name(team_dir: &Path) -> String {
-    team_dir
-        .parent()
-        .and_then(Path::file_name)
+fn workspace_dir_name(workspace: &Path) -> String {
+    workspace
+        .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("team")

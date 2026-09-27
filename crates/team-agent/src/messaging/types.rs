@@ -219,26 +219,6 @@ impl WorkerRuntimeState {
     }
 }
 
-/// 告警类型 (card §49;`scheduler.py:38` `_ALERT_TYPES`)。`stuck_cancel` 还接 `all` (展开全集)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AlertType {
-    Stuck,
-    IdleFallback,
-    CrossWorkerDeadlock,
-}
-
-impl AlertType {
-    /// `stuck_cancel(alert_type="all")` → `sorted(_ALERT_TYPES)` 全集 (`scheduler.py:269`)。
-    pub fn all() -> [AlertType; 3] {
-        [
-            AlertType::CrossWorkerDeadlock,
-            AlertType::IdleFallback,
-            AlertType::Stuck,
-        ]
-    }
-}
-
 /// selftest check 状态 (card §47;`diagnose/comms.py`)。§19 必变 enum。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
