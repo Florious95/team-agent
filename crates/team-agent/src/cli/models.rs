@@ -861,7 +861,7 @@ mod tests {
         assert!(text.contains("No models matched --search") && text.contains("auth: ok"));
         let refusal = crate::cli::emit::__test_dispatch(
             "models",
-            &["--provider".into(), "codex".into()],
+            &["--provider".into(), "cloud".into()],
             Path::new("/tmp"),
         );
         assert!(matches!(refusal, Ok(ExitCode::Error)));
@@ -961,14 +961,14 @@ mod tests {
         );
         assert_eq!(
             crate::cli::run(
-                &["models".into(), "--provider".into(), "codex".into()],
+                &["models".into(), "--provider".into(), "cloud".into()],
                 Path::new("/tmp")
             ),
             ExitCode::Error
         );
         assert_eq!(
             crate::cli::spec::command_spec("models").unwrap().usage,
-            "usage: team-agent models [--provider pi|cursor_agent] [QUERY|--search TEXT] [--json]"
+            "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code] [QUERY|--search TEXT] [--json]"
         );
     }
 
