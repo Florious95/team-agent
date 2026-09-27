@@ -98,6 +98,15 @@ fn report_result_notification_preserves_long_multiline_summary_verbatim() {
             .contains("Verification: the full summary must survive report_result formatting and leader delivery.\nDetails: preserve this second paragraph"),
         "multi-line descriptive paragraphs must remain separated"
     );
+    eprintln!(
+        "report_result notification diagnostic: message_id={:?} status={:?} leader_notified={:?} channel={:?}; db_message_status={:?}\nevents.jsonl:\n{}",
+        report.body.get("notification_message_id"),
+        report.body.get("notification_status"),
+        report.body.get("leader_notified"),
+        report.body.get("notification_channel"),
+        notification.status,
+        harness.events_text(),
+    );
     let leader_pane = harness.pane_text("leader");
     assert!(
         leader_pane.contains("FULL_SUMMARY_END_fef4a83e21d54829b5d0dcd43d6aa1c1"),
