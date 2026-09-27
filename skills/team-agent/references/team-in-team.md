@@ -9,7 +9,7 @@ This reference is for explicitly requested nested Team Agent teams. Use it only 
 - Never edit, delete, or reuse files under the parent team's `.team/current`.
 - Never shut down a team just because `.team/current` is already occupied. In a nested setup, that is probably the parent team; shutting it down can kill the main node.
 - A child team needs its own workspace directory. The role-doc directory is not the child workspace.
-- MCP tools are team-scoped. A worker must not try to widen `team_orchestrator.send_message` to another team.
+- The MCP surface is exactly `send_message`, `report_result`, and optional `get_team_status`; it is team-scoped. A worker must not try to widen `send_message` to another team. Lifecycle management uses the authorized native CLI.
 
 ## Child Workspace
 
@@ -34,29 +34,14 @@ Then create the child team's files inside the child workspace:
 
 ```bash
 cat > .team/current/TEAM.md <<'EOF'
----
-name: child-review-team
-objective: Run a bounded child-team task and report to the parent worker.
-dangerous_auto_approve: false
-fast: false
----
-
-Child team config only.
+A bounded child team for reviewing the requested files and reporting findings.
 EOF
 
 cat > .team/current/agents/reviewer.md <<'EOF'
----
-name: reviewer
-role: Independent Reviewer
-provider: codex
-tools:
-  - fs_read
-  - fs_list
-  - mcp_team
----
+# Independent Reviewer
 
 Review only the files and instructions provided by the child-team leader.
-Report findings with team_orchestrator.report_result exactly once.
+Use `send_message` for progress and report findings with `report_result` exactly once.
 EOF
 
 team-agent quick-start .team/current

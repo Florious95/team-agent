@@ -105,14 +105,14 @@ pub use results::{
     collect, collect_for_team, report_result, report_result_for_owner_team,
     report_result_for_owner_team_with_primary_error,
 };
-pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel, stuck_list};
+pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events};
 pub use selftest::{run_comms_selftest, CommsSelftestDriver};
 pub use send::{
     apply_worker_sender_bypass, send_message, MessageTarget, SendOptions, TrustedSender,
 };
 pub use trust::{attempt_trust_auto_answer, TrustAnswerOutcome};
 pub use types::{
-    ActivityStatus, AgentActivity, AlertType, CheckEvidence, CheckKind, CheckStatus,
+    ActivityStatus, AgentActivity, CheckEvidence, CheckKind, CheckStatus,
     ContractSuiteCheck, DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus,
     IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery,
     ProviderSdkCalls, ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload,

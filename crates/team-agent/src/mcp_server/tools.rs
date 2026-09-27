@@ -1,5 +1,5 @@
 //!
-//! step 14a · mcp_server::tools — `TeamOrchestratorTools`, the 12 typed handlers.
+//! step 14a · mcp_server::tools — `TeamOrchestratorTools`, the three MCP handlers.
 
 use std::path::{Path, PathBuf};
 
@@ -13,16 +13,14 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 use crate::event_log::EventLog;
 
 // ── REUSE: step 5 state persist / projection ────────────────────────────────
-use crate::state::persist::{
-    load_runtime_state, save_runtime_state, save_runtime_state_reapplying_after_conflict,
-};
+use crate::state::persist::load_runtime_state;
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
 use crate::messaging::{self, DeliveryStatus, MessageTarget, SendOptions, TrustedSender};
 
 use super::helpers::{
     current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
-    ensure_object, enum_value, is_worker_recipient, json_dumps_default, latest_task_for_assignee,
+    ensure_object, enum_value, is_worker_recipient, latest_task_for_assignee,
     non_empty_string, object_fields, requires_ack_for_target, tool_runtime_error,
     DirectMessageAttribution,
 };
@@ -35,7 +33,7 @@ use super::types::{
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TeamOrchestratorTools (tools.py:72) — the 12 typed tool handlers.
+// TeamOrchestratorTools — the three typed MCP handlers.
 // Identity/scope anchored on spawn-time env (TEAM_AGENT_ID / TEAM_AGENT_OWNER_TEAM_ID);
 // every handler delegates to runtime/MessageStore/EventLog. These ARE the
 // contract-callable behavioral entry fns.
@@ -181,100 +179,6 @@ impl TeamOrchestratorTools {
             provided.map_or(Value::Null, |value| Value::String(value.to_string())),
         );
         error
-    }
-
-    /// `assign_task` (`tools.py:84-133`): C8 Family-B task-view reconcile then deliver.
-    /// Resolves team key from owner-team env (or `active_team_key`), appends or
-    /// field-updates the task in state, then delegates delivery to
-    /// [`Self::send_message`] and compacts the result.
-    pub fn assign_task(&self, task: &Value, message: Option<&str>) -> ToolResult {
-        self.validate_rpc_scope_args("assign_task", task)?;
-        let Some(task_obj) = task.as_object() else {
-            return Err(ToolError::new(
-                ToolErrorReason::InvalidToolArguments,
-                "assign_task task must be an object",
-                "ValueError",
-            ));
-        };
-        let Some(task_id) = task
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(non_empty_string)
-        else {
-            return Err(ToolError::new(
-                ToolErrorReason::InvalidToolArguments,
-                "assign_task task.id is required",
-                "ValueError",
-            ));
-        };
-        let Some(assignee) = task
-            .get("assignee")
-            .and_then(Value::as_str)
-            .and_then(non_empty_string)
-        else {
-            return Err(ToolError::new(
-                ToolErrorReason::InvalidToolArguments,
-                "assign_task task.assignee is required",
-                "ValueError",
-            ));
-        };
-        if let Some(route) = task.get("result_route") {
-            let Some(route) = route.as_str() else {
-                return Err(ToolError::new(
-                    ToolErrorReason::InvalidToolArguments,
-                    "assign_task task.result_route must be 'leader' or 'pipeline'",
-                    "ValueError",
-                ));
-            };
-            if crate::messaging::results::ResultRoute::parse(route).is_none() {
-                return Err(ToolError::new(
-                    ToolErrorReason::InvalidToolArguments,
-                    format!("assign_task task.result_route has unknown value: {route}"),
-                    "ValueError",
-                ));
-            }
-        }
-
-        let task_value = Value::Object(task_obj.clone());
-        let recovery = task_recovery_marker(&task_value);
-        let mut state = load_runtime_state(&self.workspace).map_err(tool_runtime_error)?;
-        ensure_object(&mut state);
-        let team_key = self
-            .canonical_owner_team_key()?
-            .map(|team| team.as_str().to_string())
-            .or_else(|| assignment_team_key(&state));
-        crate::state::repository::StateRepository::new(&self.workspace)
-            .commit(
-                crate::state::repository::StateWriteIntent::McpAssignTask {
-                    team_key: team_key.as_deref(),
-                    task_id,
-                },
-                |latest| {
-                    ensure_object(latest);
-                    let latest_team_key = team_key.clone().or_else(|| assignment_team_key(latest));
-                    reconcile_assigned_task(latest, latest_team_key.as_deref(), &task_value);
-                },
-            )
-            .map_err(tool_runtime_error)?;
-
-        let content = assignment_message(task, message);
-        let out = self.send_message(
-            &MessageTarget::Single(assignee.to_string()),
-            &content,
-            Some(task_id),
-            None,
-            None,
-        )?;
-        let mut ok = compact_tool_result(&out.to_value())?;
-        if recovery {
-            ok.fields
-                .insert("recovery".to_string(), serde_json::json!(true));
-            ok.fields.insert(
-                "acceptance_marker".to_string(),
-                Value::String("recovery".to_string()),
-            );
-        }
-        Ok(ok)
     }
 
     /// `send_message` (`tools.py:135-183`): C14/C15/C17 scope resolution.
@@ -722,205 +626,10 @@ impl TeamOrchestratorTools {
         .and_then(|value| compact_tool_result(&value))
     }
 
-    /// `update_state` (`tools.py:316-325`): delegated through the lifecycle tools
-    /// facade. S0 preserves the old placeholder behavior.
-    pub fn update_state(&self, note: &str) -> ToolResult {
-        let owner_team = self.canonical_owner_team_key()?;
-        super::lifecycle_tools::update_state(&self.workspace, owner_team.as_ref(), note)
-    }
-
-    /// `get_team_status` (`tools.py:327-328`): delegated through the lifecycle tools
-    /// facade. S0 preserves the old placeholder behavior.
+    /// `get_team_status`: return the owner-team-scoped machine-readable status.
     pub fn get_team_status(&self) -> ToolResult {
         let owner_team = self.canonical_owner_team_key()?;
         super::lifecycle_tools::get_team_status(&self.workspace, owner_team.as_ref())
-    }
-
-    /// `stop_agent` (`tools.py:330-331`): delegated through the lifecycle tools facade.
-    pub fn stop_agent(&self, agent_id: &str) -> ToolResult {
-        let owner_team = self.canonical_owner_team_key()?;
-        super::lifecycle_tools::stop_agent(&self.workspace, owner_team.as_ref(), agent_id)
-    }
-
-    /// `reset_agent` (`tools.py:333-334`): delegated through the lifecycle tools facade.
-    pub fn reset_agent(&self, agent_id: &str, discard_session: bool) -> ToolResult {
-        let owner_team = self.canonical_owner_team_key()?;
-        super::lifecycle_tools::reset_agent(
-            &self.workspace,
-            owner_team.as_ref(),
-            agent_id,
-            discard_session,
-        )
-    }
-
-    /// `add_agent` (`tools.py:336-337`): delegate to real lifecycle add-agent
-    /// under the spawn-time owner team.
-    pub fn add_agent(&self, new_agent_id: &str, role_file_path: &str) -> ToolResult {
-        let owner_team = self
-            .canonical_owner_team_key()?
-            .ok_or_else(|| self.scope_refused("add_agent requires TEAM_AGENT_OWNER_TEAM_ID"))?;
-        let role_file = Path::new(role_file_path);
-        let role_file = if role_file.is_absolute() {
-            role_file.to_path_buf()
-        } else {
-            self.workspace.join(role_file)
-        };
-        crate::lifecycle::launch::add_agent(
-            &self.workspace,
-            &AgentId::new(new_agent_id.to_string()),
-            &role_file,
-            false,
-            Some(owner_team.as_str()),
-        )
-        .map_err(tool_runtime_error)
-        .and_then(|report| {
-            compact_tool_result(&serde_json::json!({
-                "ok": true,
-                "status": "added",
-                "agent_id": new_agent_id,
-                "state_file": report.env.state_file.to_string_lossy().to_string(),
-                "coordinator_started": report.env.coordinator_started,
-                "start_mode": format!("{:?}", report.start_mode),
-                "role_file": report.role_file.to_string_lossy().to_string(),
-            }))
-        })
-    }
-
-    /// `fork_agent` (`tools.py:339-340`): delegated through the lifecycle tools facade.
-    pub fn fork_agent(
-        &self,
-        source_agent_id: &str,
-        as_agent_id: &str,
-        label: Option<&str>,
-    ) -> ToolResult {
-        let owner_team = self.canonical_owner_team_key()?;
-        super::lifecycle_tools::fork_agent(
-            &self.workspace,
-            owner_team.as_ref(),
-            source_agent_id,
-            as_agent_id,
-            label,
-        )
-    }
-
-    pub fn clone_agent(
-        &self,
-        source_agent_id: &str,
-        as_agent_id: &str,
-        label: Option<&str>,
-    ) -> ToolResult {
-        let owner_team = self.canonical_owner_team_key()?;
-        super::lifecycle_tools::clone_agent(
-            &self.workspace,
-            owner_team.as_ref(),
-            source_agent_id,
-            as_agent_id,
-            label,
-        )
-    }
-
-    /// `request_human` (`tools.py:342-346`): create a `requires_ack` leader message via
-    /// the shared leader-delivery funnel; sender = env / inferred / `"unknown"`.
-    /// Returns `{ok:true, message_id, status:"needs_human"}`.
-    pub fn request_human(
-        &self,
-        question: &str,
-        task_id: Option<&str>,
-        agent_id: Option<&str>,
-    ) -> ToolResult {
-        let _owner_team = self.canonical_owner_team_key()?;
-        let explicit_sender = agent_id.and_then(non_empty_string);
-        let sender = explicit_sender
-            .or_else(|| self.agent_id.as_ref().map(AgentId::as_str))
-            .unwrap_or("unknown");
-        let event_log = EventLog::new(&self.workspace);
-        if explicit_sender.is_none() && self.agent_id.is_none() {
-            event_log
-                .write(
-                    "mcp.identity_inference_failed",
-                    serde_json::json!({"tool": "request_human"}),
-                )
-                .map_err(tool_runtime_error)?;
-        }
-        // #230 N31/N32 funnel: request_human is a leader-bound caller and must go through
-        // the same primitive as send_message(to=leader) / report_result / idle reminder.
-        // The legacy path was a raw store insert for recipient="leader" that
-        // bypassed the leader-delivery audit (no deliver_to_leader.submit emit, no rebind
-        // guard, no leader_notification_log dedup). funnel it now.
-        let state = crate::state::persist::load_runtime_state(&self.workspace)
-            .unwrap_or(serde_json::json!({}));
-        let task = task_id.map(|t| TaskId::new(t.to_string()));
-        let outcome = crate::messaging::send_to_leader_receiver(
-            &self.workspace,
-            &state,
-            "leader",
-            question,
-            task.as_ref(),
-            sender,
-            true,
-            None,
-            &event_log,
-        )
-        .map_err(tool_runtime_error)?;
-        let mut fields = serde_json::Map::new();
-        fields.insert("ok".to_string(), Value::Bool(outcome.ok));
-        fields.insert(
-            "message_id".to_string(),
-            outcome
-                .message_id
-                .clone()
-                .map_or(Value::Null, Value::String),
-        );
-        fields.insert(
-            "status".to_string(),
-            Value::String("needs_human".to_string()),
-        );
-        Ok(ToolOk { fields })
-    }
-
-    /// `stuck_list` (`tools.py:348-349`): delegate to [`messaging::stuck_list`] (the
-    /// team-scoped suppressed-alert projection).
-    pub fn stuck_list(&self) -> ToolResult {
-        let _owner_team = self.canonical_owner_team_key()?;
-        messaging::stuck_list(&self.workspace)
-            .map_err(tool_runtime_error)
-            .map(|v| ToolOk {
-                fields: object_fields(v),
-            })
-    }
-
-    /// `stuck_cancel` (`tools.py:351-352`): delegate to [`messaging::stuck_cancel`];
-    /// `suppressed_by` = env agent_id / `"leader"`.
-    pub fn stuck_cancel(&self, agent_id: &str, alert_type: &str) -> ToolResult {
-        let _owner_team = self.canonical_owner_team_key()?;
-        let alert = match alert_type {
-            "stuck" => Some(messaging::AlertType::Stuck),
-            "idle_fallback" => Some(messaging::AlertType::IdleFallback),
-            "cross_worker_deadlock" => Some(messaging::AlertType::CrossWorkerDeadlock),
-            "all" => None,
-            // scheduler.py:268-273 — an unknown alert_type refuses with the Python
-            // literal instead of silently widening to suppressing ALL alert families.
-            _ => {
-                return Ok(ToolOk {
-                    fields: object_fields(serde_json::json!({
-                        "ok": false,
-                        "status": "refused",
-                        "reason": "invalid_alert_type",
-                        "alert_type": alert_type,
-                    })),
-                });
-            }
-        };
-        let suppressed_by = self
-            .agent_id
-            .as_ref()
-            .map(AgentId::as_str)
-            .unwrap_or("leader");
-        messaging::stuck_cancel(&self.workspace, agent_id, alert, suppressed_by)
-            .map_err(tool_runtime_error)
-            .map(|v| ToolOk {
-                fields: object_fields(v),
-            })
     }
 
     /// `get_visible_peers` (`tools.py:226-247`): C16 scope-filtered peer list — live
@@ -1275,63 +984,6 @@ fn requested_scope_arg(args: &Value) -> Option<String> {
         .or_else(|| args.get("workspace").map(|_| "workspace".to_string()))
 }
 
-fn assignment_team_key(state: &Value) -> Option<String> {
-    state
-        .get("active_team_key")
-        .and_then(Value::as_str)
-        .and_then(non_empty_string)
-        .map(ToString::to_string)
-}
-
-fn reconcile_assigned_task(state: &mut Value, team_key: Option<&str>, task: &Value) {
-    let mut top = state
-        .get("tasks")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    upsert_task_in_place(&mut top, task);
-    if let Some(root) = state.as_object_mut() {
-        root.insert("tasks".to_string(), Value::Array(top.clone()));
-    }
-    if let Some(key) = team_key {
-        let mut team_tasks = state
-            .get("teams")
-            .and_then(|v| v.get(key))
-            .and_then(|team| team.get("tasks"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        upsert_task_in_place(&mut team_tasks, task);
-        write_team_tasks(state, key, team_tasks);
-    }
-}
-
-fn upsert_task_in_place(tasks: &mut Vec<Value>, task: &Value) {
-    let Some(task_id) = task.get("id").and_then(Value::as_str) else {
-        return;
-    };
-    for existing in tasks.iter_mut() {
-        if existing.get("id").and_then(Value::as_str) == Some(task_id) {
-            merge_object_fields(existing, task);
-            return;
-        }
-    }
-    tasks.push(task.clone());
-}
-
-fn merge_object_fields(existing: &mut Value, incoming: &Value) {
-    let Some(existing_obj) = existing.as_object_mut() else {
-        *existing = incoming.clone();
-        return;
-    };
-    let Some(incoming_obj) = incoming.as_object() else {
-        return;
-    };
-    for (key, value) in incoming_obj {
-        existing_obj.insert(key.clone(), value.clone());
-    }
-}
-
 fn push_report_warning(obj: &mut serde_json::Map<String, Value>, warning: Value) {
     let Some(code) = warning.get("code").and_then(Value::as_str) else {
         return;
@@ -1353,49 +1005,6 @@ fn push_report_warning(obj: &mut serde_json::Map<String, Value>, warning: Value)
             obj.insert("warnings".to_string(), Value::Array(vec![warning]));
         }
     }
-}
-
-fn write_team_tasks(state: &mut Value, team_key: &str, tasks: Vec<Value>) {
-    let Some(root) = state.as_object_mut() else {
-        return;
-    };
-    let teams = root
-        .entry("teams".to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    let Some(teams_obj) = teams.as_object_mut() else {
-        return;
-    };
-    let team = teams_obj.entry(team_key.to_string()).or_insert_with(|| {
-        let mut team = serde_json::Map::new();
-        team.insert("tasks".to_string(), Value::Array(Vec::new()));
-        team.insert("status".to_string(), Value::String("alive".to_string()));
-        Value::Object(team)
-    });
-    let Some(team_obj) = team.as_object_mut() else {
-        return;
-    };
-    team_obj.insert("tasks".to_string(), Value::Array(tasks));
-}
-
-fn assignment_message(task: &Value, explicit: Option<&str>) -> String {
-    if let Some(message) = explicit.and_then(non_empty_string) {
-        return message.to_string();
-    }
-    for key in ["description", "title"] {
-        if let Some(text) = task
-            .get(key)
-            .and_then(Value::as_str)
-            .and_then(non_empty_string)
-        {
-            return text.to_string();
-        }
-    }
-    json_dumps_default(task)
-}
-
-fn task_recovery_marker(task: &Value) -> bool {
-    task.get("recovery").and_then(Value::as_bool) == Some(true)
-        || task.get("acceptance_marker").and_then(Value::as_str) == Some("recovery")
 }
 
 fn scope_override_name(scope: Scope) -> Option<&'static str> {

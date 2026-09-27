@@ -167,7 +167,7 @@ pub(super) fn spawn_agents(
                     model: command_model,
                     effort: agent_effort,
                     system_prompt: &system_prompt,
-                    team_mcp_tools: &["send_message", "report_result"],
+                    team_mcp_tools: &["send_message", "report_result", "get_team_status"],
                     mcp_config: &mcp_config,
                     session_scope: crate::lifecycle::launch::pi_mcp::PiSessionScope::Isolated,
                 },

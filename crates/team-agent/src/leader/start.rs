@@ -304,20 +304,7 @@ fn leader_start_plan_with_ambient_authority(
             identity.team_id.as_str(),
         );
         let prompt = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
-        let team_mcp_tools = [
-            "assign_task",
-            "send_message",
-            "update_state",
-            "get_team_status",
-            "stop_agent",
-            "reset_agent",
-            "add_agent",
-            "clone_agent",
-            "fork_agent",
-            "request_human",
-            "stuck_list",
-            "stuck_cancel",
-        ];
+        let team_mcp_tools = ["send_message", "report_result", "get_team_status"];
         crate::lifecycle::launch::pi_mcp::materialize_pi_plan(
             crate::lifecycle::launch::pi_mcp::PiMaterializeRequest {
                 workspace,

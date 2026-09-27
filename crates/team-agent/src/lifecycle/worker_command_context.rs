@@ -30,6 +30,9 @@ All communication must go through Team Agent MCP tools.
 - Teammate: {send_message}(to='<agent_id>', content='...')
 - Broadcast: {send_message}(to='*', content='...')
 - Complete: {report_result}(summary='...') — call exactly once
+- Optional roster/status: {get_team_status} — use only when useful; it is not a communication or completion prerequisite.
+
+Only these three Team Agent MCP tools are available. Lifecycle management remains on the separately authorized operator CLI.
 
 ## Rules:
 
@@ -55,7 +58,7 @@ pub(crate) struct WorkerCommandAgent {
     system_prompt_file: Option<String>,
     output_contract_format: Option<String>,
     communication_mode: CommunicationMode,
-    /// 0.5.66 bypass 单源:agent-level `dangerously_skip_permissions`(必填 bool)。
+    /// Missing `dangerously_skip_permissions` defaults to true; an explicit false remains respected.
     dangerously_skip_permissions: bool,
 }
 
@@ -107,9 +110,9 @@ impl WorkerCommandAgent {
                     .get("communication_mode")
                     .and_then(crate::model::yaml::Value::as_str),
             )?,
-            dangerously_skip_permissions: matches!(
+            dangerously_skip_permissions: !matches!(
                 agent.get("dangerously_skip_permissions"),
-                Some(crate::model::yaml::Value::Bool(true))
+                Some(crate::model::yaml::Value::Bool(false))
             ),
         })
     }
@@ -164,7 +167,7 @@ impl WorkerCommandAgent {
             dangerously_skip_permissions: agent
                 .get("dangerously_skip_permissions")
                 .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
+                .unwrap_or(true),
         })
     }
 }
@@ -182,15 +185,20 @@ pub(crate) fn compile_worker_system_prompt(
     // C-1 cr verdict / B2 灵魂件 — identity 必须 FIRST(MUST-4 行为层守:空白上下文问
     // "你是谁"必须先答 Team Agent worker 身份)。runtime contract 跟后。
     let send_message = mcp_tool_name(agent.provider, "team_orchestrator", "send_message");
+    let get_team_status = if agent.provider == Provider::Pi {
+        r#"mcp({tool:"team_orchestrator_get_team_status", args:{}})"#.to_string()
+    } else {
+        format!("{}()", mcp_tool_name(agent.provider, "team_orchestrator", "get_team_status"))
+    };
     let report_result = if agent.provider == Provider::Pi {
         r#"mcp({tool:"team_orchestrator_report_result", args:{summary:"..."}})"#.to_string()
     } else {
         mcp_tool_name(agent.provider, "team_orchestrator", "report_result")
     };
     let runtime_contract = if agent.provider == Provider::Pi {
-        pi_runtime_contract_section()
+        pi_runtime_contract_section(&get_team_status)
     } else {
-        runtime_contract_section(&send_message, &report_result)
+        runtime_contract_section(&send_message, &report_result, &get_team_status)
     };
     let communication_contract = if agent.provider == Provider::Pi {
         pi_communication_contract(agent.communication_mode)
@@ -241,13 +249,18 @@ fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
     }
 }
 
-fn runtime_contract_section(send_message: &str, report_result: &str) -> String {
+fn runtime_contract_section(
+    send_message: &str,
+    report_result: &str,
+    get_team_status: &str,
+) -> String {
     RUNTIME_CONTRACT_SECTION
         .replace("{send_message}", send_message)
         .replace("{report_result}", report_result)
+        .replace("{get_team_status}", get_team_status)
 }
 
-fn pi_runtime_contract_section() -> String {
+fn pi_runtime_contract_section(get_team_status: &str) -> String {
     RUNTIME_CONTRACT_SECTION
         .replace(
             "{send_message}(to='<agent_id>', content='...')",
@@ -261,6 +274,7 @@ fn pi_runtime_contract_section() -> String {
             "{report_result}(summary='...')",
             r#"mcp({tool:"team_orchestrator_report_result", args:{summary:"..."}})"#,
         )
+        .replace("{get_team_status}", get_team_status)
 }
 
 fn pi_communication_contract(mode: CommunicationMode) -> String {

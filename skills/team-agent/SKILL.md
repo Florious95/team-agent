@@ -17,9 +17,9 @@ team-agent doctor --help
 - Dispatch: `team-agent send TO MESSAGE` (positional TO; `--watch-result` is deprecated). After success, do not poll with `sleep` / `status` / `inbox` / `collect`. TO has two co-equal logical forms: an in-team short name (`team-agent send reviewer "..."`) and a fully qualified `<workspace>::<team>/<agent>`. Use the qualified form across workspaces.
 - Inspect: `team-agent status` / `status --json`; `ok: true` plus `ready: false` is not a crash.
 - Lifecycle: `restart .` resumes a stopped team; `add-agent NAME --role-file FILE` adds or `--force` recreates one worker; `shutdown --workspace .` stops. Do not shutdown the team to add a worker.
-- Roles: every `agents/*.md` must declare boolean `dangerously_skip_permissions`. Never rewrite user-supplied model ids or read `.env` files.
+- Documents: `TEAM.md` and `agents/*.md` may be plain text/Markdown with no frontmatter; the whole team body is its objective and the whole role body is the prompt. Default worker id is the filename stem, provider `pi`, model `openai-codex/gpt-6-luna`, effort `max`, and bypass enabled. Valid optional frontmatter can override supported metadata.
 - On a structured failure `action`, run that action first, then stop. Do not guess flags. `coordinator.session_missing` is self-healing; re-check `status --json`, do not shutdown.
-The current user-facing agent is the leader (orchestrate only). Workers call `report_result` exactly once. Nested teams: `references/team-in-team.md`.
+The current user-facing agent is the leader (orchestrate only). Worker MCP exposes exactly `send_message`, `report_result`, and optional `get_team_status`; lifecycle management stays on the authorized native CLI. Workers call `report_result` exactly once. Nested teams: `references/team-in-team.md`.
 ## Provider Capability Matrix
 See `references/team-agent-operator.md` for Claude / Codex / Copilot / Gemini / fake. `quick-start` / `restart` / `claim-leader` JSON is compact by default; pass `--detail` only for internal diagnostics.
 | Provider | Resume | Turn-state detection | Per-worker model override | Team Agent fork |
@@ -30,8 +30,8 @@ See `references/team-agent-operator.md` for Claude / Codex / Copilot / Gemini / 
 Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown). Pi `fork-agent SOURCE --as TARGET` requires a captured Pi subscription source and reports both session ids plus the target backing path; it does not mutate the source session.
 ## Provider Prep
 ### Cursor provider notes
-Frontmatter: `provider: cursor_agent` (not `cursor`; launcher verb `team-agent cursor`), `auth_mode: subscription`, `name:` required, plus `role:`, `tools:`, and boolean `dangerously_skip_permissions:`. Subscription needs no `profile`.
-`model:` is required. The flag stays on argv; same-family catalog ids can change pane chrome, while unknown ids silent-fallback without warning. Pick a catalog id; after spawn, `capture-pane` once for chrome. The role field and pane chrome do not prove the live model.
+To opt into Cursor, use optional frontmatter with `provider: cursor_agent` (not `cursor`; launcher verb `team-agent cursor`) and `auth_mode: subscription`; no profile or bypass field is required. `agent_id` (legacy `name`) and `role` can be omitted, but Cursor still requires an explicit `model:`.
+The model flag stays on argv; same-family catalog ids can change pane chrome, while unknown ids silent-fallback without warning. Pick a catalog id; after spawn, `capture-pane` once for chrome. Pane chrome does not prove the live model.
 One `cursor_agent` per workspace; a second seat fail-closes because `.cursor/mcp.json` is directory-scoped and overwrites `TEAM_AGENT_ID`. Several Cursor seats need separate workspace directories. Same seat, fresh context: `reset-agent --discard-session`.
 `clone-agent` copies the source role but starts fresh. Runtime role replacement: `clone-agent` → `stop-agent` → `remove-agent --confirm` (deletes `.team/dynamic-role-files/`) → write role file → `add-agent --role-file` → dispatch.
 - Restart emits `--resume <chatId>` when `store.db` / `meta.json` exist; the gate does not read chat text. Persist anything that must survive restart.

@@ -161,10 +161,6 @@ impl<'a> StateRepository<'a> {
         #[cfg(test)]
         test_support::before_commit();
         let team_key = match intent {
-            // Assignment's existing reconcile helper updates the root task
-            // array and the explicit Team array independently (legacy parity).
-            StateWriteIntent::McpAssignTask { .. } => None,
-            StateWriteIntent::McpUpdateStateNote { team_key } => team_key,
             StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
             StateWriteIntent::ForkAgent { team_key, .. } => Some(team_key),
             _ => {
@@ -517,16 +513,6 @@ pub enum StateWriteIntent<'a> {
     CoordinatorConptyShim {
         team_key: Option<&'a str>,
     },
-    McpAssignTask {
-        team_key: Option<&'a str>,
-        task_id: &'a str,
-    },
-    McpLifecycleAgentOps {
-        team_key: Option<&'a str>,
-    },
-    McpUpdateStateNote {
-        team_key: Option<&'a str>,
-    },
     MessagingDeliveryState {
         owner_team_id: Option<&'a str>,
     },
@@ -535,9 +521,6 @@ pub enum StateWriteIntent<'a> {
     },
     MessagingSessionCapture,
     ResultCollection {
-        owner_team_id: Option<&'a str>,
-    },
-    SchedulerSuppression {
         owner_team_id: Option<&'a str>,
     },
     TaskRepair {
@@ -735,15 +718,6 @@ fn route_direct(
         // CoordinatorConptyShim -> root save
         // (coordinator/conpty_shim.rs:426/674).
         StateWriteIntent::CoordinatorConptyShim { .. } => helper_write_root(workspace, state),
-        // McpAssignTask uses the reapply variant today; direct save routes
-        // to the root helper for parity.
-        StateWriteIntent::McpAssignTask { .. } => helper_write_root(workspace, state),
-        // McpLifecycleAgentOps -> root save
-        // (mcp_server/lifecycle_tools/agent_ops.rs:385).
-        StateWriteIntent::McpLifecycleAgentOps { .. } => helper_write_root(workspace, state),
-        // McpUpdateStateNote -> root save
-        // (mcp_server/lifecycle_tools/state_status.rs:29/69).
-        StateWriteIntent::McpUpdateStateNote { .. } => helper_write_root(workspace, state),
         // MessagingDeliveryState direct writes cover team-scoped, root
         // fallback, and root (messaging/delivery.rs:2356/2358/2361).
         StateWriteIntent::MessagingDeliveryState { owner_team_id } => match owner_team_id {
@@ -766,8 +740,6 @@ fn route_direct(
             Some(_) => helper_write_team_scoped(workspace, state),
             None => helper_write_root(workspace, state),
         },
-        // SchedulerSuppression -> root save (messaging/scheduler.rs:259).
-        StateWriteIntent::SchedulerSuppression { .. } => helper_write_root(workspace, state),
         // TaskRepair -> `save_team_scoped_state` (cli/adapters.rs:675).
         StateWriteIntent::TaskRepair { .. } => helper_write_team_scoped(workspace, state),
         // FakeE2eSeed / SelfMigration are diagnostic seams. The current
@@ -798,9 +770,6 @@ fn reapply_scope(intent: &StateWriteIntent<'_>) -> ReapplyScope {
                 owner_team_id: Some(_),
             }
             | StateWriteIntent::CoordinatorTick { .. }
-            | StateWriteIntent::McpUpdateStateNote {
-                team_key: Some(_),
-            }
     ) {
         ReapplyScope::Team
     } else {
@@ -817,8 +786,7 @@ fn route_reapply<F>(
 where
     F: FnOnce(&mut Value),
 {
-    if matches!(&intent, StateWriteIntent::McpAssignTask { .. }
-        | StateWriteIntent::McpUpdateStateNote { .. } | StateWriteIntent::ResultCollection { .. })
+    if matches!(&intent, StateWriteIntent::ResultCollection { .. })
     {
         return StateRepository::new(workspace).commit(intent, reapply).map(|_| ());
     }

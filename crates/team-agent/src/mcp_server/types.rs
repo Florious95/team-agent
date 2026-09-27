@@ -48,48 +48,25 @@ pub enum McpError {
 // WIRE ENUMS (§19) —散字符串 → 穷尽 enum;契约字节级真相由这些派生。
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// The 12 MCP tool names (`server.py:19-43` if-chain = 字符串打地鼠). Exhaustive
-/// match; unknown → [`ToolErrorReason::UnknownTool`]. [`tools_contract`] (the
-/// `TOOLS` wire list returned by `tools/list`) MUST be derived from this enum so
-/// name/inputSchema stay byte-identical to `contracts.py`.
+/// The three MCP tool names. Unknown names map to [`ToolErrorReason::UnknownTool`].
+/// [`tools_contract`] (the `tools/list` payload) is derived from this enum.
 ///
 /// [`tools_contract`]: super::tools_contract
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpTool {
-    AssignTask,
     SendMessage,
     ReportResult,
-    UpdateState,
     GetTeamStatus,
-    StopAgent,
-    ResetAgent,
-    AddAgent,
-    CloneAgent,
-    ForkAgent,
-    RequestHuman,
-    StuckList,
-    StuckCancel,
 }
 
 impl McpTool {
-    /// Wire name (`assign_task` … `stuck_cancel`) — the byte-stable string used in
-    /// `tools/list` and `tools/call`. Parse failure ⇒ [`ToolErrorReason::UnknownTool`].
+    /// Wire name used in `tools/list` and `tools/call`.
     pub fn wire_name(self) -> &'static str {
         match self {
-            McpTool::AssignTask => "assign_task",
             McpTool::SendMessage => "send_message",
             McpTool::ReportResult => "report_result",
-            McpTool::UpdateState => "update_state",
             McpTool::GetTeamStatus => "get_team_status",
-            McpTool::StopAgent => "stop_agent",
-            McpTool::ResetAgent => "reset_agent",
-            McpTool::AddAgent => "add_agent",
-            McpTool::CloneAgent => "clone_agent",
-            McpTool::ForkAgent => "fork_agent",
-            McpTool::RequestHuman => "request_human",
-            McpTool::StuckList => "stuck_list",
-            McpTool::StuckCancel => "stuck_cancel",
         }
     }
 
@@ -97,19 +74,9 @@ impl McpTool {
     /// to [`ToolErrorReason::UnknownTool`], matching `server.py:43`).
     pub fn parse(name: &str) -> Option<Self> {
         match name {
-            "assign_task" => Some(McpTool::AssignTask),
             "send_message" => Some(McpTool::SendMessage),
             "report_result" => Some(McpTool::ReportResult),
-            "update_state" => Some(McpTool::UpdateState),
             "get_team_status" => Some(McpTool::GetTeamStatus),
-            "stop_agent" => Some(McpTool::StopAgent),
-            "reset_agent" => Some(McpTool::ResetAgent),
-            "add_agent" => Some(McpTool::AddAgent),
-            "clone_agent" => Some(McpTool::CloneAgent),
-            "fork_agent" => Some(McpTool::ForkAgent),
-            "request_human" => Some(McpTool::RequestHuman),
-            "stuck_list" => Some(McpTool::StuckList),
-            "stuck_cancel" => Some(McpTool::StuckCancel),
             _ => None,
         }
     }
