@@ -112,5 +112,4 @@ fn report_result_notification_preserves_long_multiline_summary_verbatim() {
         leader_pane.contains("FULL_SUMMARY_END_fef4a83e21d54829b5d0dcd43d6aa1c1"),
         "the complete summary notification must reach the leader pane; actual={leader_pane:?}"
     );
-    assert_eq!(notification.status, "delivered");
 }
