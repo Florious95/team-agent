@@ -308,6 +308,13 @@ impl McpSimHarness {
                 "teams": {
                     "teamA": {
                         "session_name": session_name,
+                        "leader_receiver": {
+                            "mode": "direct_tmux",
+                            "owner_epoch": 1,
+                            "pane_id": leader_pane,
+                            "provider": "codex",
+                            "leader_session_uuid": "leader-session-team-a"
+                        },
                         "agents": agents,
                         "tasks": [
                             {"id": "task_mcp", "assignee": "worker_a", "status": "pending"}
