@@ -304,19 +304,29 @@ fn parse_claude_catalog(bytes: &[u8], provider: &str) -> Result<Vec<ModelRecord>
     for line in text.lines() {
         if line.is_empty() { return Err(CatalogError::InvalidProtocol); }
         let frame: serde_json::Value = serde_json::from_str(line).map_err(|_| CatalogError::InvalidProtocol)?;
-        match frame.get("type").and_then(serde_json::Value::as_str) {
-            Some("system") => continue,
-            Some("control_response") => {
-                if frame.get("request_id").and_then(serde_json::Value::as_str) != Some(CLAUDE_REQUEST_ID) || response.is_some() {
-                    return Err(CatalogError::InvalidProtocol);
-                }
-                let result = frame.get("response").ok_or(CatalogError::UnsupportedSchema)?;
-                if result.get("subtype").and_then(serde_json::Value::as_str) != Some("success") { return Err(CatalogError::InvalidProtocol); }
-                let rows = result.get("response").and_then(|v| v.get("models")).and_then(serde_json::Value::as_array).ok_or(CatalogError::UnsupportedSchema)?;
-                response = Some(rows.clone());
-            }
-            _ => return Err(CatalogError::InvalidProtocol),
+        let frame_type = frame
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .filter(|frame_type| !frame_type.is_empty())
+            .ok_or(CatalogError::InvalidProtocol)?;
+        if frame_type != "control_response" {
+            continue;
         }
+        if response.is_some() {
+            return Err(CatalogError::InvalidProtocol);
+        }
+        let result = frame.get("response").ok_or(CatalogError::UnsupportedSchema)?;
+        let outer_request_id = frame.get("request_id").and_then(serde_json::Value::as_str);
+        let inner_request_id = result.get("request_id").and_then(serde_json::Value::as_str);
+        if (outer_request_id != Some(CLAUDE_REQUEST_ID) && inner_request_id != Some(CLAUDE_REQUEST_ID))
+            || frame.get("request_id").is_some_and(|id| id.as_str() != Some(CLAUDE_REQUEST_ID))
+            || result.get("request_id").is_some_and(|id| id.as_str() != Some(CLAUDE_REQUEST_ID))
+        {
+            return Err(CatalogError::InvalidProtocol);
+        }
+        if result.get("subtype").and_then(serde_json::Value::as_str) != Some("success") { return Err(CatalogError::InvalidProtocol); }
+        let rows = result.get("response").and_then(|v| v.get("models")).and_then(serde_json::Value::as_array).ok_or(CatalogError::UnsupportedSchema)?;
+        response = Some(rows.clone());
     }
     let rows = response.ok_or(CatalogError::InvalidProtocol)?;
     if rows.is_empty() { return Err(CatalogError::Empty); }
@@ -599,6 +609,24 @@ mod tests {
         assert_eq!(rows[0].default, Some(true));
         assert_eq!(rows[1].default, Some(false));
         assert!(model_matches(&rows[0], "OPUS 1M"));
+    }
+
+    #[test]
+    fn claude_ignores_other_stream_frames_and_matches_nested_request_id() {
+        let models = serde_json::json!([{"value":"default","resolvedModel":"claude-sonnet-5","displayName":"Sonnet"}]);
+        let frames = [
+            serde_json::json!({"type":"system","subtype":"hook_started"}),
+            serde_json::json!({"type":"system","subtype":"hook_response"}),
+            serde_json::json!({"type":"stream_event","event":{"type":"message_start"}}),
+            serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":CLAUDE_REQUEST_ID,"response":{"models":models}}}),
+        ];
+        let bytes = frames.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n");
+        let rows = parse_claude_catalog(bytes.as_bytes(), "claude_code").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "claude-sonnet-5");
+
+        let conflicting = serde_json::json!({"type":"control_response","request_id":CLAUDE_REQUEST_ID,"response":{"subtype":"success","request_id":"wrong-id","response":{"models":[{"value":"default","resolvedModel":"claude-sonnet-5","displayName":"Sonnet"}]}}});
+        assert!(matches!(parse_claude_catalog(format!("{}\n", conflicting).as_bytes(), "claude_code"), Err(CatalogError::InvalidProtocol)));
     }
 
     #[test]
