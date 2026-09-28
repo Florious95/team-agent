@@ -59,12 +59,9 @@ pub fn clone_agent(
         source_agent_id,
         as_agent_id,
         label,
-        None,
     )?;
-    // The materialized role carries the source role's DECLARED tools verbatim —
-    // a clone must preserve the source seat's full tools set (add-agent does
-    // the same; no leader-ceiling clamp). See role_source.rs for the removed
-    // clamp_materialized_role_to_leader.
+    // Materialization preserves the role body and legacy metadata; the compiler
+    // only maps supported fields, so ignored header keys remain behaviorally inert.
     let added = add_agent(
         &selected.run_workspace,
         as_agent_id,

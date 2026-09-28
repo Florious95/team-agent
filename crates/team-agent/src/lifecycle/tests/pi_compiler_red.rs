@@ -86,7 +86,8 @@ fn pi_role_ignores_tools_and_preserves_provider_defaults() {
 
     let defaults = valid_role_with("")
         .replace("model: team-agent/qwen3.8-27b\n", "")
-        .replace("effort: medium\n", "");
+        .replace("effort: medium\n", "")
+        .replace("dangerously_skip_permissions: true\n", "");
     let team_meta = Value::Map(vec![
         (
             "provider_models".to_string(),
@@ -105,16 +106,21 @@ fn pi_role_ignores_tools_and_preserves_provider_defaults() {
         ),
     ]);
     let compiled = compile_pi_role_with_team(&defaults, &team_meta)
-        .expect("Pi model and effort may use provider defaults");
+        .expect("omitted model and effort preserve provider-native defaults");
     assert_eq!(
         compiled.agent.get("model"),
-        Some(&Value::Str("openai-codex/gpt-6-luna".to_string())),
-        "omitted Pi model uses the Luna default rather than team metadata"
+        Some(&Value::Null),
+        "omitted Pi model stays unset rather than using team metadata"
     );
     assert_eq!(
         compiled.agent.get("effort"),
-        Some(&Value::Str("max".to_string())),
-        "omitted Pi effort uses the global max default rather than team metadata"
+        None,
+        "omitted Pi effort stays unset rather than using team metadata"
+    );
+    assert_eq!(
+        compiled.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(false)),
+        "omitted Pi bypass defaults to safe false"
     );
 
     let models = parse_pi_list_models_table(CATALOG).expect("catalog fixture");
@@ -162,10 +168,10 @@ fn pi_role_uses_standard_bypass_field_without_fabricating_argv() {
 
     let missing_ack = valid_role_with("").replace("dangerously_skip_permissions: true\n", "");
     let compiled = compile_pi_role(&missing_ack)
-        .expect("omitted bypass metadata defaults to true");
+        .expect("omitted bypass metadata defaults to false");
     assert_eq!(
         compiled.agent.get("dangerously_skip_permissions"),
-        Some(&Value::Bool(true))
+        Some(&Value::Bool(false))
     );
 }
 

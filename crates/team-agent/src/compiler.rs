@@ -15,11 +15,8 @@
 //! comparing byte-for-byte to Python golden. The absolute `workspace` path (env-
 //! dependent) is templated to `__WS__` on both sides so every other byte is pinned.
 //!
-//! SCOPE (this wave): no-profile `subscription` role docs only. The `.env`
-//! profile machinery (`profiles/`, `_profile_model`/`load_profile`) and the
-//! `rust_core` inline-secret *detection* (`contains_inline_secret` / the secret-
-//! lint rejection test) are DEFERRED to a follow-on — the compile path here only
-//! needs `contains_inline_secret` to return `false` for clean (non-secret) input.
+//! Profile references are carried as role metadata; profile files and secrets are
+//! handled by lifecycle/profile_launch, not loaded or inspected by this compiler.
 //!
 //! §10: pure lib layer — no panic on malformed input; every parse/validate path
 //! returns `Result<_, ModelError>` (mirrors Python `ValidationError`).
@@ -31,10 +28,7 @@ use crate::communication_mode::CommunicationMode;
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
 use crate::model::{paths, spec, yaml, ModelError};
-use crate::provider::wire::{
-    builtin_provider_model as wire_builtin_provider_model, parse_canonical_provider,
-    provider_model_keys,
-};
+use crate::provider::wire::parse_canonical_provider;
 
 pub const IGNORED_OWNER_TEAM_ID_FIELD: &str = "owner_team_id";
 
@@ -494,18 +488,12 @@ fn compile_role_agent_with_mode(
     let provider = string_field(&meta, "provider")
         .filter(|provider| !provider.trim().is_empty())
         .unwrap_or_else(|| "pi".to_string());
-    require_explicit_grok_role_model(&meta, role_path, &provider)?;
-    require_explicit_cursor_role_model(&meta, role_path, &provider)?;
-    validate_pi_role_fields(&meta, role_path, &provider)?;
     let is_pi = parse_canonical_provider(&provider) == Some(Provider::Pi);
-    let model = if is_pi {
-        string_field(&meta, "model")
-            .filter(|value| !value.trim().is_empty())
-            .map(Value::Str)
-            .unwrap_or_else(|| Value::Str("openai-codex/gpt-6-luna".to_string()))
-    } else {
-        resolve_model(&meta, team_meta, &provider)
-    };
+    validate_pi_role_fields(&meta, role_path, &provider)?;
+    let model = string_field(&meta, "model")
+        .filter(|value| !value.trim().is_empty())
+        .map(Value::Str)
+        .unwrap_or(Value::Null);
     let auth_mode = string_field(&meta, "auth_mode")
         .or_else(|| string_field(team_meta, "default_auth_mode"))
         .unwrap_or_else(|| "subscription".to_string());
@@ -557,15 +545,11 @@ fn compile_role_agent_with_mode(
             ]),
         ),
     ];
-    if let Some(label) = string_field(&meta, "label") {
-        agent_items.insert(1, ("label", Value::Str(label)));
-    }
     if let Some(profile) = string_field(&meta, "profile") {
         agent_items.push(("profile", Value::Str(profile)));
     }
-    // 0.4.x provider effort MVP step 3: resolve effort with role > team > none
-    // (Pi uses only explicit role effort). Validate syntax and provider support
-    // here so unsupported combinations fail at compile, not at runtime.
+    // Role effort wins; Pi uses only an explicit role value. Other providers may
+    // inherit TEAM provider_effort for Issue #238 compatibility.
     let role_effort = match string_field(&meta, "effort") {
         Some(raw) if !raw.trim().is_empty() => {
             let value = raw.trim();
@@ -577,7 +561,6 @@ fn compile_role_agent_with_mode(
             })?;
             Some(parsed)
         }
-        _ if is_pi => Some(ProviderEffort::Max),
         _ => None,
     };
     let team_effort = match string_field(team_meta, "provider_effort") {
@@ -674,54 +657,6 @@ fn string_field(meta: &Value, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// 缺 model 时框架会填内建默认（grok 上是 grok-4），席位因此静默拿到
-/// 与角色文件无关的模型和上下文窗口，而 argv 看起来完全正常。
-/// 角色文件必须自己写死；内建默认、team 级默认、CLI 全局默认都是隐式来源。
-fn require_explicit_grok_role_model(
-    meta: &Value,
-    path: &Path,
-    provider: &str,
-) -> Result<(), ModelError> {
-    if parse_canonical_provider(provider) != Some(Provider::Grok) {
-        return Ok(());
-    }
-    if string_field(meta, "model").is_some_and(|value| !value.trim().is_empty()) {
-        return Ok(());
-    }
-    Err(ModelError::Validation(format!(
-        "{}: missing front matter field model. \
-Without an explicit model the framework fills a built-in default (grok-4 for grok), \
-so the seat silently gets a model and context window that are not in the role file, \
-while argv still looks normal. The role file must name the model itself; \
-built-in defaults, team-level defaults, and the Grok CLI global default are all implicit sources. Example:\n\
-model: grok-4.6",
-        path.display()
-    )))
-}
-
-/// 缺 model 时框架曾填 builtin `sonnet-4-thinking`，本机 shim 还会剥掉该默认。
-/// 角色必须自己写死；内建默认、team 级默认、CLI 全局默认都是隐式来源。
-fn require_explicit_cursor_role_model(
-    meta: &Value,
-    path: &Path,
-    provider: &str,
-) -> Result<(), ModelError> {
-    if parse_canonical_provider(provider) != Some(Provider::CursorAgent) {
-        return Ok(());
-    }
-    if string_field(meta, "model").is_some_and(|value| !value.trim().is_empty()) {
-        return Ok(());
-    }
-    Err(ModelError::Validation(format!(
-        "{}: missing front matter field model. \
-Without an explicit model the framework fills a built-in default (sonnet-4-thinking for cursor_agent), \
-so the seat silently gets a model that is not in the role file, while argv still looks normal. \
-The role file must name the model itself; built-in defaults, team-level defaults, and the Cursor CLI default are all implicit sources. Example:\n\
-model: sonnet-4-thinking",
-        path.display()
-    )))
-}
-
 fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<(), ModelError> {
     if parse_canonical_provider(provider) != Some(Provider::Pi) {
         return Ok(());
@@ -746,7 +681,7 @@ fn validate_pi_role_fields(meta: &Value, path: &Path, provider: &str) -> Result<
 fn optional_dangerously_skip_permissions(meta: &Value) -> bool {
     match meta.get("dangerously_skip_permissions") {
         Some(Value::Bool(value)) => *value,
-        _ => true,
+        _ => false,
     }
 }
 
@@ -828,35 +763,6 @@ fn py_int_value(value: &Value) -> Option<i64> {
         Value::Str(s) => s.parse::<i64>().ok(),
         Value::Null | Value::List(_) | Value::Map(_) => None,
     }
-}
-
-fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> Value {
-    if let Some(model) = string_field(role_meta, "model") {
-        return Value::Str(model);
-    }
-    if let Some(model) =
-        provider_model(team_meta, provider).or_else(|| string_field(team_meta, "default_model"))
-    {
-        return Value::Str(model);
-    }
-    if role_meta.get("profile").is_some() {
-        return Value::Null;
-    }
-    builtin_provider_model(provider)
-        .map(|m| Value::Str(m.to_string()))
-        .unwrap_or(Value::Null)
-}
-
-fn provider_model(team_meta: &Value, provider: &str) -> Option<String> {
-    let models = team_meta.get("provider_models")?;
-    let provider = parse_canonical_provider(provider)?;
-    provider_model_keys(provider)
-        .iter()
-        .find_map(|key| string_field(models, key))
-}
-
-fn builtin_provider_model(provider: &str) -> Option<&'static str> {
-    parse_canonical_provider(provider).and_then(wire_builtin_provider_model)
 }
 
 fn non_empty_trimmed(text: &str) -> Option<String> {

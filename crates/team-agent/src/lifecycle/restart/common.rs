@@ -510,6 +510,7 @@ pub(super) fn spawn_agent_window(
         crate::lifecycle::launch::extend_worker_env_unset_for_effort(
             profile_launch.env_unset.iter().cloned().collect(),
             provider,
+            restart_effort.is_some(),
         ),
     );
     // Keep the launcher-known typed provider independent from inherited
@@ -748,7 +749,6 @@ fn merge_command_context_fields(
         "auth_mode",
         "effort",
         "profile",
-        "permission_mode",
         // 0.5.66 bypass 单源:rehydrate 同步合入,restart 的 safety 构造读到新值。
         "dangerously_skip_permissions",
     ] {

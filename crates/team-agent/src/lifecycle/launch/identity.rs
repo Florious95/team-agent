@@ -168,25 +168,21 @@ pub(crate) fn provider_effort_event_payload(
 }
 
 /// ---
-/// purpose: 对 claude 系 provider 兜底确保 CLAUDE_EFFORT 进入待清除环境变量表
+/// purpose: 仅在存在显式 effort override 时清除继承的 CLAUDE_EFFORT
 /// params:
 ///   base: 已有的待清除变量名列表
-/// returns: 非 claude 系原样返回；claude 系在缺失时补上 CLAUDE_EFFORT
+///   has_effort_override: 本次启动是否实际施加 effort
+/// returns: 无显式 override 或非 claude 系时原样返回
 /// ---
-/// 0.4.x provider effort MVP step 9: defensive guarantee that `CLAUDE_EFFORT`
-/// is unset in the Claude/ClaudeCode worker spawn env. As of the
-/// `profile_launch::provider_env_unsets` update, the base list already
-/// includes `CLAUDE_EFFORT` for Claude — so this function is idempotent
-/// (returns input unchanged). Kept as a belt-and-braces guard so a future
-/// refactor that bypasses provider_env_unsets cannot silently drop the
-/// scrub. The structural win is in `tmux_backend::shell_command` which now
-/// filters env exports by env_unset (preventing inherited values from
-/// re-introducing keys we just unset).
+/// Preserve provider-native `CLAUDE_EFFORT` unless a supported explicit role
+/// effort is applied; in that case prevent the inherited environment from
+/// overriding the requested value.
 pub(crate) fn extend_worker_env_unset_for_effort(
     base: Vec<String>,
     provider: Provider,
+    has_effort_override: bool,
 ) -> Vec<String> {
-    if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+    if !has_effort_override || !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         return base;
     }
     let mut out = base;

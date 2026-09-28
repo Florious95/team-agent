@@ -1,39 +1,54 @@
 ---
 name: team-agent
-description: Use only when the user explicitly asks to start, operate, inspect, shutdown, or restart a Team Agent team. Treat the team-agent CLI as a sealed appliance.
+description: Use when the user asks to create, operate, inspect, or stop a Team Agent team. Treat the CLI as the public interface.
 requires_team_agent: ">=0.5.0"
-last_verified_against: "0.5.66"
 ---
 # Team Agent
-Sealed appliance for someone who just got the CLI. Operator handbook (permissions, models, routing, recovery): `references/team-agent-operator.md`.
-If `team-agent --version` differs from `last_verified_against`, learn from the live CLI before copying examples:
-```bash
-team-agent --version
-team-agent --help
-team-agent doctor --help
+
+The current assistant is the **leader**. Workers use separate role files and report through Team Agent. Start from a tmux-addressable terminal or supported agent pane, in the workspace root (the parent of the team directory).
+
+## Create and start
+
+A team can be plain text; no YAML frontmatter is required:
+
+```text
+.team/current/
+  TEAM.md                 # the team's goal
+  agents/reviewer.md      # the worker's instructions
 ```
-**Launch** from a tmux-addressable pane: `team-agent claude` or `team-agent codex`, then `team-agent quick-start .team/current`. For a plain-text team directory, use `team-agent quick-start <plain-text-team-dir>`. Do not start a real team from a naked terminal; workers use independent background windows on the workspace-scoped tmux server.
-**Operate**
-- Dispatch: `team-agent send TO MESSAGE` (positional TO; `--watch-result` is deprecated). After success, do not poll with `sleep` / `status` / `inbox` / `collect`. TO has two co-equal logical forms: an in-team short name (`team-agent send reviewer "..."`) and a fully qualified `<workspace>::<team>/<agent>`. Use the qualified form across workspaces.
-- Inspect: `team-agent status` / `status --json`; `ok: true` plus `ready: false` is not a crash.
-- Lifecycle: `restart .` resumes a stopped team; `add-agent NAME --role-file FILE` adds or `--force` recreates one worker; `shutdown --workspace .` stops. Do not shutdown the team to add a worker.
-- Documents: `TEAM.md` and `agents/*.md` may be plain text/Markdown with no frontmatter; the whole team body is its objective and the whole role body is the prompt. Default worker id is the filename stem, provider `pi`, model `openai-codex/gpt-6-luna`, effort `max`, and bypass enabled. Valid optional frontmatter can override supported metadata.
-- On a structured failure `action`, run that action first, then stop. Do not guess flags. `coordinator.session_missing` is self-healing; re-check `status --json`, do not shutdown.
-The current user-facing agent is the leader (orchestrate only). Worker MCP exposes exactly `send_message`, `report_result`, and optional `get_team_status`; lifecycle management stays on the authorized native CLI. Workers call `report_result` exactly once. Nested teams: `references/team-in-team.md`.
-## Provider Capability Matrix
-See `references/team-agent-operator.md` for Claude / Codex / Copilot / Gemini / fake. `quick-start` / `restart` / `claim-leader` JSON is compact by default; pass `--detail` only for internal diagnostics.
-| Provider | Resume | Turn-state detection | Per-worker model override | Team Agent fork |
-|---|---|---|---|---|
-| `grok` | yes (`--resume <id>`, archive-gated) | no | yes (role `model` required) | yes (`--fork-session` + new `--session-id`) |
-| `cursor_agent` | yes (`--resume <chatId>`, archive-gated) | no | required on role; same-family catalog id may take effect; unknown id silent-fallback; pane chrome ≠ proof | **no — `CapabilityUnsupported`** |
-| `pi` | yes (exact `--session <backing-path>`, not selector/continue) | Unknown (no JSONL turn-state reader) | yes (role `model` / `effort`, catalog-validated) | yes (full snapshot into separate seat/session; exact backing resume) |
-Grok / `cursor_agent` have no JSONL turn-state reader (classify → Unknown). Pi `fork-agent SOURCE --as TARGET` requires a captured Pi subscription source and reports both session ids plus the target backing path; it does not mutate the source session.
-## Provider Prep
-### Cursor provider notes
-To opt into Cursor, use optional frontmatter with `provider: cursor_agent` (not `cursor`; launcher verb `team-agent cursor`) and `auth_mode: subscription`; no profile or bypass field is required. `agent_id` (legacy `name`) and `role` can be omitted, but Cursor still requires an explicit `model:`.
-The model flag stays on argv; same-family catalog ids can change pane chrome, while unknown ids silent-fallback without warning. Pick a catalog id; after spawn, `capture-pane` once for chrome. Pane chrome does not prove the live model.
-One `cursor_agent` per workspace; a second seat fail-closes because `.cursor/mcp.json` is directory-scoped and overwrites `TEAM_AGENT_ID`. Several Cursor seats need separate workspace directories. Same seat, fresh context: `reset-agent --discard-session`.
-`clone-agent` copies the source role but starts fresh. Runtime role replacement: `clone-agent` → `stop-agent` → `remove-agent --confirm` (deletes `.team/dynamic-role-files/`) → write role file → `add-agent --role-file` → dispatch.
-- Restart emits `--resume <chatId>` when `store.db` / `meta.json` exist; the gate does not read chat text. Persist anything that must survive restart.
-- Delivery sends one Enter; a second Enter interrupts the turn.
-- After spawn, the pane footer should show `Cursor Agent v<version>`. Do not use `strings` to probe the binary.
+
+Put the goal in `TEAM.md` and the worker's instructions in each `agents/*.md` body. Use the filename stem as the worker id and in-team short name in commands such as `send` and `inbox`.
+
+```sh
+team-agent quick-start .team/current
+team-agent send reviewer "Review this change"
+team-agent inbox reviewer -n 3
+team-agent add-agent analyst --role-file /absolute/path/to/analyst.md
+team-agent shutdown --workspace .
+```
+
+The `reviewer` argument is an in-team short name; use `<workspace>::<team>/<agent>` when the recipient needs a fully qualified identity. A successful `send` may mean only queued; it is not the worker's reply. Wait for a natural response or result before treating the task as complete.
+
+## Role defaults
+
+All role metadata is optional. With no overrides:
+
+| Setting | Default |
+|---|---|
+| Provider | `pi` |
+| Model | unset; let the provider choose |
+| Effort | unset; let the provider choose |
+| Permission bypass | `false`; keep provider-native permissions |
+
+Add frontmatter only when a role needs an override. Supported fields include `agent_id` (legacy alias: `name`), `role`, `provider`, `model`, `effort`, `auth_mode`, `profile`, `dangerously_skip_permissions`, and `communication_mode`. Old `tools`, `permission_mode`, and `label` role keys do not configure a worker.
+
+Profiles keep provider authentication, endpoint, and custom-model settings local. Never put secrets in `TEAM.md` or a role file. See [the operator reference](references/team-agent-operator.md) for profile setup and field details.
+
+## Inspect
+
+Use `team-agent status --json` for readiness and `team-agent --help` for current command syntax. `ok: true` with `ready: false` means the command succeeded but the team is not ready; follow the reported action.
+
+Worker MCP provides `send_message`, `report_result`, and `get_team_status`. Lifecycle actions remain on the authorized CLI. See [nested teams](references/team-in-team.md) only when the task needs them.
+
+---
+This skill is a concise public guide. Do not infer a tested version from package metadata; verify the installed CLI with `team-agent --version` when version-specific behavior matters.

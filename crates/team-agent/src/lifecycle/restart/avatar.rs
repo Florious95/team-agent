@@ -315,7 +315,6 @@ pub(crate) fn fork_pi_new_seat_locked(
             source_agent_id,
             target_agent_id,
             label,
-            Some(target_agent_id.as_str()),
         )?;
         role = Some(target_role);
         let target_role_path = role

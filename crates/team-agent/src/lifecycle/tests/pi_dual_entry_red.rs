@@ -216,18 +216,22 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
 
     std::fs::write(
         &role,
-        "---\nname: worker-a\nrole: developer\nprovider: pi\nauth_mode: subscription\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\nworker contract\n",
+        "---\nname: worker-a\nrole: developer\nprovider: pi\nauth_mode: subscription\ntools:\n  - mcp_team\n---\nworker contract\n",
     )
     .expect("write provider-default teammate role");
     let defaults = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
-        .expect("provider: pi teammate may use Pi model and effort defaults");
+        .expect("provider: pi teammate may preserve provider-native defaults");
     assert_eq!(
         defaults.agent.get("model"),
-        Some(&Value::Str("openai-codex/gpt-6-luna".to_string()))
+        Some(&Value::Null)
     );
     assert_eq!(
         defaults.agent.get("effort"),
-        Some(&Value::Str("max".to_string()))
+        None
+    );
+    assert_eq!(
+        defaults.agent.get("dangerously_skip_permissions"),
+        Some(&Value::Bool(false))
     );
     std::fs::remove_dir_all(root).expect("remove role fixture");
 

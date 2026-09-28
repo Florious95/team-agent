@@ -213,15 +213,6 @@ pub enum Backend {
     Pty,
 }
 
-/// agent permission mode(schema `agent.permission_mode`;compiler 恒发 `restricted`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionMode {
-    Restricted,
-    Ask,
-    Trusted,
-}
-
 /// tmux pane 存活态(`state.py:336-341`)。**`Unknown` 既不可当 dead 也不可当 live**
 /// (owner-gate `state.py:382` 用 `!= LIVE`)—— 穷尽 match,不 fallthrough(§11)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

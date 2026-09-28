@@ -188,8 +188,8 @@ fn r3_compiler_role_wins_team_and_pi_does_not_inherit_team_effort() {
     );
     assert_eq!(
         compiled_effort("pi", pi_model, None, Some("ultra")).expect("Pi TEAM isolation"),
-        Some("max".to_string()),
-        "Pi ignores the unsupported TEAM effort and uses its global max default"
+        None,
+        "Pi does not inherit TEAM effort or inject a global default"
     );
     let error = compiled_effort("pi", pi_model, Some("ultra"), None)
         .expect_err("Pi ultra must be rejected")
