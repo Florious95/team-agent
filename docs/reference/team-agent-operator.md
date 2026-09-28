@@ -96,7 +96,7 @@ No role frontmatter is required. With no explicit overrides, Team Agent uses:
 | `effort` | Unset by Team Agent; leave effort selection to the provider |
 | `dangerously_skip_permissions` | `false`; preserve native permissions |
 
-Do not write `model: null`, `effort: max`, or a bypass setting just to restate a default. The absence of a model or effort override is not a promise about what the provider's own UI eventually displays. Team Agent does not fill role model/effort from TEAM-level defaults or built-in model catalogs.
+Do not write `model: null`, `effort: max`, or a bypass setting just to restate a default. The absence of a model or effort override is not a promise about what the provider's own UI eventually displays. Team Agent does not fill role model from TEAM-level defaults. An unspecified role effort defaults to None (native); for non-Pi roles, a legacy explicit TEAM provider_effort remains supported for compatibility.
 
 Optional supported role metadata:
 
