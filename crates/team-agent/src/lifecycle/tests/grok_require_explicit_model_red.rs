@@ -27,11 +27,10 @@ use serial_test::serial;
 use team_agent::lifecycle::quick_start_with_transport_in_workspace;
 use team_agent::transport::test_support::OfflineTransport;
 
-/// 1. grok 角色缺 model ⇒ 启动被拒，错误含 "model" 与「内建默认 / 隐式来源」。
-///    40e91fba 上会成功启动（有 overlay / 有 spawn）⇒ 本条红。
+/// An omitted Grok role model preserves the provider-native default.
 #[test]
 #[serial(env)]
-fn grok_role_missing_model_refuses_to_start() {
+fn grok_role_missing_model_uses_provider_default() {
     let ws = tmp_dir("grok-no-model");
     let home = tmp_dir("grok-no-model-home");
     seed_grok_home(&home, Some(&ws));
@@ -46,51 +45,19 @@ fn grok_role_missing_model_refuses_to_start() {
     );
     let transport = OfflineTransport::new();
 
-    let result = quick_start_with_transport_in_workspace(
+    quick_start_with_transport_in_workspace(
         &ws,
         &team,
         None,
         true,
         Some("grokteam"),
         &transport,
-    );
-
-    let err = match result {
-        Ok(report) => panic!(
-            "grok role without model must refuse to start; a built-in default \
-             would silently pick the model; report={report:?}"
-        ),
-        Err(error) => error.to_string(),
-    };
-    let lower = err.to_ascii_lowercase();
+    )
+    .expect("Grok may use its provider-native model default");
+    let argv = first_spawn_argv(&transport);
     assert!(
-        lower.contains("model"),
-        "error must name the missing field; err={err}"
-    );
-    assert!(
-        lower.contains("built-in") || lower.contains("builtin") || err.contains("内建"),
-        "error must name the built-in default the framework would fill; err={err}"
-    );
-    assert!(
-        lower.contains("implicit") || err.contains("隐式"),
-        "error must reject every implicit source, not just one fallback; err={err}"
-    );
-    assert!(
-        err.contains("model: grok-4.6") || err.contains("model: grok-4"),
-        "error must show how to write the field; err={err}"
-    );
-    assert!(
-        !err.to_ascii_lowercase().contains("worktree") && !err.contains("then retry"),
-        "must not promise a remedy this version cannot honor; err={err}"
-    );
-    assert!(
-        transport.spawn_records().is_empty(),
-        "refusal must happen before spawn; records={:?}",
-        transport.spawn_records()
-    );
-    assert!(
-        !ws.join(".grok").join("config.toml").exists(),
-        "must refuse before writing grok overlay; leftover .grok/config.toml means the seat started"
+        !argv.iter().any(|arg| arg == "--model"),
+        "an omitted model must not fabricate a --model argument: {argv:?}"
     );
 }
 
