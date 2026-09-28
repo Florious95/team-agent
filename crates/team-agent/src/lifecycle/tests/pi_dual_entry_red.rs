@@ -227,7 +227,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     );
     assert_eq!(
         defaults.agent.get("effort"),
-        Some(&Value::Null)
+        None
     );
     assert_eq!(
         defaults.agent.get("dangerously_skip_permissions"),

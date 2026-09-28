@@ -114,7 +114,7 @@ fn pi_role_ignores_tools_and_preserves_provider_defaults() {
     );
     assert_eq!(
         compiled.agent.get("effort"),
-        Some(&Value::Null),
+        None,
         "omitted Pi effort stays unset rather than using team metadata"
     );
     assert_eq!(
