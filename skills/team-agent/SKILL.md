@@ -27,7 +27,7 @@ team-agent add-agent analyst --role-file /absolute/path/to/analyst.md
 team-agent shutdown --workspace .
 ```
 
-A successful `send` may mean only queued; it is not the worker's reply. Wait for a natural response or result before treating the task as complete.
+The `reviewer` argument is an in-team short name; use `<workspace>::<team>/<agent>` when the recipient needs a fully qualified identity. A successful `send` may mean only queued; it is not the worker's reply. Wait for a natural response or result before treating the task as complete.
 
 ## Role defaults
 

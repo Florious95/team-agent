@@ -16,6 +16,7 @@ my-team/
 
 From a tmux-addressable terminal or supported agent pane, run commands in the workspace root (the parent of `my-team`):
 
+<!-- command-coverage:normative-start -->
 ```sh
 team-agent quick-start my-team
 team-agent send reviewer "Review the current change and report the main risk."
@@ -23,6 +24,7 @@ team-agent inbox reviewer -n 3
 team-agent add-agent analyst --role-file /absolute/path/to/analyst.md
 team-agent shutdown --workspace .
 ```
+<!-- command-coverage:normative-end -->
 
 A successful `send` can mean only accepted or queued. Wait for the worker's actual reply/result; acceptance is not completion. Use `team-agent status --json` to inspect readiness. `ok: true` with `ready: false` means the command succeeded but the team is not ready; follow the reported action.
 
