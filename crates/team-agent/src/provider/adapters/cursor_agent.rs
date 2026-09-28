@@ -11,9 +11,9 @@
 //! maturity: wired
 //! ---
 //!
-//! Cursor `agent` CLI（与 `cursor-agent` 同二进制）。主路径与
-//! `.team/scripts/cursor_seat.sh` 实测一致：
-//!   `--trust --sandbox disabled --workspace <物理路径> [--force] [--model]`
+//! Cursor `agent` CLI（与 `cursor-agent` 同二进制）。默认不跳过信任或沙箱设置。
+//! 显式 bypass 时才使用 `.team/scripts/cursor_seat.sh` 的 trusted/unsandboxed 选项：
+//!   `--workspace <物理路径> [--trust --sandbox disabled --force] [--model]`
 //! Role 不入 argv，写 `<workspace>/.cursor/rules/*.mdc` + `alwaysApply: true`。
 //! MCP 无 `--mcp-config`；身份必须写进 `.cursor/mcp.json` 的 env 表
 //! （cursor 不把父进程 TEAM_AGENT_* 传给 MCP 子进程）。
@@ -57,14 +57,13 @@ pub(crate) fn cursor_agent_base_command(
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["agent".to_string()];
-    // --trust 跳过 Workspace Trust 闸（已实测）。无此 flag 会停在 Do you trust。
-    argv.push("--trust".to_string());
     if dangerously_skip_permissions {
+        // Explicit bypass also opts into Cursor's trusted, unsandboxed launch.
+        argv.push("--trust".to_string());
+        argv.push("--sandbox".to_string());
+        argv.push("disabled".to_string());
         argv.push("--force".to_string());
     }
-    // 与 cursor_seat.sh 主路径一致。沙箱实际隔离面未再拆，但 flag 本身已实测。
-    argv.push("--sandbox".to_string());
-    argv.push("disabled".to_string());
     if let Some(model) = model {
         argv.push("--model".to_string());
         argv.push(model.to_string());

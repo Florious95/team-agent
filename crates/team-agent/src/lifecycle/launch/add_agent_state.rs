@@ -390,7 +390,8 @@ fn starting_agent_entry(
     let provider = meta
         .get("provider")
         .and_then(Value::as_str)
-        .unwrap_or("codex");
+        .filter(|provider| !provider.trim().is_empty())
+        .unwrap_or("pi");
     let auth_mode = meta
         .get("auth_mode")
         .and_then(Value::as_str)
@@ -438,8 +439,9 @@ fn starting_agent_entry(
         let meta_provider = meta
             .get("provider")
             .and_then(Value::as_str)
+            .filter(|provider| !provider.trim().is_empty())
             .and_then(crate::provider::wire::parse_provider)
-            .unwrap_or(Provider::Codex);
+            .unwrap_or(Provider::Pi);
         persist_effective_approval_policy_from_yaml_agent(obj, meta, meta_provider);
     }
     entry

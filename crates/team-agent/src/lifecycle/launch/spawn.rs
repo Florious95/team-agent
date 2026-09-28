@@ -255,6 +255,7 @@ pub(super) fn spawn_agents(
             extend_worker_env_unset_for_effort(
                 profile_launch.env_unset.iter().cloned().collect(),
                 provider,
+                agent_effort.is_some(),
             ),
         );
         // The provider is the final typed value after profile overlays. Keep it

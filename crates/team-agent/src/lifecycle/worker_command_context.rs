@@ -58,7 +58,7 @@ pub(crate) struct WorkerCommandAgent {
     system_prompt_file: Option<String>,
     output_contract_format: Option<String>,
     communication_mode: CommunicationMode,
-    /// Missing `dangerously_skip_permissions` defaults to true; an explicit false remains respected.
+    /// Missing `dangerously_skip_permissions` defaults to false; only explicit true enables bypass.
     dangerously_skip_permissions: bool,
 }
 
@@ -110,9 +110,9 @@ impl WorkerCommandAgent {
                     .get("communication_mode")
                     .and_then(crate::model::yaml::Value::as_str),
             )?,
-            dangerously_skip_permissions: !matches!(
+            dangerously_skip_permissions: matches!(
                 agent.get("dangerously_skip_permissions"),
-                Some(crate::model::yaml::Value::Bool(false))
+                Some(crate::model::yaml::Value::Bool(true))
             ),
         })
     }
@@ -167,7 +167,7 @@ impl WorkerCommandAgent {
             dangerously_skip_permissions: agent
                 .get("dangerously_skip_permissions")
                 .and_then(serde_json::Value::as_bool)
-                .unwrap_or(true),
+                .unwrap_or(false),
         })
     }
 }

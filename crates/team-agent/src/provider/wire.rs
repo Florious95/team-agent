@@ -88,31 +88,6 @@ pub(crate) fn requires_resume_backing(provider: Provider) -> bool {
     )
 }
 
-pub(crate) fn provider_model_keys(provider: Provider) -> &'static [&'static str] {
-    match provider {
-        Provider::Claude => &["claude", "claude_code"],
-        Provider::ClaudeCode => &["claude_code", "claude"],
-        Provider::Codex => &["codex"],
-        Provider::Copilot => &["copilot"],
-        Provider::GeminiCli => &["gemini_cli"],
-        Provider::Grok => &["grok"],
-        Provider::CursorAgent => &["cursor_agent"],
-        Provider::Pi => &["pi"],
-        Provider::Fake => &["fake"],
-    }
-}
-
-pub(crate) fn builtin_provider_model(provider: Provider) -> Option<&'static str> {
-    match provider {
-        Provider::Claude | Provider::ClaudeCode => Some("claude-sonnet-4-6"),
-        Provider::Codex => Some("gpt-5.5"),
-        // grok: compiler 另有缺 model 硬闸，这里的 builtin 不再被 grok 角色吃到。
-        // cursor_agent: 禁止隐式默认（本机 shim 会剥 sonnet-4-thinking）；缺 model 编译失败。
-        Provider::Grok => Some("grok-4"),
-        Provider::CursorAgent | Provider::Pi => None,
-        Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
-    }
-}
 
 /// All aliases (including the canonical wire form) that parse to `provider`.
 /// The canonical wire form is always the first entry, so callers that need
@@ -235,10 +210,8 @@ mod tests {
             "model spec must validate providers through typed helpers"
         );
         assert!(
-            compiler_rs.contains("parse_canonical_provider")
-                && compiler_rs.contains("provider_model_keys")
-                && compiler_rs.contains("wire_builtin_provider_model"),
-            "compiler effort/model defaults must use typed provider helpers"
+            compiler_rs.contains("parse_canonical_provider"),
+            "compiler must validate providers through typed helpers"
         );
         assert!(
             delivery_rs.contains("parse_canonical_provider")
