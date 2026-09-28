@@ -548,8 +548,8 @@ fn compile_role_agent_with_mode(
     if let Some(profile) = string_field(&meta, "profile") {
         agent_items.push(("profile", Value::Str(profile)));
     }
-    // Only an explicit role effort is an override; validate syntax and provider support
-    // here so unsupported combinations fail at compile, not at runtime.
+    // Role effort wins; Pi uses only an explicit role value. Other providers may
+    // inherit TEAM provider_effort for Issue #238 compatibility.
     let role_effort = match string_field(&meta, "effort") {
         Some(raw) if !raw.trim().is_empty() => {
             let value = raw.trim();
@@ -563,7 +563,16 @@ fn compile_role_agent_with_mode(
         }
         _ => None,
     };
-    if let Some(effort) = role_effort {
+    let team_effort = match string_field(team_meta, "provider_effort") {
+        Some(raw) if !raw.trim().is_empty() => ProviderEffort::parse(raw.trim()),
+        _ => None,
+    };
+    let resolved_effort = if is_pi {
+        role_effort
+    } else {
+        role_effort.or(team_effort)
+    };
+    if let Some(effort) = resolved_effort {
         // Apply the shared provider admission policy at compile time.
         let provider_str = agent_items
             .iter()
