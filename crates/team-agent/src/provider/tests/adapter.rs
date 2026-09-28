@@ -550,10 +550,10 @@ fn test_cursor_resume_plan_requires_chat_id_and_never_emits_empty_resume() {
 }
 
 #[test]
-fn pi_wire_roundtrip_requires_backing_and_has_no_builtin_model() {
+fn pi_wire_roundtrip_requires_backing() {
     use crate::provider::wire::{
-        aliases, builtin_provider_model, command_name, parse_canonical_provider, parse_provider,
-        provider_wire, requires_resume_backing,
+        aliases, command_name, parse_canonical_provider, parse_provider, provider_wire,
+        requires_resume_backing,
     };
 
     let provider = Provider::Pi;
@@ -563,7 +563,6 @@ fn pi_wire_roundtrip_requires_backing_and_has_no_builtin_model() {
     assert_eq!(aliases(provider), &["pi"]);
     assert_eq!(command_name(provider), "pi");
     assert!(requires_resume_backing(provider));
-    assert_eq!(builtin_provider_model(provider), None);
 }
 
 #[test]
