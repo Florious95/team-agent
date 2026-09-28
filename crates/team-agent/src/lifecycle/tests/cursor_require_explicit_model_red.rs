@@ -31,35 +31,23 @@ use team_agent::transport::test_support::OfflineTransport;
 
 #[test]
 #[serial(env)]
-fn cursor_role_missing_model_refuses_to_start() {
+fn cursor_role_missing_model_uses_provider_default() {
     let ws = tmp_dir("cursor-no-model");
     let team = write_role_team(&ws, "cursortm", "cursor_writer", None, None);
     let transport = OfflineTransport::new();
-    let result = quick_start_with_transport_in_workspace(
+    quick_start_with_transport_in_workspace(
         &ws,
         &team,
         None,
         true,
         Some("cursortm"),
         &transport,
-    );
-    let err = match result {
-        Ok(report) => panic!("cursor role without model must refuse; report={report:?}"),
-        Err(error) => error.to_string(),
-    };
-    let lower = err.to_ascii_lowercase();
+    )
+    .expect("Cursor may use its provider-native model default");
+    let argv = first_spawn_argv(&transport);
     assert!(
-        lower.contains("model"),
-        "error must name the missing field; err={err}"
-    );
-    assert!(
-        lower.contains("built-in") || lower.contains("builtin") || err.contains("内建"),
-        "error must name the built-in default; err={err}"
-    );
-    assert!(
-        transport.spawn_records().is_empty(),
-        "refusal must happen before spawn; records={:?}",
-        transport.spawn_records()
+        !argv.iter().any(|arg| arg == "--model"),
+        "an omitted model must not fabricate a --model argument: {argv:?}"
     );
 }
 

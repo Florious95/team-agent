@@ -308,21 +308,14 @@ fn test_grok_build_command_bypass_flag_when_dangerous() {
 }
 
 #[test]
-fn test_grok_build_command_refuses_missing_model() {
+fn test_grok_build_command_omits_missing_model() {
     let adapter = get_adapter(Provider::Grok);
-    let err = adapter
+    let argv = adapter
         .build_command(AuthMode::Subscription, None, None, None)
-        .expect_err("grok must refuse to build argv without an explicit model");
-    let text = err.to_string();
+        .expect("missing model preserves the provider-native default");
     assert!(
-        text.to_ascii_lowercase().contains("model"),
-        "error must name model; got {text}"
-    );
-    assert!(
-        text.to_ascii_lowercase().contains("built-in")
-            || text.to_ascii_lowercase().contains("builtin")
-            || text.contains("内建"),
-        "error must name the built-in default the framework would fill; got {text}"
+        !argv.iter().any(|arg| arg == "--model"),
+        "missing model must not fabricate a --model argument: {argv:?}"
     );
     assert!(
         argv_contains_adjacent(
@@ -348,12 +341,8 @@ fn test_cursor_agent_build_command_includes_workspace_flag() {
         "cursor argv must carry `--workspace {{workspace}}`: {argv:?}"
     );
     assert!(
-        argv_contains_adjacent(&argv, &["--trust"]),
-        "cursor argv must carry documented --trust: {argv:?}"
-    );
-    assert!(
-        argv_contains_adjacent(&argv, &["--sandbox", "disabled"]),
-        "cursor argv must carry documented --sandbox disabled: {argv:?}"
+        !argv.iter().any(|arg| arg == "--trust" || arg == "--sandbox"),
+        "safe Cursor command must not opt into trust or disabled sandbox: {argv:?}"
     );
     assert!(
         !argv.iter().any(|a| a == "--rules" || a == "--append-system-prompt"),
@@ -509,8 +498,11 @@ fn test_cursor_fresh_plan_has_no_session_id_and_no_resume() {
         plan.argv
     );
     assert!(
-        argv_contains_adjacent(&plan.argv, &["--trust"]),
-        "fresh cursor must keep --trust; argv={:?}",
+        !plan
+            .argv
+            .iter()
+            .any(|arg| arg == "--trust" || arg == "--sandbox"),
+        "default Cursor plan must not opt into trust or disabled sandbox; argv={:?}",
         plan.argv
     );
 }

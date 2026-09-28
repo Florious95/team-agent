@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     // 0.5.66 bypass 单源 §4.1:7 个生命周期入口共享编译后的 spec。
-    // 缺失 role frontmatter 值时由编译器注入 true；此处锁定公共编译入口的默认结果。
+    // 缺失 role frontmatter 值时编译为安全默认 false；此处锁定公共编译入口的结果。
     #[test]
     fn test_all_7_triggers_use_compiled_default_bypass() {
         let team = std::env::temp_dir().join(format!(
@@ -1165,7 +1165,7 @@ mod tests {
             .expect("compiled spec has a worker");
         assert_eq!(
             agent.get("dangerously_skip_permissions"),
-            Some(&Yaml::Bool(true))
+            Some(&Yaml::Bool(false))
         );
         let _ = std::fs::remove_dir_all(&team);
     }

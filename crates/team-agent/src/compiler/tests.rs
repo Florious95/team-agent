@@ -221,9 +221,8 @@ fn compile_subscription_without_profile_is_thin_manifest() {
     );
 }
 
-// Runtime front-matter defaults: every knob from TEAM.md flows through without
-// per-role repetition; thin role inherits default_model; leader.model is null
-// (TEAM.md has no `model:` key, only `default_model:`).
+// Runtime front-matter defaults: TEAM.md runtime settings remain available,
+// but its default_model does not fill an omitted role model; leader.model is null.
 const RUNTIME_DEFAULTS_TEAM: &str = "\
 ---
 name: doc-team
@@ -256,7 +255,7 @@ dangerously_skip_permissions: false
 Implement bounded tasks.
 ";
 
-const RUNTIME_DEFAULTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.4","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":true,"tick_interval_sec":1,"push_min_interval_sec":3,"stuck_timeout_sec":5},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const RUNTIME_DEFAULTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"supervisor_worker","objective":"Compile role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":null,"auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","session_name":"team-doc-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":true,"tick_interval_sec":1,"push_min_interval_sec":3,"stuck_timeout_sec":5},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
 fn compile_runtime_front_matter_defaults_match_python() {
@@ -269,8 +268,7 @@ fn compile_runtime_front_matter_defaults_match_python() {
     assert_eq!(templated_compact_json(&spec), RUNTIME_DEFAULTS_JSON);
 }
 
-// provider_models alias ladder: role provider `claude_code` with NO `claude_code`
-// key in provider_models falls back to the `claude` key (compiler.py:317-318).
+// TEAM provider_models do not fill a role whose model is omitted.
 const ALIAS_TEAM: &str = "\
 ---
 name: debate-team
@@ -296,16 +294,16 @@ dangerously_skip_permissions: false
 Edit and defend the argument.
 ";
 
-const ALIAS_JSON: &str = r#"{"version":1,"team":{"name":"debate-team","mode":"supervisor_worker","objective":"Compile thin role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"editor","role":"Editor and Defender","provider":"claude_code","model":"claude-sonnet-4-6","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Edit and defend the argument.","file":null},"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["editor","Editor and Defender"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"editor","rules":[{"id":"route-editor","match":{"assignee":["editor"]},"assign_to":"editor","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","session_name":"team-debate-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["editor"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"editor","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const ALIAS_JSON: &str = r#"{"version":1,"team":{"name":"debate-team","mode":"supervisor_worker","objective":"Compile thin role docs.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"editor","role":"Editor and Defender","provider":"claude_code","model":null,"auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Edit and defend the argument.","file":null},"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["editor","Editor and Defender"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"editor","rules":[{"id":"route-editor","match":{"assignee":["editor"]},"assign_to":"editor","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","session_name":"team-debate-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["editor"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"editor","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
-fn compile_provider_models_claude_code_falls_back_to_claude_alias() {
+fn compile_provider_models_do_not_fill_claude_code_role_model() {
     let team = build_team(ALIAS_TEAM, &[("implementer.md", ALIAS_ROLE)], &[]);
     let spec = compile_team(&team).unwrap();
     assert_eq!(templated_compact_json(&spec), ALIAS_JSON);
 }
 
-// Builtin provider default: no model anywhere → DEFAULT_PROVIDER_MODELS[codex] = gpt-5.5.
+// Omitted role model remains null; the provider supplies its native default.
 const BUILTIN_TEAM: &str = "\
 ---
 name: default-model-team
@@ -329,10 +327,10 @@ tools:
 Implement bounded tasks.
 ";
 
-const BUILTIN_JSON: &str = r#"{"version":1,"team":{"name":"default-model-team","mode":"supervisor_worker","objective":"Compile role docs without model fields.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":"gpt-5.5","auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","session_name":"team-default-model-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
+const BUILTIN_JSON: &str = r#"{"version":1,"team":{"name":"default-model-team","mode":"supervisor_worker","objective":"Compile role docs without model fields.","workspace":"__WS__"},"leader":{"id":"leader","role":"leader","provider":"codex","model":null,"context_policy":{"keep_user_thread":true,"receive_worker_outputs":"business_messages_and_short_summaries","max_worker_result_tokens":2000}},"agents":[{"id":"implementer","role":"Implementation Engineer","provider":"codex","model":null,"auth_mode":"subscription","working_directory":"__WS__","system_prompt":{"inline":"Implement bounded tasks.","file":null},"dangerously_skip_permissions":false,"communication_mode":"leader_centric","preferred_for":["implementer","Implementation Engineer"],"avoid_for":[],"output_contract":{"format":"result_envelope_v1","required_fields":["task_id","status","summary","artifacts"]}}],"routing":{"default_assignee":"implementer","rules":[{"id":"route-implementer","match":{"assignee":["implementer"]},"assign_to":"implementer","priority":10}]},"communication":{"protocol":"mcp_inbox","topology":"leader_centered","worker_to_worker":true,"ack_timeout_sec":60,"result_format":"result_envelope_v1","message_store":{"sqlite":".team/runtime/team.db","mirror_files":".team/messages"}},"runtime":{"backend":"tmux","session_name":"team-default-model-team","auto_launch":true,"require_user_approval_before_launch":true,"max_active_agents":1,"startup_order":["implementer"],"fast":false,"tick_interval_sec":2,"push_min_interval_sec":60,"stuck_timeout_sec":300},"context":{"state_file":"team_state.md","artifact_dir":".team/artifacts","log_dir":".team/logs","summarization":{"worker_full_logs":"retain_outside_leader_context","state_update":"after_each_result"}},"tasks":[{"id":"task_initial","title":"Initial document-driven team task","type":"implementation","assignee":"implementer","deps":[],"acceptance":["Worker reports valid result_envelope_v1"],"status":"pending","requires_tools":["mcp_team"],"files":[],"risk":"low"}]}"#;
 
 #[test]
-fn compile_subscription_without_model_uses_builtin_provider_default() {
+fn compile_subscription_without_model_keeps_provider_native_default() {
     let team = build_team(BUILTIN_TEAM, &[("implementer.md", BUILTIN_ROLE)], &[]);
     let spec = compile_team(&team).unwrap();
     assert_eq!(templated_compact_json(&spec), BUILTIN_JSON);
@@ -504,38 +502,32 @@ fn build_layout(parent: &str, leaf: &str, team_md: Option<&str>, agents: AgentsD
 // ── A1 model resolution ──
 
 #[test]
-fn fix_a1_provider_models_precede_default_model() {
-    // precedence: provider_models[provider] BEFORE default_model (current swaps them).
+fn team_model_defaults_do_not_fill_role_model() {
+    // TEAM default_model and provider_models are not implicit role settings.
     let tm = "---\nname: T\nprovider: codex\ndefault_model: team-y\nprovider_models:\n  codex: pm-z\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(
-        agent0(&spec).get("model").and_then(Value::as_str),
-        Some("pm-z")
-    );
+    assert_eq!(agent0(&spec).get("model"), Some(&Value::Null));
 }
 
 #[test]
-fn fix_a1_claude_aliases_to_claude_code_provider_models() {
-    // TWO-WAY alias: provider `claude` consumes `provider_models[claude_code]`.
+fn team_provider_model_aliases_do_not_fill_role_model() {
+    // TEAM provider-model aliases do not affect an omitted role model.
     let tm = "---\nname: T\nprovider: codex\nprovider_models:\n  claude_code: cc-v\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("claude"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(
-        agent0(&spec).get("model").and_then(Value::as_str),
-        Some("cc-v")
-    );
+    assert_eq!(agent0(&spec).get("model"), Some(&Value::Null));
 }
 
 #[test]
-fn fix_a1_builtin_claude_default_is_sonnet_4_6() {
-    // DEFAULT_PROVIDER_MODELS: claude / claude_code → "claude-sonnet-4-6" (not -4-5).
+fn claude_role_without_model_keeps_provider_native_default() {
+    // A missing explicit model stays null for both Claude provider names.
     for prov in ["claude", "claude_code"] {
         let team = build_team(TM_CODEX, &[("w.md", &role_nomodel(prov))], &[]);
         let spec = compile_team(&team).unwrap();
         assert_eq!(
-            agent0(&spec).get("model").and_then(Value::as_str),
-            Some("claude-sonnet-4-6"),
+            agent0(&spec).get("model"),
+            Some(&Value::Null),
             "provider {prov}"
         );
     }
