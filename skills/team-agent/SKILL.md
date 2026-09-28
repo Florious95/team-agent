@@ -21,7 +21,7 @@ Put the goal in `TEAM.md` and the worker's instructions in each `agents/*.md` bo
 
 ```sh
 team-agent quick-start .team/current
-team-agent send reviewer "Review the current change and report the main risk."
+team-agent send reviewer "Review this change"
 team-agent inbox reviewer -n 3
 team-agent add-agent analyst --role-file /absolute/path/to/analyst.md
 team-agent shutdown --workspace .
