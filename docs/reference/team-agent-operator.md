@@ -17,13 +17,70 @@ my-team/
 From a tmux-addressable terminal or supported agent pane, run commands in the workspace root (the parent of `my-team`):
 
 <!-- command-coverage:normative-start -->
-```sh
-team-agent quick-start my-team
-team-agent send reviewer "Review the current change and report the main risk."
-team-agent inbox reviewer -n 3
-team-agent add-agent analyst --role-file /absolute/path/to/analyst.md
-team-agent shutdown --workspace .
+### Normative command inventory
+
+This inventory is the handbook authority for command coverage. Only the command
+lines between the two `command-coverage:normative-*` markers are canonical
+argv forms. Examples elsewhere in this handbook may be diagnostics, negative
+probes, historical observations, or prose and are not part of the inventory.
+
+```text
+team-agent add-agent <agent> --role-file <file>
+team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .
+team-agent approvals
+team-agent approvals <agent_id>
+team-agent approvals [coder]
+team-agent attach-leader
+team-agent claim-leader
+team-agent claude
+team-agent clone-agent <source> --as <new>
+team-agent codex
+team-agent codex --dangerously-bypass-approvals-and-sandbox
+team-agent doctor
+team-agent fork-agent <source> --as <new>
+team-agent inbox <agent_id> -n 3
+team-agent inbox coder -n 3
+team-agent profile doctor <name> --workspace . --json
+team-agent profile init <name> --auth-mode subscription --workspace .
+team-agent profile init claude-default --auth-mode subscription --workspace .
+team-agent profile init codex-default --auth-mode subscription --workspace .
+team-agent profile init deepseek --auth-mode compatible_api --workspace .
+team-agent profile show <name> --workspace . --json
+team-agent profile show deepseek --workspace . --json
+team-agent quick-start
+team-agent quick-start ./roles --team-id alpha
+team-agent quick-start .team/alpha
+team-agent quick-start .team/current
+team-agent quick-start <dir>
+team-agent quick-start <plain-text-team-dir>
+team-agent remove-agent <agent> --workspace . --confirm
+team-agent reset-agent <agent> --discard-session
+team-agent restart
+team-agent restart .
+team-agent restart . --allow-fresh
+team-agent restart . --team <session_name_or_team_name>
+team-agent send --task task_initial "Start"
+team-agent send --watch-result
+team-agent send --watch-result coder "Do the bounded task"
+team-agent send TO MESSAGE
+team-agent send reviewer "..."
+team-agent send reviewer "Review this change"
+team-agent shutdown --workspace . --keep-logs
+team-agent start-agent <agent>
+team-agent start-agent <agent_id> --workspace .
+team-agent start-agent coder --workspace .
+team-agent status
+team-agent status --detail --json
+team-agent status --json
+team-agent status coder
 ```
+
+The exact frozen CLI root help is a complementary public-surface authority:
+`team-agent --help` must expose the root verb for every canonical command that
+is not otherwise documented as a compatibility or provider form. The command
+coverage gate parses this output from the exact test binary; it never invokes a
+provider or treats a diagnostic example as a command approval.
+
 <!-- command-coverage:normative-end -->
 
 A successful `send` can mean only accepted or queued. Wait for the worker's actual reply/result; acceptance is not completion. Use `team-agent status --json` to inspect readiness. `ok: true` with `ready: false` means the command succeeded but the team is not ready; follow the reported action.
