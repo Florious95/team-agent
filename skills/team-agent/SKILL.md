@@ -12,15 +12,15 @@ The current assistant is the **leader**. Workers use separate role files and rep
 A team can be plain text; no YAML frontmatter is required:
 
 ```text
-my-team/
+.team/current/
   TEAM.md                 # the team's goal
   agents/reviewer.md      # the worker's instructions
 ```
 
-Put the goal in `TEAM.md` and the worker's instructions in each `agents/*.md` body. The filename stem is the worker id.
+Put the goal in `TEAM.md` and the worker's instructions in each `agents/*.md` body. Use the filename stem as the worker id and in-team short name in commands such as `send` and `inbox`.
 
 ```sh
-team-agent quick-start my-team
+team-agent quick-start .team/current
 team-agent send reviewer "Review the current change and report the main risk."
 team-agent inbox reviewer -n 3
 team-agent add-agent analyst --role-file /absolute/path/to/analyst.md
