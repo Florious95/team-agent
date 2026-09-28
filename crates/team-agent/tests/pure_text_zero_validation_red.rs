@@ -102,7 +102,7 @@ fn r02_plain_text_role_derives_agent_id_from_filename() {
 }
 
 #[test]
-fn r03_undeclared_bypass_defaults_to_true() {
+fn r03_undeclared_bypass_defaults_to_false() {
     let fixture = TeamFixture::new("r03");
     fixture.write_docs(
         "Plain-text team objective.",
@@ -113,7 +113,7 @@ fn r03_undeclared_bypass_defaults_to_true() {
     let spec = fixture
         .compile()
         .expect("omitting the bypass field must not prevent role compilation");
-    assert!(bypass(first_agent(&spec)), "all compiled roles default to Bypass");
+    assert!(!bypass(first_agent(&spec)), "new roles default to safe permissions");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn r04_undeclared_provider_defaults_to_pi() {
 }
 
 #[test]
-fn r05_undeclared_model_and_effort_use_luna_max_defaults() {
+fn r05_undeclared_model_and_effort_remain_provider_native() {
     let fixture = TeamFixture::new("r05");
     fixture.write_docs(
         "Plain-text team objective.",
@@ -144,11 +144,8 @@ fn r05_undeclared_model_and_effort_use_luna_max_defaults() {
         .compile()
         .expect("omitting model and effort must use the documented defaults");
     let agent = first_agent(&spec);
-    assert_eq!(
-        string_field(agent, "model"),
-        "openai-codex/gpt-6-luna"
-    );
-    assert_eq!(string_field(agent, "effort"), "max");
+    assert!(matches!(agent.get("model"), None | Some(Value::Null)));
+    assert!(matches!(agent.get("effort"), None | Some(Value::Null)));
 }
 
 #[test]
@@ -222,7 +219,7 @@ fn r09_plain_text_directory_compiles_to_valid_yaml_spec() {
     let agent = first_agent(&loaded);
     assert_eq!(string_field(agent, "id"), "worker");
     assert_eq!(string_field(agent, "provider"), "pi");
-    assert_eq!(string_field(agent, "model"), "openai-codex/gpt-6-luna");
-    assert_eq!(string_field(agent, "effort"), "max");
-    assert!(bypass(agent));
+    assert!(matches!(agent.get("model"), None | Some(Value::Null)));
+    assert!(matches!(agent.get("effort"), None | Some(Value::Null)));
+    assert!(!bypass(agent));
 }
