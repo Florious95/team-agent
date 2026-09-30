@@ -30,7 +30,7 @@ impl Shims {
             "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n--version) exit 0;;\n--list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\nopenai-codex gpt-5.6-luna\\n'; exit 0;;\nlist) printf 'npm:pi-mcp-adapter\\n%s\\n' {}; exit 0;;\nesac\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' pi \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", quote(&adapter.to_string_lossy()), binary));
         symlink(&pi_target, dir.join("pi")).unwrap();
         executable(&dir.join("codex"), &format!(
-            "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' codex \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nprintf '%s' \"${{OPENAI_BASE_URL:-}}\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.profile-url\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
+            "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' codex \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
         let inherited = std::env::var("PATH").unwrap_or_default();
         let real_tmux = std::env::split_paths(&inherited).map(|p| p.join("tmux")).find(|p| p.is_file()).expect("tmux available for isolated E2E tests");
         executable(&dir.join("tmux"), &format!(
@@ -110,11 +110,17 @@ fn codex_profile_role(id: &str, profile: &str, prompt: &str) -> String {
         .replace("auth_mode: subscription\n", "auth_mode: compatible_api\n")
         .replace("tools:\n", &format!("profile: {profile}\ntools:\n"))
 }
-fn write_codex_profile(dir: &Path, name: &str, base_url: &str) {
+fn write_codex_profile(dir: &Path, name: &str, provider_id: &str, base_url: &str) {
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join(format!("{name}.env")), format!(
-        "AUTH_MODE=compatible_api\nBASE_URL={base_url}\nAPI_KEY=role-lifecycle-fake-only\nMODEL=gpt-5.6-luna\n"
+        "AUTH_MODE=compatible_api\nMODEL_PROVIDER={provider_id}\nBASE_URL={base_url}\nAPI_KEY=role-lifecycle-fake-only\nMODEL=gpt-5.6-luna\n"
     )).unwrap();
+}
+fn assert_codex_profile(argv: &[String], provider_id: &str, base_url: &str) {
+    let selector = format!("model_provider=\"{provider_id}\"");
+    let endpoint = format!("model_providers.{provider_id}.base_url=\"{base_url}\"");
+    assert!(pair(argv, "-c", &selector), "missing Codex profile selector: {argv:?}");
+    assert!(pair(argv, "-c", &endpoint), "missing self-contained Codex profile endpoint: {argv:?}");
 }
 fn assert_config(ws: &TestWorkspace, id: &str, provider: &str, model: &str, effort: Option<&str>, bypass: bool) {
     let v = compiled(ws, id);
@@ -403,12 +409,12 @@ fn stopped_start_profile_patch_uses_workspace_profile_values() {
     let role_without_profile = role("seed", "codex", "gpt-5.6-luna", None, false, "Profile patch.")
         .replace("auth_mode: subscription\n", "auth_mode: compatible_api\n");
     fs::write(role_path(&ws, "seed"), role_without_profile).unwrap();
-    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "http://workspace.invalid/v1");
+    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
     let r = run(&ws, &shims, &start(&ws, "seed", &["--profile", "workspace-only"]));
     assert!(r.is_success(), "start profile patch: {} {}", r.stdout, r.stderr);
     assert!(fs::read_to_string(role_path(&ws, "seed")).unwrap().contains("profile: workspace-only"));
     assert_eq!(compiled(&ws, "seed").get("profile").and_then(Yaml::as_str), Some("workspace-only"));
-    assert_eq!(fs::read(ws.path().join(".role-lifecycle-launch/seed.profile-url")).unwrap(), b"http://workspace.invalid/v1");
+    assert_codex_profile(&shims.capture("seed"), "workspace_local", "http://workspace.invalid/v1");
 }
 
 #[test]
@@ -418,19 +424,19 @@ fn imported_role_profile_is_workspace_local_not_an_external_template_dependency(
     let source = external_root.join("agent.md"); fs::create_dir_all(&external_root).unwrap();
     let bytes = codex_profile_role("profiled", "workspace-only", "Imported profile role.");
     fs::write(&source, &bytes).unwrap();
-    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "http://workspace.invalid/v1");
-    write_codex_profile(&external_root.join("profiles"), "workspace-only", "http://external.invalid/v1");
+    write_codex_profile(&ws.path().join("profiles"), "workspace-only", "workspace_local", "http://workspace.invalid/v1");
+    write_codex_profile(&external_root.join("profiles"), "workspace-only", "external_ghost", "http://external.invalid/v1");
     let add = run(&ws, &shims, &cli(&ws, "add-agent", "profiled", &["--role-file", source.to_str().unwrap(), "--no-display"]));
     assert!(add.is_success(), "external profiled add: {} {}", add.stdout, add.stderr);
     assert_eq!(fs::read(&source).unwrap(), bytes.as_bytes());
     assert_eq!(fs::read(role_path(&ws, "profiled")).unwrap(), bytes.as_bytes());
-    assert_eq!(fs::read(ws.path().join(".role-lifecycle-launch/profiled.profile-url")).unwrap(), b"http://workspace.invalid/v1");
+    assert_codex_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
     assert_eq!(compiled(&ws, "profiled").get("profile").and_then(Yaml::as_str), Some("workspace-only"));
     stop(&ws, &shims, "profiled");
     fs::remove_dir_all(&external_root).unwrap();
     let restarted = run(&ws, &shims, &start(&ws, "profiled", &["--profile", "workspace-only"]));
     assert!(restarted.is_success(), "restart must remain workspace-self-contained: {} {}", restarted.stdout, restarted.stderr);
-    assert_eq!(fs::read(ws.path().join(".role-lifecycle-launch/profiled.profile-url")).unwrap(), b"http://workspace.invalid/v1");
+    assert_codex_profile(&shims.capture("profiled"), "workspace_local", "http://workspace.invalid/v1");
 }
 
 #[test]
