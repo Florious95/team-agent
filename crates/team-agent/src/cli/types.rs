@@ -475,6 +475,7 @@ pub struct RestartArgs {
 /// `start-agent`(`parser.py:369`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartAgentArgs {
+    pub role_config: crate::lifecycle::role_config::RoleConfigPatch,
     pub agent: String,
     pub workspace: PathBuf,
     pub team: Option<String>,
@@ -502,9 +503,10 @@ pub struct ResetAgentArgs {
     pub json: bool,
 }
 
-/// `add-agent`(`parser.py:395`)。`--role-file` 必需。
+/// `add-agent`: provider and bypass are explicit CLI or role-file decisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddAgentArgs {
+    pub role_config: crate::lifecycle::role_config::RoleConfigPatch,
     pub agent: String,
     pub workspace: PathBuf,
     pub team: Option<String>,

@@ -39,7 +39,7 @@ fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), L
     Ok(())
 }
 
-fn dump_role_frontmatter(meta: &Value) -> String {
+pub(crate) fn dump_role_frontmatter(meta: &Value) -> String {
     let Value::Map(pairs) = meta else {
         return yaml::dumps(meta);
     };

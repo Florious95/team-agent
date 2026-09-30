@@ -402,7 +402,10 @@ pub(super) use readiness::*;
 mod add_agent;
 pub(super) use add_agent::*;
 pub use add_agent::{add_agent, add_agent_force};
-pub(crate) use add_agent::{add_agent_with_transport, add_agent_with_transport_force};
+pub(crate) use add_agent::{
+    add_agent_with_transport, add_agent_with_transport_force,
+    add_agent_with_transport_at_paths_locked,
+};
 
 pub(crate) mod add_agent_state;
 pub(super) use add_agent_state::*;

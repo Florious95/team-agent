@@ -317,6 +317,7 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
     let dup_role = team.join("dup-role.md");
     std::fs::write(&dup_role, DELEG_VALID_ROLE).unwrap(); // role file must exist
     let args = AddAgentArgs {
+        role_config: Default::default(),
         agent: "implementer".to_string(),
         workspace: team,
         team: None,

@@ -77,7 +77,7 @@ pub(crate) mod remove;
 mod selection;
 mod team_state;
 
-pub(crate) use agent::start_agent_at_paths;
+pub(crate) use agent::{start_agent_at_paths, ensure_agent_not_running};
 pub use agent::{reset_agent, start_agent, stop_agent};
 pub(crate) use agent::{
     reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,

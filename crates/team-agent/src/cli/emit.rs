@@ -1430,9 +1430,103 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
     })
 }
 
+// Keep strict role CLI parsing separate from the legacy shared parser.
+fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lifecycle::role_config::RoleConfigPatch), CliError> {
+    let mut role = crate::lifecycle::role_config::RoleConfigPatch::default();
+    let mut forwarded = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if !argument.starts_with('-') {
+            forwarded.push(argument.clone());
+            index += 1;
+            continue;
+        }
+        let (flag, inline) = argument.split_once('=').map_or((argument.as_str(), None), |(key, value)| (key, Some(value)));
+        if !seen.insert(flag.to_string()) { return Err(CliError::Usage(format!("duplicate {flag}"))); }
+        if matches!(flag, "--json" | "--allow-fresh" | "--force") {
+            if inline.is_some() || (add && flag != "--json") {
+                return Err(CliError::Usage(format!("unsupported option: {argument}")));
+            }
+            forwarded.push(flag.to_string());
+            index += 1;
+            continue;
+        }
+        if !matches!(flag, "--provider" | "--model" | "--effort" | "--bypass" | "--prompt" | "--profile" | "--workspace" | "--team" | "--role-file")
+            || (!add && flag == "--role-file") {
+            return Err(CliError::Usage(format!("unknown option: {flag}")));
+        }
+        let value = if let Some(value) = inline { value.to_string() } else {
+            index += 1;
+            args.get(index).filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?.clone()
+        };
+        if value.trim().is_empty() { return Err(CliError::Usage(format!("empty value for {flag}"))); }
+        match flag {
+            "--provider" => {
+                let provider = crate::provider::wire::parse_provider(&value)
+                    .ok_or_else(|| CliError::Usage(format!("unknown provider: {value}")))?;
+                role.provider = Some(crate::provider::wire::provider_wire(provider).to_string());
+            }
+            "--bypass" => role.bypass = Some(match value.as_str() {
+                "true" => true, "false" => false,
+                _ => return Err(CliError::Usage("--bypass requires true or false".into())),
+            }),
+            "--model" => role.model = Some(value),
+            "--effort" => {
+                if crate::model::enums::ProviderEffort::parse(&value).is_none() {
+                    return Err(CliError::Usage(format!("unknown effort: {value}")));
+                }
+                role.effort = Some(value);
+            }
+            "--prompt" => role.prompt = Some(value),
+            "--profile" => role.profile = Some(value),
+            _ => { forwarded.push(flag.to_string()); forwarded.push(value); }
+        }
+        index += 1;
+    }
+    let parsed = parse_args(&forwarded);
+    if add && parsed.role_file.is_none() {
+        if role.provider.is_none() { return Err(CliError::Usage("add-agent requires --provider <name>".into())); }
+        if role.bypass.is_none() { return Err(CliError::Usage("add-agent requires --bypass <true|false>".into())); }
+    }
+    if parsed.positionals.len() != 1 { return Err(CliError::Usage("expected exactly one agent id".into())); }
+    Ok((parsed, role))
+}
+
+#[cfg(test)]
+mod role_cli_tests {
+    use super::*;
+    fn strings(values: &[&str]) -> Vec<String> { values.iter().map(|value| (*value).to_string()).collect() }
+
+    #[test]
+    fn add_requires_decisions_without_a_template_but_accepts_file_input() {
+        for args in [vec!["w"], vec!["w", "--provider", "pi"], vec!["w", "--bypass", "false"]] {
+            assert!(role_agent_args(&strings(&args), true).is_err());
+        }
+        assert!(role_agent_args(&strings(&["w", "--role-file", "w.md"]), true).is_ok());
+        let (_, patch) = role_agent_args(&strings(&["w", "--provider=pi", "--bypass=false"]), true).unwrap();
+        assert_eq!(patch.provider.as_deref(), Some("pi"));
+        assert_eq!(patch.bypass, Some(false));
+    }
+
+    #[test]
+    fn strict_role_options_reject_ambiguous_values() {
+        for args in [
+            vec!["w", "--bypass"], vec!["w", "--bypass", "yes"],
+            vec!["w", "--no-bypass"], vec!["w", "--bypass", "true", "--bypass=false"],
+            vec!["w", "--unknown", "x"], vec!["w", "extra"],
+        ] { assert!(role_agent_args(&strings(&args), false).is_err()); }
+        let (_, patch) = role_agent_args(&strings(&["w"]), false).unwrap();
+        assert_eq!(patch, crate::lifecycle::role_config::RoleConfigPatch::default());
+    }
+}
+
 fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliError> {
-    let parsed = parse_args(args);
+    let (parsed, role_config) = role_agent_args(args, false)?;
     Ok(StartAgentArgs {
+        role_config,
         agent: required_pos(&parsed, 0, "agent")?,
         workspace: workspace(&parsed, cwd),
         team: parsed.team,
@@ -1466,14 +1560,13 @@ fn reset_agent_args(args: &[String], cwd: &Path) -> Result<ResetAgentArgs, CliEr
 }
 
 fn add_agent_args(args: &[String], cwd: &Path) -> Result<AddAgentArgs, CliError> {
-    let parsed = parse_args(args);
+    let (parsed, role_config) = role_agent_args(args, true)?;
     Ok(AddAgentArgs {
+        role_config,
         agent: required_pos(&parsed, 0, "agent")?,
         workspace: workspace(&parsed, cwd),
         team: parsed.team,
-        role_file: parsed
-            .role_file
-            .ok_or_else(|| CliError::Usage("missing --role-file".to_string()))?,
+        role_file: parsed.role_file.unwrap_or_default(),
         force: parsed.force,
         json: parsed.json,
     })

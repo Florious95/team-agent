@@ -1100,6 +1100,7 @@ pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
         args.force,
         args.allow_fresh,
         args.team.as_deref(),
+        &args.role_config,
     )?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {
@@ -1142,6 +1143,7 @@ pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
         &args.role_file,
         args.team.as_deref(),
         args.force,
+        &args.role_config,
     )?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {

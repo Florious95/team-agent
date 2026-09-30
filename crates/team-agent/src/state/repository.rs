@@ -162,7 +162,8 @@ impl<'a> StateRepository<'a> {
         test_support::before_commit();
         let team_key = match intent {
             StateWriteIntent::ResultCollection { owner_team_id } => owner_team_id,
-            StateWriteIntent::ForkAgent { team_key, .. } => Some(team_key),
+            StateWriteIntent::ForkAgent { team_key, .. }
+            | StateWriteIntent::StartAgent { team_key, .. } => Some(team_key),
             _ => {
                 return Err(StateError::SaveFailed(
                     "intent does not accept a bounded Team delta".into(),
