@@ -141,22 +141,23 @@ fn add_agent(
     ws: &TestWorkspace,
     agent_id: &str,
     role_file: &Path,
+    extra_args: &[&str],
     shims: &ProviderShims,
 ) -> framework::TaResult {
-    run_ta_env(
-        ws,
-        &[
-            "add-agent",
-            agent_id,
-            "--role-file",
-            role_file.to_str().expect("role path is UTF-8"),
-            "--workspace",
-            ws.path().to_str().expect("workspace path is UTF-8"),
-            "--no-display",
-            "--json",
-        ],
-        &shims.env(),
-    )
+    let mut args = vec![
+        "add-agent",
+        agent_id,
+        "--role-file",
+        role_file.to_str().expect("role path is UTF-8"),
+    ];
+    args.extend_from_slice(extra_args);
+    args.extend_from_slice(&[
+        "--workspace",
+        ws.path().to_str().expect("workspace path is UTF-8"),
+        "--no-display",
+        "--json",
+    ]);
+    run_ta_env(ws, &args, &shims.env())
 }
 
 fn assert_silent_add(result: &framework::TaResult, agent_id: &str) {
@@ -351,7 +352,7 @@ fn f1_legacy_fields_are_silently_tolerated_by_public_add_and_worker_replies() {
     fs::write(&role, original).expect("write historical-format role file");
 
     quick_start(&ws, team_id, &shims);
-    let add = add_agent(&ws, "legacy", &role, &shims);
+    let add = add_agent(&ws, "legacy", &role, &[], &shims);
     assert_silent_add(&add, "legacy");
     assert_eq!(fs::read(&role).expect("legacy role remains readable"), original);
     assert_running(&ws, "legacy");
@@ -427,7 +428,13 @@ fn f2_dynamic_add_plain_text_role_uses_provider_native_safe_defaults() {
     let role = ws.path().join("roles/plain.md");
     fs::create_dir_all(role.parent().expect("roles parent")).expect("create roles dir");
     fs::write(&role, PLAIN_PROMPT).expect("write pure-text role");
-    let add = add_agent(&ws, "plain", &role, &shims);
+    let add = add_agent(
+        &ws,
+        "plain",
+        &role,
+        &["--provider", "pi", "--bypass", "false"],
+        &shims,
+    );
     assert_silent_add(&add, "plain");
     assert_running(&ws, "plain");
     let spec = runtime_spec(&ws);
