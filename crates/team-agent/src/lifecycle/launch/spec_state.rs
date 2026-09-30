@@ -327,8 +327,13 @@ pub(crate) fn write_spec_atomic(spec_path: &Path, spec: &Value) -> Result<(), Li
             .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", parent.display())))?;
     }
     let tmp = spec_path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, yaml::dumps(spec))
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+    if let Err(e) = std::fs::write(&tmp, yaml::dumps(spec)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(LifecycleError::StatePersist(format!(
+            "{}: {e}",
+            tmp.display()
+        )));
+    }
     if let Err(e) = std::fs::rename(&tmp, spec_path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(LifecycleError::StatePersist(format!(

@@ -218,6 +218,17 @@ fn start_at_selected(
                 "role identity does not match agent id".into(),
             ));
         }
+        if compiled
+            .agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .and_then(crate::provider::wire::parse_provider)
+            != Some(old_provider)
+        {
+            return Err(LifecycleError::RequirementUnmet(
+                "compiled provider does not match established provider".into(),
+            ));
+        }
         let mut spec = read_spec(selected)?;
         replace_spec_agent(&mut spec, agent_id, &compiled.agent)?;
         crate::model::spec::validate_spec(&spec, &selected.run_workspace)
@@ -376,34 +387,51 @@ fn read_text(path: &Path) -> Result<String, LifecycleError> {
 
 // Unlike read_front_matter, this returns the unnormalised body slice, including blank lines.
 fn role_parts(text: &str) -> Result<(Value, &str), LifecycleError> {
-    let opening = if text.starts_with("---\r\n") {
-        5
-    } else if text.starts_with("---\n") {
-        4
-    } else {
+    let (end, opening) = raw_line_end(text, 0);
+    if &text[..end] != "---" || end == opening {
         return Ok((Value::Map(Vec::new()), text));
-    };
+    }
     let mut offset = opening;
-    for line in text[opening..].split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) == "---" {
-            let header = &text[opening..offset];
+    while offset < text.len() {
+        let (end, next) = raw_line_end(text, offset);
+        if &text[offset..end] == "---" {
+            let header = text[opening..offset]
+                .replace("\r\n", "\n")
+                .replace('\r', "\n");
             let meta = if header.trim().is_empty() {
                 Value::Map(Vec::new())
             } else {
-                yaml::loads(header).map_err(|error| LifecycleError::Compile(error.to_string()))?
+                yaml::loads(&header).map_err(|error| LifecycleError::Compile(error.to_string()))?
             };
             if !meta.is_map() {
                 return Err(LifecycleError::Compile(
                     "role frontmatter must be a map".into(),
                 ));
             }
-            return Ok((meta, &text[offset + line.len()..]));
+            return Ok((meta, &text[next..]));
         }
-        offset += line.len();
+        offset = next;
     }
     Err(LifecycleError::Compile(
         "unterminated role frontmatter".into(),
     ))
+}
+
+fn raw_line_end(text: &str, start: usize) -> (usize, usize) {
+    match text[start..].find(['\r', '\n']) {
+        Some(relative) => {
+            let end = start + relative;
+            (
+                end,
+                end + if text[end..].starts_with("\r\n") {
+                    2
+                } else {
+                    1
+                },
+            )
+        }
+        None => (text.len(), text.len()),
+    }
 }
 
 fn patched_role(
@@ -792,6 +820,20 @@ mod tests {
         };
         assert_eq!(reconcile_creation("body", &supplied).unwrap(), supplied);
         assert!(reconcile_creation("body", &RoleConfigPatch::default()).is_err());
+    }
+
+    #[test]
+    fn legacy_cr_only_header_does_not_change_engine_when_patched() {
+        let text = "---\rprovider: codex\ndangerously_skip_permissions: false\r---\r\rbody\r";
+        let patch = RoleConfigPatch {
+            effort: Some("ultra".into()),
+            ..Default::default()
+        };
+        let next = patched_role(text, &AgentId::new("w"), &patch, false).unwrap();
+        let (meta, body) = role_parts(&next).unwrap();
+        assert_eq!(meta.get("provider"), Some(&Value::Str("codex".into())));
+        assert_eq!(body, "\rbody\r");
+        assert!(reconcile_creation(text, &RoleConfigPatch::default()).is_ok());
     }
 
     #[test]
