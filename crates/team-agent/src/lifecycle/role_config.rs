@@ -30,6 +30,7 @@ pub fn add_agent_from_role(
     agent_id: &AgentId,
     source: Option<&Path>,
     patch: &RoleConfigPatch,
+    force: bool,
     team: Option<&str>,
 ) -> Result<AddAgentReport, LifecycleError> {
     if let Some(path) = source {
@@ -47,7 +48,7 @@ pub fn add_agent_from_role(
             &selected.state,
         )?
         .backend;
-        add_at_selected(selected, agent_id, source, patch, &transport)
+        add_at_selected(selected, agent_id, source, patch, force, &transport)
     })
 }
 
@@ -96,26 +97,20 @@ fn add_at_selected(
     agent_id: &AgentId,
     source: Option<&Path>,
     patch: &RoleConfigPatch,
+    force: bool,
     transport: &dyn Transport,
 ) -> Result<AddAgentReport, LifecycleError> {
-    if selected
-        .state
-        .get("agents")
-        .and_then(|agents| agents.get(agent_id.as_str()))
-        .is_some()
-    {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "agent id already exists: {agent_id}"
-        )));
-    }
+    let recreate = admit_add(&selected.state, agent_id, force, transport)?;
     let spec = read_spec(selected)?;
-    if spec_has_agent(&spec, agent_id) {
+    if !recreate && spec_has_agent(&spec, agent_id) {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent id already exists: {agent_id}"
         )));
     }
     let role_path = role_path(selected, agent_id);
-    check_destination(&role_path, source)?;
+    if !recreate {
+        check_destination(&role_path, source)?;
+    }
     let text = match source {
         Some(path) => read_text(path)?,
         None => String::new(),
@@ -127,8 +122,13 @@ fn add_at_selected(
         if snapshot.role.bytes.as_deref() != Some(next.as_bytes()) {
             atomic_write(&role_path, next.as_bytes())?;
         }
-        // Ordinary add compiles this actual file, registers it and uses standard start.
-        super::launch::add_agent_with_transport_at_paths_locked(
+        // Reuse existing lifecycle transactions; force never admits a live seat.
+        let add = if recreate {
+            super::launch::force_recreate_with_transport_locked
+        } else {
+            super::launch::add_agent_with_transport_at_paths_locked
+        };
+        add(
             &selected.run_workspace,
             &selected.team_dir,
             agent_id,
@@ -141,6 +141,48 @@ fn add_at_selected(
     match result {
         Ok(report) => Ok(report),
         Err(error) => Err(snapshot.rollback(selected, agent_id, error)),
+    }
+}
+
+// Disaster recovery is opt-in and requires positive death of a recorded pane.
+// An absent/unknown pane binding is not permission to replace an existing seat.
+fn admit_add(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    force: bool,
+    transport: &dyn Transport,
+) -> Result<bool, LifecycleError> {
+    let Some(agent) = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+    else {
+        return Ok(false);
+    };
+    let duplicate =
+        || LifecycleError::RequirementUnmet(format!("agent id already exists: {agent_id}"));
+    if !force {
+        return Err(duplicate());
+    }
+    super::restart::ensure_agent_not_running(state, agent_id, transport)?;
+    let Some(pane) = agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(duplicate());
+    };
+    let pane = crate::transport::PaneId::new(pane);
+    let dead = match transport.has_pane(&pane) {
+        Ok(Some(present)) => !present,
+        Ok(None) | Err(_) => matches!(
+            transport.liveness(&pane),
+            Ok(crate::model::enums::PaneLiveness::Dead)
+        ),
+    };
+    if dead {
+        Ok(true)
+    } else {
+        Err(duplicate())
     }
 }
 
@@ -778,6 +820,83 @@ fn persist_error(error: std::io::Error) -> LifecycleError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    fn pane(id: &str, session: &str, window: &str) -> crate::transport::PaneInfo {
+        crate::transport::PaneInfo {
+            pane_id: crate::transport::PaneId::new(id),
+            session: crate::transport::SessionName::new(session),
+            window_name: Some(crate::transport::WindowName::new(window)),
+            window_index: None,
+            pane_index: None,
+            tty: None,
+            current_command: None,
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn live_guard_does_not_borrow_a_peer_pane_or_ignore_own_live_cohort() {
+        use crate::transport::test_support::OfflineTransport;
+        let state = serde_json::json!({"session_name": "s", "agents": {
+            "a": {"pane_id": "%b", "window": "a", "status": "running"},
+            "b": {"pane_id": "%b", "window": "b", "status": "running"}
+        }});
+        let id = AgentId::new("a");
+        let transport = OfflineTransport::new()
+            .with_targets(vec![pane("%b", "s", "b")])
+            .with_pane_presence("%b", true);
+        super::super::restart::ensure_agent_not_running(&state, &id, &transport).unwrap();
+        let transport = transport
+            .with_targets(vec![pane("%a", "s", "a"), pane("%b", "s", "b")])
+            .with_pane_presence("%a", true);
+        let error = super::super::restart::ensure_agent_not_running(&state, &id, &transport)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already running") && error.contains("cohort proof"));
+        assert!(error.contains("window=a pane=%a"));
+        assert!(!error.contains("pane=%b"));
+        let transport = transport.with_pane_presence("%a", false);
+        super::super::restart::ensure_agent_not_running(&state, &id, &transport).unwrap();
+    }
+
+    #[test]
+    fn force_admission_requires_positive_death_and_never_replaces_a_live_seat() {
+        use crate::transport::test_support::OfflineTransport;
+        let state = serde_json::json!({"session_name": "s", "agents": {
+            "a": {"pane_id": "%a", "window": "a", "status": "running"}
+        }});
+        let id = AgentId::new("a");
+        let dead = OfflineTransport::new()
+            .with_targets(vec![pane("%other", "other-team", "a")])
+            .with_pane_presence("%a", false)
+            .with_pane_presence("%other", true);
+        assert!(admit_add(&state, &id, false, &dead)
+            .unwrap_err()
+            .to_string()
+            .contains("agent id already exists"));
+        assert!(admit_add(&state, &id, true, &dead).unwrap());
+        let live = OfflineTransport::new()
+            .with_targets(vec![pane("%a", "s", "a")])
+            .with_pane_presence("%a", true);
+        assert!(admit_add(&state, &id, true, &live)
+            .unwrap_err()
+            .to_string()
+            .contains("already running"));
+        assert!(admit_add(&state, &id, true, &OfflineTransport::new()).is_err());
+        let absent_binding = serde_json::json!({"agents": {"a": {"status": "stopped"}}});
+        assert!(admit_add(&absent_binding, &id, true, &dead).is_err());
+        assert!(!admit_add(&serde_json::json!({"agents": {}}), &id, true, &dead).unwrap());
+        assert!(admit_add(
+            &state,
+            &id,
+            true,
+            &dead.with_list_targets_error("unknown topology")
+        )
+        .is_err());
+    }
 
     #[test]
     fn file_decisions_need_no_repeated_flags_and_conflicts_fail_closed() {

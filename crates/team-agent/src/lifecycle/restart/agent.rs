@@ -51,16 +51,17 @@ pub(crate) fn ensure_agent_not_running(
     let pane = agent.get("pane_id").and_then(serde_json::Value::as_str);
     let targets = transport.list_targets()
         .map_err(|error| LifecycleError::Transport(error.to_string()))?;
-    let live = targets.iter().any(|target| {
+    let live = targets.iter().find(|target| {
         target.session == session
+            && target.window_name.as_ref().is_some_and(|name| name.as_str() == window)
             && (pane == Some(target.pane_id.as_str())
-                || (!crate::lifecycle::launch::state_uses_adaptive_layout(state)
-                    && target.window_name.as_ref().is_some_and(|name| name.as_str() == window)))
+                || !crate::lifecycle::launch::state_uses_adaptive_layout(state))
             && agent_pane_live_by_id(transport, &target.pane_id)
     });
-    if live {
+    if let Some(target) = live {
         Err(LifecycleError::RequirementUnmet(format!(
-            "agent {agent_id} is already running; use stop-agent first"
+            "agent {agent_id} is already running (duplicate / active cohort); use stop-agent first; cohort proof: session={} window={window} pane={}",
+            session.as_str(), target.pane_id.as_str(),
         )))
     } else {
         Ok(())

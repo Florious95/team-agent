@@ -418,7 +418,7 @@ pub(crate) fn add_agent_with_transport_force(
 /// returns: 新席报告；成功后还要过快照的一致性校验
 /// errors: 角色文件不存在先行返回 Compile；摘除、加回或一致性校验失败时按快照恢复并返回错误
 /// ---
-pub(super) fn force_recreate_with_transport_locked(
+pub(crate) fn force_recreate_with_transport_locked(
     run_workspace: &Path,
     team_dir: &Path,
     agent_id: &AgentId,
