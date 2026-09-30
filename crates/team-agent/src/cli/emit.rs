@@ -1446,7 +1446,7 @@ fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lif
         let (flag, inline) = argument.split_once('=').map_or((argument.as_str(), None), |(key, value)| (key, Some(value)));
         if !seen.insert(flag.to_string()) { return Err(CliError::Usage(format!("duplicate {flag}"))); }
         if matches!(flag, "--json" | "--allow-fresh" | "--force") {
-            if inline.is_some() || (add && flag != "--json") {
+            if inline.is_some() || (add && flag == "--allow-fresh") {
                 return Err(CliError::Usage(format!("unsupported option: {argument}")));
             }
             forwarded.push(flag.to_string());
@@ -1506,6 +1506,10 @@ mod role_cli_tests {
             assert!(role_agent_args(&strings(&args), true).is_err());
         }
         assert!(role_agent_args(&strings(&["w", "--role-file", "w.md"]), true).is_ok());
+        let (parsed, _) = role_agent_args(&strings(&["w", "--role-file", "w.md", "--force"]), true).unwrap();
+        assert!(parsed.force);
+        assert!(role_agent_args(&strings(&["w", "--role-file", "w.md", "--force=true"]), true).is_err());
+        assert!(role_agent_args(&strings(&["w", "--role-file", "w.md", "--allow-fresh"]), true).is_err());
         let (_, patch) = role_agent_args(&strings(&["w", "--provider=pi", "--bypass=false"]), true).unwrap();
         assert_eq!(patch.provider.as_deref(), Some("pi"));
         assert_eq!(patch.bypass, Some(false));

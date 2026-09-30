@@ -60,7 +60,7 @@ team-agent add-agent analyst --provider pi --bypass true --prompt "Analyze the p
 team-agent add-agent auditor --role-file /absolute/path/to/auditor.md
 ```
 
-Add creates and immediately starts the seat. An occupied ID is rejected, including stopped seats; add never overwrites an existing worker. External role files are imported into the team's `agents/ID.md` and left untouched. A file already at that path is used in place, without copying itself.
+Add creates and immediately starts the seat. Ordinary add rejects an occupied ID, including stopped seats. Disaster recovery has one explicit exception: `add-agent ID --role-file FILE --force` may reuse the existing force-recreate lifecycle only when the registered old pane is positively confirmed dead and no live target cohort exists. A live seat or unknown/missing death proof is refused; force is not a routine configuration-update shortcut. External role files are imported into the team's `agents/ID.md` and left untouched. A file already at that path is used in place, without copying itself.
 
 ## Change and start an existing worker
 

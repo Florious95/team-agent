@@ -2875,11 +2875,10 @@ pub mod lifecycle_port {
         force: bool,
         role_config: &crate::lifecycle::role_config::RoleConfigPatch,
     ) -> Result<Value, CliError> {
-        if force { return Err(CliError::Usage("add-agent --force is not supported; use start-agent for an existing seat".into())); }
         let agent_id = crate::model::ids::AgentId::new(agent);
         let source = (!role_file.is_empty()).then(|| Path::new(role_file));
         match crate::lifecycle::role_config::add_agent_from_role(
-            workspace, &agent_id, source, role_config, team,
+            workspace, &agent_id, source, role_config, force, team,
         ) {
             Ok(report) => Ok(agent_action_value(
                 agent,
