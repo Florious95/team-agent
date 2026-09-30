@@ -77,7 +77,7 @@ Start updates the same role file and recompiles it before normal startup. Omitte
 
 A different `--provider`, including a manually edited role provider, is rejected before launch. A matching provider is allowed. Create a separate ID to use a different engine. If startup fails, the role file and runtime spec are restored to their pre-command contents; the command reports failure, not an applied update.
 
-Profiles keep provider authentication, endpoints and custom-model settings local. Never put secrets in `TEAM.md` or a role file. See [the operator reference](references/team-agent-operator.md) for existing profile and field details. Supported metadata also includes `agent_id` (legacy `name`), `role`, `auth_mode`, and `communication_mode`; old `tools`, `permission_mode`, and `label` keys do not configure a worker.
+Profiles keep provider authentication, endpoints and custom-model settings local. Imported roles use this team's/workspace's `profiles`, never the original external directory. Prepare a named profile locally through the public profile commands; do not search for or copy external credentials. Never put secrets in `TEAM.md` or a role file. See [the operator reference](references/team-agent-operator.md) for existing profile and field details. Supported metadata also includes `agent_id` (legacy `name`), `role`, `auth_mode`, and `communication_mode`; old `tools`, `permission_mode`, and `label` keys do not configure a worker.
 
 ## Inspect and stop
 

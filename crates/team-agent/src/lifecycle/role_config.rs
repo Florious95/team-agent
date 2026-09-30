@@ -234,7 +234,7 @@ fn start_at_selected(
         crate::model::spec::validate_spec(&spec, &selected.run_workspace)
             .map_err(|error| LifecycleError::Compile(error.to_string()))?;
         atomic_write(&snapshot.spec.path, yaml::dumps(&spec).as_bytes())?;
-        update_agent_config(selected, agent_id, &compiled.agent, &role_path, patch)?;
+        update_agent_config(selected, agent_id, &compiled.agent, &role_path)?;
         let outcome = super::restart::start_agent_at_paths(
             &selected.run_workspace,
             snapshot.spec.path.parent().unwrap_or(&selected.team_dir),
@@ -561,7 +561,6 @@ fn update_agent_config(
     agent_id: &AgentId,
     compiled: &Value,
     role: &Path,
-    patch: &RoleConfigPatch,
 ) -> Result<(), LifecycleError> {
     StateRepository::new(&selected.run_workspace)
         .commit(
@@ -606,7 +605,9 @@ fn update_agent_config(
                             "default".into()
                         },
                     );
-                    if patch.profile.is_some() {
+                    // Imported roles are self-contained in this Team, including
+                    // profile lookup; never retain an external credential root.
+                    if compiled.get("profile").and_then(Value::as_str).is_some() {
                         agent.insert(
                             "_profile_dir".into(),
                             selected
@@ -616,6 +617,8 @@ fn update_agent_config(
                                 .to_string()
                                 .into(),
                         );
+                    } else {
+                        agent.remove("_profile_dir");
                     }
                 }
             },
@@ -890,6 +893,76 @@ mod tests {
                 text
             );
         }
+    }
+
+    #[test]
+    fn imported_profile_is_team_local_and_failed_update_restores_target_only() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("role-projection-{}-{nonce}", std::process::id()));
+        let team_dir = root.join("roles");
+        let old = serde_json::json!({
+            "provider": "codex", "model": "old", "effort": "high",
+            "profile": "local", "_profile_dir": "/external/profiles",
+            "session_id": "preserved-session", "status": "stopped"
+        });
+        let sibling = serde_json::json!({"provider": "pi", "model": "keep"});
+        let selected_state = serde_json::json!({"agents": {"w": old.clone()}});
+        crate::state::persist::save_runtime_state(
+            &root,
+            &serde_json::json!({
+                "teams": {
+                    "t1": selected_state.clone(),
+                    "t2": {"agents": {"w": sibling.clone()}}
+                }
+            }),
+        )
+        .unwrap();
+        let spec_path = crate::model::paths::runtime_spec_path(&root, "t1");
+        atomic_write(&spec_path, b"old spec\r\n").unwrap();
+        let selected = SelectedTeam {
+            run_workspace: root.clone(),
+            team_key: "t1".into(),
+            state: selected_state,
+            team_dir: team_dir.clone(),
+            spec_workspace: spec_path.parent().map(Path::to_path_buf),
+            spec_path: Some(spec_path.clone()),
+        };
+        let id = AgentId::new("w");
+        let role = role_path(&selected, &id);
+        let snapshot = RoleSnapshot::capture(&selected, &role).unwrap();
+        let compiled = yaml::loads("provider: codex\nmodel: new\neffort: ultra\nprofile: local\ndangerously_skip_permissions: false\nsystem_prompt: new instructions\n").unwrap();
+        atomic_write(&role, b"new role").unwrap();
+        atomic_write(&spec_path, b"new spec").unwrap();
+        update_agent_config(&selected, &id, &compiled, &role).unwrap();
+        let updated = crate::state::persist::load_runtime_state(&root).unwrap();
+        let target = &updated["teams"]["t1"]["agents"]["w"];
+        assert_eq!(target["model"], "new");
+        assert_eq!(target["effort"], "ultra");
+        assert_eq!(target["system_prompt"], "new instructions");
+        assert_eq!(target["dangerously_skip_permissions"], false);
+        assert_eq!(target["session_id"], "preserved-session");
+        assert_eq!(
+            target["_profile_dir"],
+            team_dir.join("profiles").to_string_lossy().as_ref()
+        );
+        assert_eq!(updated["teams"]["t2"]["agents"]["w"], sibling);
+        let error = snapshot.rollback(
+            &selected,
+            &id,
+            LifecycleError::RequirementUnmet("injected failure".into()),
+        );
+        assert!(error.to_string().contains("injected failure"));
+        assert!(!error.to_string().contains("rollback failed"));
+        assert!(!role.exists());
+        assert_eq!(fs::read(&spec_path).unwrap(), b"old spec\r\n");
+        let restored = crate::state::persist::load_runtime_state(&root).unwrap();
+        assert_eq!(restored["teams"]["t1"]["agents"]["w"], old);
+        assert_eq!(restored["teams"]["t2"]["agents"]["w"], sibling);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -116,7 +116,7 @@ Unknown and historical role keys are ignored, not used as a way to restrict tool
 
 ## Profiles and custom models
 
-A profile keeps provider credentials, endpoint settings, and optional model settings outside role text. This supports subscription profiles and custom/third-party API models, including Claude Code-compatible providers.
+A profile keeps provider credentials, endpoint settings, and optional model settings outside role text. This supports subscription profiles and custom/third-party API models, including Claude Code-compatible providers. Once an external role is imported, profile lookup uses the current team's/workspace's `profiles`, not the external source directory. Prepare the profile locally through public commands; do not discover or copy external credentials.
 
 Create a local profile, then edit its generated file on the user's machine:
 
