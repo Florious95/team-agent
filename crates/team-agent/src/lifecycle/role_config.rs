@@ -268,6 +268,16 @@ fn reconcile_creation(
     patch: &RoleConfigPatch,
 ) -> Result<RoleConfigPatch, LifecycleError> {
     let (meta, body) = role_parts(text)?;
+    for field in ["provider", "model", "effort", "profile"] {
+        if meta
+            .get(field)
+            .is_some_and(|value| !matches!(value, Value::Null | Value::Str(_)))
+        {
+            return Err(LifecycleError::Compile(format!(
+                "role {field} must be a string"
+            )));
+        }
+    }
     let mut next = patch.clone();
     let conflict = |field: &str| {
         LifecycleError::RequirementUnmet(format!(
@@ -823,6 +833,12 @@ mod tests {
         };
         assert_eq!(reconcile_creation("body", &supplied).unwrap(), supplied);
         assert!(reconcile_creation("body", &RoleConfigPatch::default()).is_err());
+        // An invalid existing declaration is not a missing field to overwrite.
+        for field in ["provider", "model", "effort", "profile"] {
+            let text =
+                format!("---\n{field}: true\ndangerously_skip_permissions: false\n---\nbody");
+            assert!(reconcile_creation(&text, &supplied).is_err());
+        }
     }
 
     #[test]
