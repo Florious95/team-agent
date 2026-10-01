@@ -37,6 +37,37 @@ use super::team_state::write_team_state;
 use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
+/// CLI start is orthogonal to stop: refuse any live target before editing its role.
+/// Transport uncertainty is a refusal, not permission to spawn a duplicate.
+pub(crate) fn ensure_agent_not_running(
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+    transport: &dyn crate::transport::Transport,
+) -> Result<(), LifecycleError> {
+    let agent = state.get("agents").and_then(|agents| agents.get(agent_id.as_str()))
+        .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
+    let session = state_session_name(state);
+    let window = agent_window(agent, agent_id);
+    let pane = agent.get("pane_id").and_then(serde_json::Value::as_str);
+    let targets = transport.list_targets()
+        .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+    let live = targets.iter().find(|target| {
+        target.session == session
+            && target.window_name.as_ref().is_some_and(|name| name.as_str() == window)
+            && (pane == Some(target.pane_id.as_str())
+                || !crate::lifecycle::launch::state_uses_adaptive_layout(state))
+            && agent_pane_live_by_id(transport, &target.pane_id)
+    });
+    if let Some(target) = live {
+        Err(LifecycleError::RequirementUnmet(format!(
+            "agent {agent_id} is already running (duplicate / active cohort); use stop-agent first; cohort proof: session={} window={window} pane={}",
+            session.as_str(), target.pane_id.as_str(),
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 /// ---
 /// purpose: 起或复活一席的对外入口
 /// params:

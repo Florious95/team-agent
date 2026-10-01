@@ -418,7 +418,7 @@ pub(crate) fn add_agent_with_transport_force(
 /// returns: 新席报告；成功后还要过快照的一致性校验
 /// errors: 角色文件不存在先行返回 Compile；摘除、加回或一致性校验失败时按快照恢复并返回错误
 /// ---
-pub(super) fn force_recreate_with_transport_locked(
+pub(crate) fn force_recreate_with_transport_locked(
     run_workspace: &Path,
     team_dir: &Path,
     agent_id: &AgentId,
@@ -546,7 +546,7 @@ pub(super) fn add_agent_with_transport_at_paths(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add_agent_with_transport_at_paths_locked(
+pub(crate) fn add_agent_with_transport_at_paths_locked(
     run_workspace: &Path,
     team_dir: &Path,
     agent_id: &AgentId,
@@ -683,6 +683,7 @@ fn add_agent_with_transport_at_paths_reserved(
             &spec_path,
             pre_spec_text.as_deref(),
             None,
+            Some(&canonical_team_key),
             agent_id,
             "state_upsert_failed",
         );
@@ -705,6 +706,7 @@ fn add_agent_with_transport_at_paths_reserved(
                 &spec_path,
                 pre_spec_text.as_deref(),
                 None,
+                Some(&canonical_team_key),
                 agent_id,
                 "start_agent_failed",
             );
@@ -721,6 +723,7 @@ fn add_agent_with_transport_at_paths_reserved(
                 &spec_path,
                 pre_spec_text.as_deref(),
                 None,
+                Some(&canonical_team_key),
                 agent_id,
                 "start_agent_noop",
             );
@@ -734,6 +737,7 @@ fn add_agent_with_transport_at_paths_reserved(
                 &spec_path,
                 pre_spec_text.as_deref(),
                 None,
+                Some(&canonical_team_key),
                 agent_id,
                 "added_agent_paused",
             );

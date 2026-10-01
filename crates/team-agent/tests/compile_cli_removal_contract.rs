@@ -310,6 +310,7 @@ fn p5_restart_and_add_agent_keep_real_lifecycle_paths() {
     assert!(format!("{restart:?}").contains("spec") || format!("{restart:?}").contains("Err"));
 
     let add = cmd_add_agent(&AddAgentArgs {
+        role_config: Default::default(),
         agent: "new-worker".into(),
         workspace,
         team: None,

@@ -106,7 +106,9 @@ fn missing_dynamic_role_file_fails_closed_without_pruning_live_helper() {
         "--json",
     ]);
     assert_success_json(&add, "RED2 setup: add-agent helper must succeed");
-    std::fs::remove_file(&helper).expect("remove dynamic helper role file");
+    // add imports the external template; this Team file is now authoritative.
+    let helper = case.team_dir.join("agents/helper.md");
+    std::fs::remove_file(&helper).expect("remove canonical dynamic helper role file");
 
     let restart = case.restart();
     let text = output_text(&restart);

@@ -2750,15 +2750,12 @@ pub mod lifecycle_port {
         force: bool,
         allow_fresh: bool,
         team: Option<&str>,
+        role_config: &crate::lifecycle::role_config::RoleConfigPatch,
     ) -> Result<Value, CliError> {
+        let _ = force; // Never grants authority to stop an already-running seat.
         let agent_id = crate::model::ids::AgentId::new(agent);
-        match crate::lifecycle::start_agent(
-            workspace,
-            &agent_id,
-            force,
-            true,
-            allow_fresh,
-            team,
+        match crate::lifecycle::role_config::start_agent_from_role(
+            workspace, &agent_id, role_config, allow_fresh, team,
         ) {
             Ok(crate::lifecycle::StartAgentOutcome::Running {
                 env,
@@ -2876,15 +2873,12 @@ pub mod lifecycle_port {
         role_file: &str,
         team: Option<&str>,
         force: bool,
+        role_config: &crate::lifecycle::role_config::RoleConfigPatch,
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
-        match crate::lifecycle::add_agent_force(
-            workspace,
-            &agent_id,
-            Path::new(role_file),
-            true,
-            team,
-            force,
+        let source = (!role_file.is_empty()).then(|| Path::new(role_file));
+        match crate::lifecycle::role_config::add_agent_from_role(
+            workspace, &agent_id, source, role_config, force, team,
         ) {
             Ok(report) => Ok(agent_action_value(
                 agent,

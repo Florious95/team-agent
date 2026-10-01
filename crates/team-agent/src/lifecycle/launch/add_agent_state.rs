@@ -55,6 +55,7 @@ pub(super) fn rollback_add_agent_atomic(
     spec_path: &Path,
     pre_spec_text: Option<&str>,
     pre_runtime_state: Option<&serde_json::Value>,
+    team_key: Option<&str>,
     agent_id: &AgentId,
     reason: &str,
 ) {
@@ -86,7 +87,7 @@ pub(super) fn rollback_add_agent_atomic(
         crate::state::repository::StateRepository::new(run_workspace)
             .save(
                 crate::state::repository::StateWriteIntent::AgentRollback {
-                    team_key: None,
+                    team_key,
                     agent_id: agent_id.as_str(),
                 },
                 state,
@@ -94,7 +95,7 @@ pub(super) fn rollback_add_agent_atomic(
             .is_ok()
     } else {
         // No prior runtime state — drop just the agent we added (load → strip → save).
-        if let Ok(mut state) = crate::state::persist::load_runtime_state(run_workspace) {
+        if let Ok(mut state) = crate::state::projection::select_runtime_state(run_workspace, team_key) {
             if let Some(agents) = state
                 .get_mut("agents")
                 .and_then(serde_json::Value::as_object_mut)
@@ -105,7 +106,8 @@ pub(super) fn rollback_add_agent_atomic(
                 .get_mut("teams")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                for team in teams.values_mut() {
+                for (key, team) in teams.iter_mut() {
+                    if team_key.is_some_and(|selected| selected != key) { continue; }
                     if let Some(agents) = team
                         .get_mut("agents")
                         .and_then(serde_json::Value::as_object_mut)
@@ -117,7 +119,7 @@ pub(super) fn rollback_add_agent_atomic(
             crate::state::repository::StateRepository::new(run_workspace)
                 .save(
                     crate::state::repository::StateWriteIntent::AgentRollback {
-                        team_key: None,
+                        team_key,
                         agent_id: agent_id.as_str(),
                     },
                     &state,
