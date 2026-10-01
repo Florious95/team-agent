@@ -4,6 +4,7 @@ mod hermetic_guard;
 use super::*;
 use crate::tmux_backend::TmuxBackend;
 use crate::transport::test_support::OfflineTransport;
+use crate::transport::Transport;
 use serde_json::json;
 use serial_test::serial;
 
@@ -1231,7 +1232,8 @@ fn launch_with_transport_records_one_spawn_per_agent_carrying_build_command() {
         "LaunchReport.started must list the compiled agent; got {:?}",
         report.started
     );
-    let state = crate::state::persist::load_runtime_state(&team).unwrap();
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
     let generation = report.started[0].spawned_at.as_str();
     assert_eq!(state["generation"], generation);
     let team_key = crate::state::projection::team_state_key(&state);
