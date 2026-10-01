@@ -82,9 +82,11 @@ Subagents are one-shot, fire-and-forget, and can't talk to each other. Team Agen
 
 ## Status
 
-`team-agent status` prints one concise row per registered node with seven fields:
-`name`, `provider`, `runtime_status`, `activity`, `health`, `session_name`, and `tmux_command`.
-`--json` exposes the same projection as structured JSON. Missing or conflicting evidence is
+`team-agent status` prints one concise row per registered node with nine fields:
+`name`, `provider`, `model`, `effort`, `runtime_status`, `activity`, `health`, `session_name`, and `tmux_command`.
+`model` and `effort` are the last accepted launch settings, or `null` when unspecified;
+pending role-file edits and provider defaults are not inferred.
+`--json` exposes the same projection as structured JSON. Missing or conflicting runtime evidence is
 reported as `unknown`; a non-null `tmux_command` is safe to copy for the observed socket,
 session, window, and pane. `--summary` and `--detail` remain accepted for compatibility and
 do not add diagnostic or history fields. The accepted nodeprobe pairing and

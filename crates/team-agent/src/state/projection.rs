@@ -26,6 +26,21 @@ use crate::state::persist::{
 
 pub(crate) const CURRENT_TEAM_ALIAS: &str = "current";
 
+/// Physical tmux session birth identity, independent of later worker spawns.
+/// Legacy launches did not persist it: freeze their fallback BEFORE respawn.
+pub fn session_generation(state: &Value) -> Option<&str> {
+    state.get("generation").and_then(Value::as_str).or_else(|| {
+        state
+            .get("agents")
+            .and_then(Value::as_object)
+            .and_then(|agents| {
+                agents.values().find_map(|agent| {
+                    agent.get("spawned_at").and_then(Value::as_str)
+                })
+            })
+    })
+}
+
 ///
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。

@@ -333,12 +333,12 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
         );
 }
 
-// 5 [P1] — cmd_status --json emits the concise seven-field node projection.
+// 5 [P1] — cmd_status --json emits the concise nine-field node projection.
 // Status must not leak coordinator/db/history diagnostics; missing exact nodeprobe evidence remains
 // an explicit unknown projection. The fixture still seeds a real store to ensure the status path
 // does not accidentally depend on coordinator or mailbox reads.
 #[test]
-fn cli_status_emits_seven_field_brief_without_diagnostics() {
+fn cli_status_emits_nine_field_brief_without_diagnostics() {
     let ws = seed_status_workspace(); // writes .team/runtime/state.json
     let store = crate::message_store::MessageStore::open(&ws).unwrap();
     let _ = store
@@ -399,6 +399,8 @@ fn cli_status_emits_seven_field_brief_without_diagnostics() {
         [
             "name",
             "provider",
+            "model",
+            "effort",
             "runtime_status",
             "activity",
             "health",

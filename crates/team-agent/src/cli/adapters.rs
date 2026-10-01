@@ -174,7 +174,7 @@ fn append_reminder(text: String, reminder: &str) -> String {
     }
 }
 
-/// `cmd_status`(`commands.py:90`)。CLI status 统一为只读七字段 brief；
+/// `cmd_status`(`commands.py:90`)。CLI status 统一为只读九字段 brief；
 /// `--json` 与人读路径共享 native tmux/process projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
 #[cfg(test)]
 pub(crate) fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {

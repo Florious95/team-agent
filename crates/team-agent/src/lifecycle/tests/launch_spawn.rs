@@ -1231,6 +1231,48 @@ fn launch_with_transport_records_one_spawn_per_agent_carrying_build_command() {
         "LaunchReport.started must list the compiled agent; got {:?}",
         report.started
     );
+    let state = crate::state::persist::load_runtime_state(&team).unwrap();
+    let generation = report.started[0].spawned_at.as_str();
+    assert_eq!(state["generation"], generation);
+    let team_key = crate::state::projection::team_state_key(&state);
+    assert_eq!(state["teams"][&team_key]["generation"], generation);
+    let owner = transport.session_owner(&SessionName::new("team-quickteam")).unwrap().unwrap();
+    assert_eq!(owner.generation, generation);
+}
+
+#[test]
+fn start_agent_session_generation_inherits_birth_or_stamps_recreated_session() {
+    for existing_session in [true, false] {
+        for explicit_generation in [true, false] {
+            let ws = restart_ws_one_resumable_worker();
+            let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+            let birth = "2026-07-14T00:00:00+00:00";
+            state["agents"]["alpha"]["status"] = json!("stopped");
+            state["agents"]["alpha"]["spawned_at"] = json!(birth);
+            if explicit_generation {
+                state["generation"] = json!("explicit-session-birth");
+            }
+            let inherited = if explicit_generation { "explicit-session-birth" } else { birth };
+            crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+            let transport = OfflineTransport::new()
+                .with_session_present(existing_session)
+                .with_session_owner(&ws, "restartone", inherited);
+            let result = start_agent_with_transport(
+                &ws, &aid("alpha"), false, false, false, None, &transport,
+            ).unwrap();
+            assert!(matches!(result, StartAgentOutcome::Running { .. }), "{result:?}");
+            let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+            let spawned_at = state["agents"]["alpha"]["spawned_at"].as_str().unwrap();
+            assert_ne!(spawned_at, birth);
+            let expected = if existing_session { inherited } else { spawned_at };
+            assert_eq!(state["generation"], expected);
+            let team_key = crate::state::projection::team_state_key(&state);
+            assert_eq!(state["teams"][&team_key]["generation"], expected);
+            let owner = transport.session_owner(&SessionName::new("team-restartone")).unwrap().unwrap();
+            assert_eq!(owner.generation, expected);
+            assert_eq!(transport.calls().contains(&"set_session_owner_with_generation"), !existing_session);
+        }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -1704,6 +1746,9 @@ fn restart_ws_one_resumable_worker() -> PathBuf {
 #[test]
 fn restart_with_transport_spawns_resumable_workers_not_stub() {
     let ws = restart_ws_two_resumable_workers();
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["generation"] = json!("old-destroyed-session-birth");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
     let transport = OfflineTransport::new();
 
     let result = restart_with_transport(&ws, false, None, &transport);
@@ -1731,6 +1776,14 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         matches!(result, Ok(RestartReport::Restarted { coordinator_started: true, .. })),
         "restart must reach RestartReport::Restarted with coordinator_started=true (AlreadyRunning, seeded); got {result:?}"
     );
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let generation = state["agents"]["alpha"]["spawned_at"].as_str().unwrap();
+    assert_ne!(generation, "old-destroyed-session-birth");
+    assert_eq!(state["generation"], generation);
+    let team_key = crate::state::projection::team_state_key(&state);
+    assert_eq!(state["teams"][&team_key]["generation"], generation);
+    let owner = transport.session_owner(&SessionName::new("team-restartteam")).unwrap().unwrap();
+    assert_eq!(owner.generation, generation);
     let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
     let completed = events
         .iter()

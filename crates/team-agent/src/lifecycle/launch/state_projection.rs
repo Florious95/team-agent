@@ -170,12 +170,17 @@ pub(super) fn persist_spawn_agent_state(
             )?,
         );
     }
+    let generation = started
+        .first()
+        .map(|agent| agent.spawned_at.as_str())
+        .unwrap_or(session_name.as_str());
+    // Use the same birth identity as the native session owner marker. Worker
+    // spawned_at may change on start-agent; this session generation must not.
     if let Some(obj) = state.as_object_mut() {
         obj.insert("agents".to_string(), serde_json::Value::Object(agents));
+        obj.insert("generation".to_string(), serde_json::json!(generation));
     } else {
-        let mut obj = serde_json::Map::new();
-        obj.insert("agents".to_string(), serde_json::Value::Object(agents));
-        state = serde_json::Value::Object(obj);
+        state = serde_json::json!({"agents": agents, "generation": generation});
     }
     save_launched_team_state_for_key(workspace, &state, Some(&team_id), None)
 }

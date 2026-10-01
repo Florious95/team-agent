@@ -509,6 +509,8 @@ fn restart_with_selected_team_and_transport(
     let live_worker_session_deferred_teardown =
         session_live_or_default(transport, &session_name, false)
             && !collect_live_agents_from_state(&state).is_empty();
+    let inherited_generation =
+        crate::state::projection::session_generation(&state).map(str::to_string);
     let same_role_cohort_targets =
         same_role_cohort_targets_from_decisions(&state, spec_workspace, &plan.decisions);
     let pre_spawn_pane_ids = if live_worker_session_deferred_teardown {
@@ -998,6 +1000,25 @@ fn restart_with_selected_team_and_transport(
             }
         }
     }
+    if !fatal_resume_failure && !successful_agents.is_empty() {
+        let generation = if live_worker_session_deferred_teardown {
+            inherited_generation
+        } else {
+            // A recreated session gets the first successful NEW worker's birth,
+            // not an arbitrary old stopped worker still present in the roster.
+            successful_agents.first().and_then(|agent| {
+                state
+                    .get("agents")?
+                    .get(agent.agent_id.as_str())?
+                    .get("spawned_at")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+        };
+        if let Some(generation) = generation {
+            state["generation"] = serde_json::json!(generation);
+        }
+    }
     save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
         &selected.run_workspace,
         &mut state,
@@ -1040,23 +1061,9 @@ fn restart_with_selected_team_and_transport(
             attach_commands,
         });
     }
-    // Respawn changes the generation used by shutdown's ownership check, even
-    // when build-before-destroy keeps the tmux session itself alive. Stamp only
-    // the selected session, after its replacement state is durable.
-    if let Some(generation) = state
-        .get("generation")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            state
-                .get("agents")
-                .and_then(serde_json::Value::as_object)
-                .and_then(|agents| {
-                    agents.values().find_map(|agent| {
-                        agent.get("spawned_at").and_then(serde_json::Value::as_str)
-                    })
-                })
-        })
-    {
+    // Stamp the physical session birth after durable state. Replacing workers
+    // in a retained session does not create a new session generation.
+    if let Some(generation) = crate::state::projection::session_generation(&state) {
         transport
             .set_session_owner_with_generation(
                 &session_name,

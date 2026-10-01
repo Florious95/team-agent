@@ -994,6 +994,12 @@ pub trait Transport: Send + Sync {
         Ok(None)
     }
 
+    /// Native dead-pane observation. Only Some(true) proves no live pane
+    /// process; a missing/unsupported sample must remain unknown.
+    fn pane_is_dead(&self, _pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        Ok(None)
+    }
+
     /// Cheap direct pane existence check when a backend can prove it. `Ok(None)`
     /// preserves the existing Unknown boundary.
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {

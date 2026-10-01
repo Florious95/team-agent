@@ -180,8 +180,10 @@ fn scoped_shutdown_after_restart_refreshes_owner_and_preserves_sibling() {
     let report = restart_with_transport(&case.workspace, true, Some(TEAM), &transport).unwrap();
     assert!(matches!(report, RestartReport::Restarted { .. }), "{report:?}");
     let state = case.read_state();
-    let expected_generation = state["teams"][TEAM]["agents"]["w1"]["spawned_at"].as_str().unwrap();
-    assert_ne!(expected_generation, "2026-07-14T00:00:00+00:00");
+    let expected_generation = "2026-07-14T00:00:00+00:00";
+    assert_ne!(state["teams"][TEAM]["agents"]["w1"]["spawned_at"], expected_generation);
+    assert_eq!(state["generation"], expected_generation);
+    assert_eq!(state["teams"][TEAM]["generation"], expected_generation);
     let owner = transport.session_owner(&session).unwrap().unwrap();
     assert_eq!(owner.workspace, case.workspace.canonicalize().unwrap().to_string_lossy());
     assert_eq!(owner.team, TEAM);
@@ -213,8 +215,10 @@ fn failed_replacement_preserves_original_session_owner() {
         &session, &case.workspace, TEAM, "2026-07-14T00:00:00+00:00",
     ).unwrap();
     let owner_before = transport.session_owner(&session).unwrap();
+    let generation_before = case.read_state().get("generation").cloned();
     let report = restart_with_transport(&case.workspace, true, Some(TEAM), &transport).unwrap();
     assert_restart_did_not_succeed(&report);
+    assert_eq!(case.read_state().get("generation").cloned(), generation_before);
     assert_eq!(transport.session_owner(&session).unwrap(), owner_before);
     assert_eq!(transport.ops().iter().filter(|op| op.starts_with("set_session_owner:")).count(), 1);
 }

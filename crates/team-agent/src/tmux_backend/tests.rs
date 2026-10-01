@@ -356,6 +356,21 @@ fn backend_with(default: MockResp, queued: Vec<MockResp>) -> (TmuxBackend, Recor
 }
 
 #[test]
+fn pane_dead_observation_requires_native_boolean_receipt() {
+    for (text, expected) in [("1\n", Some(true)), ("0\n", Some(false)), ("", None), ("dead", None), ("2", None)] {
+        let (backend, recorded) = backend_with(MockResp::Out(ok(text)), Vec::new());
+        assert_eq!(backend.pane_is_dead(&PaneId::new("%47")).unwrap(), expected);
+        assert_eq!(recorded.lock().unwrap()[0], svec(&[
+            "tmux", "display-message", "-p", "-t", "%47", "#{pane_dead}",
+        ]));
+    }
+    let (backend, _) = backend_with(MockResp::Out(fail(1, "pane unavailable")), Vec::new());
+    assert_eq!(backend.pane_is_dead(&PaneId::new("%47")).unwrap(), None);
+    let (backend, _) = backend_with(MockResp::Io(std::io::ErrorKind::TimedOut), Vec::new());
+    assert!(backend.pane_is_dead(&PaneId::new("%47")).is_err());
+}
+
+#[test]
 fn provider_exit_receipt_accepts_only_shell_exit_status() {
     for (text, expected) in [
         ("", None),

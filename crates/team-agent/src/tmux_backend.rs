@@ -74,6 +74,7 @@ use crate::transport::{
 };
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
+pub(crate) const KEEPALIVE_WINDOW_NAME: &str = "[team-agent keepalive]";
 const TMUX_PANE_BINDING_NONCE_OPTION: &str = "@team_agent_pane_binding_nonce";
 const TMUX_SESSION_OWNER_WORKSPACE_OPTION: &str = "@team_agent_owner_workspace";
 const TMUX_SESSION_OWNER_TEAM_OPTION: &str = "@team_agent_owner_team";
@@ -3875,6 +3876,26 @@ impl Transport for TmuxBackend {
         Ok(output.stdout.trim().parse::<u8>().ok())
     }
 
+    fn pane_is_dead(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "#{pane_dead}".to_string(),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if !output.success {
+            return Ok(None);
+        }
+        Ok(match output.stdout.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        })
+    }
+
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
         let argv = self.tmux_argv(&[
             "tmux".to_string(),
@@ -4134,7 +4155,7 @@ impl Transport for TmuxBackend {
         // not a window name that could resolve to another same-named window.
         let spawn_argv = tmux_spawn_argv(
             &SessionName::new(format!("={}", session.as_str())),
-            &WindowName::new("[team-agent keepalive]"),
+            &WindowName::new(KEEPALIVE_WINDOW_NAME),
             "exec sleep 86400",
             false,
         );

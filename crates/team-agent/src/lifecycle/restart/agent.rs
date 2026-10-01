@@ -373,6 +373,8 @@ pub(crate) fn start_agent_at_paths(
     };
     let into_existing_session =
         session_live_or_default(transport, &session_name, session_name_present(&state));
+    let inherited_generation =
+        crate::state::projection::session_generation(&state).map(str::to_string);
     let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
         &agent,
         provider,
@@ -441,6 +443,24 @@ pub(crate) fn start_agent_at_paths(
         &safety,
         start_mode,
     )?;
+    let generation = if into_existing_session {
+        inherited_generation.as_deref()
+    } else {
+        Some(spawn.spawned_at.as_str())
+    };
+    if let Some(generation) = generation {
+        state["generation"] = serde_json::json!(generation);
+        if !into_existing_session {
+            transport
+                .set_session_owner_with_generation(
+                    &session_name,
+                    workspace,
+                    &resolved_team_key,
+                    generation,
+                )
+                .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+        }
+    }
     // 0.5.66 bypass 单源 §2.7:启动即带 bypass → 审计留痕。
     if safety.enabled {
         let state_agent = state

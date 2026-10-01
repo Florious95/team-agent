@@ -340,7 +340,7 @@ fn command_help(command: Option<&str>) -> String {
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或原生 tmux/process 采样时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出九字段：name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。model/effort 为已接受启动配置，未设置为 null，不猜 provider 默认值。缺少可靠定位或原生 tmux/process 采样时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, display name, and source aliases. Uses each provider's native catalog; Codex uses `codex debug models` and Claude uses SDK stream-json initialize.".to_string(),
         Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
@@ -2286,7 +2286,7 @@ mod tests {
     fn status_help_describes_brief_projection_and_unknown_boundary() {
         let help = command_help(Some("status"));
         for marker in [
-            "name/provider/runtime_status/activity/health/session_name/tmux_command",
+            "name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command",
             "人读与 --json 使用同一投影",
             "显示 unknown",
             "tmux_command",
