@@ -575,6 +575,14 @@ fn wleak_start_agent_rejects_stale_cached_foreign_pane() {
 
     let session = worker_session_name(team_id);
     let pane_b = pane_for_window(&ws, &session, "b");
+    // Start only admits stopped seats; poison the tuple after stopping its owner.
+    let stop = run_ta(&ws, &["stop-agent", "a", "--workspace", ws_path, "--json"]);
+    assert!(
+        stop.is_success(),
+        "stop-agent must succeed before corrupting the cached tuple; stdout={} stderr={}",
+        stop.stdout,
+        stop.stderr
+    );
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
     let start = run_ta(
