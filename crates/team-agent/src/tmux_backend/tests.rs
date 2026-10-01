@@ -2284,18 +2284,24 @@ fn stop_session_preservation_refuses_unknown_listing_and_rolls_back_failed_ancho
 #[test]
 #[ignore = "isolated native tmux: executed explicitly on the remote test host"]
 fn stop_session_preservation_native_tmux_stop_start_and_shutdown() {
-    let tmp = tempfile::tempdir().unwrap();
-    let endpoint = tmp.path().join("tmux.sock");
+    let tmp = std::env::temp_dir().join(format!(
+        "ta-preserve-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+    ));
+    std::fs::create_dir(&tmp).unwrap();
+    let endpoint = tmp.join("tmux.sock");
     let be = TmuxBackend::with_runner_for_tmux_endpoint(Box::new(RealCommandRunner), endpoint.to_str().unwrap());
     let session = SessionName::new("preserve-test");
-    struct Cleanup<'a>(&'a TmuxBackend, &'a SessionName);
+    struct Cleanup<'a>(&'a TmuxBackend, &'a SessionName, &'a Path);
     impl Drop for Cleanup<'_> {
-        fn drop(&mut self) { let _ = self.0.kill_session(self.1); }
+        fn drop(&mut self) {
+            let _ = self.0.kill_session(self.1);
+            let _ = std::fs::remove_dir_all(self.2);
+        }
     }
-    let _cleanup = Cleanup(&be, &session);
+    let _cleanup = Cleanup(&be, &session, &tmp);
     let argv = svec(&["sleep", "86400"]);
     let env = BTreeMap::new();
-    let mut worker = be.spawn_first(&session, &WindowName::new("worker"), &argv, tmp.path(), &env).unwrap();
+    let mut worker = be.spawn_first(&session, &WindowName::new("worker"), &argv, &tmp, &env).unwrap();
     for _ in 0..3 {
         be.preserve_session_before_stop(&session, &[Target::Pane(worker.pane_id.clone())]).unwrap();
         be.kill_pane(&worker.pane_id).unwrap();
@@ -2312,7 +2318,7 @@ fn stop_session_preservation_native_tmux_stop_start_and_shutdown() {
             assert!(Instant::now() < deadline, "keepalive must have no running process: {dead:?}");
             std::thread::sleep(Duration::from_millis(20));
         }
-        worker = be.spawn_into(&session, &WindowName::new("worker"), &argv, tmp.path(), &env).unwrap();
+        worker = be.spawn_into(&session, &WindowName::new("worker"), &argv, &tmp, &env).unwrap();
     }
     be.kill_session(&session).unwrap();
     assert!(!be.has_session(&session).unwrap());
