@@ -4087,6 +4087,95 @@ impl Transport for TmuxBackend {
         self.run_ok(&argv)
     }
 
+    fn preserve_session_before_stop(
+        &self,
+        session: &SessionName,
+        targets: &[Target],
+    ) -> Result<(), TransportError> {
+        let list_argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "list-panes".to_string(),
+            "-s".to_string(),
+            "-t".to_string(),
+            format!("={}", session.as_str()),
+            "-F".to_string(),
+            "#{pane_id}\t#{window_name}".to_string(),
+        ]);
+        let output = self.runner.run(&list_argv)?;
+        if !output.success {
+            return Err(subprocess_error(list_argv, output));
+        }
+        for line in output.stdout.lines() {
+            let Some((pane, window)) = line.split_once('\t') else {
+                return Err(TransportError::Subprocess {
+                    argv: list_argv,
+                    code: output.code,
+                    stderr: "tmux returned an invalid session pane listing".to_string(),
+                });
+            };
+            if !targets.iter().any(|target| match target {
+                Target::Pane(id) => id.as_str() == pane,
+                Target::SessionWindow {
+                    session: owner,
+                    window: name,
+                } => owner == session && name.as_str() == window,
+            }) {
+                return Ok(());
+            }
+        }
+        // An empty listing cannot prove that this is the last worker.
+        if output.stdout.trim().is_empty() {
+            return Err(TransportError::TargetNotFound {
+                target: session.as_str().to_string(),
+            });
+        }
+        // Use a separate, non-worker window: remain-on-exit does not protect a
+        // pane explicitly deleted by kill-pane. Configure by the new pane ID,
+        // not a window name that could resolve to another same-named window.
+        let spawn_argv = tmux_spawn_argv(
+            &SessionName::new(format!("={}", session.as_str())),
+            &WindowName::new("[team-agent keepalive]"),
+            "exec sleep 86400",
+            false,
+        );
+        let spawned = self.run_spawn(&spawn_argv)?;
+        let pane = spawned.stdout.trim();
+        if !pane.starts_with('%')
+            || pane.len() == 1
+            || !pane[1..].chars().all(|ch| ch.is_ascii_digit())
+        {
+            return Err(TransportError::Subprocess {
+                argv: self.tmux_argv(&spawn_argv),
+                code: spawned.code,
+                stderr: "tmux keepalive spawn returned no valid pane id".to_string(),
+            });
+        }
+        let result = self
+            .run_ok(&[
+                "tmux".to_string(),
+                "set-window-option".to_string(),
+                "-t".to_string(),
+                pane.to_string(),
+                "remain-on-exit".to_string(),
+                "on".to_string(),
+            ])
+            .and_then(|()| {
+                self.run_ok(&[
+                    "tmux".to_string(),
+                    "respawn-pane".to_string(),
+                    "-k".to_string(),
+                    "-t".to_string(),
+                    pane.to_string(),
+                    "exit 0".to_string(),
+                ])
+            });
+        if result.is_err() {
+            // The worker has not been killed yet; remove only our new anchor.
+            let _ = self.kill_pane(&PaneId::new(pane));
+        }
+        result
+    }
+
     fn kill_server(&self) -> Result<(), TransportError> {
         TmuxBackend::kill_server(self);
         Ok(())

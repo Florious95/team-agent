@@ -54,7 +54,7 @@ Diagnosis:
 
 ```bash
 team-agent status --workspace "$WORKSPACE" --json --detail
-team-agent collect --workspace "$WORKSPACE" --json
+team-agent inbox "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" -n 3 --json
 ```
 
 What to look for:
@@ -167,7 +167,7 @@ Validate:
 
 ```bash
 team-agent status --workspace "$WORKSPACE" --json --detail
-team-agent collect --workspace "$WORKSPACE" --json
+team-agent inbox "$AGENT_ID" --workspace "$WORKSPACE" --team "$TEAM" -n 3 --json
 ```
 
 The expected result is `status="restarted"` or an equivalent running projection without duplicate-session errors. Do not treat a partial failure on one worker as permission to reset the whole team.

@@ -1641,6 +1641,20 @@ mod tests {
     }
 
     #[test]
+    fn reminders_only_recommend_supported_result_commands() {
+        let reminder = crate::cli::QUICK_START_REMINDER;
+        assert!(reminder.contains("Use team-agent status / inbox instead."));
+        for text in [
+            reminder,
+            crate::cli::STATUS_REMINDER,
+            crate::cli::SEND_REMINDER,
+            &quickstart_human(&json!({"summary": "team started"})),
+        ] {
+            assert!(!text.contains("collect"), "removed CLI command leaked: {text}");
+        }
+    }
+
+    #[test]
     fn e13_quickstart_human_summary_only_when_no_attach() {
         let value = json!({"summary": "quick-start complete"});
         assert_eq!(

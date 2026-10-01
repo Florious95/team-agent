@@ -2202,6 +2202,122 @@ fn kill_session_and_kill_window_argv() {
     );
 }
 
+#[test]
+fn stop_session_preservation_creates_processless_anchor_by_exact_pane_id() {
+    let (be, rec) = backend_with(
+        MockResp::Out(ok("")),
+        vec![MockResp::Out(ok("%7\tworker\n")), MockResp::Out(ok("%8\n"))],
+    );
+    be.preserve_session_before_stop(
+        &SessionName::new("sess"),
+        &[Target::Pane(PaneId::new("%7"))],
+    ).unwrap();
+    let calls = rec.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0], svec(&[
+        "tmux", "list-panes", "-s", "-t", "=sess", "-F", "#{pane_id}\t#{window_name}",
+    ]));
+    assert_eq!(calls[1], tmux_spawn_argv(
+        &SessionName::new("=sess"), &WindowName::new("[team-agent keepalive]"),
+        "exec sleep 86400", false,
+    ));
+    assert_eq!(calls[2], svec(&[
+        "tmux", "set-window-option", "-t", "%8", "remain-on-exit", "on",
+    ]));
+    assert_eq!(calls[3], svec(&["tmux", "respawn-pane", "-k", "-t", "%8", "exit 0"]));
+}
+
+#[test]
+fn stop_session_preservation_skips_surviving_workers_leaders_and_anchors() {
+    for survivor in ["other-worker", "leader", "[team-agent keepalive]", "worker"] {
+        let (be, rec) = backend_with(
+            MockResp::Out(ok(&format!("%7\tworker\n%8\t{survivor}\n"))), vec![],
+        );
+        be.preserve_session_before_stop(
+            &SessionName::new("sess"), &[Target::Pane(PaneId::new("%7"))],
+        ).unwrap();
+        assert_eq!(rec.lock().unwrap().len(), 1, "survivor={survivor}");
+    }
+}
+
+#[test]
+fn stop_session_preservation_covers_duplicate_panes_and_legacy_window_targets() {
+    for targets in [
+        vec![Target::Pane(PaneId::new("%7")), Target::Pane(PaneId::new("%8"))],
+        vec![Target::SessionWindow { session: SessionName::new("sess"), window: WindowName::new("worker") }],
+    ] {
+        let (be, rec) = backend_with(MockResp::Out(ok("")), vec![
+            MockResp::Out(ok("%7\tworker\n%8\tworker\n")), MockResp::Out(ok("%9\n")),
+        ]);
+        be.preserve_session_before_stop(&SessionName::new("sess"), &targets).unwrap();
+        assert_eq!(rec.lock().unwrap().len(), 4);
+    }
+}
+
+#[test]
+fn stop_session_preservation_refuses_unknown_listing_and_rolls_back_failed_anchor() {
+    for response in [fail(1, "listing failed"), ok(""), ok("malformed")] {
+        let (be, rec) = backend_with(MockResp::Out(response), vec![]);
+        assert!(be.preserve_session_before_stop(
+            &SessionName::new("sess"), &[Target::Pane(PaneId::new("%7"))],
+        ).is_err());
+        assert_eq!(rec.lock().unwrap().len(), 1);
+    }
+    for failed_step in ["new-window", "set-window-option", "respawn-pane"] {
+        let mut queued = vec![MockResp::Out(ok("%7\tworker\n"))];
+        if failed_step != "new-window" { queued.push(MockResp::Out(ok("%8\n"))); }
+        if failed_step == "respawn-pane" { queued.push(MockResp::Out(ok(""))); }
+        queued.push(MockResp::Out(fail(1, "anchor failed")));
+        let (be, rec) = backend_with(MockResp::Out(ok("")), queued);
+        assert!(be.preserve_session_before_stop(
+            &SessionName::new("sess"), &[Target::Pane(PaneId::new("%7"))],
+        ).is_err());
+        let calls = rec.lock().unwrap();
+        assert!(!calls.iter().any(|argv| argv.get(1).is_some_and(|op| op == "kill-window")));
+        if failed_step != "new-window" {
+            assert_eq!(calls.last().unwrap(), &svec(&["tmux", "kill-pane", "-t", "%8"]));
+        }
+        assert!(!calls.iter().any(|argv| argv.get(1).is_some_and(|op| op == "kill-pane") && argv.contains(&"%7".to_string())));
+    }
+}
+
+#[test]
+#[ignore = "isolated native tmux: executed explicitly on the remote test host"]
+fn stop_session_preservation_native_tmux_stop_start_and_shutdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let endpoint = tmp.path().join("tmux.sock");
+    let be = TmuxBackend::with_runner_for_tmux_endpoint(Box::new(RealCommandRunner), endpoint.to_str().unwrap());
+    let session = SessionName::new("preserve-test");
+    struct Cleanup<'a>(&'a TmuxBackend, &'a SessionName);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) { let _ = self.0.kill_session(self.1); }
+    }
+    let _cleanup = Cleanup(&be, &session);
+    let argv = svec(&["sleep", "86400"]);
+    let env = BTreeMap::new();
+    let mut worker = be.spawn_first(&session, &WindowName::new("worker"), &argv, tmp.path(), &env).unwrap();
+    for _ in 0..3 {
+        be.preserve_session_before_stop(&session, &[Target::Pane(worker.pane_id.clone())]).unwrap();
+        be.kill_pane(&worker.pane_id).unwrap();
+        assert!(be.has_session(&session).unwrap());
+        assert_eq!(be.has_pane(&worker.pane_id).unwrap(), Some(false));
+        assert_eq!(be.list_windows(&session).unwrap(), vec![WindowName::new("[team-agent keepalive]")]);
+        let anchor = be.list_targets().unwrap().into_iter().find(|pane| pane.session == session).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let dead = be.runner.run(&be.tmux_argv(&svec(&[
+                "tmux", "display-message", "-p", "-t", anchor.pane_id.as_str(), "#{pane_dead}",
+            ]))).unwrap();
+            if dead.success && dead.stdout.trim() == "1" { break; }
+            assert!(Instant::now() < deadline, "keepalive must have no running process: {dead:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker = be.spawn_into(&session, &WindowName::new("worker"), &argv, tmp.path(), &env).unwrap();
+    }
+    be.kill_session(&session).unwrap();
+    assert!(!be.has_session(&session).unwrap());
+}
+
 // ── 8. ERROR MAPPING: non-zero tmux exit -> TransportError::Subprocess; runner io::Error -> Err ──
 #[test]
 fn error_paths_map_to_transport_error_not_panic() {

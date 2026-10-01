@@ -1156,6 +1156,30 @@ pub(super) fn stop_agent_at_paths(
         || !same_role_panes.is_empty()
         || (pane_id.is_none() && window_exists(transport, &session_name, &window));
     if stopped {
+        let stop_targets =
+            if let Some(pane) = pane_id.as_ref().filter(|_| stored_pane_live) {
+                vec![Target::Pane(pane.clone())]
+            } else if !same_role_panes.is_empty() {
+                same_role_panes
+                    .iter()
+                    .map(|pane| Target::Pane(pane.pane_id.clone()))
+                    .collect()
+            } else {
+                vec![Target::SessionWindow {
+                    session: session_name.clone(),
+                    window: WindowName::new(&window),
+                }]
+            };
+        // Explicit kill-pane/kill-window ignores remain-on-exit on the worker.
+        // Preserve the last window BEFORE killing it, or the coordinator sees
+        // a missing session and stops while the seat is merely being stopped.
+        transport
+            .preserve_session_before_stop(&session_name, &stop_targets)
+            .map_err(|error| {
+                LifecycleError::Transport(format!(
+                    "failed to preserve session before stopping agent {agent_id}: {error}"
+                ))
+            })?;
         // golden operations.py:84-86: a non-zero kill-window raises
         // RuntimeError(f"failed to stop agent {agent_id}: {proc.stderr.strip()}").
         //

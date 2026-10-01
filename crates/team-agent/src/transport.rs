@@ -1085,6 +1085,17 @@ pub trait Transport: Send + Sync {
 
     // —— LIFECYCLE(SL)——
 
+    /// Before stopping a seat, preserve its session if removing these targets
+    /// would otherwise destroy it. This is not called by team shutdown/restart.
+    /// Backends whose sessions outlive their panes need no special handling.
+    fn preserve_session_before_stop(
+        &self,
+        _session: &SessionName,
+        _targets: &[Target],
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     fn kill_server(&self) -> Result<(), TransportError> {
         Ok(())
     }
