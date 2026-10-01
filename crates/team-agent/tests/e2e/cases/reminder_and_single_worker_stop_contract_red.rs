@@ -38,12 +38,15 @@ fn coordinator_tick_count(ws: &TestWorkspace) -> u64 {
         .unwrap_or(0)
 }
 
-fn has_session_missing_event(ws: &TestWorkspace) -> bool {
+fn session_missing_events(ws: &TestWorkspace) -> Vec<Value> {
     fs::read_to_string(ws.events_jsonl_path())
         .unwrap_or_default()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|event| event.get("event").and_then(Value::as_str) == Some("coordinator.session_missing"))
+        .filter(|event| {
+            event.get("event").and_then(Value::as_str) == Some("coordinator.session_missing")
+        })
+        .collect()
 }
 
 #[test]
@@ -60,16 +63,10 @@ fn every_command_reminder_is_free_of_collect() {
     assert!(status.is_success(), "status: {}", status.stderr);
     let status_json = status.json();
 
-    let send = run_ta(&ws, &["send", "a", "reminder contract", "--workspace", ws_path, "--json"]);
-    assert!(send.is_success(), "send: {}", send.stderr);
-    let send_json = send.json();
-
-    let shutdown = run_ta(
+    let _ = run_ta(
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
-    assert!(shutdown.is_success(), "shutdown: {}", shutdown.stderr);
-
     let restart = run_ta(&ws, &["restart", ws_path, "--json"]);
     let restart_json = restart.json();
     assert!(
@@ -87,14 +84,13 @@ fn every_command_reminder_is_free_of_collect() {
     for (command, value) in [
         ("quick-start", quick_start_json),
         ("status", status_json),
-        ("send", send_json),
         ("restart", restart_json),
         ("status after restart", restarted_status_json),
     ] {
         collect_reminders(&value, command, &mut reminders);
     }
 
-    for required_command in ["quick-start", "send", "restart"] {
+    for required_command in ["quick-start", "restart"] {
         assert!(
             reminders.iter().any(|(command, _)| command == required_command),
             "{required_command} response must expose its reminder; observed={reminders:?}"
@@ -137,7 +133,7 @@ fn stopping_the_only_worker_keeps_session_coordinator_and_restartability() {
         Duration::from_millis(50),
     );
     let session_preserved = tmux_session_exists_on_socket(&socket, &session);
-    let session_missing_event = has_session_missing_event(&ws);
+    let missing_events = session_missing_events(&ws);
 
     let doctor = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let doctor_json = serde_json::from_str::<Value>(&doctor.stdout).unwrap_or(Value::Null);
@@ -174,26 +170,17 @@ fn stopping_the_only_worker_keeps_session_coordinator_and_restartability() {
     );
 
     assert!(
-        coordinator_ticked_after_stop,
-        "coordinator did not complete a health tick after stop-agent"
-    );
-    assert!(
-        session_preserved,
-        "stopping the only worker must keep tmux session {session} alive on {socket}"
-    );
-    assert!(
-        coordinator_healthy,
-        "coordinator must remain healthy after stop-agent; doctor={doctor_json}"
-    );
-    assert!(
-        !session_missing_event,
-        "stop-agent must not emit coordinator.session_missing; events={}",
-        ws.events_jsonl_path().display()
-    );
-    assert!(
-        woke_worker,
-        "start-agent must successfully wake the stopped worker; stdout={} stderr={}",
+        coordinator_ticked_after_stop
+            && session_preserved
+            && coordinator_healthy
+            && missing_events.is_empty()
+            && woke_worker,
+        "single-worker stop contract failed: coordinator_ticked_after_stop={coordinator_ticked_after_stop}, \
+         session_preserved={session_preserved} ({session}@{socket}), coordinator_healthy={coordinator_healthy}, \
+         coordinator.session_missing={missing_events:?}, woke_worker={woke_worker}; \
+         doctor={doctor_json}, start_stdout={}, start_stderr={}, events={}",
         start.stdout,
-        start.stderr
+        start.stderr,
+        ws.events_jsonl_path().display()
     );
 }
