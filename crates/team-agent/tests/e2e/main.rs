@@ -74,6 +74,7 @@ mod cases {
     mod stat_002_status_stopped_team;
     mod stat_003_status_dirty_state_reporting;
     mod wleak_worker_delivery_socket_leak_contract;
+    mod reminder_and_single_worker_stop_contract_red;
 }
 
 // Keep framework self-tests in the canonical E2E target; the bypass target
