@@ -117,7 +117,7 @@ fn dirty_005_cross_team_binding_pollution_keeps_explicit_team_scope() {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"]
+        vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"]
     );
     let dump = serde_json::to_string(&j).unwrap();
     assert!(

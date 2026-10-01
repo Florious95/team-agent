@@ -452,8 +452,8 @@ fn z2_dead_pane_projection_pins_all_death_fields() {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-        "Z2: public status must expose exactly the seven-field node projection; node={node}"
+        vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"],
+        "Z2: public status must expose exactly the nine-field node projection; node={node}"
     );
     assert_eq!(
         node.get("runtime_status").and_then(Value::as_str),

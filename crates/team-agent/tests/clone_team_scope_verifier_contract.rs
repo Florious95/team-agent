@@ -365,7 +365,7 @@ fn clone_ok_new_seat_is_visible_in_team_status() {
         .get("nodes")
         .and_then(Value::as_array)
         .and_then(|nodes| nodes.iter().find(|node| node.get("name").and_then(Value::as_str) == Some(CLONE)))
-        .unwrap_or_else(|| panic!("RED3: clone must be listed in the seven-field nodes projection; value={value}"));
+        .unwrap_or_else(|| panic!("RED3: clone must be listed in the nine-field nodes projection; value={value}"));
     let mut keys = node
         .as_object()
         .expect("status node object")
@@ -375,8 +375,8 @@ fn clone_ok_new_seat_is_visible_in_team_status() {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
-        "RED3: status must expose the exact seven-field projection; node={node}"
+        vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"],
+        "RED3: status must expose the exact nine-field projection; node={node}"
     );
     assert_eq!(node.get("name").and_then(Value::as_str), Some(CLONE));
     case.shutdown();

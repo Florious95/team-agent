@@ -278,7 +278,9 @@ fn brief_node_for<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
     keys.sort();
     let expected = vec![
         "activity",
+        "effort",
         "health",
+        "model",
         "name",
         "provider",
         "runtime_status",

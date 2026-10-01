@@ -882,10 +882,24 @@ pub mod lifecycle_port {
             ).unwrap();
             transport.set_session_owner_with_generation(&foreign, &foreign_workspace, "round2-foreign", "foreign-g").unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            while transport.provider_exit_status(&worker.pane_id).unwrap() != Some(0) {
-                assert!(std::time::Instant::now() < deadline, "worker must reach its inert exit wrapper");
+            let marker = format!("{} 0", crate::tmux_backend::worker_provider_exit_marker("pi"));
+            loop {
+                // This controlled fixture prints nothing: the worker wrapper
+                // and its inert tail supply these two lines. provider_exit_status
+                // is a leader-only receipt, not a worker-wrapper observation.
+                let captured = transport.capture(
+                    &crate::transport::Target::Pane(worker.pane_id.clone()),
+                    crate::transport::CaptureRange::Full,
+                ).unwrap();
+                if captured.text.contains(&marker)
+                    && captured.text.contains("Provider exited; this pane no longer accepts input.")
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "worker must reach its inert exit wrapper: {}", captured.text);
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
+            assert_eq!(transport.pane_is_dead(&worker.pane_id).unwrap(), Some(false));
             let worker_pid = worker.child_pid.unwrap();
             assert!(crate::platform::process::pid_is_alive(worker_pid));
             let state = json!({

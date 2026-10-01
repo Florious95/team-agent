@@ -341,7 +341,7 @@ fn assert_brief_nodes(value: &Value, expected_names: &[&str]) {
         keys.sort();
         assert_eq!(
             keys,
-            vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
+            vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"],
             "status brief node shape: {node}"
         );
     }
