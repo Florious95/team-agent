@@ -374,7 +374,10 @@ fn submit_key_protocol_native_tmux_is_return_in_legacy_and_extended_modes() {
         .join("tests/fixtures/submit_key_protocol_probe.py");
     let output = std::process::Command::new("python3")
         .arg(fixture)
-        .args(["--submit-key", crate::transport::tmux_submit_key_name(Key::Enter)])
+        .args([
+            "--submit-key",
+            crate::transport::tmux_submit_key_name(Key::Enter),
+        ])
         .output()
         .expect("run isolated raw-PTY submit diagnostic");
     assert!(
@@ -391,12 +394,17 @@ fn submit_key_protocol_native_tmux_is_return_in_legacy_and_extended_modes() {
 fn empty_inject_is_single_direct_send_keys_never_buffer() {
     // 命令构造 golden(STEP-9):空文本禁走 buffer,只发一条 send-keys 提交键
     // (tmux_io.py:42 —— tmux 拒空 buffer 会卡 trust prompt)。
-    // golden empty_inject_calls 仅 1 条:send-keys -t %7 C-m（锁定阳性 CR）。
+    // Return 与 Ctrl-M 只在 legacy 模式等价；提交必须保持逻辑 Enter。
     assert_eq!(
         tmux_empty_inject_argv(&PaneId::new("%7"), Key::Enter),
-        vec!["tmux", "send-keys", "-t", "%7", "C-m"]
+        vec!["tmux", "send-keys", "-t", "%7", "Enter"]
     );
-    assert_eq!(crate::transport::tmux_submit_key_name(Key::Enter), "C-m");
+    assert_eq!(
+        crate::transport::tmux_send_submit_argv(&PaneId::new("%7"), Key::Enter),
+        vec!["tmux", "send-keys", "-t", "%7", "Enter"]
+    );
+    assert_eq!(crate::transport::tmux_submit_key_name(Key::Enter), "Enter");
+    assert_eq!(crate::transport::tmux_submit_key_name(Key::Down), "Down");
 }
 
 #[test]
