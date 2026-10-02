@@ -346,9 +346,15 @@ fn command_help(command: Option<&str>) -> String {
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]".to_string(),
-        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--json]\n\nAfter a successful start, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
+        Some(name @ ("start-agent" | "add-agent")) => command_spec(name)
+            .map(|spec| format!(
+                "{}\n\n{}\n\nAfter a successful {}, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.",
+                spec.usage,
+                spec.summary,
+                if name == "start-agent" { "start" } else { "add" },
+            ))
+            .unwrap_or_else(|| format!("usage: team-agent {name} [options]")),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--json]\n\nAfter a successful add, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
@@ -2173,11 +2179,8 @@ mod tests {
             (
                 "start-agent",
                 &[
-                    "--workspace",
-                    "--team",
-                    "--force",
-                    "--allow-fresh",
-                    "--json",
+                    "--model", "--effort", "--bypass", "--prompt", "--profile", "--provider",
+                    "--workspace", "--team", "--allow-fresh", "--json",
                 ][..],
             ),
             (
@@ -2192,10 +2195,8 @@ mod tests {
             (
                 "add-agent",
                 &[
-                    "--role-file",
-                    "--workspace",
-                    "--team",
-                    "--json",
+                    "--role-file", "--provider", "--bypass", "--model", "--effort", "--prompt", "--profile",
+                    "--force", "--workspace", "--team", "--json",
                 ][..],
             ),
             (
@@ -2280,6 +2281,25 @@ mod tests {
             !command_help(Some("quick-start")).contains("--fresh"),
             "quick-start help must not advertise removed reset semantics"
         );
+    }
+
+    #[test]
+    fn worker_lifecycle_help_uses_authoritative_spec_usage_and_summary() {
+        for name in ["start-agent", "add-agent"] {
+            let spec = command_spec(name).expect("registered worker lifecycle command");
+            let help = command_help(Some(name));
+            assert_eq!(help.lines().next(), Some(spec.usage));
+            assert!(help.contains(spec.summary));
+            for flag in ["--model SLUG", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider NAME"] {
+                assert!(help.contains(flag), "{name} help missing {flag}: {help}");
+            }
+            assert!(help.contains("team-agent send AGENT MESSAGE"));
+        }
+        assert!(!command_help(Some("start-agent")).contains("--force"));
+        let add = command_help(Some("add-agent"));
+        assert!(add.contains("[--role-file FILE]"));
+        assert!(add.contains("provider/bypass required from CLI or role file"));
+        assert!(add.contains("conflicting values rejected"));
     }
 
     #[test]
