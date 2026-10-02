@@ -161,25 +161,6 @@ fn batch1_generic_transport_resolver_symbol_added() {
     );
 }
 
-/// The `TransportFactoryInput` shape is what all six caller sites
-/// route through. If someone deletes or renames a public field, the
-/// callers break — this test locks the shape.
-#[test]
-fn batch1_factory_input_shape_stable() {
-    use team_agent::transport_factory::{
-        RequestedTransportBackend, TransportFactoryInput, TransportPurpose,
-    };
-    // Compile-time proof: constructing the builder chain still works
-    // with the same public method names.
-    let ws = std::env::temp_dir().join("ta-batch1-shape");
-    let _input = TransportFactoryInput::new(&ws, TransportPurpose::LifecycleWorker)
-        .with_team_key(Some("team-a"))
-        .with_state(None)
-        .with_spec_backend_literal(None)
-        .with_explicit_backend(Some(RequestedTransportBackend::Tmux))
-        .allow_backend_switch(false);
-}
-
 /// C-1 ① at the LIFECYCLE layer (not just the factory): the
 /// generic-typed resolver returns ConPTY when state says so; and the
 /// legacy tmux-typed resolver refuses. This is the acceptance

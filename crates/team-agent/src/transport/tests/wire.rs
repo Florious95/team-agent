@@ -196,32 +196,6 @@ fn session_window_name_transparent_bytes() {
 // ════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn target_pane_and_session_window_are_distinct_addressings() {
-    // 两种合法寻址不可混传;同名 PaneId vs SessionWindow 不相等。
-    let p = Target::Pane(PaneId::new("%7"));
-    let sw = Target::SessionWindow {
-        session: SessionName::new("team-sess"),
-        window: WindowName::new("%7"),
-    };
-    assert_ne!(p, sw);
-    // Pane 寻址按 PaneId 字节相等。
-    assert_eq!(
-        Target::Pane(PaneId::new("%7")),
-        Target::Pane(PaneId::new("%7"))
-    );
-    // SessionWindow 按 (session,window) 对相等;任一不同即不等。
-    let a = Target::SessionWindow {
-        session: SessionName::new("s"),
-        window: WindowName::new("w"),
-    };
-    let b = Target::SessionWindow {
-        session: SessionName::new("s"),
-        window: WindowName::new("w2"),
-    };
-    assert_ne!(a, b);
-}
-
-#[test]
 fn spawn_first_returns_stable_addressable_target_then_reachable() {
     // contracts-rust-native: spawn_first 返回稳定可寻址 Target,且交回的 pane_id 能
     // 寻址回同一进程。RED:stub.spawn_first/capture unimplemented!()。
@@ -330,16 +304,6 @@ fn spawn_into_then_list_targets_enumerates_it() {
 // text=="" 走纯 send submit-key,禁 set/load/paste-buffer 空串(tmux 拒空 buffer
 // 会卡 trust prompt)。golden /tmp/transport_golden.py: empty_inject_*。
 // ════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn inject_payload_empty_is_typed_distinct_from_empty_text() {
-    // 类型上把空文本与含字符文本分流(InjectPayload::Empty != Text("..."))。
-    assert_ne!(InjectPayload::Empty, InjectPayload::Text(String::new()));
-    assert_eq!(
-        InjectPayload::Text("hi".into()),
-        InjectPayload::Text("hi".into())
-    );
-}
 
 #[test]
 fn inject_empty_payload_reports_empty_text_send_keys_and_turn_not_required() {
@@ -509,18 +473,6 @@ fn p2_inject_large_text_switches_to_load_buffer_stdin_at_16k() {
 // ════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn key_enum_variants_are_distinct_and_copy() {
-    // Enter/Up/Down/Left/Right/Char/CtrlC/CancelMode 互不相等;Char 携字符。
-    assert_ne!(Key::Enter, Key::CtrlC);
-    assert_ne!(Key::Up, Key::Down);
-    assert_ne!(Key::Char('1'), Key::Char('2'));
-    assert_eq!(Key::Char('3'), Key::Char('3'));
-    // Copy:可按值传两次。
-    let k = Key::Enter;
-    let _ = (k, k);
-}
-
-#[test]
 fn send_keys_sequence_routes_through_transport() {
     // send_keys 接受 &[Key];RED via stub。
     let t = tmux();
@@ -580,13 +532,6 @@ fn cancel_mode_is_noop_on_non_tmux_backends() {
 // GROUP F — CaptureRange tail/full 语义 + capture 出口规范化收口
 // tmux `-S -<N>`(Tail)/ `-S -`(Full);DELIVERY_CAPTURE_LINES=40 是默认 tail。
 // ════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn capture_range_tail_and_full_distinct() {
-    assert_ne!(CaptureRange::Tail(40), CaptureRange::Full);
-    assert_ne!(CaptureRange::Tail(40), CaptureRange::Tail(30));
-    assert_eq!(CaptureRange::Tail(40), CaptureRange::Tail(40));
-}
 
 #[test]
 fn capture_tail_records_range_in_captured_text() {

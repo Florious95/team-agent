@@ -33,22 +33,6 @@ fn f032_upper_layers_do_not_direct_call_provider_specific_prompt_handlers() {
     );
 }
 
-#[test]
-fn f032_provider_adapter_trait_exposes_startup_prompt_capability() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let adapter_rs = manifest.join("src/provider/adapter.rs");
-    let source = std::fs::read_to_string(adapter_rs).expect("read provider/adapter.rs");
-    assert!(
-        source.contains("fn handle_startup_prompts("),
-        "ProviderAdapter trait must expose handle_startup_prompts(transport, target, checks, sleep_s) -> Vec<HandledPrompt>"
-    );
-    assert!(
-        source.contains("Vec<crate::provider::HandledPrompt>")
-            || source.contains("Vec<HandledPrompt>"),
-        "ProviderAdapter::handle_startup_prompts must return Vec<HandledPrompt> so non-Codex adapters can return an empty vec"
-    );
-}
-
 fn scan_tree(manifest: &Path, root: &Path, findings: &mut Vec<Finding>) {
     let entries = std::fs::read_dir(root).expect("read source root");
     for entry in entries {

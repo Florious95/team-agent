@@ -174,62 +174,58 @@ mod tests {
     }
 
     #[test]
-    fn prefix_hit_beats_lower_distance_non_prefix() {
-        // "stat" is a prefix of "status" (distance 2) but "slat" is
-        // distance 1 (mid-word substitution). Prefix wins.
-        let out = rank("stat", &[c("slat"), c("status")]);
-        assert_eq!(out, vec!["status".to_string(), "slat".to_string()]);
-    }
-
-    #[test]
-    fn distance_orders_non_prefix() {
-        let out = rank("btea", &[c("bota"), c("beta")]);
-        assert_eq!(out[0], "beta"); // 1 edit
-        assert_eq!(out[1], "bota"); // 2 edits
-    }
-
-    #[test]
-    fn stable_key_decides_tie() {
-        // Both "beta" and "bota" are distance 2 from "bata".
-        let out = rank("bata", &[c("bota"), c("beta")]);
-        assert_eq!(out, vec!["beta".to_string(), "bota".to_string()]);
-    }
-
-    #[test]
-    fn caps_at_three() {
-        let out = rank("aaaa", &[c("aaab"), c("aaac"), c("aaad"), c("aaae")]);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out, vec!["aaab", "aaac", "aaad"]);
-    }
-
-    #[test]
-    fn case_preserved_in_payload() {
-        // "BTEA" normalized matches "Beta" (distance 1); the
-        // canonical payload preserves original casing.
-        let out = rank("BTEA", &[c("Beta")]);
-        assert_eq!(out, vec!["Beta".to_string()]);
-    }
-
-    #[test]
-    fn far_request_returns_empty() {
-        let out = rank("zzzzzz", &[c("beta")]);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn threshold_widens_with_length() {
-        assert_eq!(threshold_for_len(0), 1);
-        assert_eq!(threshold_for_len(3), 1);
-        assert_eq!(threshold_for_len(4), 2);
-        assert_eq!(threshold_for_len(6), 2);
-        assert_eq!(threshold_for_len(7), 3);
-        assert_eq!(threshold_for_len(20), 3);
-    }
-
-    #[test]
-    fn empty_request_returns_empty() {
-        let out = rank("", &[c("beta")]);
-        assert!(out.is_empty());
+    fn name_similarity_cases() {
+        enum Expected {
+            Exact(&'static [&'static str]),
+            Prefix(&'static [&'static str]),
+            Capped(usize, &'static [&'static str]),
+        }
+        enum Check {
+            Rank(&'static str, &'static [&'static str], Expected),
+            Thresholds(&'static [(usize, usize)]),
+        }
+        // (old case-id, check); Prefix deliberately does not assert the full output.
+        const CASES: &[(&str, Check)] = &[
+            // "stat" prefixes "status" (distance 2), ahead of "slat" (distance 1).
+            ("prefix_hit_beats_lower_distance_non_prefix", Check::Rank("stat", &["slat", "status"], Expected::Exact(&["status", "slat"]))),
+            // "beta" is 1 edit away; "bota" is 2 edits away. Only these first two were asserted.
+            ("distance_orders_non_prefix", Check::Rank("btea", &["bota", "beta"], Expected::Prefix(&["beta", "bota"]))),
+            // Both "beta" and "bota" are distance 2 from "bata"; stable_key breaks the tie.
+            ("stable_key_decides_tie", Check::Rank("bata", &["bota", "beta"], Expected::Exact(&["beta", "bota"]))),
+            ("caps_at_three", Check::Rank("aaaa", &["aaab", "aaac", "aaad", "aaae"], Expected::Capped(3, &["aaab", "aaac", "aaad"]))),
+            // Normalized "BTEA" matches "Beta" (distance 1); payload preserves canonical casing.
+            ("case_preserved_in_payload", Check::Rank("BTEA", &["Beta"], Expected::Exact(&["Beta"]))),
+            ("far_request_returns_empty", Check::Rank("zzzzzz", &["beta"], Expected::Exact(&[]))),
+            ("threshold_widens_with_length", Check::Thresholds(&[(0, 1), (3, 1), (4, 2), (6, 2), (7, 3), (20, 3)])),
+            ("empty_request_returns_empty", Check::Rank("", &["beta"], Expected::Exact(&[]))),
+            // Byte-lock existing emit.rs behavior: `statu` → `status`, checking only the first element.
+            ("statu_still_maps_to_status", Check::Rank("statu", &["status", "send", "start", "restart"], Expected::Prefix(&["status"]))),
+        ];
+        for (id, check) in CASES {
+            match check {
+                Check::Rank(request, candidates, expected) => {
+                    let candidates: Vec<_> = candidates.iter().map(|name| c(name)).collect();
+                    let out = rank(request, &candidates);
+                    let values = match expected {
+                        Expected::Exact(values) | Expected::Prefix(values) | Expected::Capped(_, values) => values,
+                    };
+                    let values: Vec<String> = values.iter().map(|value| (*value).to_string()).collect();
+                    match expected {
+                        Expected::Exact(_) => assert_eq!(out, values, "{id}"),
+                        Expected::Prefix(_) => assert_eq!(out.get(..values.len()), Some(values.as_slice()), "{id}: prefix"),
+                        Expected::Capped(limit, _) => {
+                            assert_eq!(out.len(), *limit, "{id}: cap");
+                            assert_eq!(out, values, "{id}");
+                        }
+                    }
+                }
+                Check::Thresholds(cases) => {
+                    for &(len, expected) in cases.iter() {
+                        assert_eq!(threshold_for_len(len), expected, "{id}: len={len}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -252,16 +248,5 @@ mod tests {
     fn best_name_convenience() {
         assert_eq!(best_name("btea", &["beta", "bota"]), Some("beta"));
         assert_eq!(best_name("zzzzzz", &["beta"]), None);
-    }
-
-    #[test]
-    fn statu_still_maps_to_status() {
-        // Byte-lock the existing emit.rs behavior: `statu` → `status`
-        // with the shared helper.
-        let out = rank(
-            "statu",
-            &[c("status"), c("send"), c("start"), c("restart")],
-        );
-        assert_eq!(out[0], "status");
     }
 }

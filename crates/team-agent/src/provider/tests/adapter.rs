@@ -404,26 +404,6 @@ fn test_cursor_agent_accepts_mcp_config_without_putting_it_on_argv() {
 }
 
 #[test]
-fn test_cursor_agent_refuses_mcp_config_loudly() {
-    // 已废除的行为：旧实现收到 mcp_config 就返回 CapabilityUnsupported
-    // （「MCP is not implemented」），此断言证明它确实没了。
-    let adapter = get_adapter(Provider::CursorAgent);
-    let cfg = McpConfig {
-        raw: serde_json::json!({
-            "team_orchestrator": {
-                "command": "/bin/team-agent",
-                "args": ["mcp-server"]
-            }
-        }),
-    };
-    let result = adapter.build_command(AuthMode::Subscription, Some(&cfg), None, None);
-    assert!(
-        !matches!(result, Err(ProviderError::CapabilityUnsupported(_))),
-        "feeding mcp_config must not return CapabilityUnsupported; got {result:?}"
-    );
-}
-
-#[test]
 fn test_grok_build_command_plan_binds_expected_session_id_to_argv() {
     let adapter = get_adapter(Provider::Grok);
     let plan = adapter

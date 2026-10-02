@@ -1321,33 +1321,6 @@ fn lanea_stop_window_present_kills_and_stopped_true() {
     );
 }
 
-// ── STOP #2 (stop-display-noop-2) [RED] — close ghostty_workspace slot: persist display.status/pane_title
-// Golden operations.py:88-92 -> display/close.py:84-85 relabels the slot: display["status"]="stopped",
-// display["pane_title"]=f"stopped: {agent_id}", written back into the persisted agent entry. Rust never
-// touches the display (mark_agent_stopped leaves it as-is) and hardcodes display_closed:false. RED: the
-// persisted display.status/pane_title are the in-process observable.
-#[test]
-#[ignore = "legacy external display contract removed; runtime is silent tmux only"]
-fn lanea_stop_ghostty_workspace_relabels_slot_to_stopped() {
-    let ws = lanea_ws_agents(json!({
-        "alpha": { "status": "running", "provider": "codex", "window": "alpha",
-                   "display": { "backend": "ghostty_workspace", "pane_id": "%5", "linked_session": "disp-alpha", "status": "running", "pane_title": "alpha" } }
-    }));
-    let tx = LaneTransport::new("team-laneateam", &["alpha"]);
-    let _ = stop_agent_with_transport(&ws, &aid("alpha"), None, &tx).expect("stop ok");
-    let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
-    assert_eq!(
-        state.pointer("/agents/alpha/display/status").and_then(serde_json::Value::as_str),
-        Some("stopped"),
-        "stop must relabel a ghostty_workspace slot: display.status='stopped' (close.py:84); Rust leaves it 'running'"
-    );
-    assert_eq!(
-        state.pointer("/agents/alpha/display/pane_title").and_then(serde_json::Value::as_str),
-        Some("stopped: alpha"),
-        "stop must set display.pane_title='stopped: <id>' (close.py:85); Rust never touches the display"
-    );
-}
-
 // ── RESET #3 (reset-paused-restart-2) [RED] — reset of a PAUSED agent returns ok=true (NOT an Err) ───
 // Golden operations.py:126-140: after discard, reset re-spawns via start_agent(force,allow_fresh).
 // discard does NOT clear `paused`, so start_agent returns the refusal-shaped {ok:False,status:paused,
@@ -1850,43 +1823,4 @@ fn fresh_start_persists_boundary_from_before_transport_spawn() {
         "the persisted capture boundary must precede the transport spawn; \
          spawned_at={spawned_at}, transport_observed_at={transport_observed_at}"
     );
-}
-
-// ── REMOVE #6/#12 (remove-rollback-no-agent-health-3 / remove-rollback-health-1) [SEAM #[ignore]] ────
-// Golden _RemoveRollback captures `self.health = copy.deepcopy(store.agent_health().get(agent_id))`
-// (agents.py:185) and restore() re-upserts it via _restore_agent_health (agents.py:215-218,268-278). The
-// Rust RemoveRollback has NO health field and never restores it (restart.rs:972-1067). This is only
-// observable when a step AFTER the agent_health delete fails — but Rust's only post-delete step is the
-// snapshot, which golden runs OUTSIDE the rollback-protected region (agents.py:135). Exercising it
-// golden-faithfully needs a production failure-injection seam at an in-try step after the delete (mirror
-// the coordinator SaveHook). PORTER: add `health: Option<Value>` to RemoveRollback (capture the row
-// before delete; restore re-upserts status||"IDLE"/last_output_at/context_usage_pct/current_task_id, or
-// deletes if None) AND move save_team_runtime_snapshot OUTSIDE the rollback region (golden agents.py:135).
-#[test]
-#[ignore = "seam: agent_health rollback restore needs a failure-injection hook (post-delete, in-try) to \
-            exercise in-process; golden agents.py:185/215-218/268-278. Porter adds RemoveRollback.health + \
-            moves save_team_runtime_snapshot outside the rollback region."]
-fn lanea_remove_rollback_restores_agent_health() {
-    // Golden contract (verified by reading agents.py): on a mid-remove failure after the agent_health
-    // row is deleted, rollback re-upserts the captured row so the health history is not lost.
-}
-
-// ── FORK (fork-incomplete-rollback) [SEAM #[ignore]] — post-spawn rollback arms ─────────────────────
-// Golden operations.py:384-394 wraps spec-mutation..start_coordinator in try/except; on ANY failure it
-// (1) kills the spawned tmux window if present, (2) adapter.cleanup_mcp, (3) restores old spec text, and
-// (4) restores prior state. Rust only restores the spec on the spawn_into arm (launch.rs:481); the
-// save_runtime_state (486-487) and start_coordinator (488-493) failure arms leave the spec mutated, the
-// already-spawned window un-killed, and the state un-rolled-back; install_mcp/cleanup_mcp are absent.
-// The adapter.fork_plan arm IS covered HARD above (lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm).
-// The post-SPAWN arms need a failure-injection seam after spawn_into (codex+subscription forks past
-// adapter.fork_plan, so the spawn succeeds and there is no in-process way to fail save/coordinator cleanly).
-// PORTER: a Drop guard armed after the spec write, disarmed on success — kills the window, restores spec
-// + state, runs cleanup_mcp on every post-write error arm.
-#[test]
-#[ignore = "seam: fork post-spawn rollback arms (save_runtime_state / start_coordinator failure) need a \
-            failure-injection hook after spawn_into; golden operations.py:384-394. Porter wires a Drop \
-            guard (kill window + restore spec/state + cleanup_mcp) armed after the spec write."]
-fn lanea_fork_rollback_complete_on_post_spawn_failure() {
-    // Golden contract (operations.py:384-394): a post-spawn failure kills the spawned window, restores
-    // the old spec text + prior state, and runs cleanup_mcp before re-raising.
 }
