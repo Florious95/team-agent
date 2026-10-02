@@ -73,6 +73,7 @@ mod cases {
     mod stat_001_status_json_shape;
     mod stat_002_status_stopped_team;
     mod stat_003_status_dirty_state_reporting;
+    mod start_add_agent_help_flags_contract_red;
     mod wleak_worker_delivery_socket_leak_contract;
     mod reminder_and_single_worker_stop_contract_red;
 }
