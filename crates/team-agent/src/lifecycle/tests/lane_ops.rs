@@ -73,6 +73,8 @@ pub(super) struct LaneTransport {
     killed: LaneKills,
     spawns: LaneSpawns,
     spawn_observed_at: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    stop_preservation: std::sync::Mutex<Vec<(Vec<crate::transport::Target>, Vec<String>)>>,
+    fail_stop_preservation: bool,
 }
 impl LaneTransport {
     pub(super) fn new(session: &str, windows: &[&str]) -> Self {
@@ -85,6 +87,8 @@ impl LaneTransport {
             killed: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawn_observed_at: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            stop_preservation: std::sync::Mutex::new(Vec::new()),
+            fail_stop_preservation: false,
         }
     }
     pub(super) fn killed(&self) -> Vec<String> {
@@ -297,6 +301,21 @@ impl crate::transport::Transport for LaneTransport {
     ) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
         Ok(crate::transport::SetEnvOutcome::Applied)
     }
+    fn preserve_session_before_stop(
+        &self,
+        session: &crate::transport::SessionName,
+        targets: &[crate::transport::Target],
+    ) -> Result<(), crate::transport::TransportError> {
+        self.stop_preservation
+            .lock()
+            .unwrap()
+            .push((targets.to_vec(), self.killed()));
+        if self.fail_stop_preservation {
+            Err(crate::transport::TransportError::TargetNotFound { target: session.as_str().to_string() })
+        } else {
+            Ok(())
+        }
+    }
     fn kill_session(
         &self,
         _s: &crate::transport::SessionName,
@@ -406,6 +425,30 @@ fn lanea_one_agent_ws(alpha_status: &str) -> PathBuf {
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
     crate::state::persist::save_runtime_state(&ws, &json!({ "session_name": "team-laneateam", "agents": { "alpha": { "status": alpha_status, "provider": "codex", "window": "alpha" } } })).unwrap();
     ws
+}
+
+#[test]
+fn stop_session_preservation_runs_before_kill_and_failure_preserves_worker_state() {
+    for fail in [false, true] {
+        let ws = lanea_one_agent_ws("running");
+        let mut tx = LaneTransport::new("team-laneateam", &["alpha"]);
+        tx.fail_stop_preservation = fail;
+        let result = stop_agent_with_transport(&ws, &aid("alpha"), None, &tx);
+        let calls = tx.stop_preservation.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, Vec::<String>::new(), "preserve must precede all worker kills");
+        assert_eq!(calls[0].0, vec![crate::transport::Target::Pane(crate::transport::PaneId::new("%alpha"))]);
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        if fail {
+            assert!(result.is_err());
+            assert!(tx.killed().is_empty());
+            assert_eq!(state["agents"]["alpha"]["status"], "running");
+        } else {
+            assert!(result.unwrap().stopped);
+            assert_eq!(tx.killed(), vec!["%alpha".to_string()]);
+            assert_eq!(state["agents"]["alpha"]["status"], "stopped");
+        }
+    }
 }
 
 fn selected_spec_path(ws: &std::path::Path) -> std::path::PathBuf {

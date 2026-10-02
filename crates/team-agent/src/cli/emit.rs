@@ -340,15 +340,21 @@ fn command_help(command: Option<&str>) -> String {
         )
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出七字段：name/provider/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。缺少可靠定位或原生 tmux/process 采样时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出九字段：name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影。model/effort 为已接受启动配置，未设置为 null，不猜 provider 默认值。缺少可靠定位或原生 tmux/process 采样时显示 unknown；tmux_command 可复制到对应目标。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
         Some("models") => "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, display name, and source aliases. Uses each provider's native catalog; Codex uses `codex debug models` and Claude uses SDK stream-json initialize.".to_string(),
         Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]".to_string(),
-        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--json]\n\nAfter a successful start, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
+        Some(name @ ("start-agent" | "add-agent")) => command_spec(name)
+            .map(|spec| format!(
+                "{}\n\n{}\n\nAfter a successful {}, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.",
+                spec.usage,
+                spec.summary,
+                if name == "start-agent" { "start" } else { "add" },
+            ))
+            .unwrap_or_else(|| format!("usage: team-agent {name} [options]")),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--json]\n\nAfter a successful add, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.".to_string(),
         Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
@@ -2173,11 +2179,8 @@ mod tests {
             (
                 "start-agent",
                 &[
-                    "--workspace",
-                    "--team",
-                    "--force",
-                    "--allow-fresh",
-                    "--json",
+                    "--model", "--effort", "--bypass", "--prompt", "--profile", "--provider",
+                    "--workspace", "--team", "--allow-fresh", "--json",
                 ][..],
             ),
             (
@@ -2192,10 +2195,8 @@ mod tests {
             (
                 "add-agent",
                 &[
-                    "--role-file",
-                    "--workspace",
-                    "--team",
-                    "--json",
+                    "--role-file", "--provider", "--bypass", "--model", "--effort", "--prompt", "--profile",
+                    "--force", "--workspace", "--team", "--json",
                 ][..],
             ),
             (
@@ -2283,10 +2284,29 @@ mod tests {
     }
 
     #[test]
+    fn worker_lifecycle_help_uses_authoritative_spec_usage_and_summary() {
+        for name in ["start-agent", "add-agent"] {
+            let spec = command_spec(name).expect("registered worker lifecycle command");
+            let help = command_help(Some(name));
+            assert_eq!(help.lines().next(), Some(spec.usage));
+            assert!(help.contains(spec.summary));
+            for flag in ["--model SLUG", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider NAME"] {
+                assert!(help.contains(flag), "{name} help missing {flag}: {help}");
+            }
+            assert!(help.contains("team-agent send AGENT MESSAGE"));
+        }
+        assert!(!command_help(Some("start-agent")).contains("--force"));
+        let add = command_help(Some("add-agent"));
+        assert!(add.contains("[--role-file FILE]"));
+        assert!(add.contains("provider/bypass required from CLI or role file"));
+        assert!(add.contains("conflicting values rejected"));
+    }
+
+    #[test]
     fn status_help_describes_brief_projection_and_unknown_boundary() {
         let help = command_help(Some("status"));
         for marker in [
-            "name/provider/runtime_status/activity/health/session_name/tmux_command",
+            "name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command",
             "人读与 --json 使用同一投影",
             "显示 unknown",
             "tmux_command",

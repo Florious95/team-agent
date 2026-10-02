@@ -13,7 +13,7 @@
 //!     - name: tmux_inject_text_argv
 //!       what: 文本注入三步 argv(装 buffer→paste→删 buffer)的唯一构造点
 //!     - name: tmux_send_submit_argv
-//!       what: 提交键 argv 的唯一构造点,Enter 锁定为 C-m
+//!       what: 提交键 argv 的唯一构造点,Enter 保持逻辑 Return 而非 Ctrl-M
 //!     - name: tmux_capture_argv
 //!       what: capture-pane argv 的唯一构造点
 //!     - name: tmux_query_argv
@@ -994,6 +994,12 @@ pub trait Transport: Send + Sync {
         Ok(None)
     }
 
+    /// Native dead-pane observation. Only Some(true) proves no live pane
+    /// process; a missing/unsupported sample must remain unknown.
+    fn pane_is_dead(&self, _pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        Ok(None)
+    }
+
     /// Cheap direct pane existence check when a backend can prove it. `Ok(None)`
     /// preserves the existing Unknown boundary.
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
@@ -1084,6 +1090,17 @@ pub trait Transport: Send + Sync {
     }
 
     // —— LIFECYCLE(SL)——
+
+    /// Before stopping a seat, preserve its session if removing these targets
+    /// would otherwise destroy it. This is not called by team shutdown/restart.
+    /// Backends whose sessions outlive their panes need no special handling.
+    fn preserve_session_before_stop(
+        &self,
+        _session: &SessionName,
+        _targets: &[Target],
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
 
     fn kill_server(&self) -> Result<(), TransportError> {
         Ok(())
@@ -1199,21 +1216,18 @@ pub fn tmux_send_keys_argv(pane: &PaneId, keys: &[Key]) -> Vec<String> {
 
 /// 投递提交键的 tmux 拼写。
 ///
-/// ledger.p0enter 锁定对：`C-j`/LF 5/5 不成回合，`C-m`/CR 5/5 成回合。
-/// `send-keys Enter` 在 raw PTY 上也是 `0d`，但提交路径只发锁定阳性名
-/// `C-m`，避免落到 LF 族。菜单 `send_keys([Down, Enter])` 不走这里。
+/// `Enter` 必须保持逻辑 Return，不能替换成控制组合 `C-m`。
+/// legacy PTY 中两者都是 CR，但启用 extended keys 后 `C-m` 会成为
+/// CSI-u / modifyOtherKeys Ctrl-M，Pi 不把它当提交；`Enter` 仍发送 CR。
 /// ---
-/// purpose: 投递提交键的 tmux 拼写:Enter 锁定为 C-m(CR),其余键回落通用翻译
+/// purpose: 投递提交键复用通用逻辑键翻译,避免协议相关的控制键别名
 /// params:
-///   key: 提交键;只有 Enter 有专门拼写
-/// returns: 提交用键名;非 Enter 与 tmux_key_name 同值(含空串情形)
+///   key: 逻辑提交键
+/// returns: 与 tmux_key_name 同值(含空串情形)
 /// boundary: 只管拼写,不管何时提交、提交是否成功;不发送、不验证
 /// ---
 pub fn tmux_submit_key_name(key: Key) -> &'static str {
-    match key {
-        Key::Enter => "C-m",
-        other => tmux_key_name(other),
-    }
+    tmux_key_name(key)
 }
 
 /// 投递提交：`send-keys -t <pane> <submit-spelling>`。
@@ -1478,7 +1492,7 @@ pub fn tmux_inject_text_argv(
 
 /// 空文本 inject:纯 `send-keys -t <target> <submit_key>`,**禁** buffer 路径
 /// (tmux 拒空 buffer 会卡 trust prompt;tmux_io.py:42)。
-/// `Key::Enter` 在此译成锁定阳性 `C-m`，不是菜单用的 `Enter`。
+/// `Key::Enter` 保持逻辑 `Enter`，不会在 extended keys 下误发 Ctrl-M。
 /// ---
 /// purpose: 空载荷注入(唤醒/ping)的 argv:只发提交键,不碰 buffer
 /// params:

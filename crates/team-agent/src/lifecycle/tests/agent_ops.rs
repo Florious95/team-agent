@@ -505,6 +505,7 @@ session="${TEAM_AGENT_E27_SESSION_NAME}"
 pane="${TEAM_AGENT_E27_PANE_ID}"
 killed_marker="${log}.killed"
 spawned_marker="${log}.spawned"
+anchor_marker="${log}.anchor"
 track=0
 case "$*" in
   *"$expected"*|*"$session"*|*"$pane"*) track=1 ;;
@@ -544,6 +545,23 @@ case "$*" in
     ;;
 esac
 case "$*" in
+  *"list-panes -s -t =$session -F"*)
+    if [ -f "$anchor_marker" ]; then
+      printf '%%9299\t[team-agent keepalive]\n'
+    fi
+    if [ ! -f "$killed_marker" ]; then
+      printf '%s\talpha\n' "$pane"
+    fi
+    if [ -f "$spawned_marker" ]; then
+      printf '%%9288\talpha\n'
+    fi
+    exit 0
+    ;;
+  *"new-window "*"[team-agent keepalive]"*)
+    : > "$anchor_marker"
+    printf '%%9299\n'
+    exit 0
+    ;;
   *"new-window "*|*"new-session "*)
     : > "$spawned_marker"
     printf '%%9288\n'
@@ -651,6 +669,10 @@ fn e27_stop_agent_uses_attached_explicit_state_socket() {
         "attached explicit-socket worker should be stopped"
     );
     assert_only_expected_socket_used(&shim.log, endpoint);
+    let raw = std::fs::read_to_string(&shim.log).unwrap();
+    assert!(raw.contains(&format!("list-panes -s -t ={session_name}")));
+    assert!(raw.contains("set-window-option -t %9299 remain-on-exit on"));
+    assert!(raw.contains("respawn-pane -k -t %9299 exit 0"));
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_eq!(
         state

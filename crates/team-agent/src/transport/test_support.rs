@@ -29,6 +29,7 @@ struct OfflineState {
     target_snapshots: VecDeque<Vec<PaneInfo>>,
     windows: Vec<WindowName>,
     pane_presence: BTreeMap<String, bool>,
+    dead_panes: BTreeMap<String, bool>,
     spawn_failures: BTreeMap<String, String>,
     spawned_panes_addressable: bool,
     liveness: BTreeMap<String, PaneLiveness>,
@@ -67,6 +68,7 @@ impl Default for OfflineState {
             target_snapshots: VecDeque::new(),
             windows: Vec::new(),
             pane_presence: BTreeMap::new(),
+            dead_panes: BTreeMap::new(),
             spawn_failures: BTreeMap::new(),
             spawned_panes_addressable: true,
             liveness: BTreeMap::new(),
@@ -140,6 +142,13 @@ impl OfflineTransport {
     pub fn with_pane_presence(self, pane: impl Into<String>, present: bool) -> Self {
         self.with_state(|state| {
             state.pane_presence.insert(pane.into(), present);
+        });
+        self
+    }
+
+    pub fn with_pane_dead(self, pane: impl Into<String>, dead: bool) -> Self {
+        self.with_state(|state| {
+            state.dead_panes.insert(pane.into(), dead);
         });
         self
     }
@@ -523,6 +532,13 @@ impl Transport for OfflineTransport {
         Ok(self.with_state(|state| state.pane_current_commands.get(&pane_id).cloned()))
     }
 
+    fn pane_is_dead(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        Ok(self.with_state(|state| {
+            state.calls.push("pane_is_dead");
+            state.dead_panes.get(pane.as_str()).copied()
+        }))
+    }
+
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
         Ok(self.with_state(|state| {
             state.calls.push("liveness");
@@ -580,6 +596,25 @@ impl Transport for OfflineTransport {
         _session: &SessionName,
     ) -> Result<Option<super::SessionOwner>, TransportError> {
         Ok(self.with_state(|state| state.session_owner.clone()))
+    }
+
+    fn set_session_owner_with_generation(
+        &self,
+        _session: &SessionName,
+        workspace: &Path,
+        team: &str,
+        generation: &str,
+    ) -> Result<(), TransportError> {
+        self.with_state(|state| {
+            state.calls.push("set_session_owner_with_generation");
+            state.session_owner = Some(super::SessionOwner {
+                workspace: workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf())
+                    .to_string_lossy().to_string(),
+                team: team.to_string(),
+                generation: generation.to_string(),
+            });
+        });
+        Ok(())
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {

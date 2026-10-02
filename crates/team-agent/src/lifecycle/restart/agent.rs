@@ -373,6 +373,8 @@ pub(crate) fn start_agent_at_paths(
     };
     let into_existing_session =
         session_live_or_default(transport, &session_name, session_name_present(&state));
+    let inherited_generation =
+        crate::state::projection::session_generation(&state).map(str::to_string);
     let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn_json(
         &agent,
         provider,
@@ -441,6 +443,24 @@ pub(crate) fn start_agent_at_paths(
         &safety,
         start_mode,
     )?;
+    let generation = if into_existing_session {
+        inherited_generation.as_deref()
+    } else {
+        Some(spawn.spawned_at.as_str())
+    };
+    if let Some(generation) = generation {
+        state["generation"] = serde_json::json!(generation);
+        if !into_existing_session {
+            transport
+                .set_session_owner_with_generation(
+                    &session_name,
+                    workspace,
+                    &resolved_team_key,
+                    generation,
+                )
+                .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+        }
+    }
     // 0.5.66 bypass 单源 §2.7:启动即带 bypass → 审计留痕。
     if safety.enabled {
         let state_agent = state
@@ -1156,6 +1176,30 @@ pub(super) fn stop_agent_at_paths(
         || !same_role_panes.is_empty()
         || (pane_id.is_none() && window_exists(transport, &session_name, &window));
     if stopped {
+        let stop_targets =
+            if let Some(pane) = pane_id.as_ref().filter(|_| stored_pane_live) {
+                vec![Target::Pane(pane.clone())]
+            } else if !same_role_panes.is_empty() {
+                same_role_panes
+                    .iter()
+                    .map(|pane| Target::Pane(pane.pane_id.clone()))
+                    .collect()
+            } else {
+                vec![Target::SessionWindow {
+                    session: session_name.clone(),
+                    window: WindowName::new(&window),
+                }]
+            };
+        // Explicit kill-pane/kill-window ignores remain-on-exit on the worker.
+        // Preserve the last window BEFORE killing it, or the coordinator sees
+        // a missing session and stops while the seat is merely being stopped.
+        transport
+            .preserve_session_before_stop(&session_name, &stop_targets)
+            .map_err(|error| {
+                LifecycleError::Transport(format!(
+                    "failed to preserve session before stopping agent {agent_id}: {error}"
+                ))
+            })?;
         // golden operations.py:84-86: a non-zero kill-window raises
         // RuntimeError(f"failed to stop agent {agent_id}: {proc.stderr.strip()}").
         //

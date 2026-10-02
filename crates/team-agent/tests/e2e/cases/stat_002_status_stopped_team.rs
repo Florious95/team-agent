@@ -63,5 +63,7 @@ fn assert_stopped_brief(value: &serde_json::Value) {
     assert_eq!(node.get("runtime_status").and_then(|v| v.as_str()), Some("stopped"));
     let mut keys = node.as_object().expect("status node object").keys().cloned().collect::<Vec<_>>();
     keys.sort();
-    assert_eq!(keys, vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"]);
+    assert_eq!(keys, vec!["activity", "effort", "health", "model", "name", "provider", "runtime_status", "session_name", "tmux_command"]);
+    assert_eq!(node.get("model").and_then(|v| v.as_str()), Some("fake"));
+    assert!(node.get("effort").is_some_and(serde_json::Value::is_null));
 }

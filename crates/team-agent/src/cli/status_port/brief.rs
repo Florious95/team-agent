@@ -1,4 +1,4 @@
-//! Seven-field, read-only status projection backed by native tmux and process samples.
+//! Read-only status: native runtime samples plus accepted launch model/effort.
 //!
 //! This intentionally does not reuse RuntimeSnapshot: the legacy snapshot reads
 //! coordinator/db/history and carries diagnostic fields that are outside the
@@ -82,6 +82,8 @@ static NODEPROBE_RESOLVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 struct RegisteredNode {
     name: String,
     provider: String,
+    model: Option<String>,
+    effort: Option<String>,
     endpoint: Option<String>,
     session: Option<String>,
     window: Option<String>,
@@ -106,6 +108,8 @@ struct ProbeNode {
 struct BriefNode {
     name: String,
     provider: String,
+    model: Option<String>,
+    effort: Option<String>,
     runtime_status: String,
     activity: String,
     health: String,
@@ -157,7 +161,7 @@ pub(crate) fn status_brief_scoped(
     })
 }
 
-/// Human output is the exact same seven-field projection as JSON, rendered in
+/// Human output is the exact same nine-field projection as JSON, rendered in
 /// stable field order. Null values remain explicit rather than becoming a
 /// diagnostic or an inferred value.
 pub(crate) fn format_status_brief(
@@ -305,9 +309,11 @@ fn write_test_capability_receipt(path: &Path) {
 
 fn format_brief_node(value: &Value) -> Option<String> {
     Some(format!(
-        "name: {} provider: {} runtime_status: {} activity: {} health: {} session_name: {} tmux_command: {}",
+        "name: {} provider: {} model: {} effort: {} runtime_status: {} activity: {} health: {} session_name: {} tmux_command: {}",
         value.get("name")?.as_str()?,
         value.get("provider")?.as_str()?,
+        display_optional(value.get("model")?),
+        display_optional(value.get("effort")?),
         value.get("runtime_status")?.as_str()?,
         value.get("activity")?.as_str()?,
         value.get("health")?.as_str()?,
@@ -369,6 +375,10 @@ fn registered_node(name: &str, value: &Value, state: &Value) -> RegisteredNode {
     RegisteredNode {
         name: name.to_string(),
         provider,
+        // Accepted launch settings, not pending role-file edits or guessed
+        // provider defaults. Runtime liveness remains a separate signal.
+        model: string_at(value, &["model"]),
+        effort: string_at(value, &["effort"]),
         endpoint: endpoint(value).or_else(|| endpoint(state)),
         session: first_string(value, &["session_name", "session"])
             .or_else(|| {
@@ -1052,6 +1062,8 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
             MatchResult::Missing => BriefNode {
                 name: node.name.clone(),
                 provider: node.provider.clone(),
+                model: node.model.clone(),
+                effort: node.effort.clone(),
                 runtime_status: "stopped".to_string(),
                 activity: "unknown".to_string(),
                 health: "unknown".to_string(),
@@ -1092,6 +1104,8 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
         } else {
             node.provider.clone()
         },
+        model: node.model.clone(),
+        effort: node.effort.clone(),
         runtime_status: "running".to_string(),
         activity: activity.to_string(),
         health: health.to_string(),
@@ -1172,6 +1186,8 @@ impl BriefNode {
         Self {
             name: node.name.clone(),
             provider: node.provider.clone(),
+            model: node.model.clone(),
+            effort: node.effort.clone(),
             runtime_status: "unknown".to_string(),
             activity: "unknown".to_string(),
             health: "unknown".to_string(),
@@ -1184,6 +1200,8 @@ impl BriefNode {
         let mut object = Map::new();
         object.insert("name".to_string(), json!(self.name));
         object.insert("provider".to_string(), json!(self.provider));
+        object.insert("model".to_string(), json!(self.model));
+        object.insert("effort".to_string(), json!(self.effort));
         object.insert("runtime_status".to_string(), json!(self.runtime_status));
         object.insert("activity".to_string(), json!(self.activity));
         object.insert("health".to_string(), json!(self.health));
@@ -1208,6 +1226,8 @@ mod tests {
         RegisteredNode {
             name: "worker".to_string(),
             provider: "pi".to_string(),
+            model: None,
+            effort: None,
             endpoint: Some("/tmp/tmux socket/o'k".to_string()),
             session: Some("sess".to_string()),
             window: Some("win".to_string()),
@@ -1232,6 +1252,45 @@ mod tests {
 
     fn producer_error_envelope() -> &'static [u8] {
         br#"{"schema_version":1,"socket":"/tmp/sock","sampled_at":"2026-01-01T00:00:00Z","nodes":[],"error":{"kind":"tmux_inventory","message":"missing"}}"#
+    }
+
+    #[test]
+    fn status_model_effort_project_accepted_launch_settings_in_all_runtime_states() {
+        for settings in [(None, None), (Some("openai-codex/gpt-6-luna"), Some("max"))] {
+            let mut node = registered();
+            node.model = settings.0.map(str::to_string);
+            node.effort = settings.1.map(str::to_string);
+            for lifecycle in [None, Some("stopped")] {
+                node.lifecycle = lifecycle.map(str::to_string);
+                for sample in [None, Some(ProbeResult { nodes: vec![probe("pi_activity_channel")] })] {
+                    let value = project_node(&node, Some(&sample)).into_json();
+                    assert_eq!(value["model"], json!(settings.0));
+                    assert_eq!(value["effort"], json!(settings.1));
+                    let human = format_brief_node(&value).unwrap();
+                    assert!(human.contains(&format!("model: {} effort: {}", settings.0.unwrap_or("null"), settings.1.unwrap_or("null"))));
+                    assert_eq!(value.as_object().unwrap().len(), 9);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn status_model_effort_use_canonical_runtime_roster_not_stale_projection() {
+        let state = json!({
+            "active_team_key": "selected",
+            "agents": {"worker": {"model": "stale-model", "effort": "low"}},
+            "teams": {"selected": {"agents": {
+                "worker": {"model": "accepted-model", "effort": "max"},
+                "plain": {}
+            }}}
+        });
+        let selected = registered_nodes(&state, Some("worker"));
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].model.as_deref(), Some("accepted-model"));
+        assert_eq!(selected[0].effort.as_deref(), Some("max"));
+        let plain = registered_nodes(&state, Some("plain"));
+        assert!(plain[0].model.is_none());
+        assert!(plain[0].effort.is_none());
     }
 
     #[test]

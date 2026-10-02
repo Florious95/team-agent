@@ -345,7 +345,7 @@ fn status_compact_reports_identity_slot_health_on_grok_identity_slot_ok() {
 }
 
 #[test]
-fn cmd_status_human_is_seven_field_brief_without_diagnostics() {
+fn cmd_status_human_is_nine_field_brief_without_diagnostics() {
     let ws = seed_status_workspace();
     let args = StatusArgs {
         agent: None,
@@ -364,7 +364,7 @@ fn cmd_status_human_is_seven_field_brief_without_diagnostics() {
 
     assert!(
         text.contains(
-            "name: a1 provider: unknown runtime_status: unknown activity: unknown health: unknown session_name: null tmux_command: null"
+            "name: a1 provider: unknown model: null effort: null runtime_status: unknown activity: unknown health: unknown session_name: null tmux_command: null"
         ),
         "{text}"
     );

@@ -174,7 +174,7 @@ fn append_reminder(text: String, reminder: &str) -> String {
     }
 }
 
-/// `cmd_status`(`commands.py:90`)。CLI status 统一为只读七字段 brief；
+/// `cmd_status`(`commands.py:90`)。CLI status 统一为只读九字段 brief；
 /// `--json` 与人读路径共享 native tmux/process projection；`--summary`/`--detail` 保留参数兼容性但不暴露诊断。
 #[cfg(test)]
 pub(crate) fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
@@ -1638,6 +1638,20 @@ mod tests {
             out.ends_with(crate::cli::QUICK_START_REMINDER),
             "must append harness reminder; got {out}"
         );
+    }
+
+    #[test]
+    fn reminders_only_recommend_supported_result_commands() {
+        let reminder = crate::cli::QUICK_START_REMINDER;
+        assert!(reminder.contains("Use team-agent status / inbox instead."));
+        for text in [
+            reminder,
+            crate::cli::STATUS_REMINDER,
+            crate::cli::SEND_REMINDER,
+            &quickstart_human(&json!({"summary": "team started"})),
+        ] {
+            assert!(!text.contains("collect"), "removed CLI command leaked: {text}");
+        }
     }
 
     #[test]

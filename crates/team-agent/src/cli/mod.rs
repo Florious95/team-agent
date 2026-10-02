@@ -49,7 +49,7 @@ use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
-pub(crate) const QUICK_START_REMINDER: &str = "Reminder: Do not inspect raw worker pane output during normal operation. Use team-agent status / inbox / collect instead. Wait for report_result.";
+pub(crate) const QUICK_START_REMINDER: &str = "Reminder: Do not inspect raw worker pane output during normal operation. Use team-agent status / inbox instead. Wait for report_result.";
 pub(crate) const SEND_REMINDER: &str = "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.";
 pub(crate) const STATUS_REMINDER: &str = "Results are finalized automatically; use --watch-result or team-agent inbox AGENT -n 3 for transport fallback. Do not capture-pane worker terminals.";
 
@@ -707,19 +707,7 @@ pub mod lifecycle_port {
     }
 
     fn state_generation(state: &Value) -> Option<&str> {
-        state
-            .get("generation")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                state
-                    .get("agents")
-                    .and_then(Value::as_object)
-                    .and_then(|agents| {
-                        agents.values().find_map(|agent| {
-                            agent.get("spawned_at").and_then(Value::as_str)
-                        })
-                    })
-            })
+        crate::state::projection::session_generation(state)
     }
 
     fn state_for_session<'a>(state: &'a Value, session: &str) -> Option<&'a Value> {
@@ -777,12 +765,23 @@ pub mod lifecycle_port {
         if owner.generation != expected_generation {
             return SessionOwnership::Foreign;
         }
-        if session_targets.iter().any(|target| {
-            target.current_path.as_ref().map_or(true, |path| {
-                !path_is_under(path.as_path(), workspace)
-            })
-        }) {
-            return SessionOwnership::Unknown;
+        for target in session_targets {
+            if target.current_path.as_ref().is_some_and(|path| {
+                path_is_under(path.as_path(), workspace)
+            }) {
+                continue;
+            }
+            // An exited keepalive has no cwd or live process. Exempt only the
+            // internal anchor, with native positive dead-pane proof, AFTER the
+            // session workspace/team/generation ownership gates above.
+            let dead_anchor = target.current_path.as_ref().is_none_or(|path| {
+                path.as_os_str().is_empty()
+            }) && target.window_name.as_ref().is_some_and(|window| {
+                window.as_str() == crate::tmux_backend::KEEPALIVE_WINDOW_NAME
+            }) && matches!(transport.pane_is_dead(&target.pane_id), Ok(Some(true)));
+            if !dead_anchor {
+                return SessionOwnership::Unknown;
+            }
         }
         SessionOwnership::Owned
     }
@@ -793,7 +792,135 @@ pub mod lifecycle_port {
 
         use super::*;
         use crate::transport::test_support::OfflineTransport;
-        use crate::transport::{PaneId, PaneInfo, SessionName};
+        use crate::transport::{PaneId, PaneInfo, SessionName, Transport, WindowName};
+
+        fn ownership_pane(session: &SessionName, pane: &str, window: &str, cwd: Option<PathBuf>) -> PaneInfo {
+            PaneInfo {
+                pane_id: PaneId::new(pane),
+                session: session.clone(),
+                window_index: None,
+                window_name: Some(WindowName::new(window)),
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: cwd,
+                active: false,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            }
+        }
+
+        #[test]
+        fn dead_anchor_ownership_requires_native_dead_proof_and_all_owner_markers() {
+            let workspace = std::env::temp_dir().canonicalize().unwrap();
+            let session = SessionName::new("owned");
+            let state = json!({"team_key": "owned", "generation": "g"});
+            for (window, cwd, dead, team, generation, expected) in [
+                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(true), "owned", "g", SessionOwnership::Owned),
+                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(false), "owned", "g", SessionOwnership::Unknown),
+                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, None, "owned", "g", SessionOwnership::Unknown),
+                ("foreign", None, Some(true), "owned", "g", SessionOwnership::Unknown),
+                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, Some(PathBuf::from("/foreign-workspace")), Some(true), "owned", "g", SessionOwnership::Unknown),
+                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(true), "other-team", "g", SessionOwnership::Foreign),
+                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(true), "owned", "other-generation", SessionOwnership::Foreign),
+            ] {
+                let mut transport = OfflineTransport::new().with_session_owner(&workspace, team, generation);
+                if let Some(dead) = dead { transport = transport.with_pane_dead("%1", dead); }
+                let targets = vec![
+                    ownership_pane(&session, "%2", "assistant", Some(workspace.clone())),
+                    ownership_pane(&session, "%1", window, cwd),
+                ];
+                assert_eq!(session_ownership(&workspace, &state, &transport, &session, &targets), expected);
+                if expected == SessionOwnership::Foreign {
+                    assert!(!transport.calls().contains(&"pane_is_dead"), "owner gates must precede exemption");
+                }
+                assert!(!transport.calls().contains(&"kill_session"));
+            }
+        }
+
+        #[test]
+        #[cfg(unix)]
+        #[ignore = "isolated native tmux: explicit Grok execution, no provider subscription"]
+        fn dead_anchor_scoped_shutdown_reaps_worker_wrapper_and_spares_other_team() {
+            let root = std::env::temp_dir().join(format!(
+                "ta-r2-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let root = root.canonicalize().unwrap();
+            let workspace = root.join("owned");
+            let foreign_workspace = root.join("foreign");
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::create_dir(&foreign_workspace).unwrap();
+            let endpoint = root.join("sock");
+            let transport = crate::tmux_backend::TmuxBackend::with_runner_for_tmux_endpoint(
+                Box::new(crate::tmux_backend::RealCommandRunner), endpoint.to_str().unwrap(),
+            );
+            let session = SessionName::new("round2-owned");
+            let foreign = SessionName::new("round2-foreign");
+            struct Cleanup<'a>(&'a crate::tmux_backend::TmuxBackend, [&'a SessionName; 2], &'a Path);
+            impl Drop for Cleanup<'_> {
+                fn drop(&mut self) {
+                    for session in self.1 { let _ = self.0.kill_session(session); }
+                    let _ = std::fs::remove_dir_all(self.2);
+                }
+            }
+            let _cleanup = Cleanup(&transport, [&session, &foreign], &root);
+            let env = BTreeMap::new();
+            let argv = vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
+            let first = transport.spawn_first_with_worker_shell_wrapper(
+                &session, &WindowName::new("assistant"), &argv, &workspace, &env, &[], "pi",
+            ).unwrap();
+            transport.set_session_owner_with_generation(&session, &workspace, "round2-owned", "g").unwrap();
+            transport.preserve_session_before_stop(&session, &[crate::transport::Target::Pane(first.pane_id.clone())]).unwrap();
+            transport.kill_pane(&first.pane_id).unwrap();
+            let worker = transport.spawn_into_with_worker_shell_wrapper(
+                &session, &WindowName::new("assistant"), &argv, &workspace, &env, &[], "pi",
+            ).unwrap();
+            let foreign_worker = transport.spawn_first(
+                &foreign, &WindowName::new("other"), &["sleep".to_string(), "60".to_string()],
+                &foreign_workspace, &env,
+            ).unwrap();
+            transport.set_session_owner_with_generation(&foreign, &foreign_workspace, "round2-foreign", "foreign-g").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let marker = format!("{} 0", crate::tmux_backend::worker_provider_exit_marker("pi"));
+            loop {
+                // This controlled fixture prints nothing: the worker wrapper
+                // and its inert tail supply these two lines. provider_exit_status
+                // is a leader-only receipt, not a worker-wrapper observation.
+                let captured = transport.capture(
+                    &crate::transport::Target::Pane(worker.pane_id.clone()),
+                    crate::transport::CaptureRange::Full,
+                ).unwrap();
+                if captured.text.contains(&marker)
+                    && captured.text.contains("Provider exited; this pane no longer accepts input.")
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "worker must reach its inert exit wrapper: {}", captured.text);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert_eq!(transport.pane_is_dead(&worker.pane_id).unwrap(), Some(false));
+            let worker_pid = worker.child_pid.unwrap();
+            assert!(crate::platform::process::pid_is_alive(worker_pid));
+            let state = json!({
+                "team_key": "round2-owned", "active_team_key": "round2-owned",
+                "session_name": session.as_str(), "tmux_socket": endpoint.to_str().unwrap(),
+                "generation": "g", "is_external_leader": true,
+                "agents": {"assistant": {
+                    "status": "running", "provider": "pi", "model": "openai-codex/gpt-6-luna", "effort": "max",
+                    "window": "assistant", "pane_id": worker.pane_id.as_str(), "pane_pid": worker_pid,
+                    "spawned_at": "new-worker-birth-after-start"
+                }}
+            });
+            crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
+            let result = shutdown_with_transport_and_state(&workspace, true, None, &transport, Some(state)).unwrap();
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["residuals"], json!({"sessions": [], "processes": [], "owned_files": []}), "{result}");
+            assert!(!transport.has_session(&session).unwrap());
+            assert!(!crate::platform::process::pid_is_alive(worker_pid));
+            assert!(transport.has_session(&foreign).unwrap());
+            assert!(crate::platform::process::pid_is_alive(foreign_worker.child_pid.unwrap()));
+        }
 
         #[test]
         fn leader_process_protection_does_not_alias_panes_across_endpoints() {

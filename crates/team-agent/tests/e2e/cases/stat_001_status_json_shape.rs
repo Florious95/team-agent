@@ -40,16 +40,20 @@ fn assert_brief_shape(value: &serde_json::Value, names: &[&str]) {
             keys,
             vec![
                 "activity",
+                "effort",
                 "health",
+                "model",
                 "name",
                 "provider",
                 "runtime_status",
                 "session_name",
                 "tmux_command",
             ],
-            "status node must be the exact seven-field projection: {node}"
+            "status node must be the exact nine-field projection: {node}"
         );
         assert_eq!(node.get("name").and_then(|v| v.as_str()), Some(*expected_name));
+        assert_eq!(node.get("model").and_then(|v| v.as_str()), Some("fake"));
+        assert!(node.get("effort").is_some_and(serde_json::Value::is_null));
     }
 }
 
@@ -76,7 +80,7 @@ fn stat_001_status_json_shape() {
     assert_eq!(j.pointer("/nodes/1/name").and_then(|v| v.as_str()), Some("b"));
 
     // --detail is compatibility-only for the brief projection; it must not
-    // restore diagnostics or change the seven-field information.
+    // restore diagnostics or change the nine-field information.
     let detail = run_ta(
         &ws,
         &[
