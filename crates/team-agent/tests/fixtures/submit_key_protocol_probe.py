@@ -82,4 +82,9 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--record"]:
         record(sys.argv[2], sys.argv[3], sys.argv[4] == "True")
     else:
-        probe()
+        rows = probe()
+        if sys.argv[1:2] == ["--submit-key"]:
+            selected = [row for row in rows if row["key"] == sys.argv[2]]
+            assert len(selected) == 3, "production submit key must have all three mode observations"
+            assert all(row["hex"] == "0d" for row in selected), selected
+            print("ProductionSubmitReturn=verified-three-modes", flush=True)
