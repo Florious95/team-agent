@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.106
+
+- Preserve the team session when stopping its last worker; scoped shutdown retains generation-bound process ownership.
+- Show accepted model/effort settings in public status and keep start/add help aligned with command specs.
+- Use logical Return for tmux submission in legacy and extended-key modes, fixing Pi messages stranded in the composer.
+- Remove stale collect guidance. Live acceptance covers Pi/Luna configuration updates, real replies, and scoped shutdown; Pi ultra support is not claimed.
+
 ## 0.5.65
 
 - **A-37 shape c: inert provider-exit tail.** After the provider exits, the wrapper records the exit marker and replaces itself with an inert `sh` tail that does not read stdin and ignores `INT` and `QUIT`; it no longer falls back to a command-capable login shell.
