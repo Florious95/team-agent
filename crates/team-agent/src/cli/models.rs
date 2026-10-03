@@ -360,18 +360,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cursor_native_tip_fixture_works_through_public_cli_once() {
-        let (agent, response) = native_cli_fixture(
+        let agent = native_cli_fixture(
             "agent",
             include_bytes!("../provider/testdata/cursor-list-models-native.stdout"),
         );
         let output = run_public_models_cli(
-            &agent,
-            Some(&response),
+            &agent.program,
+            agent.response.as_deref(),
             &["models", "--provider", "cursor_agent", "--json"],
         );
         let text = public_cli_text(&output);
-        let calls = std::fs::read_to_string(agent.with_extension("count")).unwrap_or_default();
-        cleanup_fixture(&agent);
+        let calls = std::fs::read_to_string(agent.program.with_extension("count")).unwrap_or_default();
+        drop(agent);
         assert!(output.status.success(), "{text}");
         assert_eq!(calls, "1:--list-models\n");
         let value: Value = serde_json::from_str(text.trim()).unwrap();
@@ -388,30 +388,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grok_public_cli_uses_native_catalog_and_keeps_shared_projection() {
-        let (grok, response) = native_cli_fixture(
+        let grok = native_cli_fixture(
             "grok",
             include_bytes!("../provider/testdata/grok-models-authenticated.stdout"),
         );
         let json = run_public_models_cli(
-            &grok,
-            Some(&response),
+            &grok.program,
+            grok.response.as_deref(),
             &["models", "--provider", "grok", "--json"],
         );
         let human = run_public_models_cli(
-            &grok,
-            Some(&response),
+            &grok.program,
+            grok.response.as_deref(),
             &["models", "--provider", "grok", "--search", "BUILD FAST"],
         );
         let no_match = run_public_models_cli(
-            &grok,
-            Some(&response),
+            &grok.program,
+            grok.response.as_deref(),
             &["models", "--provider", "grok", "--search", "definitely-absent"],
         );
         let json_text = public_cli_text(&json);
         let human_text = public_cli_text(&human);
         let no_match_text = public_cli_text(&no_match);
-        let calls = std::fs::read_to_string(grok.with_extension("count")).unwrap_or_default();
-        cleanup_fixture(&grok);
+        let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+        drop(grok);
         assert!(json.status.success(), "{json_text}");
         assert!(human.status.success(), "{human_text}");
         assert!(no_match.status.success(), "{no_match_text}");
@@ -432,17 +432,17 @@ mod tests {
         assert!(no_match_text.contains("No models matched --search"));
         assert!(no_match_text.contains("auth: ok (catalog_visibility)"));
 
-        let (grok, response) = native_cli_fixture(
+        let grok = native_cli_fixture(
             "grok",
             include_bytes!("../provider/testdata/grok-models-unauthenticated.stdout"),
         );
         let changed_default = run_public_models_cli(
-            &grok,
-            Some(&response),
+            &grok.program,
+            grok.response.as_deref(),
             &["models", "--provider", "grok", "--json"],
         );
         let changed_text = public_cli_text(&changed_default);
-        cleanup_fixture(&grok);
+        drop(grok);
         assert!(changed_default.status.success(), "{changed_text}");
         let changed: Value = serde_json::from_str(changed_text.trim()).unwrap();
         assert_eq!(changed["models"][0]["model_id"], "grok-4.7");
@@ -464,15 +464,14 @@ mod tests {
         ];
         let mut outcomes = Vec::new();
         for (name, bytes) in cases {
-            let (grok, response) = native_cli_fixture("grok", &bytes);
+            let grok = native_cli_fixture("grok", &bytes);
             let output = run_public_models_cli(
-                &grok,
-                Some(&response),
+                &grok.program,
+                grok.response.as_deref(),
                 &["models", "--provider", "grok", "--json"],
             );
             let text = public_cli_text(&output);
-            let calls = std::fs::read_to_string(grok.with_extension("count")).unwrap_or_default();
-            cleanup_fixture(&grok);
+            let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
             outcomes.push((name, output.status.success(), text, calls));
         }
         for (name, success, text, calls) in outcomes {
@@ -489,15 +488,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grok_nonzero_native_command_is_not_a_successful_empty_catalog() {
-        let grok = fixture_program("grok", "printf 'private diagnostic' >&2\nexit 7");
+        let grok = CliFixture::new(fixture_program("grok", "printf 'private diagnostic' >&2\nexit 7"));
         let output = run_public_models_cli(
-            &grok,
+            &grok.program,
             None,
             &["models", "--provider", "grok", "--json"],
         );
         let text = public_cli_text(&output);
-        let calls = std::fs::read_to_string(grok.with_extension("count")).unwrap_or_default();
-        cleanup_fixture(&grok);
+        let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+        drop(grok);
         assert!(!output.status.success(), "{text}");
         assert_eq!(calls, "1:models\n");
         assert!(!text.contains("private diagnostic"));
@@ -510,9 +509,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn grok_failure_help_and_unsupported_action_are_publicly_diagnostic() {
-        let missing = fixture_program("not-grok", "exit 0");
+        let missing = CliFixture::new(fixture_program("not-grok", "exit 0"));
         let output = run_public_models_cli(
-            &missing,
+            &missing.program,
             None,
             &["models", "--provider", "grok", "--json"],
         );
@@ -525,13 +524,13 @@ mod tests {
         assert!(crate::cli::spec::command_spec("models").unwrap().usage.contains("grok"));
 
         let unsupported = run_public_models_cli(
-            &missing,
+            &missing.program,
             None,
             &["models", "--provider", "cloud", "--json"],
         );
         let unsupported_text = public_cli_text(&unsupported);
         let unsupported_value: Value = serde_json::from_str(unsupported_text.trim()).unwrap();
-        cleanup_fixture(&missing);
+        drop(missing);
         assert!(!output.status.success());
         assert!(!unsupported.status.success());
         assert!(unsupported_value["action"].as_str().unwrap().contains("grok"), "{unsupported_text}");
@@ -572,11 +571,33 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn native_cli_fixture(program: &str, bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
-        let path = fixture_program(program, "exec /bin/cat \"$TEAM_AGENT_MODELS_FIXTURE\"");
-        let response = path.with_extension("stdout");
+    struct CliFixture {
+        program: std::path::PathBuf,
+        response: Option<std::path::PathBuf>,
+    }
+
+    #[cfg(unix)]
+    impl CliFixture {
+        fn new(program: std::path::PathBuf) -> Self {
+            Self { program, response: None }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for CliFixture {
+        fn drop(&mut self) {
+            cleanup_fixture(&self.program);
+        }
+    }
+
+    #[cfg(unix)]
+    fn native_cli_fixture(program: &str, bytes: &[u8]) -> CliFixture {
+        let program = fixture_program(program, "exec /bin/cat \"$TEAM_AGENT_MODELS_FIXTURE\"");
+        let mut fixture = CliFixture::new(program);
+        let response = fixture.program.with_extension("stdout");
         std::fs::write(&response, bytes).unwrap();
-        (path, response)
+        fixture.response = Some(response);
+        fixture
     }
 
     #[cfg(unix)]
