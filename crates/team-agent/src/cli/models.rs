@@ -482,7 +482,7 @@ mod tests {
             assert_eq!(value["schema_version"], "models.v1", "{name}");
             assert_eq!(value["ok"], false, "{name}");
             assert_eq!(value["models"], json!([]), "{name}");
-            assert!(!value["error"].as_str().unwrap().contains("unsupported model provider"), "{name}: {text}");
+            assert!(!value["error"].as_str().unwrap().to_ascii_lowercase().contains("unsupported model provider"), "{name}: {text}");
         }
     }
 
@@ -504,7 +504,7 @@ mod tests {
         let value: Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(value["ok"], false);
         assert_eq!(value["models"], json!([]));
-        assert!(value["error"].as_str().unwrap().contains("grok"), "{text}");
+        assert!(value["error"].as_str().unwrap().to_ascii_lowercase().contains("grok"), "{text}");
     }
 
     #[cfg(unix)]
@@ -519,7 +519,7 @@ mod tests {
         let text = public_cli_text(&output);
         let value: Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(value["ok"], false);
-        assert!(value["error"].as_str().unwrap().contains("grok"), "{text}");
+        assert!(value["error"].as_str().unwrap().to_ascii_lowercase().contains("grok"), "{text}");
         assert!(value["action"].as_str().unwrap().contains("grok"), "{text}");
         assert!(crate::cli::emit::default_help().contains("grok"));
         assert!(crate::cli::spec::command_spec("models").unwrap().usage.contains("grok"));
