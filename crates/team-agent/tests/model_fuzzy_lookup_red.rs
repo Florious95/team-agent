@@ -1593,15 +1593,3 @@ exit "${FAKE_EXIT_CODE:-0}"
         }
     }
 }
-
-#[cfg(not(unix))]
-#[test]
-fn model_catalog_fuzzy_lookup_red_requires_unix_fake_provider_fixtures() {
-    // The provider-path shims in the contract suite are Unix executables.
-}
-
-#[cfg(unix)]
-#[test]
-fn model_catalog_fuzzy_lookup_red_unix_suite_is_registered() {
-    // The behavior tests live in unix_tests; this keeps a visible crate-level test count.
-}

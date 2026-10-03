@@ -365,15 +365,6 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
     );
 }
 
-// REAL-MACHINE e2e boundary (rt-host-a verifies): after `add-agent w2`, the coordinator delivers
-// `send w2` and w2 reports a result (full round-trip). #[ignore] — needs a live tmux session + worker.
-#[test]
-#[ignore = "real-machine: add-agent then send w2 round-trips"]
-fn add_agent_then_send_w2_round_trips() {
-    // The framework asserts: add-agent w2 -> w2 in the live session + roster -> `send w2 <msg>` ->
-    // coordinator delivers -> w2 emits a result_envelope (results row). Not unit-testable in-process.
-}
-
 #[derive(Clone)]
 struct SocketRecordingRunner {
     recorded: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,

@@ -13,33 +13,19 @@ use serde_json::json;
 // =========================================================================
 
 #[test]
-fn provider_args_strips_leading_dashdash() {
-    // golden: _provider_args(["--","-x"]) == ["-x"]
-    assert_eq!(
-        provider_args(&["--".into(), "-x".into()]),
-        vec!["-x".to_string()]
-    );
-}
-
-#[test]
-fn provider_args_keeps_when_no_leading_dashdash() {
-    // golden: _provider_args(["-x","-y"]) == ["-x","-y"]
-    assert_eq!(
-        provider_args(&["-x".into(), "-y".into()]),
-        vec!["-x".to_string(), "-y".to_string()]
-    );
-}
-
-#[test]
-fn provider_args_empty_is_empty() {
-    // golden: _provider_args([]) == []
-    assert_eq!(provider_args(&[]), Vec::<String>::new());
-}
-
-#[test]
-fn provider_args_lone_dashdash_yields_empty() {
-    // golden: _provider_args(["--"]) == []  (values[1:] of single-elem list)
-    assert_eq!(provider_args(&["--".into()]), Vec::<String>::new());
+fn provider_args_cases() {
+    // (old case-id, input, Python golden); values[1:] of a lone "--" is empty.
+    const CASES: &[(&str, &[&str], &[&str])] = &[
+        ("provider_args_strips_leading_dashdash", &["--", "-x"], &["-x"]),
+        ("provider_args_keeps_when_no_leading_dashdash", &["-x", "-y"], &["-x", "-y"]),
+        ("provider_args_empty_is_empty", &[], &[]),
+        ("provider_args_lone_dashdash_yields_empty", &["--"], &[]),
+    ];
+    for (id, input, expected) in CASES {
+        let argv: Vec<String> = input.iter().map(|arg| (*arg).to_string()).collect();
+        let expected: Vec<String> = expected.iter().map(|arg| (*arg).to_string()).collect();
+        assert_eq!(provider_args(&argv), expected, "{id}");
+    }
 }
 
 // =========================================================================
@@ -47,118 +33,72 @@ fn provider_args_lone_dashdash_yields_empty() {
 // =========================================================================
 
 #[test]
-fn leader_launcher_args_empty_all_default() {
-    // golden: {'provider_args': [], 'attach_existing': False, 'confirm_attach': False, 'attach_session': None}
-    let got = leader_launcher_args(&[]).expect("empty should parse");
-    assert_eq!(got, LeaderLauncherArgs::default());
-    assert!(got.provider_args.is_empty());
-    assert!(!got.attach_existing);
-    assert!(!got.confirm_attach);
-    assert_eq!(got.attach_session, None);
-    assert!(!got.external_leader);
+fn leader_launcher_args_success_cases() {
+    // (old case-id, argv, complete expected structure), including default false flags.
+    let cases: &[(&str, &[&str], LeaderLauncherArgs)] = &[
+        ("leader_launcher_args_empty_all_default", &[], LeaderLauncherArgs::default()),
+        ("leader_launcher_args_attach_and_confirm", &["--attach", "--confirm"], LeaderLauncherArgs {
+            attach_existing: true,
+            confirm_attach: true,
+            ..Default::default()
+        }),
+        // --attach-existing is an alias of --attach.
+        ("leader_launcher_args_attach_existing_alias", &["--attach-existing"], LeaderLauncherArgs {
+            attach_existing: true,
+            ..Default::default()
+        }),
+        ("leader_launcher_args_external_leader_opt_out", &["--external-leader", "--", "--model", "opus"], LeaderLauncherArgs {
+            provider_args: vec!["--model".to_string(), "opus".to_string()],
+            external_leader: true,
+            ..Default::default()
+        }),
+        ("leader_launcher_args_attach_session_spaced", &["--attach-session", "mysess"], LeaderLauncherArgs {
+            attach_session: Some("mysess".to_string()),
+            ..Default::default()
+        }),
+        ("leader_launcher_args_attach_session_equals", &["--attach-session=mysess"], LeaderLauncherArgs {
+            attach_session: Some("mysess".to_string()),
+            ..Default::default()
+        }),
+        // Known Team Agent launcher flags after `--` are rejected by the error table.
+        ("leader_launcher_args_dashdash_passthrough_strips_separator", &["--attach", "--", "-x", "--provider-confirm"], LeaderLauncherArgs {
+            provider_args: vec!["-x".to_string(), "--provider-confirm".to_string()],
+            attach_existing: true,
+            ..Default::default()
+        }),
+        ("leader_launcher_args_unknown_tokens_collect_as_provider_args", &["foo", "--attach", "bar"], LeaderLauncherArgs {
+            provider_args: vec!["foo".to_string(), "bar".to_string()],
+            attach_existing: true,
+            ..Default::default()
+        }),
+    ];
+    for (id, input, expected) in cases {
+        let argv: Vec<String> = input.iter().map(|arg| (*arg).to_string()).collect();
+        let got = leader_launcher_args(&argv).unwrap_or_else(|err| panic!("{id}: {err}"));
+        assert_eq!(got, *expected, "{id}");
+    }
 }
 
 #[test]
-fn leader_launcher_args_attach_and_confirm() {
-    // golden: ["--attach","--confirm"] -> attach_existing=True, confirm_attach=True
-    let got = leader_launcher_args(&["--attach".into(), "--confirm".into()]).unwrap();
-    assert!(got.attach_existing);
-    assert!(got.confirm_attach);
-    assert!(got.provider_args.is_empty());
-    assert_eq!(got.attach_session, None);
-}
-
-#[test]
-fn leader_launcher_args_attach_existing_alias() {
-    // golden: ["--attach-existing"] -> attach_existing=True (alias of --attach)
-    let got = leader_launcher_args(&["--attach-existing".into()]).unwrap();
-    assert!(got.attach_existing);
-    assert!(!got.confirm_attach);
-}
-
-#[test]
-fn leader_launcher_args_external_leader_opt_out() {
-    let got = leader_launcher_args(&[
-        "--external-leader".into(),
-        "--".into(),
-        "--model".into(),
-        "opus".into(),
-    ])
-    .unwrap();
-    assert!(got.external_leader);
-    assert!(!got.attach_existing);
-    assert_eq!(
-        got.provider_args,
-        vec!["--model".to_string(), "opus".to_string()]
-    );
-}
-
-#[test]
-fn leader_launcher_args_external_leader_after_dashdash_errors() {
-    let err = leader_launcher_args(&["--".into(), "--external-leader".into()])
-        .expect_err("Team Agent flags after -- must not be silently passed to provider");
-    assert!(
-        err.to_string()
-            .contains("Team Agent launcher flag --external-leader must appear before --"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn leader_launcher_args_attach_session_spaced() {
-    // golden: ["--attach-session","mysess"] -> attach_session="mysess"
-    let got = leader_launcher_args(&["--attach-session".into(), "mysess".into()]).unwrap();
-    assert_eq!(got.attach_session, Some("mysess".to_string()));
-    assert!(!got.attach_existing);
-}
-
-#[test]
-fn leader_launcher_args_attach_session_equals() {
-    // golden: ["--attach-session=mysess"] -> attach_session="mysess"
-    let got = leader_launcher_args(&["--attach-session=mysess".into()]).unwrap();
-    assert_eq!(got.attach_session, Some("mysess".to_string()));
-}
-
-#[test]
-fn leader_launcher_args_dashdash_passthrough_strips_separator() {
-    // ["--attach","--","-x","--provider-confirm"] ->
-    //   provider_args=["-x","--provider-confirm"], attach_existing=True, confirm_attach=False
-    // Known Team Agent launcher flags after `--` are rejected by a separate guard.
-    let got = leader_launcher_args(&[
-        "--attach".into(),
-        "--".into(),
-        "-x".into(),
-        "--provider-confirm".into(),
-    ])
-    .unwrap();
-    assert!(got.attach_existing);
-    assert!(!got.confirm_attach);
-    assert_eq!(
-        got.provider_args,
-        vec!["-x".to_string(), "--provider-confirm".to_string()]
-    );
-}
-
-#[test]
-fn leader_launcher_args_unknown_tokens_collect_as_provider_args() {
-    // golden: ["foo","--attach","bar"] -> provider_args=["foo","bar"], attach_existing=True
-    let got = leader_launcher_args(&["foo".into(), "--attach".into(), "bar".into()]).unwrap();
-    assert_eq!(
-        got.provider_args,
-        vec!["foo".to_string(), "bar".to_string()]
-    );
-    assert!(got.attach_existing);
-}
-
-#[test]
-fn leader_launcher_args_attach_session_missing_value_errors() {
-    // golden: ["--attach-session"] raises RuntimeError("--attach-session requires a tmux session name")
-    let err = leader_launcher_args(&["--attach-session".into()]).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("--attach-session requires a tmux session name"),
-        "expected exact missing-value message, got: {msg}"
-    );
+fn leader_launcher_args_error_cases() {
+    // Preserve the original error-substring contract, rather than requiring exact equality.
+    const CASES: &[(&str, &[&str], &str)] = &[
+        (
+            "leader_launcher_args_external_leader_after_dashdash_errors",
+            &["--", "--external-leader"],
+            "Team Agent launcher flag --external-leader must appear before --",
+        ),
+        (
+            "leader_launcher_args_attach_session_missing_value_errors",
+            &["--attach-session"],
+            "--attach-session requires a tmux session name",
+        ),
+    ];
+    for (id, input, expected) in CASES {
+        let argv: Vec<String> = input.iter().map(|arg| (*arg).to_string()).collect();
+        let err = leader_launcher_args(&argv).expect_err(id);
+        assert!(err.to_string().contains(*expected), "{id}: unexpected error: {err}");
+    }
 }
 
 // =========================================================================
@@ -166,37 +106,22 @@ fn leader_launcher_args_attach_session_missing_value_errors() {
 // =========================================================================
 
 #[test]
-fn send_target_fanout_strips_and_filters_empty() {
-    // golden: _send_target(targets="a, b ,,c") == ["a","b","c"]
-    let got = send_target(Some("a, b ,,c"), None);
-    assert_eq!(
-        got,
-        MessageTarget::Fanout(vec!["a".to_string(), "b".to_string(), "c".to_string()])
-    );
-}
-
-#[test]
-fn send_target_single_target() {
-    // golden: _send_target(target="agent_x") == "agent_x"
-    assert_eq!(
-        send_target(None, Some("agent_x")),
-        MessageTarget::Single("agent_x".to_string())
-    );
-}
-
-#[test]
-fn send_target_broadcast_star() {
-    // skeleton contract: bare "*" target -> Broadcast (send.py interprets "*" as全队广播)
-    assert_eq!(send_target(None, Some("*")), MessageTarget::Broadcast);
-}
-
-#[test]
-fn send_target_empty_targets_falls_through_to_target() {
-    // golden: targets="" is falsy in Python -> returns args.target ("fallback")
-    assert_eq!(
-        send_target(Some(""), Some("fallback")),
-        MessageTarget::Single("fallback".to_string())
-    );
+fn send_target_cases() {
+    // (old case-id, targets, target, complete expected enum).
+    let cases: &[(&str, Option<&str>, Option<&str>, MessageTarget)] = &[
+        (
+            "send_target_fanout_strips_and_filters_empty", Some("a, b ,,c"), None,
+            MessageTarget::Fanout(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+        ),
+        ("send_target_single_target", None, Some("agent_x"), MessageTarget::Single("agent_x".to_string())),
+        // A bare "*" means broadcast to the whole team.
+        ("send_target_broadcast_star", None, Some("*"), MessageTarget::Broadcast),
+        // targets="" is falsy in Python, so it falls through to args.target.
+        ("send_target_empty_targets_falls_through_to_target", Some(""), Some("fallback"), MessageTarget::Single("fallback".to_string())),
+    ];
+    for (id, targets, target, expected) in cases {
+        assert_eq!(send_target(*targets, *target), *expected, "{id}");
+    }
 }
 
 // =========================================================================
@@ -205,61 +130,23 @@ fn send_target_empty_targets_falls_through_to_target() {
 // =========================================================================
 
 #[test]
-fn classify_failed_takes_priority() {
-    // raw in {failed,error} OR hstatus in {failed,error} -> Failed
-    assert_eq!(classify_agent_bucket("failed", ""), SummaryBucket::Failed);
-    assert_eq!(classify_agent_bucket("error", ""), SummaryBucket::Failed);
-    assert_eq!(
-        classify_agent_bucket("running", "error"),
-        SummaryBucket::Failed
-    );
-}
-
-#[test]
-fn classify_stopped() {
-    // raw in {stopped,done} OR hstatus==done -> Stopped
-    assert_eq!(classify_agent_bucket("stopped", ""), SummaryBucket::Stopped);
-    assert_eq!(classify_agent_bucket("done", ""), SummaryBucket::Stopped);
-    assert_eq!(
-        classify_agent_bucket("running", "done"),
-        SummaryBucket::Stopped
-    );
-}
-
-#[test]
-fn classify_busy() {
-    // raw==busy OR hstatus in {running,working} -> Busy
-    assert_eq!(classify_agent_bucket("busy", ""), SummaryBucket::Busy);
-    assert_eq!(classify_agent_bucket("", "running"), SummaryBucket::Busy);
-    assert_eq!(classify_agent_bucket("", "working"), SummaryBucket::Busy);
-}
-
-#[test]
-fn classify_hstatus_idle_beats_raw_running() {
-    // golden: raw=running, h=idle -> idle  (hstatus==idle branch precedes raw==running branch)
-    assert_eq!(
-        classify_agent_bucket("running", "idle"),
-        SummaryBucket::Idle
-    );
-}
-
-#[test]
-fn classify_pure_running() {
-    // raw==running, no overriding hstatus -> Running
-    assert_eq!(classify_agent_bucket("running", ""), SummaryBucket::Running);
-}
-
-#[test]
-fn classify_blocked_and_unmatched_are_unknown_never_idle() {
-    // bug-071/077/085: blocked/stuck/missing AND any unmatched value -> Unknown, NOT idle.
-    assert_eq!(classify_agent_bucket("blocked", ""), SummaryBucket::Unknown);
-    assert_eq!(classify_agent_bucket("stuck", ""), SummaryBucket::Unknown);
-    assert_eq!(classify_agent_bucket("", "missing"), SummaryBucket::Unknown);
-    assert_eq!(
-        classify_agent_bucket("weird_value", ""),
-        SummaryBucket::Unknown
-    );
-    assert_eq!(classify_agent_bucket("", ""), SummaryBucket::Unknown);
+fn classify_agent_bucket_cases() {
+    // (old case-id, all original (raw, health) inputs, expected bucket).
+    const CASES: &[(&str, &[(&str, &str)], SummaryBucket)] = &[
+        ("classify_failed_takes_priority", &[("failed", ""), ("error", ""), ("running", "error")], SummaryBucket::Failed),
+        ("classify_stopped", &[("stopped", ""), ("done", ""), ("running", "done")], SummaryBucket::Stopped),
+        ("classify_busy", &[("busy", ""), ("", "running"), ("", "working")], SummaryBucket::Busy),
+        // hstatus==idle precedes the raw==running branch.
+        ("classify_hstatus_idle_beats_raw_running", &[("running", "idle")], SummaryBucket::Idle),
+        ("classify_pure_running", &[("running", "")], SummaryBucket::Running),
+        // bug-071/077/085: unmatched and blocked/stuck/missing are Unknown, NEVER idle.
+        ("classify_blocked_and_unmatched_are_unknown_never_idle", &[("blocked", ""), ("stuck", ""), ("", "missing"), ("weird_value", ""), ("", "")], SummaryBucket::Unknown),
+    ];
+    for (id, inputs, expected) in CASES {
+        for &(raw, health) in inputs.iter() {
+            assert_eq!(classify_agent_bucket(raw, health), *expected, "{id}: raw={raw:?}, health={health:?}");
+        }
+    }
 }
 
 #[test]

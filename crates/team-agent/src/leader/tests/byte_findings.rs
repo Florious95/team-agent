@@ -54,8 +54,7 @@ fn d1_claim_team_owner_includes_os_user() {
 // fingerprint/requested_provider/warning. Golden _receiver_from_claim_target (__init__.py:861-877).
 // Rust LeaderReceiver serializes all 17 (no skip_serializing_if) -> 3 always-null extras leak. RED.
 // (The POPULATED tmux values session_name/window_*/pane_* come from the caller-target scan — a
-// deferred real-tmux seam, see d2_receiver_populated_from_caller_target_seam; the KEY-SET + ORDER
-// locked here are unchanged by that scan.)
+// deferred real-tmux seam; the KEY-SET + ORDER locked here are unchanged by that scan.)
 #[test]
 #[serial_test::serial(env)]
 fn d2_claim_leader_receiver_is_fifteen_golden_keys_in_order_no_extras() {
@@ -96,18 +95,6 @@ fn d2_claim_leader_receiver_is_fifteen_golden_keys_in_order_no_extras() {
             "pane_index","pane_tty","pane_current_command","tmux_socket","leader_session_uuid",
             "owner_epoch","attached_at","discovery",
         ], "golden _receiver_from_claim_target 15-key set + ORDER (__init__.py:861-877 + BUG-4 socket-qualified receiver)");
-}
-
-// D2 seam — the caller-target SCAN that fills session_name/window_index/window_name/pane_index/
-// pane_tty/pane_current_command from core_list_targets (golden _receiver_from_claim_target reads
-// target[...]). Rust make_receiver leaves them None (no scan). Real-tmux: needs core_list_targets.
-#[test]
-#[ignore = "real-tmux seam: leader_receiver session_name/window_*/pane_* are populated from the \
-                caller target via core_list_targets (golden _receiver_from_claim_target); Rust has no \
-                scan (values null). Porter wires the target scan; this asserts the populated values."]
-fn d2_receiver_populated_from_caller_target_seam() {
-    // Golden contract: new_receiver.session_name == caller_target.session_name, etc. Needs a live
-    // tmux target list (core_list_targets) — out of in-process scope.
 }
 
 // D3 [BLOCK] — bound_pane is RECEIVER-first (golden :624 receiver.pane_id OR owner.pane_id). PROBE-B

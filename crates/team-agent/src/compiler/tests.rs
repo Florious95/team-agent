@@ -119,65 +119,52 @@ Implement bounded tasks and report result_envelope_v1.
 // ───────────────────────────── read_front_matter ─────────────────────────────
 
 #[test]
-fn front_matter_no_marker_returns_empty_meta_and_full_text() {
-    // No leading "---\n" → ({}, text) verbatim (compiler.py:175-176).
-    let p = write_tmp("no_marker.md", "hello\nworld\n");
-    let (meta, body) = read_front_matter(&p).unwrap();
-    assert_eq!(meta, Value::Map(vec![]));
-    assert_eq!(body, "hello\nworld\n");
-}
-
-#[test]
-fn front_matter_basic_splits_meta_and_lstrips_body() {
-    let p = write_tmp("basic.md", "---\nname: x\nrole: R\n---\n\nbody line\n");
-    let (meta, body) = read_front_matter(&p).unwrap();
-    assert_eq!(
-        meta,
-        Value::Map(vec![
-            ("name".to_string(), Value::Str("x".to_string())),
-            ("role".to_string(), Value::Str("R".to_string())),
-        ])
-    );
-    assert_eq!(body, "body line\n");
-}
-
-#[test]
-fn front_matter_empty_block_is_empty_map() {
-    // "---\n\n---\nbody\n": closing marker at the blank line → raw "" → {} ; body "body\n".
-    let p = write_tmp("empty.md", "---\n\n---\nbody\n");
-    let (meta, body) = read_front_matter(&p).unwrap();
-    assert_eq!(meta, Value::Map(vec![]));
-    assert_eq!(body, "body\n");
-}
-
-#[test]
-fn front_matter_body_lstrip_strips_only_newlines() {
-    // body.lstrip("\n") removes leading NEWLINES but keeps the 2-space indent.
-    let p = write_tmp("lstrip.md", "---\nname: x\n---\n\n\n  indented body\n");
-    let (meta, body) = read_front_matter(&p).unwrap();
-    assert_eq!(
-        meta,
-        Value::Map(vec![("name".to_string(), Value::Str("x".to_string()))])
-    );
-    assert_eq!(body, "  indented body\n");
-}
-
-#[test]
-fn front_matter_unterminated_falls_back_to_plain_text() {
-    let text = "---\nname: x\n";
-    let p = write_tmp("unterminated.md", text);
-    let (meta, body) = read_front_matter(&p).expect("unterminated front matter is plain text");
-    assert_eq!(meta, Value::Map(Vec::new()));
-    assert_eq!(body, text);
-}
-
-#[test]
-fn front_matter_non_object_falls_back_to_plain_text() {
-    let text = "---\n- a\n- b\n---\nbody\n";
-    let p = write_tmp("list.md", text);
-    let (meta, body) = read_front_matter(&p).expect("non-object front matter is plain text");
-    assert_eq!(meta, Value::Map(Vec::new()));
-    assert_eq!(body, text);
+fn front_matter_cases() {
+    struct Case {
+        id: &'static str,
+        file: &'static str,
+        text: &'static str,
+        meta: &'static [(&'static str, &'static str)],
+        body: &'static str,
+    }
+    const CASES: &[Case] = &[
+        // No leading "---\n" → ({}, text) verbatim (compiler.py:175-176).
+        Case {
+            id: "front_matter_no_marker_returns_empty_meta_and_full_text", file: "no_marker.md",
+            text: "hello\nworld\n", meta: &[], body: "hello\nworld\n",
+        },
+        Case {
+            id: "front_matter_basic_splits_meta_and_lstrips_body", file: "basic.md",
+            text: "---\nname: x\nrole: R\n---\n\nbody line\n", meta: &[("name", "x"), ("role", "R")], body: "body line\n",
+        },
+        // Closing marker at the blank line → raw "" → {}; body "body\n".
+        Case {
+            id: "front_matter_empty_block_is_empty_map", file: "empty.md",
+            text: "---\n\n---\nbody\n", meta: &[], body: "body\n",
+        },
+        // body.lstrip("\n") removes leading NEWLINES but keeps the 2-space indent.
+        Case {
+            id: "front_matter_body_lstrip_strips_only_newlines", file: "lstrip.md",
+            text: "---\nname: x\n---\n\n\n  indented body\n", meta: &[("name", "x")], body: "  indented body\n",
+        },
+        Case {
+            id: "front_matter_unterminated_falls_back_to_plain_text", file: "unterminated.md",
+            text: "---\nname: x\n", meta: &[], body: "---\nname: x\n",
+        },
+        Case {
+            id: "front_matter_non_object_falls_back_to_plain_text", file: "list.md",
+            text: "---\n- a\n- b\n---\nbody\n", meta: &[], body: "---\n- a\n- b\n---\nbody\n",
+        },
+    ];
+    for case in CASES {
+        let p = write_tmp(case.file, case.text);
+        let (meta, body) = read_front_matter(&p).unwrap_or_else(|err| panic!("{}: {err}", case.id));
+        let expected_meta = Value::Map(case.meta.iter().map(|(key, value)| {
+            ((*key).to_string(), Value::Str((*value).to_string()))
+        }).collect());
+        assert_eq!(meta, expected_meta, "{}: metadata", case.id);
+        assert_eq!(body, case.body, "{}: body", case.id);
+    }
 }
 
 // ───────────────────────────── compile_team: full dict parity ─────────────────────────────

@@ -191,137 +191,50 @@ mod tests {
     // ---- find_dependency_cycle:golden 来自 Python 真相源(§4.2 双跑) ----
 
     #[test]
-    fn cycle_linear_chain_has_no_cycle() {
-        // Python C1 -> []
-        let tasks = [
-            t("a", &[], TaskStatus::Pending),
-            t("b", &["a"], TaskStatus::Pending),
-            t("c", &["b"], TaskStatus::Pending),
+    fn dependency_cycle_python_golden_cases() {
+        // (Python id, 旧函数名, note, tasks, 完整环路径)。保持输入和发现顺序。
+        let cases = [
+            ("C1", "cycle_linear_chain_has_no_cycle", "Python C1 -> []",
+                vec![t("a", &[], TaskStatus::Pending), t("b", &["a"], TaskStatus::Pending), t("c", &["b"], TaskStatus::Pending)], vec![]),
+            ("C2", "cycle_two_node", "Python C2 -> ['a','b','a']",
+                vec![t("a", &["b"], TaskStatus::Pending), t("b", &["a"], TaskStatus::Pending)], vec!["a", "b", "a"]),
+            ("C3", "cycle_three_node", "Python C3 -> ['a','b','c','a']",
+                vec![t("a", &["b"], TaskStatus::Pending), t("b", &["c"], TaskStatus::Pending), t("c", &["a"], TaskStatus::Pending)], vec!["a", "b", "c", "a"]),
+            ("C4", "cycle_self_loop", "Python C4 -> ['a','a'](走 stack.index 分支,非 [node,node] 退化分支)",
+                vec![t("a", &["a"], TaskStatus::Pending)], vec!["a", "a"]),
+            ("C5", "cycle_reached_from_acyclic_prefix", "Python C5:x->a->b->a -> ['a','b','a'](前缀 x 不在环里,被 stack.index 切掉)",
+                vec![t("x", &["a"], TaskStatus::Pending), t("a", &["b"], TaskStatus::Pending), t("b", &["a"], TaskStatus::Pending)], vec!["a", "b", "a"]),
+            ("C6", "cycle_missing_dep_is_ignored", "Python C6:a 依赖图外 'zzz' -> 不入环 -> []",
+                vec![t("a", &["zzz"], TaskStatus::Pending), t("b", &["a"], TaskStatus::Pending)], vec![]),
+            ("C7", "cycle_empty_input", "Python C7 -> []", vec![], vec![]),
         ];
-        assert!(find_dependency_cycle(&tasks).is_empty());
-    }
-
-    #[test]
-    fn cycle_two_node() {
-        // Python C2 -> ['a','b','a']
-        let tasks = [
-            t("a", &["b"], TaskStatus::Pending),
-            t("b", &["a"], TaskStatus::Pending),
-        ];
-        assert_eq!(
-            cycle_ids(&find_dependency_cycle(&tasks)),
-            vec!["a", "b", "a"]
-        );
-    }
-
-    #[test]
-    fn cycle_three_node() {
-        // Python C3 -> ['a','b','c','a']
-        let tasks = [
-            t("a", &["b"], TaskStatus::Pending),
-            t("b", &["c"], TaskStatus::Pending),
-            t("c", &["a"], TaskStatus::Pending),
-        ];
-        assert_eq!(
-            cycle_ids(&find_dependency_cycle(&tasks)),
-            vec!["a", "b", "c", "a"]
-        );
-    }
-
-    #[test]
-    fn cycle_self_loop() {
-        // Python C4 -> ['a','a'](走 stack.index 分支,非 [node,node] 退化分支)
-        let tasks = [t("a", &["a"], TaskStatus::Pending)];
-        assert_eq!(cycle_ids(&find_dependency_cycle(&tasks)), vec!["a", "a"]);
-    }
-
-    #[test]
-    fn cycle_reached_from_acyclic_prefix() {
-        // Python C5:x->a->b->a -> ['a','b','a'](前缀 x 不在环里,被 stack.index 切掉)
-        let tasks = [
-            t("x", &["a"], TaskStatus::Pending),
-            t("a", &["b"], TaskStatus::Pending),
-            t("b", &["a"], TaskStatus::Pending),
-        ];
-        assert_eq!(
-            cycle_ids(&find_dependency_cycle(&tasks)),
-            vec!["a", "b", "a"]
-        );
-    }
-
-    #[test]
-    fn cycle_missing_dep_is_ignored() {
-        // Python C6:a 依赖图外 'zzz' -> 不入环 -> []
-        let tasks = [
-            t("a", &["zzz"], TaskStatus::Pending),
-            t("b", &["a"], TaskStatus::Pending),
-        ];
-        assert!(find_dependency_cycle(&tasks).is_empty());
-    }
-
-    #[test]
-    fn cycle_empty_input() {
-        // Python C7 -> []
-        assert!(find_dependency_cycle(&[]).is_empty());
+        for (id, name, note, tasks, expected) in cases {
+            assert_eq!(cycle_ids(&find_dependency_cycle(&tasks)), expected, "case={id}/{name}; {note}");
+        }
     }
 
     // ---- ready_tasks:golden 来自 Python 真相源 ----
 
     #[test]
-    fn ready_pending_no_deps() {
-        // Python R1 -> ['a'](running 不在白名单)
-        let tasks = [
-            t("a", &[], TaskStatus::Pending),
-            t("b", &[], TaskStatus::Running),
+    fn ready_tasks_python_golden_cases() {
+        // (Python id, 旧函数名, note, tasks, 完整就绪列表)。不改变状态白名单或顺序。
+        let cases = [
+            ("R1", "ready_pending_no_deps", "Python R1 -> ['a'](running 不在白名单)",
+                vec![t("a", &[], TaskStatus::Pending), t("b", &[], TaskStatus::Running)], vec!["a"]),
+            ("R2", "ready_default_pending", "Python R2:无 status key 视作 pending -> ['a']。本类型用显式 Pending 表达缺省。",
+                vec![t("a", &[], TaskStatus::Pending)], vec!["a"]),
+            ("R3", "ready_requires_deps_done", "Python R3:a done -> b 就绪;c 依赖未完成的 b -> 不就绪 -> ['b']",
+                vec![t("a", &[], TaskStatus::Done), t("b", &["a"], TaskStatus::Pending), t("c", &["b"], TaskStatus::Pending)], vec!["b"]),
+            ("R4", "ready_status_whitelist", "Python R4:needs_retry / ready 在白名单,blocked 不在 -> ['a','b']",
+                vec![t("a", &[], TaskStatus::NeedsRetry), t("b", &[], TaskStatus::Ready), t("c", &[], TaskStatus::Blocked)], vec!["a", "b"]),
+            ("R5", "ready_missing_dep_not_done", "Python R5:依赖查无此 id -> 视作非 done -> 不就绪 -> []",
+                vec![t("b", &["missing"], TaskStatus::Pending)], vec![]),
+            ("R6", "ready_terminal_statuses_excluded", "Python R6:done/failed/cancelled 均不在白名单 -> []",
+                vec![t("a", &[], TaskStatus::Done), t("b", &[], TaskStatus::Failed), t("c", &[], TaskStatus::Cancelled)], vec![]),
         ];
-        assert_eq!(ready_ids(&ready_tasks(&tasks)), vec!["a"]);
-    }
-
-    #[test]
-    fn ready_default_pending() {
-        // Python R2:无 status key 视作 pending -> ['a']。本类型用显式 Pending 表达缺省。
-        let tasks = [t("a", &[], TaskStatus::Pending)];
-        assert_eq!(ready_ids(&ready_tasks(&tasks)), vec!["a"]);
-    }
-
-    #[test]
-    fn ready_requires_deps_done() {
-        // Python R3:a done -> b 就绪;c 依赖未完成的 b -> 不就绪 -> ['b']
-        let tasks = [
-            t("a", &[], TaskStatus::Done),
-            t("b", &["a"], TaskStatus::Pending),
-            t("c", &["b"], TaskStatus::Pending),
-        ];
-        assert_eq!(ready_ids(&ready_tasks(&tasks)), vec!["b"]);
-    }
-
-    #[test]
-    fn ready_status_whitelist() {
-        // Python R4:needs_retry / ready 在白名单,blocked 不在 -> ['a','b']
-        let tasks = [
-            t("a", &[], TaskStatus::NeedsRetry),
-            t("b", &[], TaskStatus::Ready),
-            t("c", &[], TaskStatus::Blocked),
-        ];
-        assert_eq!(ready_ids(&ready_tasks(&tasks)), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn ready_missing_dep_not_done() {
-        // Python R5:依赖查无此 id -> 视作非 done -> 不就绪 -> []
-        let tasks = [t("b", &["missing"], TaskStatus::Pending)];
-        assert!(ready_tasks(&tasks).is_empty());
-    }
-
-    #[test]
-    fn ready_terminal_statuses_excluded() {
-        // Python R6:done/failed/cancelled 均不在白名单 -> []
-        let tasks = [
-            t("a", &[], TaskStatus::Done),
-            t("b", &[], TaskStatus::Failed),
-            t("c", &[], TaskStatus::Cancelled),
-        ];
-        assert!(ready_tasks(&tasks).is_empty());
+        for (id, name, note, tasks, expected) in cases {
+            assert_eq!(ready_ids(&ready_tasks(&tasks)), expected, "case={id}/{name}; {note}");
+        }
     }
 
     // ---- update_task_status:golden 来自 Python 真相源 ----

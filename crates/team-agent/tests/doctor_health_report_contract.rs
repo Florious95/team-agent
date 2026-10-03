@@ -681,8 +681,3 @@ fn p18_unrelated_cli_help_and_status_entry_points_remain_available() {
         );
     }
 }
-
-#[cfg(windows)]
-#[test]
-#[ignore = "P18 ConPTY fixture is NOT-RUN in the Mac/Linux red-test lane"]
-fn p18_windows_conpty_fixture_is_reserved_for_platform_lane() {}

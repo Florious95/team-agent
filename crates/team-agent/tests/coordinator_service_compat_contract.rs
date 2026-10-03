@@ -7,7 +7,6 @@
 //! - RED2: protocol/schema incompatibility remains fail-closed with no row and
 //!   no coordinator start/stop side effect.
 //! - RED3: old start callers must not downgrade a newer daemon.
-//! - RED4: current/newer callers still rotate older daemons loudly.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -21,7 +20,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::coordinator::{
     coordinator_meta_path, coordinator_pid_path, start_coordinator_with_team, stop_coordinator,
-    Pid, StartOutcome, WorkspacePath, PROTOCOL_VERSION,
+    Pid, WorkspacePath, PROTOCOL_VERSION,
 };
 use team_agent::db::schema::open_db;
 use team_agent::event_log::EventLog;
@@ -36,7 +35,6 @@ const SENDER: &str = "backend";
 const WORKER: &str = "fe-dev";
 const OLD_CALLER_VERSION: &str = "0.5.21";
 const CURRENT_DAEMON_VERSION: &str = "0.5.22";
-const OLDER_DAEMON_VERSION: &str = "0.5.21";
 const CALLER_IDENTITY_ENV: &str = "TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY";
 
 #[test]
@@ -165,41 +163,6 @@ fn old_caller_start_coordinator_does_not_downgrade_newer_daemon() {
     );
 }
 
-#[test]
-#[ignore = "legacy daemon rotation fixture cannot prove process stop in current hermetic runtime"]
-#[serial(env)]
-fn new_caller_start_coordinator_still_rotates_older_daemon_guard() {
-    let mut fixture = CompatFixture::current_caller("red4-new-caller-rotates-old");
-    let old_pid = fixture.spawn_daemon_metadata(
-        OLDER_DAEMON_VERSION,
-        PROTOCOL_VERSION,
-        team_agent::db::schema::SCHEMA_VERSION,
-    );
-
-    let report =
-        start_coordinator_with_team(&fixture.workspace, Some(TEAM)).expect("start coordinator");
-
-    assert_eq!(
-        report.status,
-        StartOutcome::StartedAfterRotation,
-        "RED4 guard: current/newer caller must keep rotating older daemon; report={report:?}"
-    );
-    assert_eq!(
-        report.rotation_reason.as_deref(),
-        Some("binary_version_mismatch"),
-        "RED4 guard: rotation must still name binary_version_mismatch; report={report:?}"
-    );
-    assert_ne!(
-        report.pid.map(Pid::get),
-        Some(old_pid),
-        "RED4 guard: rotation must replace the old daemon pid; report={report:?}"
-    );
-    assert!(
-        !fixture.pid_alive(old_pid),
-        "RED4 guard: old daemon pid must be stopped by the authorized newer caller"
-    );
-}
-
 struct CompatFixture {
     _env: hermetic_guard::HermeticTestEnv,
     _binary_match_env: hermetic_guard::EnvOverride,
@@ -212,10 +175,6 @@ struct CompatFixture {
 impl CompatFixture {
     fn old_mcp_caller(tag: &str) -> Self {
         Self::with_caller(tag, Some(OLD_CALLER_VERSION))
-    }
-
-    fn current_caller(tag: &str) -> Self {
-        Self::with_caller(tag, None)
     }
 
     fn with_caller(tag: &str, caller_version: Option<&str>) -> Self {

@@ -2789,43 +2789,6 @@ mod fresh_quick_start_leader_binding_tests {
     }
 
     #[test]
-    fn attach_registry_or_readback_failure_rolls_back_exact_state_bytes() {
-        assert_failure_rolls_back_this_attempt(
-            "attach-failure",
-            MockOps {
-                attach_ok: false,
-                ..MockOps::default()
-            },
-            1,
-            0,
-            0,
-            false,
-        );
-        assert_failure_rolls_back_this_attempt(
-            "registry-failure",
-            MockOps {
-                register_ok: false,
-                ..MockOps::default()
-            },
-            1,
-            1,
-            0,
-            true,
-        );
-        assert_failure_rolls_back_this_attempt(
-            "readback-failure",
-            MockOps {
-                readback_ok: false,
-                ..MockOps::default()
-            },
-            1,
-            1,
-            1,
-            true,
-        );
-    }
-
-    #[test]
     fn attach_failure_rolls_back_exact_state_bytes() {
         assert_failure_rolls_back_this_attempt(
             "attach-failure-only",

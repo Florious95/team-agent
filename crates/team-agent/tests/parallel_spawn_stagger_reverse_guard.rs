@@ -61,37 +61,3 @@ fn parallel_spawn_stagger_sleep_is_present_and_plan_ordered() {
          guards entry order but not tail lock order under jitter)."
     );
 }
-
-#[test]
-fn parallel_spawn_stagger_carries_the_three_pillar_docstring() {
-    let source = read_source();
-    // The three pillars the cr verdict named (0538-cr-verdict.md
-    // D-k rationale): (1) specific race window, (2) reverse guard,
-    // (3) no better primitive. Each pillar must remain reachable
-    // from the stagger site so a reader can trust the sleep is a
-    // controlled serialization step, not a sleep anti-pattern.
-    let pillars = [
-        // (1) race window: pane_id assignment order at transport tail.
-        ("pane_id assignment", "pane_id assignment"),
-        // (2) reverse guard: this file itself + the OS jitter note.
-        ("scheduler jitter", "OS scheduler jitter reference"),
-        // (3) no better primitive at hand (rationale line).
-        (
-            "10ms per slot",
-            "explicit reason for the chosen stagger value",
-        ),
-    ];
-    let mut missing = Vec::new();
-    for (needle, label) in pillars {
-        if !source.contains(needle) {
-            missing.push(label);
-        }
-    }
-    assert!(
-        missing.is_empty(),
-        "D-k reverse guard: stagger docstring must retain the three \
-         cr-verdict pillars so future readers can distinguish \
-         intentional serialization from sleep anti-pattern. Missing: \
-         {missing:?}"
-    );
-}

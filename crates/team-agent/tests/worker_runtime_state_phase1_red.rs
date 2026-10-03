@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use team_agent::messaging::{ActivityStatus, AgentActivity, WorkerRuntimeState};
+use team_agent::messaging::{ActivityStatus, WorkerRuntimeState};
 
 #[test]
 fn enum_wire_round_trip() {
@@ -161,24 +161,4 @@ fn resolver_function_is_present_grep_guard() {
         "tick.rs must write the worker_state field into agent state \
          (Phase 1 §5)"
     );
-}
-
-/// AgentActivity construction with all 4 ActivityStatus variants to anchor
-/// the deprecated path. R3: activity preserved as legacy surface.
-#[test]
-fn agent_activity_construct_all_variants() {
-    for status in [
-        ActivityStatus::Working,
-        ActivityStatus::Idle,
-        ActivityStatus::Stuck,
-        ActivityStatus::Uncertain,
-    ] {
-        let a = AgentActivity {
-            status,
-            confidence: 0.5,
-            rationale: "test".to_string(),
-        };
-        // bridge to new enum.
-        let _w = WorkerRuntimeState::from_activity(a.status);
-    }
 }

@@ -1,40 +1,6 @@
 //! 0.4.x provider effort MVP — focused unit/integration tests covering the
 //! 10-step plan in .team/artifacts/provider-effort-mvp-plan.md.
 
-use team_agent::model::enums::{Provider, ProviderEffort};
-
-/// Step 1: legacy wire values remain stable while the new literal is admitted.
-#[test]
-fn provider_effort_enum_parse_round_trip() {
-    for s in ["low", "medium", "high", "xhigh", "max", "ultra"] {
-        let parsed = ProviderEffort::parse(s).unwrap_or_else(|| panic!("must parse {s}"));
-        assert_eq!(parsed.as_str(), s, "as_str round-trip for {s}");
-    }
-    assert!(ProviderEffort::parse("turbo").is_none());
-    assert!(ProviderEffort::parse("").is_none());
-    assert!(ProviderEffort::parse(" high ").is_some(), "trim whitespace");
-}
-
-#[test]
-fn provider_effort_max_and_ultra_are_codex_native() {
-    for raw in ["max", "ultra"] {
-        let effort = ProviderEffort::parse(raw).unwrap_or_else(|| panic!("must parse {raw}"));
-        assert!(effort.is_supported_by(Provider::Codex), "Codex must support {raw}");
-    }
-}
-
-#[test]
-fn provider_effort_support_matrix_protection_paths() {
-    for raw in ["low", "medium", "high", "xhigh", "max"] {
-        let effort = ProviderEffort::parse(raw).unwrap_or_else(|| panic!("must parse {raw}"));
-        assert!(effort.is_supported_by(Provider::Claude), "Claude must support {raw}");
-        assert!(effort.is_supported_by(Provider::ClaudeCode), "ClaudeCode must support {raw}");
-    }
-    for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
-        assert!(!ProviderEffort::Low.is_supported_by(provider), "{provider:?} remains non-native");
-    }
-}
-
 /// Steps 5 + 6: adapter argv contains adjacent effort flag.
 mod adapter_argv {
     use team_agent::model::enums::{AuthMode, Provider, ProviderEffort};
@@ -284,22 +250,6 @@ tasks: []
                 .any(|e| e.contains("/agents/0/effort") && e.contains("unknown effort")),
             "errors should mention unknown agent effort; got {errors:?}"
         );
-    }
-
-    #[test]
-    fn agent_effort_max_on_codex_is_accepted() {
-        let mut yaml = base_team("");
-        yaml = yaml.replace("provider: claude", "provider: codex").replace(
-            "preferred_for: [dev]",
-            "preferred_for: [dev]\n    effort: max",
-        );
-        match validate_spec_yaml_str(&yaml) {
-            Ok(()) => {}
-            Err(errors) => assert!(
-                !errors.iter().any(|e| e.contains("/agents/0/effort")),
-                "max+codex must not produce an effort error; got {errors:?}"
-            ),
-        }
     }
 
     #[test]

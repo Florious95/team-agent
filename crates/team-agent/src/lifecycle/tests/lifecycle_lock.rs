@@ -131,11 +131,6 @@ fn lifecycle_lock_long_held_event_records_holder_and_waiter() {
 }
 
 #[test]
-fn lifecycle_lock_phase_b_golden_source_guard() {
-    r2_lifecycle_lock_exists_precondition();
-}
-
-#[test]
 fn r2_lifecycle_lock_exists_precondition() {
     let src = manifest_src();
     let lock = read_src("lifecycle/lock.rs");
