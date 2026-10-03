@@ -1930,3 +1930,187 @@ fn unit0_sessions_to_kill_leader_prefixed_session_is_always_spared() {
         ),
     }
 }
+
+const ISSUE_269_ROOT_PID: u32 = 2_147_000_001;
+
+std::thread_local! {
+    static ISSUE_269_LIVENESS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ISSUE_269_FIRST_ALIVE: std::cell::RefCell<Option<std::time::Instant>> = const { std::cell::RefCell::new(None) };
+    static ISSUE_269_DEATH_DELAY: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) };
+}
+
+struct ShutdownWorkspaceCleanup(PathBuf);
+
+impl Drop for ShutdownWorkspaceCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn reset_issue_269_probe_state() {
+    ISSUE_269_LIVENESS_CALLS.with(|calls| calls.set(0));
+    ISSUE_269_FIRST_ALIVE.with(|first| *first.borrow_mut() = None);
+    ISSUE_269_DEATH_DELAY.with(|delay| delay.set(None));
+}
+
+fn issue_269_liveness_call_count() -> usize {
+    ISSUE_269_LIVENESS_CALLS.with(std::cell::Cell::get)
+}
+
+fn issue_269_empty_process_table() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+fn issue_269_transient_liveness(pid: u32) -> bool {
+    if pid != ISSUE_269_ROOT_PID {
+        return false;
+    }
+    ISSUE_269_LIVENESS_CALLS.with(|calls| {
+        let call = calls.get();
+        calls.set(call + 1);
+        match call {
+            0 => {
+                ISSUE_269_FIRST_ALIVE.with(|first| *first.borrow_mut() = Some(std::time::Instant::now()));
+                true
+            }
+            1 => {
+                let elapsed = ISSUE_269_FIRST_ALIVE.with(|first| {
+                    first.borrow().as_ref().map(std::time::Instant::elapsed)
+                });
+                ISSUE_269_DEATH_DELAY.with(|delay| delay.set(elapsed));
+                false
+            }
+            _ => false,
+        }
+    })
+}
+
+fn issue_269_persistent_liveness(pid: u32) -> bool {
+    if pid == ISSUE_269_ROOT_PID {
+        ISSUE_269_LIVENESS_CALLS.with(|calls| calls.set(calls.get() + 1));
+        true
+    } else {
+        false
+    }
+}
+
+fn issue_269_already_gone_liveness(pid: u32) -> bool {
+    if pid == ISSUE_269_ROOT_PID {
+        ISSUE_269_LIVENESS_CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+    false
+}
+
+fn save_issue_269_root_state(workspace: &Path, session: &str) {
+    crate::state::persist::save_runtime_state(
+        workspace,
+        &json!({
+            "session_name": session,
+            "team_key": session,
+            "generation": session,
+            "agents": {
+                "worker": {
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "worker",
+                    "provider_pid": ISSUE_269_ROOT_PID
+                }
+            }
+        }),
+    )
+    .unwrap();
+}
+
+fn shutdown_issue_269_with_probes(
+    workspace: &Path,
+    session: &str,
+    liveness: fn(u32) -> bool,
+) -> serde_json::Value {
+    let transport = CleanShutdownTransport::new().with_owned_session(
+        workspace,
+        session,
+        session,
+        session,
+    );
+    crate::cli::lifecycle_port::with_process_table_test_probe(
+        issue_269_empty_process_table,
+        || {
+            crate::cli::lifecycle_port::with_pid_liveness_test_probe(liveness, || {
+                crate::cli::lifecycle_port::shutdown_with_transport(
+                    workspace,
+                    true,
+                    None,
+                    &transport,
+                )
+                .expect("shutdown should complete")
+            })
+        },
+    )
+}
+
+#[test]
+fn issue269_transient_unmatched_root_converges_inside_grace() {
+    let workspace = tmp_shutdown_workspace("issue269-transient-root");
+    let _workspace_cleanup = ShutdownWorkspaceCleanup(workspace.clone());
+    let session = "team-issue269-transient";
+    save_issue_269_root_state(&workspace, session);
+    reset_issue_269_probe_state();
+
+    let started = std::time::Instant::now();
+    let out = shutdown_issue_269_with_probes(&workspace, session, issue_269_transient_liveness);
+    let elapsed = started.elapsed();
+    let calls = issue_269_liveness_call_count();
+    let death_delay = ISSUE_269_DEATH_DELAY.with(std::cell::Cell::get);
+
+    assert_eq!(
+        out["ok"],
+        json!(true),
+        "an absent final process-table row plus a root that dies during the bounded grace must converge; ppid=0/empty-command is only a conservative placeholder, not a measured identity: {out}"
+    );
+    assert_eq!(out["residuals"]["processes"], json!([]), "{out}");
+    assert!(calls >= 2, "the wait must observe both live and gone states; calls={calls}");
+    assert!(death_delay.is_some_and(|delay| delay <= std::time::Duration::from_millis(500)), "root did not disappear within the bounded grace: {death_delay:?}");
+    assert!(elapsed < std::time::Duration::from_secs(2), "shutdown exceeded the bounded wait: {elapsed:?}");
+}
+
+#[test]
+fn issue269_persistent_unmatched_root_remains_a_residual_after_grace() {
+    let workspace = tmp_shutdown_workspace("issue269-persistent-root");
+    let _workspace_cleanup = ShutdownWorkspaceCleanup(workspace.clone());
+    let session = "team-issue269-persistent";
+    save_issue_269_root_state(&workspace, session);
+    reset_issue_269_probe_state();
+
+    let started = std::time::Instant::now();
+    let out = shutdown_issue_269_with_probes(&workspace, session, issue_269_persistent_liveness);
+    let elapsed = started.elapsed();
+    let calls = issue_269_liveness_call_count();
+    let residuals = out["residuals"]["processes"].as_array().unwrap();
+
+    assert_eq!(out["ok"], json!(false), "a live root must not be filtered by placeholder fields: {out}");
+    assert_eq!(residuals.len(), 1, "{out}");
+    assert_eq!(residuals[0]["pid"], json!(ISSUE_269_ROOT_PID), "{out}");
+    assert_eq!(residuals[0]["ppid"], json!(0), "{out}");
+    assert_eq!(residuals[0]["command"], json!(""), "{out}");
+    assert!((2..=30).contains(&calls), "persistent-root polling must remain bounded; calls={calls}");
+    assert!(elapsed < std::time::Duration::from_secs(2), "shutdown exceeded the bounded wait: {elapsed:?}");
+}
+
+#[test]
+fn issue269_already_gone_root_returns_without_fixed_grace_sleep() {
+    let workspace = tmp_shutdown_workspace("issue269-already-gone-root");
+    let _workspace_cleanup = ShutdownWorkspaceCleanup(workspace.clone());
+    let session = "team-issue269-gone";
+    save_issue_269_root_state(&workspace, session);
+    reset_issue_269_probe_state();
+
+    let started = std::time::Instant::now();
+    let out = shutdown_issue_269_with_probes(&workspace, session, issue_269_already_gone_liveness);
+    let elapsed = started.elapsed();
+    let calls = issue_269_liveness_call_count();
+
+    assert_eq!(out["ok"], json!(true), "{out}");
+    assert_eq!(out["residuals"]["processes"], json!([]), "{out}");
+    assert!(calls >= 2, "the final verification path and wait path must both observe liveness; calls={calls}");
+    assert!(elapsed < std::time::Duration::from_millis(450), "already-gone roots must not incur a fixed grace sleep: {elapsed:?}");
+}

@@ -58,6 +58,165 @@ fn production_state(agents: Value) -> Value {
     })
 }
 
+struct BriefWorkspaceGuard(PathBuf);
+
+impl std::ops::Deref for BriefWorkspaceGuard {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for BriefWorkspaceGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn guarded_brief_workspace(tag: &str) -> BriefWorkspaceGuard {
+    BriefWorkspaceGuard(brief_workspace(tag))
+}
+
+fn status_agent(
+    name: &str,
+    pane: &str,
+    endpoint: &str,
+    session: &str,
+    model: &str,
+    effort: &str,
+) -> Value {
+    let mut agent = production_agent(name, pane);
+    agent["tmux_endpoint"] = json!(endpoint);
+    agent["session_name"] = json!(session);
+    agent["model"] = json!(model);
+    agent["effort"] = json!(effort);
+    agent
+}
+
+#[cfg(unix)]
+fn producer_report_nodes(socket: &str, rows: &[(String, String, String, String)]) -> String {
+    let nodes = rows
+        .iter()
+        .map(|(session, window, pane, native_session)| {
+            json!({
+                "socket": socket,
+                "workspace_path": "/ws",
+                "project_name": "demo",
+                "session": session,
+                "window_index": 1,
+                "window_name": window,
+                "pane_id": pane,
+                "name": window,
+                "provider": "pi",
+                "state": "idle",
+                "activity": "idle",
+                "session_name": native_session,
+                "health": "normal",
+                "background_tasks": {"running": 0},
+                "evidence": {"method": "pi_activity_channel", "detail": "channel"}
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&json!({
+        "schema_version": 1,
+        "socket": socket,
+        "sampled_at": "2026-01-01T00:00:00Z",
+        "nodes": nodes
+    }))
+    .unwrap()
+}
+
+#[cfg(unix)]
+fn write_nodeprobe_reports(dir: &Path, reports: &[(String, String)]) -> (PathBuf, PathBuf) {
+    std::fs::create_dir_all(dir).unwrap();
+    let log = dir.join("calls.log");
+    let mut body = format!(
+        "printf '%s\\t%s\\n' \"$1\" \"$2\" >> {}\ncase \"$2\" in\n",
+        shell_quote_for_status_test(&log.to_string_lossy())
+    );
+    for (index, (endpoint, report)) in reports.iter().enumerate() {
+        let path = dir.join(format!("report-{index}.json"));
+        std::fs::write(&path, report).unwrap();
+        body.push_str(&format!(
+            "  {} ) cat {} ;;\n",
+            shell_quote_for_status_test(endpoint),
+            shell_quote_for_status_test(&path.to_string_lossy())
+        ));
+    }
+    body.push_str("  *) exit 2 ;;\nesac\n");
+    (write_nodeprobe(dir, &body), log)
+}
+
+fn shell_quote_for_status_test(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn logged_probe_calls(log: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let (flag, endpoint) = line.split_once('\t').expect("probe call fields");
+            (flag.to_string(), endpoint.to_string())
+        })
+        .collect()
+}
+
+fn human_text(result: CmdResult) -> String {
+    match result.output {
+        CmdOutput::Human(text) => text,
+        other => panic!("expected human status output, got {other:?}"),
+    }
+}
+
+fn legacy_human_node(node: &Value) -> String {
+    let text = |key: &str| {
+        node.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("null")
+            .to_string()
+    };
+    format!(
+        "name: {} provider: {} model: {} effort: {} runtime_status: {} activity: {} health: {} session_name: {} tmux_command: {}",
+        text("name"),
+        text("provider"),
+        text("model"),
+        text("effort"),
+        text("runtime_status"),
+        text("activity"),
+        text("health"),
+        text("session_name"),
+        text("tmux_command")
+    )
+}
+
+fn human_token_count(text: &str, expected: &str) -> usize {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|token| token.eq_ignore_ascii_case(expected))
+        .count()
+}
+
+fn status_table_header(text: &str) -> Option<&str> {
+    text.lines().find(|line| {
+        !line.trim_start().starts_with("name:")
+            && [
+                "name",
+                "provider",
+                "model",
+                "effort",
+                "activity",
+                "health",
+                "session_name",
+            ]
+            .iter()
+            .all(|field| human_token_count(line, field) == 1)
+            && human_token_count(line, "runtime_status") + human_token_count(line, "runtime")
+                == 1
+            && human_token_count(line, "tmux_command") + human_token_count(line, "attach") == 1
+    })
+}
+
 fn status_args(ws: &Path, json_out: bool, agent: Option<&str>, team: Option<&str>) -> StatusArgs {
     StatusArgs {
         agent: agent.map(str::to_string),
@@ -210,6 +369,471 @@ fn cmd_status_dedupes_same_endpoint_across_agents() {
     assert_eq!(nodes.len(), 2);
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
     let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn issue271_status_human_dedupes_six_nodes_and_preserves_json() {
+    let ws = guarded_brief_workspace("issue271-six");
+    let endpoint = "/tmp/271 shared.sock";
+    let session = "team-271";
+    let mut agents = serde_json::Map::new();
+    let mut rows = Vec::new();
+    for index in 1..=6 {
+        let name = format!("worker-{index}");
+        let pane = format!("%{}", index + 20);
+        agents.insert(
+            name.clone(),
+            status_agent(
+                &name,
+                &pane,
+                endpoint,
+                session,
+                &format!("gpt-5.6-luna-{index}"),
+                if index % 2 == 0 { "high" } else { "max" },
+            ),
+        );
+        rows.push((
+            session.to_string(),
+            name.clone(),
+            pane,
+            format!("native-{name}"),
+        ));
+    }
+    write_state(
+        &ws,
+        &json!({
+            "session_name": session,
+            "tmux_endpoint": endpoint,
+            "active_team_key": "demo",
+            "agents": agents
+        }),
+    );
+    let report = producer_report_nodes(endpoint, &rows);
+    let (bin, log) = write_nodeprobe_reports(
+        &ws.join("probe"),
+        &[(endpoint.to_string(), report)],
+    );
+    let nodes = status_port::with_test_nodeprobe(bin.clone(), || {
+        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("JSON status"))
+    });
+    assert_eq!(nodes.len(), 6);
+    for node in &nodes {
+        assert_eq!(node.as_object().unwrap().len(), 9);
+        for key in [
+            "name",
+            "provider",
+            "model",
+            "effort",
+            "runtime_status",
+            "activity",
+            "health",
+            "session_name",
+            "tmux_command",
+        ] {
+            assert!(node.get(key).is_some(), "missing JSON field {key}");
+        }
+        let name = node["name"].as_str().unwrap();
+        let index = name.strip_prefix("worker-").unwrap().parse::<u32>().unwrap();
+        let pane = index + 20;
+        assert_eq!(node["provider"], "pi");
+        assert_eq!(node["model"], format!("gpt-5.6-luna-{index}"));
+        assert_eq!(node["effort"], if index % 2 == 0 { "high" } else { "max" });
+        assert_eq!(node["runtime_status"], "running");
+        assert_eq!(node["activity"], "idle");
+        assert_eq!(node["health"], "normal");
+        assert_eq!(node["session_name"], format!("native-{name}"));
+        let target = format!("{session}:{name}.%{pane}");
+        assert_eq!(
+            node["tmux_command"],
+            json!(format!(
+                "tmux -S {} attach -t {}",
+                shell_quote_for_status_test(endpoint),
+                shell_quote_for_status_test(&target)
+            ))
+        );
+    }
+    let before = nodes
+        .iter()
+        .map(legacy_human_node)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let human = status_port::with_test_nodeprobe(bin, || {
+        human_text(cmd_status(&status_args(&ws, false, None, None)).expect("human status"))
+    });
+    let prefix = format!("tmux -S {}", shell_quote_for_status_test(endpoint));
+    let prefix_count = human.matches(&prefix).count();
+    let labels_once = status_table_header(&human).is_some();
+    let targets_once = nodes.iter().all(|node| {
+        let name = node["name"].as_str().unwrap();
+        let index = name.strip_prefix("worker-").unwrap().parse::<u32>().unwrap();
+        let pane = index + 20;
+        let target = format!("{name}.%{pane}");
+        let rows = human.lines().filter(|line| line.contains(&target)).collect::<Vec<_>>();
+        rows.len() == 1 && rows[0].contains("1:")
+    });
+    let calls = logged_probe_calls(&log);
+    assert_eq!(calls.len(), 2, "one native query per status invocation: {calls:?}");
+    assert!(
+        calls.iter().all(|(flag, called)| flag == "-S" && called == endpoint),
+        "{calls:?}"
+    );
+    assert!(
+        prefix_count == 1 && labels_once && targets_once && human.len() * 4 < before.len() * 3,
+        "six-node human output must dedupe shared text and retain targets; prefix_count={prefix_count}, labels_once={labels_once}, targets_once={targets_once}, before_bytes={}, after_bytes={}\n{human}",
+        before.len(),
+        human.len()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn issue271_status_human_groups_socket_session_pairs_without_cross_routing() {
+    let ws = guarded_brief_workspace("issue271-groups");
+    let endpoint_a = "/tmp/271 socket 'α.sock";
+    let endpoint_b = "shared named socket";
+    let session_red = "red team α";
+    let session_blue = "blue's team";
+    let specs = [
+        ("a-red", endpoint_a, session_red, "%31", 1),
+        ("b-red", endpoint_a, session_red, "%32", 1),
+        ("c-other", endpoint_a, session_blue, "%33", 2),
+        ("d-named", endpoint_b, session_red, "%34", 3),
+        ("e-named", endpoint_b, session_red, "%35", 3),
+    ];
+    let mut agents = serde_json::Map::new();
+    let mut rows_a = Vec::new();
+    let mut rows_b = Vec::new();
+    for &(name, endpoint, session, pane, _) in &specs {
+        agents.insert(
+            name.to_string(),
+            status_agent(name, pane, endpoint, session, "model", "high"),
+        );
+        let row = (
+            session.to_string(),
+            name.to_string(),
+            pane.to_string(),
+            format!("native-{name}"),
+        );
+        if endpoint == endpoint_a {
+            rows_a.push(row);
+        } else {
+            rows_b.push(row);
+        }
+    }
+    write_state(
+        &ws,
+        &json!({
+            "session_name": session_red,
+            "tmux_endpoint": endpoint_a,
+            "active_team_key": "demo",
+            "agents": agents
+        }),
+    );
+    let reports = [
+        (
+            endpoint_a.to_string(),
+            producer_report_nodes(endpoint_a, &rows_a),
+        ),
+        (
+            endpoint_b.to_string(),
+            producer_report_nodes(endpoint_b, &rows_b),
+        ),
+    ];
+    let (bin, log) = write_nodeprobe_reports(&ws.join("probe"), &reports);
+    let nodes = status_port::with_test_nodeprobe(bin.clone(), || {
+        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("JSON status"))
+    });
+    assert_eq!(nodes.len(), specs.len());
+    for node in &nodes {
+        let name = node["name"].as_str().unwrap();
+        let (_, endpoint, session, pane, _) =
+            *specs.iter().find(|spec| spec.0 == name).unwrap();
+        let target = format!("{session}:{name}.{pane}");
+        assert_eq!(
+            node["tmux_command"],
+            json!(format!(
+                "tmux {} {} attach -t {}",
+                if Path::new(endpoint).is_absolute() { "-S" } else { "-L" },
+                shell_quote_for_status_test(endpoint),
+                shell_quote_for_status_test(&target)
+            ))
+        );
+    }
+    let human = status_port::with_test_nodeprobe(bin, || {
+        human_text(cmd_status(&status_args(&ws, false, None, None)).expect("human status"))
+    });
+    let abs_prefix = format!("tmux -S {}", shell_quote_for_status_test(endpoint_a));
+    let named_prefix = format!("tmux -L {}", shell_quote_for_status_test(endpoint_b));
+    let calls = logged_probe_calls(&log);
+    assert_eq!(calls.len(), 4, "one probe per endpoint per invocation: {calls:?}");
+    assert_eq!(calls.iter().filter(|(_, value)| value == endpoint_a).count(), 2);
+    assert_eq!(calls.iter().filter(|(_, value)| value == endpoint_b).count(), 2);
+    assert!(calls.iter().all(|(flag, value)| {
+        (value == endpoint_a && flag == "-S") || (value == endpoint_b && flag == "-L")
+    }));
+    let expected_groups = [
+        ("a-red", "%31", 1),
+        ("b-red", "%32", 1),
+        ("c-other", "%33", 2),
+        ("d-named", "%34", 3),
+        ("e-named", "%35", 3),
+    ];
+    let rows_routed = expected_groups.iter().all(|(name, pane, group)| {
+        let target = format!("{name}.{pane}");
+        let matching = human
+            .lines()
+            .filter(|line| line.contains(&target))
+            .collect::<Vec<_>>();
+        matching.len() == 1 && matching[0].contains(&format!("{group}:"))
+    });
+    assert!(
+        human.matches(&abs_prefix).count() == 2
+            && human.matches(&named_prefix).count() == 1
+            && human.matches(session_red).count() == 2
+            && human.matches("blue").count() == 1
+            && rows_routed,
+        "each (endpoint, session) needs one stable group and its own targets; abs={}, named={}, red={}, blue={}, rows_routed={rows_routed}\n{human}",
+        human.matches(&abs_prefix).count(),
+        human.matches(&named_prefix).count(),
+        human.matches(session_red).count(),
+        human.matches("blue").count()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn issue271_status_single_empty_unknown_and_stopped_compatibility() {
+    let endpoint = "/tmp/271-single.sock";
+    let single = guarded_brief_workspace("issue271-single");
+    write_state(
+        &single,
+        &json!({
+            "session_name": "team-single",
+            "tmux_endpoint": endpoint,
+            "agents": {
+                "solo": status_agent(
+                    "solo",
+                    "%7",
+                    endpoint,
+                    "team-single",
+                    "gpt-5.6-luna-xhigh",
+                    "high"
+                )
+            }
+        }),
+    );
+    let single_report = producer_report_nodes(
+        endpoint,
+        &[(
+            "team-single".to_string(),
+            "solo".to_string(),
+            "%7".to_string(),
+            "pi-native-solo".to_string(),
+        )],
+    );
+    let (single_bin, single_log) =
+        write_nodeprobe_reports(&single.join("probe"), &[(endpoint.to_string(), single_report)]);
+    let single_nodes = status_port::with_test_nodeprobe(single_bin.clone(), || {
+        json_nodes(cmd_status(&status_args(&single, true, None, None)).expect("single JSON"))
+    });
+    let single_human = status_port::with_test_nodeprobe(single_bin, || {
+        human_text(cmd_status(&status_args(&single, false, None, None)).expect("single human"))
+    });
+    assert_eq!(single_nodes.len(), 1);
+    assert_eq!(single_human, legacy_human_node(&single_nodes[0]));
+    assert_eq!(logged_probe_calls(&single_log).len(), 2);
+    let unknown_agent = cmd_status(&status_args(&single, false, Some("ghost"), None))
+        .unwrap_err()
+        .to_string();
+    assert!(unknown_agent.contains("unknown agent id: ghost"), "{unknown_agent}");
+
+    let empty = guarded_brief_workspace("issue271-empty");
+    write_state(&empty, &production_state(json!({})));
+    assert!(
+        human_text(cmd_status(&status_args(&empty, false, None, None)).expect("empty")).is_empty()
+    );
+
+    let mixed = guarded_brief_workspace("issue271-mixed");
+    let mut agents = serde_json::Map::new();
+    agents.insert(
+        "worker".to_string(),
+        status_agent("worker", "%7", endpoint, "team-mixed", "gpt-worker", "max"),
+    );
+    agents.insert(
+        "unknown".to_string(),
+        status_agent("unknown", "%8", endpoint, "team-mixed", "gpt-unknown", "high"),
+    );
+    let mut stopped = status_agent(
+        "stopped",
+        "%9",
+        endpoint,
+        "team-mixed",
+        "gpt-stopped",
+        "low",
+    );
+    stopped["status"] = json!("stopped");
+    agents.insert("stopped".to_string(), stopped);
+    write_state(
+        &mixed,
+        &json!({
+            "session_name": "team-mixed",
+            "tmux_endpoint": endpoint,
+            "agents": agents
+        }),
+    );
+    let mixed_report = producer_report_nodes(
+        endpoint,
+        &[(
+            "team-mixed".to_string(),
+            "worker".to_string(),
+            "%7".to_string(),
+            "pi-native-worker".to_string(),
+        )],
+    );
+    let (mixed_bin, mixed_log) =
+        write_nodeprobe_reports(&mixed.join("probe"), &[(endpoint.to_string(), mixed_report)]);
+    let mixed_nodes = status_port::with_test_nodeprobe(mixed_bin.clone(), || {
+        json_nodes(cmd_status(&status_args(&mixed, true, None, None)).expect("mixed JSON"))
+    });
+    let node = |name: &str| mixed_nodes.iter().find(|node| node["name"] == name).unwrap();
+    assert_eq!(node("worker")["runtime_status"], "running");
+    assert_eq!(node("worker")["session_name"], "pi-native-worker");
+    assert_eq!(node("unknown")["runtime_status"], "unknown");
+    assert_eq!(node("unknown")["model"], "gpt-unknown");
+    assert_eq!(node("unknown")["effort"], "high");
+    assert!(node("unknown")["tmux_command"].is_null());
+    assert!(node("unknown")["session_name"].is_null());
+    assert_eq!(node("stopped")["runtime_status"], "stopped");
+    assert_eq!(node("stopped")["model"], "gpt-stopped");
+    assert_eq!(node("stopped")["effort"], "low");
+    assert!(node("stopped")["tmux_command"].is_null());
+    let mixed_human = status_port::with_test_nodeprobe(mixed_bin.clone(), || {
+        human_text(cmd_status(&status_args(&mixed, false, None, None)).expect("mixed human"))
+    });
+    let agent_human = status_port::with_test_nodeprobe(mixed_bin, || {
+        human_text(
+            cmd_status(&status_args(&mixed, false, Some("worker"), None))
+                .expect("status AGENT"),
+        )
+    });
+    assert_eq!(agent_human, legacy_human_node(node("worker")));
+    let calls = logged_probe_calls(&mixed_log);
+    assert_eq!(calls.len(), 3, "one native query per status invocation");
+    assert!(
+        status_table_header(&mixed_human).is_some()
+            && mixed_human
+                .matches(&format!("tmux -S {}", shell_quote_for_status_test(endpoint)))
+                .count()
+                == 1,
+        "mixed output must retain one shared header and only the observed worker target:\n{mixed_human}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial(status_brief)]
+fn issue271_status_human_escapes_fields_and_quotes_shared_template() {
+    let ws = guarded_brief_workspace("issue271-escape");
+    let endpoint = "/tmp/271 space '雪.sock";
+    let session = "team '雪";
+    let window_a = "win '甲";
+    let window_b = "win β";
+    let mut agent_a = status_agent(
+        "node-a",
+        "%51",
+        endpoint,
+        session,
+        "gpt\tα\nmax",
+        "xhigh\nhigh",
+    );
+    agent_a["window"] = json!(window_a);
+    let mut agent_b = status_agent(
+        "node-b",
+        "%52",
+        endpoint,
+        session,
+        "grok\tβ\nxhigh",
+        "high\tmax\nlow",
+    );
+    agent_b["window"] = json!(window_b);
+    write_state(
+        &ws,
+        &json!({
+            "session_name": session,
+            "tmux_endpoint": endpoint,
+            "agents": {"node-a": agent_a, "node-b": agent_b}
+        }),
+    );
+    let report = producer_report_nodes(
+        endpoint,
+        &[
+            (
+                session.to_string(),
+                window_a.to_string(),
+                "%51".to_string(),
+                "pi\tα\nchannel".to_string(),
+            ),
+            (
+                session.to_string(),
+                window_b.to_string(),
+                "%52".to_string(),
+                "pi β native".to_string(),
+            ),
+        ],
+    );
+    let (bin, log) = write_nodeprobe_reports(
+        &ws.join("probe"),
+        &[(endpoint.to_string(), report)],
+    );
+    let nodes = status_port::with_test_nodeprobe(bin.clone(), || {
+        json_nodes(cmd_status(&status_args(&ws, true, None, None)).expect("JSON status"))
+    });
+    let node_a = nodes.iter().find(|node| node["name"] == "node-a").unwrap();
+    assert_eq!(node_a["model"], "gpt\tα\nmax");
+    assert_eq!(node_a["effort"], "xhigh\nhigh");
+    assert_eq!(node_a["session_name"], "pi\tα\nchannel");
+    let target_a = format!("{session}:{window_a}.%51");
+    assert_eq!(
+        node_a["tmux_command"],
+        json!(format!(
+            "tmux -S {} attach -t {}",
+            shell_quote_for_status_test(endpoint),
+            shell_quote_for_status_test(&target_a)
+        ))
+    );
+    let human = status_port::with_test_nodeprobe(bin, || {
+        human_text(cmd_status(&status_args(&ws, false, None, None)).expect("human status"))
+    });
+    let row_a = human
+        .lines()
+        .find(|line| line.contains("node-a"))
+        .unwrap_or("");
+    let row_b = human
+        .lines()
+        .find(|line| line.contains("node-b"))
+        .unwrap_or("");
+    let calls = logged_probe_calls(&log);
+    assert_eq!(calls.len(), 2, "one native query per status invocation");
+    assert!(
+        human
+            .matches(&format!("tmux -S {}", shell_quote_for_status_test(endpoint)))
+            .count()
+            == 1
+            && row_a.contains("gpt\\tα\\nmax")
+            && row_a.contains("xhigh\\nhigh")
+            && row_a.contains("pi\\tα\\nchannel")
+            && row_a.contains("win '甲")
+            && row_a.contains("%51")
+            && row_b.contains("grok\\tβ\\nxhigh")
+            && row_b.contains("high\\tmax\\nlow")
+            && row_a.matches("node-a").count() == 1
+            && row_b.matches("node-b").count() == 1,
+        "human fields must be escaped without splitting node rows and the shared template must quote its context:\n{human}"
+    );
 }
 
 #[test]
