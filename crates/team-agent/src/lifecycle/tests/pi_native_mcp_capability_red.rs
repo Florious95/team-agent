@@ -235,10 +235,16 @@ esac
     let alias = registration["name"]
         .as_str()
         .expect("native registration name");
-    assert!(
-        alias.starts_with("team_orchestrator_") && !alias.contains('-') && !alias.contains('/'),
-        "native server must use a safe Team-owned alias: {alias:?}"
+    let alias_id = alias
+        .strip_prefix("team_")
+        .expect("native server alias must be Team-owned");
+    assert_eq!(
+        alias_id.len(),
+        32,
+        "Team alias retains UUID entropy: {alias:?}"
     );
+    assert!(alias_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(!alias.contains('-') && !alias.contains('/'));
     let native_config = &registration["config"];
     assert_eq!(native_config["command"], json!(candidate.to_string_lossy()));
     assert_eq!(native_config["args"], json!(args));
