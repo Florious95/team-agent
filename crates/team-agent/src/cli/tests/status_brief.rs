@@ -129,6 +129,7 @@ fn producer_report_nodes(socket: &str, rows: &[(String, String, String, String)]
 
 #[cfg(unix)]
 fn write_nodeprobe_reports(dir: &Path, reports: &[(String, String)]) -> (PathBuf, PathBuf) {
+    std::fs::create_dir_all(dir).unwrap();
     let log = dir.join("calls.log");
     let mut body = format!(
         "printf '%s\\t%s\\n' \"$1\" \"$2\" >> {}\ncase \"$2\" in\n",
