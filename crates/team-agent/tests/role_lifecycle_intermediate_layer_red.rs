@@ -20,14 +20,10 @@ impl Shims {
         let capture_dir = ws.path().join(".role-lifecycle-launch");
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&capture_dir).unwrap();
-        let adapter = dir.join("pi-mcp-adapter");
-        fs::create_dir_all(&adapter).unwrap();
-        fs::write(adapter.join("package.json"), r#"{"name":"pi-mcp-adapter","version":"1.0.0","pi":{"extensions":["./index.ts"]}}"#).unwrap();
-        fs::write(adapter.join("index.ts"), "// hermetic adapter\n").unwrap();
         let binary = quote(&framework::ta_binary().to_string_lossy());
         let pi_target = dir.join("pi-test-target");
         executable(&pi_target, &format!(
-            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n--version) exit 0;;\n--list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\nopenai-codex gpt-5.6-luna\\n'; exit 0;;\nlist) printf 'npm:pi-mcp-adapter\\n%s\\n' {}; exit 0;;\nesac\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' pi \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", quote(&adapter.to_string_lossy()), binary));
+            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n--version) exit 0;;\n--list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\nopenai-codex gpt-5.6-luna\\n'; exit 0;;\nlist) exit 64;;\nesac\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' pi \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));
         symlink(&pi_target, dir.join("pi")).unwrap();
         executable(&dir.join("codex"), &format!(
             "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' codex \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\n[ ! -f \"${{TEAM_AGENT_WORKSPACE}}/.role-lifecycle-fail-launch\" ] || exit 73\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n", binary));

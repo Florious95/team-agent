@@ -280,17 +280,10 @@ fn write_fake_pi(root: &Path) -> (PathBuf, String) {
     use std::os::unix::fs::{symlink, PermissionsExt};
     let bin = root.join("pi-bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let package = root.join("pi-adapter");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("package.json"), r#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#).unwrap();
-    std::fs::write(package.join("index.ts"), "export default function(pi: any) {}\n").unwrap();
     let real_pi = bin.join("real-pi");
     std::fs::write(
         &real_pi,
-        format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.84.4 ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\n  *) exec cat ;;\nesac\n",
-            package.display()
-        ),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.84.4 ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) exit 64 ;;\n  *) exec cat ;;\nesac\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&real_pi).unwrap().permissions();

@@ -47,25 +47,14 @@ impl PathEnvGuard {
     fn with_fake_pi(root: &Path) -> Self {
         let wrapper_bin = root.join("bin/wrapper");
         let real_bin = root.join("bin/real");
-        let package_root = root.join("node_modules/pi-mcp-adapter");
         fs::create_dir_all(&wrapper_bin).expect("create fake wrapper bin");
         fs::create_dir_all(&real_bin).expect("create fake real bin");
-        fs::create_dir_all(&package_root).expect("create fake adapter package");
         let wrapper = wrapper_bin.join("pi");
-        let wrapper_script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n--version) echo 0.87.1 ;;\n--list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\nlist) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\nesac\nexit 0\n",
-            package_root.display()
-        );
+        let wrapper_script = "#!/bin/sh\ncase \"$1\" in\n--version) echo 0.87.1 ;;\n--list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\nlist) exit 64 ;;\nesac\nexit 0\n";
         fs::write(&wrapper, wrapper_script).expect("write offline Pi wrapper");
         let real = real_bin.join("pi");
         fs::write(&real, "#!/bin/sh\necho 0.87.1\nexit 0\n")
             .expect("write offline Pi real-binary stand-in");
-        let package =
-            json!({"name":"pi-mcp-adapter","version":"0.1.0","pi":{"extensions":["./index.ts"]}});
-        fs::write(package_root.join("package.json"), package.to_string())
-            .expect("write offline adapter package metadata");
-        fs::write(package_root.join("index.ts"), "export {};\n")
-            .expect("write offline adapter extension entry");
         for pi in [&wrapper, &real] {
             let mut permissions = fs::metadata(pi).expect("fake Pi metadata").permissions();
             permissions.set_mode(0o755);

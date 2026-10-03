@@ -203,6 +203,34 @@ esac
         1,
         "one owned native server registration is expected"
     );
+    let expected_runtime_tools = BTreeSet::from(REQUIRED_TOOLS.map(|tool| {
+        format!(
+            "mcp__{}__{tool}",
+            registrations[0]["name"].as_str().unwrap()
+        )
+    }));
+    let runtime_tools = native_receipt["activeTools"]
+        .as_array()
+        .expect("native Pi consumer exposes active tools")
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(runtime_tools, expected_runtime_tools);
+    assert_eq!(
+        native_receipt["expectedTools"]
+            .as_array()
+            .expect("host confirms native binding tools")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        expected_runtime_tools,
+    );
+    let wire_prompt = native_receipt["wirePrompt"]
+        .as_str()
+        .expect("Pi wrapper installs an actual tool wire binding");
+    assert!(REQUIRED_TOOLS.iter().all(|tool| wire_prompt.contains(tool)));
     let registration = &registrations[0];
     let alias = registration["name"]
         .as_str()
