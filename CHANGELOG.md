@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.107
+
+- Use Pi's native session-only MCP registration instead of requiring a named adapter package during executable/model validation.
+- Bind the three Team MCP operations to the observed native or public-bridge tool surface, with owned readiness receipts and fail-closed shutdown when tools remain unavailable.
+- Keep explicit Pi MCP disable settings respected; native support requires an enabled MCP consumer. Existing public-bridge compatibility is capability-based, not package-name-based.
+
 ## 0.5.106
 
 - Preserve the team session when stopping its last worker; scoped shutdown retains generation-bound process ownership.
