@@ -58,8 +58,9 @@ fn native_pi_without_adapter_registers_and_serves_all_team_tools() {
 fn native_pi_without_adapter_registers_and_serves_all_team_tools_body() {
     let hermetic = HermeticTestEnv::enter("pi-native-mcp-n1");
     let system_path = std::env::var_os("PATH").expect("test PATH");
-    let bun = executable_on_path("bun", &system_path)
-        .expect("N1 fixture requires the preflight-verified Bun TypeScript runtime");
+    let runner = executable_on_path("bun", &system_path)
+        .or_else(|| executable_on_path("node", &system_path))
+        .expect("N1 fixture requires Bun or Node.js (>=22) runtime");
     let root = hermetic.workspace("native-pi");
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).expect("create fake Pi bin");
@@ -179,7 +180,7 @@ esac
         .expect("create registration receipt directory");
     let host_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/lifecycle/tests/fixtures/pi_native_mcp_host.mjs");
-    let host = Command::new(&bun)
+    let host = Command::new(&runner)
         .arg(host_fixture)
         .arg(&seat.wrapper)
         .arg(&receipt_path)
