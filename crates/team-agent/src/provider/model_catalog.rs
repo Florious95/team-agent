@@ -647,4 +647,35 @@ mod tests {
         assert!(!model_matches(&row, "LUNA absent"));
         assert!(model_matches(&row, "  "));
     }
+
+    #[test]
+    fn frozen_cursor_catalog_skips_only_its_native_trailing_tip() {
+        let frozen = include_bytes!("testdata/cursor-list-models-native.stdout");
+        let records = parse_cursor_catalog(frozen).unwrap();
+        let low = records.iter().find(|row| row.id == "gpt-5.6-luna-low").unwrap();
+        assert_eq!(low.provider.as_str(), "cursor_agent");
+        assert_eq!(low.vendor.as_str(), "gpt");
+        assert_eq!(low.display_name, "GPT-5.6 Luna 1M Low (current)");
+        assert_eq!(low.default, Some(false));
+        assert!(low.aliases.is_empty());
+        let xhigh = records.iter().find(|row| row.id == "gpt-5.6-luna-xhigh").unwrap();
+        assert_eq!(xhigh.id.as_str(), "gpt-5.6-luna-xhigh");
+        assert_eq!(xhigh.display_name, "GPT-5.6 Luna 1M Extra High");
+        let auto = records.iter().find(|row| row.id == "auto").unwrap();
+        assert_eq!(auto.default, Some(true));
+
+        let text = std::str::from_utf8(frozen).unwrap();
+        let without_tip = text.split_once("\nTip: use --model ").unwrap().0;
+        assert_eq!(parse_cursor_catalog(without_tip.as_bytes()).unwrap(), parse_cursor_catalog(frozen).unwrap());
+    }
+
+    #[test]
+    fn cursor_tip_compatibility_keeps_fail_closed_row_validation() {
+        let duplicate = b"Available models\na - A\na - A\n";
+        assert!(matches!(parse_cursor_catalog(duplicate), Err(CatalogError::DuplicateIdentity(_))));
+        assert!(matches!(parse_cursor_catalog(b"Available models\n"), Err(CatalogError::Empty)));
+        assert!(matches!(parse_cursor_catalog(&[b'A', 0xff]), Err(CatalogError::InvalidUtf8)));
+        assert!(matches!(parse_cursor_catalog(b"Available models\na - A\nnot a model row\n"), Err(CatalogError::Malformed)));
+        assert!(matches!(parse_cursor_catalog(b"Available models\na - A\nTip: use --model a to switch.\nunexpected tail\n"), Err(CatalogError::Malformed)));
+    }
 }
