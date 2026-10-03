@@ -1217,7 +1217,7 @@ mod tests {
         );
         assert_eq!(
             crate::cli::spec::command_spec("models").unwrap().usage,
-            "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code] [QUERY|--search TEXT] [--json]"
+            "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok] [QUERY|--search TEXT] [--json]"
         );
     }
 
