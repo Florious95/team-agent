@@ -280,17 +280,10 @@ fn write_fake_pi(root: &Path) -> (PathBuf, String) {
     use std::os::unix::fs::{symlink, PermissionsExt};
     let bin = root.join("pi-bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let package = root.join("pi-adapter");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("package.json"), r#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#).unwrap();
-    std::fs::write(package.join("index.ts"), "export default function(pi: any) {}\n").unwrap();
     let real_pi = bin.join("real-pi");
     std::fs::write(
         &real_pi,
-        format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.84.4 ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\n  *) exec cat ;;\nesac\n",
-            package.display()
-        ),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.84.4 ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) exit 64 ;;\n  *) exec cat ;;\nesac\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&real_pi).unwrap().permissions();
@@ -328,10 +321,11 @@ impl Drop for PathGuard {
 fn assert_pi_wrapper_identity(path: &Path, agent_id: &str, team_id: &str) {
     let source = std::fs::read_to_string(path).unwrap();
     assert!(source.contains("\"TEAM_AGENT_ID\""), "wrapper must retain framework-owned agent identity");
-    assert!(source.contains(&format!("\"TEAM_AGENT_ID\": \"{agent_id}\"")), "wrong wrapper agent identity: {}", path.display());
-    assert!(source.contains(&format!("\"TEAM_AGENT_OWNER_TEAM_ID\": \"{team_id}\"")), "wrong wrapper owner team: {}", path.display());
-    assert!(source.contains("\"command\": \"/"), "candidate MCP command must stay absolutely pinned: {}", path.display());
-    assert!(source.contains("name: \"team_orchestrator\""), "runtime wrapper lost the team_orchestrator server entry");
+    assert!(source.contains(&format!("\"TEAM_AGENT_ID\":\"{agent_id}\"")), "wrong wrapper agent identity: {}", path.display());
+    assert!(source.contains(&format!("\"TEAM_AGENT_OWNER_TEAM_ID\":\"{team_id}\"")), "wrong wrapper owner team: {}", path.display());
+    assert!(source.contains("\"command\":\"/"), "candidate MCP command must stay absolutely pinned: {}", path.display());
+    assert!(source.contains("\"includeTools\":["), "runtime wrapper lost the Team tool allowlist");
+    assert!(source.contains("pi.registerMcpServer(alias"), "runtime wrapper must use the native registration API");
 }
 
 fn write_pi_runtime_spec(root: &Path, team_id: &str) -> PathBuf {

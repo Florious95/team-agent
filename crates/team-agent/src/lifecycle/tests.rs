@@ -84,6 +84,7 @@ mod pi_dual_entry_red;
 mod pi_executable_mcp_red;
 mod pi_fork_session_inheritance_red;
 mod pi_lifecycle_doctor_red;
+mod pi_native_mcp_capability_red;
 mod pi_session_delivery_red;
 mod quick_start_worker_readiness_red;
 mod realmachine_clusters_1_6_red;

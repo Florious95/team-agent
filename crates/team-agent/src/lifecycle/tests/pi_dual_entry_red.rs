@@ -371,16 +371,11 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
 
     let pi_provider_root = hermetic.workspace("pi-add-provider");
     let pi_bin = pi_provider_root.join("bin");
-    let pi_package = pi_provider_root.join("pi-mcp-adapter");
     std::fs::create_dir_all(&pi_bin).expect("create Pi test bin");
-    std::fs::create_dir_all(&pi_package).expect("create Pi test adapter");
     let pi_real = pi_provider_root.join("pi-cli");
     std::fs::write(
         &pi_real,
-        format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) printf '0.84.4\\n' ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) printf 'npm:pi-mcp-adapter\\n{}\\n' ;;\n  *) exit 64 ;;\nesac\n",
-            pi_package.display()
-        ),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) printf '0.84.4\\n' ;;\n  --list-models) printf 'provider model\\nteam-agent qwen3.8-27b\\n' ;;\n  list) exit 64 ;;\n  *) exit 64 ;;\nesac\n",
     )
     .expect("write protocol-capable Pi test executable");
     std::fs::set_permissions(
@@ -389,16 +384,6 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     )
     .expect("make Pi test executable");
     std::os::unix::fs::symlink(&pi_real, pi_bin.join("pi")).expect("link Pi test executable");
-    std::fs::write(
-        pi_package.join("package.json"),
-        br#"{"name":"pi-mcp-adapter","version":"2.30.0","pi":{"extensions":["./index.ts"]}}"#,
-    )
-    .expect("write Pi test adapter package");
-    std::fs::write(
-        pi_package.join("index.ts"),
-        b"export const createMcpAdapter = () => {};\n",
-    )
-    .expect("write Pi test adapter entry");
     let _pi_path = EnvVarGuard::set("PATH", pi_bin.as_os_str());
     let pi_success_role = "---\nname: mate\nrole: Pi Dynamic Worker\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\n\ndynamic pi\n";
     let (pi_success_team, pi_success_role_path) =

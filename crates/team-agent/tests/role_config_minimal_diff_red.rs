@@ -27,20 +27,9 @@ impl ProviderShims {
         fs::create_dir_all(ws.path().join(".role-config-launch"))
             .expect("create launch capture directory");
         let binary = shell_quote(&framework::ta_binary().to_string_lossy());
-        let adapter = dir.join("pi-mcp-adapter");
-        fs::create_dir_all(&adapter).expect("create fake Pi adapter package");
-        fs::write(
-            adapter.join("package.json"),
-            r#"{"name":"pi-mcp-adapter","version":"1.0.0","pi":{"extensions":["./index.ts"]}}"#,
-        )
-        .expect("write fake Pi adapter metadata");
-        fs::write(adapter.join("index.ts"), "// isolated test adapter\n")
-            .expect("write fake Pi adapter entry");
-
         let pi_target = dir.join("pi-test-target");
         let pi_script = format!(
-            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  --version) echo 'pi-test-target 1.0.0'; exit 0 ;;\n  --list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\n'; exit 0 ;;\n  list) printf 'npm:pi-mcp-adapter\\n%s\\n' {}; exit 0 ;;\nesac\nif [ -z \"${{TEAM_AGENT_AGENT_ID:-}}\" ] || [ -z \"${{TEAM_AGENT_WORKSPACE:-}}\" ]; then exit 0; fi\nprintf '%s\\0' 'pi' \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-config-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n",
-            shell_quote(&adapter.to_string_lossy()),
+            "#!/bin/sh\nset -eu\ncase \"${{1:-}}\" in\n  --version) echo 'pi-test-target 1.0.0'; exit 0 ;;\n  --list-models) printf 'provider model\\nopenai-codex gpt-6-luna\\n'; exit 0 ;;\n  list) exit 64 ;;\nesac\nif [ -z \"${{TEAM_AGENT_AGENT_ID:-}}\" ] || [ -z \"${{TEAM_AGENT_WORKSPACE:-}}\" ]; then exit 0; fi\nprintf '%s\\0' 'pi' \"$@\" > \"${{TEAM_AGENT_WORKSPACE}}/.role-config-launch/${{TEAM_AGENT_AGENT_ID}}.argv\"\nexec {} fake-worker --workspace \"${{TEAM_AGENT_WORKSPACE}}\" --agent-id \"${{TEAM_AGENT_AGENT_ID}}\"\n",
             binary,
         );
         write_executable(&pi_target, &pi_script);

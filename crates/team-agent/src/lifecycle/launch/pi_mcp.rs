@@ -1,5 +1,5 @@
 //! ---
-//! purpose: Pi executable/catalog/adapter 验证、per-seat wrapper 与共享启动计划物化
+//! purpose: Pi executable/catalog 验证、原生/公共 MCP 能力注册与共享启动计划物化
 //! contract:
 //!   provides:
 //!     - name: materialize_pi_plan
@@ -29,24 +29,11 @@ use crate::model::enums::{Provider, ProviderEffort};
 use crate::provider::adapters::pi::{build_pi_command_argv, PiCommandRequest, PiSessionSelector};
 use crate::provider::{CommandPlan, McpConfig, ProviderError, SessionId};
 
-const ADAPTER_NAME: &str = "pi-mcp-adapter";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PiExecutableFileType {
     Wrapper,
     Symlink,
     Binary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PiAdapterIdentity {
-    pub package_name: String,
-    pub version: String,
-    pub extension_entry: String,
-    pub package_json: PathBuf,
-    pub index_ts: PathBuf,
-    pub package_json_sha256: String,
-    pub index_ts_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +44,6 @@ pub(crate) struct PiExecutableChain {
     pub real_binary: PathBuf,
     pub pi_version: String,
     pub catalog_sha256: String,
-    pub adapter: PiAdapterIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,54 +169,9 @@ pub(crate) fn verify_started_pi_model(selected: &str, observed: &str) -> Result<
 }
 
 /// ---
-/// purpose: 校验 pi-mcp-adapter 的公共 package/entry 能力
-/// returns: package identity 与可解析的 absolute entry 完整时成功
-/// errors: package 或 entry 缺失时返回 ProviderError；version/digests 仅保留为观测值
-/// ---
-pub(crate) fn validate_pi_adapter_identity(
-    identity: &PiAdapterIdentity,
-) -> Result<(), ProviderError> {
-    if identity.package_name != ADAPTER_NAME
-        || identity.extension_entry.is_empty()
-        || !identity.package_json.is_absolute()
-        || !identity.index_ts.is_absolute()
-    {
-        return Err(ProviderError::Command(
-            "Pi MCP adapter package or extension entry is not resolvable".to_string(),
-        ));
-    }
-    let package_root = identity.package_json.parent().ok_or_else(|| {
-        ProviderError::Command("Pi MCP adapter package root is not resolvable".to_string())
-    })?;
-    let extension_entry = Path::new(&identity.extension_entry);
-    if extension_entry.is_absolute() {
-        return Err(ProviderError::Command(
-            "Pi MCP adapter extension entry must be package-relative".to_string(),
-        ));
-    }
-    let declared_entry =
-        std::fs::canonicalize(package_root.join(extension_entry)).map_err(|error| {
-            ProviderError::Io(format!(
-                "Pi MCP adapter extension entry {}: {error}",
-                identity.index_ts.display()
-            ))
-        })?;
-    let loaded_entry = std::fs::canonicalize(&identity.index_ts)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", identity.index_ts.display())))?;
-    if declared_entry != loaded_entry || !identity.package_json.is_file() {
-        return Err(ProviderError::Command(
-            "Pi MCP adapter package or extension entry is not loadable".to_string(),
-        ));
-    }
-    std::fs::read(&loaded_entry)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", loaded_entry.display())))?;
-    Ok(())
-}
-
-/// ---
-/// purpose: 校验 Pi launch/real path、catalog 与 adapter 公共能力
-/// returns: executable chain 与 capability receipts 完整时成功
-/// errors: 缺路径、catalog receipt 或 adapter capability 时返回 ProviderError
+/// purpose: 校验 Pi launch/real path 与 live catalog；MCP 能力在实际 Pi context 验证
+/// returns: executable chain 与 catalog receipt 完整时成功
+/// errors: 缺路径或 catalog receipt 时返回 ProviderError
 /// ---
 pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<(), ProviderError> {
     if !chain.path_entry.is_absolute()
@@ -253,12 +194,11 @@ pub(crate) fn validate_pi_executable_chain(chain: &PiExecutableChain) -> Result<
             "Pi executable chain does not provide the required public protocol".to_string(),
         ));
     }
-    validate_pi_adapter_identity(&chain.adapter)
+    Ok(())
 }
 
 pub(crate) struct PiWrapperRequest<'a> {
     pub destination: &'a Path,
-    pub adapter: &'a PiAdapterIdentity,
     pub candidate_executable: &'a Path,
     pub mcp_config: &'a McpConfig,
     pub team_id: &'a str,
@@ -301,7 +241,17 @@ fn candidate_from_mcp_config(config: &McpConfig) -> Result<PathBuf, ProviderErro
 }
 
 fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderError> {
-    validate_pi_adapter_identity(request.adapter)?;
+    let allowed = request.include_tools.iter().copied().collect::<BTreeSet<_>>();
+    if allowed.is_empty()
+        || allowed.len() != request.include_tools.len()
+        || allowed
+            .iter()
+            .any(|tool| !["send_message", "report_result", "get_team_status"].contains(tool))
+    {
+        return Err(ProviderError::Command(
+            "Pi MCP tools must be a non-empty subset of the three Team tools".to_string(),
+        ));
+    }
     let configured_candidate = candidate_from_mcp_config(request.mcp_config)?;
     let expected = std::fs::canonicalize(request.candidate_executable)
         .unwrap_or_else(|_| request.candidate_executable.to_path_buf());
@@ -349,63 +299,55 @@ fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderE
         "TEAM_AGENT_OWNER_TEAM_ID".to_string(),
         serde_json::Value::String(request.team_id.to_string()),
     );
-    let definition = serde_json::to_string_pretty(&serde_json::Value::Object(server))
+    let definition = serde_json::to_string(&serde_json::Value::Object(server))
         .map_err(|error| ProviderError::Command(format!("serialize Pi MCP server: {error}")))?;
+    let receipt_root = request
+        .destination
+        .parent()
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            ProviderError::Command("Pi MCP wrapper requires an absolute seat directory".to_string())
+        })?;
+    let receipt_root = serde_json::to_string(&receipt_root.to_string_lossy())
+        .map_err(|error| ProviderError::Command(format!("serialize Pi MCP seat directory: {error}")))?;
     Ok(format!(
-        r#"const MCP_RUNTIME_REGISTER_EVENT = "pi-mcp-adapter:runtime-register:v1";
-
-export default function teamAgentMcp(pi: any) {{
-  let registration: {{ dispose(): Promise<void> }} | undefined;
-
-  pi.on("session_start", () => {{
-    if (registration) return;
-    const request: any = {{
-      version: 1,
-      name: "team_orchestrator",
-      definition: {definition},
-    }};
-    pi.events.emit(MCP_RUNTIME_REGISTER_EVENT, request);
-    if (!request.result) throw new Error("pi-mcp-adapter is not enabled");
-    if (!request.result.ok) throw request.result.error;
-    registration = request.result.registration;
-  }});
-
-  pi.on("session_shutdown", async () => {{
-    const current = registration;
-    registration = undefined;
-    await current?.dispose();
-  }});
-}}
-"#
+        "const teamMcpDefinition = {definition};\nconst teamMcpReceiptRoot = {receipt_root};\n\n{}",
+        include_str!("pi_mcp_extension.js")
     ))
 }
 
 /// ---
-/// purpose: 静态核对 wrapper 只做 per-seat runtime MCP registration
-/// returns: wrapper 保留 direct Pi 配置且冻结 seat identity 时成功
-/// errors: identity、runtime registration 或 candidate 缺失时返回 ProviderError
+/// purpose: 静态核对 wrapper 使用原生/公共 MCP 能力模板与指定 candidate
+/// returns: 模板完整且 candidate、seat 目录正确时成功
+/// errors: 模板、candidate 或 seat 目录不匹配时返回 ProviderError
 /// ---
 pub(crate) fn validate_pi_wrapper_source(
     source: &str,
-    adapter: &PiAdapterIdentity,
     candidate_executable: &Path,
 ) -> Result<(), ProviderError> {
-    validate_pi_adapter_identity(adapter)?;
-    let candidate = candidate_executable.to_string_lossy();
-    if !source.contains(candidate.as_ref())
-        || !source.contains("pi-mcp-adapter:runtime-register:v1")
-        || !source.contains("session_start")
-        || !source.contains("session_shutdown")
-        || !source.contains("team_orchestrator")
-        || !source.contains("includeTools")
-        || source.contains("createMcpAdapter")
-        || source.contains("directTools")
-        || source.contains("toolPrefix")
-        || source.contains("--mcp-config")
-    {
-        return Err(ProviderError::Command(
-            "Pi wrapper source does not preserve direct Pi plus per-seat runtime MCP".to_string(),
-        ));
+    let invalid = || {
+        ProviderError::Command(
+            "Pi wrapper source is not the owned MCP capability template".to_string(),
+        )
+    };
+    let prefix = source
+        .strip_suffix(include_str!("pi_mcp_extension.js"))
+        .ok_or_else(invalid)?;
+    let (definition, root) = prefix
+        .strip_prefix("const teamMcpDefinition = ")
+        .and_then(|value| value.split_once(";\nconst teamMcpReceiptRoot = "))
+        .ok_or_else(invalid)?;
+    let definition: serde_json::Value = serde_json::from_str(definition).map_err(|_| invalid())?;
+    let command = definition
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(invalid)?;
+    let root: String = serde_json::from_str(root.strip_suffix(";\n\n").ok_or_else(invalid)?)
+        .map_err(|_| invalid())?;
+    let expected = std::fs::canonicalize(candidate_executable)
+        .unwrap_or_else(|_| candidate_executable.to_path_buf());
+    if Path::new(command) != expected || !Path::new(&root).is_absolute() {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -424,7 +366,7 @@ pub(crate) fn write_pi_wrapper_with_publish(
     publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<PathBuf, ProviderError> {
     let source = render_pi_wrapper(&request)?;
-    validate_pi_wrapper_source(&source, request.adapter, request.candidate_executable)?;
+    validate_pi_wrapper_source(&source, request.candidate_executable)?;
     let parent = request.destination.parent().ok_or_else(|| {
         ProviderError::Io("Pi wrapper destination has no parent directory".to_string())
     })?;
@@ -726,63 +668,8 @@ fn command_stdout(executable: &Path, args: &[&str]) -> Result<Vec<u8>, ProviderE
     Ok(output.stdout)
 }
 
-fn discover_pi_adapter(launch_executable: &Path) -> Result<PiAdapterIdentity, ProviderError> {
-    let listing = command_stdout(launch_executable, &["list"])?;
-    let listing = std::str::from_utf8(&listing).map_err(|error| {
-        ProviderError::Command(format!("Pi package list is not UTF-8: {error}"))
-    })?;
-    let mut lines = listing.lines();
-    let mut package_root = None;
-    while let Some(line) = lines.next() {
-        if line.trim() == "npm:pi-mcp-adapter" {
-            package_root = lines
-                .next()
-                .map(str::trim)
-                .filter(|path| Path::new(path).is_absolute())
-                .map(PathBuf::from);
-            break;
-        }
-    }
-    let package_root = package_root.ok_or_else(|| {
-        ProviderError::Command("Pi package list does not resolve npm:pi-mcp-adapter".to_string())
-    })?;
-    let package_json = package_root.join("package.json");
-    let package_bytes = std::fs::read(&package_json)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", package_json.display())))?;
-    let package: serde_json::Value = serde_json::from_slice(&package_bytes)
-        .map_err(|error| ProviderError::Command(format!("{}: {error}", package_json.display())))?;
-    let extension_entry = package
-        .pointer("/pi/extensions")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|entries| entries.iter().find_map(serde_json::Value::as_str))
-        .unwrap_or("")
-        .to_string();
-    let index_ts = package_root.join(extension_entry.trim_start_matches("./"));
-    let index_bytes = std::fs::read(&index_ts)
-        .map_err(|error| ProviderError::Io(format!("{}: {error}", index_ts.display())))?;
-    let identity = PiAdapterIdentity {
-        package_name: package
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        version: package
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        extension_entry,
-        package_json,
-        index_ts,
-        package_json_sha256: sha256(&package_bytes),
-        index_ts_sha256: sha256(&index_bytes),
-    };
-    validate_pi_adapter_identity(&identity)?;
-    Ok(identity)
-}
-
 /// ---
-/// purpose: 从当前 PATH 环境测量 Pi launch/real executable、catalog 与 adapter
+/// purpose: 从当前 PATH 环境测量 Pi launch/real executable 与 live catalog，不检查 Pi packages
 /// returns: 已验证的 chain 与同次 live catalog exact ids
 /// errors: 缺失、命令失败或任一公共 protocol capability 缺失时返回 ProviderError
 /// ---
@@ -829,7 +716,6 @@ pub(crate) fn resolve_pi_executable_chain(
         })?;
     let catalog = command_stdout(&path_entry, &["--list-models"])?;
     let models = parse_pi_list_models_table(&catalog)?;
-    let adapter = discover_pi_adapter(&path_entry)?;
     let chain = PiExecutableChain {
         path_entry: path_entry.clone(),
         path_entry_type,
@@ -837,7 +723,6 @@ pub(crate) fn resolve_pi_executable_chain(
         real_binary,
         pi_version: version,
         catalog_sha256: sha256(&catalog),
-        adapter,
     };
     validate_pi_executable_chain(&chain)?;
     Ok((chain, models))
@@ -906,7 +791,7 @@ fn materialize_pi_plan_with_session(
     request: PiMaterializeRequest<'_>,
     resume: Option<(&SessionId, &Path, &Path)>,
 ) -> Result<CommandPlan, ProviderError> {
-    let (chain, catalog) = resolve_pi_executable_chain()?;
+    let (_chain, catalog) = resolve_pi_executable_chain()?;
     let model = request
         .model
         .map(|model| select_exact_pi_model(&catalog, model))
@@ -954,7 +839,6 @@ fn materialize_pi_plan_with_session(
     let candidate = candidate_from_mcp_config(request.mcp_config)?;
     let wrapper = write_pi_wrapper(PiWrapperRequest {
         destination: &paths.wrapper,
-        adapter: &chain.adapter,
         candidate_executable: &candidate,
         mcp_config: request.mcp_config,
         team_id: request.team_id,

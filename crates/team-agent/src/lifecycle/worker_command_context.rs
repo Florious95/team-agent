@@ -185,26 +185,13 @@ pub(crate) fn compile_worker_system_prompt(
     // C-1 cr verdict / B2 灵魂件 — identity 必须 FIRST(MUST-4 行为层守:空白上下文问
     // "你是谁"必须先答 Team Agent worker 身份)。runtime contract 跟后。
     let send_message = mcp_tool_name(agent.provider, "team_orchestrator", "send_message");
-    let get_team_status = if agent.provider == Provider::Pi {
-        r#"mcp({tool:"team_orchestrator_get_team_status", args:{}})"#.to_string()
-    } else {
-        format!("{}()", mcp_tool_name(agent.provider, "team_orchestrator", "get_team_status"))
-    };
-    let report_result = if agent.provider == Provider::Pi {
-        r#"mcp({tool:"team_orchestrator_report_result", args:{summary:"..."}})"#.to_string()
-    } else {
-        mcp_tool_name(agent.provider, "team_orchestrator", "report_result")
-    };
-    let runtime_contract = if agent.provider == Provider::Pi {
-        pi_runtime_contract_section(&get_team_status)
-    } else {
-        runtime_contract_section(&send_message, &report_result, &get_team_status)
-    };
-    let communication_contract = if agent.provider == Provider::Pi {
-        pi_communication_contract(agent.communication_mode)
-    } else {
-        agent.communication_mode.runtime_contract(&send_message)
-    };
+    let get_team_status = format!(
+        "{}()",
+        mcp_tool_name(agent.provider, "team_orchestrator", "get_team_status")
+    );
+    let report_result = mcp_tool_name(agent.provider, "team_orchestrator", "report_result");
+    let runtime_contract = runtime_contract_section(&send_message, &report_result, &get_team_status);
+    let communication_contract = agent.communication_mode.runtime_contract(&send_message);
     let mut chunks = vec![
         identity_section(agent),
         runtime_contract,
@@ -224,11 +211,9 @@ pub(crate) fn compile_worker_system_prompt(
 pub(crate) fn compile_pi_leader_system_prompt() -> String {
     r#"You are the Team Agent leader for this workspace. Coordinate work through the existing Team Agent MCP server.
 
-Use the Pi MCP proxy call form with server-prefixed tool names, for example:
-mcp({tool:"team_orchestrator_get_team_status", args:{}})
-mcp({tool:"team_orchestrator_send_message", args:{to:"<agent_id>", content:"..."}})
+The logical operations are send_message, report_result and get_team_status. The Team-owned Pi extension supplies the actual native/proxy tool names in the MCP wire binding before a run. Use that binding, not guessed tool names.
 
-Do not invent a second team protocol or assume that a configured lazy MCP server is connected before a call returns."#
+Do not pass sender, task_id or schema_version. Do not invent a second team protocol or assume that MCP registration proves a call has returned."#
         .to_string()
 }
 
@@ -238,7 +223,8 @@ fn mcp_tool_name(provider: Provider, server: &str, tool: &str) -> String {
     match provider {
         Provider::Claude | Provider::ClaudeCode => format!("mcp__{server}__{tool}"),
         Provider::Grok => format!("{server}__{tool}"),
-        Provider::Pi => format!("{server}_{tool}"),
+        // Pi's owned extension binds these logical operations to the observed MCP call surface.
+        Provider::Pi => tool.to_string(),
         // CursorAgent / Codex / Copilot / GeminiCli / Fake: 未验证，沿用现状点号。
         // CursorAgent 不可与 grok 同臂：仓库里没有活转录，`{server}__{tool}` 是推断。
         Provider::CursorAgent
@@ -258,35 +244,6 @@ fn runtime_contract_section(
         .replace("{send_message}", send_message)
         .replace("{report_result}", report_result)
         .replace("{get_team_status}", get_team_status)
-}
-
-fn pi_runtime_contract_section(get_team_status: &str) -> String {
-    RUNTIME_CONTRACT_SECTION
-        .replace(
-            "{send_message}(to='<agent_id>', content='...')",
-            r#"mcp({tool:"team_orchestrator_send_message", args:{to:"<agent_id>", content:"..."}})"#,
-        )
-        .replace(
-            "{send_message}(to='*', content='...')",
-            r#"mcp({tool:"team_orchestrator_send_message", args:{to:"*", content:"..."}})"#,
-        )
-        .replace(
-            "{report_result}(summary='...')",
-            r#"mcp({tool:"team_orchestrator_report_result", args:{summary:"..."}})"#,
-        )
-        .replace("{get_team_status}", get_team_status)
-}
-
-fn pi_communication_contract(mode: CommunicationMode) -> String {
-    match mode {
-        CommunicationMode::LeaderCentric => r#"# Team Agent communication contract: leader_centric
-
-- Progress, blockers, questions: mcp({tool:"team_orchestrator_send_message", args:{to:"leader", content:"..."}})
-
-Respond through Team Agent MCP tools only to actionable requests or questions; writing in your terminal does not deliver it."#
-            .to_string(),
-        CommunicationMode::Orchestrated => mode.runtime_contract("mcp"),
-    }
 }
 
 fn communication_mode(value: Option<&str>) -> Result<CommunicationMode, LifecycleError> {
