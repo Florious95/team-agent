@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.108
+
+- Scoped shutdown allows up to 500ms for tracked root-process liveness to converge before fresh residual verification; persistent live roots remain failures.
+- `models` accepts Cursor's trailing selection tip and discovers Grok's native catalog through PATH-first `grok models`, while retaining fail-closed parsing.
+- Multi-node `status` human output shares attach templates by tmux socket/session and shows each observed window.pane target; single-node output and full JSON commands remain unchanged.
+
 ## 0.5.107
 
 - Use Pi's native session-only MCP registration instead of requiring a named adapter package during executable/model validation.
