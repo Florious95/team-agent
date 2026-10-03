@@ -338,6 +338,7 @@ esac
     assert_eq!(result_row.owner_team_id.as_deref(), Some("teamA"));
     assert_eq!(result_row.agent_id, "worker_a");
     assert_eq!(result_row.task_id, "task_mcp");
+    harness.bind_leader_receiver_to_team("teamA");
     harness.drive_delivery_twice();
     assert!(harness.pane_text("leader").contains(&marker));
     assert!(harness.pane_text("leader").contains(&result_marker));
