@@ -1518,15 +1518,15 @@ exit "${FAKE_EXIT_CODE:-0}"
         let help = fixture.run(&["models", "--help"]);
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
-        for provider in ["pi", "cursor_agent", "codex", "claude", "claude_code"] {
+        for provider in ["pi", "cursor_agent", "codex", "claude", "claude_code", "grok"] {
             assert!(
                 help.contains(provider),
                 "F20 registered provider absent from help: {provider}"
             );
         }
         let unsupported = failed_json(
-            &fixture.run(&["models", "--provider", "grok", "--json"]),
-            "F20 unsupported provider is explicit",
+            &fixture.run(&["models", "--provider", "cloud", "--json"]),
+            "F20 unknown provider is explicit",
         );
         assert!(unsupported["action"].as_str().unwrap().contains("pi"));
         assert!(unsupported["action"].as_str().unwrap().contains("codex"));

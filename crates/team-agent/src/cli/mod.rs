@@ -1358,6 +1358,13 @@ pub mod lifecycle_port {
             .map(|path| json!({ "path": path }))
             .collect::<Vec<_>>();
         deadline.check("process_residuals")?;
+        // Let already-protected-filtered shutdown roots converge before the final
+        // snapshot, so a transient OS reaping window is not reported as a residue.
+        wait_for_processes_gone(
+            &root_pids,
+            std::time::Duration::from_millis(500).min(deadline.remaining()),
+        );
+        deadline.check("process_residuals")?;
         // C-①: the post-verify gets ONE fresh verification snapshot (reaps changed
         // the world; #248 post-verify facts must be current, not the entry view).
         let verify_table =
@@ -1936,6 +1943,10 @@ pub mod lifecycle_port {
             }
             Ok(())
         }
+
+        fn remaining(&self) -> std::time::Duration {
+            self.timeout.saturating_sub(self.start.elapsed())
+        }
     }
 
     fn shutdown_state_for_team(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
@@ -2239,9 +2250,70 @@ pub mod lifecycle_port {
         }
     }
 
+    #[cfg(test)]
+    #[derive(Clone, Copy)]
+    struct ShutdownTestProbes {
+        process_table: Option<fn() -> Result<Vec<String>, String>>,
+        pid_is_alive: Option<fn(u32) -> bool>,
+    }
+
+    #[cfg(test)]
+    std::thread_local! {
+        static SHUTDOWN_TEST_PROBES: std::cell::Cell<ShutdownTestProbes> = const {
+            std::cell::Cell::new(ShutdownTestProbes { process_table: None, pid_is_alive: None })
+        };
+    }
+
+    #[cfg(test)]
+    struct ShutdownTestProbeRestore(ShutdownTestProbes);
+
+    #[cfg(test)]
+    impl Drop for ShutdownTestProbeRestore {
+        fn drop(&mut self) {
+            SHUTDOWN_TEST_PROBES.with(|probes| probes.set(self.0));
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_process_table_test_probe<T>(
+        probe: fn() -> Result<Vec<String>, String>,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        let previous = SHUTDOWN_TEST_PROBES.with(|probes| {
+            let previous = probes.get();
+            probes.set(ShutdownTestProbes { process_table: Some(probe), ..previous });
+            previous
+        });
+        let _restore = ShutdownTestProbeRestore(previous);
+        run()
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_pid_liveness_test_probe<T>(
+        probe: fn(u32) -> bool,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        let previous = SHUTDOWN_TEST_PROBES.with(|probes| {
+            let previous = probes.get();
+            probes.set(ShutdownTestProbes { pid_is_alive: Some(probe), ..previous });
+            previous
+        });
+        let _restore = ShutdownTestProbeRestore(previous);
+        run()
+    }
+
     /// swallow batch 1: the raw ps probe with an explicit error channel — a failed
     /// probe must never masquerade as "no processes" (CLAUDE.md §5).
     fn probed_process_table() -> Result<Vec<ProcessInfo>, String> {
+        #[cfg(test)]
+        if let Some(probe) = SHUTDOWN_TEST_PROBES.with(|probes| probes.get().process_table) {
+            return probe().map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(|line| parse_process_info(line))
+                    .collect()
+            });
+        }
         match crate::os_probe::bounded_command_output_with_probe(
             std::process::Command::new("ps").args(["-axo", "pid=,ppid=,pgid=,sess=,command="]),
             "ps_table",
@@ -2696,20 +2768,31 @@ pub mod lifecycle_port {
     // 1:1 to SIGTERM/SIGKILL, ProcessLiveness::Live == the previous
     // `kill(pid, 0) == 0 || EPERM` branch).
 
+    fn shutdown_pid_is_alive(pid: u32) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = SHUTDOWN_TEST_PROBES.with(|probes| probes.get().pid_is_alive) {
+            return probe(pid);
+        }
+        crate::platform::process::pid_is_alive(pid)
+    }
+
     fn wait_for_processes_gone(pids: &[u32], timeout: std::time::Duration) {
         let start = std::time::Instant::now();
         loop {
             for pid in pids {
                 crate::platform::process::reap_child_if_possible(*pid);
             }
+            let elapsed = start.elapsed();
             if !pids
                 .iter()
-                .any(|pid| crate::platform::process::pid_is_alive(*pid))
-                || start.elapsed() >= timeout
+                .any(|pid| shutdown_pid_is_alive(*pid))
+                || elapsed >= timeout
             {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(
+                std::time::Duration::from_millis(25).min(timeout.saturating_sub(elapsed)),
+            );
         }
     }
 
@@ -2730,7 +2813,7 @@ pub mod lifecycle_port {
             .collect::<std::collections::BTreeSet<_>>();
         for pid in root_pids {
             if !protected.contains_pid(*pid)
-                && crate::platform::process::pid_is_alive(*pid)
+                && shutdown_pid_is_alive(*pid)
                 && seen.insert(*pid)
             {
                 residuals.push(ProcessInfo {

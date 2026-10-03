@@ -218,7 +218,7 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         }
     }
     // Status brief is deliberately independent of the legacy RuntimeSnapshot:
-    // it performs one native tmux/process sample and exposes exactly seven
+    // it performs one native tmux/process sample and exposes exactly nine
     // fields. `--summary` and `--detail` remain parser-compatible but do not
     // re-enable history, runtime diagnostics, or reminder text.
     if args.json {

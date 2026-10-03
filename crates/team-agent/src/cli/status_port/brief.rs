@@ -117,6 +117,14 @@ struct BriefNode {
     tmux_command: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttachContext {
+    endpoint: String,
+    session: String,
+    window: String,
+    pane: String,
+}
+
 #[derive(Debug)]
 struct ProbeResult {
     nodes: Vec<ProbeNode>,
@@ -150,34 +158,45 @@ pub(crate) fn status_brief_scoped(
     state: &Value,
     agent: Option<&str>,
 ) -> Value {
-    let registered = registered_nodes(state, agent);
-    let probes = probe_registered_endpoints(&registered);
-    let nodes = registered
-        .iter()
-        .map(|node| project_node(node, probes.get(node.endpoint.as_deref().unwrap_or(""))))
-        .collect::<Vec<_>>();
+    let nodes = project_status_nodes(state, agent);
     json!({
-        "nodes": nodes.into_iter().map(BriefNode::into_json).collect::<Vec<_>>()
+        "nodes": nodes
+            .into_iter()
+            .map(|(node, _)| node.into_json())
+            .collect::<Vec<_>>()
     })
 }
 
-/// Human output is the exact same nine-field projection as JSON, rendered in
-/// stable field order. Null values remain explicit rather than becoming a
-/// diagnostic or an inferred value.
+/// Human output keeps the legacy single-node form and groups shared attach
+/// context only when multiple nodes make that repetition useful.
 pub(crate) fn format_status_brief(
-    workspace: &Path,
+    _workspace: &Path,
     state: &Value,
     agent: Option<&str>,
 ) -> String {
-    let value = status_brief_scoped(workspace, state, agent);
-    value
-        .get("nodes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(format_brief_node)
-        .collect::<Vec<_>>()
-        .join("\n")
+    let nodes = project_status_nodes(state, agent);
+    if nodes.len() <= 1 {
+        return nodes
+            .into_iter()
+            .filter_map(|(node, _)| format_brief_node(&node.into_json()))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    format_multi_node_brief(nodes)
+}
+
+fn project_status_nodes(
+    state: &Value,
+    agent: Option<&str>,
+) -> Vec<(BriefNode, Option<AttachContext>)> {
+    let registered = registered_nodes(state, agent);
+    let probes = probe_registered_endpoints(&registered);
+    registered
+        .iter()
+        .map(|node| {
+            project_node_with_attach(node, probes.get(node.endpoint.as_deref().unwrap_or("")))
+        })
+        .collect()
 }
 
 pub(crate) fn registered_agent_exists(state: &Value, agent: &str) -> bool {
@@ -320,6 +339,86 @@ fn format_brief_node(value: &Value) -> Option<String> {
         display_optional(value.get("session_name")?),
         display_optional(value.get("tmux_command")?),
     ))
+}
+
+fn format_multi_node_brief(nodes: Vec<(BriefNode, Option<AttachContext>)>) -> String {
+    let mut groups = Vec::<(String, String)>::new();
+    for (_, context) in &nodes {
+        let Some(context) = context else { continue };
+        if !groups.iter().any(|(endpoint, session)| {
+            endpoint == &context.endpoint && session == &context.session
+        }) {
+            groups.push((context.endpoint.clone(), context.session.clone()));
+        }
+    }
+
+    let mut lines = groups
+        .iter()
+        .enumerate()
+        .map(|(index, (endpoint, session))| {
+            format_attach_template(index + 1, endpoint, session)
+        })
+        .collect::<Vec<_>>();
+    if !groups.is_empty() {
+        lines.push(
+            "TMUX templates: replace <target> with the window.pane part of the matching ATTACH value."
+                .to_string(),
+        );
+    }
+    lines.push(
+        "NAME\tPROVIDER\tMODEL\tEFFORT\tRUNTIME_STATUS\tACTIVITY\tHEALTH\tSESSION_NAME\tATTACH"
+            .to_string(),
+    );
+    for (node, context) in nodes {
+        let attach = context
+            .as_ref()
+            .and_then(|context| {
+                groups
+                    .iter()
+                    .position(|(endpoint, session)| {
+                        endpoint == &context.endpoint && session == &context.session
+                    })
+                    .map(|index| format!("{}:{}.{}", index + 1, context.window, context.pane))
+            })
+            .unwrap_or_else(|| "null".to_string());
+        lines.push(
+            [
+                escape_human_cell(&node.name),
+                escape_human_cell(&node.provider),
+                escape_human_cell(node.model.as_deref().unwrap_or("null")),
+                escape_human_cell(node.effort.as_deref().unwrap_or("null")),
+                escape_human_cell(&node.runtime_status),
+                escape_human_cell(&node.activity),
+                escape_human_cell(&node.health),
+                escape_human_cell(node.session_name.as_deref().unwrap_or("null")),
+                escape_human_cell(&attach),
+            ]
+            .join("\t"),
+        );
+    }
+    lines.join("\n")
+}
+
+fn format_attach_template(group: usize, endpoint: &str, session: &str) -> String {
+    let flag = if Path::new(endpoint).is_absolute() {
+        "-S"
+    } else {
+        "-L"
+    };
+    let target = format!("{session}:<target>");
+    format!(
+        "TMUX[{group}] tmux {flag} {} attach -t {}",
+        shell_quote(endpoint),
+        shell_quote(&target)
+    )
+}
+
+fn escape_human_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn display_optional(value: &Value) -> String {
@@ -1051,14 +1150,22 @@ fn non_empty(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(test)]
 fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> BriefNode {
+    project_node_with_attach(node, probe).0
+}
+
+fn project_node_with_attach(
+    node: &RegisteredNode,
+    probe: Option<&Option<ProbeResult>>,
+) -> (BriefNode, Option<AttachContext>) {
     let stopped = matches!(
         node.lifecycle.as_deref(),
         Some("stopped" | "done" | "failed" | "error" | "terminated")
     );
     let matched = match_result(node, probe);
     if stopped {
-        return match matched {
+        let projected = match matched {
             MatchResult::Missing => BriefNode {
                 name: node.name.clone(),
                 provider: node.provider.clone(),
@@ -1072,14 +1179,15 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
             },
             MatchResult::Unique(_) | MatchResult::Ambiguous => BriefNode::unknown(node),
         };
+        return (projected, None);
     }
     let MatchResult::Unique(observed) = matched else {
-        return BriefNode::unknown(node);
+        return (BriefNode::unknown(node), None);
     };
     if !node.provider.eq_ignore_ascii_case("unknown")
         && !node.provider.eq_ignore_ascii_case(&observed.provider)
     {
-        return BriefNode::unknown(node);
+        return (BriefNode::unknown(node), None);
     }
     let pi_channel = observed.provider.eq_ignore_ascii_case("pi")
         && observed.evidence_method.as_deref() == Some("pi_activity_channel");
@@ -1097,21 +1205,31 @@ fn project_node(node: &RegisteredNode, probe: Option<&Option<ProbeResult>>) -> B
     } else {
         valid_health(&observed.health)
     };
-    BriefNode {
-        name: node.name.clone(),
-        provider: if node.provider.eq_ignore_ascii_case("unknown") {
-            observed.provider.clone()
-        } else {
-            node.provider.clone()
+    let tmux_command = tmux_command(node, observed);
+    let attach = tmux_command.as_ref().map(|_| AttachContext {
+        endpoint: observed.socket.clone(),
+        session: observed.session.clone(),
+        window: observed.window.clone(),
+        pane: observed.pane.clone(),
+    });
+    (
+        BriefNode {
+            name: node.name.clone(),
+            provider: if node.provider.eq_ignore_ascii_case("unknown") {
+                observed.provider.clone()
+            } else {
+                node.provider.clone()
+            },
+            model: node.model.clone(),
+            effort: node.effort.clone(),
+            runtime_status: "running".to_string(),
+            activity: activity.to_string(),
+            health: health.to_string(),
+            session_name: observed.session_name.clone(),
+            tmux_command,
         },
-        model: node.model.clone(),
-        effort: node.effort.clone(),
-        runtime_status: "running".to_string(),
-        activity: activity.to_string(),
-        health: health.to_string(),
-        session_name: observed.session_name.clone(),
-        tmux_command: tmux_command(node, observed),
-    }
+        attach,
+    )
 }
 
 fn match_result<'a>(
