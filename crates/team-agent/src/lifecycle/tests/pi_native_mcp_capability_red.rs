@@ -51,6 +51,8 @@ fn native_pi_without_adapter_registers_and_serves_all_team_tools() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
 }
 
 fn native_pi_without_adapter_registers_and_serves_all_team_tools_body() {
@@ -345,6 +347,7 @@ esac
 
     let trace_path = workspace.join(".team/test-evidence/native-mcp-stdio.jsonl");
     client.write_trace(&trace_path);
+    let raw_trace = std::fs::read_to_string(&trace_path).expect("raw MCP stdio trace");
     let server_pid = client.pid();
     let exit = client.close_stdin_and_wait();
     assert!(
@@ -370,8 +373,11 @@ esac
     );
     println!(
         "N1_NATIVE_MCP_RECEIPT={}",
-        json!({"alias":alias,"candidate":candidate,"server_pid":server_pid,"exit_code":exit.code(),"tool_names":tool_names,"stdio_trace":trace_path})
+        json!({"alias":alias,"candidate":candidate,"native_config":native_config,"native_host":native_receipt,"server_pid":server_pid,"exit_code":exit.code(),"tool_names":tool_names,"pi_commands":commands,"server_events":events,"stdio_trace":trace_path})
     );
+    println!("N1_NATIVE_MCP_TRACE_BEGIN");
+    print!("{raw_trace}");
+    println!("N1_NATIVE_MCP_TRACE_END");
 }
 
 fn executable_on_path(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
