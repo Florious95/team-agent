@@ -196,6 +196,26 @@ fn human_token_count(text: &str, expected: &str) -> usize {
         .count()
 }
 
+fn status_table_header(text: &str) -> Option<&str> {
+    text.lines().find(|line| {
+        !line.trim_start().starts_with("name:")
+            && [
+                "name",
+                "provider",
+                "model",
+                "effort",
+                "activity",
+                "health",
+                "session_name",
+            ]
+            .iter()
+            .all(|field| human_token_count(line, field) == 1)
+            && human_token_count(line, "runtime_status") + human_token_count(line, "runtime")
+                == 1
+            && human_token_count(line, "tmux_command") + human_token_count(line, "attach") == 1
+    })
+}
+
 fn status_args(ws: &Path, json_out: bool, agent: Option<&str>, team: Option<&str>) -> StatusArgs {
     StatusArgs {
         agent: agent.map(str::to_string),
@@ -443,30 +463,21 @@ fn issue271_status_human_dedupes_six_nodes_and_preserves_json() {
     });
     let prefix = format!("tmux -S {}", shell_quote_for_status_test(endpoint));
     let prefix_count = human.matches(&prefix).count();
-    let labels_once = [
-        "name",
-        "provider",
-        "model",
-        "effort",
-        "activity",
-        "health",
-        "session_name",
-    ]
-    .iter()
-    .all(|label| human_token_count(&human, label) == 1)
-        && human_token_count(&human, "runtime_status")
-            + human_token_count(&human, "runtime")
-            == 1
-        && human_token_count(&human, "tmux_command") + human_token_count(&human, "attach") == 1;
+    let labels_once = status_table_header(&human).is_some();
     let targets_once = nodes.iter().all(|node| {
         let name = node["name"].as_str().unwrap();
         let index = name.strip_prefix("worker-").unwrap().parse::<u32>().unwrap();
         let pane = index + 20;
-        human.matches(name).count() == 1 && human.contains(&format!("{name}.%{pane}"))
+        let target = format!("{name}.%{pane}");
+        let rows = human.lines().filter(|line| line.contains(&target)).collect::<Vec<_>>();
+        rows.len() == 1 && rows[0].contains("1:")
     });
     let calls = logged_probe_calls(&log);
     assert_eq!(calls.len(), 2, "one native query per status invocation: {calls:?}");
-    assert!(calls.iter().all(|(_, called)| called == endpoint), "{calls:?}");
+    assert!(
+        calls.iter().all(|(flag, called)| flag == "-S" && called == endpoint),
+        "{calls:?}"
+    );
     assert!(
         prefix_count == 1 && labels_once && targets_once && human.len() * 4 < before.len() * 3,
         "six-node human output must dedupe shared text and retain targets; prefix_count={prefix_count}, labels_once={labels_once}, targets_once={targets_once}, before_bytes={}, after_bytes={}\n{human}",
@@ -559,6 +570,9 @@ fn issue271_status_human_groups_socket_session_pairs_without_cross_routing() {
     assert_eq!(calls.len(), 4, "one probe per endpoint per invocation: {calls:?}");
     assert_eq!(calls.iter().filter(|(_, value)| value == endpoint_a).count(), 2);
     assert_eq!(calls.iter().filter(|(_, value)| value == endpoint_b).count(), 2);
+    assert!(calls.iter().all(|(flag, value)| {
+        (value == endpoint_a && flag == "-S") || (value == endpoint_b && flag == "-L")
+    }));
     let expected_groups = [
         ("a-red", "%31", 1),
         ("b-red", "%32", 1),
@@ -567,13 +581,12 @@ fn issue271_status_human_groups_socket_session_pairs_without_cross_routing() {
         ("e-named", "%35", 3),
     ];
     let rows_routed = expected_groups.iter().all(|(name, pane, group)| {
+        let target = format!("{name}.{pane}");
         let matching = human
             .lines()
-            .filter(|line| line.contains(name))
+            .filter(|line| line.contains(&target))
             .collect::<Vec<_>>();
-        matching.len() == 1
-            && matching[0].contains(&format!("{group}:"))
-            && matching[0].contains(&format!("{name}.{pane}"))
+        matching.len() == 1 && matching[0].contains(&format!("{group}:"))
     });
     assert!(
         human.matches(&abs_prefix).count() == 2
@@ -710,8 +723,7 @@ fn issue271_status_single_empty_unknown_and_stopped_compatibility() {
     let calls = logged_probe_calls(&mixed_log);
     assert_eq!(calls.len(), 3, "one native query per status invocation");
     assert!(
-        human_token_count(&mixed_human, "name") == 1
-            && human_token_count(&mixed_human, "provider") == 1
+        status_table_header(&mixed_human).is_some()
             && mixed_human
                 .matches(&format!("tmux -S {}", shell_quote_for_status_test(endpoint)))
                 .count()
