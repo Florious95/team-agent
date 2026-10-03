@@ -1358,6 +1358,13 @@ pub mod lifecycle_port {
             .map(|path| json!({ "path": path }))
             .collect::<Vec<_>>();
         deadline.check("process_residuals")?;
+        // Let already-protected-filtered shutdown roots converge before the final
+        // snapshot, so a transient OS reaping window is not reported as a residue.
+        wait_for_processes_gone(
+            &root_pids,
+            std::time::Duration::from_millis(500).min(deadline.remaining()),
+        );
+        deadline.check("process_residuals")?;
         // C-①: the post-verify gets ONE fresh verification snapshot (reaps changed
         // the world; #248 post-verify facts must be current, not the entry view).
         let verify_table =
@@ -1935,6 +1942,10 @@ pub mod lifecycle_port {
                 ));
             }
             Ok(())
+        }
+
+        fn remaining(&self) -> std::time::Duration {
+            self.timeout.saturating_sub(self.start.elapsed())
         }
     }
 
@@ -2702,14 +2713,17 @@ pub mod lifecycle_port {
             for pid in pids {
                 crate::platform::process::reap_child_if_possible(*pid);
             }
+            let elapsed = start.elapsed();
             if !pids
                 .iter()
                 .any(|pid| crate::platform::process::pid_is_alive(*pid))
-                || start.elapsed() >= timeout
+                || elapsed >= timeout
             {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::thread::sleep(
+                std::time::Duration::from_millis(25).min(timeout.saturating_sub(elapsed)),
+            );
         }
     }
 

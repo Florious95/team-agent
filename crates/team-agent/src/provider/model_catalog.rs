@@ -80,10 +80,11 @@ impl CatalogError {
             "cursor_agent" => "agent",
             "codex" => "codex",
             "claude" | "claude_code" => "claude",
+            "grok" => "grok",
             _ => "provider CLI",
         };
         match self {
-            Self::UnsupportedProvider => "choose a supported provider: pi, cursor_agent, codex, claude, or claude_code".into(),
+            Self::UnsupportedProvider => "choose a supported provider: pi, cursor_agent, codex, claude, claude_code, or grok".into(),
             Self::ExecutableUnavailable => format!("install or repair the PATH-first `{executable}` executable, then retry `team-agent models --provider {provider}`"),
             Self::UnsupportedSchema => format!("upgrade `{executable}` to a version that supports its model catalog protocol, then retry `team-agent models --provider {provider}`"),
             Self::CommandFailed => format!("run `{executable}` directly to check catalog/account access, then retry `team-agent models --provider {provider}`"),
@@ -118,6 +119,7 @@ fn display_provider(provider: &str) -> &str {
         "cursor_agent" => "Cursor",
         "codex" => "Codex",
         "claude" | "claude_code" => "Claude",
+        "grok" => "Grok",
         _ => provider,
     }
 }
@@ -130,6 +132,7 @@ pub fn parse_catalog_provider(name: &str) -> Option<Provider> {
         "codex" => Some(Provider::Codex),
         "claude" => Some(Provider::Claude),
         "claude_code" => Some(Provider::ClaudeCode),
+        "grok" => Some(Provider::Grok),
         _ => None,
     }
 }
@@ -153,6 +156,7 @@ enum CatalogSource {
     Pi,
     CursorAgent,
     Codex,
+    Grok,
     Claude,
 }
 
@@ -163,7 +167,8 @@ fn catalog_source(provider: Provider) -> Option<CatalogSource> {
         Provider::CursorAgent => Some(CatalogSource::CursorAgent),
         Provider::Codex => Some(CatalogSource::Codex),
         Provider::Claude | Provider::ClaudeCode => Some(CatalogSource::Claude),
-        Provider::Copilot | Provider::GeminiCli | Provider::Grok | Provider::Fake => None,
+        Provider::Grok => Some(CatalogSource::Grok),
+        Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }
 
@@ -183,6 +188,10 @@ pub fn discover_model_catalog(provider_name: &str) -> Result<Vec<ModelRecord>, C
         CatalogSource::Codex => {
             let bytes = run_native("codex", &["debug", "models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
             parse_codex_catalog(&bytes, requested_provider)?
+        }
+        CatalogSource::Grok => {
+            let bytes = run_native("grok", &["models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
+            parse_grok_catalog(&bytes)?
         }
         CatalogSource::Claude => discover_claude_catalog(requested_provider)?,
     };
@@ -242,8 +251,20 @@ pub(crate) fn parse_pi_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, Catalog
 
 pub(crate) fn parse_cursor_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, CatalogError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CatalogError::InvalidUtf8)?;
+    let lines = text.lines().collect::<Vec<_>>();
+    let tip_line = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .filter(|index| {
+            lines[*index]
+                .strip_prefix("Tip: use --model ")
+                .is_some_and(|tip| !tip.is_empty())
+        });
     let mut records: Vec<ModelRecord> = Vec::new();
-    for line in text.lines() {
+    for (index, line) in lines.into_iter().enumerate() {
+        if Some(index) == tip_line {
+            continue;
+        }
         let line = line.trim();
         if line.is_empty() || line.trim_end_matches(':').eq_ignore_ascii_case("available models") { continue; }
         let Some((id, display)) = line.split_once(" - ") else { return Err(CatalogError::Malformed); };
@@ -257,6 +278,117 @@ pub(crate) fn parse_cursor_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, Cat
         records.push(ModelRecord { provider: "cursor_agent".into(), vendor, id: id.into(), display_name, default: Some(default), aliases: Vec::new() });
     }
     if records.is_empty() { return Err(CatalogError::Empty); }
+    Ok(records)
+}
+
+fn parse_grok_catalog(bytes: &[u8]) -> Result<Vec<ModelRecord>, CatalogError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| CatalogError::InvalidUtf8)?;
+    let mut has_auth_notice = false;
+    let mut has_models_header = false;
+    let mut declared_default: Option<String> = None;
+    let mut starred_default: Option<String> = None;
+    let mut marked_default: Option<String> = None;
+    let mut seen = HashSet::new();
+    let mut records = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !has_models_header {
+            if matches!(line, "You are logged in with grok.com." | "You are not authenticated.") {
+                if has_auth_notice {
+                    return Err(CatalogError::Malformed);
+                }
+                has_auth_notice = true;
+                continue;
+            }
+            if let Some(id) = line.strip_prefix("Default model: ") {
+                if declared_default.is_some() || id.is_empty() {
+                    return Err(CatalogError::Malformed);
+                }
+                validate_identity(id)?;
+                declared_default = Some(id.to_string());
+                continue;
+            }
+            if line == "Available models:" {
+                has_models_header = true;
+                continue;
+            }
+            return Err(CatalogError::Malformed);
+        }
+
+        let (is_starred, row) = if let Some(row) = line.strip_prefix("- ") {
+            (false, row)
+        } else if let Some(row) = line.strip_prefix("* ") {
+            (true, row)
+        } else {
+            return Err(CatalogError::Malformed);
+        };
+        if row == "(default)" {
+            return Err(CatalogError::Malformed);
+        }
+        let (id, has_default_marker) = row
+            .strip_suffix(" (default)")
+            .map_or((row, false), |id| (id, true));
+        if id.is_empty() {
+            return Err(CatalogError::Malformed);
+        }
+        validate_identity(id)?;
+        if !seen.insert(id.to_string()) {
+            return Err(CatalogError::DuplicateIdentity(id.to_string()));
+        }
+        if is_starred {
+            if starred_default.as_deref().is_some_and(|current| current != id) {
+                return Err(CatalogError::Malformed);
+            }
+            starred_default = Some(id.to_string());
+        }
+        if has_default_marker {
+            if marked_default.as_deref().is_some_and(|current| current != id) {
+                return Err(CatalogError::Malformed);
+            }
+            marked_default = Some(id.to_string());
+        }
+        records.push(ModelRecord {
+            provider: "grok".into(),
+            vendor: "xai".into(),
+            id: id.into(),
+            display_name: id.into(),
+            default: None,
+            aliases: Vec::new(),
+        });
+    }
+    if !has_models_header {
+        return Err(CatalogError::Malformed);
+    }
+    if records.is_empty() {
+        return Err(CatalogError::Empty);
+    }
+
+    let mut default_id: Option<&str> = None;
+    for candidate in [
+        declared_default.as_deref(),
+        starred_default.as_deref(),
+        marked_default.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if default_id.is_some_and(|current| current != candidate) {
+            return Err(CatalogError::Malformed);
+        }
+        default_id = Some(candidate);
+    }
+    if let Some(default_id) = default_id {
+        if !seen.contains(default_id) {
+            return Err(CatalogError::Malformed);
+        }
+        for record in &mut records {
+            record.default = Some(record.id.as_str() == default_id);
+        }
+    }
     Ok(records)
 }
 
