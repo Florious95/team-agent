@@ -173,11 +173,14 @@ impl RealCommandRunner {
         let stdout_thread = std::thread::spawn(move || read_pipe(stdout));
         let stderr_thread = std::thread::spawn(move || read_pipe(stderr));
         let deadline = Instant::now() + COMMAND_TIMEOUT;
+        // Observe short-lived commands promptly; retain the old cadence for long ones.
+        let mut poll_interval = Duration::from_millis(1);
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break status;
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if now >= deadline {
                 child.kill()?;
                 child.wait()?;
                 let _ = join_pipe_reader(stdout_thread)?;
@@ -187,7 +190,8 @@ impl RealCommandRunner {
                     format!("{program} exceeded 5s timeout"),
                 ));
             }
-            std::thread::sleep(Duration::from_millis(25));
+            std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
+            poll_interval = (poll_interval * 2).min(Duration::from_millis(25));
         };
         let stdout = join_pipe_reader(stdout_thread)?;
         let stderr = join_pipe_reader(stderr_thread)?;
@@ -4315,3 +4319,96 @@ fn non_empty(raw: &str) -> Option<&str> {
 // tmux is a Unix concept), the test module stays Unix-only.
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod command_runner_regressions {
+    use super::{CommandRunner, RealCommandRunner, COMMAND_TIMEOUT};
+    use std::io::ErrorKind;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn shell(command: &str) -> Vec<String> {
+        vec!["/bin/sh".into(), "-c".into(), command.into()]
+    }
+
+    #[test]
+    fn nonzero_exit_preserves_both_outputs_and_lossy_utf8() {
+        let output = RealCommandRunner
+            .run(&shell("printf 'stdout\\377'; printf 'stderr\\376' >&2; exit 17"))
+            .unwrap();
+        assert!(!output.success);
+        assert_eq!(output.code, Some(17));
+        assert_eq!(output.stdout, "stdout\u{fffd}");
+        assert_eq!(output.stderr, "stderr\u{fffd}");
+    }
+
+    #[test]
+    fn stdin_is_delivered_and_closed_before_waiting_for_exit() {
+        let input = "first line\nsecond λ line\n".repeat(32);
+        let output = RealCommandRunner
+            .run_with_stdin(&["/bin/cat".into()], &input)
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(output.code, Some(0));
+        assert_eq!(output.stdout, input);
+        assert_eq!(output.stderr, "");
+    }
+
+    #[test]
+    fn signal_exit_retains_absent_exit_code() {
+        let output = RealCommandRunner.run(&shell("kill -TERM $$")).unwrap();
+        assert!(!output.success);
+        assert_eq!(output.code, None);
+    }
+
+    #[test]
+    fn drains_stdout_and_stderr_beyond_pipe_capacity() {
+        let output = RealCommandRunner
+            .run(&shell(
+                "i=0; while [ \"$i\" -lt 20000 ]; do printf 'out\\n'; printf 'err\\n' >&2; i=$((i+1)); done",
+            ))
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(output.code, Some(0));
+        assert_eq!(output.stdout, "out\n".repeat(20000));
+        assert_eq!(output.stderr, "err\n".repeat(20000));
+    }
+
+    #[test]
+    fn timeout_keeps_five_second_budget_and_reaps_the_owned_child() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_path = std::env::temp_dir().join(format!(
+            "team-agent-runner-timeout-{}-{nonce}.pid",
+            std::process::id()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pid_path)
+            .unwrap();
+        drop(file);
+        // exec keeps one owned PID and closes both pipes when the runner kills it.
+        let mut argv = shell("printf '%s' \"$$\" > \"$1\"; exec /bin/sleep 30");
+        argv.extend([
+            "runner-timeout-test".into(),
+            pid_path.to_string_lossy().into_owned(),
+        ]);
+        let started = Instant::now();
+        let error = RealCommandRunner.run(&argv).unwrap_err();
+        let elapsed = started.elapsed();
+        let pid: i32 = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
+        std::fs::remove_file(pid_path).unwrap();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(elapsed >= COMMAND_TIMEOUT);
+        assert!(elapsed < COMMAND_TIMEOUT + Duration::from_secs(2));
+        assert!(pid > 1);
+        // SAFETY: signal 0 only probes the exact child PID recorded by this fixture.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+}
