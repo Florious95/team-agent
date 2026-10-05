@@ -1,5 +1,8 @@
 //! Issue #283 independent public CLI contracts. Frozen baseline: 86a4d431.
 //! No new product API is assumed; Initial RED must be behavioral, not compilation failure.
+//! Equivalent real-machine isolation facts (not a live-provider test): Fixture owns
+//! each temporary HOME/current_dir; every child goes through Fixture::command,
+//! which scrubs TMUX/TEAM_AGENT_WORKSPACE and all shared CALLER_IDENTITY_ENVS.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 #[path = "support/hermetic.rs"]

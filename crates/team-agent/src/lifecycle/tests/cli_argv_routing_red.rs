@@ -109,7 +109,7 @@ impl Fixture {
         }
     }
     fn spec(&self, provider: &str, ids: &[&str]) -> PathBuf {
-        fs::write(self.team.join("TEAM.md"), "---\nname: argvteam\nobjective: Literal argv route fixture.\ndisplay_backend: none\n---\n\nTeam.\n").unwrap();
+        fs::write(self.team.join("TEAM.md"), "---\nname: argvteam\nobjective: Literal argv route fixture.\n---\n\nTeam.\n").unwrap();
         for id in ids {
             fs::write(
                 self.team.join(format!("agents/{id}.md")),
