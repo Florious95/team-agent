@@ -56,7 +56,11 @@ impl Fixture {
         let native = env.root().join("native-argv");
         // Synthetic noncredential metadata; no user auth store or login is read.
         fs::create_dir_all(env.home().join(".grok")).unwrap();
-        fs::write(env.home().join(".grok/auth.json"), r#"{"fixture_only":true}"#).unwrap();
+        fs::write(
+            env.home().join(".grok/auth.json"),
+            r#"{"fixture_only":true}"#,
+        )
+        .unwrap();
         let script = format!("#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' \"$*\" >> '{}'; echo 0.87.1; exit 0;;\n--list-models) printf '%s\\n' \"$*\" >> '{}'; printf 'provider model\\nteam-agent qwen3.8-27b\\n'; exit 0;;\nplugin|mcp|auth|list) printf '%s\\n' \"$*\" >> '{}'; exit 0;;\nesac\nprintf '%s\\0' \"$@\" > '{}'\n/bin/kill -TERM \"$PPID\"\n", probes.display(), probes.display(), probes.display(), native.display());
         for name in ["claude", "codex", "copilot", "gemini", "grok", "agent"] {
             executable(&bin.join(name), &script);
@@ -276,7 +280,10 @@ fn same_leader_env(actual: &BTreeMap<String, String>, base: &BTreeMap<String, St
     // This intentional caller-input difference is not product env injection.
     actual.remove(SWITCH);
     base.remove(SWITCH);
-    assert!(actual == base, "native env changed beyond the caller's routing override");
+    assert!(
+        actual == base,
+        "native env changed beyond the caller's routing override"
+    );
 }
 fn live_pane(ws: &Path) -> PaneInfo {
     let state = crate::state::projection::select_runtime_state(ws, Some("argvteam")).unwrap();
@@ -582,8 +589,10 @@ provider_tests! {
 #[test]
 #[serial(env)]
 fn a06_fake_worker_is_outside_native_router_even_under_invalid_optin() {
-    let f = Fixture::new("argv-fake"); let base = f.cold("fake");
-    f.raw("invalid JSON"); f.switch(Some("on"));
+    let f = Fixture::new("argv-fake");
+    let base = f.cold("fake");
+    f.raw("invalid JSON");
+    f.switch(Some("on"));
     assert_eq!(f.cold("fake"), base);
     assert!(base.iter().any(|v| v == "fake-worker"));
 }
@@ -631,12 +640,28 @@ fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
             if routed.mode == LeaderStartMode::NewTmuxSession {
                 // Execute the actual encoded shell payload against a recorder,
                 // not tmux or a real provider. This path execs, so exit normally.
-                executable(&f.env.root().join("pi-real"), &format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nexit 0\n", f.native_file().display()));
+                executable(
+                    &f.env.root().join("pi-real"),
+                    &format!(
+                        "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nexit 0\n",
+                        f.native_file().display()
+                    ),
+                );
                 let shell = routed.argv.last().unwrap();
                 assert!(shell.starts_with("cd "));
-                assert!(Command::new("/bin/sh").args(["-c", shell]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
+                assert!(Command::new("/bin/sh")
+                    .args(["-c", shell])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success());
                 let bytes = fs::read(f.native_file()).unwrap();
-                let actual = bytes.split(|b| *b == 0).take(routed.provider_argv.len() - 1).map(|v| String::from_utf8(v.to_vec()).unwrap()).collect::<Vec<_>>();
+                let actual = bytes
+                    .split(|b| *b == 0)
+                    .take(routed.provider_argv.len() - 1)
+                    .map(|v| String::from_utf8(v.to_vec()).unwrap())
+                    .collect::<Vec<_>>();
                 assert_eq!(actual, routed.provider_argv[1..]);
             }
             samples.push((base.provider_argv, routed.provider_argv));
@@ -651,7 +676,9 @@ fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
         assert!(attach.provider_argv.is_empty());
     }
     assert_eq!(samples.len(), 6);
-    for (base, routed) in samples { injected(&base, &["--mode".into(), "rpc".into()], &routed); }
+    for (base, routed) in samples {
+        injected(&base, &["--mode".into(), "rpc".into()], &routed);
+    }
 }
 
 #[test]
@@ -701,16 +728,26 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     drop(f);
     let f = Fixture::new("argv-paused");
     let spec = f.spec("codex", &["worker", "mate"]);
-    f.raw("invalid schema"); f.switch(Some("on"));
+    f.raw("invalid schema");
+    f.switch(Some("on"));
     // Typed paused flags, not assumptions about YAML renderer indentation.
     use crate::model::yaml::Value as Yaml;
     let mut paused = crate::model::yaml::loads(&fs::read_to_string(&spec).unwrap()).unwrap();
-    let Yaml::Map(top) = &mut paused else { panic!("fixture spec object"); };
-    let Yaml::List(agents) = &mut top.iter_mut().find(|(key, _)| key == "agents").unwrap().1 else { panic!("fixture agents list"); };
+    let Yaml::Map(top) = &mut paused else {
+        panic!("fixture spec object");
+    };
+    let Yaml::List(agents) = &mut top.iter_mut().find(|(key, _)| key == "agents").unwrap().1 else {
+        panic!("fixture agents list");
+    };
     for agent in agents {
-        let Yaml::Map(fields) = agent else { panic!("fixture agent object"); };
-        if let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == "paused") { *value = Yaml::Bool(true); }
-        else { fields.push(("paused".into(), Yaml::Bool(true))); }
+        let Yaml::Map(fields) = agent else {
+            panic!("fixture agent object");
+        };
+        if let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == "paused") {
+            *value = Yaml::Bool(true);
+        } else {
+            fields.push(("paused".into(), Yaml::Bool(true)));
+        }
     }
     fs::write(&spec, crate::model::yaml::dumps(&paused)).unwrap();
     let paused_t = offline();
@@ -1012,8 +1049,19 @@ fn a10_live_start_noop_is_not_validated_against_bad_route_config() {
         .with_liveness("%old", crate::transport::PaneLiveness::Live);
     // The baseline restart library deliberately rebuilds live seats. Observe
     // the actual existing live-seat Noop surface, without inventing new policy.
-    let result = start_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, false, Some("argvteam"), &t);
-    assert!(matches!(result, Ok(crate::lifecycle::StartAgentOutcome::Noop { .. })), "live Noop must not consult router: {result:?}");
+    let result = start_agent_with_transport(
+        &f.ws,
+        &AgentId::new("worker"),
+        false,
+        false,
+        false,
+        Some("argvteam"),
+        &t,
+    );
+    assert!(
+        matches!(result, Ok(crate::lifecycle::StartAgentOutcome::Noop { .. })),
+        "live Noop must not consult router: {result:?}"
+    );
     assert!(t.spawn_records().is_empty());
 }
 
@@ -1271,7 +1319,13 @@ fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
         Some("argvteam"),
         &t,
     );
-    assert!(matches!(start, Err(_) | Ok(crate::lifecycle::StartAgentOutcome::Noop { .. })), "existing live seat must refuse/noop without spawn");
+    assert!(
+        matches!(
+            start,
+            Err(_) | Ok(crate::lifecycle::StartAgentOutcome::Noop { .. })
+        ),
+        "existing live seat must refuse/noop without spawn"
+    );
     assert!(t.spawn_records().is_empty());
     let reset = reset_agent_with_transport(
         &f.ws,
