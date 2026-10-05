@@ -884,7 +884,9 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
     assert!(reset.is_ok(), "retain-session reset fixture: {reset:?}");
     assert_eq!(retained.spawn_records().len(), 1);
     let reset_argv = retained.spawn_records()[0].1.clone();
-    assert!(reset_argv.windows(2).any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
+    assert!(reset_argv
+        .windows(2)
+        .any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
     let restarted = offline()
         .with_session_present(true)
         .with_default_liveness(crate::transport::PaneLiveness::Dead);
@@ -1343,7 +1345,10 @@ fn a14_conpty_spawn_request_frame_preserves_routed_vector_not_windows_live_pass(
 fn a15_provider_drift_and_unknown_force_remain_refused() {
     let f = Fixture::new("argv-drift");
     f.start_team("codex", &["worker"]);
-    f.seed(true, json!({"pi":["must-not-spawn"],"codex":["must-not-spawn"]}));
+    f.seed(
+        true,
+        json!({"pi":["must-not-spawn"],"codex":["must-not-spawn"]}),
+    );
     f.switch(None);
     f.mutate_agent("worker", |a| {
         a["status"] = json!("stopped");
@@ -1360,19 +1365,32 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
         true,
         Some("argvteam"),
     );
-    assert!(matches!(drift, Err(crate::lifecycle::LifecycleError::RequirementUnmet(ref message)) if message.contains("provider change is not allowed")));
+    assert!(
+        matches!(drift, Err(crate::lifecycle::LifecycleError::RequirementUnmet(ref message)) if message.contains("provider change is not allowed"))
+    );
     assert!(!f.native_file().exists());
     let role_file = f.ws.join("replacement.md");
     fs::write(&role_file, role("codex", "worker")).unwrap();
     let unknown = offline().with_default_liveness(crate::transport::PaneLiveness::Unknown);
     let forced = crate::lifecycle::launch::add_agent_with_transport_force(
-        &f.team, &AgentId::new("worker"), &role_file, false,
-        Some("argvteam"), true, &unknown,
+        &f.team,
+        &AgentId::new("worker"),
+        &role_file,
+        false,
+        Some("argvteam"),
+        true,
+        &unknown,
     );
-    assert!(forced.is_err(), "unknown old pane must not be force-recreated");
+    assert!(
+        forced.is_err(),
+        "unknown old pane must not be force-recreated"
+    );
     assert!(unknown.spawn_records().is_empty());
     let after = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
-    assert_eq!(after["agents"]["worker"]["provider"], before["agents"]["worker"]["provider"]);
+    assert_eq!(
+        after["agents"]["worker"]["provider"],
+        before["agents"]["worker"]["provider"]
+    );
 }
 
 #[test]
