@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.109
+
+- Observe short-lived tmux command exits with bounded early polling while retaining the 5s timeout, exit codes, and pipe handling.
+- Wake model-catalog discovery on reader completion instead of a fixed 10ms tail sleep; retain the 10s timeout, 100ms oversized-output grace, 1MiB limit, and strict parsing.
+- Batch native status process snapshots per tmux endpoint using deduplicated PIDs and the same pid/ppid/stat/comm-only query; preserve the human nine-field and JSON projections.
+
 ## 0.5.108
 
 - Scoped shutdown allows up to 500ms for tracked root-process liveness to converge before fresh residual verification; persistent live roots remain failures.
