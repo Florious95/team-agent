@@ -975,7 +975,10 @@ fn a09_public_clone_reaches_native_argv_without_inheriting_old_route() {
     // generated provider shell line against the argv recorder, never real tmux.
     let calls = f.env.root().join("clone-spawn-calls");
     let identity = f.env.root().join("clone-pane-identity");
-    executable(&f.bin.join("tmux"), &format!(r#"#!/bin/sh
+    executable(
+        &f.bin.join("tmux"),
+        &format!(
+            r#"#!/bin/sh
 if [ "$1" = -S ] || [ "$1" = -L ]; then shift 2; fi
 op=$1; shift
 case "$op" in
@@ -996,7 +999,13 @@ display-message) for last do :; done; case "$last" in *pane_id*) echo %99;; *pan
 capture-pane) echo '> '; ;;
 *) exit 0;;
 esac
-"#, calls.display(), f.ws.display(), identity.display(), identity.display()));
+"#,
+            calls.display(),
+            f.ws.display(),
+            identity.display(),
+            identity.display()
+        ),
+    );
     f.seed(true, json!({"pi":["clone-route"]}));
     f.switch(None);
     let cloned = crate::lifecycle::clone_agent(
