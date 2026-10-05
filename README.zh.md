@@ -66,6 +66,36 @@ team-agent claude
 
 也就是说:你可以让 Claude 当队长出方案、做评审,让 Codex 队友批量干实现。你手上有哪几家的订阅,就能怎么搭着用。
 
+## 原生 CLI 参数路由（默认关闭）
+
+在任意目录按 Provider 全局配置字面启动参数，无需工作区或已登录的 CLI：
+
+```sh
+team-agent route set pi -- --mode rpc
+team-agent route enable
+team-agent route status --json
+team-agent route show pi --json
+team-agent route add pi -- --verbose
+team-agent route clear pi
+team-agent route disable
+```
+
+默认 OFF；开关与映射保存于 `~/.team-agent/argv-routing.json`。
+环境变量 `TEAM_AGENT_CLI_ARGV_ROUTING=1|true|on` 或 `0|false|off` 优先于持久化开关
+（忽略大小写和两侧空白），无效值安全关闭。`enable/disable` 不清映射，`set` 精确替换、
+`add` 按序追加、`clear` 删除一个映射。结果同时报告持久化态、实际有效态与环境覆盖。
+
+Provider 键为 `claude`、`codex`、`copilot`、`gemini_cli`、`grok`、`cursor_agent`、`pi`。
+Claude/Claude Code 共用映射；支持 `claude_code/claude-code` 和 `agent/cursor` 别名。
+第一个 `--` 后全部是字面 argv，包括 `--help`、`--json`、空字符串、`{workspace}`，不会二次 shell 展开。
+注入位置为原生 executable 之后、原有参数之前。不要保存密码/token，或覆盖框架管理的
+session/MCP/权限参数；既有身份、认证与安全检查不变。
+
+下一次真实 Leader/worker 启动读取当前配置，包括 restart、start/reset/add/clone、Pi 新席 fork
+及 remove 失败回滚复活。运行中或仅 attach 的进程、dry-run、model/version/auth 探测与其他辅助进程不变。
+已开启但无效的配置会在原生 spawn 前报错；可用 `TEAM_AGENT_CLI_ARGV_ROUTING=off` 紧急停用，
+但这不会修复坏文件。Pi `--mode rpc` 只是启动参数，不会自动建立 RPC 宿主或改变 Team Agent 的传输。
+
 ## 常见问题
 
 **需要什么前提?**

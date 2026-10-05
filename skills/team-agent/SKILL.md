@@ -79,6 +79,38 @@ A different `--provider`, including a manually edited role provider, is rejected
 
 Profiles keep provider authentication, endpoints and custom-model settings local. Imported roles use this team's/workspace's `profiles`, never the original external directory. Prepare a named profile locally through the public profile commands; do not search for or copy external credentials. Never put secrets in `TEAM.md` or a role file. See [the operator reference](references/team-agent-operator.md) for existing profile and field details. Supported metadata also includes `agent_id` (legacy `name`), `role`, `auth_mode`, and `communication_mode`; old `tools`, `permission_mode`, and `label` keys do not configure a worker.
 
+## Global native CLI argv (optional)
+
+Default OFF; no workspace or provider login is needed to manage routes:
+
+```sh
+team-agent route set pi -- --mode rpc
+team-agent route enable
+team-agent route status --json
+team-agent route show pi --json
+team-agent route add pi -- --verbose
+team-agent route clear pi
+team-agent route disable
+```
+
+`set` replaces one mapping, `add` appends without deduplication, `clear` removes it;
+none changes the switch. `enable`/`disable` preserve mappings in `~/.team-agent/argv-routing.json`.
+`TEAM_AGENT_CLI_ARGV_ROUTING` overrides the switch: `1/true/on`, `0/false/off` (case-insensitive,
+trimmed); invalid values disable routing. Check `persisted_enabled`, `effective_enabled` and
+`override_status` rather than assuming `enable` defeats an environment OFF.
+
+Keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `cursor_agent`, `pi`.
+Claude/Claude Code share `claude`; aliases `claude_code/claude-code`, `agent/cursor` are accepted.
+The first `--` ends control parsing: subsequent tokens, including `--help`, `--json`, empty strings
+and `{workspace}`, are literal data. Tokens go after the executable and before its original tail;
+there is no shell expansion. Do not route secrets or override framework-managed session/MCP/permission flags.
+
+The current mapping affects the next actual Leader/worker spawn (also restart, single-seat start/reset,
+add/clone, Pi new-seat fork and remove rollback), not running/attached processes, dry-run or helper probes.
+Enabled bad configuration prevents native spawn; an emergency environment OFF avoids reading it,
+while `route disable` will not overwrite a broken file. Pi `--mode rpc` does not provide an RPC host
+or change the existing Team Agent transport.
+
 ## Inspect and stop
 
 Use `team-agent status --json` for readiness and the installed command's `--help` for syntax. `ok: true` with `ready: false` means the team is not ready; follow the reported action. Accepted/queued send is not the worker's reply: wait for a natural response or result. Use `<workspace>::<team>/<agent>` when a fully qualified recipient is needed.

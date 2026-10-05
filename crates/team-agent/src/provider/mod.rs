@@ -42,13 +42,14 @@
 // 复用 model::enums 的 Provider/AuthMode,并 re-export(下游惯于 `provider::Provider` 取用)。
 pub use crate::model::enums::{AuthMode, Provider};
 
-/// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
-pub(crate) mod bypass_flags;
 pub mod adapter;
 /// 0.4.x decoupling step 2: per-provider command builders + permission/auth
 /// helpers split out of `adapter.rs`. Pure extraction — behavior unchanged.
 pub(crate) mod adapters;
 pub mod approvals;
+pub mod argv_route;
+/// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
+pub(crate) mod bypass_flags;
 pub mod classify;
 pub mod faults;
 pub mod model_catalog;
