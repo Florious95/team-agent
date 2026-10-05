@@ -881,12 +881,10 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
         Some("argvteam"),
         &retained,
     );
-    assert!(reset.is_ok(), "retain-session reset fixture: {reset:?}");
-    assert_eq!(retained.spawn_records().len(), 1);
-    let reset_argv = retained.spawn_records()[0].1.clone();
-    assert!(reset_argv
-        .windows(2)
-        .any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
+    // Existing reset policy requires discard-session even with a valid tuple.
+    // Protect refusal; routing must not invent a retain-session reset branch.
+    assert!(matches!(reset, Ok(crate::lifecycle::ResetAgentOutcome::Refused { .. })));
+    assert!(retained.spawn_records().is_empty());
     let restarted = offline()
         .with_session_present(true)
         .with_default_liveness(crate::transport::PaneLiveness::Dead);
@@ -898,7 +896,6 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
         .windows(2)
         .any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
     assert_route(&argv, &["resume-route"]);
-    assert_route(&reset_argv, &["resume-route"]);
     assert_route(&restart_argv, &["resume-route"]);
 }
 
@@ -1371,21 +1368,19 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
     assert!(!f.native_file().exists());
     let role_file = f.ws.join("replacement.md");
     fs::write(&role_file, role("codex", "worker")).unwrap();
-    let unknown = offline().with_default_liveness(crate::transport::PaneLiveness::Unknown);
-    let forced = crate::lifecycle::launch::add_agent_with_transport_force(
-        &f.team,
+    // The public role-config admission guard owns unknown/live force refusal.
+    // Its native tmux fixture returns inconclusive identity, never proven dead.
+    executable(&f.bin.join("tmux"), "#!/bin/sh\ncase \"$*\" in\n*-V*) echo 'tmux 3.4';;\n*display-message*) echo 'fixture backend unavailable' >&2; exit 1;;\n*) exit 0;;\nesac\n");
+    let forced = crate::lifecycle::role_config::add_agent_from_role(
+        &f.ws,
         &AgentId::new("worker"),
-        &role_file,
-        false,
-        Some("argvteam"),
+        Some(&role_file),
+        &Default::default(),
         true,
-        &unknown,
+        Some("argvteam"),
     );
-    assert!(
-        forced.is_err(),
-        "unknown old pane must not be force-recreated"
-    );
-    assert!(unknown.spawn_records().is_empty());
+    assert!(forced.is_err(), "unknown old pane must not be force-recreated");
+    assert!(!f.native_file().exists());
     let after = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
     assert_eq!(
         after["agents"]["worker"]["provider"],
