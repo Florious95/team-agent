@@ -330,6 +330,8 @@ pub(super) fn spawn_agents(
             ensure_grok_login_and_folder_trust(workspace)?;
             apply_grok_mcp_overlay(workspace, &mcp_config)?;
         }
+        crate::provider::argv_route::apply(provider, &mut plan.argv)
+            .map_err(|error| LifecycleError::Provider(error.to_string()))?;
         let spawn_epoch = u64::try_from(started.len()).unwrap_or(u64::MAX);
         let spawned_at = spawn_timestamp_for_agent(u32::try_from(spawn_epoch).unwrap_or(u32::MAX));
         // E6 层1 实证3 + 诊断留痕:落最终 worker argv(spawn 前的真实形态)。

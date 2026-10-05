@@ -66,6 +66,39 @@ The lead and each teammate independently choose which CLI to use:
 
 In other words: let Claude be the lead for planning and review, let Codex teammates handle bulk implementation. Mix and match whatever subscriptions you have.
 
+## Native CLI argv routing (opt-in)
+
+Configure literal startup arguments globally, separately for each provider, from any directory:
+
+```sh
+team-agent route set pi -- --mode rpc
+team-agent route enable
+team-agent route status --json
+team-agent route show pi --json
+team-agent route add pi -- --verbose
+team-agent route clear pi
+team-agent route disable
+```
+
+The default is OFF. `~/.team-agent/argv-routing.json` stores the switch and mappings;
+`TEAM_AGENT_CLI_ARGV_ROUTING=1|true|on` or `0|false|off` overrides the persisted switch
+(case-insensitive, surrounding whitespace accepted). Invalid overrides safely disable routing.
+`enable`/`disable` preserve mappings; `set` replaces, `add` appends, and `clear` removes one mapping.
+Commands report both persisted and effective states, including an active environment override.
+
+Provider keys: `claude`, `codex`, `copilot`, `gemini_cli`, `grok`, `cursor_agent`, `pi`.
+Claude/Claude Code share one mapping; `claude_code`/`claude-code` and `agent`/`cursor` are accepted aliases.
+Everything after the first `--` is literal argv data, including `--help`, `--json`, empty strings
+and `{workspace}`; no shell expansion is performed. Arguments are inserted immediately after
+the native executable, before its original arguments. Do not store secrets or override framework-managed
+session/MCP/permission arguments; routing does not bypass existing identity or authentication checks.
+
+Only the next actual native Leader/worker launch uses the current mapping, including restart,
+start/reset/add/clone, Pi new-seat fork and remove rollback. Running/attached processes, dry runs,
+model/version/auth probes and other helper processes are unchanged. Enabled invalid configuration
+fails before native spawn; `TEAM_AGENT_CLI_ARGV_ROUTING=off` is an emergency override, not a file repair.
+Pi `--mode rpc` is passed through as startup argv; it does **not** create an RPC host or change Team Agent's transport.
+
 ## FAQ
 
 **What do I need?**

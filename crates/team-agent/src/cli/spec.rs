@@ -74,6 +74,7 @@ pub(crate) enum DispatchKind {
     Peek,
     Coordinator,
     Models,
+    Route,
 }
 
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
@@ -112,6 +113,7 @@ pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
     DispatchKind::Peek,
     DispatchKind::Coordinator,
     DispatchKind::Models,
+    DispatchKind::Route,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +177,7 @@ pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec { name: "clone-agent", tier: CommandTier::Secondary, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::CloneAgent), summary: "clone a worker role into a fresh session", usage: "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
     CommandSpec { name: "allow-peer-talk", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::AllowPeerTalk), summary: "allow direct worker peer talk", usage: "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "capability/config surface" }) },
     CommandSpec { name: "approvals", tier: CommandTier::Secondary, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Approvals), summary: "inspect provider approval state", usage: "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "approval diagnostics" }) },
+    CommandSpec { name: "route", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Route), summary: "manage global native CLI argv routing", usage: "usage: team-agent route [status|enable|disable|show|set|add|clear] [PROVIDER] [--json] [-- ARG ...]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "opt-in host-global provider argv setup" }) },
     CommandSpec { name: "profile", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Profile), summary: "manage provider profiles", usage: "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "provider/profile setup" }) },
     CommandSpec { name: "install-skill", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::InstallSkill), summary: "install or uninstall Team Agent skills", usage: "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "capability setup" }) },
     CommandSpec { name: "inbox", tier: CommandTier::Secondary, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Inbox), summary: "inspect recent message summaries", usage: "usage: team-agent inbox AGENT [-n N|--limit N] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },

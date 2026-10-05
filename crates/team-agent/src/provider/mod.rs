@@ -45,6 +45,7 @@ pub use crate::model::enums::{AuthMode, Provider};
 /// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
 pub(crate) mod bypass_flags;
 pub mod adapter;
+pub mod argv_route;
 /// 0.4.x decoupling step 2: per-provider command builders + permission/auth
 /// helpers split out of `adapter.rs`. Pure extraction — behavior unchanged.
 pub(crate) mod adapters;

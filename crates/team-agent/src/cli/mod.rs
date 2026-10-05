@@ -63,6 +63,7 @@ pub mod leader;
 pub mod leaders;
 pub mod named_address;
 pub mod profile;
+pub(crate) mod route;
 pub mod send;
 pub(crate) mod spec;
 pub mod status;

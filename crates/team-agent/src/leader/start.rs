@@ -291,7 +291,7 @@ fn leader_start_plan_with_ambient_authority(
         ),
         _ => None,
     };
-    let provider_argv = if provider == Provider::Pi && mode != LeaderStartMode::AttachExisting {
+    let mut provider_argv = if provider == Provider::Pi && mode != LeaderStartMode::AttachExisting {
         let parsed = crate::lifecycle::launch::pi_mcp::parse_pi_leader_args(provider_args)
             .map_err(|error| LeaderError::Start(error.to_string()))?;
         let mcp_config = adapter
@@ -329,6 +329,10 @@ fn leader_start_plan_with_ambient_authority(
     } else {
         provider_command_argv(provider, provider_args)
     };
+    if mode != LeaderStartMode::AttachExisting {
+        crate::provider::argv_route::apply(provider, &mut provider_argv)
+            .map_err(|error| LeaderError::Start(error.to_string()))?;
+    }
     let argv = start_argv(
         mode,
         provider,

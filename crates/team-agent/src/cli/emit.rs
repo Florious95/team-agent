@@ -56,6 +56,9 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     let Some(command) = argv.first().map(String::as_str) else {
         return emit_missing_subcommand_usage();
     };
+    if command == "route" {
+        return super::route::run(&argv[1..]);
+    }
     if is_leader_passthrough_command(command) {
         return match cmd_leader_passthrough(command, &argv[1..], cwd) {
             Ok(result) => emit_result(result),
@@ -115,7 +118,7 @@ fn emit_status_cli_error(error: &CliError) -> ExitCode {
 
 /// Print a handler's CmdResult to stdout (emit formats json/human), then surface its exit code.
 /// (parser.py: `print(emit(result, as_json))` then the ok→exit mapping.)
-fn emit_result(r: CmdResult) -> ExitCode {
+pub(super) fn emit_result(r: CmdResult) -> ExitCode {
     let persisted_message_id = match &r.output {
         CmdOutput::Json(value) => value
             .get("message_id")
@@ -160,6 +163,9 @@ pub(crate) fn __test_dispatch(
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    if command == "route" {
+        return Ok(super::route::run(args));
+    }
     // Keep the removed flag harmless for older scripts and persisted command
     // lines; the default tmux backend is already the only runtime path.
     let filtered_args: Vec<String> = args
@@ -341,6 +347,7 @@ fn command_help(command: Option<&str>) -> String {
         .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出九字段：name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影字段（多节点人读紧凑显示 tmux_command）。--json 始终保留每节点完整可复制的 tmux_command；人读单节点保留完整旧格式，多节点按(socket, tmux session)显示每组一次共享 attach 模板，ATTACH列为<group>:<window>.<pane>，模板中的 <target> 替换为其 window.pane 部分。model/effort 为已接受启动配置，未设置为 null，不猜 provider 默认值；缺少可靠定位或原生 tmux/process 采样时显示 unknown，不推导attach信息。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
+        Some("route") => super::route::HELP.to_string(),
         Some("models") => "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, display name, and source aliases. Uses each provider's native catalog; Cursor uses `agent --list-models`, Codex uses `codex debug models`, Claude uses SDK stream-json initialize, and Grok uses the PATH-first `grok models` command.".to_string(),
         Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),

@@ -1,0 +1,207 @@
+//! Host-global route management: raw argv, no workspace selection or error log.
+
+use super::{CmdOutput, CmdResult, ExitCode};
+use crate::provider::argv_route::{self, Config, Mutation, Override, RouteError};
+use crate::provider::Provider;
+use serde_json::{json, Value};
+
+pub(crate) const HELP: &str = "usage: team-agent route [status] [--json]\n       team-agent route enable|disable [--json]\n       team-agent route show [PROVIDER] [--json]\n       team-agent route set|add PROVIDER [--json] -- ARG [ARG ...]\n       team-agent route clear PROVIDER [--json]\n\nGlobal config: ~/.team-agent/argv-routing.json (default OFF).\nTEAM_AGENT_CLI_ARGV_ROUTING overrides the persisted switch.\nEverything after -- is literal argv data; routing affects the next native Agent launch only.";
+
+struct Request {
+    operation: String,
+    provider: Option<Provider>,
+    tokens: Vec<String>,
+    json: bool,
+}
+
+fn usage() -> RouteError {
+    RouteError {
+        error: "invalid route arguments".to_string(),
+        reason: "argv_route_usage",
+        action: "run `team-agent route --help`; set/add require PROVIDER -- ARG [ARG ...]"
+            .to_string(),
+        config_path: None,
+    }
+}
+
+fn parse(args: &[String], delimiter: usize) -> Result<Request, RouteError> {
+    let mut json = false;
+    let mut positionals = Vec::new();
+    for token in &args[..delimiter] {
+        if token == "--json" {
+            if json {
+                return Err(usage());
+            }
+            json = true;
+        } else if token.starts_with('-') {
+            return Err(usage());
+        } else {
+            positionals.push(token.as_str());
+        }
+    }
+    let operation = positionals.first().copied().unwrap_or("status");
+    let provider_required = matches!(operation, "set" | "add" | "clear");
+    let provider_allowed = provider_required || operation == "show";
+    if !matches!(
+        operation,
+        "status" | "enable" | "disable" | "show" | "set" | "add" | "clear"
+    ) || positionals.len() > if provider_allowed { 2 } else { 1 }
+        || (provider_required && positionals.len() != 2)
+    {
+        return Err(usage());
+    }
+    let provider = positionals
+        .get(1)
+        .map(|raw| argv_route::parse_route_provider(raw).ok_or_else(usage))
+        .transpose()?;
+    let tokens = if matches!(operation, "set" | "add") {
+        if delimiter == args.len() || delimiter + 1 == args.len() {
+            return Err(usage());
+        }
+        let tokens = args[delimiter + 1..].to_vec();
+        if !argv_route::valid_tokens(&tokens) {
+            return Err(usage());
+        }
+        tokens
+    } else {
+        if delimiter != args.len() {
+            return Err(usage());
+        }
+        Vec::new()
+    };
+    Ok(Request {
+        operation: operation.to_string(),
+        provider,
+        tokens,
+        json,
+    })
+}
+
+fn switch_fields(
+    path: Option<&std::path::Path>,
+    persisted: Option<bool>,
+    present: bool,
+    override_state: Override,
+) -> Value {
+    json!({
+        "config_path": path,
+        "persisted_enabled": persisted,
+        "effective_enabled": override_state.effective(persisted.unwrap_or(false)),
+        "enabled_source": override_state.source(present),
+        "override_status": override_state.status(),
+    })
+}
+
+fn execute(request: &Request) -> Result<Value, RouteError> {
+    let path = argv_route::config_path()?;
+    let (config, present) = match request.operation.as_str() {
+        "enable" => argv_route::mutate(&path, Mutation::Enable(true))?,
+        "disable" => argv_route::mutate(&path, Mutation::Enable(false))?,
+        "set" | "add" | "clear" => {
+            let provider = request.provider.ok_or_else(usage)?;
+            let mutation = match request.operation.as_str() {
+                "set" => Mutation::Set(provider, request.tokens.clone()),
+                "add" => Mutation::Add(provider, request.tokens.clone()),
+                _ => Mutation::Clear(provider),
+            };
+            argv_route::mutate(&path, mutation)?
+        }
+        _ => argv_route::read_config(&path)?,
+    };
+    let override_state = Override::current();
+    let mut value = switch_fields(Some(&path), Some(config.enabled), present, override_state);
+    value["ok"] = json!(true);
+    value["operation"] = json!(request.operation);
+    if let Some(provider) = request.provider {
+        add_provider_fields(&mut value, &config, provider);
+    } else if request.operation == "show" {
+        value["providers"] = json!(config.providers);
+    }
+    if override_state != Override::Unset {
+        value["notice"] = json!(format!(
+            "effective switch is overridden by {} ({})",
+            argv_route::ENV_NAME,
+            override_state.status()
+        ));
+    }
+    Ok(value)
+}
+
+fn add_provider_fields(value: &mut Value, config: &Config, provider: Provider) {
+    if let Some(key) = argv_route::route_key(provider) {
+        value["provider"] = json!(key);
+        value["configured"] = json!(config.providers.contains_key(key));
+        value["argv"] = json!(config.providers.get(key).cloned().unwrap_or_default());
+    }
+}
+
+/// Route-only error renderer: reuse redaction/formatting, never cwd log policy.
+fn emit_error(error: RouteError, args: &[String], delimiter: usize, as_json: bool) -> ExitCode {
+    let is_usage = error.reason == "argv_route_usage";
+    let mut value = json!({
+        "ok": false, "error": error.error, "reason": error.reason,
+        "action": error.action, "config_path": error.config_path,
+    });
+    if !is_usage {
+        // Best-effort switch observation even when strict management read fails.
+        // No config content or invalid argv is included in the error channel.
+        let path = error.config_path.as_deref();
+        let loose = path
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let persisted = loose
+            .as_ref()
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool);
+        let fields = switch_fields(
+            path,
+            persisted,
+            path.is_some_and(std::path::Path::exists),
+            Override::current(),
+        );
+        if let (Some(target), Some(fields)) = (value.as_object_mut(), fields.as_object()) {
+            target.extend(fields.clone());
+        }
+        value["operation"] = json!(args[..delimiter]
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+            .unwrap_or("status"));
+    }
+    if let Some(text) = super::emit(&CmdOutput::Json(value), as_json) {
+        if as_json {
+            println!("{text}");
+        } else {
+            eprintln!("{text}");
+        }
+    }
+    if is_usage {
+        ExitCode::Usage
+    } else {
+        ExitCode::Error
+    }
+}
+
+pub(crate) fn run(args: &[String]) -> ExitCode {
+    let delimiter = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    // Help and output-format controls stop at the first delimiter. Neither
+    // generic help scanning nor the old --no-display compatibility filter runs.
+    if args[..delimiter]
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        println!("{HELP}");
+        return ExitCode::Ok;
+    }
+    let as_json = args[..delimiter].iter().any(|arg| arg == "--json");
+    match parse(args, delimiter) {
+        Ok(request) => match execute(&request) {
+            Ok(value) => super::emit::emit_result(CmdResult::from_json(value, request.json)),
+            Err(error) => emit_error(error, args, delimiter, as_json),
+        },
+        Err(error) => emit_error(error, args, delimiter, as_json),
+    }
+}
