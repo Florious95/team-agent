@@ -54,11 +54,14 @@ impl Fixture {
     }
     fn cold(&self, provider: &str) -> Vec<String> {
         let spec = self.spec(provider, &["worker"]);
-        let t = OfflineTransport::new();
+        let t = offline();
         // Each property sample is a new fixture-owned cold generation, not an
         // unauthorized overwrite of a live topology. No real pane/process exists.
         let state_path = crate::state::persist::runtime_state_path(&self.ws);
-        if state_path.exists() { fs::remove_file(state_path).unwrap(); }
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        // Missing files can legitimately recover from the process-local state
+        // cache. A literal empty fixture snapshot starts a new cold generation.
+        fs::write(state_path, "{}").unwrap();
         let result = launch_with_transport_in_workspace(&self.ws, &spec, false, false, true, &t);
         assert!(result.is_ok(), "fixture library cold boundary must reach native plan: {result:?}");
         let spawns = t.spawn_records(); assert_eq!(spawns.len(), 1); spawns[0].1.clone()
@@ -68,7 +71,7 @@ impl Fixture {
     }
     fn start_team(&self, provider: &str, ids: &[&str]) -> OfflineTransport {
         self.spec(provider, ids);
-        let t = OfflineTransport::new();
+        let t = offline();
         let report = quick_start_with_transport_in_workspace(&self.ws, &self.team, None, true, Some("argvteam"), &t).unwrap();
         assert!(matches!(report, crate::lifecycle::QuickStartReport::Ready { .. }), "setup must produce real spawn: {report:?}");
         assert_eq!(t.spawn_records().len(), ids.len()); t
@@ -82,6 +85,11 @@ impl Fixture {
 }
 // Field guards restore changed environment before HermeticTestEnv removes its owned root.
 impl Drop for Fixture { fn drop(&mut self) { self.guards.clear(); } }
+fn offline() -> OfflineTransport {
+    let mut t = OfflineTransport::new();
+    for index in 1..=8 { t = t.with_capture_for_pane(format!("%{index}"), "Claude Code\n> \nOpenAI Codex\ncodex>\n❯\n"); }
+    t
+}
 fn executable(path: &Path, script: &str) { fs::write(path, script).unwrap(); fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap(); }
 fn role(provider: &str, id: &str) -> String {
     let model = if provider == "pi" { "team-agent/qwen3.8-27b" } else { "gpt-5.5" };
@@ -124,11 +132,12 @@ fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
     let off_leader = f.leader(Provider::Codex, true, false).unwrap();
     assert_eq!(off_leader.argv, leader.argv); assert_eq!(off_leader.leader_env, leader.leader_env); assert_eq!(off_leader.workspace, leader.workspace); assert_eq!(off_leader.identity, leader.identity);
     unsafe { std::env::remove_var("TMUX"); }
-    fs::remove_file(f.config()).unwrap(); f.switch(None);
+    drop(f);
+    let f = Fixture::new("argv-a01-common"); f.switch(None);
     f.start_team("codex", &["worker"]);
-    let baseline = OfflineTransport::new(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &baseline).unwrap();
+    let baseline = offline(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &baseline).unwrap();
     f.seed(true, json!({"codex":["must-not-appear"]})); f.switch(Some("off"));
-    let t = OfflineTransport::new(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t).unwrap();
+    let t = offline(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t).unwrap();
     assert_eq!(normalized(&t.spawn_records()[0].1), normalized(&baseline.spawn_records()[0].1));
     assert_eq!(t.spawn_cwd_records(), baseline.spawn_cwd_records());
     assert!(!t.spawn_records()[0].1.iter().any(|v| v == "must-not-appear"));
@@ -268,11 +277,11 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     assert!(noop.is_ok()); assert_eq!(t.spawn_records().len(), 2, "live-noop must not spawn again");
     let spec = f.spec("codex", &["worker", "mate"]);
     f.raw("invalid schema"); f.switch(Some("on"));
-    let dry = OfflineTransport::new(); assert!(launch_with_transport_in_workspace(&f.ws, &spec, true, false, true, &dry).is_ok()); assert!(dry.spawn_records().is_empty());
+    let dry = offline(); assert!(launch_with_transport_in_workspace(&f.ws, &spec, true, false, true, &dry).is_ok()); assert!(dry.spawn_records().is_empty());
     let text = fs::read_to_string(&spec).unwrap();
     // Every agent is paused; no route configuration must be consulted because no native spawn occurs.
     let paused = text.replace("    provider:", "    paused: true\n    provider:"); fs::write(&spec, paused).unwrap();
-    let paused_t = OfflineTransport::new();
+    let paused_t = offline();
     let result = launch_with_transport_in_workspace(&f.ws, &spec, false, false, true, &paused_t);
     assert!(result.is_ok(), "paused-only must not validate opt-in routing: {result:?}"); assert!(paused_t.spawn_records().is_empty());
     for (_, argv) in observed_spawns { assert_route(&argv, &["cold-route"]); }
@@ -286,14 +295,14 @@ fn a09_start_fresh_missing_backing_reset_and_add_use_new_route_once() {
     let mut samples = Vec::new();
     for backing in [false, true] {
         f.mutate_agent("worker", |a| { a["status"] = json!("stopped"); if backing { a["session_id"] = json!("lost-session"); a["rollout_path"] = json!(f.ws.join("missing.jsonl")); a["captured_at"] = json!("2026-01-01T00:00:00Z"); a["captured_via"] = json!("session_scan"); } });
-        let t = OfflineTransport::new();
+        let t = offline();
         let result = start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t);
         assert!(result.is_ok(), "allow-fresh missing backing fixture: {result:?}"); assert_eq!(t.spawn_records().len(), 1); samples.push(t.spawn_records()[0].1.clone());
     }
-    let reset = OfflineTransport::new(); let result = reset_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, Some("argvteam"), &reset);
+    let reset = offline(); let result = reset_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, Some("argvteam"), &reset);
     assert!(result.is_ok(), "reset fixture: {result:?}"); assert_eq!(reset.spawn_records().len(), 1); samples.push(reset.spawn_records()[0].1.clone());
     let role_file = f.ws.join("mate-role.md"); fs::write(&role_file, role("codex", "mate")).unwrap();
-    let added = OfflineTransport::new().with_session_present(true);
+    let added = offline().with_session_present(true);
     add_agent_with_transport(&f.team, &AgentId::new("mate"), &role_file, false, Some("argvteam"), &added).unwrap(); assert_eq!(added.spawn_records().len(), 1); samples.push(added.spawn_records()[0].1.clone());
     assert_eq!(samples.len(), 4); for argv in samples { assert_route(&argv, &["single-route"]); }
 }
@@ -309,10 +318,10 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
     fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":pending,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"a","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"seed"}]}}))).unwrap();
     f.mutate_agent("worker", |a| { a["status"] = json!("stopped"); a["session_id"] = json!(pending); a["rollout_path"] = json!(session); a["captured_at"] = json!("2026-01-01T00:00:01Z"); a["captured_via"] = json!("session_scan"); a["first_send_at"] = json!("2026-01-01T00:00:01Z"); });
     f.seed(true, json!({"pi":["resume-route"]})); f.switch(None);
-    let t = OfflineTransport::new(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, false, Some("argvteam"), &t).unwrap();
+    let t = offline(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, false, Some("argvteam"), &t).unwrap();
     assert_eq!(t.spawn_records().len(), 1); let argv = t.spawn_records()[0].1.clone();
     assert!(argv.windows(2).any(|p| p[0] == "--session" && Path::new(&p[1]) == session)); assert!(!argv.iter().any(|v| v == "--session-id"));
-    let restarted = OfflineTransport::new().with_session_present(true).with_default_liveness(crate::transport::PaneLiveness::Dead);
+    let restarted = offline().with_session_present(true).with_default_liveness(crate::transport::PaneLiveness::Dead);
     let report = restart_with_transport(&f.ws, false, Some("argvteam"), &restarted); assert!(report.is_ok(), "in-session resume fixture: {report:?}"); assert_eq!(restarted.spawn_records().len(), 1);
     let restart_argv = restarted.spawn_records()[0].1.clone(); assert!(restart_argv.windows(2).any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
     assert_route(&argv, &["resume-route"]); assert_route(&restart_argv, &["resume-route"]);
@@ -325,7 +334,7 @@ fn a09_remove_rollback_respawns_original_seat_with_route_once() {
     f.mutate_agent("worker", |a| { a["pane_id"] = json!("%old"); a["window"] = json!("worker"); });
     let _fail = f.env.with_env("TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE", "argv-route-red");
     f.seed(true, json!({"codex":["rollback-route"]})); f.switch(None);
-    let t = OfflineTransport::new().with_session_present(true).with_targets(vec![live_pane()]);
+    let t = offline().with_session_present(true).with_targets(vec![live_pane()]);
     let result = crate::lifecycle::restart::remove_agent_with_transport(&f.ws, &AgentId::new("worker"), true, true, Some("argvteam"), &t);
     assert!(result.is_err()); assert_eq!(t.spawn_records().len(), 1, "fault must reach rollback respawn: {result:?}"); assert_route(&t.spawn_records()[0].1, &["rollback-route"]);
     let state = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap(); assert!(state["agents"]["worker"].is_object(), "rollback must restore original seat");
@@ -341,7 +350,7 @@ fn a09_pi_fork_inherits_session_and_routes_only_new_native_spawn() {
     fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":id,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"seed01","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"fork seed"}]}}))).unwrap();
     f.mutate_agent("worker", |a| { a["session_id"] = json!(id); a["rollout_path"] = json!(session); a["captured_at"] = json!("2026-01-01T00:00:01Z"); a["captured_via"] = json!("session_scan"); });
     let original = fs::read(&session).unwrap(); f.seed(true, json!({"pi":["fork-route"]})); f.switch(None);
-    let t = OfflineTransport::new().with_session_present(true);
+    let t = offline().with_session_present(true);
     let report = fork_agent_with_transport(&f.ws, &AgentId::new("worker"), &AgentId::new("forked"), None, false, Some("argvteam"), &t);
     assert!(report.is_ok(), "valid v3 Pi fork must reach native spawn: {report:?}"); assert_eq!(t.spawn_records().len(), 1); assert_route(&t.spawn_records()[0].1, &["fork-route"]); assert_eq!(fs::read(session).unwrap(), original);
 }
@@ -369,7 +378,7 @@ fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
     let f = Fixture::new("argv-force"); f.start_team("codex", &["worker"]);
     let role_file = f.ws.join("replacement.md"); fs::write(&role_file, role("codex", "worker")).unwrap();
     f.seed(true, json!({"codex":["force-route"]})); f.switch(None);
-    let t = OfflineTransport::new();
+    let t = offline();
     let result = crate::lifecycle::launch::add_agent_with_transport_force(&f.ws, &AgentId::new("worker"), &role_file, false, Some("argvteam"), true, &t);
     assert!(result.is_ok(), "allowed dead-seat force fixture must complete: {result:?}"); assert_eq!(t.spawn_records().len(), 1); assert_route(&t.spawn_records()[0].1, &["force-route"]);
 }
@@ -380,7 +389,7 @@ fn a10_keep_running_is_not_restarted_or_validated_against_bad_route_config() {
     let f = Fixture::new("argv-keep"); f.start_team("codex", &["worker"]);
     f.mutate_agent("worker", |a| { a["pane_id"] = json!("%old"); a["window"] = json!("worker"); });
     f.raw("invalid JSON"); f.switch(Some("on"));
-    let t = OfflineTransport::new().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]).with_liveness("%old", crate::transport::PaneLiveness::Live);
+    let t = offline().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]).with_liveness("%old", crate::transport::PaneLiveness::Live);
     let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
     assert!(result.is_ok(), "keep-running cannot consult router: {result:?}"); assert!(t.spawn_records().is_empty());
 }
@@ -392,7 +401,7 @@ fn a10_restart_first_parallel_later_reloads_mapping_without_stacking() {
     let mut samples = Vec::new();
     for marker in ["route-generation-one", "route-generation-two"] {
         f.seed(true, json!({"codex":[marker]})); f.switch(None);
-        let t = OfflineTransport::new(); let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
+        let t = offline(); let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
         assert!(result.is_ok(), "restart fixture must reach plans: {result:?}"); assert_eq!(t.spawn_records().len(), 3);
         for (_, argv) in t.spawn_records() { samples.push((marker, argv)); }
     }
@@ -406,9 +415,9 @@ fn a11_enabled_bad_schema_fails_before_native_spawn_at_all_three_boundaries() {
     let f = Fixture::new("argv-errors"); f.start_team("codex", &["worker"]);
     for raw in ["bad JSON", r#"{"schema_version":2,"enabled":true,"providers":{}}"#, r#"{"schema_version":1,"enabled":true,"providers":{"unknown":[]}}"#, r#"{"schema_version":1,"enabled":true,"providers":{"pi":[7]}}"#, r#"{"schema_version":1,"enabled":true,"providers":{"pi":["\u0000"]}}"#, r#"{"schema_version":1,"enabled":true,"providers":{"pi":[],"pi":[]}}"#] {
         f.raw(raw); f.switch(Some("on"));
-        let spec = f.spec("codex", &["worker"]); let cold = OfflineTransport::new();
+        let spec = f.spec("codex", &["worker"]); let cold = offline();
         assert!(launch_with_transport_in_workspace(&f.ws, &spec, false, false, true, &cold).is_err(), "ON cold must reject {raw}"); assert!(cold.spawn_records().is_empty());
-        let single = OfflineTransport::new(); assert!(start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &single).is_err(), "ON single must reject {raw}"); assert!(single.spawn_records().is_empty());
+        let single = offline(); assert!(start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &single).is_err(), "ON single must reject {raw}"); assert!(single.spawn_records().is_empty());
         let leader = f.leader(Provider::Codex, false, false); assert!(leader.is_err(), "ON leader must reject {raw}");
     }
     f.seed(true, json!({"pi":[]})); f.switch(None);
@@ -480,7 +489,7 @@ fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
     let f = Fixture::new("argv-old-refusals"); f.start_team("codex", &["worker"]);
     f.mutate_agent("worker", |a| { a["pane_id"] = json!("%old"); a["window"] = json!("worker"); });
     f.seed(true, json!({"codex":["refusal-route"]})); f.switch(None);
-    let t = OfflineTransport::new().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]).with_liveness("%old", crate::transport::PaneLiveness::Live);
+    let t = offline().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]).with_liveness("%old", crate::transport::PaneLiveness::Live);
     let start = start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t); assert!(start.is_ok(), "existing start returns typed live-noop: {start:?}"); assert!(t.spawn_records().is_empty());
     let reset = reset_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, Some("argvteam"), &t).unwrap(); assert!(matches!(reset, crate::lifecycle::ResetAgentOutcome::Refused { .. })); assert!(t.spawn_records().is_empty());
     let fork = fork_agent_with_transport(&f.ws, &AgentId::new("worker"), &AgentId::new("forked"), None, false, Some("argvteam"), &t); assert!(fork.is_err()); assert!(t.spawn_records().is_empty());
