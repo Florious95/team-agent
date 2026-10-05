@@ -33,7 +33,9 @@ impl Fixture {
         let probes = env.root().join("probe-argv");
         let native = env.root().join("native-argv");
         let script = format!("#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' \"$*\" >> '{}'; echo 0.87.1; exit 0;;\n--list-models) printf '%s\\n' \"$*\" >> '{}'; printf 'provider model\\nteam-agent qwen3.8-27b\\n'; exit 0;;\nplugin|mcp|auth|list) printf '%s\\n' \"$*\" >> '{}'; exit 0;;\nesac\nprintf '%s\\0' \"$@\" > '{}'\n/bin/kill -TERM \"$PPID\"\n", probes.display(), probes.display(), probes.display(), native.display());
-        for name in ["pi", "claude", "codex", "copilot", "gemini", "grok", "agent"] { executable(&bin.join(name), &script); }
+        for name in ["claude", "codex", "copilot", "gemini", "grok", "agent"] { executable(&bin.join(name), &script); }
+        let real_pi = env.root().join("pi-real"); executable(&real_pi, &script);
+        std::os::unix::fs::symlink(&real_pi, bin.join("pi")).unwrap();
         executable(&bin.join("tmux"), "#!/bin/sh\ncase \"$*\" in\n*-V*) echo 'tmux 3.4';;\n*has-session*) exit 1;;\n*list-sessions*|*list-windows*|*list-panes*) exit 0;;\n*) exit 0;;\nesac\n");
         let guards = vec![env.with_env("PATH", &format!("{}:/usr/bin:/bin", bin.display())), env.with_env(SWITCH, "off"), env.with_env("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]"), env.with_env("TEAM_AGENT_RESTART_SESSION_CAPTURE_DEADLINE_MS", "25"), env.with_env("TEAM_AGENT_RESTART_SESSION_CAPTURE_POLL_MS", "5")];
         seed_coordinator(&ws);
@@ -53,8 +55,11 @@ impl Fixture {
     fn cold(&self, provider: &str) -> Vec<String> {
         let spec = self.spec(provider, &["worker"]);
         let t = OfflineTransport::new();
-        let result = launch_with_transport_in_workspace(&self.ws, &spec, false, false, true, &t);
-        assert!(result.is_ok(), "fixture library launch must reach native plan: {result:?}");
+        let compiled = crate::model::yaml::loads(&fs::read_to_string(&spec).unwrap()).unwrap();
+        // Property sampling is the real cold native boundary without re-saving a
+        // previously live generation. Full library/quick-start orchestration is A08.
+        let result = crate::lifecycle::launch::spawn_agents(&self.ws, &spec, &compiled, &SessionName::new("team-argvteam"), &t);
+        assert!(result.is_ok(), "fixture cold boundary must reach native plan: {result:?}");
         let spawns = t.spawn_records(); assert_eq!(spawns.len(), 1); spawns[0].1.clone()
     }
     fn leader(&self, provider: Provider, external: bool, attach: bool) -> Result<LeaderStartPlan, crate::leader::LeaderError> {
@@ -70,7 +75,7 @@ impl Fixture {
     fn mutate_agent(&self, id: &str, f: impl FnOnce(&mut Value)) {
         let selected = crate::state::projection::select_runtime_state(&self.ws, Some("argvteam")).unwrap();
         let mut state = selected; f(&mut state["agents"][id]);
-        crate::state::projection::save_team_scoped_state(&self.ws, &state).unwrap();
+        crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority(&self.ws, &state, "argvteam", &[id]).unwrap();
     }
     fn native_file(&self) -> PathBuf { self.env.root().join("native-argv") }
 }
@@ -110,7 +115,7 @@ fn live_pane() -> PaneInfo {
 #[serial(env)]
 fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
     let f = Fixture::new("argv-a01"); f.switch(None);
-    let cold = f.cold("codex");
+    let cold = f.cold("codex"); assert!(!f.config().exists());
     unsafe { std::env::set_var("TMUX", "fixture,1,0"); }
     let leader = f.leader(Provider::Codex, true, false).unwrap();
     f.seed(true, json!({"codex":["must-not-appear"]})); f.switch(Some("off"));
@@ -118,8 +123,13 @@ fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
     let off_leader = f.leader(Provider::Codex, true, false).unwrap();
     assert_eq!(off_leader.argv, leader.argv); assert_eq!(off_leader.leader_env, leader.leader_env); assert_eq!(off_leader.workspace, leader.workspace); assert_eq!(off_leader.identity, leader.identity);
     unsafe { std::env::remove_var("TMUX"); }
+    fs::remove_file(f.config()).unwrap(); f.switch(None);
     f.start_team("codex", &["worker"]);
+    let baseline = OfflineTransport::new(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &baseline).unwrap();
+    f.seed(true, json!({"codex":["must-not-appear"]})); f.switch(Some("off"));
     let t = OfflineTransport::new(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t).unwrap();
+    assert_eq!(normalized(&t.spawn_records()[0].1), normalized(&baseline.spawn_records()[0].1));
+    assert_eq!(t.spawn_cwd_records(), baseline.spawn_cwd_records());
     assert!(!t.spawn_records()[0].1.iter().any(|v| v == "must-not-appear"));
     assert!(!f.config().with_file_name("argv-routing.lock").exists());
 }
@@ -192,20 +202,27 @@ fn a05_generated_literal_tokens_roundtrip_cli_json_native_and_posix_wrappers() {
     }
 }
 
-#[test]
-#[serial(env)]
-fn a06_all_typed_providers_are_isolated_and_native_tail_is_byte_preserved() {
-    for (key, provider) in CANONICAL {
-        let f = Fixture::new("argv-provider");
-        let wire = crate::provider::wire::provider_wire(*provider);
-        let base = f.cold(wire);
-        let providers = CANONICAL.iter().map(|(k, _)| ((*k).to_string(), json!([format!("route-only-{k}")]))).collect::<serde_json::Map<_, _>>();
-        f.seed(true, Value::Object(providers)); f.switch(None);
-        let actual = f.cold(wire); injected(&base, &[format!("route-only-{key}")], &actual);
-        assert_eq!(actual.iter().filter(|v| v.starts_with("route-only-")).count(), 1);
-        f.seed(true, json!({"pi":["pi-must-not-leak"]}));
-        if *provider != Provider::Pi { assert_eq!(normalized(&f.cold(wire)), normalized(&base)); }
-    }
+fn provider_property(key: &str, provider: Provider) {
+    let f = Fixture::new("argv-provider");
+    let wire = crate::provider::wire::provider_wire(provider);
+    let base = f.cold(wire);
+    let providers = CANONICAL.iter().map(|(k, _)| ((*k).to_string(), json!([format!("route-only-{k}")]))).collect::<serde_json::Map<_, _>>();
+    f.seed(true, Value::Object(providers)); f.switch(None); let actual = f.cold(wire);
+    f.seed(true, json!({"pi":["pi-must-not-leak"]}));
+    if provider != Provider::Pi { assert_eq!(normalized(&f.cold(wire)), normalized(&base)); }
+    injected(&base, &[format!("route-only-{key}")], &actual);
+    assert_eq!(actual.iter().filter(|v| v.starts_with("route-only-")).count(), 1);
+}
+macro_rules! provider_tests { ($($name:ident => $key:literal, $provider:ident;)*) => { $(#[test] #[serial(env)] fn $name() { provider_property($key, Provider::$provider); })* }; }
+provider_tests! {
+    a06_claude => "claude", Claude;
+    a06_claude_code => "claude", ClaudeCode;
+    a06_codex => "codex", Codex;
+    a06_copilot => "copilot", Copilot;
+    a06_gemini_cli => "gemini_cli", GeminiCli;
+    a06_grok => "grok", Grok;
+    a06_cursor_agent => "cursor_agent", CursorAgent;
+    a06_pi => "pi", Pi;
 }
 
 #[test]
@@ -245,7 +262,7 @@ fn a07_pi_explicit_invalid_arguments_remain_rejected_under_routing() {
 fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     let f = Fixture::new("argv-quick"); f.seed(true, json!({"codex":["cold-route"]})); f.switch(None);
     let t = f.start_team("codex", &["worker", "mate"]);
-    for (_, argv) in t.spawn_records() { assert_route(&argv, &["cold-route"]); }
+    let observed_spawns = t.spawn_records();
     let noop = quick_start_with_transport_in_workspace(&f.ws, &f.team, None, true, Some("argvteam"), &t);
     assert!(noop.is_ok()); assert_eq!(t.spawn_records().len(), 2, "live-noop must not spawn again");
     let spec = f.spec("codex", &["worker", "mate"]);
@@ -257,6 +274,7 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     let paused_t = OfflineTransport::new();
     let result = launch_with_transport_in_workspace(&f.ws, &spec, false, false, true, &paused_t);
     assert!(result.is_ok(), "paused-only must not validate opt-in routing: {result:?}"); assert!(paused_t.spawn_records().is_empty());
+    for (_, argv) in observed_spawns { assert_route(&argv, &["cold-route"]); }
 }
 
 #[test]
@@ -264,17 +282,19 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
 fn a09_start_fresh_missing_backing_reset_and_add_use_new_route_once() {
     let f = Fixture::new("argv-single"); f.start_team("codex", &["worker"]);
     f.seed(true, json!({"codex":["single-route"]})); f.switch(None);
+    let mut samples = Vec::new();
     for backing in [false, true] {
         f.mutate_agent("worker", |a| { a["status"] = json!("stopped"); if backing { a["session_id"] = json!("lost-session"); a["rollout_path"] = json!(f.ws.join("missing.jsonl")); a["captured_at"] = json!("2026-01-01T00:00:00Z"); a["captured_via"] = json!("session_scan"); } });
         let t = OfflineTransport::new();
         let result = start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t);
-        assert!(result.is_ok(), "allow-fresh missing backing fixture: {result:?}"); assert_eq!(t.spawn_records().len(), 1); assert_route(&t.spawn_records()[0].1, &["single-route"]);
+        assert!(result.is_ok(), "allow-fresh missing backing fixture: {result:?}"); assert_eq!(t.spawn_records().len(), 1); samples.push(t.spawn_records()[0].1.clone());
     }
     let reset = OfflineTransport::new(); let result = reset_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, Some("argvteam"), &reset);
-    assert!(result.is_ok(), "reset fixture: {result:?}"); assert_eq!(reset.spawn_records().len(), 1); assert_route(&reset.spawn_records()[0].1, &["single-route"]);
+    assert!(result.is_ok(), "reset fixture: {result:?}"); assert_eq!(reset.spawn_records().len(), 1); samples.push(reset.spawn_records()[0].1.clone());
     let role_file = f.ws.join("mate-role.md"); fs::write(&role_file, role("codex", "mate")).unwrap();
     let added = OfflineTransport::new().with_session_present(true);
-    add_agent_with_transport(&f.team, &AgentId::new("mate"), &role_file, false, Some("argvteam"), &added).unwrap(); assert_eq!(added.spawn_records().len(), 1); assert_route(&added.spawn_records()[0].1, &["single-route"]);
+    add_agent_with_transport(&f.team, &AgentId::new("mate"), &role_file, false, Some("argvteam"), &added).unwrap(); assert_eq!(added.spawn_records().len(), 1); samples.push(added.spawn_records()[0].1.clone());
+    assert_eq!(samples.len(), 4); for argv in samples { assert_route(&argv, &["single-route"]); }
 }
 
 #[test]
@@ -286,11 +306,15 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
     let session = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&f.ws, "argvteam", "worker").sessions.join("valid.jsonl");
     fs::create_dir_all(session.parent().unwrap()).unwrap();
     fs::write(&session, format!("{}\n{}\n", json!({"type":"session","version":3,"id":pending,"cwd":f.ws,"timestamp":"2026-01-01T00:00:00Z"}), json!({"type":"message","id":"a","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"seed"}]}}))).unwrap();
-    f.mutate_agent("worker", |a| { a["status"] = json!("stopped"); a["session_id"] = json!(pending); a["rollout_path"] = json!(session); a["captured_at"] = json!("2026-01-01T00:00:01Z"); a["captured_via"] = json!("session_scan"); });
+    f.mutate_agent("worker", |a| { a["status"] = json!("stopped"); a["session_id"] = json!(pending); a["rollout_path"] = json!(session); a["captured_at"] = json!("2026-01-01T00:00:01Z"); a["captured_via"] = json!("session_scan"); a["first_send_at"] = json!("2026-01-01T00:00:01Z"); });
     f.seed(true, json!({"pi":["resume-route"]})); f.switch(None);
     let t = OfflineTransport::new(); start_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, false, Some("argvteam"), &t).unwrap();
-    assert_eq!(t.spawn_records().len(), 1); let argv = t.spawn_records()[0].1.clone(); assert_route(&argv, &["resume-route"]);
+    assert_eq!(t.spawn_records().len(), 1); let argv = t.spawn_records()[0].1.clone();
     assert!(argv.windows(2).any(|p| p[0] == "--session" && Path::new(&p[1]) == session)); assert!(!argv.iter().any(|v| v == "--session-id"));
+    let restarted = OfflineTransport::new().with_session_present(true).with_default_liveness(crate::transport::PaneLiveness::Dead);
+    let report = restart_with_transport(&f.ws, false, Some("argvteam"), &restarted); assert!(report.is_ok(), "in-session resume fixture: {report:?}"); assert_eq!(restarted.spawn_records().len(), 1);
+    let restart_argv = restarted.spawn_records()[0].1.clone(); assert!(restart_argv.windows(2).any(|p| p[0] == "--session" && Path::new(&p[1]) == session));
+    assert_route(&argv, &["resume-route"]); assert_route(&restart_argv, &["resume-route"]);
 }
 
 #[test]
@@ -323,14 +347,56 @@ fn a09_pi_fork_inherits_session_and_routes_only_new_native_spawn() {
 
 #[test]
 #[serial(env)]
+fn a09_public_clone_reaches_native_argv_without_inheriting_old_route() {
+    let f = Fixture::new("argv-clone"); f.start_team("pi", &["worker"]);
+    // Public clone has no Transport seam: this fixture tmux executes the actual
+    // generated provider shell line against the argv recorder, never real tmux.
+    let calls = f.env.root().join("clone-spawn-calls");
+    executable(&f.bin.join("tmux"), &format!("#!/bin/sh\nif [ \"$1\" = -S ]; then shift 2; fi\nop=$1; shift\ncase \"$op\" in\n-V) echo 'tmux 3.4';;\nhas-session) exit 0;;\nnew-window|new-session|split-window) for last do :; done; printf '%s\\n' \"$op\" >> '{}'; /bin/sh -c \"$last\" >/dev/null 2>&1; echo %99; exit 0;;\ndisplay-message) for last do :; done; case \"$last\" in *pane_id*) echo %99;; *pane_dead*) echo 0;; *pane_width*) echo 120;; esac;;\ncapture-pane) echo '> '; ;;
+*) exit 0;;\nesac\n", calls.display()));
+    f.seed(true, json!({"pi":["clone-route"]})); f.switch(None);
+    let cloned = crate::lifecycle::clone_agent(&f.ws, &AgentId::new("worker"), &AgentId::new("cloned"), None, false, Some("argvteam"));
+    assert!(cloned.is_ok(), "public clone fixture must complete: {cloned:?}");
+    assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
+    let bytes = fs::read(f.native_file()).unwrap(); let args = bytes.split(|b| *b == 0).filter(|b| !b.is_empty()).map(|b| String::from_utf8(b.to_vec()).unwrap()).collect::<Vec<_>>();
+    assert_eq!(args.first().map(String::as_str), Some("clone-route")); assert_eq!(args.iter().filter(|v| v.as_str() == "clone-route").count(), 1);
+}
+
+#[test]
+#[serial(env)]
+fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
+    let f = Fixture::new("argv-force"); f.start_team("codex", &["worker"]);
+    let role_file = f.ws.join("replacement.md"); fs::write(&role_file, role("codex", "worker")).unwrap();
+    f.seed(true, json!({"codex":["force-route"]})); f.switch(None);
+    let t = OfflineTransport::new();
+    let result = crate::lifecycle::launch::add_agent_with_transport_force(&f.ws, &AgentId::new("worker"), &role_file, false, Some("argvteam"), true, &t);
+    assert!(result.is_ok(), "allowed dead-seat force fixture must complete: {result:?}"); assert_eq!(t.spawn_records().len(), 1); assert_route(&t.spawn_records()[0].1, &["force-route"]);
+}
+
+#[test]
+#[serial(env)]
+fn a10_keep_running_is_not_restarted_or_validated_against_bad_route_config() {
+    let f = Fixture::new("argv-keep"); f.start_team("codex", &["worker"]);
+    f.mutate_agent("worker", |a| { a["pane_id"] = json!("%old"); a["window"] = json!("worker"); });
+    f.raw("invalid JSON"); f.switch(Some("on"));
+    let t = OfflineTransport::new().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]).with_liveness("%old", crate::transport::PaneLiveness::Live);
+    let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
+    assert!(result.is_ok(), "keep-running cannot consult router: {result:?}"); assert!(t.spawn_records().is_empty());
+}
+
+#[test]
+#[serial(env)]
 fn a10_restart_first_parallel_later_reloads_mapping_without_stacking() {
     let f = Fixture::new("argv-restart"); f.start_team("codex", &["worker", "mate", "third"]);
+    let mut samples = Vec::new();
     for marker in ["route-generation-one", "route-generation-two"] {
         f.seed(true, json!({"codex":[marker]})); f.switch(None);
         let t = OfflineTransport::new(); let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
         assert!(result.is_ok(), "restart fixture must reach plans: {result:?}"); assert_eq!(t.spawn_records().len(), 3);
-        for (_, argv) in t.spawn_records() { assert_route(&argv, &[marker]); if marker.ends_with("two") { assert!(!argv.iter().any(|v| v == "route-generation-one")); } }
+        for (_, argv) in t.spawn_records() { samples.push((marker, argv)); }
     }
+    assert_eq!(samples.len(), 6);
+    for (marker, argv) in samples { assert_route(&argv, &[marker]); if marker.ends_with("two") { assert!(!argv.iter().any(|v| v == "route-generation-one")); } }
 }
 
 #[test]
@@ -353,11 +419,47 @@ fn a11_enabled_bad_schema_fails_before_native_spawn_at_all_three_boundaries() {
 #[serial(env)]
 fn a13_materializer_version_catalog_and_nonagent_command_builders_are_not_routed() {
     let f = Fixture::new("argv-probes"); f.seed(true, json!({"pi":["--mode","rpc"],"copilot":["must-not-pollute-probe"]})); f.switch(None);
-    let base = f.cold("pi"); assert_route(&base, &["--mode", "rpc"]);
+    let base = f.cold("pi");
     let _ = crate::lifecycle::launch::pi_mcp::pi_model_candidates("team-agent/qwen3.8-27b");
     let probes = fs::read_to_string(&f.probes).unwrap(); assert!(probes.contains("--version")); assert!(probes.contains("--list-models"));
     for line in probes.lines() { assert!(!line.contains("rpc") && !line.contains("--mode")); }
-    assert!(f.native_file().exists() == false, "plan/materializer must not execute native provider session");
+    assert!(!f.native_file().exists(), "plan/materializer must not execute native provider session");
+    assert_route(&base, &["--mode", "rpc"]);
+}
+
+#[test]
+#[serial(env)]
+fn a07_attach_existing_never_opens_enabled_invalid_route_config() {
+    let f = Fixture::new("argv-attach"); f.raw("invalid JSON"); f.switch(Some("on"));
+    let plan = f.leader(Provider::Pi, true, true).unwrap();
+    assert_eq!(plan.mode, LeaderStartMode::AttachExisting); assert!(plan.provider_argv.is_empty()); assert!(!plan.argv.iter().any(|v| v == "rpc"));
+}
+
+#[test]
+#[serial(env)]
+fn a13_all_provider_version_auth_and_cursor_mcp_auxiliary_argv_are_native() {
+    let f = Fixture::new("argv-aux");
+    let mappings = CANONICAL.iter().map(|(k, _)| ((*k).to_string(), json!(["route-must-not-enter-aux"]))).collect::<serde_json::Map<_, _>>();
+    f.seed(true, Value::Object(mappings)); f.switch(None);
+    for (_, provider) in CANONICAL { assert!(crate::provider::get_adapter(*provider).version().is_ok()); }
+    let _ = crate::provider::get_adapter(Provider::ClaudeCode).auth_hint(crate::model::enums::AuthMode::Subscription);
+    assert_eq!(crate::lifecycle::launch::cursor_mcp_enable_argv(), ["agent", "mcp", "enable", "team_orchestrator"]);
+    let _ = f.cold("copilot");
+    let probes = fs::read_to_string(&f.probes).unwrap();
+    assert!(!probes.contains("route-must-not-enter-aux")); assert!(probes.contains("--version"));
+}
+
+#[test]
+#[serial(env)]
+fn a14_posix_native_recorder_literal_vector_positive_guard() {
+    let f = Fixture::new("argv-posix-positive"); let sentinel = f.env.root().join("MUST-NOT-EXIST");
+    let argv = vec![f.bin.join("pi").to_string_lossy().into_owned(), "".into(), " x y ".into(), "路由🚀".into(), "'\"\\\n".into(), format!(";touch {};$(touch {});`touch {}`", sentinel.display(), sentinel.display(), sentinel.display()), "--help".into(), "--json".into(), "--no-display".into(), "--".into()];
+    for leader in [false, true] {
+        let line = if leader { crate::tmux_backend::leader_shell_wrapper_command(&argv, &f.ws, &BTreeMap::new(), &[], "pi") } else { crate::tmux_backend::worker_shell_wrapper_command(&argv, &f.ws, &BTreeMap::new(), &[], "pi") };
+        let status = Command::new("/bin/sh").args(["-c", &line]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap(); assert!(!status.success());
+        let bytes = fs::read(f.native_file()).unwrap(); let received = bytes.split(|b| *b == 0).take(argv.len()-1).map(|v| String::from_utf8(v.to_vec()).unwrap()).collect::<Vec<_>>();
+        assert_eq!(received, argv[1..]); assert!(!sentinel.exists());
+    }
 }
 
 #[test]
@@ -377,7 +479,7 @@ fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
     let f = Fixture::new("argv-old-refusals"); f.start_team("codex", &["worker"]);
     f.mutate_agent("worker", |a| { a["pane_id"] = json!("%old"); a["window"] = json!("worker"); });
     f.seed(true, json!({"codex":["refusal-route"]})); f.switch(None);
-    let t = OfflineTransport::new().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]);
+    let t = OfflineTransport::new().with_session_present(true).with_targets(vec![live_pane()]).with_windows(vec![WindowName::new("worker")]).with_liveness("%old", crate::transport::PaneLiveness::Live);
     let start = start_agent_with_transport(&f.ws, &AgentId::new("worker"), true, false, false, Some("argvteam"), &t); assert!(start.is_ok(), "existing start returns typed live-noop: {start:?}"); assert!(t.spawn_records().is_empty());
     let reset = reset_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, Some("argvteam"), &t).unwrap(); assert!(matches!(reset, crate::lifecycle::ResetAgentOutcome::Refused { .. })); assert!(t.spawn_records().is_empty());
     let fork = fork_agent_with_transport(&f.ws, &AgentId::new("worker"), &AgentId::new("forked"), None, false, Some("argvteam"), &t); assert!(fork.is_err()); assert!(t.spawn_records().is_empty());
