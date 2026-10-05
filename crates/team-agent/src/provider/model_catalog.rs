@@ -589,15 +589,18 @@ pub(crate) fn run_command(
         Some((writer, rx))
     } else { None };
     let mut output = None;
+    let mut pending_output = None;
+    let mut output_ready_at: Option<Instant> = None;
     let mut too_large_at = None;
     let status = loop {
-        match reader_rx.try_recv() {
+        match pending_output.take().map_or_else(|| reader_rx.try_recv(), Ok) {
             Ok(Ok(bytes)) => {
                 if bytes.len() as u64 > max_bytes {
                     too_large_at.get_or_insert_with(Instant::now);
                 } else {
                     output = Some(bytes);
                 }
+                output_ready_at = Some(Instant::now());
             }
             Ok(Err(_)) => { terminate(&mut child, pid); return Err(CatalogError::OutputReadFailed); }
             Err(mpsc::TryRecvError::Disconnected) if output.is_none() && too_large_at.is_none() => { terminate(&mut child, pid); return Err(CatalogError::OutputReadFailed); }
@@ -614,7 +617,24 @@ pub(crate) fn run_command(
                 terminate(&mut child, pid);
                 return Err(CatalogError::OutputTooLarge);
             }
-            Ok(None) if started.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if started.elapsed() < timeout => {
+                let mut wait = timeout.saturating_sub(started.elapsed()).min(Duration::from_millis(10));
+                if let Some(over_at) = too_large_at {
+                    wait = wait.min(Duration::from_millis(100).saturating_sub(over_at.elapsed()));
+                }
+                if output.is_none() && too_large_at.is_none() {
+                    // Reader completion wakes us instead of trailing a blind 10ms sleep.
+                    if let Ok(result) = reader_rx.recv_timeout(wait) {
+                        pending_output = Some(result);
+                    }
+                } else {
+                    // stdout can close before exit; never busy-poll a disconnected channel.
+                    let interval = output_ready_at.map_or(Duration::from_millis(10), |at| {
+                        catalog_exit_poll_interval(at.elapsed())
+                    });
+                    std::thread::sleep(wait.min(interval));
+                }
+            }
             Ok(None) if too_large_at.is_some() => { terminate(&mut child, pid); return Err(CatalogError::OutputTooLarge); }
             Ok(None) => { terminate(&mut child, pid); return Err(CatalogError::Timeout); }
             Err(_) => { terminate(&mut child, pid); return Err(CatalogError::CommandCouldNotBeObserved); }
@@ -640,6 +660,16 @@ pub(crate) fn run_command(
     }
     let _ = reader.join();
     output.ok_or(CatalogError::OutputReadFailed)
+}
+
+fn catalog_exit_poll_interval(elapsed: Duration) -> Duration {
+    [1, 3, 6, 10]
+        .into_iter()
+        .map(Duration::from_millis)
+        .find(|checkpoint| *checkpoint > elapsed)
+        .map_or(Duration::from_millis(10), |checkpoint| {
+            checkpoint.saturating_sub(elapsed)
+        })
 }
 
 fn terminate(child: &mut Child, pid: u32) {
@@ -698,6 +728,151 @@ impl OwnedTempDir {
 }
 impl Drop for OwnedTempDir {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+}
+
+#[cfg(all(test, unix))]
+mod command_wait_regressions {
+    use super::*;
+
+    #[derive(Default)]
+    struct Observer {
+        pid: Option<u32>,
+        exits: Vec<Option<i32>>,
+        output_timeouts: usize,
+    }
+
+    impl CatalogObserver for Observer {
+        fn spawned(&mut self, pid: u32) { self.pid = Some(pid); }
+        fn exited(&mut self, status: &ExitStatus) { self.exits.push(status.code()); }
+        fn output_timeout(&mut self) { self.output_timeouts += 1; }
+    }
+
+    fn run(
+        script: &str,
+        input: Option<&[u8]>,
+        timeout: Duration,
+        max_bytes: u64,
+        observer: &mut Observer,
+    ) -> Result<Vec<u8>, CatalogError> {
+        run_command(
+            Path::new("/bin/sh"), &["-c", script], input, None, &[], &[],
+            timeout, max_bytes, observer,
+        )
+    }
+
+    fn assert_owned_child_gone(observer: &Observer) {
+        let pid = observer.pid.unwrap();
+        assert!(pid > 1);
+        let status = Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!status.success(), "owned child must be reaped");
+    }
+
+    #[test]
+    fn eof_and_success_preserve_input_and_raw_output() {
+        let mut observer = Observer::default();
+        let input = b"catalog\0\xff\n";
+        let output = run(
+            "exec /bin/cat", Some(input), CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut observer,
+        ).unwrap();
+        assert_eq!(output, input.to_vec());
+        assert_eq!(observer.exits, vec![Some(0)]);
+        assert_eq!(observer.output_timeouts, 0);
+        assert_owned_child_gone(&observer);
+    }
+
+    #[test]
+    fn stdout_eof_does_not_hide_a_later_nonzero_exit() {
+        let mut observer = Observer::default();
+        let error = run(
+            "printf 'partial'; exec 1>&-; /bin/sleep 0.03; exit 17",
+            None, CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut observer,
+        ).unwrap_err();
+        assert_eq!(error, CatalogError::CommandFailed);
+        assert_eq!(observer.exits, vec![Some(17)]);
+        assert_eq!(observer.output_timeouts, 0);
+        assert_owned_child_gone(&observer);
+    }
+
+    #[test]
+    fn stdout_eof_does_not_disable_the_ten_second_process_timeout() {
+        let mut observer = Observer::default();
+        let started = Instant::now();
+        let error = run(
+            "exec 1>&-; exec /bin/sleep 30", None, CATALOG_TIMEOUT,
+            MAX_CATALOG_BYTES, &mut observer,
+        ).unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(CATALOG_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(error, CatalogError::Timeout);
+        assert!(elapsed >= CATALOG_TIMEOUT);
+        assert!(elapsed < CATALOG_TIMEOUT + Duration::from_secs(2));
+        assert!(observer.exits.is_empty());
+        assert_eq!(observer.output_timeouts, 0);
+        assert_owned_child_gone(&observer);
+    }
+
+    #[test]
+    fn exact_one_mib_is_allowed_and_one_more_byte_is_rejected() {
+        assert_eq!(MAX_CATALOG_BYTES, 1024 * 1024);
+        let mut observer = Observer::default();
+        let script = format!("exec /usr/bin/head -c {MAX_CATALOG_BYTES} /dev/zero");
+        let output = run(
+            &script, None, CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut observer,
+        ).unwrap();
+        assert_eq!(output.len() as u64, MAX_CATALOG_BYTES);
+        assert_owned_child_gone(&observer);
+        let mut observer = Observer::default();
+        let script = format!("exec /usr/bin/head -c {} /dev/zero", MAX_CATALOG_BYTES + 1);
+        assert_eq!(
+            run(&script, None, CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut observer),
+            Err(CatalogError::OutputTooLarge)
+        );
+        assert_owned_child_gone(&observer);
+    }
+
+    #[test]
+    fn oversized_output_keeps_one_hundred_millisecond_exit_grace() {
+        let mut observer = Observer::default();
+        let started = Instant::now();
+        let error = run(
+            "printf '%65s' x; exec /bin/sleep 30", None, CATALOG_TIMEOUT, 64, &mut observer,
+        ).unwrap_err();
+        assert_eq!(error, CatalogError::OutputTooLarge);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_owned_child_gone(&observer);
+    }
+
+    #[test]
+    fn exited_child_with_inherited_stdout_keeps_output_timeout_observation() {
+        let mut observer = Observer::default();
+        let error = run(
+            "/bin/sleep 30 & exit 0", None, Duration::from_millis(200),
+            MAX_CATALOG_BYTES, &mut observer,
+        ).unwrap_err();
+        assert_eq!(error, CatalogError::Timeout);
+        assert_eq!(observer.exits, vec![Some(0)]);
+        assert_eq!(observer.output_timeouts, 1);
+        assert_owned_child_gone(&observer);
+    }
+
+    #[test]
+    fn early_eof_polling_keeps_ten_millisecond_anchor_and_then_old_cadence() {
+        let mut elapsed = Duration::ZERO;
+        for (sleep_ms, check_ms) in [(1, 1), (2, 3), (3, 6), (4, 10), (10, 20)] {
+            let interval = catalog_exit_poll_interval(elapsed);
+            assert_eq!(interval, Duration::from_millis(sleep_ms));
+            elapsed += interval;
+            assert_eq!(elapsed, Duration::from_millis(check_ms));
+        }
+        assert_eq!(catalog_exit_poll_interval(Duration::from_micros(9500)), Duration::from_micros(500));
+        assert_eq!(catalog_exit_poll_interval(Duration::from_millis(50)), Duration::from_millis(10));
+    }
 }
 
 #[cfg(test)]
