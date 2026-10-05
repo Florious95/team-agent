@@ -52,6 +52,7 @@ mod b0_reader_hideone_audit_contract;
 mod behavioral_diff_264_red;
 mod claude_compatible_config_red;
 mod claude_profile_launch_red;
+mod cli_argv_routing_red;
 mod clone_agent_preserves_source_tools;
 mod clone_fork_copilot_perms_red;
 mod codex_weak_window_attribution_red;
