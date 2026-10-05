@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.110]
+
+- **Global native CLI argv routing (Issue #283, PR #284):** add opt-in, provider-isolated startup arguments in `~/.team-agent/argv-routing.json`. Default OFF; `TEAM_AGENT_CLI_ARGV_ROUTING` overrides the persisted switch. Claude/Claude Code share a mapping, Cursor aliases resolve to `cursor_agent`, and unmapped providers retain their original argv.
+- **Route management CLI:** add `route status`, `enable`, `disable`, `show`, `set`, `add`, and `clear`, usable without a workspace or provider login. The first `--` ends control parsing; subsequent tokens are stored literally, including empty strings, `--help`, `--json`, and `--no-display`. Results distinguish persisted/effective state and environment overrides; route success, help, and errors do not create cwd `.team` state.
+- **Leader and lifecycle integration:** insert routed tokens once, immediately after the native executable and before its original argument tail. Apply after Pi materialization and existing placeholder/MCP/profile preparation across actual Leader launches, cold/library launches, start/reset/add/clone, new-seat Pi fork, full-team restart, and remove rollback. Running/attached processes, dry runs, probes, helpers, authentication, session ownership, and transport semantics remain unchanged. Pi `--mode rpc` is startup argv, not an RPC-host implementation.
+- **Configuration safety:** reject invalid schemas, unknown/duplicate keys, non-string tokens, and NUL; preserve literal token order without shell expansion. Use a stable write lock and private, atomically replaced files. Explicit OFF/invalid overrides do not read configuration; enabled invalid configuration fails before native spawn rather than silently falling back.
+- **Finite verification:** Grok Bot targeted routing/regression validation executed **73 PASS / 0 FAILED** (one child helper ignored). macOS real-subscription Pi/GPT-6-Luna acceptance verified text-mode startup, natural business replies, stop/start resume with retained context, discard-reset fresh launch argv, and scoped shutdown/cleanup. Other-provider native argv isolation remained BLOCKED and reset fresh-transcript strong proof remained UNKNOWN; these results do not claim all-provider/all-scenario live coverage or full-workspace fmt/clippy PASS.
+
 ## 0.5.109
 
 - Observe short-lived tmux command exits with bounded early polling while retaining the 5s timeout, exit codes, and pipe handling.
