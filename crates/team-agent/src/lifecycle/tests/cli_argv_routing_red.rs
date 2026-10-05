@@ -883,7 +883,10 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
     );
     // Existing reset policy requires discard-session even with a valid tuple.
     // Protect refusal; routing must not invent a retain-session reset branch.
-    assert!(matches!(reset, Ok(crate::lifecycle::ResetAgentOutcome::Refused { .. })));
+    assert!(matches!(
+        reset,
+        Ok(crate::lifecycle::ResetAgentOutcome::Refused { .. })
+    ));
     assert!(retained.spawn_records().is_empty());
     let restarted = offline()
         .with_session_present(true)
@@ -1379,7 +1382,10 @@ fn a15_provider_drift_and_unknown_force_remain_refused() {
         true,
         Some("argvteam"),
     );
-    assert!(forced.is_err(), "unknown old pane must not be force-recreated");
+    assert!(
+        forced.is_err(),
+        "unknown old pane must not be force-recreated"
+    );
     assert!(!f.native_file().exists());
     let after = crate::state::projection::select_runtime_state(&f.ws, Some("argvteam")).unwrap();
     assert_eq!(
