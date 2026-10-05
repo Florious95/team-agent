@@ -201,10 +201,10 @@ impl Drop for Fixture {
 }
 fn offline() -> OfflineTransport {
     let mut t = OfflineTransport::new();
-    for index in 1..=8 {
+    for index in 0..=8 {
         t = t.with_capture_for_pane(
             format!("%{index}"),
-            "Claude Code\n> \nOpenAI Codex\ncodex>\n❯\n",
+            "Claude Code\n> \nOpenAI Codex\ncodex>\n❯\n / commands · ? help\n",
         );
     }
     t
@@ -974,8 +974,29 @@ fn a09_public_clone_reaches_native_argv_without_inheriting_old_route() {
     // Public clone has no Transport seam: this fixture tmux executes the actual
     // generated provider shell line against the argv recorder, never real tmux.
     let calls = f.env.root().join("clone-spawn-calls");
-    executable(&f.bin.join("tmux"), &format!("#!/bin/sh\nif [ \"$1\" = -S ] || [ \"$1\" = -L ]; then shift 2; fi\nop=$1; shift\ncase \"$op\" in\n-V) echo 'tmux 3.4';;\nhas-session) exit 0;;\nnew-window|new-session|split-window) for last do :; done; printf '%s\\n' \"$op\" >> '{}'; /bin/sh -c \"$last\" >/dev/null 2>&1; echo %99; exit 0;;\ndisplay-message) for last do :; done; case \"$last\" in *pane_id*) echo %99;; *pane_dead*) echo 0;; *pane_width*) echo 120;; esac;;\ncapture-pane) echo '> '; ;;
-*) exit 0;;\nesac\n", calls.display()));
+    let identity = f.env.root().join("clone-pane-identity");
+    executable(&f.bin.join("tmux"), &format!(r#"#!/bin/sh
+if [ "$1" = -S ] || [ "$1" = -L ]; then shift 2; fi
+op=$1; shift
+case "$op" in
+-V) echo 'tmux 3.4';;
+has-session) exit 0;;
+new-window|new-session|split-window)
+    previous=''
+    for last do
+        case "$previous" in -s|-t) session=$last;; -n) window=$last;; esac
+        previous=$last
+    done
+    printf '%s\n' "$op" >> '{}'
+    printf '%%99__TA_FIELD__%s__TA_FIELD__1__TA_FIELD__%s__TA_FIELD__0__TA_FIELD__/dev/pts/99__TA_FIELD__pi__TA_FIELD__1__TA_FIELD__{}__TA_FIELD__0__TA_FIELD__0__TA_FIELD__1__TA_FIELD__\n' "$session" "$window" > '{}'
+    /bin/sh -c "$last" >/dev/null 2>&1
+    echo %99; exit 0;;
+list-panes) while IFS= read -r line; do printf '%s\n' "$line"; done < '{}';;
+display-message) for last do :; done; case "$last" in *pane_id*) echo %99;; *pane_dead*) echo 0;; *pane_width*) echo 120;; esac;;
+capture-pane) echo '> '; ;;
+*) exit 0;;
+esac
+"#, calls.display(), f.ws.display(), identity.display(), identity.display()));
     f.seed(true, json!({"pi":["clone-route"]}));
     f.switch(None);
     let cloned = crate::lifecycle::clone_agent(
