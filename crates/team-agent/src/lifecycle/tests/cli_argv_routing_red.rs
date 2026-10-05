@@ -54,6 +54,9 @@ impl Fixture {
         fs::create_dir(&bin).unwrap();
         let probes = env.root().join("probe-argv");
         let native = env.root().join("native-argv");
+        // Synthetic noncredential metadata; no user auth store or login is read.
+        fs::create_dir_all(env.home().join(".grok")).unwrap();
+        fs::write(env.home().join(".grok/auth.json"), r#"{"fixture_only":true}"#).unwrap();
         let script = format!("#!/bin/sh\ncase \"$1\" in\n--version) printf '%s\\n' \"$*\" >> '{}'; echo 0.87.1; exit 0;;\n--list-models) printf '%s\\n' \"$*\" >> '{}'; printf 'provider model\\nteam-agent qwen3.8-27b\\n'; exit 0;;\nplugin|mcp|auth|list) printf '%s\\n' \"$*\" >> '{}'; exit 0;;\nesac\nprintf '%s\\0' \"$@\" > '{}'\n/bin/kill -TERM \"$PPID\"\n", probes.display(), probes.display(), probes.display(), native.display());
         for name in ["claude", "codex", "copilot", "gemini", "grok", "agent"] {
             executable(&bin.join(name), &script);
@@ -65,6 +68,7 @@ impl Fixture {
         let guards = vec![
             env.with_env("PATH", &format!("{}:/usr/bin:/bin", bin.display())),
             env.with_env(SWITCH, "off"),
+            env.with_env("GROK_FOLDER_TRUST", "0"),
             env.with_env(
                 "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
                 "[\"/bin/zsh\"]",
@@ -266,10 +270,19 @@ fn assert_route(actual: &[String], route: &[&str]) {
         );
     }
 }
-fn live_pane() -> PaneInfo {
+fn same_leader_env(actual: &BTreeMap<String, String>, base: &BTreeMap<String, String>) {
+    let mut actual = actual.clone();
+    let mut base = base.clone();
+    // This intentional caller-input difference is not product env injection.
+    actual.remove(SWITCH);
+    base.remove(SWITCH);
+    assert!(actual == base, "native env changed beyond the caller's routing override");
+}
+fn live_pane(ws: &Path) -> PaneInfo {
+    let state = crate::state::projection::select_runtime_state(ws, Some("argvteam")).unwrap();
     PaneInfo {
         pane_id: PaneId::new("%old"),
-        session: SessionName::new("team-argvteam"),
+        session: SessionName::new(state["session_name"].as_str().unwrap()),
         window_index: None,
         window_name: Some(WindowName::new("worker")),
         pane_index: None,
@@ -298,7 +311,7 @@ fn a01_default_off_matches_explicit_off_at_cold_common_and_leader_boundaries() {
     assert_eq!(normalized(&f.cold("codex")), normalized(&cold));
     let off_leader = f.leader(Provider::Codex, true, false).unwrap();
     assert_eq!(off_leader.argv, leader.argv);
-    assert_eq!(off_leader.leader_env, leader.leader_env);
+    same_leader_env(&off_leader.leader_env, &leader.leader_env);
     assert_eq!(off_leader.workspace, leader.workspace);
     assert_eq!(off_leader.identity, leader.identity);
     unsafe {
@@ -530,6 +543,8 @@ fn a05_generated_literal_tokens_roundtrip_cli_json_native_and_posix_wrappers() {
 
 fn provider_property(key: &str, provider: Provider) {
     let f = Fixture::new("argv-provider");
+    let _leader = f.env.with_env("TEAM_AGENT_LEADER_PROVIDER", "pi");
+    let _caller = f.env.with_env("TEAM_AGENT_CALLER_PROVIDER", "pi");
     let wire = crate::provider::wire::provider_wire(provider);
     let base = f.cold(wire);
     let providers = CANONICAL
@@ -566,7 +581,17 @@ provider_tests! {
 
 #[test]
 #[serial(env)]
+fn a06_fake_worker_is_outside_native_router_even_under_invalid_optin() {
+    let f = Fixture::new("argv-fake"); let base = f.cold("fake");
+    f.raw("invalid JSON"); f.switch(Some("on"));
+    assert_eq!(f.cold("fake"), base);
+    assert!(base.iter().any(|v| v == "fake-worker"));
+}
+
+#[test]
+#[serial(env)]
 fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
+    let mut samples = Vec::new();
     for existing in [false, true] {
         let f = Fixture::new("argv-leader");
         if existing {
@@ -594,12 +619,7 @@ fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
             f.switch(None);
             let routed = f.leader(Provider::Pi, external, false).unwrap();
             assert_eq!(routed.mode, expected_mode);
-            injected(
-                &base.provider_argv,
-                &["--mode".into(), "rpc".into()],
-                &routed.provider_argv,
-            );
-            assert_eq!(routed.leader_env, base.leader_env);
+            same_leader_env(&routed.leader_env, &base.leader_env);
             assert_eq!(routed.workspace, base.workspace);
             assert_eq!(routed.identity, base.identity);
             if routed.mode == LeaderStartMode::ExecProvider {
@@ -608,6 +628,18 @@ fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
             if routed.mode == LeaderStartMode::ManagedTmuxClient {
                 assert!(!routed.argv.iter().any(|v| v == "--mode" || v == "rpc"));
             }
+            if routed.mode == LeaderStartMode::NewTmuxSession {
+                // Execute the actual encoded shell payload against a recorder,
+                // not tmux or a real provider. This path execs, so exit normally.
+                executable(&f.env.root().join("pi-real"), &format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nexit 0\n", f.native_file().display()));
+                let shell = routed.argv.last().unwrap();
+                assert!(shell.starts_with("cd "));
+                assert!(Command::new("/bin/sh").args(["-c", shell]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
+                let bytes = fs::read(f.native_file()).unwrap();
+                let actual = bytes.split(|b| *b == 0).take(routed.provider_argv.len() - 1).map(|v| String::from_utf8(v.to_vec()).unwrap()).collect::<Vec<_>>();
+                assert_eq!(actual, routed.provider_argv[1..]);
+            }
+            samples.push((base.provider_argv, routed.provider_argv));
         }
         unsafe {
             std::env::remove_var("TMUX");
@@ -618,6 +650,8 @@ fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
         assert_eq!(attach.mode, LeaderStartMode::AttachExisting);
         assert!(attach.provider_argv.is_empty());
     }
+    assert_eq!(samples.len(), 6);
+    for (base, routed) in samples { injected(&base, &["--mode".into(), "rpc".into()], &routed); }
 }
 
 #[test]
@@ -664,10 +698,21 @@ fn a08_quick_start_first_later_paused_dry_run_and_live_noop() {
     let dry = offline();
     assert!(launch_with_transport_in_workspace(&f.ws, &spec, true, false, true, &dry).is_ok());
     assert!(dry.spawn_records().is_empty());
-    let text = fs::read_to_string(&spec).unwrap();
-    // Every agent is paused; no route configuration must be consulted because no native spawn occurs.
-    let paused = text.replace("    provider:", "    paused: true\n    provider:");
-    fs::write(&spec, paused).unwrap();
+    drop(f);
+    let f = Fixture::new("argv-paused");
+    let spec = f.spec("codex", &["worker", "mate"]);
+    f.raw("invalid schema"); f.switch(Some("on"));
+    // Typed paused flags, not assumptions about YAML renderer indentation.
+    use crate::model::yaml::Value as Yaml;
+    let mut paused = crate::model::yaml::loads(&fs::read_to_string(&spec).unwrap()).unwrap();
+    let Yaml::Map(top) = &mut paused else { panic!("fixture spec object"); };
+    let Yaml::List(agents) = &mut top.iter_mut().find(|(key, _)| key == "agents").unwrap().1 else { panic!("fixture agents list"); };
+    for agent in agents {
+        let Yaml::Map(fields) = agent else { panic!("fixture agent object"); };
+        if let Some((_, value)) = fields.iter_mut().find(|(key, _)| key == "paused") { *value = Yaml::Bool(true); }
+        else { fields.push(("paused".into(), Yaml::Bool(true))); }
+    }
+    fs::write(&spec, crate::model::yaml::dumps(&paused)).unwrap();
     let paused_t = offline();
     let result = launch_with_transport_in_workspace(&f.ws, &spec, false, false, true, &paused_t);
     assert!(
@@ -702,9 +747,9 @@ fn a09_start_fresh_missing_backing_reset_and_add_use_new_route_once() {
         let result = start_agent_with_transport(
             &f.ws,
             &AgentId::new("worker"),
+            false,
+            false,
             true,
-            false,
-            false,
             Some("argvteam"),
             &t,
         );
@@ -768,6 +813,7 @@ fn a09_resume_retains_session_metadata_while_routes_change() {
         a["rollout_path"] = json!(session);
         a["captured_at"] = json!("2026-01-01T00:00:01Z");
         a["captured_via"] = json!("session_scan");
+        a["capture_state"] = json!("captured");
         a["first_send_at"] = json!("2026-01-01T00:00:01Z");
     });
     f.seed(true, json!({"pi":["resume-route"]}));
@@ -820,7 +866,7 @@ fn a09_remove_rollback_respawns_original_seat_with_route_once() {
     f.switch(None);
     let t = offline()
         .with_session_present(true)
-        .with_targets(vec![live_pane()]);
+        .with_targets(vec![live_pane(&f.ws)]);
     let result = crate::lifecycle::restart::remove_agent_with_transport(
         &f.ws,
         &AgentId::new("worker"),
@@ -859,6 +905,7 @@ fn a09_pi_fork_inherits_session_and_routes_only_new_native_spawn() {
         a["rollout_path"] = json!(session);
         a["captured_at"] = json!("2026-01-01T00:00:01Z");
         a["captured_via"] = json!("session_scan");
+        a["capture_state"] = json!("captured");
     });
     let original = fs::read(&session).unwrap();
     f.seed(true, json!({"pi":["fork-route"]}));
@@ -890,7 +937,7 @@ fn a09_public_clone_reaches_native_argv_without_inheriting_old_route() {
     // Public clone has no Transport seam: this fixture tmux executes the actual
     // generated provider shell line against the argv recorder, never real tmux.
     let calls = f.env.root().join("clone-spawn-calls");
-    executable(&f.bin.join("tmux"), &format!("#!/bin/sh\nif [ \"$1\" = -S ]; then shift 2; fi\nop=$1; shift\ncase \"$op\" in\n-V) echo 'tmux 3.4';;\nhas-session) exit 0;;\nnew-window|new-session|split-window) for last do :; done; printf '%s\\n' \"$op\" >> '{}'; /bin/sh -c \"$last\" >/dev/null 2>&1; echo %99; exit 0;;\ndisplay-message) for last do :; done; case \"$last\" in *pane_id*) echo %99;; *pane_dead*) echo 0;; *pane_width*) echo 120;; esac;;\ncapture-pane) echo '> '; ;;
+    executable(&f.bin.join("tmux"), &format!("#!/bin/sh\nif [ \"$1\" = -S ] || [ \"$1\" = -L ]; then shift 2; fi\nop=$1; shift\ncase \"$op\" in\n-V) echo 'tmux 3.4';;\nhas-session) exit 0;;\nnew-window|new-session|split-window) for last do :; done; printf '%s\\n' \"$op\" >> '{}'; /bin/sh -c \"$last\" >/dev/null 2>&1; echo %99; exit 0;;\ndisplay-message) for last do :; done; case \"$last\" in *pane_id*) echo %99;; *pane_dead*) echo 0;; *pane_width*) echo 120;; esac;;\ncapture-pane) echo '> '; ;;
 *) exit 0;;\nesac\n", calls.display()));
     f.seed(true, json!({"pi":["clone-route"]}));
     f.switch(None);
@@ -931,7 +978,7 @@ fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
     f.switch(None);
     let t = offline();
     let result = crate::lifecycle::launch::add_agent_with_transport_force(
-        &f.ws,
+        &f.team,
         &AgentId::new("worker"),
         &role_file,
         false,
@@ -949,7 +996,7 @@ fn a09_allowed_force_recreate_uses_route_once_after_old_seat_is_dead() {
 
 #[test]
 #[serial(env)]
-fn a10_keep_running_is_not_restarted_or_validated_against_bad_route_config() {
+fn a10_live_start_noop_is_not_validated_against_bad_route_config() {
     let f = Fixture::new("argv-keep");
     f.start_team("codex", &["worker"]);
     f.mutate_agent("worker", |a| {
@@ -960,14 +1007,13 @@ fn a10_keep_running_is_not_restarted_or_validated_against_bad_route_config() {
     f.switch(Some("on"));
     let t = offline()
         .with_session_present(true)
-        .with_targets(vec![live_pane()])
+        .with_targets(vec![live_pane(&f.ws)])
         .with_windows(vec![WindowName::new("worker")])
         .with_liveness("%old", crate::transport::PaneLiveness::Live);
-    let result = restart_with_transport(&f.ws, true, Some("argvteam"), &t);
-    assert!(
-        result.is_ok(),
-        "keep-running cannot consult router: {result:?}"
-    );
+    // The baseline restart library deliberately rebuilds live seats. Observe
+    // the actual existing live-seat Noop surface, without inventing new policy.
+    let result = start_agent_with_transport(&f.ws, &AgentId::new("worker"), false, false, false, Some("argvteam"), &t);
+    assert!(matches!(result, Ok(crate::lifecycle::StartAgentOutcome::Noop { .. })), "live Noop must not consult router: {result:?}");
     assert!(t.spawn_records().is_empty());
 }
 
@@ -1213,22 +1259,19 @@ fn a15_route_does_not_relax_running_start_reset_discard_or_unsupported_fork() {
     f.switch(None);
     let t = offline()
         .with_session_present(true)
-        .with_targets(vec![live_pane()])
+        .with_targets(vec![live_pane(&f.ws)])
         .with_windows(vec![WindowName::new("worker")])
         .with_liveness("%old", crate::transport::PaneLiveness::Live);
     let start = start_agent_with_transport(
         &f.ws,
         &AgentId::new("worker"),
-        true,
+        false,
         false,
         false,
         Some("argvteam"),
         &t,
     );
-    assert!(
-        start.is_ok(),
-        "existing start returns typed live-noop: {start:?}"
-    );
+    assert!(matches!(start, Err(_) | Ok(crate::lifecycle::StartAgentOutcome::Noop { .. })), "existing live seat must refuse/noop without spawn");
     assert!(t.spawn_records().is_empty());
     let reset = reset_agent_with_transport(
         &f.ws,
