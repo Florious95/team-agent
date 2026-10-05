@@ -55,11 +55,12 @@ impl Fixture {
     fn cold(&self, provider: &str) -> Vec<String> {
         let spec = self.spec(provider, &["worker"]);
         let t = OfflineTransport::new();
-        let compiled = crate::model::yaml::loads(&fs::read_to_string(&spec).unwrap()).unwrap();
-        // Property sampling is the real cold native boundary without re-saving a
-        // previously live generation. Full library/quick-start orchestration is A08.
-        let result = crate::lifecycle::launch::spawn_agents(&self.ws, &spec, &compiled, &SessionName::new("team-argvteam"), &t);
-        assert!(result.is_ok(), "fixture cold boundary must reach native plan: {result:?}");
+        // Each property sample is a new fixture-owned cold generation, not an
+        // unauthorized overwrite of a live topology. No real pane/process exists.
+        let state_path = crate::state::persist::runtime_state_path(&self.ws);
+        if state_path.exists() { fs::remove_file(state_path).unwrap(); }
+        let result = launch_with_transport_in_workspace(&self.ws, &spec, false, false, true, &t);
+        assert!(result.is_ok(), "fixture library cold boundary must reach native plan: {result:?}");
         let spawns = t.spawn_records(); assert_eq!(spawns.len(), 1); spawns[0].1.clone()
     }
     fn leader(&self, provider: Provider, external: bool, attach: bool) -> Result<LeaderStartPlan, crate::leader::LeaderError> {
