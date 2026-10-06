@@ -313,16 +313,18 @@ mod tests {
             row("/Users/alauda/stale", "old-team", "STALE", "-"),
         ];
         let out = format_leaders_human(&rows, LeadersView::All);
-        let header = out.lines().next().unwrap();
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "one header and both selected rows: {out}");
+        let header = lines[0];
         assert_eq!(header.split('\t').count(), 5);
         assert!(header.contains("状态") && header.contains("项目") && header.contains("队伍"));
-        let live: Vec<_> = out.lines().nth(1).unwrap().split('\t').collect();
+        let live: Vec<_> = lines[1].split('\t').collect();
         assert_eq!(&live[..4], &["leader", "可用", "/Volumes/nvme/Projects/讨论team-agent", "wiki-team"]);
         assert_eq!(
             super::super::adapters::split_shell_argv(live[4]),
             ["team-agent", "send", "leader", "请完成任务并把答案回复给 leader。", "--workspace", "/Volumes/nvme/Projects/讨论team-agent", "--team", "wiki-team"]
         );
-        let stale: Vec<_> = out.lines().nth(2).unwrap().split('\t').collect();
+        let stale: Vec<_> = lines[2].split('\t').collect();
         assert_eq!(&stale[..4], &["leader", "已失效", "/Users/alauda/stale", "old-team"]);
         assert_eq!(stale[4], "-", "stale rows must never suggest a send: {out}");
     }
