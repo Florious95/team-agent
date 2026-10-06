@@ -331,7 +331,7 @@ fn peek_help_and_parser_accept_head_search() {
     let handler = source_section(&adapters, "pub fn cmd_peek", "fn peek_unavailable");
     let failures = [
         (
-            !help.contains("team-agent status")
+            !help.contains("team-agent --help")
                 || help.contains("--head")
                 || help.contains("--search"),
             "Machine help must give Human navigation without private flags",

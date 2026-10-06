@@ -418,10 +418,9 @@ fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
         .split_once("fn dispatch(")
         .expect("dispatch function")
         .1;
-    let dispatch = dispatch
+    let (forwarders, dispatch) = dispatch
         .split_once("match command {")
-        .expect("command match")
-        .1;
+        .expect("command match");
     let dispatch = dispatch
         .split_once("const LEADER_PASSTHROUGH_COMMANDS")
         .expect("dispatch end")
@@ -434,6 +433,11 @@ fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
         })
         .flatten()
         .collect();
+    names.extend(forwarders.split("if command == \"").skip(1).filter_map(|guard| {
+        let (name, body) = guard.split_once('"')?;
+        let body = body.split_once('}')?.0;
+        (body.contains("return Ok(") && body.contains("::run(args)")).then(|| name.to_string())
+    }));
     names.extend(parse_const_str_array(emit, "LEADER_PASSTHROUGH_COMMANDS"));
     names
 }
