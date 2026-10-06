@@ -182,7 +182,9 @@ fn quote_cli_arg(raw: &str) -> String {
 fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
     if rows.is_empty() {
         return match view {
-            LeadersView::Live => "没有可用主控；运行 team-agent doctor --workspace . 检查当前队伍。\n".to_string(),
+            LeadersView::Live => {
+                "没有可用主控；运行 team-agent doctor --workspace . 检查当前队伍。\n".to_string()
+            }
             LeadersView::All => "没有已登记主控；首次协作用 team-agent pi 打开主控。\n".to_string(),
             LeadersView::Stale => "没有已失效的主控登记。\n".to_string(),
         };
@@ -190,13 +192,25 @@ fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
     let mut out = String::from("主控\t状态\t项目\t队伍\t发送命令\n");
     for row in rows {
         out.push_str("leader\t");
-        out.push_str(match row.status { "LIVE" => "可用", "STALE" => "已失效", "AMBIGUOUS" => "需确认归属", other => other });
+        out.push_str(match row.status {
+            "LIVE" => "可用",
+            "STALE" => "已失效",
+            "AMBIGUOUS" => "需确认归属",
+            other => other,
+        });
         out.push('\t');
         out.push_str(&row.entry.workspace.display().to_string());
         out.push('\t');
         out.push_str(&row.entry.team_key);
         out.push('\t');
-        out.push_str(&super::adapters::send_command("leader", &row.entry.workspace, Some(&row.entry.team_key)).unwrap_or_else(|| "请核对项目路径".to_string()));
+        out.push_str(
+            &super::adapters::send_command(
+                "leader",
+                &row.entry.workspace,
+                Some(&row.entry.team_key),
+            )
+            .unwrap_or_else(|| "请核对项目路径".to_string()),
+        );
         out.push('\n');
     }
     out
@@ -242,7 +256,9 @@ fn format_prune_human(report: &RegistryPruneReport) -> String {
                 "team_key_not_found" => "队伍已不在项目中",
                 "team_not_alive" => "队伍已停止",
                 "registry_entry_missing" => "登记已不存在",
-                "registry_entry_changed" | "canonical_state_changed" => "登记或队伍已变化，停止清理",
+                "registry_entry_changed" | "canonical_state_changed" => {
+                    "登记或队伍已变化，停止清理"
+                }
                 "canonical_state_unavailable" => "无法读取队伍状态，保留登记",
                 "registry_lock_unavailable" => "登记正被其他操作使用，停止清理",
                 "remove_failed" => "删除登记失败，请查看文件权限",

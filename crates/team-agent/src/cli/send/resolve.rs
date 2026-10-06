@@ -7,12 +7,10 @@ use serde_json::{json, Value};
 
 pub(super) fn warn_send_alias(flag: &str) {
     let spec = crate::cli::spec::command_spec("send");
-    let sunset = spec
-        .and_then(|spec| spec.sunset)
-        .unwrap_or("后续兼容版本");
-    let action = spec
-        .and_then(|spec| spec.action)
-        .unwrap_or("使用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选择项目和队伍");
+    let sunset = spec.and_then(|spec| spec.sunset).unwrap_or("后续兼容版本");
+    let action = spec.and_then(|spec| spec.action).unwrap_or(
+        "使用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选择项目和队伍",
+    );
     eprintln!("提示：{flag} 已弃用，将在{sunset}移除。下一步：{action}");
 }
 
@@ -38,7 +36,8 @@ pub(super) fn logical_to_from_args(
     .count();
     if supplied > 1 {
         return Err(CliError::Usage(
-            "队友名、--targets、--to-name 和 --to-leader 不能同时使用；请只选一种收信方式".to_string(),
+            "队友名、--targets、--to-name 和 --to-leader 不能同时使用；请只选一种收信方式"
+                .to_string(),
         ));
     }
     let logical_to = if args.to_leader.is_some() {
@@ -220,7 +219,11 @@ pub(super) fn send_to_logical_to(
                 }
                 let audit = error.n38_message();
                 let (message, action) = error.human_guidance(raw_name);
-                return Err(CliError::AddressRefusal { audit, error: message, action });
+                return Err(CliError::AddressRefusal {
+                    audit,
+                    error: message,
+                    action,
+                });
             }
         }
     }
@@ -346,7 +349,9 @@ pub(super) fn send_to_resolved_name(
 ) -> Result<Value, CliError> {
     let recipient = logical_recipient_id(resolved)?;
     if resolved.warning.is_some() {
-        eprintln!("提示：旧收信方式已弃用；请用队友名发送，通过 --workspace/--team 选择项目和队伍。");
+        eprintln!(
+            "提示：旧收信方式已弃用；请用队友名发送，通过 --workspace/--team 选择项目和队伍。"
+        );
     }
     let target = MessageTarget::Single(recipient);
     let mut value = persist_resolved_target(args, resolved, &target, content)?;
