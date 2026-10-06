@@ -1679,9 +1679,9 @@ mod tests {
             ],
         });
         let out = quickstart_human(&value);
-        assert!(out.contains("team started"), "must keep summary; got {out}");
+        assert!(out.contains("队伍已启动"), "must show startup summary; got {out}");
         assert!(
-            out.contains("attach:"),
+            out.contains("连接队伍："),
             "must render attach block; got {out}"
         );
         assert!(
@@ -1697,14 +1697,17 @@ mod tests {
     #[test]
     fn reminders_only_recommend_supported_result_commands() {
         let reminder = crate::cli::QUICK_START_REMINDER;
-        assert!(reminder.contains("Use team-agent status / inbox instead."));
+        assert!(reminder.contains("team-agent status"));
+        assert!(reminder.contains("team-agent inbox"));
         for text in [
             reminder,
             crate::cli::STATUS_REMINDER,
             crate::cli::SEND_REMINDER,
             &quickstart_human(&json!({"summary": "team started"})),
         ] {
-            assert!(!text.contains("collect"), "removed CLI command leaked: {text}");
+            for hidden in ["collect", "team-agent results", "team-agent wait"] {
+                assert!(!text.contains(hidden), "private/removed CLI command leaked: {text}");
+            }
         }
     }
 
@@ -1713,13 +1716,13 @@ mod tests {
         let value = json!({"summary": "quick-start complete"});
         assert_eq!(
             quickstart_human(&value),
-            format!("quick-start complete\n{}", crate::cli::QUICK_START_REMINDER)
+            format!("队伍已启动；下面是连接方式和派发任务的命令。\n{}", crate::cli::QUICK_START_REMINDER)
         );
-        // 空数组也只 summary。
+        // 空数组也只显示人类摘要与下一步，不凭空编造连接方式。
         let value2 = json!({"summary": "s", "attach_commands": []});
         assert_eq!(
             quickstart_human(&value2),
-            format!("s\n{}", crate::cli::QUICK_START_REMINDER)
+            format!("队伍已启动；下面是连接方式和派发任务的命令。\n{}", crate::cli::QUICK_START_REMINDER)
         );
     }
 
@@ -1738,7 +1741,7 @@ mod tests {
                 "team-agent",
                 "send",
                 "worker name; echo unsafe",
-                "MESSAGE",
+                "请完成任务并把答案回复给 leader。",
                 "--workspace",
                 "/tmp/my workspace",
                 "--team",
@@ -1753,7 +1756,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             command,
-            "team-agent send 'worker name; echo unsafe' MESSAGE --workspace '/tmp/my workspace' --team team-a"
+            "team-agent send 'worker name; echo unsafe' '请完成任务并把答案回复给 leader。' --workspace '/tmp/my workspace' --team team-a"
         );
     }
 
@@ -1801,8 +1804,19 @@ mod tests {
             .unwrap();
         assert!(command.contains("send worker"));
         assert!(command.contains("--team team-a"));
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        assert_eq!(parts[3], "MESSAGE");
+        assert_eq!(
+            split_shell_argv(command),
+            [
+                "team-agent",
+                "send",
+                "worker",
+                "请完成任务并把答案回复给 leader。",
+                "--workspace",
+                "/tmp/ws",
+                "--team",
+                "team-a",
+            ]
+        );
     }
 
     #[test]
