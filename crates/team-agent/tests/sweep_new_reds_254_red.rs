@@ -25,8 +25,8 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::cli::{
-    cmd_doctor, cmd_preflight, cmd_wait_ready, CmdOutput,
-    DoctorArgs, ExitCode, PreflightArgs, WaitReadyArgs,
+    cmd_doctor, cmd_preflight, cmd_wait_ready, CmdOutput, DoctorArgs, ExitCode, PreflightArgs,
+    WaitReadyArgs,
 };
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
@@ -331,7 +331,9 @@ fn peek_help_and_parser_accept_head_search() {
     let handler = source_section(&adapters, "pub fn cmd_peek", "fn peek_unavailable");
     let failures = [
         (
-            !help.contains("team-agent status") || help.contains("--head") || help.contains("--search"),
+            !help.contains("team-agent status")
+                || help.contains("--head")
+                || help.contains("--search"),
             "Machine help must give Human navigation without private flags",
         ),
         (
@@ -579,8 +581,7 @@ fn repairs_induce_claim_command(repairs: &Value) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|text| {
                     let trimmed = text.trim();
-                    trimmed.starts_with("team-agent claim-leader")
-                        || trimmed == "claim-leader"
+                    trimmed.starts_with("team-agent claim-leader") || trimmed == "claim-leader"
                 })
         })
     })

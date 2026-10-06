@@ -1225,9 +1225,12 @@ fn source(relative: &str) -> String {
 }
 
 fn command_spec<'a>(source: &'a str, needle: &str) -> &'a str {
-    let start = source.find(needle).unwrap_or_else(|| panic!("missing spec {needle}"));
+    let start = source
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing spec {needle}"));
     let rest = &source[start..];
-    rest.split_once("CommandSpec").map_or(rest, |(entry, _)| entry)
+    rest.split_once("CommandSpec")
+        .map_or(rest, |(entry, _)| entry)
 }
 
 fn path(value: &Path) -> &str {

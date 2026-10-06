@@ -659,7 +659,11 @@ fn cmd_send_default_human_output_is_brief_without_false_delivered() {
     assert!(!r.as_json);
     let text = emit(&r.output, r.as_json).expect("send should render human text");
     let lines: Vec<_> = text.lines().collect();
-    assert_eq!(lines.len(), 2, "send must separate outcome and next action: {text}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "send must separate outcome and next action: {text}"
+    );
     assert!(
         lines[0].contains("任务已收下") && lines[0].contains("还未送到队友的对话"),
         "queued send must report its true pending outcome: {text}"

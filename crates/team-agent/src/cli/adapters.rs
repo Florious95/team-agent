@@ -1753,7 +1753,10 @@ mod tests {
             ],
         });
         let out = quickstart_human(&value);
-        assert!(out.contains("队伍已启动"), "must show startup summary; got {out}");
+        assert!(
+            out.contains("队伍已启动"),
+            "must show startup summary; got {out}"
+        );
         assert!(
             out.contains("连接队伍："),
             "must render attach block; got {out}"
@@ -1780,7 +1783,10 @@ mod tests {
             &quickstart_human(&json!({"summary": "team started"})),
         ] {
             for hidden in ["collect", "team-agent results", "team-agent wait"] {
-                assert!(!text.contains(hidden), "private/removed CLI command leaked: {text}");
+                assert!(
+                    !text.contains(hidden),
+                    "private/removed CLI command leaked: {text}"
+                );
             }
         }
     }
@@ -1790,13 +1796,19 @@ mod tests {
         let value = json!({"summary": "quick-start complete"});
         assert_eq!(
             quickstart_human(&value),
-            format!("队伍已启动；下面是连接方式和派发任务的命令。\n{}", crate::cli::QUICK_START_REMINDER)
+            format!(
+                "队伍已启动；下面是连接方式和派发任务的命令。\n{}",
+                crate::cli::QUICK_START_REMINDER
+            )
         );
         // 空数组也只显示人类摘要与下一步，不凭空编造连接方式。
         let value2 = json!({"summary": "s", "attach_commands": []});
         assert_eq!(
             quickstart_human(&value2),
-            format!("队伍已启动；下面是连接方式和派发任务的命令。\n{}", crate::cli::QUICK_START_REMINDER)
+            format!(
+                "队伍已启动；下面是连接方式和派发任务的命令。\n{}",
+                crate::cli::QUICK_START_REMINDER
+            )
         );
     }
 

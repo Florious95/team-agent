@@ -152,9 +152,9 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         "the real CLI dispatch table must route team-agent pi before generic subcommand parsing"
     );
     assert!(
-        crate::cli::emit::default_help().lines().any(|line| {
-            line.split_whitespace().next() == Some("pi")
-        }),
+        crate::cli::emit::default_help()
+            .lines()
+            .any(|line| { line.split_whitespace().next() == Some("pi") }),
         "default help must advertise the dispatchable Pi launcher"
     );
     let leader = parse_pi_leader_args(&leader_argv[2..])
@@ -222,14 +222,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     .expect("write provider-default teammate role");
     let defaults = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
         .expect("provider: pi teammate may preserve provider-native defaults");
-    assert_eq!(
-        defaults.agent.get("model"),
-        Some(&Value::Null)
-    );
-    assert_eq!(
-        defaults.agent.get("effort"),
-        None
-    );
+    assert_eq!(defaults.agent.get("model"), Some(&Value::Null));
+    assert_eq!(defaults.agent.get("effort"), None);
     assert_eq!(
         defaults.agent.get("dangerously_skip_permissions"),
         Some(&Value::Bool(false))

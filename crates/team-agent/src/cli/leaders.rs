@@ -335,13 +335,33 @@ mod tests {
         assert_eq!(header.split('\t').count(), 5);
         assert!(header.contains("状态") && header.contains("项目") && header.contains("队伍"));
         let live: Vec<_> = lines[1].split('\t').collect();
-        assert_eq!(&live[..4], &["leader", "可用", "/Volumes/nvme/Projects/讨论team-agent", "wiki-team"]);
+        assert_eq!(
+            &live[..4],
+            &[
+                "leader",
+                "可用",
+                "/Volumes/nvme/Projects/讨论team-agent",
+                "wiki-team"
+            ]
+        );
         assert_eq!(
             super::super::adapters::split_shell_argv(live[4]),
-            ["team-agent", "send", "leader", "请完成任务并把答案回复给 leader。", "--workspace", "/Volumes/nvme/Projects/讨论team-agent", "--team", "wiki-team"]
+            [
+                "team-agent",
+                "send",
+                "leader",
+                "请完成任务并把答案回复给 leader。",
+                "--workspace",
+                "/Volumes/nvme/Projects/讨论team-agent",
+                "--team",
+                "wiki-team"
+            ]
         );
         let stale: Vec<_> = lines[2].split('\t').collect();
-        assert_eq!(&stale[..4], &["leader", "已失效", "/Users/alauda/stale", "old-team"]);
+        assert_eq!(
+            &stale[..4],
+            &["leader", "已失效", "/Users/alauda/stale", "old-team"]
+        );
         assert_eq!(stale[4], "-", "stale rows must never suggest a send: {out}");
     }
 
