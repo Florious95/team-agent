@@ -313,7 +313,9 @@ mod tests {
             row("/Users/alauda/stale", "old-team", "STALE", "-"),
         ];
         let out = format_leaders_human(&rows, LeadersView::All);
-        assert!(out.starts_with("STATUS\tWORKSPACE\tTEAM\tSEND\n"));
+        let header = out.lines().next().unwrap();
+        assert_eq!(header.split('\t').count(), 4);
+        assert!(header.contains("状态") && header.contains("项目") && header.contains("队伍"));
         assert!(out.contains("LIVE\t/Volumes/nvme/Projects/讨论team-agent\twiki-team\tsend-live\n"));
         assert!(out.contains("STALE\t/Users/alauda/stale\told-team\t-\n"));
     }
@@ -352,17 +354,14 @@ mod tests {
 
     #[test]
     fn empty_view_names_are_explicit() {
-        assert_eq!(
-            format_leaders_human(&[], LeadersView::Live),
-            "no live leaders\n"
-        );
-        assert_eq!(
-            format_leaders_human(&[], LeadersView::Stale),
-            "no stale leaders\n"
-        );
-        assert_eq!(
-            format_leaders_human(&[], LeadersView::All),
-            "no registered leaders\n"
-        );
+        for (view, empty) in [
+            (LeadersView::Live, "没有可用主控"),
+            (LeadersView::Stale, "没有离线主控"),
+            (LeadersView::All, "没有登记主控"),
+        ] {
+            let out = format_leaders_human(&[], view);
+            assert!(out.contains(empty), "{out}");
+            assert!(out.contains("team-agent doctor") && out.ends_with('\n'), "{out}");
+        }
     }
 }

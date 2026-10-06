@@ -380,14 +380,14 @@ fn send_to_name_mutual_exclusion() {
     let args = named_send_args(&cwd, Some("team-a/qa"), Some("%1"), None, &["hello"]);
     let err = cmd_send(&args).unwrap_err();
     assert!(
-        matches!(err, CliError::Usage(ref message) if message.contains("--to-name and --pane/TARGET/--to are mutually exclusive")),
+        matches!(err, CliError::Usage(ref message) if message.contains("--to-name/--pane/--to") && message.contains("不能同时")),
         "expected --to-name mutual exclusion, got {err:?}"
     );
 
     let args = named_send_args(&cwd, Some("team-a/qa"), None, Some("worker"), &["hello"]);
     let err = cmd_send(&args).unwrap_err();
     assert!(
-        matches!(err, CliError::Usage(ref message) if message.contains("--to-name and --pane/TARGET/--to are mutually exclusive")),
+        matches!(err, CliError::Usage(ref message) if message.contains("--to-name/--pane/--to") && message.contains("不能同时")),
         "expected --to-name/--to mutual exclusion, got {err:?}"
     );
 

@@ -2055,7 +2055,7 @@ mod tests {
         help.lines()
             .filter_map(|line| {
                 let trimmed = line.strip_prefix("  ")?;
-                if trimmed.starts_with("team-agent ") {
+                if trimmed.starts_with("team-agent ") || trimmed.starts_with(char::is_whitespace) {
                     return None;
                 }
                 let command = trimmed.split_whitespace().next()?;
@@ -2366,12 +2366,12 @@ mod tests {
             for flag in ["--model MODEL", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider TOOL"] {
                 assert!(help.contains(flag), "{name} help missing {flag}: {help}");
             }
-            assert!(help.contains("下一步") && help.contains("team-agent send"));
+            assert!(help.contains("下一步") && help.contains("send"));
         }
         assert!(!command_help(Some("start-agent")).contains("--force"));
         let add = command_help(Some("add-agent"));
         assert!(add.contains("[--role-file FILE]"));
-        assert!(add.contains("provider") && add.contains("bypass") && add.contains("角色文件"));
+        assert!(add.contains("provider") && add.contains("bypass") && add.contains("--role-file"));
         assert!(add.contains("冲突") && add.contains("拒绝"));
     }
 
@@ -2533,7 +2533,7 @@ mod tests {
         let args = send_args(&cli_argv(&["--pane", "%1596"]), &cwd).unwrap();
         let err = cmd_send(&args).unwrap_err();
         assert!(
-            matches!(err, CliError::Usage(ref message) if message == "--pane requires a non-empty message" || (message.contains("--pane") && message.contains("非空"))),
+            matches!(err, CliError::Usage(ref message) if message.contains("--pane") && message.contains("不能发送空消息")),
             "expected empty-message usage error, got {err:?}"
         );
 
@@ -2670,10 +2670,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_agent_args_builder_refuses_on_multi_alive_team_before_agent_validation() {
+    fn reset_agent_complete_input_refuses_multi_alive_team_before_agent_validation() {
         let ws = tmp_workspace();
         seed_two_alive_teams_in(&ws);
-        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let argv = cli_argv(&["nonexistent-agent", "--discard-session", "--workspace", &ws.to_string_lossy()]);
         let err = reset_agent_args(&argv, &ws).expect_err("must refuse");
         assert!(
             err.to_string().contains("multiple alive teams"),
@@ -2682,10 +2682,10 @@ mod tests {
     }
 
     #[test]
-    fn remove_agent_args_builder_refuses_on_multi_alive_team_before_agent_validation() {
+    fn remove_agent_complete_input_refuses_multi_alive_team_before_agent_validation() {
         let ws = tmp_workspace();
         seed_two_alive_teams_in(&ws);
-        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let argv = cli_argv(&["nonexistent-agent", "--workspace", &ws.to_string_lossy()]);
         let err = remove_agent_args(&argv, &ws).expect_err("must refuse");
         assert!(
             err.to_string().contains("multiple alive teams"),

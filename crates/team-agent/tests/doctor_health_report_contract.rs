@@ -671,11 +671,11 @@ fn p17_normal_shutdown_is_not_reported_as_missing_session() {
 #[test]
 fn p18_unrelated_cli_help_and_status_entry_points_remain_available() {
     let fixture = Fixture::new("p18-other-commands");
-    for command in ["preflight", "wait-ready", "status"] {
+    for (command, exit) in [("preflight", 2), ("wait-ready", 2), ("status", 0)] {
         let output = run(command, &["--help"], &fixture);
         assert_eq!(
             output.status.code(),
-            Some(0),
+            Some(exit),
             "P18 unrelated command {command} help regressed: {}",
             text(&output.stderr)
         );

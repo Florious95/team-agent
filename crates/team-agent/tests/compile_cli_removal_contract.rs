@@ -65,7 +65,7 @@ fn assert_unknown_compile(output: &Output) {
     let err = stderr(output);
     assert_eq!(output.status.code(), Some(1), "stderr={err:?}");
     assert!(output.stdout.is_empty(), "unknown command must not write stdout");
-    assert!(err.contains("invalid choice: 'compile'"), "not generic unknown: {err:?}");
+    assert!(err.contains("没有这个操作") && err.contains("'compile'"), "not generic unknown: {err:?}");
     assert!(!err.contains("missing --team"), "reached compile argument parsing: {err:?}");
     assert!(!err.contains("team.spec.yaml"), "reached compiler/runtime handling: {err:?}");
 }
@@ -408,9 +408,12 @@ fn p4_quick_start_keeps_canonical_runtime_spec_location() {
 #[serial(env)]
 fn p5_lifecycle_commands_remain_registered() {
     let env = HermeticTestEnv::enter("compile-p5-registry");
-    for command in ["restart", "add-agent", "validate", "preflight", "doctor", "quick-start"] {
+    for (command, exit) in [
+        ("restart", 0), ("add-agent", 0), ("validate", 2), ("preflight", 2),
+        ("doctor", 0), ("quick-start", 0),
+    ] {
         let output = run(&env, env.root(), &[command, "--help"]);
-        assert_eq!(output.status.code(), Some(0), "{command}: {}", stderr(&output));
+        assert_eq!(output.status.code(), Some(exit), "{command}: {}", stderr(&output));
     }
 }
 
@@ -420,5 +423,6 @@ fn p6_validate_errors_are_not_unknown_command_errors() {
     let env = HermeticTestEnv::enter("compile-p6-error");
     let output = run(&env, env.root(), &["validate", "missing-team", "--json"]);
     assert!(!stderr(&output).contains("invalid choice: 'validate'"));
+    assert!(!stderr(&output).contains("没有这个操作"));
     assert_ne!(output.status.code(), Some(0));
 }

@@ -395,7 +395,7 @@ fn cli_error_payload_plain_runtime() {
     assert_eq!(payload.error, "some other error");
     assert_eq!(
         payload.action,
-        "run `team-agent doctor` or inspect the log path shown here"
+        "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
     );
     assert_eq!(payload.log, "/tmp/y.log");
     assert_eq!(payload.reason, None);
@@ -417,19 +417,12 @@ fn cli_error_payload_tmux_conflict_quick_start_enrichment() {
     // context reset is only through restart --allow-fresh with explicit consent.
     assert_eq!(
             payload.action,
-            "tmux session `my-team` already exists. It may be your own existing team. \
-To resume it use `team-agent restart`. \
-If recovery is impossible, use `team-agent restart --allow-fresh` only after explicit context-loss consent. \
-Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. \
-Never terminate existing tmux sessions from quick-start."
+            "终端会话 `my-team` 已存在，可能是你的已有队伍。恢复用 team-agent restart；只有明确同意丢弃旧对话才用 --allow-fresh。另建队伍请修改 TEAM.md 的 name 后再 quick-start；不要关闭已有队伍凑成功。"
         );
-    assert_eq!(
-            payload.next_actions,
-            Some(vec![
-                "If this is your existing team, resume it with `team-agent restart`.".to_string(),
-                "If you want a separate team, change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string(),
-            ])
-        );
+    let next = payload.next_actions.as_ref().unwrap();
+    assert_eq!(next.len(), 2);
+    assert!(next[0].contains("team-agent restart"));
+    assert!(next[1].contains("TEAM.md") && next[1].contains("name") && next[1].contains("quick-start"));
 }
 
 #[test]
@@ -440,16 +433,11 @@ fn cli_error_payload_tmux_conflict_non_quick_start_enrichment() {
     assert_eq!(payload.session_name.as_deref(), Some("my-team"));
     assert_eq!(
         payload.action,
-        "tmux session `my-team` already exists. It may be an active team. \
-Do not terminate existing tmux sessions from startup; \
-use a different team name or runtime.session_name and start again."
+        "终端会话 `my-team` 已存在，可能属于运行中的队伍。不要关闭它；请使用另一个队伍名称后再启动。"
     );
-    assert_eq!(
-        payload.next_actions,
-        Some(vec![
-            "Use a different team name or runtime.session_name before starting again.".to_string()
-        ])
-    );
+    let next = payload.next_actions.as_ref().unwrap();
+    assert_eq!(next.len(), 1);
+    assert!(next[0].contains("队伍") && next[0].contains("名称"));
 }
 
 #[test]
@@ -641,19 +629,35 @@ fn cmd_status_summary_with_agent_rejected() {
 // =========================================================================
 
 #[test]
-fn cmd_leader_passthrough_help_returns_none() {
-    // parser.py:516: provider_args in (["-h"],["--help"]) -> print usage, return (no emit).
-    let r = cmd_leader_passthrough("codex", &["-h".into()], Path::new(".")).unwrap();
-    assert_eq!(r.output, CmdOutput::None);
-    assert_eq!(r.exit, ExitCode::Ok);
-    let r2 = cmd_leader_passthrough("claude", &["--help".into()], Path::new(".")).unwrap();
-    assert_eq!(r2.output, CmdOutput::None);
-    let r3 = cmd_leader_passthrough("copilot", &["--help".into()], Path::new(".")).unwrap();
-    assert_eq!(r3.output, CmdOutput::None);
-    let r4 = cmd_leader_passthrough("grok", &["-h".into()], Path::new(".")).unwrap();
-    assert_eq!(r4.output, CmdOutput::None);
-    let r5 = cmd_leader_passthrough("cursor", &["--help".into()], Path::new(".")).unwrap();
-    assert_eq!(r5.output, CmdOutput::None);
+#[serial_test::serial(env)]
+fn cmd_leader_passthrough_help_is_pure_human_guidance() {
+    let env = crate::cli::hermetic_test_support::HermeticTestEnv::enter("launcher-help-unit");
+    let cwd = env.workspace("empty");
+    let tools = ["pi", "codex", "claude", "copilot", "grok", "agent", "cursor"];
+    let bin = env.root().join("canaries");
+    std::fs::create_dir(&bin).unwrap();
+    #[cfg(unix)]
+    let _path = {
+        use std::os::unix::fs::PermissionsExt;
+        for tool in tools {
+            let path = bin.join(tool);
+            std::fs::write(&path, "#!/bin/sh\nprintf called > \"$0.called\"\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.with_env("PATH", &bin.to_string_lossy())
+    };
+    for provider in ["pi", "codex", "claude", "copilot", "grok", "cursor"] {
+        for alias in ["-h", "--help"] {
+            let result = cmd_leader_passthrough(provider, &[alias.into()], &cwd).unwrap();
+            assert_eq!(result.exit, ExitCode::Ok);
+            assert!(matches!(&result.output, CmdOutput::Human(text) if text.contains(provider) && text.contains("用法") && text.contains("Examples") && text.contains("下一步")));
+        }
+    }
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
+    assert!(env.registry_entries().is_empty());
+    for tool in tools {
+        assert!(!bin.join(format!("{tool}.called")).exists(), "native tool invoked");
+    }
 }
 
 #[test]

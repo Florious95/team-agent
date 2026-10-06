@@ -249,7 +249,7 @@ fn external_leader_after_dashdash_fails_with_visible_guidance() {
         "stderr must name the misplaced flag; stderr={stderr:?}"
     );
     assert!(
-        stderr.contains("action: move the Team Agent launcher flag before `--`"),
+        stderr.contains("action: 将主控启动选项放在 -- 前面；-- 后面只能是工具自己的参数。"),
         "stderr must tell the user how to fix the flag boundary; stderr={stderr:?}"
     );
     assert!(

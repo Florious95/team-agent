@@ -40,22 +40,9 @@ const CALLER_PANE: &str = "%0";
 const STALE_OWNER_PANE: &str = "%9";
 const LIVE_LEADER_PID: u32 = 14_663;
 const STALE_OWNER_PID: u32 = 47_641;
-const BASELINE_VISIBLE_COMMANDS: &[&str] = &[
-    "quick-start",
-    "send",
-    "status",
-    "results",
-    "restart",
-    "shutdown",
-    "add-agent",
-    "start-agent",
-    "stop-agent",
-    "reset-agent",
-    "doctor",
-    "claim-leader",
-    "takeover",
-    "attach-leader",
-];
+#[path = "support/human_catalog.rs"]
+mod human_catalog;
+use human_catalog::HUMAN_COMMANDS as BASELINE_VISIBLE_COMMANDS;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
@@ -211,23 +198,17 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
     let help = String::from_utf8_lossy(&output.stdout);
     let commands = visible_commands(&help);
     let actual_commands = commands.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    let mut expected_commands = BASELINE_VISIBLE_COMMANDS
+    let expected_commands = BASELINE_VISIBLE_COMMANDS
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    if help.lines().any(|line| {
-        line.strip_prefix("  ")
-            .is_some_and(|rest| rest.split_whitespace().next() == Some("models"))
-    }) {
-        expected_commands.insert("models");
-    }
     assert!(
-        actual_commands.contains("results"),
-        "results remains a public handler and must stay in --help; visible commands={commands:?}"
+        !actual_commands.contains("results"),
+        "results retains private dispatch but must not enter Human help; visible commands={commands:?}"
     );
     assert_eq!(
         actual_commands, expected_commands,
-        "B car governance: visible command set must keep the resign baseline plus published models when advertised; visible commands={commands:?}"
+        "B car governance: visible command set must equal Human30, not an open-ended superset; visible commands={commands:?}"
     );
     assert_eq!(
         commands.len(),
@@ -1118,17 +1099,7 @@ fn json_output(output: &Output, label: &str) -> Value {
 }
 
 fn visible_commands(help: &str) -> Vec<String> {
-    help.lines()
-        .filter_map(|line| line.strip_prefix("  "))
-        .filter(|line| !line.starts_with("team-agent "))
-        .filter_map(|line| line.split_whitespace().next())
-        .filter(|command| {
-            command
-                .chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-        })
-        .map(str::to_string)
-        .collect()
+    human_catalog::public_command_rows(help)
 }
 
 fn candidate_gate_files() -> Vec<(String, String)> {
