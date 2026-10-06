@@ -415,6 +415,7 @@ fn failed_parameterized_start_restores_existing_role_and_spec_bytes() {
 #[test]
 fn failed_prompt_bypass_start_restores_complete_existing_role_and_spec() {
     let (ws, shims) = ws_seed("rolelife-rollback-prompt-bypass", "pi", "gpt-6-luna", None); stop(&ws, &shims, "seed");
+    quiesce_owned_coordinator_before_rejection_snapshot(&ws);
     let spec = spec_path(&ws); let before = snapshot(&ws, &shims, "seed");
     fs::write(ws.path().join(".role-lifecycle-fail-launch"), b"injected tmux spawn failure").unwrap();
     let r = run(&ws, &shims, &start(&ws, "seed", &["--bypass", "true", "--prompt", "F2 rollback prompt."]));
