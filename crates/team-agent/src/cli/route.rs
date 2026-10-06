@@ -167,7 +167,9 @@ fn emit_error(error: RouteError, args: &[String], delimiter: usize, as_json: boo
             .map(String::as_str)
             .unwrap_or("status"));
     }
-    if is_usage { value["next_actions"] = json!(["team-agent route --help"]); }
+    if is_usage {
+        value["next_actions"] = json!(["team-agent route --help"]);
+    }
     if let Some(text) = super::emit(&CmdOutput::Json(value), as_json) {
         if as_json {
             println!("{text}");
@@ -176,7 +178,9 @@ fn emit_error(error: RouteError, args: &[String], delimiter: usize, as_json: boo
         }
     }
     if is_usage {
-        if !as_json { eprintln!("\n{HELP}"); }
+        if !as_json {
+            eprintln!("\n{HELP}");
+        }
         ExitCode::Usage
     } else {
         ExitCode::Error

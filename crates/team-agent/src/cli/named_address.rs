@@ -80,7 +80,9 @@ pub(crate) fn human_address_reason(reason: &str) -> Option<&'static str> {
     Some(match reason {
         "name_invalid" => "收信队友名不正确；请使用队友列表中的名称。",
         "workspace_not_found" => "所选项目目录不存在；请核对项目路径。",
-        "state_not_found" | "workspace_no_state" => "所选项目还没有可用队伍；首次起队用 quick-start，已有队伍恢复用 restart。",
+        "state_not_found" | "workspace_no_state" => {
+            "所选项目还没有可用队伍；首次起队用 quick-start，已有队伍恢复用 restart。"
+        }
         "team_key_not_found" => "所选项目没有这支队伍；请核对 --workspace 和 --team。",
         "leader_not_attached" => "主控还没有连接到这支队伍；请先体检，按提示恢复连接。",
         "name_not_resolvable" => "当前队伍没有这个队友；请先查看队友列表。",
@@ -110,13 +112,18 @@ impl NamedAddressError {
 
     fn with_human_scope(mut self, workspace: Option<&Path>, team: Option<&str>) -> Self {
         self.human_scope = workspace.map(Path::to_path_buf);
-        if self.human_team.is_none() { self.human_team = team.map(str::to_string); }
+        if self.human_team.is_none() {
+            self.human_team = team.map(str::to_string);
+        }
         self
     }
 
     pub(crate) fn human_guidance(&self, requested: &str) -> (String, String) {
         let workspace = self.human_scope.as_deref();
-        let mut message = format!("{}\n你刚才填写的是 {requested:?}。", human_address_reason(self.kind.as_str()).unwrap_or("未能找到可用的收信队友。"));
+        let mut message = format!(
+            "{}\n你刚才填写的是 {requested:?}。",
+            human_address_reason(self.kind.as_str()).unwrap_or("未能找到可用的收信队友。")
+        );
         if let Some(workspace) = workspace {
             message.push_str(&format!("\n所选项目：{:?}。", workspace.to_string_lossy()));
         }
@@ -125,21 +132,48 @@ impl NamedAddressError {
         }
         let mut action = "没有可靠的拼写建议；请先核对项目和队伍，不猜对象。".to_string();
         for candidate in &self.candidates {
-            if let (Some(agent), Some(team)) = (candidate.get("agent_id").and_then(Value::as_str), candidate.get("team_key").and_then(Value::as_str)) {
-                message.push_str(&format!("\n候选队伍 {team:?}，队友 {agent:?}；请确认是否是你要找的对象。"));
+            if let (Some(agent), Some(team)) = (
+                candidate.get("agent_id").and_then(Value::as_str),
+                candidate.get("team_key").and_then(Value::as_str),
+            ) {
+                message.push_str(&format!(
+                    "\n候选队伍 {team:?}，队友 {agent:?}；请确认是否是你要找的对象。"
+                ));
             }
         }
-        if let Some(candidate) = self.suggested_name.as_deref().and_then(|suggested| self.candidates.iter().find(|candidate| candidate.get("name").and_then(Value::as_str) == Some(suggested))) {
-            if let (Some(workspace), Some(agent), Some(team)) = (workspace, candidate.get("agent_id").and_then(Value::as_str), candidate.get("team_key").and_then(Value::as_str)) {
-                if !agent.is_empty() && !team.is_empty() && !agent.chars().chain(team.chars()).chain(workspace.to_string_lossy().chars()).any(char::is_control) {
-                    if let Some(command) = super::adapters::send_command(agent, workspace, Some(team)) {
+        if let Some(candidate) = self.suggested_name.as_deref().and_then(|suggested| {
+            self.candidates
+                .iter()
+                .find(|candidate| candidate.get("name").and_then(Value::as_str) == Some(suggested))
+        }) {
+            if let (Some(workspace), Some(agent), Some(team)) = (
+                workspace,
+                candidate.get("agent_id").and_then(Value::as_str),
+                candidate.get("team_key").and_then(Value::as_str),
+            ) {
+                if !agent.is_empty()
+                    && !team.is_empty()
+                    && !agent
+                        .chars()
+                        .chain(team.chars())
+                        .chain(workspace.to_string_lossy().chars())
+                        .any(char::is_control)
+                {
+                    if let Some(command) =
+                        super::adapters::send_command(agent, workspace, Some(team))
+                    {
                         action = format!("你是否想发给 {agent:?}、队伍 {team:?}？确认后将任务内容替换到这个例子；本次没有发送：\n{command}");
                     }
                 }
             }
         }
-        if let Some(workspace) = workspace.filter(|path| !path.to_string_lossy().chars().any(char::is_control)) {
-            action.push_str(&format!("\n也可查看可用队友列表：\nteam-agent status --workspace {}", super::adapters::shell_quote(&workspace.to_string_lossy())));
+        if let Some(workspace) =
+            workspace.filter(|path| !path.to_string_lossy().chars().any(char::is_control))
+        {
+            action.push_str(&format!(
+                "\n也可查看可用队友列表：\nteam-agent status --workspace {}",
+                super::adapters::shell_quote(&workspace.to_string_lossy())
+            ));
         }
         (message, action)
     }
@@ -243,9 +277,7 @@ impl NamedAddressError {
                 })
             })
             .collect();
-        let best = ranked
-            .first()
-            .map(|agent_id| format!("{team}/{agent_id}"));
+        let best = ranked.first().map(|agent_id| format!("{team}/{agent_id}"));
         self.with_scoped_suggestions(requested_display, candidate_values, best)
     }
 
@@ -271,9 +303,7 @@ impl NamedAddressError {
         // returned candidate (RED-4). Falls back to a status-JSON
         // hint when no candidate cleared the threshold.
         if let Some(best) = best_copyable {
-            self.action = format!(
-                "Did you mean `{best}`? Rerun with `--to-name {best}`."
-            );
+            self.action = format!("Did you mean `{best}`? Rerun with `--to-name {best}`.");
         } else {
             self.action = format!(
                 "No close matches for `{requested}`. \
@@ -485,7 +515,10 @@ pub(crate) fn resolve_name_for_cli(
     // registry-to-E6 internal helper deliberately pass `None` so
     // caller-supplied `--team` never overrides a full address.
     let parsed = normalize_bare_with_team_scope(parsed, bare_team_scope);
-    let requested_team = match &parsed.target { ParsedTarget::TeamEntity { team, .. } => Some(team.as_str()), _ => None };
+    let requested_team = match &parsed.target {
+        ParsedTarget::TeamEntity { team, .. } => Some(team.as_str()),
+        _ => None,
+    };
     let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())
         .map_err(|error| error.with_human_scope(None, requested_team))?;
     let state = load_state_checked(&target_workspace)
@@ -497,7 +530,8 @@ pub(crate) fn resolve_name_for_cli(
         &state,
         &parsed,
         transport.as_ref(),
-    ).map_err(|error| error.with_human_scope(Some(&target_workspace), requested_team))?;
+    )
+    .map_err(|error| error.with_human_scope(Some(&target_workspace), requested_team))?;
     Ok((resolved, transport))
 }
 
@@ -545,8 +579,8 @@ pub(crate) fn parse_leader_target_workspace_and_team(
     match parsed.target {
         ParsedTarget::TeamEntity { team, entity } if entity == "leader" => {
             let state = load_state_checked(&target_workspace)?;
-            let canonical = canonical_named_team_key(&target_workspace, &state, &team)
-                .unwrap_or(team);
+            let canonical =
+                canonical_named_team_key(&target_workspace, &state, &team).unwrap_or(team);
             Ok(Some((target_workspace, canonical)))
         }
         _ => Ok(None),
@@ -672,7 +706,10 @@ fn resolve_in_workspace(
                     transport,
                 )
             };
-            result.map_err(|mut error| { error.human_team = Some(canonical); error })
+            result.map_err(|mut error| {
+                error.human_team = Some(canonical);
+                error
+            })
         }
         ParsedTarget::SessionWindow { session, window } => resolve_session_window(
             sender_workspace,
@@ -1035,11 +1072,7 @@ fn resolve_leader(
     let socket = string_field(receiver, "tmux_socket")
         .map(str::to_string)
         .or_else(|| transport.tmux_endpoint());
-    match crate::messaging::resolve_live_leader_channel(
-        target_workspace,
-        receiver,
-        transport,
-    ) {
+    match crate::messaging::resolve_live_leader_channel(target_workspace, receiver, transport) {
         crate::messaging::LeaderChannelResolution::Live(
             crate::messaging::LiveLeaderChannel::DirectTmux(channel),
         ) => Ok(ResolvedNamedAddress {
@@ -1253,8 +1286,8 @@ fn transport_for_cli_target(
     parsed: &ParsedNamedAddress,
 ) -> Box<dyn Transport> {
     if let ParsedTarget::TeamEntity { team, entity } = &parsed.target {
-        let canonical = canonical_named_team_key(target_workspace, state, team)
-            .unwrap_or_else(|| team.clone());
+        let canonical =
+            canonical_named_team_key(target_workspace, state, team).unwrap_or_else(|| team.clone());
         if entity == "leader" {
             let team_scoped_socket = team_entry(state, &canonical)
                 .and_then(|entry| entry.get("leader_receiver"))
@@ -1361,11 +1394,8 @@ fn canonical_named_team_key(
     if team_entry(state, requested).is_some() || is_legacy_single_team_active(state, requested) {
         return Some(requested.to_string());
     }
-    let selected = crate::state::projection::select_runtime_state(
-        target_workspace,
-        Some(requested),
-    )
-    .ok()?;
+    let selected =
+        crate::state::projection::select_runtime_state(target_workspace, Some(requested)).ok()?;
     let canonical = selected
         .get("active_team_key")
         .and_then(Value::as_str)

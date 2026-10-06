@@ -186,20 +186,42 @@ pub(super) fn send_human_output(value: &Value) -> String {
     let agent = send_human_target(value);
     if value.get("ok").and_then(Value::as_bool) == Some(false) {
         let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
-        let explanation = crate::cli::named_address::human_address_reason(reason).unwrap_or(match reason {
-            "target_not_in_team" | "unknown_recipient" => "当前队伍没有这个队友。",
-            "missing_permissions" | "human_confirmation_required" => "发送被拒绝：需要先确认交流权限。",
-            "recipient_busy" | "recipient_pane_in_non_input_mode" => "队友当前不能接收任务；请先查看其状态。",
-            "routing_ambiguous" | "empty_target_list" | "ambiguous" => "没有明确选定收信队友；请填写队友名和任务内容。",
-            "team_owner_mismatch" | "PaneWorkspaceMismatch" | "session_drift" => "队伍或终端归属不匹配；已停止发送。",
-            "coordinator_unavailable" | "tmux_target_missing" => "队伍连接暂不可用；本次没有确认送达。",
-            "message_already_claimed" | "duplicate" => "这条消息已由其他发送处理接收；不要重复发送。",
-            "no_caller_pane" => "当前终端没有可用的队伍连接；请在主控的命令行/工具上下文发送。",
-            _ => value.get("error").and_then(Value::as_str).unwrap_or("发送未成功；没有确认任务已送达。"),
-        });
+        let explanation =
+            crate::cli::named_address::human_address_reason(reason).unwrap_or(match reason {
+                "target_not_in_team" | "unknown_recipient" => "当前队伍没有这个队友。",
+                "missing_permissions" | "human_confirmation_required" => {
+                    "发送被拒绝：需要先确认交流权限。"
+                }
+                "recipient_busy" | "recipient_pane_in_non_input_mode" => {
+                    "队友当前不能接收任务；请先查看其状态。"
+                }
+                "routing_ambiguous" | "empty_target_list" | "ambiguous" => {
+                    "没有明确选定收信队友；请填写队友名和任务内容。"
+                }
+                "team_owner_mismatch" | "PaneWorkspaceMismatch" | "session_drift" => {
+                    "队伍或终端归属不匹配；已停止发送。"
+                }
+                "coordinator_unavailable" | "tmux_target_missing" => {
+                    "队伍连接暂不可用；本次没有确认送达。"
+                }
+                "message_already_claimed" | "duplicate" => {
+                    "这条消息已由其他发送处理接收；不要重复发送。"
+                }
+                "no_caller_pane" => "当前终端没有可用的队伍连接；请在主控的命令行/工具上下文发送。",
+                _ => value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("发送未成功；没有确认任务已送达。"),
+            });
         let mut out = format!("{explanation}\n下一步：先运行 team-agent status，使用列表中的队友名；连接问题用 team-agent doctor --workspace .。不要反复重发。");
-        if let Some(suggested) = value.get("suggested_name").and_then(Value::as_str).filter(|name| !name.is_empty() && !name.contains(['/', ':', ',', '\n', '\r'])) {
-            out.push_str(&format!("\n你是否想发给 {suggested}？确认后使用这个队友名。"));
+        if let Some(suggested) = value
+            .get("suggested_name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty() && !name.contains(['/', ':', ',', '\n', '\r']))
+        {
+            out.push_str(&format!(
+                "\n你是否想发给 {suggested}？确认后使用这个队友名。"
+            ));
         }
         return out;
     }
@@ -222,8 +244,12 @@ pub(super) fn send_human_field(value: &Value, key: &str) -> String {
 }
 
 pub(super) fn send_human_target(value: &Value) -> String {
-    value.get("agent_id").and_then(Value::as_str)
-        .filter(|name| !name.is_empty() && *name != "*" && !name.contains(['/', ':', ',', '\n', '\r']))
+    value
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .filter(|name| {
+            !name.is_empty() && *name != "*" && !name.contains(['/', ':', ',', '\n', '\r'])
+        })
         .map(str::to_string)
         .unwrap_or_else(|| "该队友".to_string())
 }

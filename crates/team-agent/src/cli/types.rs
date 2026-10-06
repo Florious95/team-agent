@@ -43,7 +43,11 @@ pub enum CliError {
     Usage(String),
     /// Preserve the original refusal for audit while carrying safe human guidance.
     #[error("usage error: {audit}")]
-    AddressRefusal { audit: String, error: String, action: String },
+    AddressRefusal {
+        audit: String,
+        error: String,
+        action: String,
+    },
     /// state 解析失败(歧义/未找到 team 等)。透传 step 5。
     #[error("{0}")]
     State(#[from] crate::state::StateError),
@@ -81,7 +85,10 @@ impl CliError {
             error: error.clone(),
             action: if super::spec::command_spec(command).is_some() {
                 "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
-            } else { "run `team-agent doctor` or inspect the log path shown here" }.to_string(),
+            } else {
+                "run `team-agent doctor` or inspect the log path shown here"
+            }
+            .to_string(),
             log: log_path.to_string_lossy().to_string(),
             reason: None,
             session_name: None,
@@ -96,23 +103,20 @@ impl CliError {
                 );
                 payload.next_actions = Some(vec![
                     "如果是自己的已有队伍，使用 team-agent restart 恢复。".to_string(),
-                    "如要另建队伍，修改 TEAM.md 的 name 后再运行 team-agent quick-start。".to_string(),
+                    "如要另建队伍，修改 TEAM.md 的 name 后再运行 team-agent quick-start。"
+                        .to_string(),
                 ]);
             } else {
                 payload.action = format!(
                     "终端会话 `{session}` 已存在，可能属于运行中的队伍。不要关闭它；请使用另一个队伍名称后再启动。"
                 );
-                payload.next_actions = Some(vec![
-                    "请使用另一个队伍名称后再启动。"
-                        .to_string(),
-                ]);
+                payload.next_actions = Some(vec!["请使用另一个队伍名称后再启动。".to_string()]);
             }
         } else if error.contains("Team Agent launcher flag")
             && error.contains("must appear before --")
         {
-            payload.action = String::from(
-                "将主控启动选项放在 -- 前面；-- 后面只能是工具自己的参数。",
-            );
+            payload.action =
+                String::from("将主控启动选项放在 -- 前面；-- 后面只能是工具自己的参数。");
         } else if error.contains("managed launcher refuses a different ambient tmux server") {
             payload.action = String::from(
                 "先退出当前 tmux 客户端再重试；只有明确需要嵌套连接时才在 -- 前加 --allow-nested-attach。",

@@ -57,7 +57,11 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("{}", default_help());
         return ExitCode::Ok;
     };
-    if is_machine_command(command) && argv[1..].iter().any(|arg| matches!(arg.as_str(), "-h" | "--help")) {
+    if is_machine_command(command)
+        && argv[1..]
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+    {
         eprintln!("{HUMAN_NAVIGATION}");
         return ExitCode::Usage;
     }
@@ -112,20 +116,32 @@ fn emit_cli_error_for_command(
         let explanation = match error {
             CliError::Usage(message) => match message.as_str() {
                 "missing agent" | "missing source_agent" => "请填写队友名。".to_string(),
-                "missing profile command" => "请填写 profile 操作：init、doctor 或 show。".to_string(),
+                "missing profile command" => {
+                    "请填写 profile 操作：init、doctor 或 show。".to_string()
+                }
                 "missing profile name" => "请填写登录/代理配置的名称。".to_string(),
-                "add-agent requires --provider <name>" => "请用 --provider 明确选择工具，或用 --role-file 提供角色文件。".to_string(),
-                "add-agent requires --bypass <true|false>" => "请用 --bypass false 明确保留权限询问，或在角色文件中明确此设置。".to_string(),
-                other => other.strip_prefix("missing ").map(|field| format!("请补齐必需参数：{field}。")).unwrap_or_else(|| other.to_string()),
+                "add-agent requires --provider <name>" => {
+                    "请用 --provider 明确选择工具，或用 --role-file 提供角色文件。".to_string()
+                }
+                "add-agent requires --bypass <true|false>" => {
+                    "请用 --bypass false 明确保留权限询问，或在角色文件中明确此设置。".to_string()
+                }
+                other => other
+                    .strip_prefix("missing ")
+                    .map(|field| format!("请补齐必需参数：{field}。"))
+                    .unwrap_or_else(|| other.to_string()),
             },
             _ => error.to_string(),
         };
         if has_arg(args, "--json") {
             let payload = error.to_payload(Path::new(""), command);
-            let mut value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error.to_string()}));
+            let mut value = serde_json::to_value(payload)
+                .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error.to_string()}));
             value["error"] = serde_json::json!(explanation);
             value["action"] = serde_json::json!(format!("team-agent {command} --help"));
-            value["next_actions"] = serde_json::json!([format!("请按 team-agent {command} --help 的 Examples 补齐参数")]);
+            value["next_actions"] = serde_json::json!([format!(
+                "请按 team-agent {command} --help 的 Examples 补齐参数"
+            )]);
             println!("{}", python_compact_json(&value));
         } else {
             eprintln!("{explanation}\n\n{help}");
@@ -205,7 +221,10 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         .collect();
     let args = filtered_args.as_slice();
     if is_machine_command(command) {
-        if args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help")) {
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+        {
             eprintln!("{HUMAN_NAVIGATION}");
             return Ok(ExitCode::Usage);
         }
@@ -220,8 +239,25 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
             return Ok(emit_unknown_subcommand_usage(command));
         }
     }
-    if args.iter().all(|arg| arg == "--json") && matches!(command, "send" | "inbox" | "add-agent" | "start-agent" | "stop-agent" | "reset-agent" | "clone-agent" | "fork-agent" | "remove-agent" | "allow-peer-talk" | "profile") {
-        return Err(CliError::Usage("请填写队友名、任务内容或命令所需设置；见下方用法与 Examples".to_string()));
+    if args.iter().all(|arg| arg == "--json")
+        && matches!(
+            command,
+            "send"
+                | "inbox"
+                | "add-agent"
+                | "start-agent"
+                | "stop-agent"
+                | "reset-agent"
+                | "clone-agent"
+                | "fork-agent"
+                | "remove-agent"
+                | "allow-peer-talk"
+                | "profile"
+        )
+    {
+        return Err(CliError::Usage(
+            "请填写队友名、任务内容或命令所需设置；见下方用法与 Examples".to_string(),
+        ));
     }
     match command {
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
@@ -268,7 +304,21 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 
 // Script compatibility is deliberately outside the human catalog and suggestions.
 fn is_machine_command(command: &str) -> bool {
-    matches!(command, "results" | "wait" | "wait-ready" | "preflight" | "validate" | "identity" | "sessions" | "watch" | "e2e" | "peek" | "coordinator" | "attach-app-server-leader")
+    matches!(
+        command,
+        "results"
+            | "wait"
+            | "wait-ready"
+            | "preflight"
+            | "validate"
+            | "identity"
+            | "sessions"
+            | "watch"
+            | "e2e"
+            | "peek"
+            | "coordinator"
+            | "attach-app-server-leader"
+    )
 }
 
 fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
@@ -284,7 +334,10 @@ fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCo
         "e2e" => cmd_e2e(&e2e_args(args, cwd)).map(emit_result),
         "peek" => cmd_peek(&peek_args(args, cwd)?).map(emit_result),
         "coordinator" => run_coordinator(args, cwd),
-        "attach-app-server-leader" => cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?).map(emit_result),
+        "attach-app-server-leader" => {
+            cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
+                .map(emit_result)
+        }
         _ => Ok(emit_unknown_subcommand_usage(command)),
     }
 }
@@ -312,13 +365,41 @@ fn is_known_subcommand(command: &str) -> bool {
 
 pub(crate) fn default_help() -> String {
     let mut out = String::from("Team Agent：起一支队伍，给队友发任务，看回复，安全关队。\n\n1. 准备队友\n   在项目目录运行 team-agent quick-start；空目录会给出 TEAM.md 和 agents/worker.md 两文件模板，请自行创建。\n2. 打开主控并起队\n   已安装且已登录 Pi？运行 team-agent pi。\n   在该主控的命令行/工具上下文运行 team-agent quick-start。\n   已有队伍要恢复？看 team-agent restart --help，不要接管或删除它。\n3. 发任务、看回复\n   team-agent send worker '计算 245 × 37，把答案回复给 leader。'\n   team-agent inbox leader -n 3\n   team-agent status\n   发出任务不等于完成；等队友真正回复。\n4. 体检、关队\n   team-agent doctor --workspace .\n   team-agent shutdown --workspace . --json\n   检查本队残留为空，再用 doctor 确认所选项目没有待处理问题。\n\n多个项目/队伍用 --workspace/--team 选择，不猜对象；模型名称先用 models 查询。\nWindows 使用 ConPTY 需要 Windows 主机和已安装的 shim；tmux 指令不是通用 Windows 路径。\n");
-    append_help_section(&mut out, "开始协作", &["quick-start", "send", "status", "models", "inbox"]);
+    append_help_section(
+        &mut out,
+        "开始协作",
+        &["quick-start", "send", "status", "models", "inbox"],
+    );
     append_help_section(&mut out, "队伍管理", &["restart", "shutdown"]);
-    append_help_section(&mut out, "队友管理", &["add-agent", "start-agent", "stop-agent", "reset-agent", "clone-agent", "fork-agent", "remove-agent"]);
-    append_help_section(&mut out, "观察与协作", &["leaders", "doctor", "approvals", "allow-peer-talk"]);
+    append_help_section(
+        &mut out,
+        "队友管理",
+        &[
+            "add-agent",
+            "start-agent",
+            "stop-agent",
+            "reset-agent",
+            "clone-agent",
+            "fork-agent",
+            "remove-agent",
+        ],
+    );
+    append_help_section(
+        &mut out,
+        "观察与协作",
+        &["leaders", "doctor", "approvals", "allow-peer-talk"],
+    );
     append_help_section(&mut out, "设置", &["route", "profile", "install-skill"]);
-    append_help_section(&mut out, "按体检提示恢复", &["claim-leader", "takeover", "attach-leader"]);
-    append_help_section(&mut out, "启动主控", &["pi", "codex", "claude", "copilot", "grok", "cursor"]);
+    append_help_section(
+        &mut out,
+        "按体检提示恢复",
+        &["claim-leader", "takeover", "attach-leader"],
+    );
+    append_help_section(
+        &mut out,
+        "启动主控",
+        &["pi", "codex", "claude", "copilot", "grok", "cursor"],
+    );
     out.push_str("\n每个操作的参数和例子：team-agent <command> --help");
     out
 }
@@ -353,14 +434,21 @@ pub fn __test_quick_start_args(
     quick_start_args(args, cwd)
 }
 
-pub(super) const TEAM_TEMPLATE: &str = "---\nname: help-demo\n---\nA small team for a command-line example.\n";
+pub(super) const TEAM_TEMPLATE: &str =
+    "---\nname: help-demo\n---\nA small team for a command-line example.\n";
 pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n完成任务后，把简明答案回复给 leader。\n";
 const HUMAN_NAVIGATION: &str = "请用 team-agent --help 查看可用操作。";
 
 pub(super) fn command_help(command: Option<&str>) -> String {
-    let Some(name) = command else { return default_help(); };
-    let Some(spec) = command_spec(name) else { return HUMAN_NAVIGATION.to_string(); };
-    if name == "route" { return super::route::HELP.to_string(); }
+    let Some(name) = command else {
+        return default_help();
+    };
+    let Some(spec) = command_spec(name) else {
+        return HUMAN_NAVIGATION.to_string();
+    };
+    if name == "route" {
+        return super::route::HELP.to_string();
+    }
     let (details, examples, next) = match name {
         "quick-start" => (
             "TEAMDIR 是含 TEAM.md 和 agents/ 的角色目录；--workspace 选择运行项目。\n--name 设置队伍名称；--team/--team-id 选择队伍；--yes 确认已有提示；--detail 查看详细返回。\n工具须已安装并登录；工具/模型/思考强度写在角色文件中；跳过权限询问默认 false。\n--backend tmux 用于 POSIX；Windows 的 conpty 需要 Windows 主机和已安装的 ConPTY shim。",
@@ -421,16 +509,24 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         } else {
             format!("team-agent {name}\nteam-agent {name} --help\n{native} --help")
         }
-    } else { examples.to_string() };
+    } else {
+        examples.to_string()
+    };
     let scope = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
         "--json 给程序读取；不把 --workspace/--team 当作主控选项传入，它们会交给原生工具。"
-    } else { "--json 给程序读取；--workspace 选项目，支持 --team 的操作用它选队伍，不猜对象。" };
+    } else {
+        "--json 给程序读取；--workspace 选项目，支持 --team 的操作用它选队伍，不猜对象。"
+    };
     let mut out = format!("做什么：\n{}。\n用法：{}\n\n怎么用：\n{}\n{}\nExamples（可复制）：\n{}\n\n下一步（Next Action）：\n{}", spec.summary, spec.usage, details, scope, examples, next);
     if name == "quick-start" {
         out.push_str(&format!("\n\n最简两文件（请自行创建，不会自动写入）：\nTEAM.md：\n{TEAM_TEMPLATE}\nagents/worker.md：\n{WORKER_TEMPLATE}"));
     }
-    if name == "cursor" { out.push_str("\n查询模型用 team-agent models --provider cursor_agent。"); }
-    if name == "copilot" { out.push_str("\nCopilot 暂无 team-agent models 查询入口，请看工具原生帮助。"); }
+    if name == "cursor" {
+        out.push_str("\n查询模型用 team-agent models --provider cursor_agent。");
+    }
+    if name == "copilot" {
+        out.push_str("\nCopilot 暂无 team-agent models 查询入口，请看工具原生帮助。");
+    }
     out
 }
 
@@ -697,15 +793,29 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
             payload.error = crate::redaction::redact_external_text(error);
             payload.action = action.clone();
         }
-    } else if let Some(reason) = payload.error.strip_prefix("usage error: ").unwrap_or(&payload.error).strip_prefix("Error: ").and_then(|text| text.split_once(':').map(|(reason, _)| reason)) {
+    } else if let Some(reason) = payload
+        .error
+        .strip_prefix("usage error: ")
+        .unwrap_or(&payload.error)
+        .strip_prefix("Error: ")
+        .and_then(|text| text.split_once(':').map(|(reason, _)| reason))
+    {
         if let Some(message) = super::named_address::human_address_reason(reason) {
             payload.error = message.to_string();
             payload.action = "先运行 team-agent status，再用列表中的队友名发送；用 --workspace/--team 选择项目和队伍，连接问题先 doctor。".to_string();
         }
     }
-    if command_spec(command).is_some() && payload.action == "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。" {
-        let mut doctor = format!("team-agent doctor --workspace {}", super::adapters::shell_quote(&workspace.to_string_lossy()));
-        if let Some(team) = parsed.team.as_deref() { doctor.push_str(&format!(" --team {}", super::adapters::shell_quote(team))); }
+    if command_spec(command).is_some()
+        && payload.action
+            == "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
+    {
+        let mut doctor = format!(
+            "team-agent doctor --workspace {}",
+            super::adapters::shell_quote(&workspace.to_string_lossy())
+        );
+        if let Some(team) = parsed.team.as_deref() {
+            doctor.push_str(&format!(" --team {}", super::adapters::shell_quote(team)));
+        }
         payload.action = format!("先运行 {doctor} 检查所选队伍，或查看此处列出的错误日志。");
     }
     payload.action = crate::redaction::redact_external_text(&payload.action);
@@ -1070,7 +1180,9 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
             let path = positional_agents_dir.as_ref()?;
             if let Some(run_workspace) = path
                 .ancestors()
-                .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some(".team"))
+                .find(|ancestor| {
+                    ancestor.file_name().and_then(|name| name.to_str()) == Some(".team")
+                })
                 .and_then(Path::parent)
             {
                 return Some(run_workspace.to_path_buf());
@@ -1138,8 +1250,15 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     validate_send_flags(args)?;
     warn_send_legacy_delivery_flags(args);
     let parsed = parse_args(args);
-    if parsed.targets.is_none() && parsed.pane.is_none() && parsed.to_name.is_none() && parsed.to_leader.is_none() && parsed.positionals.len() < 2 {
-        return Err(CliError::Usage("请填写收信队友名和任务内容，例如 team-agent send worker '检查改动'".to_string()));
+    if parsed.targets.is_none()
+        && parsed.pane.is_none()
+        && parsed.to_name.is_none()
+        && parsed.to_leader.is_none()
+        && parsed.positionals.len() < 2
+    {
+        return Err(CliError::Usage(
+            "请填写收信队友名和任务内容，例如 team-agent send worker '检查改动'".to_string(),
+        ));
     }
     let target = if parsed.targets.is_some()
         || parsed.pane.is_some()
@@ -1251,9 +1370,7 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
         "--message-id",
     ];
     let spec = command_spec("send");
-    let sunset = spec
-        .and_then(|spec| spec.sunset)
-        .unwrap_or("后续兼容版本");
+    let sunset = spec.and_then(|spec| spec.sunset).unwrap_or("后续兼容版本");
     let action = spec
         .and_then(|spec| spec.action)
         .unwrap_or("使用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选项目和队伍");
@@ -1509,7 +1626,10 @@ fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
 }
 
 // Keep strict role CLI parsing separate from the legacy shared parser.
-fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lifecycle::role_config::RoleConfigPatch), CliError> {
+fn role_agent_args(
+    args: &[String],
+    add: bool,
+) -> Result<(ParsedArgs, crate::lifecycle::role_config::RoleConfigPatch), CliError> {
     let mut role = crate::lifecycle::role_config::RoleConfigPatch::default();
     let mut forwarded = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -1521,8 +1641,12 @@ fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lif
             index += 1;
             continue;
         }
-        let (flag, inline) = argument.split_once('=').map_or((argument.as_str(), None), |(key, value)| (key, Some(value)));
-        if !seen.insert(flag.to_string()) { return Err(CliError::Usage(format!("duplicate {flag}"))); }
+        let (flag, inline) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(key, value)| (key, Some(value)));
+        if !seen.insert(flag.to_string()) {
+            return Err(CliError::Usage(format!("duplicate {flag}")));
+        }
         if matches!(flag, "--json" | "--allow-fresh" | "--force") {
             if inline.is_some() || (add && flag == "--allow-fresh") {
                 return Err(CliError::Usage(format!("unsupported option: {argument}")));
@@ -1531,26 +1655,46 @@ fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lif
             index += 1;
             continue;
         }
-        if !matches!(flag, "--provider" | "--model" | "--effort" | "--bypass" | "--prompt" | "--profile" | "--workspace" | "--team" | "--role-file")
-            || (!add && flag == "--role-file") {
+        if !matches!(
+            flag,
+            "--provider"
+                | "--model"
+                | "--effort"
+                | "--bypass"
+                | "--prompt"
+                | "--profile"
+                | "--workspace"
+                | "--team"
+                | "--role-file"
+        ) || (!add && flag == "--role-file")
+        {
             return Err(CliError::Usage(format!("unknown option: {flag}")));
         }
-        let value = if let Some(value) = inline { value.to_string() } else {
+        let value = if let Some(value) = inline {
+            value.to_string()
+        } else {
             index += 1;
-            args.get(index).filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?.clone()
+            args.get(index)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?
+                .clone()
         };
-        if value.trim().is_empty() { return Err(CliError::Usage(format!("empty value for {flag}"))); }
+        if value.trim().is_empty() {
+            return Err(CliError::Usage(format!("empty value for {flag}")));
+        }
         match flag {
             "--provider" => {
                 let provider = crate::provider::wire::parse_provider(&value)
                     .ok_or_else(|| CliError::Usage(format!("unknown provider: {value}")))?;
                 role.provider = Some(crate::provider::wire::provider_wire(provider).to_string());
             }
-            "--bypass" => role.bypass = Some(match value.as_str() {
-                "true" => true, "false" => false,
-                _ => return Err(CliError::Usage("--bypass requires true or false".into())),
-            }),
+            "--bypass" => {
+                role.bypass = Some(match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(CliError::Usage("--bypass requires true or false".into())),
+                })
+            }
             "--model" => role.model = Some(value),
             "--effort" => {
                 if crate::model::enums::ProviderEffort::parse(&value).is_none() {
@@ -1560,17 +1704,35 @@ fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lif
             }
             "--prompt" => role.prompt = Some(value),
             "--profile" => role.profile = Some(value),
-            _ => { forwarded.push(flag.to_string()); forwarded.push(value); }
+            _ => {
+                forwarded.push(flag.to_string());
+                forwarded.push(value);
+            }
         }
         index += 1;
     }
     let parsed = parse_args(&forwarded);
     if add && parsed.role_file.is_none() {
-        if role.provider.is_none() { return Err(CliError::Usage("add-agent requires --provider <name>".into())); }
-        if role.bypass.is_none() { return Err(CliError::Usage("add-agent requires --bypass <true|false>".into())); }
+        if role.provider.is_none() {
+            return Err(CliError::Usage(
+                "add-agent requires --provider <name>".into(),
+            ));
+        }
+        if role.bypass.is_none() {
+            return Err(CliError::Usage(
+                "add-agent requires --bypass <true|false>".into(),
+            ));
+        }
     }
     if parsed.positionals.len() != 1 {
-        return Err(CliError::Usage(if parsed.positionals.is_empty() { "missing agent" } else { "expected exactly one agent id" }.into()));
+        return Err(CliError::Usage(
+            if parsed.positionals.is_empty() {
+                "missing agent"
+            } else {
+                "expected exactly one agent id"
+            }
+            .into(),
+        ));
     }
     Ok((parsed, role))
 }
@@ -1578,19 +1740,35 @@ fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lif
 #[cfg(test)]
 mod role_cli_tests {
     use super::*;
-    fn strings(values: &[&str]) -> Vec<String> { values.iter().map(|value| (*value).to_string()).collect() }
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
 
     #[test]
     fn add_requires_decisions_without_a_template_but_accepts_file_input() {
-        for args in [vec!["w"], vec!["w", "--provider", "pi"], vec!["w", "--bypass", "false"]] {
+        for args in [
+            vec!["w"],
+            vec!["w", "--provider", "pi"],
+            vec!["w", "--bypass", "false"],
+        ] {
             assert!(role_agent_args(&strings(&args), true).is_err());
         }
         assert!(role_agent_args(&strings(&["w", "--role-file", "w.md"]), true).is_ok());
-        let (parsed, _) = role_agent_args(&strings(&["w", "--role-file", "w.md", "--force"]), true).unwrap();
+        let (parsed, _) =
+            role_agent_args(&strings(&["w", "--role-file", "w.md", "--force"]), true).unwrap();
         assert!(parsed.force);
-        assert!(role_agent_args(&strings(&["w", "--role-file", "w.md", "--force=true"]), true).is_err());
-        assert!(role_agent_args(&strings(&["w", "--role-file", "w.md", "--allow-fresh"]), true).is_err());
-        let (_, patch) = role_agent_args(&strings(&["w", "--provider=pi", "--bypass=false"]), true).unwrap();
+        assert!(role_agent_args(
+            &strings(&["w", "--role-file", "w.md", "--force=true"]),
+            true
+        )
+        .is_err());
+        assert!(role_agent_args(
+            &strings(&["w", "--role-file", "w.md", "--allow-fresh"]),
+            true
+        )
+        .is_err());
+        let (_, patch) =
+            role_agent_args(&strings(&["w", "--provider=pi", "--bypass=false"]), true).unwrap();
         assert_eq!(patch.provider.as_deref(), Some("pi"));
         assert_eq!(patch.bypass, Some(false));
     }
@@ -1598,12 +1776,20 @@ mod role_cli_tests {
     #[test]
     fn strict_role_options_reject_ambiguous_values() {
         for args in [
-            vec!["w", "--bypass"], vec!["w", "--bypass", "yes"],
-            vec!["w", "--no-bypass"], vec!["w", "--bypass", "true", "--bypass=false"],
-            vec!["w", "--unknown", "x"], vec!["w", "extra"],
-        ] { assert!(role_agent_args(&strings(&args), false).is_err()); }
+            vec!["w", "--bypass"],
+            vec!["w", "--bypass", "yes"],
+            vec!["w", "--no-bypass"],
+            vec!["w", "--bypass", "true", "--bypass=false"],
+            vec!["w", "--unknown", "x"],
+            vec!["w", "extra"],
+        ] {
+            assert!(role_agent_args(&strings(&args), false).is_err());
+        }
         let (_, patch) = role_agent_args(&strings(&["w"]), false).unwrap();
-        assert_eq!(patch, crate::lifecycle::role_config::RoleConfigPatch::default());
+        assert_eq!(
+            patch,
+            crate::lifecycle::role_config::RoleConfigPatch::default()
+        );
     }
 }
 
@@ -1633,7 +1819,11 @@ fn stop_agent_args(args: &[String], cwd: &Path) -> Result<StopAgentArgs, CliErro
 fn reset_agent_args(args: &[String], cwd: &Path) -> Result<ResetAgentArgs, CliError> {
     let parsed = parse_args(args);
     let agent = required_pos(&parsed, 0, "agent")?;
-    if !parsed.discard_session { return Err(CliError::Usage("missing --discard-session；只有用户明确同意清除会话关联后才能添加此参数".to_string())); }
+    if !parsed.discard_session {
+        return Err(CliError::Usage(
+            "missing --discard-session；只有用户明确同意清除会话关联后才能添加此参数".to_string(),
+        ));
+    }
     let workspace = workspace(&parsed, cwd);
     refuse_if_multi_alive_team_missing_scope("reset-agent", &workspace, parsed.team.as_deref())?;
     Ok(ResetAgentArgs {
@@ -2256,35 +2446,41 @@ mod tests {
             (
                 "start-agent",
                 &[
-                    "--model", "--effort", "--bypass", "--prompt", "--profile", "--provider",
-                    "--workspace", "--team", "--allow-fresh", "--json",
+                    "--model",
+                    "--effort",
+                    "--bypass",
+                    "--prompt",
+                    "--profile",
+                    "--provider",
+                    "--workspace",
+                    "--team",
+                    "--allow-fresh",
+                    "--json",
                 ][..],
             ),
             (
                 "reset-agent",
-                &[
-                    "--workspace",
-                    "--team",
-                    "--discard-session",
-                    "--json",
-                ][..],
+                &["--workspace", "--team", "--discard-session", "--json"][..],
             ),
             (
                 "add-agent",
                 &[
-                    "--role-file", "--provider", "--bypass", "--model", "--effort", "--prompt", "--profile",
-                    "--force", "--workspace", "--team", "--json",
-                ][..],
-            ),
-            (
-                "fork-agent",
-                &[
-                    "--as",
-                    "--label",
+                    "--role-file",
+                    "--provider",
+                    "--bypass",
+                    "--model",
+                    "--effort",
+                    "--prompt",
+                    "--profile",
+                    "--force",
                     "--workspace",
                     "--team",
                     "--json",
                 ][..],
+            ),
+            (
+                "fork-agent",
+                &["--as", "--label", "--workspace", "--team", "--json"][..],
             ),
             (
                 "remove-agent",
@@ -2367,7 +2563,14 @@ mod tests {
             let help = command_help(Some(name));
             assert_eq!(help.lines().next(), Some(spec.usage));
             assert!(help.contains(spec.summary));
-            for flag in ["--model SLUG", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider NAME"] {
+            for flag in [
+                "--model SLUG",
+                "--effort LEVEL",
+                "--bypass true|false",
+                "--prompt TEXT",
+                "--profile NAME",
+                "--provider NAME",
+            ] {
                 assert!(help.contains(flag), "{name} help missing {flag}: {help}");
             }
             assert!(help.contains("team-agent send AGENT MESSAGE"));
@@ -2389,7 +2592,10 @@ mod tests {
             "tmux_command",
             "不增加诊断字段",
         ] {
-            assert!(help.contains(marker), "status help missing {marker}: {help}");
+            assert!(
+                help.contains(marker),
+                "status help missing {marker}: {help}"
+            );
         }
         assert!(!help.contains("错误细分走 status --summary"));
     }
