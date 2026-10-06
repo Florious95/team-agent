@@ -152,8 +152,9 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         "the real CLI dispatch table must route team-agent pi before generic subcommand parsing"
     );
     assert!(
-        crate::cli::emit::default_help()
-            .contains("team-agent codex|claude|copilot|grok|cursor|pi ..."),
+        crate::cli::emit::default_help().lines().any(|line| {
+            line.split_whitespace().next() == Some("pi")
+        }),
         "default help must advertise the dispatchable Pi launcher"
     );
     let leader = parse_pi_leader_args(&leader_argv[2..])

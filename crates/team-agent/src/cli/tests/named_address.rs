@@ -391,7 +391,7 @@ fn send_to_name_mutual_exclusion() {
     let args = named_send_args(&cwd, Some("team-a/qa"), None, None, &[]);
     let err = cmd_send(&args).unwrap_err();
     assert!(
-        matches!(err, CliError::Usage(ref message) if message == "--to-name requires a non-empty message"),
+        matches!(err, CliError::Usage(ref message) if message == "请填写任务内容；--to-name 不能发送空消息"),
         "expected empty-message usage error, got {err:?}"
     );
     let _ = std::fs::remove_dir_all(&cwd);

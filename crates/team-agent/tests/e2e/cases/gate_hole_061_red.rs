@@ -84,21 +84,29 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         vec!["team-agent", "quick-start", ".team/current"],
         "TOOTH-1: runner changed the documented argv"
     );
+    assert_eq!(out.exit_code, 1, "an incomplete leader bind is not launch success");
     assert!(
-        out.stdout.contains("status: leader_binding_incomplete")
-            && out.stdout.contains("caller_pane_missing")
-            && out.stdout.contains("\"all_workers_spawned\": true")
-            && out.stdout.contains("do not run claim-leader"),
-        "TOOTH-1: hermetic documented quick-start must spawn workers and report the \
-         no-caller incomplete bind boundary; exit={} stdout={} stderr={}",
-        out.exit_code,
+        out.stdout.contains("启动未完成")
+            && out.stdout.contains("team-agent doctor --workspace")
+            && out.stdout.contains("status")
+            && !out.stdout.contains("claim-leader")
+            && out.stderr.is_empty(),
+        "TOOTH-1: incomplete launch must give safe Human guidance; stdout={} stderr={}",
         out.stdout,
         out.stderr
     );
+    let events = std::fs::read_to_string(ws.events_jsonl_path()).expect("launch events");
+    assert!(events.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(|event| {
+        event["event"] == "quick_start.leader_bind_refused"
+            && event["reason"] == "caller_pane_missing"
+            && event["stage"] == "caller_pane"
+    }), "TOOTH-1: the typed no-caller bind refusal must remain in machine evidence: {events}");
 
     assert_file_exists(&ws.state_json_path());
     assert_file_absent(&ws.path().join(".team/current/.team/runtime/state.json"));
     let state = ws.read_state();
+    assert_eq!(state["agents"]["coder"]["status"], "running", "documented invocation must actually spawn coder: {state}");
+    assert!(state["agents"]["coder"]["pane_id"].as_str().is_some_and(|pane| !pane.is_empty()));
     let team_key = state["active_team_key"]
         .as_str()
         .expect("TOOTH-1: active_team_key must be a string");

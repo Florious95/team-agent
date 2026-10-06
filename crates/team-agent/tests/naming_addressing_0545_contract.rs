@@ -291,7 +291,7 @@ fn red_3_positional_human_refusal_keeps_typo_and_copyable_suggestion() {
         "RED-3: original typo missing: {human}"
     );
     assert!(
-        human.to_ascii_lowercase().contains("did you mean"),
+        human.contains("你是否想发给") && human.contains("本次没有发送"),
         "RED-3: {human}"
     );
     assert!(
@@ -344,11 +344,12 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
     assert_eq!(output.status.code(), Some(0), "{}", combined(&output));
     let help = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
     for required in [
-        "logical recipient",
-        "returns after the message is persisted",
+        "team-agent send <agent>",
+        "队友名",
         "--mailbox",
-        "stores durably without live injection",
-        "omitted sends to the live conversation",
+        "只留言，不发送到当前对话",
+        "默认发送到队友对话",
+        "已收下任务不等于送达或完成",
     ] {
         assert!(
             help.contains(required),
@@ -371,8 +372,8 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
     }
 
     let specs = source("src/cli/spec.rs").to_ascii_lowercase();
-    let send_spec = line_containing(&specs, "name: \"send\"");
-    for required in ["persist a message", "logical recipient"] {
+    let send_spec = command_spec(&specs, "name: \"send\"");
+    for required in ["队友", "任务", "team-agent send <agent>", "--mailbox"] {
         assert!(
             send_spec.contains(required),
             "RED-4: COMMAND_SPECS/help drift; missing {required}; spec={send_spec}"
@@ -1194,7 +1195,7 @@ fn candidate_names(body: &Value) -> Vec<String> {
 fn assert_named_human_refusal(output: &Output, typo: &str, suggestion: &str) {
     let human = combined(output);
     assert_eq!(output.status.code(), Some(1));
-    for marker in ["Error:", "Action:", "Log:"] {
+    for marker in ["error:", "action:", "log:"] {
         assert!(
             human.contains(marker),
             "RED-3: N38 marker {marker} missing: {human}"
@@ -1205,12 +1206,16 @@ fn assert_named_human_refusal(output: &Output, typo: &str, suggestion: &str) {
         "RED-3: original typo missing: {human}"
     );
     assert!(
-        human.to_ascii_lowercase().contains("did you mean"),
+        human.contains("你是否想发给") && human.contains("本次没有发送"),
         "RED-3: {human}"
     );
     assert!(
-        human.contains(suggestion),
-        "RED-3: copyable token missing: {human}"
+        suggestion.split_once('/').is_some_and(|(team, agent)| {
+            human.contains(&format!("team-agent send {agent} "))
+                && human.contains(&format!("--team {team}"))
+                && human.contains("--workspace ")
+        }),
+        "RED-3: copyable short-name command with the actual candidate scope missing: {human}"
     );
 }
 
@@ -1219,11 +1224,10 @@ fn source(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("read {relative}: {error}"))
 }
 
-fn line_containing<'a>(source: &'a str, needle: &str) -> &'a str {
-    source
-        .lines()
-        .find(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("missing line containing {needle}"))
+fn command_spec<'a>(source: &'a str, needle: &str) -> &'a str {
+    let start = source.find(needle).unwrap_or_else(|| panic!("missing spec {needle}"));
+    let rest = &source[start..];
+    rest.split_once("CommandSpec").map_or(rest, |(entry, _)| entry)
 }
 
 fn path(value: &Path) -> &str {

@@ -323,7 +323,7 @@ fn peek_help_and_parser_accept_head_search() {
     let emit = source("src/cli/emit.rs");
     let types = source("src/cli/types.rs");
     let adapters = source("src/cli/adapters.rs");
-    let help = source_section(&emit, "Some(\"peek\")", "Some(\"coordinator\")");
+    let help = team_agent::cli::emit::__test_command_help(Some("peek"));
     let parsed = source_section(&emit, "struct ParsedArgs", "fn parse_args");
     let parser = source_section(&emit, "fn parse_args", "fn next_arg");
     let peek_args = source_section(&emit, "fn peek_args", "fn run_coordinator");
@@ -331,8 +331,8 @@ fn peek_help_and_parser_accept_head_search() {
     let handler = source_section(&adapters, "pub fn cmd_peek", "fn peek_unavailable");
     let failures = [
         (
-            !help.contains("--head") || !help.contains("--search"),
-            "help must list --head and --search",
+            !help.contains("team-agent status") || help.contains("--head") || help.contains("--search"),
+            "Machine help must give Human navigation without private flags",
         ),
         (
             !parsed.contains("head: Option<usize>") || !parsed.contains("search: Option<String>"),
@@ -389,7 +389,7 @@ fn attach_leader_help_lists_pane_provider_and_dispatches_handler() {
     let emit = source("src/cli/emit.rs");
     let types = source("src/cli/types.rs");
     let cli_mod = source("src/cli/mod.rs");
-    let help = source_section(&emit, "Some(\"attach-leader\")", "Some(\"identity\")");
+    let help = team_agent::cli::emit::__test_command_help(Some("attach-leader"));
     let dispatch = source_section(&emit, "fn dispatch", "const LEADER_PASSTHROUGH_COMMANDS");
     let parser = source_section(&emit, "fn parse_args", "fn next_arg");
     assert!(

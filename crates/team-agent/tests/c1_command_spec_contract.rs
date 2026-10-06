@@ -429,9 +429,10 @@ fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
     let mut names: BTreeSet<String> = dispatch
         .lines()
         .filter_map(|line| {
-            let (name, arm) = line.trim().strip_prefix('"')?.split_once('"')?;
-            arm.trim_start().starts_with("=>").then(|| name.to_string())
+            let arms = line.trim().strip_prefix('"')?.split_once("=>")?.0;
+            Some(arms.split('"').step_by(2).map(str::to_string))
         })
+        .flatten()
         .collect();
     names.extend(parse_const_str_array(emit, "LEADER_PASSTHROUGH_COMMANDS"));
     names

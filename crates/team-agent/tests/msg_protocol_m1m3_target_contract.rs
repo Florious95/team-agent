@@ -201,7 +201,9 @@ fn accepted(parsed: &Option<Value>, exit_ok: bool) -> bool {
 
 fn sunset_notice(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("sunset") || lower.contains("deprecat")
+    lower.contains("sunset")
+        || lower.contains("deprecat")
+        || (text.contains("已弃用") && text.contains("移除"))
 }
 
 /// M1a — a caller-supplied sender identity must be rejected, and a forged

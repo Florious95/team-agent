@@ -314,10 +314,17 @@ mod tests {
         ];
         let out = format_leaders_human(&rows, LeadersView::All);
         let header = out.lines().next().unwrap();
-        assert_eq!(header.split('\t').count(), 4);
+        assert_eq!(header.split('\t').count(), 5);
         assert!(header.contains("状态") && header.contains("项目") && header.contains("队伍"));
-        assert!(out.contains("LIVE\t/Volumes/nvme/Projects/讨论team-agent\twiki-team\tsend-live\n"));
-        assert!(out.contains("STALE\t/Users/alauda/stale\told-team\t-\n"));
+        let live: Vec<_> = out.lines().nth(1).unwrap().split('\t').collect();
+        assert_eq!(&live[..4], &["leader", "可用", "/Volumes/nvme/Projects/讨论team-agent", "wiki-team"]);
+        assert_eq!(
+            super::super::adapters::split_shell_argv(live[4]),
+            ["team-agent", "send", "leader", "请完成任务并把答案回复给 leader。", "--workspace", "/Volumes/nvme/Projects/讨论team-agent", "--team", "wiki-team"]
+        );
+        let stale: Vec<_> = out.lines().nth(2).unwrap().split('\t').collect();
+        assert_eq!(&stale[..4], &["leader", "已失效", "/Users/alauda/stale", "old-team"]);
+        assert_eq!(stale[4], "-", "stale rows must never suggest a send: {out}");
     }
 
     #[test]
@@ -354,17 +361,16 @@ mod tests {
 
     #[test]
     fn empty_view_names_are_explicit() {
-        for (view, empty) in [
-            (LeadersView::Live, "没有可用主控"),
-            (LeadersView::Stale, "没有离线主控"),
-            (LeadersView::All, "没有登记主控"),
+        for (view, empty, next) in [
+            (LeadersView::Live, "没有可用主控", Some("team-agent doctor")),
+            (LeadersView::Stale, "没有已失效的主控登记", None),
+            (LeadersView::All, "没有已登记主控", Some("team-agent pi")),
         ] {
             let out = format_leaders_human(&[], view);
-            assert!(out.contains(empty), "{out}");
-            assert!(
-                out.contains("team-agent doctor") && out.ends_with('\n'),
-                "{out}"
-            );
+            assert!(out.contains(empty) && out.ends_with('\n'), "{out}");
+            if let Some(next) = next {
+                assert!(out.contains(next), "{out}");
+            }
         }
     }
 }

@@ -170,7 +170,9 @@ fn purge_agent_help_and_dispatch_are_consistent() {
         );
     } else {
         assert!(
-            command.contains("unknown subcommand") || command.contains("invalid choice"),
+            command.contains("unknown subcommand")
+                || command.contains("invalid choice")
+                || command.contains("没有这个操作"),
             "RED6: if purge-agent is not implemented, help and dispatch must agree it is absent; help={help} command={command}"
         );
     }
