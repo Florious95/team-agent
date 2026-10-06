@@ -182,12 +182,12 @@ fn quote_cli_arg(raw: &str) -> String {
 fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
     if rows.is_empty() {
         return match view {
-            LeadersView::Live => "no live leaders\n".to_string(),
-            LeadersView::All => "no registered leaders\n".to_string(),
-            LeadersView::Stale => "no stale leaders\n".to_string(),
+            LeadersView::Live => "没有可用主控；运行 team-agent doctor --workspace . 检查当前队伍。\n".to_string(),
+            LeadersView::All => "没有已登记主控；首次协作用 team-agent pi 打开主控。\n".to_string(),
+            LeadersView::Stale => "没有已失效的主控登记。\n".to_string(),
         };
     }
-    let mut out = String::from("STATUS\tWORKSPACE\tTEAM\tSEND\n");
+    let mut out = String::from("状态\t项目\t队伍\t发送命令\n");
     for row in rows {
         out.push_str(row.status);
         out.push('\t');
@@ -195,7 +195,7 @@ fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
         out.push('\t');
         out.push_str(&row.entry.team_key);
         out.push('\t');
-        out.push_str(&row.send_hint);
+        out.push_str(&super::adapters::send_command("leader", &row.entry.workspace, Some(&row.entry.team_key)).unwrap_or_else(|| "请核对项目路径".to_string()));
         out.push('\n');
     }
     out

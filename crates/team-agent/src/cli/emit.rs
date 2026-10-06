@@ -54,8 +54,13 @@ fn emit_with_json_order(
 /// **行为入口**:契约可端到端跑 argv→(stdout, exit code)。
 pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     let Some(command) = argv.first().map(String::as_str) else {
-        return emit_missing_subcommand_usage();
+        println!("{}", default_help());
+        return ExitCode::Ok;
     };
+    if is_machine_command(command) && argv[1..].iter().any(|arg| matches!(arg.as_str(), "-h" | "--help")) {
+        eprintln!("{HUMAN_NAVIGATION}");
+        return ExitCode::Usage;
+    }
     if command == "route" {
         return super::route::run(&argv[1..]);
     }
@@ -101,7 +106,20 @@ fn emit_cli_error_for_command(
     cwd: &Path,
     error: &CliError,
 ) -> ExitCode {
-    if command == "status" {
+    let missing_input = matches!(error, CliError::Usage(message) if message.starts_with("missing ") || message.starts_with("请填写") || matches!(message.as_str(), "expected exactly one agent id" | "add-agent requires --provider <name>" | "add-agent requires --bypass <true|false>" | "--source is required unless --uninstall"));
+    if command_spec(command).is_some() && missing_input {
+        let help = command_help(Some(command));
+        if has_arg(args, "--json") {
+            let payload = error.to_payload(Path::new(""), command);
+            let mut value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error.to_string()}));
+            value["action"] = serde_json::json!(format!("team-agent {command} --help"));
+            value["next_actions"] = serde_json::json!([format!("请按 team-agent {command} --help 的 Examples 补齐参数")]);
+            println!("{}", python_compact_json(&value));
+        } else {
+            eprintln!("请按用法补齐必需参数（队友名、任务内容或所需选项）。\n{error}\n\n{help}");
+        }
+        ExitCode::Usage
+    } else if command == "status" {
         emit_status_cli_error(error)
     } else {
         emit_cli_error(command, args, cwd, error)
@@ -133,7 +151,7 @@ pub(super) fn emit_result(r: CmdResult) -> ExitCode {
                 let mut stderr = stderr.lock();
                 let _ = writeln!(
                     stderr,
-                    "stdout unavailable after durable send; persisted_message_id={message_id}"
+                    "输出暂不可用；消息已保存，消息编号={message_id}。用 team-agent inbox leader -n 3 查看回复，不要重发。"
                 );
             }
             return if error.kind() == ErrorKind::BrokenPipe {
@@ -174,6 +192,13 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         .cloned()
         .collect();
     let args = filtered_args.as_slice();
+    if is_machine_command(command) {
+        if args.iter().any(|arg| matches!(arg.as_str(), "-h" | "--help")) {
+            eprintln!("{HUMAN_NAVIGATION}");
+            return Ok(ExitCode::Usage);
+        }
+        return dispatch_machine(command, args, cwd);
+    }
     let Some(spec) = command_spec(command) else {
         return Ok(emit_unknown_subcommand_usage(command));
     };
@@ -182,6 +207,9 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         CommandKind::LeaderPassthrough { .. } => {
             return Ok(emit_unknown_subcommand_usage(command));
         }
+    }
+    if args.iter().all(|arg| arg == "--json") && matches!(command, "send" | "inbox" | "add-agent" | "start-agent" | "stop-agent" | "reset-agent" | "clone-agent" | "fork-agent" | "remove-agent" | "allow-peer-talk" | "profile") {
+        return Err(CliError::Usage("请填写队友名、任务内容或命令所需设置；见下方用法与 Examples".to_string()));
     }
     match command {
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
@@ -204,16 +232,11 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "claim-leader" => cmd_claim_leader(&claim_leader_args(args, cwd)).map(emit_result),
         // Real dispatch: `cmd_attach_leader` writes the `leader_receiver` binding.
         "attach-leader" => cmd_attach_leader(&attach_leader_args(args, cwd)?).map(emit_result),
-        "attach-app-server-leader" => {
-            cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
-                .map(emit_result)
-        }
-        "identity" => cmd_identity(&identity_args(args, cwd)).map(emit_result),
+
         "approvals" => cmd_approvals(&approvals_args(args, cwd)).map(emit_result),
         "inbox" => cmd_inbox(&inbox_args(args, cwd)?).map(emit_result),
         "doctor" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
-        "watch" => cmd_watch(&watch_args(args, cwd)).map(emit_result),
-        "sessions" => cmd_sessions(&sessions_args(args, cwd)).map(emit_result),
+
         // 0.5.9 E7 host-leader-registry: `leaders` is the host-level derived
         // discovery command. It reads ~/.team-agent/leaders, validates each
         // entry against canonical state, and reports LIVE/STALE/AMBIGUOUS
@@ -223,16 +246,33 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         // delivery path — no separate route authority.
         "leaders" => cmd_leaders(&leaders_args(args, cwd)?).map(emit_result),
         "models" => cmd_models(&models_args(args)?).map(emit_result),
-        "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
+
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
+
+        _ => Ok(emit_unknown_subcommand_usage(command)),
+    }
+}
+
+// Script compatibility is deliberately outside the human catalog and suggestions.
+fn is_machine_command(command: &str) -> bool {
+    matches!(command, "results" | "wait" | "wait-ready" | "preflight" | "validate" | "identity" | "sessions" | "watch" | "e2e" | "peek" | "coordinator" | "attach-app-server-leader")
+}
+
+fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    match command {
         "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
+        "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
+        "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
+        "identity" => cmd_identity(&identity_args(args, cwd)).map(emit_result),
+        "sessions" => cmd_sessions(&sessions_args(args, cwd)).map(emit_result),
+        "watch" => cmd_watch(&watch_args(args, cwd)).map(emit_result),
         "e2e" => cmd_e2e(&e2e_args(args, cwd)).map(emit_result),
         "peek" => cmd_peek(&peek_args(args, cwd)?).map(emit_result),
         "coordinator" => run_coordinator(args, cwd),
+        "attach-app-server-leader" => cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?).map(emit_result),
         _ => Ok(emit_unknown_subcommand_usage(command)),
     }
 }
@@ -250,11 +290,6 @@ pub(crate) fn is_leader_passthrough_command(command: &str) -> bool {
         )
 }
 
-fn emit_missing_subcommand_usage() -> ExitCode {
-    emit_usage_error("the following arguments are required: {codex,claude,...,doctor}");
-    ExitCode::Usage
-}
-
 /// Registered subcommands (the dispatch table) plus spec-only verbs that have no
 /// dispatch arm yet but must still respond to `--help` per CR-063/G4.
 /// Used by the `--help` short-circuit gate so unknown commands keep falling through
@@ -264,41 +299,15 @@ fn is_known_subcommand(command: &str) -> bool {
 }
 
 pub(crate) fn default_help() -> String {
-    let mut out = String::from("usage: team-agent <command> [options]\n");
-    append_help_section(
-        &mut out,
-        "Core",
-        &[
-            "quick-start",
-            "send",
-            "status",
-            "results",
-            "models",
-            "leaders",
-        ],
-    );
-    append_help_section(
-        &mut out,
-        "Lifecycle",
-        &[
-            "restart",
-            "shutdown",
-            "add-agent",
-            "start-agent",
-            "stop-agent",
-            "reset-agent",
-        ],
-    );
-    append_help_section(&mut out, "Diagnose", &["doctor"]);
-    append_help_section(
-        &mut out,
-        "Guided recovery",
-        &["claim-leader", "takeover", "attach-leader"],
-    );
-    out.push_str("\nWorkflow: `team-agent models --provider pi`, then quick-start/add-agent/start-agent, then `team-agent send AGENT MESSAGE`.\n");
-    out.push_str("Model catalogs: pi, cursor_agent, codex, claude, claude_code, grok.\n");
-    out.push_str("Provider launchers:\n  team-agent codex|claude|copilot|grok|cursor|pi ...\n");
-    out.push_str("\nRun `team-agent <command> --help` for command flags.");
+    let mut out = String::from("Team Agent：起一支队伍，给队友发任务，看回复，安全关队。\n\n1. 准备队友\n   在项目目录运行 team-agent quick-start；空目录会给出 TEAM.md 和 agents/worker.md 两文件模板，请自行创建。\n2. 打开主控并起队\n   已安装且已登录 Pi？运行 team-agent pi。\n   在该主控的命令行/工具上下文运行 team-agent quick-start。\n   已有队伍要恢复？看 team-agent restart --help，不要接管或删除它。\n3. 发任务、看回复\n   team-agent send worker '计算 245 × 37，把答案回复给 leader。'\n   team-agent inbox leader -n 3\n   team-agent status\n   发出任务不等于完成；等队友真正回复。\n4. 体检、关队\n   team-agent doctor --workspace .\n   team-agent shutdown --workspace . --json\n   检查本队残留为空，再用 doctor 确认所选项目没有待处理问题。\n\n多个项目/队伍用 --workspace/--team 选择，不猜对象；模型名称先用 models 查询。\nWindows 使用 ConPTY 需要 Windows 主机和已安装的 shim；tmux 指令不是通用 Windows 路径。\n");
+    append_help_section(&mut out, "开始协作", &["quick-start", "send", "status", "models", "inbox"]);
+    append_help_section(&mut out, "队伍管理", &["restart", "shutdown"]);
+    append_help_section(&mut out, "队友管理", &["add-agent", "start-agent", "stop-agent", "reset-agent", "clone-agent", "fork-agent", "remove-agent"]);
+    append_help_section(&mut out, "观察与协作", &["leaders", "doctor", "approvals", "allow-peer-talk"]);
+    append_help_section(&mut out, "设置", &["route", "profile", "install-skill"]);
+    append_help_section(&mut out, "按体检提示恢复", &["claim-leader", "takeover", "attach-leader"]);
+    append_help_section(&mut out, "启动主控", &["pi", "codex", "claude", "copilot", "grok", "cursor"]);
+    out.push_str("\n每个操作的参数和例子：team-agent <command> --help");
     out
 }
 
@@ -332,71 +341,94 @@ pub fn __test_quick_start_args(
     quick_start_args(args, cwd)
 }
 
-fn command_help(command: Option<&str>) -> String {
-    match command {
-        None => default_help(),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--backend tmux|conpty] [--json] [--detail]\n\n--backend selects the worker transport: tmux (default on POSIX) or conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).\n\n--detail includes internal receiver/topology diagnostics in JSON output.\n\nAfter a successful start, use the returned `send_commands` (or choose an agent explicitly) with `team-agent send AGENT MESSAGE`.".to_string(),
-        Some("send") => concat!(
-            "usage: team-agent send TO MESSAGE... ",
-            "[--workspace WORKSPACE] [--team TEAM] ",
-            "[--mailbox] ",
-            "[--json]\n\n",
-            "TO is a logical recipient; send returns after the message is persisted. ",
-            "--mailbox stores durably without live injection; omitted sends to the live conversation."
-        )
-        .to_string(),
-        Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n输出九字段：name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command；人读与 --json 使用同一投影字段（多节点人读紧凑显示 tmux_command）。--json 始终保留每节点完整可复制的 tmux_command；人读单节点保留完整旧格式，多节点按(socket, tmux session)显示每组一次共享 attach 模板，ATTACH列为<group>:<window>.<pane>，模板中的 <target> 替换为其 window.pane 部分。model/effort 为已接受启动配置，未设置为 null，不猜 provider 默认值；缺少可靠定位或原生 tmux/process 采样时显示 unknown，不推导attach信息。--summary/--detail 仅保留兼容性，不增加诊断字段。".to_string(),
-        Some("route") => super::route::HELP.to_string(),
-        Some("models") => "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok] [QUERY|--search TEXT] [--json]\n\nLists exact provider model ids with case-insensitive multi-word search across provider, vendor, id, display name, and source aliases. Uses each provider's native catalog; Cursor uses `agent --list-models`, Codex uses `codex debug models`, Claude uses SDK stream-json initialize, and Grok uses the PATH-first `grok models` command.".to_string(),
-        Some("leaders") => "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]\n\nLists LIVE leaders by default. Use --all to include retained STALE entries, --stale to inspect only STALE entries, QUERY or --search TEXT to match workspace/team/name fields, and --prune to remove only entries proven terminal by canonical state. --dry-run is valid only with --prune.".to_string(),
-        Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
-        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]".to_string(),
-        Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]".to_string(),
-        Some(name @ ("start-agent" | "add-agent")) => command_spec(name)
-            .map(|spec| format!(
-                "{}\n\n{}\n\nAfter a successful {}, use the returned `send_commands` with `team-agent send AGENT MESSAGE`.",
-                spec.usage,
-                spec.summary,
-                if name == "start-agent" { "start" } else { "add" },
-            ))
-            .unwrap_or_else(|| format!("usage: team-agent {name} [options]")),
-        Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("clone-agent") => "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
-        // 0.5.26 (§7.6): removed from help; dispatch was never wired.
-        Some("takeover") => "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
-        Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json] [--detail]".to_string(),
-        Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--pane PANE] [--provider PROVIDER] [--confirm] [--json]".to_string(),
-        Some("attach-app-server-leader") => "usage: team-agent attach-app-server-leader [--workspace WORKSPACE] [--team TEAM] --socket unix:///path.sock --thread-id THREAD_ID [--json]".to_string(),
-        Some("identity") => "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("approvals") => "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("inbox") => "usage: team-agent inbox AGENT [-n N|--limit N] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("doctor") => "usage: team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--gate orphans|comms] [--comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]".to_string(),
-        Some("watch") => "usage: team-agent watch [--workspace WORKSPACE] [--team TEAM]".to_string(),
-        Some("sessions") => "usage: team-agent sessions [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
-        Some("install-skill") => "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]".to_string(),
-        Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]".to_string(),
-        Some("results") => "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("wait") => "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]".to_string(),
-        Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
-        Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]".to_string(),
-        Some("e2e") => "usage: team-agent e2e [--workspace WORKSPACE] [--providers LIST] [--real] [--json]".to_string(),
-        Some("peek") => "usage: team-agent peek AGENT [--workspace WORKSPACE] [--tail N|--head N] [--search TEXT] [--allow-raw-screen] [--json]".to_string(),
-        Some("coordinator") => "usage: team-agent coordinator [--workspace WORKSPACE] [--once] [--tick-interval SECONDS]".to_string(),
-        Some(other) => format!("usage: team-agent {other} [options]"),
+pub(super) const TEAM_TEMPLATE: &str = "---\nname: help-demo\n---\nA small team for a command-line example.\n";
+pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\n完成任务后，把简明答案回复给 leader。\n";
+const HUMAN_NAVIGATION: &str = "请用 team-agent --help 查看可用操作。";
+
+pub(super) fn command_help(command: Option<&str>) -> String {
+    let Some(name) = command else { return default_help(); };
+    let Some(spec) = command_spec(name) else { return HUMAN_NAVIGATION.to_string(); };
+    if name == "route" { return super::route::HELP.to_string(); }
+    let (details, examples, next) = match name {
+        "quick-start" => (
+            "TEAMDIR 是含 TEAM.md 和 agents/ 的角色目录；--workspace 选择运行项目。\n--name 设置队伍名称；--team/--team-id 选择队伍；--yes 确认已有提示；--detail 查看详细返回。\n工具须已安装并登录；工具/模型/思考强度写在角色文件中；跳过权限询问默认 false。\n--backend tmux 用于 POSIX；Windows 的 conpty 需要 Windows 主机和已安装的 ConPTY shim。",
+            "team-agent quick-start\nteam-agent quick-start ./roles --workspace ./project\nteam-agent quick-start . --json",
+            "确认 Pi 已安装并登录，用 team-agent models --provider pi 核对模型。\n运行 team-agent pi，在该主控的命令行/工具上下文再运行 quick-start；已有队伍看 restart --help。"),
+        "send" => ("<agent> 是 status 中的队友名；MESSAGE 是任务内容。\n--mailbox 只留言，不发送到当前对话；默认发送到队友对话。",
+            "team-agent send worker '计算 245 × 37，把答案回复给 leader。'\nteam-agent send worker '检查改动' --workspace . --team help-demo\nteam-agent send worker '下次上线时查看' --mailbox",
+            "已收下任务不等于送达或完成。等真实回复，用 team-agent inbox leader -n 3；有疑问看 status/doctor，不反复重发。"),
+        "inbox" => ("<agent> 是收信队友名；-n/--limit 限制条数。查看回复不触发重发。",
+            "team-agent inbox leader -n 3\nteam-agent inbox worker --limit 5\nteam-agent inbox leader --workspace . --team help-demo --json", "没有回复时先等队友自然返回，再看 team-agent status；不要读取队友终端内容。"),
+        "status" => ("可选 <agent> 只查看一位队友；--summary/--detail 保留兼容，不增加字段。\n九字段：name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command。\n运行状态、忙闲、健康各有含义；unknown 表示证据不足，null 表示未设置，不猜默认模型。",
+            "team-agent status\nteam-agent status worker\nteam-agent status --workspace . --team help-demo --json", "看回复用 team-agent inbox leader -n 3；查问题用 team-agent doctor --workspace .。"),
+        "models" => ("--provider 选择工具，默认 pi；QUERY 或 --search 按关键词搜索，不能同时用。\nCursor 的工具名是 cursor_agent；Copilot 暂无此模型查询入口。返回真实目录，不猜模型。",
+            "team-agent models --provider pi\nteam-agent models --provider pi --search luna\nteam-agent models --provider cursor_agent --json", "把返回的完整模型名称填入角色文件或 add-agent --model，再起队或加人。"),
+        "restart" => ("WORKSPACE 默认当前项目；优先恢复已保存会话。\n只有用户明确允许丢弃旧对话时才加 --allow-fresh；--session-converge-deadline 设置等待秒数。",
+            "team-agent restart .\nteam-agent restart . --team help-demo --json", "用 status 查看恢复结果；需要新会话先征得用户同意，不用 takeover 代替恢复。"),
+        "shutdown" => ("只关闭所选项目/队伍；日志默认保留，--keep-logs 保留兼容。\n--json 查看关闭范围、降级情况及本队残留，返回成功不代表其他队伍已关闭。",
+            "team-agent shutdown --workspace .\nteam-agent shutdown --workspace . --team help-demo --json", "核对本队残留为空，再用 team-agent doctor --workspace .；不要广域清理其他队伍。"),
+        "add-agent" => ("<agent> 是新队友名；--provider 选择工具；--model 模型名称；--effort 思考强度。\n--bypass 是否跳过权限询问，示例 false；--prompt 任务职责；--profile 登录/代理设置。\n工具和 bypass 必须由参数或 --role-file 明确提供；冲突会拒绝，不猜设置。",
+            "team-agent add-agent reviewer --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt '检查任务'\nteam-agent add-agent reviewer --role-file ./agents/reviewer.md", "用 status 确认队友，再运行 team-agent send reviewer '检查改动'。"),
+        "start-agent" => ("只启动已有队友；仍在运行时先 stop-agent。\n--provider 工具；--model 模型名称；--effort 思考强度；--bypass 是否跳过权限询问。\n--prompt/--profile 更换职责/登录设置；只有明确获准丢弃旧对话才用 --allow-fresh。",
+            "team-agent start-agent worker\nteam-agent start-agent worker --model openai-codex/gpt-6-luna", "新增队友用 add-agent；启动后看 status，再 send 分派任务。"),
+        "stop-agent" => ("<agent> 指定要暂停的队友；暂停不是删除，配置与会话记录保留。",
+            "team-agent stop-agent worker\nteam-agent stop-agent worker --workspace . --team help-demo --json", "用 status 确认停止；恢复用 team-agent start-agent worker。"),
+        "reset-agent" => ("必须明确加 --discard-session，清除保存的会话关联；不承诺工具会删除全部历史记录。",
+            "team-agent reset-agent worker --discard-session\nteam-agent reset-agent worker --discard-session --workspace . --team help-demo --json", "仅在用户同意丢弃会话关联后执行；再用 start-agent 启动并核对 status。"),
+        "clone-agent" => ("<agent> 是源队友；--as 新队友名；--label 可读标签。\n复制配置创建新队友，不复制完整对话。",
+            "team-agent clone-agent worker --as reviewer\nteam-agent clone-agent worker --as reviewer --label '审阅队友' --workspace .", "用 status 查看新队友，再 send reviewer 分派独立任务。"),
+        "fork-agent" => ("<agent> 是源队友；--as 新队友名；--label 可读标签。\n需要源会话已保存且工具支持分支；不满足条件会拒绝，不保证所有工具都可分支。",
+            "team-agent fork-agent worker --as experiment\nteam-agent fork-agent worker --as experiment --workspace . --team help-demo --json", "分支成功会占用新资源；看 status，再向 experiment 派发任务，用完停止或移除。"),
+        "remove-agent" => ("必须 --confirm；默认移除运行队友，不删除用户角色文件。\n--from-spec 同时从队伍配置移除；--force 仅在理解强制移除风险且明确授权后使用。",
+            "team-agent remove-agent reviewer --confirm\nteam-agent remove-agent reviewer --from-spec --confirm --workspace . --team help-demo --json", "先保存所需回复；移除后核对 status 和实际配置范围，不对其他队友使用强制清理。"),
+        "leaders" => ("默认列出可用主控；--all 包含已失效登记，--stale 只看失效项。\nQUERY/--search 按项目/队伍/名称筛选；--prune 仅清理已确认退役的登记，--dry-run 先预览。",
+            "team-agent leaders\nteam-agent leaders --all --json\nteam-agent leaders --prune --dry-run", "根据项目和队伍选择 --workspace/--team；清理登记不等于关闭进程。"),
+        "doctor" => ("默认只检查，不修复；SPEC 可选配置路径。\n--comms/--gate comms 检查连接，不证明队友实际回复；--gate orphans 检查残留。\n--fix/--fix-schema/--cleanup-orphans 仅在获准的范围内使用；危险修复需要 --confirm。",
+            "team-agent doctor --workspace .\nteam-agent doctor --workspace . --team help-demo --json", "按实际问题与所选队伍范围处理；不要把体检建议当成已执行的修复。"),
+        "approvals" => ("可选 <agent> 查看一位队友；仅观察权限询问，不自动批准。",
+            "team-agent approvals\nteam-agent approvals worker --json", "确认权限用途后，在工具的实际权限询问处处理，再看 status。"),
+        "allow-peer-talk" => ("指定两位现有队友；--workspace 选择项目。此命令不支持 --team。",
+            "team-agent allow-peer-talk worker reviewer\nteam-agent allow-peer-talk worker reviewer --workspace . --json", "再向队友发送交流任务；允许交流不等于已经互发消息。"),
+        "profile" => ("init 创建配置，doctor 检查配置，show 显示设置；NAME 是配置名。\n--auth-mode 登录方式；--proxy-mode direct 不走代理、inherit 沿用环境代理。\n配置存放在所选工作区，不因 --team 自动变成队伍独立配置；不要输出凭证。",
+            "team-agent profile init local --auth-mode subscription\nteam-agent profile doctor local\nteam-agent profile show local", "检查通过后用 add-agent/start-agent --profile local；需要登录时使用工具原生登录入口。"),
+        "install-skill" => ("--source 必须是已核实的指南目录；--target 选择 codex/claude/copilot/all。\n--dest 覆盖安装位置；--dry-run 只预览；--uninstall 移除目标指南。此项不是起队前提。",
+            "team-agent install-skill --source \"$SKILL_DIR\" --target codex --dry-run\nteam-agent install-skill --source \"$SKILL_DIR\" --target codex", "先把 SKILL_DIR 设为实际已核验目录；核对预览后再安装，不覆盖未知用户文件。"),
+        "claim-leader" => ("仅在 doctor 明确提示登记主控、且当前终端确为主控时使用。\n--confirm 表示授权登记；不会自动打开新工具。",
+            "team-agent claim-leader --workspace . --json\nteam-agent claim-leader --workspace . --team help-demo --confirm --json", "先核对 doctor 与当前终端归属；未确认前的拒绝不是一次成功登记。"),
+        "takeover" => ("仅在 doctor 提示接管且用户已授权时使用 --confirm。\n没有 --confirm 的调用会拒绝，不是安全预演；正常恢复用 restart。",
+            "team-agent takeover --workspace . --team help-demo\nteam-agent takeover --workspace . --team help-demo --confirm --json", "核实主控和队伍归属再确认；完成后查看 status/doctor，不接管其他人的队伍。"),
+        "attach-leader" => ("PANE 必须来自实际核验的主控终端，不能猜终端编号。\n--provider 选择实际工具；--confirm 表示授权连接已有主控，仅按 doctor 提示使用。",
+            "team-agent attach-leader --pane \"$PANE\" --provider pi --workspace .\nteam-agent attach-leader --pane \"$PANE\" --provider pi --workspace . --team help-demo --confirm --json", "先将 PANE 设为已核验的终端；连接后用 doctor 确认，再派发任务。"),
+        _ => ("先确保工具已安装并完成原生登录；当前目录作为项目。\n--attach-existing 与 --confirm 只在已核验主控归属并明确授权后使用；--attach-session 选择已核验的会话。\n--external-leader 选择外部主控；--allow-nested-attach 仅在明确授权使用嵌套终端时添加。\n-- 后面的参数原样交给工具；纯 --help/-h 只显示这里的帮助，不启动工具。",
+            "", "在打开的主控命令行/工具上下文运行 team-agent quick-start；不是在普通队友对话中起队。"),
+    };
+    let examples = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
+        let native = if name == "cursor" { "agent" } else { name };
+        if name == "pi" {
+            "team-agent pi\nteam-agent pi -- --model openai-codex/gpt-6-luna\npi --help".to_string()
+        } else {
+            format!("team-agent {name}\nteam-agent {name} --help\n{native} --help")
+        }
+    } else { examples.to_string() };
+    let scope = if matches!(spec.kind, CommandKind::LeaderPassthrough { .. }) {
+        "--json 给程序读取；不把 --workspace/--team 当作主控选项传入，它们会交给原生工具。"
+    } else { "--json 给程序读取；--workspace 选项目，支持 --team 的操作用它选队伍，不猜对象。" };
+    let mut out = format!("做什么：\n{}。\n用法：{}\n\n怎么用：\n{}\n{}\nExamples（可复制）：\n{}\n\n下一步（Next Action）：\n{}", spec.summary, spec.usage, details, scope, examples, next);
+    if name == "quick-start" {
+        out.push_str(&format!("\n\n最简两文件（请自行创建，不会自动写入）：\nTEAM.md：\n{TEAM_TEMPLATE}\nagents/worker.md：\n{WORKER_TEMPLATE}"));
     }
+    if name == "cursor" { out.push_str("\n查询模型用 team-agent models --provider cursor_agent。"); }
+    if name == "copilot" { out.push_str("\nCopilot 暂无 team-agent models 查询入口，请看工具原生帮助。"); }
+    out
 }
 
 fn emit_unknown_subcommand_usage(command: &str) -> ExitCode {
     emit_usage_error(&format!(
-        "argument {{codex,claude,...,doctor}}: invalid choice: '{command}' (choose from codex, claude, ..., doctor)"
+        "没有这个操作：'{command}'。请用 team-agent --help 查看可用操作。"
     ));
     // E8 (N38): 错路引导 —— 拼写近似时建议最接近的真子命令(additive,不改既有 golden 行)。
     if let Some(suggestion) = nearest_subcommand(command) {
-        eprintln!("team-agent: did you mean `{suggestion}`?");
+        eprintln!("你是否想使用 `{suggestion}`？运行 team-agent {suggestion} --help 查看例子。");
     }
     // 0.5.45 naming-addressing (RED-6): unknown subcommand exits 1
     // (Error), aligned with the family of typo refusals throughout
@@ -428,8 +460,8 @@ fn nearest_subcommand(input: &str) -> Option<&'static str> {
 }
 
 fn emit_usage_error(message: &str) {
-    eprintln!("usage: team-agent [-h] {{codex,claude,...,doctor}} ...");
-    eprintln!("team-agent: error: {message}");
+    eprintln!("用法：team-agent <command>；查看所有操作：team-agent --help");
+    eprintln!("错误：{message}");
 }
 
 /// `cmd_validate` delegates to runtime validate_file.
@@ -648,6 +680,12 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     let _ = std::fs::write(&log_path, format!("{safe_error}\n"));
     let mut payload = payload_error.to_payload(&log_path, command);
     payload.error = safe_error;
+    if let Some(reason) = payload.error.strip_prefix("usage error: ").unwrap_or(&payload.error).strip_prefix("Error: ").and_then(|text| text.split_once(':').map(|(reason, _)| reason)) {
+        if let Some(message) = super::named_address::human_address_reason(reason) {
+            payload.error = message.to_string();
+            payload.action = "先运行 team-agent status，再用列表中的队友名发送；用 --workspace/--team 选择项目和队伍，连接问题先 doctor。".to_string();
+        }
+    }
     payload.action = crate::redaction::redact_external_text(&payload.action);
     payload.log = crate::redaction::redact_external_text(&payload.log);
     payload.reason = payload
@@ -1027,9 +1065,7 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         let normalized = literal.trim().to_ascii_lowercase();
         if normalized != "tmux" && normalized != "conpty" {
             return Err(CliError::Usage(format!(
-                "--backend must be `tmux` or `conpty`, got {literal:?}. \
-                 `pty` is not a supported literal in Phase 1d (design \
-                 §Non-Goals + CR C-1 ②)."
+                "--backend 只能是 tmux 或 conpty，收到 {literal:?}。POSIX 使用 tmux；Windows ConPTY 需要 Windows 主机和已安装的 shim。"
             )));
         }
     }
@@ -1076,6 +1112,9 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     validate_send_flags(args)?;
     warn_send_legacy_delivery_flags(args);
     let parsed = parse_args(args);
+    if parsed.targets.is_none() && parsed.pane.is_none() && parsed.to_name.is_none() && parsed.to_leader.is_none() && parsed.positionals.len() < 2 {
+        return Err(CliError::Usage("请填写收信队友名和任务内容，例如 team-agent send worker '检查改动'".to_string()));
+    }
     let target = if parsed.targets.is_some()
         || parsed.pane.is_some()
         || parsed.to_name.is_some()
@@ -1106,8 +1145,8 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         presentation_value.as_ref(),
     )
     .map_err(|error| CliError::Usage(format!("invalid send routing: {error}")))?;
-    if let Some(deprecation) = normalized.deprecation {
-        eprintln!("warning: {deprecation}");
+    if normalized.deprecation.is_some() {
+        eprintln!("提示：旧发送设置已弃用。直接用 team-agent send <agent> '任务内容'；只留言请加 --mailbox。");
     }
     Ok(SendArgs {
         target,
@@ -1188,16 +1227,16 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
     let spec = command_spec("send");
     let sunset = spec
         .and_then(|spec| spec.sunset)
-        .unwrap_or("next compatibility release");
+        .unwrap_or("后续兼容版本");
     let action = spec
         .and_then(|spec| spec.action)
-        .unwrap_or("use positional logical TO and the returned message id");
+        .unwrap_or("使用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选项目和队伍");
     for flag in FLAGS {
         if args
             .iter()
             .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
         {
-            eprintln!("warning: {flag} is deprecated; sunset: {sunset}; action: {action}");
+            eprintln!("提示：{flag} 已弃用，将在{sunset}移除。下一步：{action}");
         }
     }
 }
@@ -1565,10 +1604,12 @@ fn stop_agent_args(args: &[String], cwd: &Path) -> Result<StopAgentArgs, CliErro
 
 fn reset_agent_args(args: &[String], cwd: &Path) -> Result<ResetAgentArgs, CliError> {
     let parsed = parse_args(args);
+    let agent = required_pos(&parsed, 0, "agent")?;
+    if !parsed.discard_session { return Err(CliError::Usage("missing --discard-session；只有用户明确同意清除会话关联后才能添加此参数".to_string())); }
     let workspace = workspace(&parsed, cwd);
     refuse_if_multi_alive_team_missing_scope("reset-agent", &workspace, parsed.team.as_deref())?;
     Ok(ResetAgentArgs {
-        agent: required_pos(&parsed, 0, "agent")?,
+        agent,
         workspace,
         team: parsed.team,
         discard_session: parsed.discard_session,
@@ -1619,10 +1660,11 @@ fn clone_agent_args(args: &[String], cwd: &Path) -> Result<CloneAgentArgs, CliEr
 
 fn remove_agent_args(args: &[String], cwd: &Path) -> Result<RemoveAgentArgs, CliError> {
     let parsed = parse_args(args);
+    let agent = required_pos(&parsed, 0, "agent")?;
     let workspace = workspace(&parsed, cwd);
     refuse_if_multi_alive_team_missing_scope("remove-agent", &workspace, parsed.team.as_deref())?;
     Ok(RemoveAgentArgs {
-        agent: required_pos(&parsed, 0, "agent")?,
+        agent,
         workspace,
         team: parsed.team,
         from_spec: parsed.from_spec,

@@ -105,7 +105,7 @@ pub fn cmd_leader_passthrough(
     cwd: &Path,
 ) -> Result<CmdResult, CliError> {
     if provider_args == ["-h"] || provider_args == ["--help"] {
-        return Ok(CmdResult::none());
+        return Ok(CmdResult::human(&super::emit::command_help(Some(command))));
     }
     let as_json = leader_launcher_json(provider_args);
     let launcher_args = without_leader_json(provider_args);

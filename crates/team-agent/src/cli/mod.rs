@@ -48,10 +48,10 @@ use thiserror::Error;
 use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
-pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
-pub(crate) const QUICK_START_REMINDER: &str = "Reminder: Do not inspect raw worker pane output during normal operation. Use team-agent status / inbox instead. Wait for report_result.";
-pub(crate) const SEND_REMINDER: &str = "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.";
-pub(crate) const STATUS_REMINDER: &str = "Results are finalized automatically; use --watch-result or team-agent inbox AGENT -n 3 for transport fallback. Do not capture-pane worker terminals.";
+pub(crate) const COMMS_BOUNDARY_TEXT: &str = "这里只检查终端连接是否一致，不实际发送消息，也不证明队友已回复。";
+pub(crate) const QUICK_START_REMINDER: &str = "下一步：向队友派发任务；用 team-agent status 看状态，用 team-agent inbox leader -n 3 看回复，不读取队友终端内容。";
+pub(crate) const SEND_REMINDER: &str = "等队友真正回复，用 team-agent inbox leader -n 3 查看；不要读取队友终端内容。";
+pub(crate) const STATUS_REMINDER: &str = "下一步：用 team-agent inbox leader -n 3 查看回复；状态不是任务完成证明，不读取队友终端内容。";
 
 pub mod adapters;
 pub mod attach_app_server_leader;

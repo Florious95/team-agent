@@ -73,6 +73,20 @@ pub(crate) struct NamedAddressError {
     pub requested_name: Option<String>,
 }
 
+pub(crate) fn human_address_reason(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "name_invalid" => "收信队友名不正确；请使用队友列表中的名称。",
+        "workspace_not_found" => "所选项目目录不存在；请核对项目路径。",
+        "state_not_found" | "workspace_no_state" => "所选项目还没有可用队伍；首次起队用 quick-start，已有队伍恢复用 restart。",
+        "team_key_not_found" => "所选项目没有这支队伍；请核对 --workspace 和 --team。",
+        "leader_not_attached" => "主控还没有连接到这支队伍；请先体检，按提示恢复连接。",
+        "name_not_resolvable" => "当前队伍没有这个队友；请先查看队友列表。",
+        "name_not_live" => "该队友当前未运行或连接已失效；请查看状态再恢复。",
+        "name_ambiguous" => "有多个同名对象；请明确选择项目和队伍，不猜对象。",
+        _ => return None,
+    })
+}
+
 impl NamedAddressError {
     pub(crate) fn new(kind: NamedAddressErrorKind, message: impl Into<String>) -> Self {
         Self {
@@ -237,8 +251,8 @@ impl NamedAddressError {
             "reason".to_string(),
             Value::String(self.kind.as_str().to_string()),
         );
-        obj.insert("error".to_string(), Value::String(self.message.clone()));
-        obj.insert("action".to_string(), Value::String(self.action.clone()));
+        obj.insert("error".to_string(), Value::String(human_address_reason(self.kind.as_str()).unwrap_or(&self.message).to_string()));
+        obj.insert("action".to_string(), Value::String("先运行 team-agent status，再使用列表中的队友名发送；用 --workspace/--team 选择项目和队伍。连接问题运行 team-agent doctor --workspace .。".to_string()));
         obj.insert("log".to_string(), Value::String(self.log.clone()));
         obj.insert(
             "candidates".to_string(),

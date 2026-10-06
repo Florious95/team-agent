@@ -16,6 +16,9 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         args.yes,
         args.backend.as_deref(),
     )?;
+    if let Some(result) = quick_start_config_guidance(&mut value, args) {
+        return Ok(result);
+    }
     append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
     let readiness = value.get("readiness").and_then(Value::as_object);
     let all_resumable_have_session = readiness
@@ -53,13 +56,53 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     }
 }
 
+// Project only an actual compiler rejection; never reject a valid lifecycle fallback.
+fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Option<CmdResult> {
+    if value.get("ok").and_then(Value::as_bool) != Some(false) { return None; }
+    let error = value.get("error")?.as_str()?;
+    let compile = error.strip_prefix("spec compile failed: ")?;
+    let detail = compile.strip_prefix("validation error: ").unwrap_or(compile);
+    let team_path = args.agents_dir.join("TEAM.md");
+    let agents_path = args.agents_dir.join("agents");
+    let missing_team = detail == format!("{}: missing TEAM.md", team_path.display())
+        && team_path.try_exists().ok() == Some(false);
+    let missing_roles = detail == format!("{}: missing agents directory", agents_path.display())
+        || detail == format!("{}: no role docs found", agents_path.display());
+    let missing_field = detail.starts_with(&format!("{}/", agents_path.display()))
+        && detail.contains(": ") && (detail.contains("missing required field") || detail.contains("is required"));
+    if !missing_team && !(team_path.is_file() && (missing_roles || missing_field)) { return None; }
+    let role_path = agents_path.join("worker.md");
+    let mut retry = format!("team-agent quick-start {} --workspace {}", shell_quote(&args.agents_dir.to_string_lossy()), shell_quote(&args.workspace.to_string_lossy()));
+    if let Some(team) = args.team_id.as_deref() { retry.push_str(&format!(" --team {}", shell_quote(team))); }
+    if let Some(name) = args.name.as_deref() { retry.push_str(&format!(" --name {}", shell_quote(name))); }
+    if let Some(backend) = args.backend.as_deref() { retry.push_str(&format!(" --backend {}", shell_quote(backend))); }
+    if args.yes { retry.push_str(" --yes"); }
+    if args.detail { retry.push_str(" --detail"); }
+    if args.json { retry.push_str(" --json"); }
+    let explanation = if missing_team {
+        format!("这里还没有队伍配置：{}。没有启动任何队友。请自行创建下面两个文件；本命令没有写入这些文件。", team_path.display())
+    } else { format!("队友配置尚不完整：{detail}。请补齐角色目录或必需字段；下面仅给安全示例，不覆盖已有文件。") };
+    let next = format!("确认 Pi 已安装并登录；运行 team-agent models --provider pi 核对模型。\n运行 team-agent pi，在该主控的命令行/工具上下文再次执行：\n{retry}");
+    let mut templates = vec![serde_json::json!({"path": role_path, "content": super::emit::WORKER_TEMPLATE})];
+    let mut human = explanation.clone();
+    if missing_team {
+        templates.insert(0, serde_json::json!({"path": team_path, "content": super::emit::TEAM_TEMPLATE}));
+        human.push_str(&format!("\n\n{}：\n{}", team_path.display(), super::emit::TEAM_TEMPLATE));
+    }
+    human.push_str(&format!("\n\n{}：\n{}\n下一步：\n{next}", role_path.display(), super::emit::WORKER_TEMPLATE));
+    value["action"] = serde_json::json!(explanation);
+    value["next_actions"] = serde_json::json!(["team-agent models --provider pi", "team-agent pi", retry]);
+    value["templates"] = serde_json::json!(templates);
+    if args.json { Some(CmdResult::from_json(value.clone(), true)) }
+    else { let mut result = CmdResult::human(&human); result.exit = ExitCode::Error; Some(result) }
+}
+
 /// E13:quick-start "team 起了" 人类输出 = summary + attach 块。所有成功出口共用(别每分支手拷)。
 /// attach_commands 缺/空 → 只 summary(向后兼容)。
 fn quickstart_human(value: &Value) -> String {
-    let summary = value
-        .get("summary")
-        .and_then(Value::as_str)
-        .unwrap_or("quick-start complete");
+    let summary = if value.get("summary").and_then(Value::as_str) == Some("existing runtime") {
+        "发现已有队伍；请查看返回的连接方式，不会另建同名队伍。"
+    } else { "队伍已启动；下面是连接方式和派发任务的命令。" };
     let attach: Vec<&str> = value
         .get("attach_commands")
         .and_then(Value::as_array)
@@ -72,14 +115,14 @@ fn quickstart_human(value: &Value) -> String {
         .unwrap_or_default();
     let mut out = String::from(summary);
     if !attach.is_empty() {
-        out.push_str("\n\nattach:");
+        out.push_str("\n\n连接队伍：");
         for cmd in attach {
             out.push_str("\n  ");
             out.push_str(cmd);
         }
     }
     if !sends.is_empty() {
-        out.push_str("\n\nsend:");
+        out.push_str("\n\n派发任务（请替换任务内容）：");
         for cmd in sends {
             out.push_str("\n  ");
             out.push_str(cmd);
@@ -146,7 +189,7 @@ pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) ->
     let mut command = format!(
         "team-agent send {} {} --workspace {}",
         shell_quote(agent),
-        shell_quote("MESSAGE"),
+        shell_quote("请完成任务并把答案回复给 leader。"),
         shell_quote(workspace)
     );
     if let Some(team) = team {
@@ -156,7 +199,7 @@ pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) ->
     Some(command)
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if value.bytes().all(|byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':')
     }) {
