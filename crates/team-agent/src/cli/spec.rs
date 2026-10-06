@@ -2,35 +2,92 @@
 #![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandTier { Core, Guided, Secondary, DevInternal }
+pub(crate) enum CommandTier {
+    Core,
+    Guided,
+    Secondary,
+    DevInternal,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandCategory { Start, Daily, TeamLifecycle, WorkerLifecycle, GuidedRecovery, Setup, Observe, Dev }
+pub(crate) enum CommandCategory {
+    Start,
+    Daily,
+    TeamLifecycle,
+    WorkerLifecycle,
+    GuidedRecovery,
+    Setup,
+    Observe,
+    Dev,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
     Dispatch(DispatchKind),
     LeaderPassthrough { provider: &'static str },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TokenUsage { No, Yes, Conditional }
+pub(crate) enum TokenUsage {
+    No,
+    Yes,
+    Conditional,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DispatchKind {
-    QuickStart, Send, Status, Models, Inbox, Restart, Shutdown,
-    AddAgent, StartAgent, StopAgent, ResetAgent, CloneAgent, ForkAgent, RemoveAgent,
-    Leaders, Doctor, Approvals, AllowPeerTalk, Route, Profile, InstallSkill,
-    ClaimLeader, Takeover, AttachLeader,
+    QuickStart,
+    Send,
+    Status,
+    Models,
+    Inbox,
+    Restart,
+    Shutdown,
+    AddAgent,
+    StartAgent,
+    StopAgent,
+    ResetAgent,
+    CloneAgent,
+    ForkAgent,
+    RemoveAgent,
+    Leaders,
+    Doctor,
+    Approvals,
+    AllowPeerTalk,
+    Route,
+    Profile,
+    InstallSkill,
+    ClaimLeader,
+    Takeover,
+    AttachLeader,
 }
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
-    DispatchKind::QuickStart, DispatchKind::Send, DispatchKind::Status, DispatchKind::Models,
-    DispatchKind::Inbox, DispatchKind::Restart, DispatchKind::Shutdown, DispatchKind::AddAgent,
-    DispatchKind::StartAgent, DispatchKind::StopAgent, DispatchKind::ResetAgent,
-    DispatchKind::CloneAgent, DispatchKind::ForkAgent, DispatchKind::RemoveAgent,
-    DispatchKind::Leaders, DispatchKind::Doctor, DispatchKind::Approvals,
-    DispatchKind::AllowPeerTalk, DispatchKind::Route, DispatchKind::Profile,
-    DispatchKind::InstallSkill, DispatchKind::ClaimLeader, DispatchKind::Takeover,
+    DispatchKind::QuickStart,
+    DispatchKind::Send,
+    DispatchKind::Status,
+    DispatchKind::Models,
+    DispatchKind::Inbox,
+    DispatchKind::Restart,
+    DispatchKind::Shutdown,
+    DispatchKind::AddAgent,
+    DispatchKind::StartAgent,
+    DispatchKind::StopAgent,
+    DispatchKind::ResetAgent,
+    DispatchKind::CloneAgent,
+    DispatchKind::ForkAgent,
+    DispatchKind::RemoveAgent,
+    DispatchKind::Leaders,
+    DispatchKind::Doctor,
+    DispatchKind::Approvals,
+    DispatchKind::AllowPeerTalk,
+    DispatchKind::Route,
+    DispatchKind::Profile,
+    DispatchKind::InstallSkill,
+    DispatchKind::ClaimLeader,
+    DispatchKind::Takeover,
     DispatchKind::AttachLeader,
 ];
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct GovernanceNote { pub(crate) decision: &'static str, pub(crate) reason: &'static str }
+pub(crate) struct GovernanceNote {
+    pub(crate) decision: &'static str,
+    pub(crate) reason: &'static str,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CommandSpec {
     pub(crate) name: &'static str,

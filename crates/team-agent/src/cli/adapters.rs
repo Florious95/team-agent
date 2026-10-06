@@ -49,6 +49,16 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         if args.json && status.as_deref() == Some("pending_tool_load") {
             result.exit = ExitCode::Ok;
         }
+        if !args.json {
+            if let CmdOutput::Json(value) = &result.output {
+                let explanation = if value.get("ok").and_then(Value::as_bool) == Some(false) {
+                    format!("启动未完成：{}", value.get("error").and_then(Value::as_str).unwrap_or("队伍尚未准备好接收任务"))
+                } else { "队伍尚未准备好接收任务；请等待工具完成启动。".to_string() };
+                let mut doctor = format!("team-agent doctor --workspace {}", shell_quote(&args.workspace.to_string_lossy()));
+                if let Some(team) = args.team_id.as_deref() { doctor.push_str(&format!(" --team {}", shell_quote(team))); }
+                result.output = CmdOutput::Human(format!("{explanation}\n下一步：运行 {doctor}，按体检提示处理；用 status 查看状态，不反复起队或重发任务。"));
+            }
+        }
         Ok(result)
     } else {
         // E13:happy 人类路径必须带 attach_commands(json 路径 cli/mod.rs:1775 已有)。
@@ -68,8 +78,9 @@ fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Opti
         && team_path.try_exists().ok() == Some(false);
     let missing_roles = detail == format!("{}: missing agents directory", agents_path.display())
         || detail == format!("{}: no role docs found", agents_path.display());
-    let missing_field = detail.starts_with(&format!("{}/", agents_path.display()))
-        && detail.contains(": ") && (detail.contains("missing required field") || detail.contains("is required"));
+    let missing_field = detail.split_once(": ").is_some_and(|(path, reason)|
+        Path::new(path).parent() == Some(agents_path.as_path())
+        && (reason.contains("missing required field") || reason.contains("is required")));
     if !missing_team && !(team_path.is_file() && (missing_roles || missing_field)) { return None; }
     let role_path = agents_path.join("worker.md");
     let mut retry = format!("team-agent quick-start {} --workspace {}", shell_quote(&args.agents_dir.to_string_lossy()), shell_quote(&args.workspace.to_string_lossy()));

@@ -106,17 +106,29 @@ fn emit_cli_error_for_command(
     cwd: &Path,
     error: &CliError,
 ) -> ExitCode {
-    let missing_input = matches!(error, CliError::Usage(message) if message.starts_with("missing ") || message.starts_with("请填写") || matches!(message.as_str(), "expected exactly one agent id" | "add-agent requires --provider <name>" | "add-agent requires --bypass <true|false>" | "--source is required unless --uninstall"));
+    let missing_input = matches!(error, CliError::Usage(message) if message.starts_with("missing ") || message.starts_with("请填写") || matches!(message.as_str(), "add-agent requires --provider <name>" | "add-agent requires --bypass <true|false>" | "--source is required unless --uninstall"));
     if command_spec(command).is_some() && missing_input {
         let help = command_help(Some(command));
+        let explanation = match error {
+            CliError::Usage(message) => match message.as_str() {
+                "missing agent" | "missing source_agent" => "请填写队友名。".to_string(),
+                "missing profile command" => "请填写 profile 操作：init、doctor 或 show。".to_string(),
+                "missing profile name" => "请填写登录/代理配置的名称。".to_string(),
+                "add-agent requires --provider <name>" => "请用 --provider 明确选择工具，或用 --role-file 提供角色文件。".to_string(),
+                "add-agent requires --bypass <true|false>" => "请用 --bypass false 明确保留权限询问，或在角色文件中明确此设置。".to_string(),
+                other => other.strip_prefix("missing ").map(|field| format!("请补齐必需参数：{field}。")).unwrap_or_else(|| other.to_string()),
+            },
+            _ => error.to_string(),
+        };
         if has_arg(args, "--json") {
             let payload = error.to_payload(Path::new(""), command);
             let mut value = serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error.to_string()}));
+            value["error"] = serde_json::json!(explanation);
             value["action"] = serde_json::json!(format!("team-agent {command} --help"));
             value["next_actions"] = serde_json::json!([format!("请按 team-agent {command} --help 的 Examples 补齐参数")]);
             println!("{}", python_compact_json(&value));
         } else {
-            eprintln!("请按用法补齐必需参数（队友名、任务内容或所需选项）。\n{error}\n\n{help}");
+            eprintln!("{explanation}\n\n{help}");
         }
         ExitCode::Usage
     } else if command == "status" {
@@ -367,9 +379,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent restart .\nteam-agent restart . --team help-demo --json", "用 status 查看恢复结果；需要新会话先征得用户同意，不用 takeover 代替恢复。"),
         "shutdown" => ("只关闭所选项目/队伍；日志默认保留，--keep-logs 保留兼容。\n--json 查看关闭范围、降级情况及本队残留，返回成功不代表其他队伍已关闭。",
             "team-agent shutdown --workspace .\nteam-agent shutdown --workspace . --team help-demo --json", "核对本队残留为空，再用 team-agent doctor --workspace .；不要广域清理其他队伍。"),
-        "add-agent" => ("<agent> 是新队友名；--provider 选择工具；--model 模型名称；--effort 思考强度。\n--bypass 是否跳过权限询问，示例 false；--prompt 任务职责；--profile 登录/代理设置。\n工具和 bypass 必须由参数或 --role-file 明确提供；冲突会拒绝，不猜设置。",
+        "add-agent" => ("<agent> 是新队友名；--provider 选择工具；--model 模型名称；--effort 思考强度。\n--bypass 是否跳过权限询问，示例 false；--prompt 任务职责；--profile 登录/代理设置。\n工具和 bypass 必须由参数或 --role-file 明确提供；冲突会拒绝，不猜设置。--force 替换已有队友，仅在用户明确授权后用。",
             "team-agent add-agent reviewer --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt '检查任务'\nteam-agent add-agent reviewer --role-file ./agents/reviewer.md", "用 status 确认队友，再运行 team-agent send reviewer '检查改动'。"),
-        "start-agent" => ("只启动已有队友；仍在运行时先 stop-agent。\n--provider 工具；--model 模型名称；--effort 思考强度；--bypass 是否跳过权限询问。\n--prompt/--profile 更换职责/登录设置；只有明确获准丢弃旧对话才用 --allow-fresh。",
+        "start-agent" => ("只启动已有队友；仍在运行时先 stop-agent。\n--provider 工具；--model 模型名称；--effort 思考强度；--bypass 是否跳过权限询问。\n--prompt/--profile 更换职责/登录设置；只有明确获准丢弃旧对话才用 --allow-fresh；--force 仅在获准替换已有队友后用。",
             "team-agent start-agent worker\nteam-agent start-agent worker --model openai-codex/gpt-6-luna", "新增队友用 add-agent；启动后看 status，再 send 分派任务。"),
         "stop-agent" => ("<agent> 指定要暂停的队友；暂停不是删除，配置与会话记录保留。",
             "team-agent stop-agent worker\nteam-agent stop-agent worker --workspace . --team help-demo --json", "用 status 确认停止；恢复用 team-agent start-agent worker。"),
@@ -379,7 +391,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent clone-agent worker --as reviewer\nteam-agent clone-agent worker --as reviewer --label '审阅队友' --workspace .", "用 status 查看新队友，再 send reviewer 分派独立任务。"),
         "fork-agent" => ("<agent> 是源队友；--as 新队友名；--label 可读标签。\n需要源会话已保存且工具支持分支；不满足条件会拒绝，不保证所有工具都可分支。",
             "team-agent fork-agent worker --as experiment\nteam-agent fork-agent worker --as experiment --workspace . --team help-demo --json", "分支成功会占用新资源；看 status，再向 experiment 派发任务，用完停止或移除。"),
-        "remove-agent" => ("必须 --confirm；默认移除运行队友，不删除用户角色文件。\n--from-spec 同时从队伍配置移除；--force 仅在理解强制移除风险且明确授权后使用。",
+        "remove-agent" => ("必须 --confirm；配置定义的队友还需 --from-spec，动态队友可以不加。\n只删除托管角色副本，不删除外部用户角色文件；运行中的队友先 stop-agent。\n--force 可停止并移除运行中的队友，仅在理解风险且明确授权后使用。",
             "team-agent remove-agent reviewer --confirm\nteam-agent remove-agent reviewer --from-spec --confirm --workspace . --team help-demo --json", "先保存所需回复；移除后核对 status 和实际配置范围，不对其他队友使用强制清理。"),
         "leaders" => ("默认列出可用主控；--all 包含已失效登记，--stale 只看失效项。\nQUERY/--search 按项目/队伍/名称筛选；--prune 仅清理已确认退役的登记，--dry-run 先预览。",
             "team-agent leaders\nteam-agent leaders --all --json\nteam-agent leaders --prune --dry-run", "根据项目和队伍选择 --workspace/--team；清理登记不等于关闭进程。"),
@@ -685,6 +697,11 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
             payload.error = message.to_string();
             payload.action = "先运行 team-agent status，再用列表中的队友名发送；用 --workspace/--team 选择项目和队伍，连接问题先 doctor。".to_string();
         }
+    }
+    if command_spec(command).is_some() && payload.action == "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。" {
+        let mut doctor = format!("team-agent doctor --workspace {}", super::adapters::shell_quote(&workspace.to_string_lossy()));
+        if let Some(team) = parsed.team.as_deref() { doctor.push_str(&format!(" --team {}", super::adapters::shell_quote(team))); }
+        payload.action = format!("先运行 {doctor} 检查所选队伍，或查看此处列出的错误日志。");
     }
     payload.action = crate::redaction::redact_external_text(&payload.action);
     payload.log = crate::redaction::redact_external_text(&payload.log);
@@ -1543,7 +1560,9 @@ fn role_agent_args(args: &[String], add: bool) -> Result<(ParsedArgs, crate::lif
         if role.provider.is_none() { return Err(CliError::Usage("add-agent requires --provider <name>".into())); }
         if role.bypass.is_none() { return Err(CliError::Usage("add-agent requires --bypass <true|false>".into())); }
     }
-    if parsed.positionals.len() != 1 { return Err(CliError::Usage("expected exactly one agent id".into())); }
+    if parsed.positionals.len() != 1 {
+        return Err(CliError::Usage(if parsed.positionals.is_empty() { "missing agent" } else { "expected exactly one agent id" }.into()));
+    }
     Ok((parsed, role))
 }
 
