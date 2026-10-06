@@ -806,11 +806,39 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
         // executes synchronously, rather than racing a detached new session.
         let ws = env.workspace(wrapper);
         let socket = hermetic::short_tmux_socket("286-native");
-        let started = Command::new("tmux").args(["-S", socket.to_str().unwrap(), "new-session", "-d", "-s", "native286", "-c", ws.to_str().unwrap(), "sleep 600"]).output().unwrap();
-        assert!(started.status.success(), "owned tmux fixture: {}", text(&started));
+        let started = Command::new("tmux")
+            .args([
+                "-S",
+                socket.to_str().unwrap(),
+                "new-session",
+                "-d",
+                "-s",
+                "native286",
+                "-c",
+                ws.to_str().unwrap(),
+                "sleep 600",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            started.status.success(),
+            "owned tmux fixture: {}",
+            text(&started)
+        );
         env.register_owned_tmux_socket(&socket);
         let probe = |format: &str| {
-            let out = Command::new("tmux").args(["-S", socket.to_str().unwrap(), "display-message", "-p", "-t", "native286:0", format]).output().unwrap();
+            let out = Command::new("tmux")
+                .args([
+                    "-S",
+                    socket.to_str().unwrap(),
+                    "display-message",
+                    "-p",
+                    "-t",
+                    "native286:0",
+                    format,
+                ])
+                .output()
+                .unwrap();
             assert!(out.status.success(), "owned pane probe: {}", text(&out));
             String::from_utf8(out.stdout).unwrap().trim().to_string()
         };
@@ -842,7 +870,12 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
                 "literal value",
                 "",
             ],
-            &[("PATH", &path), ("TEAM_AGENT_CLI_ARGV_ROUTING", "off"), ("TMUX", &tmux), ("TMUX_PANE", &pane)],
+            &[
+                ("PATH", &path),
+                ("TEAM_AGENT_CLI_ARGV_ROUTING", "off"),
+                ("TMUX", &tmux),
+                ("TMUX_PANE", &pane),
+            ],
         );
         if wrapper == "pi" {
             // The frozen Pi leader contract validates native --model/--thinking
