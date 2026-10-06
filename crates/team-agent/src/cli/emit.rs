@@ -2050,10 +2050,11 @@ mod tests {
                     return None;
                 }
                 let command = trimmed.split_whitespace().next()?;
-                command
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-                    .then(|| command.to_string())
+                (command.chars().next()?.is_ascii_lowercase()
+                    && command
+                        .chars()
+                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'))
+                .then(|| command.to_string())
             })
             .collect()
     }
@@ -2143,6 +2144,7 @@ mod tests {
             .filter(|spec| spec.default_help)
             .map(|spec| spec.name)
             .collect();
+        assert_eq!(expected.len(), 30, "the public catalog is Human30");
         for spec_name in &expected {
             assert!(
                 visible.iter().any(|command| command == spec_name),
@@ -2156,7 +2158,7 @@ mod tests {
         expected_sorted.sort();
         assert_eq!(
             actual, expected_sorted,
-            "default help must match the exact default_help spec set (d40 ∪ results when present), not a slack threshold; got {visible:?}"
+            "default help must match the exact Human30 public spec set, not a slack threshold; got {visible:?}"
         );
         assert!(
             top_help.contains("copilot"),
@@ -2169,7 +2171,11 @@ mod tests {
         let top_help = command_help(None);
         let visible = visible_help_commands(&top_help);
         assert!(visible.iter().any(|command| command == "doctor"));
-        for command in ["leaders", "e2e", "peek", "coordinator"] {
+        assert!(visible.iter().any(|command| command == "leaders"));
+        for command in [
+            "results", "wait", "attach-app-server-leader", "identity", "watch", "sessions",
+            "validate", "preflight", "wait-ready", "e2e", "peek", "coordinator",
+        ] {
             assert!(
                 !visible.iter().any(|visible| visible == command),
                 "`{command}` must stay hidden from default help"
@@ -2190,10 +2196,10 @@ mod tests {
     #[test]
     fn observation_a_commands_have_terminal_tiers() {
         for (command, tier) in [
-            ("allow-peer-talk", CommandTier::Secondary),
-            ("approvals", CommandTier::Secondary),
-            ("profile", CommandTier::Secondary),
-            ("install-skill", CommandTier::Secondary),
+            ("allow-peer-talk", CommandTier::Core),
+            ("approvals", CommandTier::Core),
+            ("profile", CommandTier::Core),
+            ("install-skill", CommandTier::Core),
         ] {
             assert_eq!(command_spec(command).map(|spec| spec.tier), Some(tier));
         }
@@ -2202,7 +2208,7 @@ mod tests {
     #[test]
     fn suggestion_index_excludes_hidden_commands() {
         assert_eq!(nearest_subcommand("statu"), Some("status"));
-        assert_eq!(nearest_subcommand("leader"), None);
+        assert_eq!(nearest_subcommand("leader"), Some("leaders"));
         assert_eq!(nearest_subcommand("fallback-send-leade"), None);
         assert_eq!(nearest_subcommand("coordinato"), None);
     }
@@ -2316,26 +2322,7 @@ mod tests {
                 "inbox",
                 &["--workspace", "--team", "-n", "--limit", "--json"][..],
             ),
-            ("sessions", &["--workspace", "--team", "--json"][..]),
-            (
-                "wait-ready",
-                &["--workspace", "--team", "--timeout", "--json"][..],
-            ),
-            (
-                "peek",
-                &[
-                    "--workspace",
-                    "--tail",
-                    "--head",
-                    "--search",
-                    "--allow-raw-screen",
-                    "--json",
-                ][..],
-            ),
-            (
-                "coordinator",
-                &["--workspace", "--once", "--tick-interval"][..],
-            ),
+
         ] {
             let help = command_help(Some(command));
             for flag in flags {
@@ -2345,6 +2332,15 @@ mod tests {
                 );
             }
         }
+        let cwd = tmp_workspace();
+        for command in ["sessions", "wait-ready", "peek", "coordinator"] {
+            assert_eq!(
+                run(&cli_argv(&[command, "--help"]), &cwd),
+                ExitCode::Usage,
+                "Machine help must be generic Usage2, not a private flag tutorial"
+            );
+        }
+        std::fs::remove_dir_all(cwd).unwrap();
         assert!(
             !command_help(Some("quick-start")).contains("--fresh"),
             "quick-start help must not advertise removed reset semantics"
@@ -2356,18 +2352,18 @@ mod tests {
         for name in ["start-agent", "add-agent"] {
             let spec = command_spec(name).expect("registered worker lifecycle command");
             let help = command_help(Some(name));
-            assert_eq!(help.lines().next(), Some(spec.usage));
-            assert!(help.contains(spec.summary));
-            for flag in ["--model SLUG", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider NAME"] {
+            assert!(help.contains(spec.usage));
+            assert!(help.contains("做什么："));
+            for flag in ["--model MODEL", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider TOOL"] {
                 assert!(help.contains(flag), "{name} help missing {flag}: {help}");
             }
-            assert!(help.contains("team-agent send AGENT MESSAGE"));
+            assert!(help.contains("下一步") && help.contains("team-agent send"));
         }
         assert!(!command_help(Some("start-agent")).contains("--force"));
         let add = command_help(Some("add-agent"));
         assert!(add.contains("[--role-file FILE]"));
-        assert!(add.contains("provider/bypass required from CLI or role file"));
-        assert!(add.contains("conflicting values rejected"));
+        assert!(add.contains("provider") && add.contains("bypass") && add.contains("角色文件"));
+        assert!(add.contains("冲突") && add.contains("拒绝"));
     }
 
     #[test]
@@ -2375,10 +2371,10 @@ mod tests {
         let help = command_help(Some("status"));
         for marker in [
             "name/provider/model/effort/runtime_status/activity/health/session_name/tmux_command",
-            "人读与 --json 使用同一投影",
-            "显示 unknown",
+            "--json 给程序读取",
+            "unknown 表示证据不足",
             "tmux_command",
-            "不增加诊断字段",
+            "不增加字段",
         ] {
             assert!(help.contains(marker), "status help missing {marker}: {help}");
         }
@@ -2521,14 +2517,14 @@ mod tests {
         .unwrap();
         let err = cmd_send(&args).unwrap_err();
         assert!(
-            matches!(err, CliError::Usage(ref message) if message.contains("--pane and TARGET/--to are mutually exclusive")),
+            matches!(err, CliError::Usage(ref message) if message.contains("--pane") && message.contains("--to") && message.contains("不能") && message.contains("同时")),
             "expected --pane/--to mutual-exclusion usage error, got {err:?}"
         );
 
         let args = send_args(&cli_argv(&["--pane", "%1596"]), &cwd).unwrap();
         let err = cmd_send(&args).unwrap_err();
         assert!(
-            matches!(err, CliError::Usage(ref message) if message == "--pane requires a non-empty message"),
+            matches!(err, CliError::Usage(ref message) if message == "--pane requires a non-empty message" || (message.contains("--pane") && message.contains("非空"))),
             "expected empty-message usage error, got {err:?}"
         );
 
