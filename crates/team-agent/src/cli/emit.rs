@@ -694,7 +694,7 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     payload.error = safe_error;
     if let CliError::AddressRefusal { error, action, .. } = payload_error {
         if !has_arg(args, "--json") {
-            payload.error = error.clone();
+            payload.error = crate::redaction::redact_external_text(error);
             payload.action = action.clone();
         }
     } else if let Some(reason) = payload.error.strip_prefix("usage error: ").unwrap_or(&payload.error).strip_prefix("Error: ").and_then(|text| text.split_once(':').map(|(reason, _)| reason)) {
