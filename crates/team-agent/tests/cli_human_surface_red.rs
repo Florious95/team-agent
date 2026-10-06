@@ -335,7 +335,9 @@ fn examples_property(command: &str) {
     );
     if launcher {
         assert!(
-            examples.iter().any(|argv| argv.len() == 1 && argv[0] == command),
+            examples
+                .iter()
+                .any(|argv| argv.len() == 1 && argv[0] == command),
             "H4 launcher must include its actual bare startup example: {help}"
         );
     }
