@@ -381,7 +381,7 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent shutdown --workspace .\nteam-agent shutdown --workspace . --team help-demo --json", "核对本队残留为空，再用 team-agent doctor --workspace .；不要广域清理其他队伍。"),
         "add-agent" => ("<agent> 是新队友名；--provider 选择工具；--model 模型名称；--effort 思考强度。\n--bypass 是否跳过权限询问，示例 false；--prompt 任务职责；--profile 登录/代理设置。\n工具和 bypass 必须由参数或 --role-file 明确提供；冲突会拒绝，不猜设置。--force 替换已有队友，仅在用户明确授权后用。",
             "team-agent add-agent reviewer --provider pi --model openai-codex/gpt-6-luna --bypass false --prompt '检查任务'\nteam-agent add-agent reviewer --role-file ./agents/reviewer.md", "用 status 确认队友，再运行 team-agent send reviewer '检查改动'。"),
-        "start-agent" => ("只启动已有队友；仍在运行时先 stop-agent。\n--provider 工具；--model 模型名称；--effort 思考强度；--bypass 是否跳过权限询问。\n--prompt/--profile 更换职责/登录设置；只有明确获准丢弃旧对话才用 --allow-fresh；--force 仅在获准替换已有队友后用。",
+        "start-agent" => ("只启动已有队友；仍在运行时先 stop-agent。\n--provider 工具；--model 模型名称；--effort 思考强度；--bypass 是否跳过权限询问。\n--prompt/--profile 更换职责/登录设置；只有明确获准丢弃旧对话才用 --allow-fresh。",
             "team-agent start-agent worker\nteam-agent start-agent worker --model openai-codex/gpt-6-luna", "新增队友用 add-agent；启动后看 status，再 send 分派任务。"),
         "stop-agent" => ("<agent> 指定要暂停的队友；暂停不是删除，配置与会话记录保留。",
             "team-agent stop-agent worker\nteam-agent stop-agent worker --workspace . --team help-demo --json", "用 status 确认停止；恢复用 team-agent start-agent worker。"),
