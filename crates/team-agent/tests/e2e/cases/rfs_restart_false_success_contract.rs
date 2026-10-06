@@ -126,6 +126,30 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     let ws_path = ws.path().to_str().unwrap();
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
+    // This synthetic topology fixture must not race a background state writer.
+    {
+        use std::thread;
+        use std::time::{Duration, Instant};
+        use team_agent::coordinator::{pid_is_running, stop_coordinator, Pid, WorkspacePath};
+
+        let raw_pid = fs::read_to_string(ws.coordinator_pid_file())
+            .expect("read RFS fixture coordinator PID")
+            .trim()
+            .parse::<u32>()
+            .expect("parse RFS fixture coordinator PID");
+        assert!(ws.pid_is_owned_coordinator(raw_pid), "refusing non-owned coordinator {raw_pid}");
+        let pid = Pid::new(raw_pid);
+        let stopped = stop_coordinator(&WorkspacePath::new(ws.path().to_path_buf()))
+            .expect("stop RFS fixture-owned coordinator");
+        assert!(stopped.ok, "RFS coordinator stop failed: {stopped:?}");
+        assert_eq!(stopped.pid, Some(pid), "stop must address exact owned PID");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while pid_is_running(pid).expect("probe exact RFS coordinator") {
+            assert!(Instant::now() < deadline, "RFS coordinator did not exit");
+            thread::sleep(Duration::from_millis(10));
+        }
+        eprintln!("RFS_FIXTURE_COORDINATOR_QUIESCED pid={} running=false", pid.get());
+    }
     let old_socket = unique_socket("rfs008-old");
     let new_socket = unique_socket("rfs008-new");
     let _guard = TmuxSocketGuard::new(vec![old_socket.clone(), new_socket.clone()]);
@@ -134,6 +158,15 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     assert_team_session_live_on_endpoint(&old_socket, &session_name);
     create_dummy_session(&new_socket, "rfs008-leader-side", ws.path().to_path_buf());
     write_split_brain_state(&ws, &old_socket, &new_socket);
+    let injected = ws.read_state();
+    let canonical = injected.get("teams").and_then(|teams| teams.get(team_id))
+        .expect("RFS canonical team state must exist");
+    for scope in [&injected, canonical] {
+        assert_eq!(scope.get("tmux_endpoint"), Some(&json!(old_socket)));
+        assert_eq!(scope.get("tmux_socket"), Some(&json!(new_socket)));
+        assert_eq!(scope.pointer("/leader_receiver/tmux_socket"), Some(&json!(new_socket)));
+    }
+    assert_team_session_live_on_endpoint(&old_socket, &session_name);
 
     let out = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
     let mut body = out.json();
