@@ -692,7 +692,12 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     let _ = std::fs::write(&log_path, format!("{safe_error}\n"));
     let mut payload = payload_error.to_payload(&log_path, command);
     payload.error = safe_error;
-    if let Some(reason) = payload.error.strip_prefix("usage error: ").unwrap_or(&payload.error).strip_prefix("Error: ").and_then(|text| text.split_once(':').map(|(reason, _)| reason)) {
+    if let CliError::AddressRefusal { error, action, .. } = payload_error {
+        if !has_arg(args, "--json") {
+            payload.error = error.clone();
+            payload.action = action.clone();
+        }
+    } else if let Some(reason) = payload.error.strip_prefix("usage error: ").unwrap_or(&payload.error).strip_prefix("Error: ").and_then(|text| text.split_once(':').map(|(reason, _)| reason)) {
         if let Some(message) = super::named_address::human_address_reason(reason) {
             payload.error = message.to_string();
             payload.action = "先运行 team-agent status，再用列表中的队友名发送；用 --workspace/--team 选择项目和队伍，连接问题先 doctor。".to_string();
@@ -724,7 +729,11 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     } else {
         eprintln!("error: {}", payload.error);
         eprintln!("action: {}", payload.action);
-        eprintln!("log: {}", payload.log);
+        if matches!(payload_error, CliError::AddressRefusal { .. }) {
+            eprintln!("log: {:?}", payload.log);
+        } else {
+            eprintln!("log: {}", payload.log);
+        }
     }
     ExitCode::Error
 }

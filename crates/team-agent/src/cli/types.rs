@@ -41,6 +41,9 @@ pub enum CliError {
     /// `peek` 缺 `--allow-raw-screen`)。对应 Python 抛 `TeamAgentError` 或 parser.error。
     #[error("usage error: {0}")]
     Usage(String),
+    /// Preserve the original refusal for audit while carrying safe human guidance.
+    #[error("usage error: {audit}")]
+    AddressRefusal { audit: String, error: String, action: String },
     /// state 解析失败(歧义/未找到 team 等)。透传 step 5。
     #[error("{0}")]
     State(#[from] crate::state::StateError),

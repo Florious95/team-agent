@@ -188,7 +188,7 @@ pub(super) fn send_to_logical_to(
     }
 
     let mut resolved = Vec::with_capacity(names.len());
-    for name in names {
+    for (raw_name, name) in logical_to.split(',').zip(names) {
         match crate::cli::named_address::resolve_name_for_cli(
             &args.workspace,
             name,
@@ -218,7 +218,9 @@ pub(super) fn send_to_logical_to(
                 if args.json {
                     return Ok(error.to_json());
                 }
-                return Err(CliError::Usage(error.n38_message()));
+                let audit = error.n38_message();
+                let (message, action) = error.human_guidance(raw_name);
+                return Err(CliError::AddressRefusal { audit, error: message, action });
             }
         }
     }

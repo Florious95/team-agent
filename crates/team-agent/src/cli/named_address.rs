@@ -71,6 +71,9 @@ pub(crate) struct NamedAddressError {
     /// `requested_name`/`suggested_name` without re-parsing. Absent
     /// for exact refusals like empty-workspace.
     pub requested_name: Option<String>,
+    // Presentation only: never serialized or used as routing authority.
+    human_scope: Option<PathBuf>,
+    human_team: Option<String>,
 }
 
 pub(crate) fn human_address_reason(reason: &str) -> Option<&'static str> {
@@ -100,7 +103,45 @@ impl NamedAddressError {
             available_team_keys: Vec::new(),
             suggested_name: None,
             requested_name: None,
+            human_scope: None,
+            human_team: None,
         }
+    }
+
+    fn with_human_scope(mut self, workspace: Option<&Path>, team: Option<&str>) -> Self {
+        self.human_scope = workspace.map(Path::to_path_buf);
+        if self.human_team.is_none() { self.human_team = team.map(str::to_string); }
+        self
+    }
+
+    pub(crate) fn human_guidance(&self, requested: &str) -> (String, String) {
+        let workspace = self.human_scope.as_deref();
+        let mut message = format!("{}\n你刚才填写的是 {requested:?}。", human_address_reason(self.kind.as_str()).unwrap_or("未能找到可用的收信队友。"));
+        if let Some(workspace) = workspace {
+            message.push_str(&format!("\n所选项目：{:?}。", workspace.to_string_lossy()));
+        }
+        if let Some(team) = self.human_team.as_deref() {
+            message.push_str(&format!("\n所选队伍：{team:?}。"));
+        }
+        let mut action = "没有可靠的拼写建议；请先核对项目和队伍，不猜对象。".to_string();
+        if let Some(workspace) = workspace.filter(|path| !path.to_string_lossy().chars().any(char::is_control)) {
+            action.push_str(&format!("\nteam-agent status --workspace {}", super::adapters::shell_quote(&workspace.to_string_lossy())));
+        }
+        for candidate in &self.candidates {
+            if let (Some(agent), Some(team)) = (candidate.get("agent_id").and_then(Value::as_str), candidate.get("team_key").and_then(Value::as_str)) {
+                message.push_str(&format!("\n候选队伍 {team:?}，队友 {agent:?}；请确认是否是你要找的对象。"));
+            }
+        }
+        if let Some(candidate) = self.suggested_name.as_deref().and_then(|suggested| self.candidates.iter().find(|candidate| candidate.get("name").and_then(Value::as_str) == Some(suggested))) {
+            if let (Some(workspace), Some(agent), Some(team)) = (workspace, candidate.get("agent_id").and_then(Value::as_str), candidate.get("team_key").and_then(Value::as_str)) {
+                if !agent.is_empty() && !team.is_empty() && !agent.chars().chain(team.chars()).chain(workspace.to_string_lossy().chars()).any(char::is_control) {
+                    if let Some(command) = super::adapters::send_command(agent, workspace, Some(team)) {
+                        action = format!("你是否想发给 {agent:?}、队伍 {team:?}？确认后将任务内容替换到这个例子；本次没有发送：\n{command}");
+                    }
+                }
+            }
+        }
+        (message, action)
     }
 
     pub(crate) fn n38_message(&self) -> String {
@@ -251,7 +292,7 @@ impl NamedAddressError {
             "reason".to_string(),
             Value::String(self.kind.as_str().to_string()),
         );
-        obj.insert("error".to_string(), Value::String(human_address_reason(self.kind.as_str()).unwrap_or(&self.message).to_string()));
+        obj.insert("error".to_string(), Value::String(self.message.clone()));
         obj.insert("action".to_string(), Value::String(self.action.clone()));
         obj.insert("log".to_string(), Value::String(self.log.clone()));
         obj.insert(
@@ -444,8 +485,11 @@ pub(crate) fn resolve_name_for_cli(
     // registry-to-E6 internal helper deliberately pass `None` so
     // caller-supplied `--team` never overrides a full address.
     let parsed = normalize_bare_with_team_scope(parsed, bare_team_scope);
-    let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())?;
-    let state = load_state_checked(&target_workspace)?;
+    let requested_team = match &parsed.target { ParsedTarget::TeamEntity { team, .. } => Some(team.as_str()), _ => None };
+    let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())
+        .map_err(|error| error.with_human_scope(None, requested_team))?;
+    let state = load_state_checked(&target_workspace)
+        .map_err(|error| error.with_human_scope(Some(&target_workspace), requested_team))?;
     let transport = transport_for_cli_target(&target_workspace, &state, &parsed);
     let resolved = resolve_in_workspace(
         sender_workspace,
@@ -453,7 +497,7 @@ pub(crate) fn resolve_name_for_cli(
         &state,
         &parsed,
         transport.as_ref(),
-    )?;
+    ).map_err(|error| error.with_human_scope(Some(&target_workspace), requested_team))?;
     Ok((resolved, transport))
 }
 
@@ -608,7 +652,7 @@ fn resolve_in_workspace(
         ParsedTarget::TeamEntity { team, entity } => {
             let canonical = canonical_named_team_key(target_workspace, state, team)
                 .unwrap_or_else(|| team.clone());
-            if entity == "leader" {
+            let result = if entity == "leader" {
                 resolve_leader(
                     sender_workspace,
                     target_workspace,
@@ -627,7 +671,8 @@ fn resolve_in_workspace(
                     parsed,
                     transport,
                 )
-            }
+            };
+            result.map_err(|mut error| { error.human_team = Some(canonical); error })
         }
         ParsedTarget::SessionWindow { session, window } => resolve_session_window(
             sender_workspace,
