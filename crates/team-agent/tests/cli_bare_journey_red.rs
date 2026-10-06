@@ -497,7 +497,10 @@ fn h8_peek_retains_real_raw_screen_gate_and_scoped_unavailable_shape() {
     assert_eq!(denied.status.code(), Some(1));
     let denied_body = body(&denied);
     assert_eq!(denied_body["ok"], false);
-    assert!(denied_body["error"].as_str().unwrap().contains("--allow-raw-screen"));
+    assert!(denied_body["error"]
+        .as_str()
+        .unwrap()
+        .contains("--allow-raw-screen"));
     let v = body(&env.run_cli(
         &ws,
         &[
@@ -836,14 +839,27 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
             assert!(text(&out).contains("Pi leader") && text(&out).contains("--help"));
             assert!(!capture.exists());
         } else {
-            assert_eq!(out.status.code(), Some(0), "H7 native boundary: {}", text(&out));
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "H7 native boundary: {}",
+                text(&out)
+            );
             let actual = fs::read(&capture).expect("native process must actually be invoked");
             let literal = b"--help\0literal value\0\0";
             assert!(actual.windows(literal.len()).any(|bytes| bytes == literal),
                 "H7 raw argument order/empty bytes changed; provider-owned defaults may remain: {actual:?}");
         }
-        let raw = vec!["--".into(), "--help".into(), "literal value".into(), "".into()];
-        assert_eq!(team_agent::cli::provider_args(&raw), vec!["--help", "literal value", ""]);
+        let raw = vec![
+            "--".into(),
+            "--help".into(),
+            "literal value".into(),
+            "".into(),
+        ];
+        assert_eq!(
+            team_agent::cli::provider_args(&raw),
+            vec!["--help", "literal value", ""]
+        );
     }
 }
 fn quiesce(ws: &framework::TestWorkspace) {
