@@ -794,118 +794,47 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
     let env = HermeticTestEnv::enter("native-boundary");
     let bin = env.root().join("native");
     fs::create_dir(&bin).unwrap();
-    for (wrapper, native) in [
-        ("pi", "pi"),
-        ("codex", "codex"),
-        ("claude", "claude"),
-        ("copilot", "copilot"),
-        ("grok", "grok"),
-        ("cursor", "agent"),
-    ] {
-        // Use a real owned ambient terminal so the existing external launcher
-        // executes synchronously, rather than racing a detached new session.
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    for (wrapper, native) in [("pi", "pi"), ("codex", "codex"), ("claude", "claude"), ("copilot", "copilot"), ("grok", "grok"), ("cursor", "agent")] {
         let ws = env.workspace(wrapper);
         let socket = hermetic::short_tmux_socket("286-native");
-        let started = Command::new("tmux")
-            .args([
-                "-S",
-                socket.to_str().unwrap(),
-                "new-session",
-                "-d",
-                "-s",
-                "native286",
-                "-c",
-                ws.to_str().unwrap(),
-                "sleep 600",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            started.status.success(),
-            "owned tmux fixture: {}",
-            text(&started)
-        );
-        env.register_owned_tmux_socket(&socket);
-        let probe = |format: &str| {
-            let out = Command::new("tmux")
-                .args([
-                    "-S",
-                    socket.to_str().unwrap(),
-                    "display-message",
-                    "-p",
-                    "-t",
-                    "native286:0",
-                    format,
-                ])
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "owned pane probe: {}", text(&out));
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
-        let pane = probe("#{pane_id}");
-        let tmux = format!("{},{},0", socket.display(), probe("#{pid}"));
         let capture = env.root().join(format!("{wrapper}.argv"));
         let exe = bin.join(native);
-        fs::write(
-            &exe,
-            format!(
-                "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nexit 0\n",
-                capture.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&exe, format!("#!/bin/sh\nprintf '%s\\0' \"$@\" > {}\nexit 0\n", quote(capture.to_str().unwrap()))).unwrap();
         fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let out = env.run_cli_env(
-            &ws,
-            &[
-                wrapper,
-                "--external-leader",
-                "--",
-                "--help",
-                "literal value",
-                "",
-            ],
-            &[
-                ("PATH", &path),
-                ("TEAM_AGENT_CLI_ARGV_ROUTING", "off"),
-                ("TMUX", &tmux),
-                ("TMUX_PANE", &pane),
-            ],
-        );
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let stdout = ws.join("native.stdout");
+        let stderr = ws.join("native.stderr");
+        let receipt = ws.join("native.exit");
+        let script = ws.join("invoke.sh");
+        // Run inside this genuine PTY, not an SSH child merely claiming its
+        // TMUX/PANE identity: the frozen caller controlling-TTY gate remains intact.
+        let argv = [env!("CARGO_BIN_EXE_team-agent"), wrapper, "--external-leader", "--", "--help", "literal value", ""];
+        let command = argv.iter().map(|arg| quote(arg)).collect::<Vec<_>>().join(" ");
+        fs::write(&script, format!("#!/bin/sh\nexport HOME={} PATH={} TEAM_AGENT_CLI_ARGV_ROUTING=off\n{} > {} 2> {}\nprintf '%s\\n' \"$?\" > {}\nexec sleep 600\n", quote(env.home().to_str().unwrap()), quote(&path), command, quote(stdout.to_str().unwrap()), quote(stderr.to_str().unwrap()), quote(receipt.to_str().unwrap()))).unwrap();
+        let pane_command = format!("/bin/sh {}", quote(script.to_str().unwrap()));
+        let started = Command::new("tmux").args(["-S", socket.to_str().unwrap(), "new-session", "-d", "-s", "native286", "-c", ws.to_str().unwrap(), &pane_command]).output().unwrap();
+        assert!(started.status.success(), "owned PTY fixture: {}", text(&started));
+        env.register_owned_tmux_socket(&socket);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !receipt.exists() { assert!(Instant::now() < deadline, "owned PTY CLI did not return: {wrapper}"); thread::sleep(Duration::from_millis(10)); }
+        let code = fs::read_to_string(&receipt).unwrap().trim().parse::<i32>().unwrap();
+        let rendered = format!("{}{}", fs::read_to_string(stdout).unwrap(), fs::read_to_string(stderr).unwrap());
+        eprintln!("H7_NATIVE_DELIMITER_PROBE wrapper={wrapper} exit={code} actual_pty=true output={rendered:?}");
         if wrapper == "pi" {
-            // The frozen Pi leader contract validates native --model/--thinking
-            // and rejects --help. #286 must neither widen that parser nor turn
-            // this post-delimiter request into successful wrapper help.
-            assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-            assert!(text(&out).contains("Pi leader") && text(&out).contains("--help"));
+            // Pi's existing native --model/--thinking gate rejects --help. Do
+            // not widen it or misclassify post-delimiter data as wrapper help.
+            assert_eq!(code, 1, "{rendered}");
+            assert!(rendered.contains("Pi leader") && rendered.contains("--help"), "{rendered}");
             assert!(!capture.exists());
         } else {
-            assert_eq!(
-                out.status.code(),
-                Some(0),
-                "H7 native boundary: {}",
-                text(&out)
-            );
+            assert_eq!(code, 0, "H7 native boundary: {rendered}");
             let actual = fs::read(&capture).expect("native process must actually be invoked");
             let literal = b"--help\0literal value\0\0";
-            assert!(actual.windows(literal.len()).any(|bytes| bytes == literal),
-                "H7 raw argument order/empty bytes changed; provider-owned defaults may remain: {actual:?}");
+            assert!(actual.windows(literal.len()).any(|bytes| bytes == literal), "H7 literal order/empty bytes changed; provider-owned defaults may remain: {actual:?}");
         }
-        let raw = vec![
-            "--".into(),
-            "--help".into(),
-            "literal value".into(),
-            "".into(),
-        ];
-        assert_eq!(
-            team_agent::cli::provider_args(&raw),
-            vec!["--help", "literal value", ""]
-        );
+        let raw = vec!["--".into(), "--help".into(), "literal value".into(), "".into()];
+        assert_eq!(team_agent::cli::provider_args(&raw), vec!["--help", "literal value", ""]);
     }
 }
 fn quiesce(ws: &framework::TestWorkspace) {
