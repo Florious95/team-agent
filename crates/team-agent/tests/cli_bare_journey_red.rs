@@ -108,7 +108,7 @@ fn seeded(env: &HermeticTestEnv) -> PathBuf {
     save_runtime_state(&ws,&json!({"active_team_key":"alpha","session_name":"team-alpha","agents":agents,"tasks":tasks,"teams":{"alpha":{"status":"alive","session_name":"team-alpha","agents":agents,"tasks":tasks}}})).unwrap();
     let store = MessageStore::open(&ws).unwrap();
     let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-    let envelope = json!({"schema_version":"result_envelope_v1","result_id":"res-286","task_id":"task-286","agent_id":"worker","status":"success","summary":"RESULT_COMPAT_286","artifacts":[{"path":"artifact://286","nested":{"preserve":true}}]});
+    let envelope = json!({"schema_version":"result_envelope_v1","result_id":"res-286","task_id":"task-286","agent_id":"worker","status":"success","summary":"RESULT_COMPAT_286","presentation":{"case_id":"case-286"},"artifacts":[{"path":"artifact://286","nested":{"preserve":true}}]});
     conn.execute("insert into results(result_id,owner_team_id,task_id,agent_id,envelope,status,created_at) values (?1,?2,?3,?4,?5,?6,?7)",rusqlite::params!["res-286","alpha","task-286","worker",envelope.to_string(),"success","2026-10-06T00:00:00Z"]).unwrap();
     ws
 }
@@ -492,7 +492,12 @@ fn h8_peek_retains_real_raw_screen_gate_and_scoped_unavailable_shape() {
             "--json",
         ],
     );
-    assert_eq!(denied.status.code(), Some(2));
+    // This machine safety refusal has always been a runtime error (exit1),
+    // not the new Human missing-input Usage contract.
+    assert_eq!(denied.status.code(), Some(1));
+    let denied_body = body(&denied);
+    assert_eq!(denied_body["ok"], false);
+    assert!(denied_body["error"].as_str().unwrap().contains("--allow-raw-screen"));
     let v = body(&env.run_cli(
         &ws,
         &[
@@ -782,7 +787,7 @@ fn h7_delimiter_literal_route_help_data_and_priority_remain_unchanged() {
 }
 #[test]
 #[serial(env)]
-fn h7_native_delimiter_help_is_not_wrapper_help_and_off_preserves_real_argv() {
+fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
     let env = HermeticTestEnv::enter("native-boundary");
     let ws = env.workspace("empty");
     let bin = env.root().join("native");
@@ -823,16 +828,22 @@ fn h7_native_delimiter_help_is_not_wrapper_help_and_off_preserves_real_argv() {
             ],
             &[("PATH", &path), ("TEAM_AGENT_CLI_ARGV_ROUTING", "off")],
         );
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "H7 native boundary: {}",
-            text(&out)
-        );
-        assert_eq!(
-            fs::read(&capture).expect("native process must actually be invoked"),
-            b"--help\0literal value\0\0"
-        );
+        if wrapper == "pi" {
+            // The frozen Pi leader contract validates native --model/--thinking
+            // and rejects --help. #286 must neither widen that parser nor turn
+            // this post-delimiter request into successful wrapper help.
+            assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+            assert!(text(&out).contains("Pi leader") && text(&out).contains("--help"));
+            assert!(!capture.exists());
+        } else {
+            assert_eq!(out.status.code(), Some(0), "H7 native boundary: {}", text(&out));
+            let actual = fs::read(&capture).expect("native process must actually be invoked");
+            let literal = b"--help\0literal value\0\0";
+            assert!(actual.windows(literal.len()).any(|bytes| bytes == literal),
+                "H7 raw argument order/empty bytes changed; provider-owned defaults may remain: {actual:?}");
+        }
+        let raw = vec!["--".into(), "--help".into(), "literal value".into(), "".into()];
+        assert_eq!(team_agent::cli::provider_args(&raw), vec!["--help", "literal value", ""]);
     }
 }
 fn quiesce(ws: &framework::TestWorkspace) {
