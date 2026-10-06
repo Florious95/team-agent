@@ -792,7 +792,6 @@ fn h7_delimiter_literal_route_help_data_and_priority_remain_unchanged() {
 #[serial(env)]
 fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
     let env = HermeticTestEnv::enter("native-boundary");
-    let ws = env.workspace("empty");
     let bin = env.root().join("native");
     fs::create_dir(&bin).unwrap();
     for (wrapper, native) in [
@@ -803,6 +802,20 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
         ("grok", "grok"),
         ("cursor", "agent"),
     ] {
+        // Use a real owned ambient terminal so the existing external launcher
+        // executes synchronously, rather than racing a detached new session.
+        let ws = env.workspace(wrapper);
+        let socket = hermetic::short_tmux_socket("286-native");
+        let started = Command::new("tmux").args(["-S", socket.to_str().unwrap(), "new-session", "-d", "-s", "native286", "-c", ws.to_str().unwrap(), "sleep 600"]).output().unwrap();
+        assert!(started.status.success(), "owned tmux fixture: {}", text(&started));
+        env.register_owned_tmux_socket(&socket);
+        let probe = |format: &str| {
+            let out = Command::new("tmux").args(["-S", socket.to_str().unwrap(), "display-message", "-p", "-t", "native286:0", format]).output().unwrap();
+            assert!(out.status.success(), "owned pane probe: {}", text(&out));
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let pane = probe("#{pane_id}");
+        let tmux = format!("{},{},0", socket.display(), probe("#{pid}"));
         let capture = env.root().join(format!("{wrapper}.argv"));
         let exe = bin.join(native);
         fs::write(
@@ -829,7 +842,7 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
                 "literal value",
                 "",
             ],
-            &[("PATH", &path), ("TEAM_AGENT_CLI_ARGV_ROUTING", "off")],
+            &[("PATH", &path), ("TEAM_AGENT_CLI_ARGV_ROUTING", "off"), ("TMUX", &tmux), ("TMUX_PANE", &pane)],
         );
         if wrapper == "pi" {
             // The frozen Pi leader contract validates native --model/--thinking
