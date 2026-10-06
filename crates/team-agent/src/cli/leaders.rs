@@ -203,14 +203,18 @@ fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
         out.push('\t');
         out.push_str(&row.entry.team_key);
         out.push('\t');
-        out.push_str(
-            &super::adapters::send_command(
-                "leader",
-                &row.entry.workspace,
-                Some(&row.entry.team_key),
-            )
-            .unwrap_or_else(|| "请核对项目路径".to_string()),
-        );
+        if row.status == "STALE" {
+            out.push('-');
+        } else {
+            out.push_str(
+                &super::adapters::send_command(
+                    "leader",
+                    &row.entry.workspace,
+                    Some(&row.entry.team_key),
+                )
+                .unwrap_or_else(|| "请核对项目路径".to_string()),
+            );
+        }
         out.push('\n');
     }
     out
