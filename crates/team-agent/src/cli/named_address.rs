@@ -124,9 +124,6 @@ impl NamedAddressError {
             message.push_str(&format!("\n所选队伍：{team:?}。"));
         }
         let mut action = "没有可靠的拼写建议；请先核对项目和队伍，不猜对象。".to_string();
-        if let Some(workspace) = workspace.filter(|path| !path.to_string_lossy().chars().any(char::is_control)) {
-            action.push_str(&format!("\nteam-agent status --workspace {}", super::adapters::shell_quote(&workspace.to_string_lossy())));
-        }
         for candidate in &self.candidates {
             if let (Some(agent), Some(team)) = (candidate.get("agent_id").and_then(Value::as_str), candidate.get("team_key").and_then(Value::as_str)) {
                 message.push_str(&format!("\n候选队伍 {team:?}，队友 {agent:?}；请确认是否是你要找的对象。"));
@@ -140,6 +137,9 @@ impl NamedAddressError {
                     }
                 }
             }
+        }
+        if let Some(workspace) = workspace.filter(|path| !path.to_string_lossy().chars().any(char::is_control)) {
+            action.push_str(&format!("\n也可查看可用队友列表：\nteam-agent status --workspace {}", super::adapters::shell_quote(&workspace.to_string_lossy())));
         }
         (message, action)
     }
