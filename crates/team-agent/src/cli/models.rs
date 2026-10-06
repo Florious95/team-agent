@@ -298,7 +298,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn search_survives_unrelated_spaced_model_ids() {
-        let catalog = include_str!("../lifecycle/tests/fixtures/pi_list_models_spaced_ids.stdout.txt");
+        let catalog =
+            include_str!("../lifecycle/tests/fixtures/pi_list_models_spaced_ids.stdout.txt");
         let path = fixture(&format!("printf '%s' '{catalog}'"));
         let result = cmd_models_with(
             &ModelsArgs {
@@ -370,7 +371,8 @@ mod tests {
             &["models", "--provider", "cursor_agent", "--json"],
         );
         let text = public_cli_text(&output);
-        let calls = std::fs::read_to_string(agent.program.with_extension("count")).unwrap_or_default();
+        let calls =
+            std::fs::read_to_string(agent.program.with_extension("count")).unwrap_or_default();
         drop(agent);
         assert!(output.status.success(), "{text}");
         assert_eq!(calls, "1:--list-models\n");
@@ -405,12 +407,19 @@ mod tests {
         let no_match = run_public_models_cli(
             &grok.program,
             grok.response.as_deref(),
-            &["models", "--provider", "grok", "--search", "definitely-absent"],
+            &[
+                "models",
+                "--provider",
+                "grok",
+                "--search",
+                "definitely-absent",
+            ],
         );
         let json_text = public_cli_text(&json);
         let human_text = public_cli_text(&human);
         let no_match_text = public_cli_text(&no_match);
-        let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+        let calls =
+            std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
         drop(grok);
         assert!(json.status.success(), "{json_text}");
         assert!(human.status.success(), "{human_text}");
@@ -422,10 +431,15 @@ mod tests {
         assert_eq!(value["auth_basis"], "catalog_visibility");
         let models = value["models"].as_array().unwrap();
         assert_eq!(
-            models.iter().map(|model| model["model_id"].as_str().unwrap()).collect::<Vec<_>>(),
+            models
+                .iter()
+                .map(|model| model["model_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
             vec!["grok-4.7", "grok-4.7-build-fast", "grok-4.5", "grok-4.6"]
         );
-        assert!(models.iter().all(|model| model["provider"] == "grok" && model["vendor"] == "xai" && model["aliases"] == json!([])));
+        assert!(models.iter().all(|model| model["provider"] == "grok"
+            && model["vendor"] == "xai"
+            && model["aliases"] == json!([])));
         assert_eq!(models[0]["default"], false);
         assert_eq!(models[3]["default"], true);
         assert!(human_text.contains("grok-4.7-build-fast"));
@@ -471,7 +485,8 @@ mod tests {
                 &["models", "--provider", "grok", "--json"],
             );
             let text = public_cli_text(&output);
-            let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+            let calls =
+                std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
             outcomes.push((name, output.status.success(), text, calls));
         }
         for (name, success, text, calls) in outcomes {
@@ -481,21 +496,32 @@ mod tests {
             assert_eq!(value["schema_version"], "models.v1", "{name}");
             assert_eq!(value["ok"], false, "{name}");
             assert_eq!(value["models"], json!([]), "{name}");
-            assert!(!value["error"].as_str().unwrap().to_ascii_lowercase().contains("unsupported model provider"), "{name}: {text}");
+            assert!(
+                !value["error"]
+                    .as_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("unsupported model provider"),
+                "{name}: {text}"
+            );
         }
     }
 
     #[cfg(unix)]
     #[test]
     fn grok_nonzero_native_command_is_not_a_successful_empty_catalog() {
-        let grok = CliFixture::new(fixture_program("grok", "printf 'private diagnostic' >&2\nexit 7"));
+        let grok = CliFixture::new(fixture_program(
+            "grok",
+            "printf 'private diagnostic' >&2\nexit 7",
+        ));
         let output = run_public_models_cli(
             &grok.program,
             None,
             &["models", "--provider", "grok", "--json"],
         );
         let text = public_cli_text(&output);
-        let calls = std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
+        let calls =
+            std::fs::read_to_string(grok.program.with_extension("count")).unwrap_or_default();
         drop(grok);
         assert!(!output.status.success(), "{text}");
         assert_eq!(calls, "1:models\n");
@@ -503,7 +529,14 @@ mod tests {
         let value: Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(value["ok"], false);
         assert_eq!(value["models"], json!([]));
-        assert!(value["error"].as_str().unwrap().to_ascii_lowercase().contains("grok"), "{text}");
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("grok"),
+            "{text}"
+        );
     }
 
     #[cfg(unix)]
@@ -518,10 +551,20 @@ mod tests {
         let text = public_cli_text(&output);
         let value: Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(value["ok"], false);
-        assert!(value["error"].as_str().unwrap().to_ascii_lowercase().contains("grok"), "{text}");
+        assert!(
+            value["error"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("grok"),
+            "{text}"
+        );
         assert!(value["action"].as_str().unwrap().contains("grok"), "{text}");
         assert!(crate::cli::emit::default_help().contains("grok"));
-        assert!(crate::cli::spec::command_spec("models").unwrap().usage.contains("grok"));
+        assert!(crate::cli::spec::command_spec("models")
+            .unwrap()
+            .usage
+            .contains("grok"));
 
         let unsupported = run_public_models_cli(
             &missing.program,
@@ -533,7 +576,13 @@ mod tests {
         drop(missing);
         assert!(!output.status.success());
         assert!(!unsupported.status.success());
-        assert!(unsupported_value["action"].as_str().unwrap().contains("grok"), "{unsupported_text}");
+        assert!(
+            unsupported_value["action"]
+                .as_str()
+                .unwrap()
+                .contains("grok"),
+            "{unsupported_text}"
+        );
     }
 
     #[cfg(unix)]
@@ -579,7 +628,10 @@ mod tests {
     #[cfg(unix)]
     impl CliFixture {
         fn new(program: std::path::PathBuf) -> Self {
-            Self { program, response: None }
+            Self {
+                program,
+                response: None,
+            }
         }
     }
 
@@ -614,7 +666,10 @@ mod tests {
                 "--nocapture",
             ])
             .env("TEAM_AGENT_MODELS_CHILD", "1")
-            .env("TEAM_AGENT_MODELS_ARGS", serde_json::to_string(args).unwrap())
+            .env(
+                "TEAM_AGENT_MODELS_ARGS",
+                serde_json::to_string(args).unwrap(),
+            )
             .env("PATH", path.parent().unwrap())
             .env_remove("PI_PROVIDER")
             .env_remove("PI_MODEL")
@@ -719,7 +774,10 @@ mod tests {
     fn with_native_mode<T>(
         mode: &str,
         action: impl FnOnce() -> T,
-    ) -> (T, crate::lifecycle::launch::pi_mcp::PiCatalogTestObservation) {
+    ) -> (
+        T,
+        crate::lifecycle::launch::pi_mcp::PiCatalogTestObservation,
+    ) {
         let receipt = native_timeout_receipt();
         assert!(!receipt.exists());
         let result = crate::lifecycle::launch::pi_mcp::with_pi_catalog_test_observation(
@@ -1122,9 +1180,8 @@ mod tests {
     fn runner_fails_closed_for_nonzero_oversize_timeout_and_unavailable() {
         let fail = native_timeout_fixture();
         let started = Instant::now();
-        let (failed_result, fail_observation) = with_native_mode("exit7", || {
-            run_catalog(&fail, Duration::from_secs(1), 1024)
-        });
+        let (failed_result, fail_observation) =
+            with_native_mode("exit7", || run_catalog(&fail, Duration::from_secs(1), 1024));
         let elapsed = started.elapsed();
         assert_eq!(
             failed_result.unwrap_err(),
@@ -1161,9 +1218,8 @@ mod tests {
         assert_eq!(failed.exit, ExitCode::Error);
         assert!(!text.contains("sensitive-token"));
         let big = native_timeout_fixture();
-        let (big_result, big_observation) = with_native_mode("oversize", || {
-            run_catalog(&big, Duration::from_secs(1), 8)
-        });
+        let (big_result, big_observation) =
+            with_native_mode("oversize", || run_catalog(&big, Duration::from_secs(1), 8));
         assert!(big_result.unwrap_err().contains("bounded output"));
         assert_eq!(big_observation.spawn_count, 1);
         assert_eq!(big_observation.argv, vec!["--list-models"]);

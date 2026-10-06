@@ -361,7 +361,10 @@ mod tests {
         ] {
             let out = format_leaders_human(&[], view);
             assert!(out.contains(empty), "{out}");
-            assert!(out.contains("team-agent doctor") && out.ends_with('\n'), "{out}");
+            assert!(
+                out.contains("team-agent doctor") && out.ends_with('\n'),
+                "{out}"
+            );
         }
     }
 }

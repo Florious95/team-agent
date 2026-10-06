@@ -79,9 +79,7 @@ fn red1_default_help_contracts_to_core_guided_surface() {
     );
     let lower = help.to_lowercase();
     assert!(
-        lower.contains("codex")
-            && lower.contains("claude")
-            && lower.contains("copilot"),
+        lower.contains("codex") && lower.contains("claude") && lower.contains("copilot"),
         "RED1: Human catalog must discover the provider launchers as real commands; help=\n{help}"
     );
 }
@@ -92,7 +90,13 @@ fn doctor_help_points_to_public_doctor_command() {
     let output = case.run_ta(&["doctor", "--help"]);
     let text = output_text(&output);
     assert!(output.status.success(), "doctor --help: {text}");
-    assert!(text.contains("team-agent doctor") && text.contains("用法") && text.contains("Examples") && text.contains("下一步"), "{text}");
+    assert!(
+        text.contains("team-agent doctor")
+            && text.contains("用法")
+            && text.contains("Examples")
+            && text.contains("下一步"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -148,7 +152,10 @@ fn red2_command_registry_covers_current_dispatch_and_replaces_source_scans() {
     if spec_path.exists() {
         let spec = std::fs::read_to_string(&spec_path).expect("read public registry");
         for private in MACHINE_COMMANDS {
-            assert!(spec_block_for(&spec, private).is_none(), "Machine must not re-enter public spec: {private}");
+            assert!(
+                spec_block_for(&spec, private).is_none(),
+                "Machine must not re-enter public spec: {private}"
+            );
         }
     }
     for forbidden in [
@@ -407,13 +414,25 @@ fn visible_default_commands(help: &str) -> BTreeSet<String> {
 }
 
 fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
-    let dispatch = emit.split_once("fn dispatch(").expect("dispatch function").1;
-    let dispatch = dispatch.split_once("match command {").expect("command match").1;
-    let dispatch = dispatch.split_once("const LEADER_PASSTHROUGH_COMMANDS").expect("dispatch end").0;
-    let mut names: BTreeSet<String> = dispatch.lines().filter_map(|line| {
-        let (name, arm) = line.trim().strip_prefix('"')?.split_once('"')?;
-        arm.trim_start().starts_with("=>").then(|| name.to_string())
-    }).collect();
+    let dispatch = emit
+        .split_once("fn dispatch(")
+        .expect("dispatch function")
+        .1;
+    let dispatch = dispatch
+        .split_once("match command {")
+        .expect("command match")
+        .1;
+    let dispatch = dispatch
+        .split_once("const LEADER_PASSTHROUGH_COMMANDS")
+        .expect("dispatch end")
+        .0;
+    let mut names: BTreeSet<String> = dispatch
+        .lines()
+        .filter_map(|line| {
+            let (name, arm) = line.trim().strip_prefix('"')?.split_once('"')?;
+            arm.trim_start().starts_with("=>").then(|| name.to_string())
+        })
+        .collect();
     names.extend(parse_const_str_array(emit, "LEADER_PASSTHROUGH_COMMANDS"));
     names
 }

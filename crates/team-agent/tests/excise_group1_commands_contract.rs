@@ -57,7 +57,9 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, SnapshotEntry> {
             .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()));
         let relative = path
             .strip_prefix(root)
-            .unwrap_or_else(|error| panic!("{} outside {}: {error}", path.display(), root.display()))
+            .unwrap_or_else(|error| {
+                panic!("{} outside {}: {error}", path.display(), root.display())
+            })
             .to_path_buf();
         let file_type = metadata.file_type();
         let snapshot_metadata = snapshot_metadata(&metadata);
@@ -207,8 +209,11 @@ fn assert_removed_command_contract(command: &str) {
         let mut canary = ProcessCanary::spawn(&workspace);
         fs::write(workspace.join("keep.txt"), b"untouched\n").expect("write sentinel");
         fs::create_dir(workspace.join("nested")).expect("create sentinel directory");
-        fs::write(workspace.join("nested/state.json"), b"{\"preserve\":true}\n")
-            .expect("write nested sentinel");
+        fs::write(
+            workspace.join("nested/state.json"),
+            b"{\"preserve\":true}\n",
+        )
+        .expect("write nested sentinel");
         assert!(!workspace.join(".team").exists());
 
         let variants = invocation_variants(command, &workspace);
@@ -229,13 +234,19 @@ fn assert_removed_command_contract(command: &str) {
         }
         let expected_error = format!("没有这个操作：'{command}'");
         if !stderr.contains(&expected_error) {
-            violations.push(format!("stderr lacks {expected_error:?}: {}", preview(&output.stderr)));
+            violations.push(format!(
+                "stderr lacks {expected_error:?}: {}",
+                preview(&output.stderr)
+            ));
         }
         if !output.stdout.is_empty() {
             violations.push(format!("stdout must be empty: {}", preview(&output.stdout)));
         }
         if before != after {
-            violations.push(format!("workspace/home snapshot changed: {:?}", changed_paths(&before, &after)));
+            violations.push(format!(
+                "workspace/home snapshot changed: {:?}",
+                changed_paths(&before, &after)
+            ));
         }
         if workspace.join(".team").exists() {
             violations.push("created .team in a workspace that had none".to_string());
@@ -280,10 +291,19 @@ removed_command_test!(diagnose_is_rejected_without_side_effects, "diagnose");
 removed_command_test!(init_is_rejected_without_side_effects, "init");
 removed_command_test!(start_is_rejected_without_side_effects, "start");
 removed_command_test!(stop_is_rejected_without_side_effects, "stop");
-removed_command_test!(restart_agent_is_rejected_without_side_effects, "restart-agent");
+removed_command_test!(
+    restart_agent_is_rejected_without_side_effects,
+    "restart-agent"
+);
 removed_command_test!(stuck_list_is_rejected_without_side_effects, "stuck-list");
-removed_command_test!(stuck_cancel_is_rejected_without_side_effects, "stuck-cancel");
-removed_command_test!(acknowledge_idle_is_rejected_without_side_effects, "acknowledge-idle");
+removed_command_test!(
+    stuck_cancel_is_rejected_without_side_effects,
+    "stuck-cancel"
+);
+removed_command_test!(
+    acknowledge_idle_is_rejected_without_side_effects,
+    "acknowledge-idle"
+);
 
 #[test]
 #[serial(env)]
@@ -299,13 +319,24 @@ fn canonical_doctor_shutdown_and_reset_agent_remain_registered() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            !String::from_utf8_lossy(&output.stderr).contains(&format!("invalid choice: '{command}'")),
+            !String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("invalid choice: '{command}'")),
             "canonical command {command} was treated as unknown"
         );
     }
     for args in [
-        vec!["doctor", "--workspace", workspace.to_str().unwrap(), "--json"],
-        vec!["shutdown", "--workspace", workspace.to_str().unwrap(), "--json"],
+        vec![
+            "doctor",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--json",
+        ],
+        vec![
+            "shutdown",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--json",
+        ],
         vec![
             "reset-agent",
             "worker-a",
@@ -329,7 +360,15 @@ fn canonical_doctor_shutdown_and_reset_agent_remain_registered() {
 fn canonical_doctor_reads_a_workspace_and_not_an_unknown_command() {
     let env = HermeticTestEnv::enter("excise-doctor-preserved");
     let workspace = env.workspace("doctor");
-    let output = env.run_cli(&workspace, &["doctor", "--workspace", workspace.to_str().unwrap(), "--json"]);
+    let output = env.run_cli(
+        &workspace,
+        &[
+            "doctor",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--json",
+        ],
+    );
     assert!(
         output.status.code().is_some(),
         "doctor must complete with a process exit status"

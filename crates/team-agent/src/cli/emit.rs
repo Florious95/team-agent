@@ -2182,8 +2182,18 @@ mod tests {
         assert!(visible.iter().any(|command| command == "doctor"));
         assert!(visible.iter().any(|command| command == "leaders"));
         for command in [
-            "results", "wait", "attach-app-server-leader", "identity", "watch", "sessions",
-            "validate", "preflight", "wait-ready", "e2e", "peek", "coordinator",
+            "results",
+            "wait",
+            "attach-app-server-leader",
+            "identity",
+            "watch",
+            "sessions",
+            "validate",
+            "preflight",
+            "wait-ready",
+            "e2e",
+            "peek",
+            "coordinator",
         ] {
             assert!(
                 !visible.iter().any(|visible| visible == command),
@@ -2262,35 +2272,41 @@ mod tests {
             (
                 "start-agent",
                 &[
-                    "--model", "--effort", "--bypass", "--prompt", "--profile", "--provider",
-                    "--workspace", "--team", "--allow-fresh", "--json",
+                    "--model",
+                    "--effort",
+                    "--bypass",
+                    "--prompt",
+                    "--profile",
+                    "--provider",
+                    "--workspace",
+                    "--team",
+                    "--allow-fresh",
+                    "--json",
                 ][..],
             ),
             (
                 "reset-agent",
-                &[
-                    "--workspace",
-                    "--team",
-                    "--discard-session",
-                    "--json",
-                ][..],
+                &["--workspace", "--team", "--discard-session", "--json"][..],
             ),
             (
                 "add-agent",
                 &[
-                    "--role-file", "--provider", "--bypass", "--model", "--effort", "--prompt", "--profile",
-                    "--force", "--workspace", "--team", "--json",
-                ][..],
-            ),
-            (
-                "fork-agent",
-                &[
-                    "--as",
-                    "--label",
+                    "--role-file",
+                    "--provider",
+                    "--bypass",
+                    "--model",
+                    "--effort",
+                    "--prompt",
+                    "--profile",
+                    "--force",
                     "--workspace",
                     "--team",
                     "--json",
                 ][..],
+            ),
+            (
+                "fork-agent",
+                &["--as", "--label", "--workspace", "--team", "--json"][..],
             ),
             (
                 "remove-agent",
@@ -2331,7 +2347,6 @@ mod tests {
                 "inbox",
                 &["--workspace", "--team", "-n", "--limit", "--json"][..],
             ),
-
         ] {
             let help = command_help(Some(command));
             for flag in flags {
@@ -2363,7 +2378,14 @@ mod tests {
             let help = command_help(Some(name));
             assert!(help.contains(spec.usage));
             assert!(help.contains("做什么："));
-            for flag in ["--model MODEL", "--effort LEVEL", "--bypass true|false", "--prompt TEXT", "--profile NAME", "--provider TOOL"] {
+            for flag in [
+                "--model MODEL",
+                "--effort LEVEL",
+                "--bypass true|false",
+                "--prompt TEXT",
+                "--profile NAME",
+                "--provider TOOL",
+            ] {
                 assert!(help.contains(flag), "{name} help missing {flag}: {help}");
             }
             assert!(help.contains("下一步") && help.contains("send"));
@@ -2385,7 +2407,10 @@ mod tests {
             "tmux_command",
             "不增加字段",
         ] {
-            assert!(help.contains(marker), "status help missing {marker}: {help}");
+            assert!(
+                help.contains(marker),
+                "status help missing {marker}: {help}"
+            );
         }
         assert!(!help.contains("错误细分走 status --summary"));
     }
@@ -2673,7 +2698,12 @@ mod tests {
     fn reset_agent_complete_input_refuses_multi_alive_team_before_agent_validation() {
         let ws = tmp_workspace();
         seed_two_alive_teams_in(&ws);
-        let argv = cli_argv(&["nonexistent-agent", "--discard-session", "--workspace", &ws.to_string_lossy()]);
+        let argv = cli_argv(&[
+            "nonexistent-agent",
+            "--discard-session",
+            "--workspace",
+            &ws.to_string_lossy(),
+        ]);
         let err = reset_agent_args(&argv, &ws).expect_err("must refuse");
         assert!(
             err.to_string().contains("multiple alive teams"),

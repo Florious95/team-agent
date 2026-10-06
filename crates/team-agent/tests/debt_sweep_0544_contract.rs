@@ -664,7 +664,6 @@ impl ProcessTree {
             child,
         }
     }
-
 }
 
 impl Drop for ProcessTree {

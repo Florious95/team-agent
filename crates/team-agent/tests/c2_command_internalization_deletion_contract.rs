@@ -716,12 +716,21 @@ fn spec_block_for(spec: &str, command: &str) -> Option<String> {
 }
 
 fn dispatch_contains_command_arm(emit: &str, command: &str) -> bool {
-    let dispatch = emit.split_once("fn dispatch(").expect("dispatch function").1;
-    let dispatch = dispatch.split_once("match command {").expect("command match").1;
-    let dispatch = dispatch.split_once("const LEADER_PASSTHROUGH_COMMANDS").expect("dispatch end").0;
-    dispatch.lines().any(|line| {
-        line.trim_start().starts_with(&format!("\"{command}\" =>"))
-    })
+    let dispatch = emit
+        .split_once("fn dispatch(")
+        .expect("dispatch function")
+        .1;
+    let dispatch = dispatch
+        .split_once("match command {")
+        .expect("command match")
+        .1;
+    let dispatch = dispatch
+        .split_once("const LEADER_PASSTHROUGH_COMMANDS")
+        .expect("dispatch end")
+        .0;
+    dispatch
+        .lines()
+        .any(|line| line.trim_start().starts_with(&format!("\"{command}\" =>")))
 }
 
 fn packaged_worker_reference_files() -> Vec<String> {
