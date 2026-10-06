@@ -760,13 +760,46 @@ fn h3_actual_error_and_deprecation_collection_is_free_of_author_jargon() {
     let mut outputs = String::new();
     // Collect all actual output before asserting, so a preceding no-write or
     // missing-help RED cannot prevent observation of the error-copy surface.
-    for args in [vec!["send"], vec!["add-agent"], vec!["start-agent"], vec!["stop-agent"], vec!["reset-agent"], vec!["clone-agent"], vec!["fork-agent"], vec!["remove-agent"], vec!["inbox"], vec!["allow-peer-talk"], vec!["profile"], vec!["profile", "show"], vec!["route", "set", "pi"], vec!["route", "add", "pi"], vec!["quick-start", "."], vec!["models", "--provider", "not-a-provider"]] {
+    for args in [
+        vec!["send"],
+        vec!["add-agent"],
+        vec!["start-agent"],
+        vec!["stop-agent"],
+        vec!["reset-agent"],
+        vec!["clone-agent"],
+        vec!["fork-agent"],
+        vec!["remove-agent"],
+        vec!["inbox"],
+        vec!["allow-peer-talk"],
+        vec!["profile"],
+        vec!["profile", "show"],
+        vec!["route", "set", "pi"],
+        vec!["route", "add", "pi"],
+        vec!["quick-start", "."],
+        vec!["models", "--provider", "not-a-provider"],
+    ] {
         outputs.push_str(&text(&env.run_cli(&empty, &args)));
     }
-    for args in [vec!["send", "worker", "PRIVACY_ERROR_COPY_286", "--mailbox"], vec!["send", "--to-name", "worker", "PRIVACY_LEGACY_COPY_286", "--no-wait", "--no-ack", "--mailbox"], vec!["send", "wroker", "PRIVACY_TYPO_COPY_286", "--mailbox"]] {
+    for args in [
+        vec!["send", "worker", "PRIVACY_ERROR_COPY_286", "--mailbox"],
+        vec![
+            "send",
+            "--to-name",
+            "worker",
+            "PRIVACY_LEGACY_COPY_286",
+            "--no-wait",
+            "--no-ack",
+            "--mailbox",
+        ],
+        vec!["send", "wroker", "PRIVACY_TYPO_COPY_286", "--mailbox"],
+    ] {
         outputs.push_str(&text(&env.run_cli(&ws, &args)));
     }
-    fs::write(ws.join("agents/worker.md"), "---\nname: worker\nprovider: not-a-provider\n---\nExisting role.\n").unwrap();
+    fs::write(
+        ws.join("agents/worker.md"),
+        "---\nname: worker\nprovider: not-a-provider\n---\nExisting role.\n",
+    )
+    .unwrap();
     outputs.push_str(&text(&env.run_cli(&ws, &["quick-start", "."])));
     no_jargon(&outputs);
 }
