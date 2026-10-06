@@ -252,7 +252,7 @@ impl NamedAddressError {
             Value::String(self.kind.as_str().to_string()),
         );
         obj.insert("error".to_string(), Value::String(human_address_reason(self.kind.as_str()).unwrap_or(&self.message).to_string()));
-        obj.insert("action".to_string(), Value::String("先运行 team-agent status，再使用列表中的队友名发送；用 --workspace/--team 选择项目和队伍。连接问题运行 team-agent doctor --workspace .。".to_string()));
+        obj.insert("action".to_string(), Value::String(self.action.clone()));
         obj.insert("log".to_string(), Value::String(self.log.clone()));
         obj.insert(
             "candidates".to_string(),
