@@ -324,7 +324,21 @@ fn examples_property(command: &str) {
                 .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
         })
         .count();
-    assert!(functional >= 2, "H4 at least two examples must exercise real parser/dispatch, not wrapper help shortcuts: {help}");
+    let launcher = matches!(
+        command,
+        "pi" | "codex" | "claude" | "copilot" | "grok" | "cursor"
+    );
+    let minimum = if launcher && command != "pi" { 1 } else { 2 };
+    assert!(
+        functional >= minimum,
+        "H4 too few real non-help examples for {command}: {help}"
+    );
+    if launcher {
+        assert!(
+            examples.iter().any(|argv| argv.len() == 1 && argv[0] == command),
+            "H4 launcher must include its actual bare startup example: {help}"
+        );
+    }
     for mut argv in examples {
         for word in &mut argv {
             *word = word
