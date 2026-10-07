@@ -48,10 +48,13 @@ use thiserror::Error;
 use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
-pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
-pub(crate) const QUICK_START_REMINDER: &str = "Reminder: Do not inspect raw worker pane output during normal operation. Use team-agent status / inbox instead. Wait for report_result.";
-pub(crate) const SEND_REMINDER: &str = "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.";
-pub(crate) const STATUS_REMINDER: &str = "Results are finalized automatically; use --watch-result or team-agent inbox AGENT -n 3 for transport fallback. Do not capture-pane worker terminals.";
+pub(crate) const COMMS_BOUNDARY_TEXT: &str =
+    "这里只检查终端连接是否一致，不实际发送消息，也不证明队友已回复。";
+pub(crate) const QUICK_START_REMINDER: &str = "下一步：向队友派发任务；用 team-agent status 看状态，用 team-agent inbox leader -n 3 看回复，不读取队友终端内容。";
+pub(crate) const SEND_REMINDER: &str =
+    "等队友真正回复，用 team-agent inbox leader -n 3 查看；不要读取队友终端内容。";
+pub(crate) const STATUS_REMINDER: &str =
+    "下一步：用 team-agent inbox leader -n 3 查看回复；状态不是任务完成证明，不读取队友终端内容。";
 
 pub mod adapters;
 pub mod attach_app_server_leader;
@@ -137,12 +140,7 @@ pub mod lifecycle_port {
         backend: Option<&str>,
     ) -> Result<Value, CliError> {
         match crate::lifecycle::quick_start_in_workspace_with_backend(
-            workspace,
-            agents_dir,
-            name,
-            yes,
-            team_id,
-            backend,
+            workspace, agents_dir, name, yes, team_id, backend,
         ) {
             Ok(report) => Ok(quick_start_value(report)),
             Err(e) => Ok(error_value(e)),
@@ -677,7 +675,9 @@ pub mod lifecycle_port {
                         "session_marker+state_session+pane_path",
                         "positive workspace/team ownership",
                     ) {
-                        result.error.get_or_insert_with(|| format!("pre-kill audit failed: {error}"));
+                        result
+                            .error
+                            .get_or_insert_with(|| format!("pre-kill audit failed: {error}"));
                     } else if let Err(error) = transport.kill_session(&session) {
                         if !tmux_absent_error(&error.to_string()) {
                             result.error.get_or_insert_with(|| error.to_string());
@@ -691,7 +691,9 @@ pub mod lifecycle_port {
                 }
                 SessionOwnership::Unknown => {
                     push_unique_session(&mut result.spared_sessions, session);
-                    result.error.get_or_insert_with(|| "session ownership is unknown; destructive cleanup refused".to_string());
+                    result.error.get_or_insert_with(|| {
+                        "session ownership is unknown; destructive cleanup refused".to_string()
+                    });
                 }
                 SessionOwnership::Gone => {}
             }
@@ -718,7 +720,11 @@ pub mod lifecycle_port {
         state
             .get("teams")
             .and_then(Value::as_object)
-            .and_then(|teams| teams.values().find_map(|team| state_for_session(team, session)))
+            .and_then(|teams| {
+                teams
+                    .values()
+                    .find_map(|team| state_for_session(team, session))
+            })
     }
 
     fn session_ownership(
@@ -759,27 +765,33 @@ pub mod lifecycle_port {
         if owner.team != expected_team {
             return SessionOwnership::Foreign;
         }
-        let Some(expected_generation) = state_generation(identity_state)
-            .filter(|generation| !generation.is_empty()) else {
+        let Some(expected_generation) =
+            state_generation(identity_state).filter(|generation| !generation.is_empty())
+        else {
             return SessionOwnership::Unknown;
         };
         if owner.generation != expected_generation {
             return SessionOwnership::Foreign;
         }
         for target in session_targets {
-            if target.current_path.as_ref().is_some_and(|path| {
-                path_is_under(path.as_path(), workspace)
-            }) {
+            if target
+                .current_path
+                .as_ref()
+                .is_some_and(|path| path_is_under(path.as_path(), workspace))
+            {
                 continue;
             }
             // An exited keepalive has no cwd or live process. Exempt only the
             // internal anchor, with native positive dead-pane proof, AFTER the
             // session workspace/team/generation ownership gates above.
-            let dead_anchor = target.current_path.as_ref().is_none_or(|path| {
-                path.as_os_str().is_empty()
-            }) && target.window_name.as_ref().is_some_and(|window| {
-                window.as_str() == crate::tmux_backend::KEEPALIVE_WINDOW_NAME
-            }) && matches!(transport.pane_is_dead(&target.pane_id), Ok(Some(true)));
+            let dead_anchor = target
+                .current_path
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+                && target.window_name.as_ref().is_some_and(|window| {
+                    window.as_str() == crate::tmux_backend::KEEPALIVE_WINDOW_NAME
+                })
+                && matches!(transport.pane_is_dead(&target.pane_id), Ok(Some(true)));
             if !dead_anchor {
                 return SessionOwnership::Unknown;
             }
@@ -795,7 +807,12 @@ pub mod lifecycle_port {
         use crate::transport::test_support::OfflineTransport;
         use crate::transport::{PaneId, PaneInfo, SessionName, Transport, WindowName};
 
-        fn ownership_pane(session: &SessionName, pane: &str, window: &str, cwd: Option<PathBuf>) -> PaneInfo {
+        fn ownership_pane(
+            session: &SessionName,
+            pane: &str,
+            window: &str,
+            cwd: Option<PathBuf>,
+        ) -> PaneInfo {
             PaneInfo {
                 pane_id: PaneId::new(pane),
                 session: session.clone(),
@@ -817,23 +834,81 @@ pub mod lifecycle_port {
             let session = SessionName::new("owned");
             let state = json!({"team_key": "owned", "generation": "g"});
             for (window, cwd, dead, team, generation, expected) in [
-                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(true), "owned", "g", SessionOwnership::Owned),
-                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(false), "owned", "g", SessionOwnership::Unknown),
-                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, None, "owned", "g", SessionOwnership::Unknown),
-                ("foreign", None, Some(true), "owned", "g", SessionOwnership::Unknown),
-                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, Some(PathBuf::from("/foreign-workspace")), Some(true), "owned", "g", SessionOwnership::Unknown),
-                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(true), "other-team", "g", SessionOwnership::Foreign),
-                (crate::tmux_backend::KEEPALIVE_WINDOW_NAME, None, Some(true), "owned", "other-generation", SessionOwnership::Foreign),
+                (
+                    crate::tmux_backend::KEEPALIVE_WINDOW_NAME,
+                    None,
+                    Some(true),
+                    "owned",
+                    "g",
+                    SessionOwnership::Owned,
+                ),
+                (
+                    crate::tmux_backend::KEEPALIVE_WINDOW_NAME,
+                    None,
+                    Some(false),
+                    "owned",
+                    "g",
+                    SessionOwnership::Unknown,
+                ),
+                (
+                    crate::tmux_backend::KEEPALIVE_WINDOW_NAME,
+                    None,
+                    None,
+                    "owned",
+                    "g",
+                    SessionOwnership::Unknown,
+                ),
+                (
+                    "foreign",
+                    None,
+                    Some(true),
+                    "owned",
+                    "g",
+                    SessionOwnership::Unknown,
+                ),
+                (
+                    crate::tmux_backend::KEEPALIVE_WINDOW_NAME,
+                    Some(PathBuf::from("/foreign-workspace")),
+                    Some(true),
+                    "owned",
+                    "g",
+                    SessionOwnership::Unknown,
+                ),
+                (
+                    crate::tmux_backend::KEEPALIVE_WINDOW_NAME,
+                    None,
+                    Some(true),
+                    "other-team",
+                    "g",
+                    SessionOwnership::Foreign,
+                ),
+                (
+                    crate::tmux_backend::KEEPALIVE_WINDOW_NAME,
+                    None,
+                    Some(true),
+                    "owned",
+                    "other-generation",
+                    SessionOwnership::Foreign,
+                ),
             ] {
-                let mut transport = OfflineTransport::new().with_session_owner(&workspace, team, generation);
-                if let Some(dead) = dead { transport = transport.with_pane_dead("%1", dead); }
+                let mut transport =
+                    OfflineTransport::new().with_session_owner(&workspace, team, generation);
+                if let Some(dead) = dead {
+                    transport = transport.with_pane_dead("%1", dead);
+                }
                 let targets = vec![
                     ownership_pane(&session, "%2", "assistant", Some(workspace.clone())),
                     ownership_pane(&session, "%1", window, cwd),
                 ];
-                assert_eq!(session_ownership(&workspace, &state, &transport, &session, &targets), expected);
+                assert_eq!(
+                    session_ownership(&workspace, &state, &transport, &session, &targets),
+                    expected
+                );
                 if expected == SessionOwnership::Foreign {
-                    assert!(!transport.calls().contains(&"pane_is_dead"), "owner gates must precede exemption");
+                    assert!(
+                        !transport.calls().contains(&"pane_is_dead"),
+                        "owner gates must precede exemption"
+                    );
                 }
                 assert!(!transport.calls().contains(&"kill_session"));
             }
@@ -844,7 +919,9 @@ pub mod lifecycle_port {
         #[ignore = "isolated native tmux: explicit Grok execution, no provider subscription"]
         fn dead_anchor_scoped_shutdown_reaps_worker_wrapper_and_spares_other_team() {
             let root = std::env::temp_dir().join(format!(
-                "ta-r2-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+                "ta-r2-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap(),
             ));
             std::fs::create_dir(&root).unwrap();
             let root = root.canonicalize().unwrap();
@@ -854,53 +931,109 @@ pub mod lifecycle_port {
             std::fs::create_dir(&foreign_workspace).unwrap();
             let endpoint = root.join("sock");
             let transport = crate::tmux_backend::TmuxBackend::with_runner_for_tmux_endpoint(
-                Box::new(crate::tmux_backend::RealCommandRunner), endpoint.to_str().unwrap(),
+                Box::new(crate::tmux_backend::RealCommandRunner),
+                endpoint.to_str().unwrap(),
             );
             let session = SessionName::new("round2-owned");
             let foreign = SessionName::new("round2-foreign");
-            struct Cleanup<'a>(&'a crate::tmux_backend::TmuxBackend, [&'a SessionName; 2], &'a Path);
+            struct Cleanup<'a>(
+                &'a crate::tmux_backend::TmuxBackend,
+                [&'a SessionName; 2],
+                &'a Path,
+            );
             impl Drop for Cleanup<'_> {
                 fn drop(&mut self) {
-                    for session in self.1 { let _ = self.0.kill_session(session); }
+                    for session in self.1 {
+                        let _ = self.0.kill_session(session);
+                    }
                     let _ = std::fs::remove_dir_all(self.2);
                 }
             }
             let _cleanup = Cleanup(&transport, [&session, &foreign], &root);
             let env = BTreeMap::new();
             let argv = vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
-            let first = transport.spawn_first_with_worker_shell_wrapper(
-                &session, &WindowName::new("assistant"), &argv, &workspace, &env, &[], "pi",
-            ).unwrap();
-            transport.set_session_owner_with_generation(&session, &workspace, "round2-owned", "g").unwrap();
-            transport.preserve_session_before_stop(&session, &[crate::transport::Target::Pane(first.pane_id.clone())]).unwrap();
+            let first = transport
+                .spawn_first_with_worker_shell_wrapper(
+                    &session,
+                    &WindowName::new("assistant"),
+                    &argv,
+                    &workspace,
+                    &env,
+                    &[],
+                    "pi",
+                )
+                .unwrap();
+            transport
+                .set_session_owner_with_generation(&session, &workspace, "round2-owned", "g")
+                .unwrap();
+            transport
+                .preserve_session_before_stop(
+                    &session,
+                    &[crate::transport::Target::Pane(first.pane_id.clone())],
+                )
+                .unwrap();
             transport.kill_pane(&first.pane_id).unwrap();
-            let worker = transport.spawn_into_with_worker_shell_wrapper(
-                &session, &WindowName::new("assistant"), &argv, &workspace, &env, &[], "pi",
-            ).unwrap();
-            let foreign_worker = transport.spawn_first(
-                &foreign, &WindowName::new("other"), &["sleep".to_string(), "60".to_string()],
-                &foreign_workspace, &env,
-            ).unwrap();
-            transport.set_session_owner_with_generation(&foreign, &foreign_workspace, "round2-foreign", "foreign-g").unwrap();
+            let worker = transport
+                .spawn_into_with_worker_shell_wrapper(
+                    &session,
+                    &WindowName::new("assistant"),
+                    &argv,
+                    &workspace,
+                    &env,
+                    &[],
+                    "pi",
+                )
+                .unwrap();
+            let foreign_worker = transport
+                .spawn_first(
+                    &foreign,
+                    &WindowName::new("other"),
+                    &["sleep".to_string(), "60".to_string()],
+                    &foreign_workspace,
+                    &env,
+                )
+                .unwrap();
+            transport
+                .set_session_owner_with_generation(
+                    &foreign,
+                    &foreign_workspace,
+                    "round2-foreign",
+                    "foreign-g",
+                )
+                .unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            let marker = format!("{} 0", crate::tmux_backend::worker_provider_exit_marker("pi"));
+            let marker = format!(
+                "{} 0",
+                crate::tmux_backend::worker_provider_exit_marker("pi")
+            );
             loop {
                 // This controlled fixture prints nothing: the worker wrapper
                 // and its inert tail supply these two lines. provider_exit_status
                 // is a leader-only receipt, not a worker-wrapper observation.
-                let captured = transport.capture(
-                    &crate::transport::Target::Pane(worker.pane_id.clone()),
-                    crate::transport::CaptureRange::Full,
-                ).unwrap();
+                let captured = transport
+                    .capture(
+                        &crate::transport::Target::Pane(worker.pane_id.clone()),
+                        crate::transport::CaptureRange::Full,
+                    )
+                    .unwrap();
                 if captured.text.contains(&marker)
-                    && captured.text.contains("Provider exited; this pane no longer accepts input.")
+                    && captured
+                        .text
+                        .contains("Provider exited; this pane no longer accepts input.")
                 {
                     break;
                 }
-                assert!(std::time::Instant::now() < deadline, "worker must reach its inert exit wrapper: {}", captured.text);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker must reach its inert exit wrapper: {}",
+                    captured.text
+                );
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            assert_eq!(transport.pane_is_dead(&worker.pane_id).unwrap(), Some(false));
+            assert_eq!(
+                transport.pane_is_dead(&worker.pane_id).unwrap(),
+                Some(false)
+            );
             let worker_pid = worker.child_pid.unwrap();
             assert!(crate::platform::process::pid_is_alive(worker_pid));
             let state = json!({
@@ -914,13 +1047,21 @@ pub mod lifecycle_port {
                 }}
             });
             crate::state::persist::save_runtime_state(&workspace, &state).unwrap();
-            let result = shutdown_with_transport_and_state(&workspace, true, None, &transport, Some(state)).unwrap();
+            let result =
+                shutdown_with_transport_and_state(&workspace, true, None, &transport, Some(state))
+                    .unwrap();
             assert_eq!(result["ok"], true, "{result}");
-            assert_eq!(result["residuals"], json!({"sessions": [], "processes": [], "owned_files": []}), "{result}");
+            assert_eq!(
+                result["residuals"],
+                json!({"sessions": [], "processes": [], "owned_files": []}),
+                "{result}"
+            );
             assert!(!transport.has_session(&session).unwrap());
             assert!(!crate::platform::process::pid_is_alive(worker_pid));
             assert!(transport.has_session(&foreign).unwrap());
-            assert!(crate::platform::process::pid_is_alive(foreign_worker.child_pid.unwrap()));
+            assert!(crate::platform::process::pid_is_alive(
+                foreign_worker.child_pid.unwrap()
+            ));
         }
 
         #[test]
@@ -931,7 +1072,13 @@ pub mod lifecycle_port {
             });
             let table = [(10, 1), (20, 10), (30, 10), (31, 30)]
                 .into_iter()
-                .map(|(pid, ppid)| ProcessInfo { pid, ppid, pgid: None, session: None, command: String::new() })
+                .map(|(pid, ppid)| ProcessInfo {
+                    pid,
+                    ppid,
+                    pgid: None,
+                    session: None,
+                    command: String::new(),
+                })
                 .collect::<Vec<_>>();
             for (endpoint, pane_pid, should_protect) in [
                 ("/tmp/s4-worker-only.sock", 20, false),
@@ -955,8 +1102,16 @@ pub mod lifecycle_port {
                 let mut protected = ShutdownProtection::default();
                 extend_protection_with_leader_panes(&mut protected, &transport, &state, &table);
                 assert_eq!(protected.pids.contains(&pane_pid), should_protect);
-                assert_eq!(protected.pids.contains(&31), should_protect, "leader descendants");
-                assert_eq!(protected.pids.contains(&10), should_protect, "leader's server");
+                assert_eq!(
+                    protected.pids.contains(&31),
+                    should_protect,
+                    "leader descendants"
+                );
+                assert_eq!(
+                    protected.pids.contains(&10),
+                    should_protect,
+                    "leader's server"
+                );
             }
         }
 
@@ -1211,15 +1366,14 @@ pub mod lifecycle_port {
             // External and managed leaders both pass the same positive ownership
             // gate; topology only decides whether a verified session is reduced
             // to worker panes or removed as a whole.
-            let leader_anchor_ids = collect_state_leader_anchor_pane_ids(
-                &state,
-                transport.tmux_endpoint().as_deref(),
-            );
+            let leader_anchor_ids =
+                collect_state_leader_anchor_pane_ids(&state, transport.tmux_endpoint().as_deref());
             let (live_targets_now, live_targets_known) = match transport.list_targets() {
                 Ok(targets) => (targets, true),
                 Err(error) => {
                     push_unique_session(&mut spared_sessions, session.clone());
-                    kill_error.get_or_insert_with(|| format!("session ownership probe failed: {error}"));
+                    kill_error
+                        .get_or_insert_with(|| format!("session ownership probe failed: {error}"));
                     (Vec::new(), false)
                 }
             };
@@ -1237,7 +1391,9 @@ pub mod lifecycle_port {
             if ownership != SessionOwnership::Owned {
                 push_unique_session(&mut spared_sessions, session.clone());
                 if ownership == SessionOwnership::Unknown {
-                    kill_error.get_or_insert_with(|| "session ownership is unknown; destructive cleanup refused".to_string());
+                    kill_error.get_or_insert_with(|| {
+                        "session ownership is unknown; destructive cleanup refused".to_string()
+                    });
                 }
             } else {
                 let session_has_leader_anchor = live_targets_now.iter().any(|target| {
@@ -1247,7 +1403,8 @@ pub mod lifecycle_port {
                 if crate::state::projection::state_is_managed_leader(&state)
                     && session_has_leader_anchor
                 {
-                    let _ = event_log_write_session_spared(&run_workspace, session, &leader_anchor_ids);
+                    let _ =
+                        event_log_write_session_spared(&run_workspace, session, &leader_anchor_ids);
                     push_unique_session(&mut spared_sessions, session.clone());
                     let worker_panes = collect_session_worker_panes(
                         &state,
@@ -1256,7 +1413,8 @@ pub mod lifecycle_port {
                         &live_targets_now,
                     );
                     let event_log = crate::event_log::EventLog::new(&run_workspace);
-                    let identity_state = state_for_session(&state, session.as_str()).unwrap_or(&state);
+                    let identity_state =
+                        state_for_session(&state, session.as_str()).unwrap_or(&state);
                     for pane in &worker_panes {
                         let pane_target = vec![pane.as_str().to_string()];
                         let audit = crate::kill_audit::pre_kill_audit_scoped(
@@ -1272,7 +1430,8 @@ pub mod lifecycle_port {
                             "positive workspace/team ownership",
                         );
                         if let Err(error) = audit {
-                            kill_error.get_or_insert_with(|| format!("pre-kill audit failed: {error}"));
+                            kill_error
+                                .get_or_insert_with(|| format!("pre-kill audit failed: {error}"));
                             continue;
                         }
                         if let Err(error) = transport.kill_pane(pane) {
@@ -1324,7 +1483,8 @@ pub mod lifecycle_port {
         if team.is_none() {
             deadline.check("shared_socket_cleanup")?;
             let event_log = crate::event_log::EventLog::new(&run_workspace);
-            let cleanup = bare_shutdown_socket_cleanup(&run_workspace, transport, &state, &event_log);
+            let cleanup =
+                bare_shutdown_socket_cleanup(&run_workspace, transport, &state, &event_log);
             for session in cleanup.killed_sessions {
                 push_unique_session(&mut killed_sessions, session);
             }
@@ -1619,10 +1779,8 @@ pub mod lifecycle_port {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| session.as_str());
-        let leader_panes = collect_state_leader_anchor_pane_ids(
-            state,
-            transport.tmux_endpoint().as_deref(),
-        );
+        let leader_panes =
+            collect_state_leader_anchor_pane_ids(state, transport.tmux_endpoint().as_deref());
         let event_log = crate::event_log::EventLog::new(workspace);
         let team_key = state.get("team_key").and_then(Value::as_str);
         let generation = state_generation(state);
@@ -2142,10 +2300,13 @@ pub mod lifecycle_port {
         let spawn_cwds = state_spawn_cwds(state, scope);
         for root in root_pids {
             for pid in process_tree_from_table(*root, table) {
-                let owned = table
-                    .iter()
-                    .find(|process| process.pid == pid)
-                    .is_some_and(|process| process_matches_workspace(process, workspace, &spawn_cwds));
+                let owned =
+                    table
+                        .iter()
+                        .find(|process| process.pid == pid)
+                        .is_some_and(|process| {
+                            process_matches_workspace(process, workspace, &spawn_cwds)
+                        });
                 if owned && !protected.contains_pid(pid) && seen.insert(pid) {
                     pids.push(pid);
                 }
@@ -2223,14 +2384,8 @@ pub mod lifecycle_port {
             let round_table = shutdown_table_snapshot(workspace, probe_degraded, "residual_round");
             let mut protected = shutdown_protection_set(&round_table);
             extend_protection_with_leader_panes(&mut protected, transport, state, &round_table);
-            let residuals = matched_processes(
-                workspace,
-                state,
-                root_pids,
-                &protected,
-                scope,
-                &round_table,
-            );
+            let residuals =
+                matched_processes(workspace, state, root_pids, &protected, scope, &round_table);
             if residuals.is_empty() {
                 return;
             }
@@ -2282,7 +2437,10 @@ pub mod lifecycle_port {
     ) -> T {
         let previous = SHUTDOWN_TEST_PROBES.with(|probes| {
             let previous = probes.get();
-            probes.set(ShutdownTestProbes { process_table: Some(probe), ..previous });
+            probes.set(ShutdownTestProbes {
+                process_table: Some(probe),
+                ..previous
+            });
             previous
         });
         let _restore = ShutdownTestProbeRestore(previous);
@@ -2296,7 +2454,10 @@ pub mod lifecycle_port {
     ) -> T {
         let previous = SHUTDOWN_TEST_PROBES.with(|probes| {
             let previous = probes.get();
-            probes.set(ShutdownTestProbes { pid_is_alive: Some(probe), ..previous });
+            probes.set(ShutdownTestProbes {
+                pid_is_alive: Some(probe),
+                ..previous
+            });
             previous
         });
         let _restore = ShutdownTestProbeRestore(previous);
@@ -2551,17 +2712,29 @@ pub mod lifecycle_port {
         endpoint: Option<&str>,
         out: &mut std::collections::BTreeSet<String>,
     ) {
-        for (key, peer_key) in [("team_owner", "leader_receiver"), ("leader_receiver", "team_owner")] {
-            let Some(anchor) = state.get(key) else { continue };
-            let Some(pane_id) = anchor.get("pane_id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        for (key, peer_key) in [
+            ("team_owner", "leader_receiver"),
+            ("leader_receiver", "team_owner"),
+        ] {
+            let Some(anchor) = state.get(key) else {
+                continue;
+            };
+            let Some(pane_id) = anchor
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
                 continue;
             };
             // team_owner often records only a pane ID; its receiver supplies
             // the endpoint only when it describes that exact same anchor.
-            let anchor_endpoint = anchor.get("tmux_socket").and_then(Value::as_str)
+            let anchor_endpoint = anchor
+                .get("tmux_socket")
+                .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
-                    state.get(peer_key)
+                    state
+                        .get(peer_key)
                         .filter(|peer| peer.get("pane_id").and_then(Value::as_str) == Some(pane_id))
                         .and_then(|peer| peer.get("tmux_socket"))
                         .and_then(Value::as_str)
@@ -2569,7 +2742,9 @@ pub mod lifecycle_port {
                 });
             if let (Some(anchor_path), Some(transport_path)) = (
                 anchor_endpoint.and_then(socket_file_for_endpoint),
-                endpoint.filter(|s| !s.is_empty()).and_then(socket_file_for_endpoint),
+                endpoint
+                    .filter(|s| !s.is_empty())
+                    .and_then(socket_file_for_endpoint),
             ) {
                 let anchor_path = anchor_path.canonicalize().unwrap_or(anchor_path);
                 let transport_path = transport_path.canonicalize().unwrap_or(transport_path);
@@ -2688,10 +2863,8 @@ pub mod lifecycle_port {
         );
         // Source 2: state.json team_owner / leader_receiver 真锚 pane_id(top-level +
         // teams[*]),per-workspace socket 命中。
-        let anchor_pane_ids = collect_state_leader_anchor_pane_ids(
-            state,
-            transport.tmux_endpoint().as_deref(),
-        );
+        let anchor_pane_ids =
+            collect_state_leader_anchor_pane_ids(state, transport.tmux_endpoint().as_deref());
         leader_pane_pids.extend(
             pane_targets
                 .iter()
@@ -2707,7 +2880,8 @@ pub mod lifecycle_port {
         // 的 list_targets 找 anchor pane_id → pane_pid → 进入 process_tree 保护。
         // 不在 state 中的 socket 不查(MUST-17 不撒宽 / 不主动枚举全机器 sockets)。
         for socket_endpoint in collect_state_recorded_tmux_sockets(state) {
-            let anchor_pane_ids = collect_state_leader_anchor_pane_ids(state, Some(&socket_endpoint));
+            let anchor_pane_ids =
+                collect_state_leader_anchor_pane_ids(state, Some(&socket_endpoint));
             let cross_backend =
                 crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket_endpoint);
             let cross_panes =
@@ -2784,11 +2958,7 @@ pub mod lifecycle_port {
                 crate::platform::process::reap_child_if_possible(*pid);
             }
             let elapsed = start.elapsed();
-            if !pids
-                .iter()
-                .any(|pid| shutdown_pid_is_alive(*pid))
-                || elapsed >= timeout
-            {
+            if !pids.iter().any(|pid| shutdown_pid_is_alive(*pid)) || elapsed >= timeout {
                 return;
             }
             std::thread::sleep(
@@ -2805,18 +2975,13 @@ pub mod lifecycle_port {
         scope: ShutdownReapScope,
         table: &[ProcessInfo],
     ) -> Vec<Value> {
-        let mut residuals = matched_processes(
-            workspace, state, root_pids, protected, scope, table,
-        );
+        let mut residuals = matched_processes(workspace, state, root_pids, protected, scope, table);
         let mut seen = residuals
             .iter()
             .map(|process| process.pid)
             .collect::<std::collections::BTreeSet<_>>();
         for pid in root_pids {
-            if !protected.contains_pid(*pid)
-                && shutdown_pid_is_alive(*pid)
-                && seen.insert(*pid)
-            {
+            if !protected.contains_pid(*pid) && shutdown_pid_is_alive(*pid) && seen.insert(*pid) {
                 residuals.push(ProcessInfo {
                     pid: *pid,
                     ppid: 0,
@@ -2966,7 +3131,11 @@ pub mod lifecycle_port {
         let _ = force; // Never grants authority to stop an already-running seat.
         let agent_id = crate::model::ids::AgentId::new(agent);
         match crate::lifecycle::role_config::start_agent_from_role(
-            workspace, &agent_id, role_config, allow_fresh, team,
+            workspace,
+            &agent_id,
+            role_config,
+            allow_fresh,
+            team,
         ) {
             Ok(crate::lifecycle::StartAgentOutcome::Running {
                 env,
@@ -2995,14 +3164,19 @@ pub mod lifecycle_port {
                 }),
             )),
             Ok(crate::lifecycle::StartAgentOutcome::Noop { env, target }) => {
-                Ok(agent_action_value(agent, workspace, team, json!({
-                    "ok": true,
-                    "agent_id": env.agent_id.as_str(),
-                    "status": "already_running",
-                    "target": target,
-                    "coordinator_started": env.coordinator_started,
-                    "state_file": env.state_file.to_string_lossy(),
-                })))
+                Ok(agent_action_value(
+                    agent,
+                    workspace,
+                    team,
+                    json!({
+                        "ok": true,
+                        "agent_id": env.agent_id.as_str(),
+                        "status": "already_running",
+                        "target": target,
+                        "coordinator_started": env.coordinator_started,
+                        "state_file": env.state_file.to_string_lossy(),
+                    }),
+                ))
             }
             Ok(crate::lifecycle::StartAgentOutcome::Paused { agent_id }) => Ok(json!({
                 "ok": false,
@@ -3035,13 +3209,7 @@ pub mod lifecycle_port {
         team: Option<&str>,
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
-        match crate::lifecycle::reset_agent(
-            workspace,
-            &agent_id,
-            discard_session,
-            true,
-            team,
-        ) {
+        match crate::lifecycle::reset_agent(workspace, &agent_id, discard_session, true, team) {
             Ok(crate::lifecycle::ResetAgentOutcome::Reset {
                 env,
                 start_mode,
@@ -3089,7 +3257,12 @@ pub mod lifecycle_port {
         let agent_id = crate::model::ids::AgentId::new(agent);
         let source = (!role_file.is_empty()).then(|| Path::new(role_file));
         match crate::lifecycle::role_config::add_agent_from_role(
-            workspace, &agent_id, source, role_config, force, team,
+            workspace,
+            &agent_id,
+            source,
+            role_config,
+            force,
+            team,
         ) {
             Ok(report) => Ok(agent_action_value(
                 agent,
@@ -3108,7 +3281,12 @@ pub mod lifecycle_port {
             Err(e) => Ok(error_value(e)),
         }
     }
-    fn agent_action_value(agent: &str, workspace: &Path, team: Option<&str>, mut value: Value) -> Value {
+    fn agent_action_value(
+        agent: &str,
+        workspace: &Path,
+        team: Option<&str>,
+        mut value: Value,
+    ) -> Value {
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
             if let Some(object) = value.as_object_mut() {
                 if let Some(command) = super::adapters::send_command(agent, workspace, team) {
@@ -3749,10 +3927,7 @@ pub mod lifecycle_port {
             let mut default = detail.clone();
             compact_quick_start_value(&mut default);
             assert_eq!(default["status"], json!("leader_bind_refused"));
-            assert_eq!(
-                default["reason"],
-                json!("provider_unresolved")
-            );
+            assert_eq!(default["reason"], json!("provider_unresolved"));
             assert_eq!(
                 default["next_actions"],
                 json!(["set TEAM_AGENT_LEADER_PROVIDER or run from a provider pane; do not run claim-leader"])
@@ -3772,14 +3947,18 @@ pub mod lifecycle_port {
             );
             assert!(default["readiness"].get("all_spawned").is_none());
             assert!(default["readiness"].get("all_attached_receiver").is_none());
-            assert!(default["readiness"].get("leader_receiver_attached").is_none());
+            assert!(default["readiness"]
+                .get("leader_receiver_attached")
+                .is_none());
             assert_eq!(
                 default["worker_readiness"]["all_workers_spawned"],
                 json!(true)
             );
             assert!(default["worker_readiness"].get("all_spawned").is_none());
             assert!(detail["readiness"].get("all_spawned").is_some());
-            assert!(detail["worker_readiness"].get("leader_receiver_attached").is_some());
+            assert!(detail["worker_readiness"]
+                .get("leader_receiver_attached")
+                .is_some());
         }
 
         #[test]
@@ -3935,7 +4114,10 @@ pub mod lifecycle_port {
             compact_restart_value(&mut default);
             assert_eq!(default["status"], json!("partial"));
             assert_eq!(default["reason"], json!("restart_agent_failed"));
-            assert_eq!(default["next_actions"], json!(["reset-agent worker --discard-session"]));
+            assert_eq!(
+                default["next_actions"],
+                json!(["reset-agent worker --discard-session"])
+            );
             assert!(default.get("coordinator").is_none());
             assert!(detail.get("coordinator").is_some());
         }
@@ -3975,7 +4157,9 @@ pub mod lifecycle_port {
                 &transport,
             )
             .expect("first quick-start");
-            let crate::lifecycle::QuickStartReport::Ready { team: ready_team, .. } = &first
+            let crate::lifecycle::QuickStartReport::Ready {
+                team: ready_team, ..
+            } = &first
             else {
                 panic!("first producer must return Ready; got {first:?}");
             };
@@ -3992,7 +4176,7 @@ pub mod lifecycle_port {
                     "team-agent".to_string(),
                     "send".to_string(),
                     "implementer".to_string(),
-                    "MESSAGE".to_string(),
+                    "请完成任务并把答案回复给 leader。".to_string(),
                     "--workspace".to_string(),
                     team_dir.to_string_lossy().into_owned(),
                     "--team".to_string(),
@@ -4029,7 +4213,7 @@ pub mod lifecycle_port {
                     "team-agent".to_string(),
                     "send".to_string(),
                     "implementer".to_string(),
-                    "MESSAGE".to_string(),
+                    "请完成任务并把答案回复给 leader。".to_string(),
                     "--workspace".to_string(),
                     team_dir.to_string_lossy().into_owned(),
                     "--team".to_string(),
@@ -4054,10 +4238,7 @@ pub mod lifecycle_port {
                 value
                     .get("agent_ids")
                     .and_then(Value::as_array)
-                    .map(|items| items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()),
+                    .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>()),
                 Some(vec!["sol", "luna"])
             );
         }
@@ -4087,14 +4268,15 @@ pub mod lifecycle_port {
 
         #[test]
         fn existing_runtime_send_guidance_does_not_pair_alice_with_bob() {
-            let mut value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
-                team: Some("bob".to_string()),
-                session_name: Some(crate::transport::SessionName::new("team-bob")),
-                state_path: Some(PathBuf::from("/tmp/state.json")),
-                next_actions: vec!["restart".to_string()],
-                attach_commands: Vec::new(),
-                agent_ids: vec!["bob".to_string()],
-            });
+            let mut value =
+                quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
+                    team: Some("bob".to_string()),
+                    session_name: Some(crate::transport::SessionName::new("team-bob")),
+                    state_path: Some(PathBuf::from("/tmp/state.json")),
+                    next_actions: vec!["restart".to_string()],
+                    attach_commands: Vec::new(),
+                    agent_ids: vec!["bob".to_string()],
+                });
             crate::cli::adapters::append_send_guidance(
                 &mut value,
                 Path::new("/tmp/ws"),
@@ -4189,7 +4371,7 @@ pub mod lifecycle_port {
                     value["reason"] = json!(reason);
                 }
                 value
-            },
+            }
             crate::lifecycle::RestartReport::Partial {
                 session_name,
                 agents,
@@ -4243,7 +4425,7 @@ pub mod lifecycle_port {
                     value["leader_bind_reason"] = json!(reason);
                 }
                 value
-            },
+            }
             crate::lifecycle::RestartReport::Failed {
                 session_name,
                 failed_agents,
@@ -5254,7 +5436,11 @@ pub mod diagnose_port {
     ///
     /// `orphan_gate(fix, confirm)`(`--gate orphans`)。CI gate。
     #[cfg(test)]
-    pub(super) fn orphan_gate(workspace: &Path, fix: bool, confirm: bool) -> Result<Value, CliError> {
+    pub(super) fn orphan_gate(
+        workspace: &Path,
+        fix: bool,
+        confirm: bool,
+    ) -> Result<Value, CliError> {
         crate::diagnose::orphans::orphan_gate_json(workspace, fix, confirm)
     }
     ///

@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(env)]
     fn prune_removes_team_proven_terminal() {
         let (_home_guard, _home, workspace) = test_home("terminal");
         write_state(
@@ -834,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(env)]
     fn prune_removes_missing_key_only_from_valid_teams_map() {
         let (_home_guard, _home, workspace) = test_home("missing-key");
         write_state(&workspace, json!({"teams": {"other": {"status": "alive"}}}));
@@ -850,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(env)]
     fn prune_keeps_null_nonobject_and_legacy_teams_shapes() {
         for (label, state) in [
             ("null", json!({"teams": null})),

@@ -20,7 +20,7 @@ pub(super) fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> V
         "watcher_id": format!("watch-{agent_id}"),
         "task_id": opts.task_id.as_ref().map(|t| t.as_str().to_string()),
         "agent_id": agent_id,
-        "notice": "Team Agent will collect the result and notify the leader when this task reports completion."
+        "notice": "队友回复后会通知主控；用 team-agent inbox leader -n 3 查看。"
     })
 }
 
@@ -183,39 +183,56 @@ pub(super) fn cmd_send_result(value: Value, as_json: bool) -> CmdResult {
 }
 
 pub(super) fn send_human_output(value: &Value) -> String {
-    let mut parts = vec![
-        send_human_field(value, "ok"),
-        format!("status: {}", send_human_status(value)),
-        send_human_field(value, "message_id"),
-        format!("target: {}", send_human_target(value)),
-    ];
-    for key in ["verification", "stage", "reason", "channel", "turn_verification"] {
-        if !value.get(key).is_none_or(Value::is_null) {
-            parts.push(send_human_field(value, key));
+    let agent = send_human_target(value);
+    if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
+        let explanation =
+            crate::cli::named_address::human_address_reason(reason).unwrap_or(match reason {
+                "target_not_in_team" | "unknown_recipient" => "当前队伍没有这个队友。",
+                "missing_permissions" | "human_confirmation_required" => {
+                    "发送被拒绝：需要先确认交流权限。"
+                }
+                "recipient_busy" | "recipient_pane_in_non_input_mode" => {
+                    "队友当前不能接收任务；请先查看其状态。"
+                }
+                "routing_ambiguous" | "empty_target_list" | "ambiguous" => {
+                    "没有明确选定收信队友；请填写队友名和任务内容。"
+                }
+                "team_owner_mismatch" | "PaneWorkspaceMismatch" | "session_drift" => {
+                    "队伍或终端归属不匹配；已停止发送。"
+                }
+                "coordinator_unavailable" | "tmux_target_missing" => {
+                    "队伍连接暂不可用；本次没有确认送达。"
+                }
+                "message_already_claimed" | "duplicate" => {
+                    "这条消息已由其他发送处理接收；不要重复发送。"
+                }
+                "no_caller_pane" => "当前终端没有可用的队伍连接；请在主控的命令行/工具上下文发送。",
+                _ => value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("发送未成功；没有确认任务已送达。"),
+            });
+        let mut out = format!("{explanation}\n下一步：先运行 team-agent status，使用列表中的队友名；连接问题用 team-agent doctor --workspace .。不要反复重发。");
+        if let Some(suggested) = value
+            .get("suggested_name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty() && !name.contains(['/', ':', ',', '\n', '\r']))
+        {
+            out.push_str(&format!(
+                "\n你是否想发给 {suggested}？确认后使用这个队友名。"
+            ));
         }
+        return out;
     }
-    // 0.5.45 naming-addressing (design §3.4/§3.5, RED-3 positional):
-    // when the refusal envelope carries a scope-safe suggestion,
-    // surface it verbatim in human output so users can copy the
-    // right short id. `requested_name` echoes the typo, `suggested_
-    // name` is the copyable canonical.
-    if let Some(requested) = value
-        .get("requested_name")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        parts.push(format!("requested_name: {requested}"));
+    if value.get("status").and_then(Value::as_str) == Some("stored_only") {
+        return format!("已给{agent}留下消息；本次没有发送到当前对话。\n下一步：用 team-agent inbox leader -n 3 查看回复；留言不保证自动执行。");
     }
-    if let Some(suggested) = value
-        .get("suggested_name")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        parts.push(format!(
-            "Did you mean `{suggested}`? suggested_name: {suggested}"
-        ));
+    if value.get("delivered").and_then(Value::as_bool) == Some(true) {
+        format!("已发给{agent}。{}", crate::cli::SEND_REMINDER)
+    } else {
+        "任务已收下，但还未送到队友的对话。\n下一步：查看 team-agent status 或 team-agent doctor --workspace .，等真实回复，不反复重发。".to_string()
     }
-    parts.join(" ")
 }
 
 pub(super) fn send_human_field(value: &Value, key: &str) -> String {
@@ -227,11 +244,14 @@ pub(super) fn send_human_field(value: &Value, key: &str) -> String {
 }
 
 pub(super) fn send_human_target(value: &Value) -> String {
-    ["target", "agent_id", "pane_id", "to_name"]
-        .iter()
-        .find_map(|key| value.get(*key).filter(|v| !v.is_null()))
-        .map(send_human_value)
-        .unwrap_or_else(|| "None".to_string())
+    value
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .filter(|name| {
+            !name.is_empty() && *name != "*" && !name.contains(['/', ':', ',', '\n', '\r'])
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| "该队友".to_string())
 }
 
 pub(super) fn send_human_status(value: &Value) -> String {
@@ -265,13 +285,12 @@ pub(super) fn send_reminder_for_value(value: &Value) -> &'static str {
     let delivered = value.get("delivered").and_then(Value::as_bool);
     let status = value.get("status").and_then(Value::as_str);
     let delivery_status = value.get("delivery_status").and_then(Value::as_str);
-    if delivered == Some(false)
-        || matches!(status, Some("queued"))
-        || matches!(delivery_status, Some("pending"))
-    {
-        "Message queued; coordinator will notify when the worker receives it. Do not poll the worker terminal with capture-pane."
-    } else {
+    if status == Some("stored_only") {
+        "本次只留言，没有发送到当前对话；留言不保证自动执行。"
+    } else if delivered == Some(true) && delivery_status != Some("pending") {
         crate::cli::SEND_REMINDER
+    } else {
+        "任务已收下，但还未确认送到队友对话。查看 team-agent status/doctor，等真实回复，不反复重发。"
     }
 }
 

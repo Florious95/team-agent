@@ -16,8 +16,16 @@ use serde_json::json;
 fn provider_args_cases() {
     // (old case-id, input, Python golden); values[1:] of a lone "--" is empty.
     const CASES: &[(&str, &[&str], &[&str])] = &[
-        ("provider_args_strips_leading_dashdash", &["--", "-x"], &["-x"]),
-        ("provider_args_keeps_when_no_leading_dashdash", &["-x", "-y"], &["-x", "-y"]),
+        (
+            "provider_args_strips_leading_dashdash",
+            &["--", "-x"],
+            &["-x"],
+        ),
+        (
+            "provider_args_keeps_when_no_leading_dashdash",
+            &["-x", "-y"],
+            &["-x", "-y"],
+        ),
         ("provider_args_empty_is_empty", &[], &[]),
         ("provider_args_lone_dashdash_yields_empty", &["--"], &[]),
     ];
@@ -36,41 +44,73 @@ fn provider_args_cases() {
 fn leader_launcher_args_success_cases() {
     // (old case-id, argv, complete expected structure), including default false flags.
     let cases: &[(&str, &[&str], LeaderLauncherArgs)] = &[
-        ("leader_launcher_args_empty_all_default", &[], LeaderLauncherArgs::default()),
-        ("leader_launcher_args_attach_and_confirm", &["--attach", "--confirm"], LeaderLauncherArgs {
-            attach_existing: true,
-            confirm_attach: true,
-            ..Default::default()
-        }),
+        (
+            "leader_launcher_args_empty_all_default",
+            &[],
+            LeaderLauncherArgs::default(),
+        ),
+        (
+            "leader_launcher_args_attach_and_confirm",
+            &["--attach", "--confirm"],
+            LeaderLauncherArgs {
+                attach_existing: true,
+                confirm_attach: true,
+                ..Default::default()
+            },
+        ),
         // --attach-existing is an alias of --attach.
-        ("leader_launcher_args_attach_existing_alias", &["--attach-existing"], LeaderLauncherArgs {
-            attach_existing: true,
-            ..Default::default()
-        }),
-        ("leader_launcher_args_external_leader_opt_out", &["--external-leader", "--", "--model", "opus"], LeaderLauncherArgs {
-            provider_args: vec!["--model".to_string(), "opus".to_string()],
-            external_leader: true,
-            ..Default::default()
-        }),
-        ("leader_launcher_args_attach_session_spaced", &["--attach-session", "mysess"], LeaderLauncherArgs {
-            attach_session: Some("mysess".to_string()),
-            ..Default::default()
-        }),
-        ("leader_launcher_args_attach_session_equals", &["--attach-session=mysess"], LeaderLauncherArgs {
-            attach_session: Some("mysess".to_string()),
-            ..Default::default()
-        }),
+        (
+            "leader_launcher_args_attach_existing_alias",
+            &["--attach-existing"],
+            LeaderLauncherArgs {
+                attach_existing: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "leader_launcher_args_external_leader_opt_out",
+            &["--external-leader", "--", "--model", "opus"],
+            LeaderLauncherArgs {
+                provider_args: vec!["--model".to_string(), "opus".to_string()],
+                external_leader: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "leader_launcher_args_attach_session_spaced",
+            &["--attach-session", "mysess"],
+            LeaderLauncherArgs {
+                attach_session: Some("mysess".to_string()),
+                ..Default::default()
+            },
+        ),
+        (
+            "leader_launcher_args_attach_session_equals",
+            &["--attach-session=mysess"],
+            LeaderLauncherArgs {
+                attach_session: Some("mysess".to_string()),
+                ..Default::default()
+            },
+        ),
         // Known Team Agent launcher flags after `--` are rejected by the error table.
-        ("leader_launcher_args_dashdash_passthrough_strips_separator", &["--attach", "--", "-x", "--provider-confirm"], LeaderLauncherArgs {
-            provider_args: vec!["-x".to_string(), "--provider-confirm".to_string()],
-            attach_existing: true,
-            ..Default::default()
-        }),
-        ("leader_launcher_args_unknown_tokens_collect_as_provider_args", &["foo", "--attach", "bar"], LeaderLauncherArgs {
-            provider_args: vec!["foo".to_string(), "bar".to_string()],
-            attach_existing: true,
-            ..Default::default()
-        }),
+        (
+            "leader_launcher_args_dashdash_passthrough_strips_separator",
+            &["--attach", "--", "-x", "--provider-confirm"],
+            LeaderLauncherArgs {
+                provider_args: vec!["-x".to_string(), "--provider-confirm".to_string()],
+                attach_existing: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "leader_launcher_args_unknown_tokens_collect_as_provider_args",
+            &["foo", "--attach", "bar"],
+            LeaderLauncherArgs {
+                provider_args: vec!["foo".to_string(), "bar".to_string()],
+                attach_existing: true,
+                ..Default::default()
+            },
+        ),
     ];
     for (id, input, expected) in cases {
         let argv: Vec<String> = input.iter().map(|arg| (*arg).to_string()).collect();
@@ -97,7 +137,10 @@ fn leader_launcher_args_error_cases() {
     for (id, input, expected) in CASES {
         let argv: Vec<String> = input.iter().map(|arg| (*arg).to_string()).collect();
         let err = leader_launcher_args(&argv).expect_err(id);
-        assert!(err.to_string().contains(*expected), "{id}: unexpected error: {err}");
+        assert!(
+            err.to_string().contains(*expected),
+            "{id}: unexpected error: {err}"
+        );
     }
 }
 
@@ -110,14 +153,31 @@ fn send_target_cases() {
     // (old case-id, targets, target, complete expected enum).
     let cases: &[(&str, Option<&str>, Option<&str>, MessageTarget)] = &[
         (
-            "send_target_fanout_strips_and_filters_empty", Some("a, b ,,c"), None,
+            "send_target_fanout_strips_and_filters_empty",
+            Some("a, b ,,c"),
+            None,
             MessageTarget::Fanout(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
         ),
-        ("send_target_single_target", None, Some("agent_x"), MessageTarget::Single("agent_x".to_string())),
+        (
+            "send_target_single_target",
+            None,
+            Some("agent_x"),
+            MessageTarget::Single("agent_x".to_string()),
+        ),
         // A bare "*" means broadcast to the whole team.
-        ("send_target_broadcast_star", None, Some("*"), MessageTarget::Broadcast),
+        (
+            "send_target_broadcast_star",
+            None,
+            Some("*"),
+            MessageTarget::Broadcast,
+        ),
         // targets="" is falsy in Python, so it falls through to args.target.
-        ("send_target_empty_targets_falls_through_to_target", Some(""), Some("fallback"), MessageTarget::Single("fallback".to_string())),
+        (
+            "send_target_empty_targets_falls_through_to_target",
+            Some(""),
+            Some("fallback"),
+            MessageTarget::Single("fallback".to_string()),
+        ),
     ];
     for (id, targets, target, expected) in cases {
         assert_eq!(send_target(*targets, *target), *expected, "{id}");
@@ -133,18 +193,52 @@ fn send_target_cases() {
 fn classify_agent_bucket_cases() {
     // (old case-id, all original (raw, health) inputs, expected bucket).
     const CASES: &[(&str, &[(&str, &str)], SummaryBucket)] = &[
-        ("classify_failed_takes_priority", &[("failed", ""), ("error", ""), ("running", "error")], SummaryBucket::Failed),
-        ("classify_stopped", &[("stopped", ""), ("done", ""), ("running", "done")], SummaryBucket::Stopped),
-        ("classify_busy", &[("busy", ""), ("", "running"), ("", "working")], SummaryBucket::Busy),
+        (
+            "classify_failed_takes_priority",
+            &[("failed", ""), ("error", ""), ("running", "error")],
+            SummaryBucket::Failed,
+        ),
+        (
+            "classify_stopped",
+            &[("stopped", ""), ("done", ""), ("running", "done")],
+            SummaryBucket::Stopped,
+        ),
+        (
+            "classify_busy",
+            &[("busy", ""), ("", "running"), ("", "working")],
+            SummaryBucket::Busy,
+        ),
         // hstatus==idle precedes the raw==running branch.
-        ("classify_hstatus_idle_beats_raw_running", &[("running", "idle")], SummaryBucket::Idle),
-        ("classify_pure_running", &[("running", "")], SummaryBucket::Running),
+        (
+            "classify_hstatus_idle_beats_raw_running",
+            &[("running", "idle")],
+            SummaryBucket::Idle,
+        ),
+        (
+            "classify_pure_running",
+            &[("running", "")],
+            SummaryBucket::Running,
+        ),
         // bug-071/077/085: unmatched and blocked/stuck/missing are Unknown, NEVER idle.
-        ("classify_blocked_and_unmatched_are_unknown_never_idle", &[("blocked", ""), ("stuck", ""), ("", "missing"), ("weird_value", ""), ("", "")], SummaryBucket::Unknown),
+        (
+            "classify_blocked_and_unmatched_are_unknown_never_idle",
+            &[
+                ("blocked", ""),
+                ("stuck", ""),
+                ("", "missing"),
+                ("weird_value", ""),
+                ("", ""),
+            ],
+            SummaryBucket::Unknown,
+        ),
     ];
     for (id, inputs, expected) in CASES {
         for &(raw, health) in inputs.iter() {
-            assert_eq!(classify_agent_bucket(raw, health), *expected, "{id}: raw={raw:?}, health={health:?}");
+            assert_eq!(
+                classify_agent_bucket(raw, health),
+                *expected,
+                "{id}: raw={raw:?}, health={health:?}"
+            );
         }
     }
 }
@@ -395,7 +489,7 @@ fn cli_error_payload_plain_runtime() {
     assert_eq!(payload.error, "some other error");
     assert_eq!(
         payload.action,
-        "run `team-agent doctor` or inspect the log path shown here"
+        "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
     );
     assert_eq!(payload.log, "/tmp/y.log");
     assert_eq!(payload.reason, None);
@@ -417,19 +511,14 @@ fn cli_error_payload_tmux_conflict_quick_start_enrichment() {
     // context reset is only through restart --allow-fresh with explicit consent.
     assert_eq!(
             payload.action,
-            "tmux session `my-team` already exists. It may be your own existing team. \
-To resume it use `team-agent restart`. \
-If recovery is impossible, use `team-agent restart --allow-fresh` only after explicit context-loss consent. \
-Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. \
-Never terminate existing tmux sessions from quick-start."
+            "终端会话 `my-team` 已存在，可能是你的已有队伍。恢复用 team-agent restart；只有明确同意丢弃旧对话才用 --allow-fresh。另建队伍请修改 TEAM.md 的 name 后再 quick-start；不要关闭已有队伍凑成功。"
         );
-    assert_eq!(
-            payload.next_actions,
-            Some(vec![
-                "If this is your existing team, resume it with `team-agent restart`.".to_string(),
-                "If you want a separate team, change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string(),
-            ])
-        );
+    let next = payload.next_actions.as_ref().unwrap();
+    assert_eq!(next.len(), 2);
+    assert!(next[0].contains("team-agent restart"));
+    assert!(
+        next[1].contains("TEAM.md") && next[1].contains("name") && next[1].contains("quick-start")
+    );
 }
 
 #[test]
@@ -440,16 +529,11 @@ fn cli_error_payload_tmux_conflict_non_quick_start_enrichment() {
     assert_eq!(payload.session_name.as_deref(), Some("my-team"));
     assert_eq!(
         payload.action,
-        "tmux session `my-team` already exists. It may be an active team. \
-Do not terminate existing tmux sessions from startup; \
-use a different team name or runtime.session_name and start again."
+        "终端会话 `my-team` 已存在，可能属于运行中的队伍。不要关闭它；请使用另一个队伍名称后再启动。"
     );
-    assert_eq!(
-        payload.next_actions,
-        Some(vec![
-            "Use a different team name or runtime.session_name before starting again.".to_string()
-        ])
-    );
+    let next = payload.next_actions.as_ref().unwrap();
+    assert_eq!(next.len(), 1);
+    assert!(next[0].contains("队伍") && next[0].contains("名称"));
 }
 
 #[test]
@@ -641,19 +725,42 @@ fn cmd_status_summary_with_agent_rejected() {
 // =========================================================================
 
 #[test]
-fn cmd_leader_passthrough_help_returns_none() {
-    // parser.py:516: provider_args in (["-h"],["--help"]) -> print usage, return (no emit).
-    let r = cmd_leader_passthrough("codex", &["-h".into()], Path::new(".")).unwrap();
-    assert_eq!(r.output, CmdOutput::None);
-    assert_eq!(r.exit, ExitCode::Ok);
-    let r2 = cmd_leader_passthrough("claude", &["--help".into()], Path::new(".")).unwrap();
-    assert_eq!(r2.output, CmdOutput::None);
-    let r3 = cmd_leader_passthrough("copilot", &["--help".into()], Path::new(".")).unwrap();
-    assert_eq!(r3.output, CmdOutput::None);
-    let r4 = cmd_leader_passthrough("grok", &["-h".into()], Path::new(".")).unwrap();
-    assert_eq!(r4.output, CmdOutput::None);
-    let r5 = cmd_leader_passthrough("cursor", &["--help".into()], Path::new(".")).unwrap();
-    assert_eq!(r5.output, CmdOutput::None);
+#[serial_test::serial(env)]
+fn cmd_leader_passthrough_help_is_pure_human_guidance() {
+    let env = crate::cli::hermetic_test_support::HermeticTestEnv::enter("launcher-help-unit");
+    let cwd = env.workspace("empty");
+    let tools = [
+        "pi", "codex", "claude", "copilot", "grok", "agent", "cursor",
+    ];
+    let bin = env.root().join("canaries");
+    std::fs::create_dir(&bin).unwrap();
+    #[cfg(unix)]
+    let _path = {
+        use std::os::unix::fs::PermissionsExt;
+        for tool in tools {
+            let path = bin.join(tool);
+            std::fs::write(&path, "#!/bin/sh\nprintf called > \"$0.called\"\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.with_env("PATH", &bin.to_string_lossy())
+    };
+    for provider in ["pi", "codex", "claude", "copilot", "grok", "cursor"] {
+        for alias in ["-h", "--help"] {
+            let result = cmd_leader_passthrough(provider, &[alias.into()], &cwd).unwrap();
+            assert_eq!(result.exit, ExitCode::Ok);
+            assert!(
+                matches!(&result.output, CmdOutput::Human(text) if text.contains(provider) && text.contains("用法") && text.contains("Examples") && text.contains("下一步"))
+            );
+        }
+    }
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
+    assert!(env.registry_entries().is_empty());
+    for tool in tools {
+        assert!(
+            !bin.join(format!("{tool}.called")).exists(),
+            "native tool invoked"
+        );
+    }
 }
 
 #[test]

@@ -257,8 +257,7 @@ fn inbox_excludes_leader_stage_result_notifications() {
 // the deterministic check sub-shapes (run_id is a random uuid; not value-locked). ────────────────
 #[test]
 fn comms_selftest_golden_boundary_scope_and_check_shapes() {
-    let boundary = "validates live pane binding consistency and zero-token comms contracts. \
-                        Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
+    let boundary = "这里只检查终端连接是否一致，不实际发送消息，也不证明队友已回复。";
     let ws = tmp_workspace();
     let v = diagnose_port::comms_selftest(&ws, None, None).expect("comms_selftest");
     let obj = v.as_object().expect("comms dict");

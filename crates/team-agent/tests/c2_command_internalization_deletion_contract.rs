@@ -35,22 +35,8 @@ const DELETED_COMMANDS: &[&str] = &[
     "repair-state",
 ];
 const FALLBACK_COMMANDS: &[&str] = &["fallback-send-leader", "fallback-report-result"];
-const RESIGN_PLUS_RESULTS: &[&str] = &[
-    "quick-start",
-    "send",
-    "status",
-    "results",
-    "restart",
-    "shutdown",
-    "add-agent",
-    "start-agent",
-    "stop-agent",
-    "reset-agent",
-    "doctor",
-    "claim-leader",
-    "takeover",
-    "attach-leader",
-];
+#[path = "support/human_catalog.rs"]
+mod human_catalog;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -708,50 +694,12 @@ fn json_output(label: &str, output: &Output) -> Value {
     })
 }
 
-fn exact_visible_contract(help: &str) -> BTreeSet<String> {
-    let mut expected: BTreeSet<String> = RESIGN_PLUS_RESULTS
-        .iter()
-        .map(|command| (*command).to_string())
-        .collect();
-    if visible_default_commands(help).contains("models") {
-        expected.insert("models".to_string());
-    }
-    expected
+fn exact_visible_contract(_help: &str) -> BTreeSet<String> {
+    human_catalog::expected_human_commands()
 }
 
 fn visible_default_commands(help: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    if let Some((_, rest)) = help.split_once("Commands:") {
-        let section = rest.split("\n\n").next().unwrap_or(rest);
-        for part in section.split(',') {
-            let command = part.trim();
-            if is_command_name(command) {
-                names.insert(command.to_string());
-            }
-        }
-    } else {
-        for line in help.lines() {
-            let trimmed = line.trim_start();
-            if !line.starts_with("  ") || trimmed.starts_with("team-agent ") {
-                continue;
-            }
-            let command = trimmed.split_whitespace().next().unwrap_or_default();
-            if is_command_name(command) {
-                names.insert(command.to_string());
-            }
-        }
-    }
-    for provider in ["codex", "claude", "copilot", "grok", "cursor"] {
-        names.remove(provider);
-    }
-    names
-}
-
-fn is_command_name(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    human_catalog::public_commands(help)
 }
 
 fn spec_block_for(spec: &str, command: &str) -> Option<String> {
@@ -768,12 +716,21 @@ fn spec_block_for(spec: &str, command: &str) -> Option<String> {
 }
 
 fn dispatch_contains_command_arm(emit: &str, command: &str) -> bool {
-    let dispatch = emit.split_once("fn dispatch(").expect("dispatch function").1;
-    let dispatch = dispatch.split_once("match command {").expect("command match").1;
-    let dispatch = dispatch.split_once("const LEADER_PASSTHROUGH_COMMANDS").expect("dispatch end").0;
-    dispatch.lines().any(|line| {
-        line.trim_start().starts_with(&format!("\"{command}\" =>"))
-    })
+    let dispatch = emit
+        .split_once("fn dispatch(")
+        .expect("dispatch function")
+        .1;
+    let dispatch = dispatch
+        .split_once("match command {")
+        .expect("command match")
+        .1;
+    let dispatch = dispatch
+        .split_once("const LEADER_PASSTHROUGH_COMMANDS")
+        .expect("dispatch end")
+        .0;
+    dispatch
+        .lines()
+        .any(|line| line.trim_start().starts_with(&format!("\"{command}\" =>")))
 }
 
 fn packaged_worker_reference_files() -> Vec<String> {

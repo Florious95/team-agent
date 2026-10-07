@@ -5,7 +5,7 @@ use crate::provider::argv_route::{self, Config, Mutation, Override, RouteError};
 use crate::provider::Provider;
 use serde_json::{json, Value};
 
-pub(crate) const HELP: &str = "usage: team-agent route [status] [--json]\n       team-agent route enable|disable [--json]\n       team-agent route show [PROVIDER] [--json]\n       team-agent route set|add PROVIDER [--json] -- ARG [ARG ...]\n       team-agent route clear PROVIDER [--json]\n\nGlobal config: ~/.team-agent/argv-routing.json (default OFF).\nTEAM_AGENT_CLI_ARGV_ROUTING overrides the persisted switch.\nEverything after -- is literal argv data; routing affects the next native Agent launch only.";
+pub(crate) const HELP: &str = "做什么：\n设置工具启动时额外使用的命令行参数，默认关闭。\n用法：team-agent route [status|enable|disable|show [TOOL]|set TOOL -- ARG...|add TOOL -- ARG...|clear TOOL] [--json]\n\n怎么用：\nstatus 看开关；enable 开启；disable 关闭；show 看全部或指定工具的参数。\nset 替换参数；add 追加参数；clear 清除指定工具的参数；--json 给程序读取。\nTOOL 是已支持的工具名称，如 pi/codex/claude/copilot/grok/cursor_agent。\n第一个 -- 后全是工具的字面参数，包含 --help/--json 也不会被这里解析。\n配置保存在 ~/.team-agent/argv-routing.json；影响全机，不按项目或队伍隔离。\nTEAM_AGENT_CLI_ARGV_ROUTING 环境变量优先于保存的开关。\nExamples（可复制）：\nteam-agent route status\nteam-agent route set pi -- --mode text\nteam-agent route enable\n\n下一步（Next Action）：\n用 route show pi 核对参数；仅影响下一次启动，不改变正在运行的对话。\n没有开启或没有配置时，工具仍按原参数启动；不了解参数用途时保持关闭。";
 
 struct Request {
     operation: String,
@@ -16,10 +16,9 @@ struct Request {
 
 fn usage() -> RouteError {
     RouteError {
-        error: "invalid route arguments".to_string(),
+        error: "参数不完整或不正确；set/add 需要工具名、-- 和至少一个工具参数".to_string(),
         reason: "argv_route_usage",
-        action: "run `team-agent route --help`; set/add require PROVIDER -- ARG [ARG ...]"
-            .to_string(),
+        action: "请按 team-agent route --help 的 Examples 填写；例如 team-agent route set pi -- --mode text".to_string(),
         config_path: None,
     }
 }
@@ -119,7 +118,7 @@ fn execute(request: &Request) -> Result<Value, RouteError> {
     }
     if override_state != Override::Unset {
         value["notice"] = json!(format!(
-            "effective switch is overridden by {} ({})",
+            "当前开关由环境变量 {} 决定（{}）",
             argv_route::ENV_NAME,
             override_state.status()
         ));
@@ -168,6 +167,9 @@ fn emit_error(error: RouteError, args: &[String], delimiter: usize, as_json: boo
             .map(String::as_str)
             .unwrap_or("status"));
     }
+    if is_usage {
+        value["next_actions"] = json!(["team-agent route --help"]);
+    }
     if let Some(text) = super::emit(&CmdOutput::Json(value), as_json) {
         if as_json {
             println!("{text}");
@@ -176,6 +178,9 @@ fn emit_error(error: RouteError, args: &[String], delimiter: usize, as_json: boo
         }
     }
     if is_usage {
+        if !as_json {
+            eprintln!("\n{HELP}");
+        }
         ExitCode::Usage
     } else {
         ExitCode::Error

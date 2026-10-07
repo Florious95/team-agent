@@ -41,6 +41,13 @@ pub enum CliError {
     /// `peek` 缺 `--allow-raw-screen`)。对应 Python 抛 `TeamAgentError` 或 parser.error。
     #[error("usage error: {0}")]
     Usage(String),
+    /// Preserve the original refusal for audit while carrying safe human guidance.
+    #[error("usage error: {audit}")]
+    AddressRefusal {
+        audit: String,
+        error: String,
+        action: String,
+    },
     /// state 解析失败(歧义/未找到 team 等)。透传 step 5。
     #[error("{0}")]
     State(#[from] crate::state::StateError),
@@ -76,7 +83,12 @@ impl CliError {
         let mut payload = CliErrorPayload {
             ok: false,
             error: error.clone(),
-            action: "run `team-agent doctor` or inspect the log path shown here".to_string(),
+            action: if super::spec::command_spec(command).is_some() {
+                "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
+            } else {
+                "run `team-agent doctor` or inspect the log path shown here"
+            }
+            .to_string(),
             log: log_path.to_string_lossy().to_string(),
             reason: None,
             session_name: None,
@@ -87,30 +99,27 @@ impl CliError {
             payload.session_name = Some(session.clone());
             if command == "quick-start" {
                 payload.action = format!(
-                    "tmux session `{session}` already exists. It may be your own existing team. To resume it use `team-agent restart`. If recovery is impossible, use `team-agent restart --allow-fresh` only after explicit context-loss consent. Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. Never terminate existing tmux sessions from quick-start."
+                    "终端会话 `{session}` 已存在，可能是你的已有队伍。恢复用 team-agent restart；只有明确同意丢弃旧对话才用 --allow-fresh。另建队伍请修改 TEAM.md 的 name 后再 quick-start；不要关闭已有队伍凑成功。"
                 );
                 payload.next_actions = Some(vec![
-                    "If this is your existing team, resume it with `team-agent restart`.".to_string(),
-                    "If you want a separate team, change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string(),
+                    "如果是自己的已有队伍，使用 team-agent restart 恢复。".to_string(),
+                    "如要另建队伍，修改 TEAM.md 的 name 后再运行 team-agent quick-start。"
+                        .to_string(),
                 ]);
             } else {
                 payload.action = format!(
-                    "tmux session `{session}` already exists. It may be an active team. Do not terminate existing tmux sessions from startup; use a different team name or runtime.session_name and start again."
+                    "终端会话 `{session}` 已存在，可能属于运行中的队伍。不要关闭它；请使用另一个队伍名称后再启动。"
                 );
-                payload.next_actions = Some(vec![
-                    "Use a different team name or runtime.session_name before starting again."
-                        .to_string(),
-                ]);
+                payload.next_actions = Some(vec!["请使用另一个队伍名称后再启动。".to_string()]);
             }
         } else if error.contains("Team Agent launcher flag")
             && error.contains("must appear before --")
         {
-            payload.action = String::from(
-                "move the Team Agent launcher flag before `--`; only provider flags belong after `--`",
-            );
+            payload.action =
+                String::from("将主控启动选项放在 -- 前面；-- 后面只能是工具自己的参数。");
         } else if error.contains("managed launcher refuses a different ambient tmux server") {
             payload.action = String::from(
-                "leave the current tmux client and retry, or pass `--allow-nested-attach` before `--` to opt in to a nested managed attach",
+                "先退出当前 tmux 客户端再重试；只有明确需要嵌套连接时才在 -- 前加 --allow-nested-attach。",
             );
         }
         payload

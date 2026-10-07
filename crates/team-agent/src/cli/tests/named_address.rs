@@ -248,12 +248,9 @@ fn resolve_qualified_name_prefers_unique_state_pane_over_same_window_idle_pane()
         pane("team-a", "qa", "%idle"),
     ]);
 
-    let resolved = resolve_name_with_transport(
-        &ws,
-        &format!("{}::team-a/qa", ws.display()),
-        &transport,
-    )
-    .expect("a qualified worker address should use its unique state pane");
+    let resolved =
+        resolve_name_with_transport(&ws, &format!("{}::team-a/qa", ws.display()), &transport)
+            .expect("a qualified worker address should use its unique state pane");
     assert_eq!(resolved.pane_id, "%worker");
     assert_eq!(resolved.state_pane_id.as_deref(), Some("%worker"));
     assert!(!resolved.state_pane_stale);
@@ -271,11 +268,17 @@ fn resolve_qualified_name_state_pane_must_uniquely_match_scoped_candidates() {
                     .as_object_mut()
                     .unwrap()
                     .remove("pane_id");
-                vec![pane("team-a", "qa", "%worker"), pane("team-a", "qa", "%idle")]
+                vec![
+                    pane("team-a", "qa", "%worker"),
+                    pane("team-a", "qa", "%idle"),
+                ]
             }
             "stale" => {
                 team["agents"]["qa"]["pane_id"] = json!("%stale");
-                vec![pane("team-a", "qa", "%worker"), pane("team-a", "qa", "%idle")]
+                vec![
+                    pane("team-a", "qa", "%worker"),
+                    pane("team-a", "qa", "%idle"),
+                ]
             }
             "cross-session" => vec![
                 pane("old-team-a", "qa", "%worker"),
@@ -293,12 +296,9 @@ fn resolve_qualified_name_state_pane_must_uniquely_match_scoped_candidates() {
         };
         seed_state(&ws, state_with_teams(json!({"team-a": team})));
         let transport = OfflineTransport::new().with_targets(targets);
-        let err = resolve_name_with_transport(
-            &ws,
-            &format!("{}::team-a/qa", ws.display()),
-            &transport,
-        )
-        .expect_err("non-unique state pane evidence must remain fail-closed");
+        let err =
+            resolve_name_with_transport(&ws, &format!("{}::team-a/qa", ws.display()), &transport)
+                .expect_err("non-unique state pane evidence must remain fail-closed");
         assert_eq!(err.kind, NamedAddressErrorKind::NameAmbiguous, "{scenario}");
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -313,11 +313,8 @@ fn resolve_qualified_name_canonicalizes_legacy_session_alias() {
             "teamdir": worker_team("team-displayname", "qa", "%1", "qa")
         })),
     );
-    let transport = OfflineTransport::new().with_targets(vec![pane(
-        "team-displayname",
-        "qa",
-        "%1",
-    )]);
+    let transport =
+        OfflineTransport::new().with_targets(vec![pane("team-displayname", "qa", "%1")]);
 
     let resolved = resolve_name_with_transport(&ws, "displayname/qa", &transport)
         .expect("qualified legacy alias must resolve through the canonical selector");
@@ -380,21 +377,21 @@ fn send_to_name_mutual_exclusion() {
     let args = named_send_args(&cwd, Some("team-a/qa"), Some("%1"), None, &["hello"]);
     let err = cmd_send(&args).unwrap_err();
     assert!(
-        matches!(err, CliError::Usage(ref message) if message.contains("--to-name and --pane/TARGET/--to are mutually exclusive")),
+        matches!(err, CliError::Usage(ref message) if message.contains("--to-name/--pane/--to") && message.contains("不能同时")),
         "expected --to-name mutual exclusion, got {err:?}"
     );
 
     let args = named_send_args(&cwd, Some("team-a/qa"), None, Some("worker"), &["hello"]);
     let err = cmd_send(&args).unwrap_err();
     assert!(
-        matches!(err, CliError::Usage(ref message) if message.contains("--to-name and --pane/TARGET/--to are mutually exclusive")),
+        matches!(err, CliError::Usage(ref message) if message.contains("--to-name/--pane/--to") && message.contains("不能同时")),
         "expected --to-name/--to mutual exclusion, got {err:?}"
     );
 
     let args = named_send_args(&cwd, Some("team-a/qa"), None, None, &[]);
     let err = cmd_send(&args).unwrap_err();
     assert!(
-        matches!(err, CliError::Usage(ref message) if message == "--to-name requires a non-empty message"),
+        matches!(err, CliError::Usage(ref message) if message == "请填写任务内容；--to-name 不能发送空消息"),
         "expected empty-message usage error, got {err:?}"
     );
     let _ = std::fs::remove_dir_all(&cwd);

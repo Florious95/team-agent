@@ -105,24 +105,19 @@ pub fn cmd_leader_passthrough(
     cwd: &Path,
 ) -> Result<CmdResult, CliError> {
     if provider_args == ["-h"] || provider_args == ["--help"] {
-        return Ok(CmdResult::none());
+        return Ok(CmdResult::human(&super::emit::command_help(Some(command))));
     }
     let as_json = leader_launcher_json(provider_args);
     let launcher_args = without_leader_json(provider_args);
     let attach = leader_launcher_args(&launcher_args)?;
-    let provider = leader_passthrough_provider(command).ok_or_else(|| {
-        CliError::Usage(format!(
-            "unknown leader passthrough command: {command}"
-        ))
-    })?;
+    let provider = leader_passthrough_provider(command)
+        .ok_or_else(|| CliError::Usage(format!("unknown leader passthrough command: {command}")))?;
     let value = lifecycle_port::start_leader(provider, &attach.provider_args, cwd, &attach)?;
     Ok(CmdResult::from_json(value, as_json))
 }
 
 /// Closed-set verb → Provider. `None` = not a passthrough verb (must not become ClaudeCode).
-pub(crate) fn leader_passthrough_provider(
-    command: &str,
-) -> Option<crate::model::enums::Provider> {
+pub(crate) fn leader_passthrough_provider(command: &str) -> Option<crate::model::enums::Provider> {
     use crate::model::enums::Provider;
     match command {
         "codex" => Some(Provider::Codex),

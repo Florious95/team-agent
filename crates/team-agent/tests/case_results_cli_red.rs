@@ -749,8 +749,8 @@ fn envelope(row: &Value) -> &Value {
 
 fn assert_results_help(output: &Output, tooth: &str) -> String {
     assert!(
-        output.status.success(),
-        "{tooth} RED results_cli_help_missing: stdout={} stderr={}",
+        output.status.code() == Some(2),
+        "{tooth} hidden Machine help must be Usage2: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -760,8 +760,8 @@ fn assert_results_help(output: &Output, tooth: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text.contains("usage: team-agent results --case"),
-        "{tooth} RED results_cli_help_missing: help={text}"
+        text.contains("team-agent --help") && !text.contains("results") && !text.contains("--case"),
+        "{tooth} private usage/name/flags leaked instead of Human navigation: help={text}"
     );
     text
 }

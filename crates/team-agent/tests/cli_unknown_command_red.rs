@@ -90,11 +90,11 @@ fn unknown_subcommand_uses_d_o_error_exit1_with_argparse_diagnostic() {
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        err.starts_with("usage: team-agent"),
+        err.starts_with("用法：team-agent"),
         "golden prints an argparse usage block to stderr; Rust is SILENT. got {err:?}"
     );
     assert!(
-        err.contains("team-agent: error:") && err.contains("invalid choice: 'bogus'"),
+        err.contains("错误：") && err.contains("没有这个操作") && err.contains("'bogus'"),
         "golden: `team-agent: error: argument {{...}}: invalid choice: 'bogus' (choose from ...)`; \
          got {err:?}"
     );
@@ -102,22 +102,13 @@ fn unknown_subcommand_uses_d_o_error_exit1_with_argparse_diagnostic() {
 
 // ── missing subcommand (no args) -> argparse `required` error to STDERR, exit 2 (sibling gap) ──
 #[test]
-fn no_subcommand_is_argparse_required_error_exit2() {
+fn no_subcommand_is_pure_root_help_exit0() {
     let cwd = tmp_cwd("noargs");
     let out = run(&[], &cwd);
-    let err = String::from_utf8_lossy(&out.stderr);
-
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "golden argparse requires a subcommand -> exit 2; Rust run() with no argv returns \
-         ExitCode::Ok (exit 0). got {:?}",
-        out.status.code()
-    );
-    assert!(
-        err.starts_with("usage: team-agent")
-            && err.contains("the following arguments are required"),
-        "golden: usage block + `team-agent: error: the following arguments are required: {{...}}`; \
-         got {err:?}"
-    );
+    let help = run(&["--help"], &cwd);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(help.status.code(), Some(0));
+    assert_eq!(out.stdout, help.stdout);
+    assert!(out.stderr.is_empty() && help.stderr.is_empty());
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
 }

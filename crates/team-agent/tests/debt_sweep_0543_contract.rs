@@ -258,8 +258,11 @@ fn send_pane_compat_surface_has_no_direct_inject_path() {
     let source = composite_source::composite_source("src/cli/send.rs");
     assert!(!source.contains("fn send_to_pane_direct"));
     assert!(!source.contains("send.pane_direct"));
-    assert!(source.contains("--pane {pane_id} is deprecated and sunset"));
-    assert!(source.contains("use a logical TARGET"));
+    assert!(source.contains("--pane {pane_id} 已不再支持"));
+    assert!(source.contains("warn_send_alias(\"--pane\")"));
+    assert!(source.contains(
+        "请用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选择项目和队伍"
+    ));
 }
 
 include!("support/debt_sweep_0543.rs");

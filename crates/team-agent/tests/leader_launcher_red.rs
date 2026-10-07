@@ -42,7 +42,15 @@ fn assert_brief_shape(value: &Value, context: &str) {
         keys.sort();
         assert_eq!(
             keys,
-            vec!["activity", "health", "name", "provider", "runtime_status", "session_name", "tmux_command"],
+            vec![
+                "activity",
+                "health",
+                "name",
+                "provider",
+                "runtime_status",
+                "session_name",
+                "tmux_command"
+            ],
             "{context}: exact seven-field status projection: {node}"
         );
     }
@@ -249,7 +257,7 @@ fn external_leader_after_dashdash_fails_with_visible_guidance() {
         "stderr must name the misplaced flag; stderr={stderr:?}"
     );
     assert!(
-        stderr.contains("action: move the Team Agent launcher flag before `--`"),
+        stderr.contains("action: 将主控启动选项放在 -- 前面；-- 后面只能是工具自己的参数。"),
         "stderr must tell the user how to fix the flag boundary; stderr={stderr:?}"
     );
     assert!(
@@ -348,10 +356,7 @@ fn attach_leader_prefers_verified_caller_socket_over_worker_socket() {
                 std::env::var("PATH").unwrap_or_default()
             )),
         ),
-        (
-            "TMUX",
-            Some(format!("{},123,0", caller_socket.display())),
-        ),
+        ("TMUX", Some(format!("{},123,0", caller_socket.display()))),
         ("TMUX_PANE", Some("%77".to_string())),
     ]);
 
@@ -788,7 +793,8 @@ esac
 "#,
                 self.tmux_log.display(),
                 socket_path.display(),
-                workspace = self.bin
+                workspace = self
+                    .bin
                     .parent()
                     .expect("workspace fake-bin has parent")
                     .to_string_lossy()

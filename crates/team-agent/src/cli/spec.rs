@@ -1,7 +1,4 @@
-//!
-//! C1 command registry: one catalog for help visibility, known-command gates,
-//! suggestion candidates, and command-tier governance.
-
+//! Human command catalog: help, spelling suggestions, and public dispatch guards.
 #![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11,7 +8,6 @@ pub(crate) enum CommandTier {
     Secondary,
     DevInternal,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandCategory {
     Start,
@@ -23,105 +19,75 @@ pub(crate) enum CommandCategory {
     Observe,
     Dev,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
     Dispatch(DispatchKind),
     LeaderPassthrough { provider: &'static str },
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TokenUsage {
     No,
     Yes,
     Conditional,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DispatchKind {
     QuickStart,
     Send,
-    AllowPeerTalk,
     Status,
-    Shutdown,
+    Models,
+    Inbox,
     Restart,
+    Shutdown,
+    AddAgent,
     StartAgent,
     StopAgent,
     ResetAgent,
-    AddAgent,
     CloneAgent,
     ForkAgent,
     RemoveAgent,
-    Takeover,
-    ClaimLeader,
-    AttachLeader,
-    AttachAppServerLeader,
-    Identity,
-    Approvals,
-    Inbox,
-    Doctor,
-    Watch,
-    Sessions,
     Leaders,
-    Validate,
-    InstallSkill,
-    Profile,
-    Results,
-    Wait,
-    Preflight,
-    WaitReady,
-    E2e,
-    Peek,
-    Coordinator,
-    Models,
+    Doctor,
+    Approvals,
+    AllowPeerTalk,
     Route,
+    Profile,
+    InstallSkill,
+    ClaimLeader,
+    Takeover,
+    AttachLeader,
 }
-
 pub(crate) const ALL_DISPATCH_KINDS: &[DispatchKind] = &[
     DispatchKind::QuickStart,
     DispatchKind::Send,
-    DispatchKind::AllowPeerTalk,
     DispatchKind::Status,
-    DispatchKind::Shutdown,
+    DispatchKind::Models,
+    DispatchKind::Inbox,
     DispatchKind::Restart,
+    DispatchKind::Shutdown,
+    DispatchKind::AddAgent,
     DispatchKind::StartAgent,
     DispatchKind::StopAgent,
     DispatchKind::ResetAgent,
-    DispatchKind::AddAgent,
     DispatchKind::CloneAgent,
     DispatchKind::ForkAgent,
     DispatchKind::RemoveAgent,
-    DispatchKind::Takeover,
-    DispatchKind::ClaimLeader,
-    DispatchKind::AttachLeader,
-    DispatchKind::AttachAppServerLeader,
-    DispatchKind::Identity,
-    DispatchKind::Approvals,
-    DispatchKind::Inbox,
-    DispatchKind::Doctor,
-    DispatchKind::Watch,
-    DispatchKind::Sessions,
     DispatchKind::Leaders,
-    DispatchKind::Validate,
-    DispatchKind::InstallSkill,
-    DispatchKind::Profile,
-    DispatchKind::Results,
-    DispatchKind::Wait,
-    DispatchKind::Preflight,
-    DispatchKind::WaitReady,
-    DispatchKind::E2e,
-    DispatchKind::Peek,
-    DispatchKind::Coordinator,
-    DispatchKind::Models,
+    DispatchKind::Doctor,
+    DispatchKind::Approvals,
+    DispatchKind::AllowPeerTalk,
     DispatchKind::Route,
+    DispatchKind::Profile,
+    DispatchKind::InstallSkill,
+    DispatchKind::ClaimLeader,
+    DispatchKind::Takeover,
+    DispatchKind::AttachLeader,
 ];
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GovernanceNote {
     pub(crate) decision: &'static str,
     pub(crate) reason: &'static str,
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CommandSpec {
     pub(crate) name: &'static str,
@@ -139,58 +105,39 @@ pub(crate) struct CommandSpec {
     pub(crate) governance: Option<GovernanceNote>,
 }
 
-/// Visible default-help contract:
-/// - d40 / v0.5.77 published 15 names including `models` and excluding `results`.
-/// - `results` remains a public handler and must stay discoverable.
-/// - Exact composed set is d40 ∪ {results}. This is a frozen name set, not a
-///   numeric slack threshold.
+// Only human operations belong here. Compatibility commands are private in emit.rs.
 #[rustfmt::skip]
 pub(crate) const COMMAND_SPECS: &[CommandSpec] = &[
-    CommandSpec { name: "quick-start", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::QuickStart), summary: "start or attach a team from TEAM.md", usage: "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--backend tmux|conpty] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "send", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Send), summary: "persist a message for an in-team short name or fully-qualified logical recipient", usage: "usage: team-agent send TO MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--mailbox] [--json]\nTO forms are co-equal: an in-team short name (for example `team-agent send reviewer \"Review\"`) or `<workspace>::<team>/<agent>`.", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: Some("next compatibility release"), action: Some("use positional logical TO and the returned message id"), governance: None },
-    CommandSpec { name: "status", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Status), summary: "show current team status", usage: "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "models", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Models), summary: "list exact provider model ids", usage: "usage: team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok] [QUERY|--search TEXT] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "results", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Results), summary: "read reported results for a case", usage: "usage: team-agent results --case CASE_ID [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "wait", tier: CommandTier::Core, category: CommandCategory::Daily, kind: CommandKind::Dispatch(DispatchKind::Wait), summary: "block until a task result is stored", usage: "usage: team-agent wait --task TASK [--workspace WORKSPACE] [--json]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "restart", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Restart), summary: "restart the selected team", usage: "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "shutdown", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Shutdown), summary: "stop the selected team", usage: "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "add-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::AddAgent), summary: "create and start a new worker", usage: "usage: team-agent add-agent AGENT [--role-file FILE] [--provider NAME] [--bypass true|false] [--model SLUG] [--effort LEVEL] [--prompt TEXT] [--profile NAME] [--force] [--workspace WORKSPACE] [--team TEAM] [--json] (provider/bypass required from CLI or role file; conflicting values rejected; force only recreates a confirmed dead registered pane)", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "start-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::StartAgent), summary: "update and start a stopped worker (stop first if running)", usage: "usage: team-agent start-agent AGENT [--model SLUG] [--effort LEVEL] [--bypass true|false] [--prompt TEXT] [--profile NAME] [--provider NAME] [--workspace WORKSPACE] [--team TEAM] [--allow-fresh] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "stop-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::StopAgent), summary: "stop a worker", usage: "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "reset-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::ResetAgent), summary: "reset a worker session", usage: "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "claim-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::ClaimLeader), summary: "bind this pane when doctor reports rebind_required", usage: "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "takeover", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::Takeover), summary: "replace a live leader binding with explicit consent", usage: "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "attach-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::AttachLeader), summary: "bind an external leader pane", usage: "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--pane PANE] [--provider PROVIDER] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-
-    CommandSpec { name: "codex", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "codex" }, summary: "launch a Codex leader", usage: "usage: team-agent codex [provider args...]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-    CommandSpec { name: "claude", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "claude" }, summary: "launch a Claude leader", usage: "usage: team-agent claude [provider args...]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-    CommandSpec { name: "copilot", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "copilot" }, summary: "launch a Copilot leader", usage: "usage: team-agent copilot [provider args...]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-    CommandSpec { name: "grok", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "grok" }, summary: "launch a Grok leader", usage: "usage: team-agent grok [provider args...]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-    CommandSpec { name: "cursor", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "cursor" }, summary: "launch a Cursor leader", usage: "usage: team-agent cursor [provider args...]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-    CommandSpec { name: "pi", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "pi" }, summary: "launch a Pi leader", usage: "usage: team-agent pi [provider args...]", default_help: false, command_help: true, suggestion_index: true, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-
-    CommandSpec { name: "leaders", tier: CommandTier::Secondary, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Leaders), summary: "list live, stale, or ambiguous host leaders", usage: "usage: team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "doctor", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Doctor), summary: "inspect environment and Team runtime health", usage: "usage: team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--gate orphans|comms] [--comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "attach-app-server-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::AttachAppServerLeader), summary: "bind an app-server leader receiver", usage: "usage: team-agent attach-app-server-leader [--workspace WORKSPACE] [--team TEAM] --socket unix:///path.sock --thread-id THREAD_ID [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "remove-agent", tier: CommandTier::Secondary, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::RemoveAgent), summary: "remove a worker", usage: "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "fork-agent", tier: CommandTier::Secondary, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::ForkAgent), summary: "fork a worker", usage: "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "clone-agent", tier: CommandTier::Secondary, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::CloneAgent), summary: "clone a worker role into a fresh session", usage: "usage: team-agent clone-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
-    CommandSpec { name: "allow-peer-talk", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::AllowPeerTalk), summary: "allow direct worker peer talk", usage: "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "capability/config surface" }) },
-    CommandSpec { name: "approvals", tier: CommandTier::Secondary, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Approvals), summary: "inspect provider approval state", usage: "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "approval diagnostics" }) },
-    CommandSpec { name: "route", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Route), summary: "manage global native CLI argv routing", usage: "usage: team-agent route [status|enable|disable|show|set|add|clear] [PROVIDER] [--json] [-- ARG ...]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "opt-in host-global provider argv setup" }) },
-    CommandSpec { name: "profile", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Profile), summary: "manage provider profiles", usage: "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "provider/profile setup" }) },
-    CommandSpec { name: "install-skill", tier: CommandTier::Secondary, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::InstallSkill), summary: "install or uninstall Team Agent skills", usage: "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: Some(GovernanceNote { decision: "secondary", reason: "capability setup" }) },
-    CommandSpec { name: "inbox", tier: CommandTier::Secondary, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Inbox), summary: "inspect recent message summaries", usage: "usage: team-agent inbox AGENT [-n N|--limit N] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-
-    CommandSpec { name: "identity", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Identity), summary: "inspect identity metadata", usage: "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "watch", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Watch), summary: "watch event logs", usage: "usage: team-agent watch [--workspace WORKSPACE] [--team TEAM]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "sessions", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Sessions), summary: "inspect session inventory", usage: "usage: team-agent sessions [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "validate", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Validate), summary: "validate a team spec", usage: "usage: team-agent validate [SPEC] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "preflight", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Preflight), summary: "run preflight checks", usage: "usage: team-agent preflight [TEAMDIR] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "wait-ready", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::WaitReady), summary: "wait for runtime readiness", usage: "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "e2e", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::E2e), summary: "run e2e harness", usage: "usage: team-agent e2e [--workspace WORKSPACE] [--providers LIST] [--real] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::Yes, sunset: None, action: None, governance: None },
-    CommandSpec { name: "peek", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Peek), summary: "capture low-level terminal output", usage: "usage: team-agent peek AGENT [--workspace WORKSPACE] [--tail N|--head N] [--search TEXT] [--allow-raw-screen] [--json]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
-    CommandSpec { name: "coordinator", tier: CommandTier::DevInternal, category: CommandCategory::Dev, kind: CommandKind::Dispatch(DispatchKind::Coordinator), summary: "run the coordinator daemon", usage: "usage: team-agent coordinator [--workspace WORKSPACE] [--once] [--tick-interval SECONDS]", default_help: false, command_help: true, suggestion_index: false, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "quick-start", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::QuickStart), summary: "从角色文件启动队伍，或查看已有队伍的连接方式", usage: "team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--team TEAM] [--name NAME] [--team-id TEAM] [--yes] [--backend tmux|conpty] [--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "send", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Send), summary: "向指定队友派发任务", usage: "team-agent send <agent> MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--mailbox] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: Some("后续兼容版本"), action: Some("使用 team-agent send <agent> '任务内容'，用 --workspace 和 --team 选择队伍"), governance: None },
+    CommandSpec { name: "status", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Status), summary: "查看队友状态，不读取队友的对话内容", usage: "team-agent status [<agent>] [--workspace WORKSPACE] [--team TEAM] [--json] [--summary|--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "models", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Models), summary: "查找工具实际支持的模型名称", usage: "team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok] [QUERY|--search TEXT] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "inbox", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::Dispatch(DispatchKind::Inbox), summary: "查看队友回复", usage: "team-agent inbox <agent> [-n N|--limit N] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "restart", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Restart), summary: "恢复已有队伍，优先沿用已保存的会话", usage: "team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "shutdown", tier: CommandTier::Core, category: CommandCategory::TeamLifecycle, kind: CommandKind::Dispatch(DispatchKind::Shutdown), summary: "关闭指定队伍，并查看是否仍有残留资源", usage: "team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "add-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::AddAgent), summary: "新增并启动一位队友", usage: "team-agent add-agent <agent> [--role-file FILE] [--provider TOOL] [--model MODEL] [--effort LEVEL] [--bypass true|false] [--prompt TEXT] [--profile NAME] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "start-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::StartAgent), summary: "启动队伍中已有的队友", usage: "team-agent start-agent <agent> [--provider TOOL] [--model MODEL] [--effort LEVEL] [--bypass true|false] [--prompt TEXT] [--profile NAME] [--workspace WORKSPACE] [--team TEAM] [--allow-fresh] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "stop-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::StopAgent), summary: "暂停一位队友，保留其配置和会话记录", usage: "team-agent stop-agent <agent> [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "reset-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::ResetAgent), summary: "清除队友保存的会话关联", usage: "team-agent reset-agent <agent> --discard-session [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "clone-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::CloneAgent), summary: "复制队友配置，创建新队友", usage: "team-agent clone-agent <agent> --as NEW_AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "fork-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::ForkAgent), summary: "在工具支持的条件下从队友会话分出新队友", usage: "team-agent fork-agent <agent> --as NEW_AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "remove-agent", tier: CommandTier::Core, category: CommandCategory::WorkerLifecycle, kind: CommandKind::Dispatch(DispatchKind::RemoveAgent), summary: "确认后移除一位队友", usage: "team-agent remove-agent <agent> --confirm [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--force] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "leaders", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Leaders), summary: "查看本机可用的主控及其所属队伍", usage: "team-agent leaders [QUERY|--search TEXT] [--all|--stale] [--json] | --prune [--dry-run] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "doctor", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Doctor), summary: "检查队伍并给出恢复建议，默认不修复", usage: "team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--comms] [--gate orphans|comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "approvals", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::Approvals), summary: "查看队友正在等待的权限确认", usage: "team-agent approvals [<agent>] [--workspace WORKSPACE] [--team TEAM] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "allow-peer-talk", tier: CommandTier::Core, category: CommandCategory::Observe, kind: CommandKind::Dispatch(DispatchKind::AllowPeerTalk), summary: "允许两位队友直接交流", usage: "team-agent allow-peer-talk <agent> OTHER_AGENT [--workspace WORKSPACE] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "route", tier: CommandTier::Core, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Route), summary: "设置工具启动时额外使用的命令行参数", usage: "team-agent route [status|enable|disable|show [TOOL]|set TOOL -- ARG...|add TOOL -- ARG...|clear TOOL] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "profile", tier: CommandTier::Core, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::Profile), summary: "管理登录方式和代理设置", usage: "team-agent profile init|doctor|show NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--proxy-mode direct|inherit] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "install-skill", tier: CommandTier::Core, category: CommandCategory::Setup, kind: CommandKind::Dispatch(DispatchKind::InstallSkill), summary: "可选：安装已有的公开操作指南", usage: "team-agent install-skill (--source DIR|--uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "claim-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::ClaimLeader), summary: "仅按体检提示，将当前终端登记为主控", usage: "team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json] [--detail]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "takeover", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::Takeover), summary: "仅按体检提示，确认后接管现有队伍", usage: "team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "attach-leader", tier: CommandTier::Guided, category: CommandCategory::GuidedRecovery, kind: CommandKind::Dispatch(DispatchKind::AttachLeader), summary: "仅按体检提示，将已核验的终端连接为主控", usage: "team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] --pane PANE --provider TOOL [--confirm] [--json]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::No, sunset: None, action: None, governance: None },
+    CommandSpec { name: "pi", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "pi" }, summary: "用 Pi 打开主控对话", usage: "team-agent pi [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "codex", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "codex" }, summary: "用 Codex 打开主控对话", usage: "team-agent codex [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "claude", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "claude" }, summary: "用 Claude Code 打开主控对话", usage: "team-agent claude [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "copilot", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "copilot" }, summary: "用 Copilot 打开主控对话", usage: "team-agent copilot [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "grok", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "grok" }, summary: "用 Grok 打开主控对话", usage: "team-agent grok [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
+    CommandSpec { name: "cursor", tier: CommandTier::Core, category: CommandCategory::Start, kind: CommandKind::LeaderPassthrough { provider: "cursor_agent" }, summary: "用 Cursor 的 agent 工具打开主控对话", usage: "team-agent cursor [--attach-existing] [--confirm] [--attach-session SESSION] [--external-leader] [--allow-nested-attach] [--json] [-- TOOL_ARGS...]", default_help: true, command_help: true, suggestion_index: true, token_usage: TokenUsage::Conditional, sunset: None, action: None, governance: None },
 ];
 
 pub(crate) fn command_spec(name: &str) -> Option<&'static CommandSpec> {

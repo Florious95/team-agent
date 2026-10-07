@@ -30,10 +30,8 @@ impl Fixture {
     fn new(tag: &str) -> Self {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "ta-doctor-health-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ta-doctor-health-{tag}-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("create fixture root");
         let workspace = root.join("workspace");
@@ -597,7 +595,10 @@ fn p14_explicit_team_selection_is_isolated_and_missing_selection_fails() {
 
 #[test]
 fn p15_explicit_gate_and_repair_modes_keep_safe_rejections_and_evidence() {
-    for args in [&["--fix", "--json"][..], &["--gate", "not-a-gate", "--json"][..]] {
+    for args in [
+        &["--fix", "--json"][..],
+        &["--gate", "not-a-gate", "--json"][..],
+    ] {
         let fixture = Fixture::new("p15-doctor");
         let doctor = run("doctor", args, &fixture);
         assert_eq!(doctor.status.code(), Some(1), "{args:?}");
@@ -671,11 +672,11 @@ fn p17_normal_shutdown_is_not_reported_as_missing_session() {
 #[test]
 fn p18_unrelated_cli_help_and_status_entry_points_remain_available() {
     let fixture = Fixture::new("p18-other-commands");
-    for command in ["preflight", "wait-ready", "status"] {
+    for (command, exit) in [("preflight", 2), ("wait-ready", 2), ("status", 0)] {
         let output = run(command, &["--help"], &fixture);
         assert_eq!(
             output.status.code(),
-            Some(0),
+            Some(exit),
             "P18 unrelated command {command} help regressed: {}",
             text(&output.stderr)
         );

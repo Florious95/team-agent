@@ -16,6 +16,9 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         args.yes,
         args.backend.as_deref(),
     )?;
+    if let Some(result) = quick_start_config_guidance(&mut value, args) {
+        return Ok(result);
+    }
     append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
     let readiness = value.get("readiness").and_then(Value::as_object);
     let all_resumable_have_session = readiness
@@ -46,6 +49,29 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         if args.json && status.as_deref() == Some("pending_tool_load") {
             result.exit = ExitCode::Ok;
         }
+        if !args.json {
+            if let CmdOutput::Json(value) = &result.output {
+                let explanation = if value.get("ok").and_then(Value::as_bool) == Some(false) {
+                    format!(
+                        "启动未完成：{}",
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("队伍尚未准备好接收任务")
+                    )
+                } else {
+                    "队伍尚未准备好接收任务；请等待工具完成启动。".to_string()
+                };
+                let mut doctor = format!(
+                    "team-agent doctor --workspace {}",
+                    shell_quote(&args.workspace.to_string_lossy())
+                );
+                if let Some(team) = args.team_id.as_deref() {
+                    doctor.push_str(&format!(" --team {}", shell_quote(team)));
+                }
+                result.output = CmdOutput::Human(format!("{explanation}\n下一步：运行 {doctor}，按体检提示处理；用 status 查看状态，不反复起队或重发任务。"));
+            }
+        }
         Ok(result)
     } else {
         // E13:happy 人类路径必须带 attach_commands(json 路径 cli/mod.rs:1775 已有)。
@@ -53,13 +79,99 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     }
 }
 
+// Project only an actual compiler rejection; never reject a valid lifecycle fallback.
+fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Option<CmdResult> {
+    if value.get("ok").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let error = value.get("error")?.as_str()?;
+    let compile = error.strip_prefix("spec compile failed: ")?;
+    let detail = compile
+        .strip_prefix("validation error: ")
+        .unwrap_or(compile);
+    let team_path = args.agents_dir.join("TEAM.md");
+    let agents_path = args.agents_dir.join("agents");
+    let missing_team = detail == format!("{}: missing TEAM.md", team_path.display())
+        && team_path.try_exists().ok() == Some(false);
+    let missing_roles = detail == format!("{}: missing agents directory", agents_path.display())
+        || detail == format!("{}: no role docs found", agents_path.display());
+    let missing_field = detail.split_once(": ").is_some_and(|(path, reason)| {
+        Path::new(path).parent() == Some(agents_path.as_path())
+            && (reason.contains("missing required field") || reason.contains("is required"))
+    });
+    if !missing_team && !(team_path.is_file() && (missing_roles || missing_field)) {
+        return None;
+    }
+    let role_path = agents_path.join("worker.md");
+    let mut retry = format!(
+        "team-agent quick-start {} --workspace {}",
+        shell_quote(&args.agents_dir.to_string_lossy()),
+        shell_quote(&args.workspace.to_string_lossy())
+    );
+    if let Some(team) = args.team_id.as_deref() {
+        retry.push_str(&format!(" --team {}", shell_quote(team)));
+    }
+    if let Some(name) = args.name.as_deref() {
+        retry.push_str(&format!(" --name {}", shell_quote(name)));
+    }
+    if let Some(backend) = args.backend.as_deref() {
+        retry.push_str(&format!(" --backend {}", shell_quote(backend)));
+    }
+    if args.yes {
+        retry.push_str(" --yes");
+    }
+    if args.detail {
+        retry.push_str(" --detail");
+    }
+    if args.json {
+        retry.push_str(" --json");
+    }
+    let explanation = if missing_team {
+        format!("这里还没有队伍配置：{}。没有启动任何队友。请自行创建下面两个文件；本命令没有写入这些文件。", team_path.display())
+    } else {
+        format!("队友配置尚不完整：{detail}。请补齐角色目录或必需字段；下面仅给安全示例，不覆盖已有文件。")
+    };
+    let next = format!("确认 Pi 已安装并登录；运行 team-agent models --provider pi 核对模型。\n运行 team-agent pi，在该主控的命令行/工具上下文再次执行：\n{retry}");
+    let mut templates =
+        vec![serde_json::json!({"path": role_path, "content": super::emit::WORKER_TEMPLATE})];
+    let mut human = explanation.clone();
+    if missing_team {
+        templates.insert(
+            0,
+            serde_json::json!({"path": team_path, "content": super::emit::TEAM_TEMPLATE}),
+        );
+        human.push_str(&format!(
+            "\n\n{}：\n{}",
+            team_path.display(),
+            super::emit::TEAM_TEMPLATE
+        ));
+    }
+    human.push_str(&format!(
+        "\n\n{}：\n{}\n下一步：\n{next}",
+        role_path.display(),
+        super::emit::WORKER_TEMPLATE
+    ));
+    value["action"] = serde_json::json!(explanation);
+    value["next_actions"] =
+        serde_json::json!(["team-agent models --provider pi", "team-agent pi", retry]);
+    value["templates"] = serde_json::json!(templates);
+    if args.json {
+        Some(CmdResult::from_json(value.clone(), true))
+    } else {
+        let mut result = CmdResult::human(&human);
+        result.exit = ExitCode::Error;
+        Some(result)
+    }
+}
+
 /// E13:quick-start "team 起了" 人类输出 = summary + attach 块。所有成功出口共用(别每分支手拷)。
 /// attach_commands 缺/空 → 只 summary(向后兼容)。
 fn quickstart_human(value: &Value) -> String {
-    let summary = value
-        .get("summary")
-        .and_then(Value::as_str)
-        .unwrap_or("quick-start complete");
+    let summary = if value.get("summary").and_then(Value::as_str) == Some("existing runtime") {
+        "发现已有队伍；请查看返回的连接方式，不会另建同名队伍。"
+    } else {
+        "队伍已启动；下面是连接方式和派发任务的命令。"
+    };
     let attach: Vec<&str> = value
         .get("attach_commands")
         .and_then(Value::as_array)
@@ -72,14 +184,14 @@ fn quickstart_human(value: &Value) -> String {
         .unwrap_or_default();
     let mut out = String::from(summary);
     if !attach.is_empty() {
-        out.push_str("\n\nattach:");
+        out.push_str("\n\n连接队伍：");
         for cmd in attach {
             out.push_str("\n  ");
             out.push_str(cmd);
         }
     }
     if !sends.is_empty() {
-        out.push_str("\n\nsend:");
+        out.push_str("\n\n派发任务（请替换任务内容）：");
         for cmd in sends {
             out.push_str("\n  ");
             out.push_str(cmd);
@@ -146,7 +258,7 @@ pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) ->
     let mut command = format!(
         "team-agent send {} {} --workspace {}",
         shell_quote(agent),
-        shell_quote("MESSAGE"),
+        shell_quote("请完成任务并把答案回复给 leader。"),
         shell_quote(workspace)
     );
     if let Some(team) = team {
@@ -156,7 +268,7 @@ pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) ->
     Some(command)
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if value.bytes().all(|byte| {
         byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':')
     }) {
@@ -551,10 +663,8 @@ fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
                 "next_actions": [],
             }),
         )?;
-        let auto_finalized = report
-            .get("finalization_status")
-            .and_then(Value::as_str)
-            == Some("auto_finalized");
+        let auto_finalized =
+            report.get("finalization_status").and_then(Value::as_str) == Some("auto_finalized");
         let shutdown = fake_shutdown(workspace)?;
         let ok = launch.get("ok").and_then(Value::as_bool) == Some(true)
             && send.ok
@@ -1015,27 +1125,24 @@ fn format_inbox_human(agent: &str, value: &Value) -> String {
                     .and_then(Value::as_str)
                     .unwrap_or("-"),
             );
-            let sender = clean_inbox_field(
-                message.get("sender").and_then(Value::as_str).unwrap_or("-"),
-            );
+            let sender =
+                clean_inbox_field(message.get("sender").and_then(Value::as_str).unwrap_or("-"));
             let recipient = clean_inbox_field(
                 message
                     .get("recipient")
                     .and_then(Value::as_str)
                     .unwrap_or("-"),
             );
-            let status = clean_inbox_field(
-                message.get("status").and_then(Value::as_str).unwrap_or("-"),
-            );
+            let status =
+                clean_inbox_field(message.get("status").and_then(Value::as_str).unwrap_or("-"));
             let time = clean_inbox_field(
                 message
                     .get("created_at")
                     .and_then(Value::as_str)
                     .unwrap_or("-"),
             );
-            let summary = clean_inbox_field(
-                message.get("summary").and_then(Value::as_str).unwrap_or(""),
-            );
+            let summary =
+                clean_inbox_field(message.get("summary").and_then(Value::as_str).unwrap_or(""));
             truncate_inbox_line(&format!(
                 "[{id}] [{sender} -> {recipient}] [{status}] [{time}] [{summary}]"
             ))
@@ -1054,8 +1161,7 @@ pub fn cmd_takeover(args: &TakeoverArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_claim_leader`(`commands.py:156`)。
 pub fn cmd_claim_leader(args: &ClaimLeaderArgs) -> Result<CmdResult, CliError> {
-    let mut value =
-        leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?;
+    let mut value = leader_port::claim_leader(&args.workspace, args.team.as_deref(), args.confirm)?;
     if !args.detail {
         leader_port::compact_lease_value(&mut value);
     }
@@ -1104,10 +1210,7 @@ pub fn cmd_start_agent(args: &StartAgentArgs) -> Result<CmdResult, CliError> {
     )?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "agent_ids".to_string(),
-                json!([args.agent.as_str()]),
-            );
+            object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
         }
     }
     append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
@@ -1147,10 +1250,7 @@ pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
     )?;
     if value.get("agent_ids").is_none() {
         if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "agent_ids".to_string(),
-                json!([args.agent.as_str()]),
-            );
+            object.insert("agent_ids".to_string(), json!([args.agent.as_str()]));
         }
     }
     append_send_guidance(&mut value, &args.workspace, args.team.as_deref());
@@ -1222,10 +1322,8 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     }
 
     let explicit_comms = args.comms || matches!(args.gate, Some(DoctorGate::Comms));
-    let default_report = !explicit_comms
-        && args.gate.is_none()
-        && !args.cleanup_orphans
-        && !args.fix_schema;
+    let default_report =
+        !explicit_comms && args.gate.is_none() && !args.cleanup_orphans && !args.fix_schema;
     let mut value = if explicit_comms {
         crate::diagnose::comms::doctor_comms_json(
             &args.workspace,
@@ -1282,22 +1380,28 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
         args.team.as_deref(),
         crate::state::selector::SelectorMode::RuntimeOnly,
     );
-    let run_workspace = selected.as_ref().map(|selected| selected.run_workspace.clone())
-        .unwrap_or_else(|_| crate::model::paths::canonical_run_workspace(&args.workspace)
-            .unwrap_or_else(|_| args.workspace.clone()));
+    let run_workspace = selected
+        .as_ref()
+        .map(|selected| selected.run_workspace.clone())
+        .unwrap_or_else(|_| {
+            crate::model::paths::canonical_run_workspace(&args.workspace)
+                .unwrap_or_else(|_| args.workspace.clone())
+        });
     let runtime_present = selected.as_ref().is_ok_and(|selected| {
         crate::cli::diagnose::workspace_has_existing_team_runtime(
             &selected.run_workspace,
             &selected.team_key,
         )
     });
-    let db_present = crate::model::paths::runtime_dir(&run_workspace).join("team.db").exists();
+    let db_present = crate::model::paths::runtime_dir(&run_workspace)
+        .join("team.db")
+        .exists();
     // One read-only observation supplies both issue classification and details.
     // A physical database must be checked even before state.json is created.
     let health = (runtime_present || db_present).then(|| {
-        crate::coordinator::coordinator_health_read_only(
-            &crate::coordinator::WorkspacePath::new(run_workspace.clone()),
-        )
+        crate::coordinator::coordinator_health_read_only(&crate::coordinator::WorkspacePath::new(
+            run_workspace.clone(),
+        ))
     });
     match selected {
         Ok(selected) => {
@@ -1358,10 +1462,17 @@ fn unified_default_doctor_report(args: &DoctorArgs, mut value: Value) -> Value {
     }
     if let Some(object) = value.as_object_mut() {
         object.insert("runtime".to_string(), runtime);
-        object.insert("event_log".to_string(), Value::String(
-            run_workspace.join(".team").join("logs").join("events.jsonl")
-                .to_string_lossy().to_string(),
-        ));
+        object.insert(
+            "event_log".to_string(),
+            Value::String(
+                run_workspace
+                    .join(".team")
+                    .join("logs")
+                    .join("events.jsonl")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        );
     }
     finalize_doctor_report(&mut value, true);
     value
@@ -1385,7 +1496,10 @@ fn merge_report_array(report: &mut Value, key: &str, incoming: &Value) {
         .expect("report array normalized before merge");
     for item in items {
         let identity = report_item_identity(item);
-        if !target.iter().any(|existing| report_item_identity(existing) == identity) {
+        if !target
+            .iter()
+            .any(|existing| report_item_identity(existing) == identity)
+        {
             target.push(item.clone());
         }
     }
@@ -1450,11 +1564,17 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
     let mut add = |issue: Value, repair: Option<Value>| {
-        if !issues.iter().any(|existing| report_item_identity(existing) == report_item_identity(&issue)) {
+        if !issues
+            .iter()
+            .any(|existing| report_item_identity(existing) == report_item_identity(&issue))
+        {
             issues.push(issue);
         }
         if let Some(repair) = repair {
-            if !repairs.iter().any(|existing| report_item_identity(existing) == report_item_identity(&repair)) {
+            if !repairs
+                .iter()
+                .any(|existing| report_item_identity(existing) == report_item_identity(&repair))
+            {
                 repairs.push(repair);
             }
         }
@@ -1467,10 +1587,10 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
             .or_else(|| object.get("reason").and_then(Value::as_str))
             .unwrap_or("doctor_failed");
         let issue = if status == "failed" {
-            object
-                .get("gate")
-                .and_then(Value::as_str)
-                .map_or_else(|| "doctor_failed".to_string(), |gate| format!("{gate}_failed"))
+            object.get("gate").and_then(Value::as_str).map_or_else(
+                || "doctor_failed".to_string(),
+                |gate| format!("{gate}_failed"),
+            )
         } else if status.ends_with("_failed") || status == "refused" {
             status.to_string()
         } else {
@@ -1481,7 +1601,10 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
             .or_else(|| object.get("next_action"))
             .or_else(|| object.get("reason"))
             .cloned();
-        add(Value::String(issue), repair.map(|value| json!({"action": value})));
+        add(
+            Value::String(issue),
+            repair.map(|value| json!({"action": value})),
+        );
     }
     if object
         .get("workspace")
@@ -1512,9 +1635,9 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
         {
             add(
                 json!("grok_slot_mismatch"),
-                grok.get("reason").cloned().map(|reason| {
-                    json!({"issue": "grok_slot_mismatch", "action": reason})
-                }),
+                grok.get("reason")
+                    .cloned()
+                    .map(|reason| json!({"issue": "grok_slot_mismatch", "action": reason})),
             );
         }
     }
@@ -1559,7 +1682,9 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
     if runtime_status == "unresolved" {
         add(
             json!("runtime_selection_failed"),
-            Some(json!({"issue": "runtime_selection_failed", "action": "select an existing Team runtime"})),
+            Some(
+                json!({"issue": "runtime_selection_failed", "action": "select an existing Team runtime"}),
+            ),
         );
     }
     if runtime_status == "present"
@@ -1610,7 +1735,10 @@ mod tests {
         let output = format_inbox_human("worker", &value);
         for line in output.lines() {
             assert!(line.len() <= 160, "line is {} bytes: {line:?}", line.len());
-            assert!(!line.chars().any(char::is_control), "controls leaked: {line:?}");
+            assert!(
+                !line.chars().any(char::is_control),
+                "controls leaked: {line:?}"
+            );
         }
     }
 
@@ -1625,9 +1753,12 @@ mod tests {
             ],
         });
         let out = quickstart_human(&value);
-        assert!(out.contains("team started"), "must keep summary; got {out}");
         assert!(
-            out.contains("attach:"),
+            out.contains("队伍已启动"),
+            "must show startup summary; got {out}"
+        );
+        assert!(
+            out.contains("连接队伍："),
             "must render attach block; got {out}"
         );
         assert!(
@@ -1643,14 +1774,20 @@ mod tests {
     #[test]
     fn reminders_only_recommend_supported_result_commands() {
         let reminder = crate::cli::QUICK_START_REMINDER;
-        assert!(reminder.contains("Use team-agent status / inbox instead."));
+        assert!(reminder.contains("team-agent status"));
+        assert!(reminder.contains("team-agent inbox"));
         for text in [
             reminder,
             crate::cli::STATUS_REMINDER,
             crate::cli::SEND_REMINDER,
             &quickstart_human(&json!({"summary": "team started"})),
         ] {
-            assert!(!text.contains("collect"), "removed CLI command leaked: {text}");
+            for hidden in ["collect", "team-agent results", "team-agent wait"] {
+                assert!(
+                    !text.contains(hidden),
+                    "private/removed CLI command leaked: {text}"
+                );
+            }
         }
     }
 
@@ -1659,13 +1796,19 @@ mod tests {
         let value = json!({"summary": "quick-start complete"});
         assert_eq!(
             quickstart_human(&value),
-            format!("quick-start complete\n{}", crate::cli::QUICK_START_REMINDER)
+            format!(
+                "队伍已启动；下面是连接方式和派发任务的命令。\n{}",
+                crate::cli::QUICK_START_REMINDER
+            )
         );
-        // 空数组也只 summary。
+        // 空数组也只显示人类摘要与下一步，不凭空编造连接方式。
         let value2 = json!({"summary": "s", "attach_commands": []});
         assert_eq!(
             quickstart_human(&value2),
-            format!("s\n{}", crate::cli::QUICK_START_REMINDER)
+            format!(
+                "队伍已启动；下面是连接方式和派发任务的命令。\n{}",
+                crate::cli::QUICK_START_REMINDER
+            )
         );
     }
 
@@ -1684,7 +1827,7 @@ mod tests {
                 "team-agent",
                 "send",
                 "worker name; echo unsafe",
-                "MESSAGE",
+                "请完成任务并把答案回复给 leader。",
                 "--workspace",
                 "/tmp/my workspace",
                 "--team",
@@ -1695,11 +1838,15 @@ mod tests {
 
     #[test]
     fn send_guidance_is_copyable_and_preserves_explicit_scope() {
-        let command = send_command("worker name; echo unsafe", Path::new("/tmp/my workspace"), Some("team-a"))
-            .unwrap();
+        let command = send_command(
+            "worker name; echo unsafe",
+            Path::new("/tmp/my workspace"),
+            Some("team-a"),
+        )
+        .unwrap();
         assert_eq!(
             command,
-            "team-agent send 'worker name; echo unsafe' MESSAGE --workspace '/tmp/my workspace' --team team-a"
+            "team-agent send 'worker name; echo unsafe' '请完成任务并把答案回复给 leader。' --workspace '/tmp/my workspace' --team team-a"
         );
     }
 
@@ -1720,7 +1867,10 @@ mod tests {
     fn quick_start_guidance_lists_every_known_agent_without_guessing() {
         let mut value = json!({"ok": true, "agent_ids": ["sol", "luna"]});
         append_send_guidance(&mut value, Path::new("/tmp/ws"), Some("team"));
-        let commands = value.get("send_commands").and_then(|v| v.as_array()).unwrap();
+        let commands = value
+            .get("send_commands")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(commands.len(), 2);
         assert!(commands[0].as_str().unwrap().contains("send sol"));
         assert!(commands[1].as_str().unwrap().contains("send luna"));
@@ -1747,8 +1897,19 @@ mod tests {
             .unwrap();
         assert!(command.contains("send worker"));
         assert!(command.contains("--team team-a"));
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        assert_eq!(parts[3], "MESSAGE");
+        assert_eq!(
+            split_shell_argv(command),
+            [
+                "team-agent",
+                "send",
+                "worker",
+                "请完成任务并把答案回复给 leader。",
+                "--workspace",
+                "/tmp/ws",
+                "--team",
+                "team-a",
+            ]
+        );
     }
 
     #[test]

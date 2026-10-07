@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use hermetic_guard::HermeticTestEnv;
-use serial_test::serial;
 use serde_json::Value;
+use serial_test::serial;
 use team_agent::cli::{
     cmd_add_agent, cmd_quick_start, cmd_restart, AddAgentArgs, QuickStartArgs, RestartArgs,
 };
@@ -64,10 +64,22 @@ fn json_stdout(output: &Output) -> Value {
 fn assert_unknown_compile(output: &Output) {
     let err = stderr(output);
     assert_eq!(output.status.code(), Some(1), "stderr={err:?}");
-    assert!(output.stdout.is_empty(), "unknown command must not write stdout");
-    assert!(err.contains("invalid choice: 'compile'"), "not generic unknown: {err:?}");
-    assert!(!err.contains("missing --team"), "reached compile argument parsing: {err:?}");
-    assert!(!err.contains("team.spec.yaml"), "reached compiler/runtime handling: {err:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "unknown command must not write stdout"
+    );
+    assert!(
+        err.contains("没有这个操作") && err.contains("'compile'"),
+        "not generic unknown: {err:?}"
+    );
+    assert!(
+        !err.contains("missing --team"),
+        "reached compile argument parsing: {err:?}"
+    );
+    assert!(
+        !err.contains("team.spec.yaml"),
+        "reached compiler/runtime handling: {err:?}"
+    );
 }
 
 fn snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
@@ -135,14 +147,25 @@ fn r3_legacy_arguments_cannot_write_out_or_default_spec() {
     let output = run(
         &env,
         &team,
-        &["compile", "--team", team.to_str().unwrap(), "--out", out.to_str().unwrap(), "--json"],
+        &[
+            "compile",
+            "--team",
+            team.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--json",
+        ],
     );
     assert_unknown_compile(&output);
     assert_eq!(fs::read(&out).expect("read sentinel"), before);
 
     let default_spec = team.join("team.spec.yaml");
     let _ = fs::remove_file(&default_spec);
-    let output = run(&env, &team, &["compile", "--team", team.to_str().unwrap(), "--json"]);
+    let output = run(
+        &env,
+        &team,
+        &["compile", "--team", team.to_str().unwrap(), "--json"],
+    );
     assert_unknown_compile(&output);
     assert!(!default_spec.exists(), "default team.spec.yaml was created");
 }
@@ -162,7 +185,13 @@ fn r4_bad_team_role_and_path_inputs_are_not_read() {
         vec!["compile", "--team", no_team_md.to_str().unwrap()],
         vec!["compile", "--team", invalid_role.to_str().unwrap()],
         vec!["compile", "--team", valid.to_str().unwrap(), "--json"],
-        vec!["compile", "--out", "old.yaml", "--team", valid.to_str().unwrap()],
+        vec![
+            "compile",
+            "--out",
+            "old.yaml",
+            "--team",
+            valid.to_str().unwrap(),
+        ],
     ];
     for args in cases {
         assert_unknown_compile(&run(&env, env.root(), &args));
@@ -177,9 +206,17 @@ fn r5_compile_has_no_fixture_or_adjacent_team_side_effects() {
     let adjacent = fixture(&env, "adjacent-team");
     fs::write(adjacent.join("sentinel.log"), b"unchanged\n").expect("write sentinel");
     let before = snapshot(env.root());
-    let output = run(&env, env.root(), &["compile", "--team", team.to_str().unwrap(), "--json"]);
+    let output = run(
+        &env,
+        env.root(),
+        &["compile", "--team", team.to_str().unwrap(), "--json"],
+    );
     assert_unknown_compile(&output);
-    assert_eq!(snapshot(env.root()), before, "compile changed fixture state");
+    assert_eq!(
+        snapshot(env.root()),
+        before,
+        "compile changed fixture state"
+    );
 }
 
 #[test]
@@ -216,7 +253,12 @@ fn p1_compiler_and_spec_validation_remain_available() {
         .get("agents")
         .and_then(team_agent::model::yaml::Value::as_list)
         .expect("compiled agents");
-    assert_eq!(agents[0].get("id").and_then(team_agent::model::yaml::Value::as_str), Some("worker"));
+    assert_eq!(
+        agents[0]
+            .get("id")
+            .and_then(team_agent::model::yaml::Value::as_str),
+        Some("worker")
+    );
 }
 
 #[test]
@@ -225,12 +267,23 @@ fn p2_preflight_and_doctor_still_execute_compile_checks() {
     let env = HermeticTestEnv::enter("compile-p2");
     let team = fixture(&env, "team");
 
-    let preflight = run(&env, env.root(), &["preflight", team.to_str().unwrap(), "--json"]);
-    assert_eq!(preflight.status.code(), Some(0), "preflight: {}", stderr(&preflight));
+    let preflight = run(
+        &env,
+        env.root(),
+        &["preflight", team.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(
+        preflight.status.code(),
+        Some(0),
+        "preflight: {}",
+        stderr(&preflight)
+    );
     let body = json_stdout(&preflight);
     assert_eq!(body["ok"], true);
     assert!(body["checks"].as_array().is_some_and(|checks| {
-        checks.iter().any(|check| check["name"] == "compile" && check["ok"] == true)
+        checks
+            .iter()
+            .any(|check| check["name"] == "compile" && check["ok"] == true)
     }));
 
     let doctor = run(
@@ -249,13 +302,21 @@ fn p2_preflight_and_doctor_still_execute_compile_checks() {
 fn p3_invalid_role_remains_a_real_compile_diagnostic() {
     let env = HermeticTestEnv::enter("compile-p3");
     let team = invalid_fixture(&env, "invalid role");
-    let preflight = run(&env, env.root(), &["preflight", team.to_str().unwrap(), "--json"]);
+    let preflight = run(
+        &env,
+        env.root(),
+        &["preflight", team.to_str().unwrap(), "--json"],
+    );
     assert_eq!(preflight.status.code(), Some(1));
     let body = json_stdout(&preflight);
     assert_eq!(body["ok"], false);
     assert!(body.to_string().contains("provider"));
 
-    let validate = run(&env, env.root(), &["validate", team.to_str().unwrap(), "--json"]);
+    let validate = run(
+        &env,
+        env.root(),
+        &["validate", team.to_str().unwrap(), "--json"],
+    );
     assert_ne!(validate.status.code(), Some(0));
     assert!(format!("{}{}", stdout(&validate), stderr(&validate)).contains("provider"));
 }
@@ -277,7 +338,9 @@ fn p4_quick_start_compiles_valid_team_and_rejects_invalid_role() {
         detail: true,
     })
     .expect("quick-start returns a typed result");
-    assert!(workspace.join(".team/runtime/contract-team/team.spec.yaml").exists());
+    assert!(workspace
+        .join(".team/runtime/contract-team/team.spec.yaml")
+        .exists());
 
     let invalid = invalid_fixture(&env, "invalid");
     let result = cmd_quick_start(&QuickStartArgs {
@@ -326,12 +389,25 @@ fn p5_restart_and_add_agent_keep_real_lifecycle_paths() {
 fn p6_validate_keeps_internal_compiler_for_valid_and_invalid_team_dirs() {
     let env = HermeticTestEnv::enter("compile-p6");
     let valid = fixture(&env, "valid");
-    let output = run(&env, env.root(), &["validate", valid.to_str().unwrap(), "--json"]);
-    assert_eq!(output.status.code(), Some(0), "validate: {}", stderr(&output));
+    let output = run(
+        &env,
+        env.root(),
+        &["validate", valid.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "validate: {}",
+        stderr(&output)
+    );
     assert_eq!(json_stdout(&output)["ok"], true);
 
     let invalid = invalid_fixture(&env, "invalid");
-    let output = run(&env, env.root(), &["validate", invalid.to_str().unwrap(), "--json"]);
+    let output = run(
+        &env,
+        env.root(),
+        &["validate", invalid.to_str().unwrap(), "--json"],
+    );
     assert_ne!(output.status.code(), Some(0));
     assert!(format!("{}{}", stdout(&output), stderr(&output)).contains("provider"));
 }
@@ -343,7 +419,11 @@ fn p1_compiler_retains_core_shape_and_is_read_only() {
     let team = fixture(&env, "team");
     let before = snapshot(env.root());
     let spec = team_agent::compiler::compile_team(&team).expect("fixture compiles");
-    assert_eq!(spec.get("version").and_then(team_agent::model::yaml::Value::as_i64), Some(1));
+    assert_eq!(
+        spec.get("version")
+            .and_then(team_agent::model::yaml::Value::as_i64),
+        Some(1)
+    );
     assert_eq!(
         spec.get("team")
             .and_then(|team| team.get("name"))
@@ -368,8 +448,17 @@ fn p1_compiler_retains_core_shape_and_is_read_only() {
 fn p2_preflight_keeps_compile_check_name_for_invalid_inputs() {
     let env = HermeticTestEnv::enter("compile-p2-invalid");
     let team = invalid_fixture(&env, "invalid");
-    let body = json_stdout(&run(&env, env.root(), &["preflight", team.to_str().unwrap(), "--json"]));
-    let compile = body["checks"].as_array().unwrap().iter().find(|check| check["name"] == "compile").expect("compile check");
+    let body = json_stdout(&run(
+        &env,
+        env.root(),
+        &["preflight", team.to_str().unwrap(), "--json"],
+    ));
+    let compile = body["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "compile")
+        .expect("compile check");
     assert_eq!(compile["ok"], false);
 }
 
@@ -400,7 +489,9 @@ fn p4_quick_start_keeps_canonical_runtime_spec_location() {
         json: true,
         detail: true,
     });
-    assert!(workspace.join(".team/runtime/location-team/team.spec.yaml").is_file());
+    assert!(workspace
+        .join(".team/runtime/location-team/team.spec.yaml")
+        .is_file());
     assert!(!team.join("team.spec.yaml").exists());
 }
 
@@ -408,9 +499,21 @@ fn p4_quick_start_keeps_canonical_runtime_spec_location() {
 #[serial(env)]
 fn p5_lifecycle_commands_remain_registered() {
     let env = HermeticTestEnv::enter("compile-p5-registry");
-    for command in ["restart", "add-agent", "validate", "preflight", "doctor", "quick-start"] {
+    for (command, exit) in [
+        ("restart", 0),
+        ("add-agent", 0),
+        ("validate", 2),
+        ("preflight", 2),
+        ("doctor", 0),
+        ("quick-start", 0),
+    ] {
         let output = run(&env, env.root(), &[command, "--help"]);
-        assert_eq!(output.status.code(), Some(0), "{command}: {}", stderr(&output));
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{command}: {}",
+            stderr(&output)
+        );
     }
 }
 
@@ -420,5 +523,6 @@ fn p6_validate_errors_are_not_unknown_command_errors() {
     let env = HermeticTestEnv::enter("compile-p6-error");
     let output = run(&env, env.root(), &["validate", "missing-team", "--json"]);
     assert!(!stderr(&output).contains("invalid choice: 'validate'"));
+    assert!(!stderr(&output).contains("没有这个操作"));
     assert_ne!(output.status.code(), Some(0));
 }

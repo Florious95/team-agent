@@ -182,20 +182,39 @@ fn quote_cli_arg(raw: &str) -> String {
 fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
     if rows.is_empty() {
         return match view {
-            LeadersView::Live => "no live leaders\n".to_string(),
-            LeadersView::All => "no registered leaders\n".to_string(),
-            LeadersView::Stale => "no stale leaders\n".to_string(),
+            LeadersView::Live => {
+                "没有可用主控；运行 team-agent doctor --workspace . 检查当前队伍。\n".to_string()
+            }
+            LeadersView::All => "没有已登记主控；首次协作用 team-agent pi 打开主控。\n".to_string(),
+            LeadersView::Stale => "没有已失效的主控登记。\n".to_string(),
         };
     }
-    let mut out = String::from("STATUS\tWORKSPACE\tTEAM\tSEND\n");
+    let mut out = String::from("主控\t状态\t项目\t队伍\t发送命令\n");
     for row in rows {
-        out.push_str(row.status);
+        out.push_str("leader\t");
+        out.push_str(match row.status {
+            "LIVE" => "可用",
+            "STALE" => "已失效",
+            "AMBIGUOUS" => "需确认归属",
+            other => other,
+        });
         out.push('\t');
         out.push_str(&row.entry.workspace.display().to_string());
         out.push('\t');
         out.push_str(&row.entry.team_key);
         out.push('\t');
-        out.push_str(&row.send_hint);
+        if row.status == "STALE" {
+            out.push('-');
+        } else {
+            out.push_str(
+                &super::adapters::send_command(
+                    "leader",
+                    &row.entry.workspace,
+                    Some(&row.entry.team_key),
+                )
+                .unwrap_or_else(|| "请核对项目路径".to_string()),
+            );
+        }
         out.push('\n');
     }
     out
@@ -221,22 +240,34 @@ fn prune_json(report: &RegistryPruneReport) -> Value {
 }
 
 fn format_prune_human(report: &RegistryPruneReport) -> String {
-    let mut out = format!("dry-run: {}\n", report.dry_run);
+    let mut out = format!("仅预览：{}\n", report.dry_run);
     for (label, items) in [
-        ("candidates", &report.candidates),
-        ("removed", &report.removed),
-        ("kept", &report.kept),
-        ("skipped", &report.skipped),
-        ("errors", &report.errors),
+        ("可清理登记", &report.candidates),
+        ("已清理", &report.removed),
+        ("保留", &report.kept),
+        ("跳过", &report.skipped),
+        ("错误", &report.errors),
     ] {
         out.push_str(&format!("{label}: {}\n", items.len()));
         for item in items {
             out.push_str("  ");
             out.push_str(&item.workspace.display().to_string());
-            out.push_str("::");
+            out.push_str("，队伍：");
             out.push_str(&item.team_key);
             out.push_str(" [");
-            out.push_str(&item.reason);
+            out.push_str(match item.reason.as_str() {
+                "LIVE" => "仍可用，保留登记",
+                "team_key_not_found" => "队伍已不在项目中",
+                "team_not_alive" => "队伍已停止",
+                "registry_entry_missing" => "登记已不存在",
+                "registry_entry_changed" | "canonical_state_changed" => {
+                    "登记或队伍已变化，停止清理"
+                }
+                "canonical_state_unavailable" => "无法读取队伍状态，保留登记",
+                "registry_lock_unavailable" => "登记正被其他操作使用，停止清理",
+                "remove_failed" => "删除登记失败，请查看文件权限",
+                _ => "无法安全确认该登记；请体检所选项目",
+            });
             out.push_str("]\n");
         }
     }
@@ -302,9 +333,40 @@ mod tests {
             row("/Users/alauda/stale", "old-team", "STALE", "-"),
         ];
         let out = format_leaders_human(&rows, LeadersView::All);
-        assert!(out.starts_with("STATUS\tWORKSPACE\tTEAM\tSEND\n"));
-        assert!(out.contains("LIVE\t/Volumes/nvme/Projects/讨论team-agent\twiki-team\tsend-live\n"));
-        assert!(out.contains("STALE\t/Users/alauda/stale\told-team\t-\n"));
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "one header and both selected rows: {out}");
+        let header = lines[0];
+        assert_eq!(header.split('\t').count(), 5);
+        assert!(header.contains("状态") && header.contains("项目") && header.contains("队伍"));
+        let live: Vec<_> = lines[1].split('\t').collect();
+        assert_eq!(
+            &live[..4],
+            &[
+                "leader",
+                "可用",
+                "/Volumes/nvme/Projects/讨论team-agent",
+                "wiki-team"
+            ]
+        );
+        assert_eq!(
+            super::super::adapters::split_shell_argv(live[4]),
+            [
+                "team-agent",
+                "send",
+                "leader",
+                "请完成任务并把答案回复给 leader。",
+                "--workspace",
+                "/Volumes/nvme/Projects/讨论team-agent",
+                "--team",
+                "wiki-team"
+            ]
+        );
+        let stale: Vec<_> = lines[2].split('\t').collect();
+        assert_eq!(
+            &stale[..4],
+            &["leader", "已失效", "/Users/alauda/stale", "old-team"]
+        );
+        assert_eq!(stale[4], "-", "stale rows must never suggest a send: {out}");
     }
 
     #[test]
@@ -341,17 +403,16 @@ mod tests {
 
     #[test]
     fn empty_view_names_are_explicit() {
-        assert_eq!(
-            format_leaders_human(&[], LeadersView::Live),
-            "no live leaders\n"
-        );
-        assert_eq!(
-            format_leaders_human(&[], LeadersView::Stale),
-            "no stale leaders\n"
-        );
-        assert_eq!(
-            format_leaders_human(&[], LeadersView::All),
-            "no registered leaders\n"
-        );
+        for (view, empty, next) in [
+            (LeadersView::Live, "没有可用主控", Some("team-agent doctor")),
+            (LeadersView::Stale, "没有已失效的主控登记", None),
+            (LeadersView::All, "没有已登记主控", Some("team-agent pi")),
+        ] {
+            let out = format_leaders_human(&[], view);
+            assert!(out.contains(empty) && out.ends_with('\n'), "{out}");
+            if let Some(next) = next {
+                assert!(out.contains(next), "{out}");
+            }
+        }
     }
 }

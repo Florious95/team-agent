@@ -19,22 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 use team_agent::state::persist::save_runtime_state;
 
-const DEFAULT_COMMANDS: &[&str] = &[
-    "quick-start",
-    "send",
-    "status",
-    "results",
-    "restart",
-    "shutdown",
-    "add-agent",
-    "start-agent",
-    "stop-agent",
-    "reset-agent",
-    "doctor",
-    "claim-leader",
-    "takeover",
-    "attach-leader",
-];
+#[path = "support/human_catalog.rs"]
+mod human_catalog;
+use human_catalog::{HUMAN_COMMANDS as DEFAULT_COMMANDS, MACHINE_COMMANDS};
 
 const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "fallback-send-leader",
@@ -42,15 +29,9 @@ const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "settle",
     "validate-result",
     "repair-state",
-    "leaders",
+    "results",
+    "wait",
     "attach-app-server-leader",
-    "remove-agent",
-    "fork-agent",
-    "allow-peer-talk",
-    "approvals",
-    "profile",
-    "install-skill",
-    "inbox",
     "identity",
     "watch",
     "sessions",
@@ -77,10 +58,7 @@ fn red1_default_help_contracts_to_core_guided_surface() {
     );
 
     let visible = visible_default_commands(&help);
-    let mut expected: BTreeSet<String> = DEFAULT_COMMANDS.iter().map(|s| (*s).to_string()).collect();
-    if visible.iter().any(|command| command == "models") {
-        expected.insert("models".to_string());
-    }
+    let expected = human_catalog::expected_human_commands();
     let hidden: BTreeSet<String> = HIDDEN_FROM_DEFAULT_HELP
         .iter()
         .map(|s| (*s).to_string())
@@ -91,7 +69,7 @@ fn red1_default_help_contracts_to_core_guided_surface() {
 
     assert!(
         missing.is_empty() && leaked.is_empty() && extra.is_empty() && visible == expected,
-        "RED1: default help must match the exact published set (d40 ∪ results; models only when the binary advertises it), not a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
+        "RED1: default help must match exactly Human30, never Machine entries or a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
         visible.len(),
         visible,
         missing,
@@ -101,11 +79,8 @@ fn red1_default_help_contracts_to_core_guided_surface() {
     );
     let lower = help.to_lowercase();
     assert!(
-        lower.contains("provider")
-            && lower.contains("codex")
-            && lower.contains("claude")
-            && lower.contains("copilot"),
-        "RED1: default help must render provider launchers as a launcher group, not as counted commands; help=\n{help}"
+        lower.contains("codex") && lower.contains("claude") && lower.contains("copilot"),
+        "RED1: Human catalog must discover the provider launchers as real commands; help=\n{help}"
     );
 }
 
@@ -115,7 +90,13 @@ fn doctor_help_points_to_public_doctor_command() {
     let output = case.run_ta(&["doctor", "--help"]);
     let text = output_text(&output);
     assert!(output.status.success(), "doctor --help: {text}");
-    assert!(text.contains("usage: team-agent doctor"), "{text}");
+    assert!(
+        text.contains("team-agent doctor")
+            && text.contains("用法")
+            && text.contains("Examples")
+            && text.contains("下一步"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -147,7 +128,10 @@ fn red2_command_registry_covers_current_dispatch_and_replaces_source_scans() {
                 ));
             }
         }
-        for command in &dispatch_names {
+        for command in DEFAULT_COMMANDS {
+            if !dispatch_names.contains(*command) {
+                failures.push(format!("Human command `{command}` lacks actual dispatch"));
+            }
             match spec_block_for(&spec, command) {
                 Some(block) => {
                     for field in ["tier", "category", "token_usage", "usage", "summary"] {
@@ -165,6 +149,15 @@ fn red2_command_registry_covers_current_dispatch_and_replaces_source_scans() {
         }
     }
 
+    if spec_path.exists() {
+        let spec = std::fs::read_to_string(&spec_path).expect("read public registry");
+        for private in MACHINE_COMMANDS {
+            assert!(
+                spec_block_for(&spec, private).is_none(),
+                "Machine must not re-enter public spec: {private}"
+            );
+        }
+    }
     for forbidden in [
         "fn source_dispatch_commands",
         "source_dispatch_commands()",
@@ -201,10 +194,10 @@ fn red3_observation_a_commands_have_terminal_tiers_not_placeholders() {
     );
     let spec = std::fs::read_to_string(&spec_path).expect("read cli/spec.rs");
     let expected = BTreeMap::from([
-        ("allow-peer-talk", "secondary"),
-        ("approvals", "secondary"),
-        ("profile", "secondary"),
-        ("install-skill", "secondary"),
+        ("allow-peer-talk", "core"),
+        ("approvals", "core"),
+        ("profile", "core"),
+        ("install-skill", "core"),
     ]);
     let mut failures = Vec::new();
     for (command, tier) in expected {
@@ -417,48 +410,40 @@ fn output_text(output: &Output) -> String {
 }
 
 fn visible_default_commands(help: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    if let Some((_, rest)) = help.split_once("Commands:") {
-        let section = rest.split("\n\n").next().unwrap_or(rest);
-        for part in section.split(',') {
-            let command = part.trim();
-            if is_command_name(command) {
-                names.insert(command.to_string());
-            }
-        }
-    } else {
-        for line in help.lines() {
-            let trimmed = line.trim_start();
-            if !line.starts_with("  ") || trimmed.starts_with("team-agent ") {
-                continue;
-            }
-            let command = trimmed.split_whitespace().next().unwrap_or_default();
-            if is_command_name(command) {
-                names.insert(command.to_string());
-            }
-        }
-    }
-    for provider in ["codex", "claude", "copilot", "grok", "cursor"] {
-        names.remove(provider);
-    }
-    names
-}
-
-fn is_command_name(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    human_catalog::public_commands(help)
 }
 
 fn current_command_surface_from_emit(emit: &str) -> BTreeSet<String> {
-    let dispatch = emit.split_once("fn dispatch(").expect("dispatch function").1;
-    let dispatch = dispatch.split_once("match command {").expect("command match").1;
-    let dispatch = dispatch.split_once("const LEADER_PASSTHROUGH_COMMANDS").expect("dispatch end").0;
-    let mut names: BTreeSet<String> = dispatch.lines().filter_map(|line| {
-        let (name, arm) = line.trim().strip_prefix('"')?.split_once('"')?;
-        arm.trim_start().starts_with("=>").then(|| name.to_string())
-    }).collect();
+    let dispatch = emit
+        .split_once("fn dispatch(")
+        .expect("dispatch function")
+        .1;
+    let (forwarders, dispatch) = dispatch
+        .split_once("match command {")
+        .expect("command match");
+    let dispatch = dispatch
+        .split_once("const LEADER_PASSTHROUGH_COMMANDS")
+        .expect("dispatch end")
+        .0;
+    let mut names: BTreeSet<String> = dispatch
+        .lines()
+        .filter_map(|line| {
+            let arms = line.trim().strip_prefix('"')?.split_once("=>")?.0;
+            Some(arms.split('"').step_by(2).map(str::to_string))
+        })
+        .flatten()
+        .collect();
+    names.extend(
+        forwarders
+            .split("if command == \"")
+            .skip(1)
+            .filter_map(|guard| {
+                let (name, body) = guard.split_once('"')?;
+                let body = body.split_once('}')?.0;
+                (body.contains("return Ok(") && body.contains("::run(args)"))
+                    .then(|| name.to_string())
+            }),
+    );
     names.extend(parse_const_str_array(emit, "LEADER_PASSTHROUGH_COMMANDS"));
     names
 }

@@ -645,7 +645,7 @@ fn cmd_send_joins_message_with_single_space() {
                 );
                 assert_eq!(
                     v.get("reminder").and_then(|reminder| reminder.as_str()),
-                    Some("Message queued; coordinator will notify when the worker receives it. Do not poll the worker terminal with capture-pane.")
+                    Some("任务已收下，但还未确认送到队友对话。查看 team-agent status/doctor，等真实回复，不反复重发。")
                 );
             }
         }
@@ -654,22 +654,27 @@ fn cmd_send_joins_message_with_single_space() {
 }
 
 #[test]
-fn cmd_send_default_human_output_is_one_line_without_false_delivered() {
+fn cmd_send_default_human_output_is_brief_without_false_delivered() {
     let r = cmd_send(&queued_send_args_fixture(false)).expect("cmd_send returns CmdResult");
     assert!(!r.as_json);
     let text = emit(&r.output, r.as_json).expect("send should render human text");
     let lines: Vec<_> = text.lines().collect();
     assert_eq!(
         lines.len(),
-        1,
-        "default send output must be one line: {text}"
+        2,
+        "send must separate outcome and next action: {text}"
     );
     assert!(
-        lines[0].contains("ok:")
-            && lines[0].contains("status:")
-            && lines[0].contains("message_id:")
-            && lines[0].contains("target:"),
-        "default send output must keep only the core fields; got {text}"
+        lines[0].contains("任务已收下") && lines[0].contains("还未送到队友的对话"),
+        "queued send must report its true pending outcome: {text}"
+    );
+    assert!(
+        lines[1].contains("下一步")
+            && lines[1].contains("team-agent status")
+            && lines[1].contains("doctor")
+            && lines[1].contains("等真实回复")
+            && lines[1].contains("不反复重发"),
+        "queued send must give honest next steps: {text}"
     );
     assert!(
         !text.contains("delivered"),
@@ -946,7 +951,7 @@ fn cmd_send_unknown_task_surfaces_golden_error_envelope_not_silent() {
     );
     assert_eq!(
         payload.action,
-        "run `team-agent doctor` or inspect the log path shown here"
+        "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

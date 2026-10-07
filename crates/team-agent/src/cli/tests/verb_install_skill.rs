@@ -62,8 +62,8 @@ fn install_skill_missing_source_is_usage_error() {
     );
     assert_eq!(
         code,
-        ExitCode::Error,
-        "install-skill without --source must error (CliError::Usage -> emit_cli_error exit 1)"
+        ExitCode::Usage,
+        "known missing --source must give pure Usage2 guidance"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
