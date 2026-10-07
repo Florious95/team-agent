@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.112]
+
+- **Comprehensive CLI excision (Issue #289, PR #290):** synthesize two independent advanced-model worktree implementations (Astra and Opus) into the accepted final delivery. Remove all ten deprecated command closures: `e2e`, `allow-peer-talk`, `results`, `validate`, `identity`, `sessions`, `watch`, `peek`, `wait-ready`, and `preflight`, including their dispatch, help, suggestion routes, obsolete harnesses, and test stubs; no compatibility shells remain.
+- **Measured slimming:** net removal of 5,541 lines of source and tests, reducing the macOS arm64 binary by approximately 500 KB. Retire the unused `peer_allowlist` from fresh/managed schemas while preserving legacy tables and rows without changing schema V5.
+- **Protected runtime paths:** retain `coordinator`, `install-skill`, and `attach-app-server-leader`; preserve FIFO `wait`, real Cargo E2E, compiler/spec validation, identity/lease derivation, doctor HTTP profile smoke, and the shared readiness calculation still used by `status`.
+- **Finite verification and acceptance:** Grok Bot scoped regression verification completed 1,051 tests with 0 failures (36 ignored). The latest macOS candidate passed real-subscription team lifecycle and arithmetic acceptance, including the expected answer **19788**, followed by scoped shutdown with **zero residuals**. Independent audit accepted the final delivery; these receipts cover the exercised scenarios, not an unrestricted all-platform/all-scenario guarantee.
+- **Release metadata:** align the Rust workspace/lockfile, installer, three platform packages, and official publishing workflow at 0.5.112. The formal tag workflow supplies the full Rust test and three-platform build/publish gates.
+
 ## [0.5.111]
 
 - **Human-first CLI (Issue #286, PR #287):** separate the 30 public human commands from 12 retained machine/compatibility entries. Human guidance uses plain teammate names with explicit `--workspace`/`--team`, rather than physical terminal identifiers, fully qualified addressing jargon, or obsolete routing switches. Existing machine JSON fields and compatibility parsing remain available.
