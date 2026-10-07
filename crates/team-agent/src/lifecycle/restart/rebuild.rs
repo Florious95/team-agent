@@ -100,7 +100,7 @@ fn lifecycle_phase_wire_labels_remain_stable() {
             }));
             assert_eq!(
                 serde_json::to_string(&phase.event_fields(elapsed_ms)).expect("phase JSON"),
-                format!("{{\"elapsed_ms\":{elapsed_ms},\"phase\":\"{wire}\"}}"),
+                format!("{{\"phase\":\"{wire}\",\"elapsed_ms\":{elapsed_ms}}}"),
             );
         }
     }
