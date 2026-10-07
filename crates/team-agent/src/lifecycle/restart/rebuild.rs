@@ -41,6 +41,53 @@ use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest}
 // `pane_verify_ms`, `startup_prompt_handler_ms`, `tmux_start_mode`) so
 // bounded-concurrency spawn can be justified with real numbers.
 
+/// Stable wire labels for launch/restart timing events, not readiness states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LifecyclePhase {
+    ResolveContext,
+    CompileSpec,
+    PlanClassification,
+    Teardown,
+    SpawnAll,
+    SaveState,
+    CoordinatorStart,
+    ReadinessWait,
+    Completed,
+}
+
+impl LifecyclePhase {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ResolveContext => "resolve_context",
+            Self::CompileSpec => "compile_spec",
+            Self::PlanClassification => "plan_classification",
+            Self::Teardown => "teardown",
+            Self::SpawnAll => "spawn_all",
+            Self::SaveState => "save_state",
+            Self::CoordinatorStart => "coordinator_start",
+            Self::ReadinessWait => "readiness_wait",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[test]
+fn lifecycle_phase_wire_labels_remain_stable() {
+    for (phase, wire) in [
+        (LifecyclePhase::ResolveContext, "resolve_context"),
+        (LifecyclePhase::CompileSpec, "compile_spec"),
+        (LifecyclePhase::PlanClassification, "plan_classification"),
+        (LifecyclePhase::Teardown, "teardown"),
+        (LifecyclePhase::SpawnAll, "spawn_all"),
+        (LifecyclePhase::SaveState, "save_state"),
+        (LifecyclePhase::CoordinatorStart, "coordinator_start"),
+        (LifecyclePhase::ReadinessWait, "readiness_wait"),
+        (LifecyclePhase::Completed, "completed"),
+    ] {
+        assert_eq!(phase.as_str(), wire);
+    }
+}
+
 pub(crate) struct RestartPhaseTimer {
     started_at: std::time::Instant,
 }
@@ -71,12 +118,12 @@ impl RestartPhaseTimer {
 ///   phase: 阶段名
 /// returns: 写事件失败被吞掉，不影响主流程
 /// ---
-    pub(crate) fn emit(&self, workspace: &Path, kind: &'static str, phase: &'static str) {
+    pub(crate) fn emit(&self, workspace: &Path, kind: &'static str, phase: LifecyclePhase) {
         let event_log = crate::event_log::EventLog::new(workspace);
         let _ = event_log.write(
             kind,
             serde_json::json!({
-                "phase": phase,
+                "phase": phase.as_str(),
                 "elapsed_ms": self.elapsed_ms(),
             }),
         );
@@ -305,7 +352,7 @@ fn restart_with_selected_team_and_transport(
     // resolved a context; downstream phases are emitted with monotonic
     // `elapsed_ms` for at-a-glance latency triage.
     let phase_timer = RestartPhaseTimer::start();
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "resolve_context");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ResolveContext);
     let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "restart",
@@ -345,7 +392,7 @@ fn restart_with_selected_team_and_transport(
     // 写 runtime spec。角色缺(TEAM.md/agents 不在)→ 显式拒(列缺哪些),旧 spec 原地保留不删不用。
     let spec =
         rebuild_runtime_spec_from_roles(&selected.run_workspace, &selected.team_key, &state)?;
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "compile_spec");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::CompileSpec);
     // 重建后 spec_workspace 恒为 runtime spec 的父目录(.team/runtime/<team_key>/)。
     let runtime_spec =
         crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
@@ -441,7 +488,7 @@ fn restart_with_selected_team_and_transport(
     phase_timer.emit(
         &selected.run_workspace,
         "restart.phase",
-        "plan_classification",
+        LifecyclePhase::PlanClassification,
     );
     write_restart_resume_decision_events(
         &selected.run_workspace,
@@ -558,8 +605,8 @@ fn restart_with_selected_team_and_transport(
             &topology_authority_agent_ids,
         )?;
     }
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "teardown");
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "spawn_all");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::Teardown);
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::SpawnAll);
     // 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3): when the
     // pre-spawn teardown was DEFERRED (live worker session with
     // authoritative running agents), snapshot the pre-spawn agent rows
@@ -582,8 +629,8 @@ fn restart_with_selected_team_and_transport(
     // tmux session is created deterministically; the remaining independent
     // decisions run their `transport.spawn_into` in parallel via a thread
     // scope with concurrency capped at `min(4, workers-1)`. Every spawn
-    // result is collected in-memory; `verify_spawned_agent_live` +
-    // `mark_agent_respawned` are then applied in ORIGINAL PLAN ORDER so
+    // result is collected in-memory; `mark_agent_respawned` is then
+    // applied in ORIGINAL PLAN ORDER so
     // persisted `spawn_epoch` / `spawned_at` / `pane_id` / `window` stay
     // deterministic regardless of thread completion order. Failure
     // aggregation stays equivalent to serial: per-agent errors go into
@@ -837,17 +884,14 @@ fn restart_with_selected_team_and_transport(
             agent.get("dangerously_skip_permissions"),
             Some(serde_json::Value::Bool(true))
         );
-        if let Err(error) = verify_spawned_agent_live(&decision.agent_id, &spawn, transport)
-            .and_then(|_| {
-                mark_agent_respawned(
-                    &mut state,
-                    &decision.agent_id,
-                    decision.restart_mode,
-                    &spawn,
-                    transport,
-                    launched_bypass,
-                )
-            })
+        if let Err(error) = mark_agent_respawned(
+            &mut state,
+            &decision.agent_id,
+            decision.restart_mode,
+            &spawn,
+            transport,
+            launched_bypass,
+        )
         {
             let error = error.to_string();
             mark_agent_restart_failed(&mut state, decision, &error);
@@ -1026,7 +1070,7 @@ fn restart_with_selected_team_and_transport(
         &capture_backfill_skip_agent_ids,
         &topology_authority_agent_ids,
     )?;
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "save_state");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::SaveState);
     if fatal_resume_failure {
         let attach_commands = Vec::new();
         let next_actions = restart_failure_next_actions(&failed_agents);
@@ -1304,10 +1348,10 @@ fn restart_with_selected_team_and_transport(
     phase_timer.emit(
         &selected.run_workspace,
         "restart.phase",
-        "coordinator_start",
+        LifecyclePhase::CoordinatorStart,
     );
     let coordinator_started = coordinator.ok;
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "readiness_wait");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::ReadinessWait);
     wait_restart_readiness_or_timeout(
         &selected.run_workspace,
         &state,
@@ -1331,7 +1375,7 @@ fn restart_with_selected_team_and_transport(
     let mut next_actions = Vec::new();
     if !failed_agents.is_empty() {
         next_actions.extend(restart_failure_next_actions(&failed_agents));
-        phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
+        phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::Completed);
         write_restart_completed_event(
             &selected.run_workspace,
             &successful_agents,
@@ -1360,7 +1404,7 @@ fn restart_with_selected_team_and_transport(
             leader_bind_reason,
         });
     }
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", LifecyclePhase::Completed);
     write_restart_completed_event(
         &selected.run_workspace,
         &successful_agents,
@@ -1850,14 +1894,6 @@ fn yes_no(value: bool) -> &'static str {
     } else {
         "no"
     }
-}
-
-fn verify_spawned_agent_live(
-    _agent_id: &AgentId,
-    _spawn: &SpawnedAgentWindow,
-    _transport: &dyn crate::transport::Transport,
-) -> Result<(), LifecycleError> {
-    Ok(())
 }
 
 /// 0.3.30 Bug 1: restart success path auto-attach.
@@ -3088,8 +3124,8 @@ fn run_bounded_parallel_worker_spawns(
     outcomes
 }
 
-/// 0.5.38 Step 2: serial post-spawn stage. Runs verify_spawned_agent_live +
-/// mark_agent_respawned in plan order, emits worker.spawn_timing, and
+/// 0.5.38 Step 2: serial post-spawn stage. Runs mark_agent_respawned
+/// in plan order, emits worker.spawn_timing, and
 /// updates the successful/failed agent lists exactly like the pre-0.5.38
 /// serial loop. Keeping this serial guarantees deterministic persisted
 /// state (`spawn_epoch`, `spawned_at`, etc.) regardless of parallel
@@ -3111,17 +3147,14 @@ fn apply_marked_respawn(
     launched_bypass: bool,
 ) {
     let verify_start = std::time::Instant::now();
-    if let Err(error) =
-        verify_spawned_agent_live(&decision.agent_id, spawn, transport).and_then(|_| {
-            mark_agent_respawned(
-                state,
-                &decision.agent_id,
-                decision.restart_mode,
-                spawn,
-                transport,
-                launched_bypass,
-            )
-        })
+    if let Err(error) = mark_agent_respawned(
+        state,
+        &decision.agent_id,
+        decision.restart_mode,
+        spawn,
+        transport,
+        launched_bypass,
+    )
     {
         let error = error.to_string();
         mark_agent_restart_failed(state, decision, &error);
