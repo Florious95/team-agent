@@ -133,7 +133,7 @@ pub fn launch_with_transport_in_workspace(
     // 所有角色都未声明 dangerously_skip_permissions=true → 写 warning 事件不阻塞。
     // TODO(0.6.0): remove(0.6.0 彻底删源头 A 后此警示无意义)。
     emit_dangerous_flag_no_role_declared_warning(workspace, &spec);
-    phase_timer.emit(workspace, "launch.phase", "compile_spec");
+    phase_timer.emit(workspace, "launch.phase", super::restart::LifecyclePhase::CompileSpec);
     let session_name = spec_session_name(&spec);
     if !dry_run && transport_has_session(transport, &session_name) {
         return Err(LifecycleError::SessionConflict(format!(
@@ -145,7 +145,7 @@ pub fn launch_with_transport_in_workspace(
     let started = if dry_run {
         Vec::new()
     } else {
-        phase_timer.emit(workspace, "launch.phase", "spawn_all");
+        phase_timer.emit(workspace, "launch.phase", super::restart::LifecyclePhase::SpawnAll);
         let started = spawn_agents(workspace, spec_path, &spec, &session_name, transport)?;
         persist_spawn_agent_state(
             workspace,
