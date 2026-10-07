@@ -1478,7 +1478,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     let coordinator_started = crate::coordinator::start_coordinator(&coordinator_workspace)
         .map(|report| report.ok)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    quick_start_phase_timer.emit(&workspace, "launch.phase", "coordinator_start");
+    quick_start_phase_timer.emit(&workspace, "launch.phase", crate::lifecycle::restart::LifecyclePhase::CoordinatorStart);
     let coordinator_action = if coordinator_started {
         "coordinator started"
     } else {
@@ -1491,7 +1491,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     //   loaded successfully (provider-side codex/claude schema rejections happen
     //   asynchronously after spawn), so the verdict is PendingToolLoad — never
     //   bare Ready.
-    quick_start_phase_timer.emit(&workspace, "launch.phase", "readiness_wait");
+    quick_start_phase_timer.emit(&workspace, "launch.phase", crate::lifecycle::restart::LifecyclePhase::ReadinessWait);
     let worker_readiness = quick_start_worker_readiness(&workspace, &state_team_key);
     let attach_windows = load_runtime_state(&workspace)
         .ok()
@@ -1531,7 +1531,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         ));
     }
     next_actions.extend(attach_commands.iter().cloned());
-    quick_start_phase_timer.emit(&workspace, "launch.phase", "completed");
+    quick_start_phase_timer.emit(&workspace, "launch.phase", crate::lifecycle::restart::LifecyclePhase::Completed);
     Ok(QuickStartReport::Ready {
         session_name,
         launch: Box::new(launch),
