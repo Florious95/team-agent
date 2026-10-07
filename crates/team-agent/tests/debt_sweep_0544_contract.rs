@@ -204,11 +204,11 @@ fn b_car_adds_no_new_visible_team_agent_commands() {
         .collect::<BTreeSet<_>>();
     assert!(
         !actual_commands.contains("results"),
-        "results retains private dispatch but must not enter Human help; visible commands={commands:?}"
+        "retired results must not enter Human help; visible commands={commands:?}"
     );
     assert_eq!(
         actual_commands, expected_commands,
-        "B car governance: visible command set must equal Human30, not an open-ended superset; visible commands={commands:?}"
+        "B car governance: visible command set must equal Human29, not an open-ended superset; visible commands={commands:?}"
     );
     assert_eq!(
         commands.len(),

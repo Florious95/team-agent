@@ -24,10 +24,7 @@ use mcp_sim_harness::McpSimHarness;
 use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::{
-    cmd_doctor, cmd_preflight, cmd_wait_ready, CmdOutput, DoctorArgs, ExitCode, PreflightArgs,
-    WaitReadyArgs,
-};
+use team_agent::cli::{cmd_doctor, CmdOutput, DoctorArgs, ExitCode};
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
@@ -182,42 +179,6 @@ fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
 }
 
 #[test]
-fn wait_ready_fake_live_worker_with_mcp_config_and_window_is_ready() {
-    let root = tmp_dir("wait-ready-selected");
-    let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
-    seed_selected_team_state(&root, "teamA", &team, true);
-    let mcp_config = root.join(".team").join("runtime").join("worker_a.mcp.json");
-    std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
-    std::fs::write(&mcp_config, "{}").unwrap();
-    let mut state = load_runtime_state(&root).unwrap();
-    state["teams"]["teamA"]["agents"]["worker_a"]["mcp_config"] =
-        json!(mcp_config.to_string_lossy().to_string());
-    state["teams"]["teamA"]["agents"]["worker_a"]["task_prompt_delivered"] = json!(false);
-    save_runtime_state(&root, &state).unwrap();
-
-    let out = json_result(
-        cmd_wait_ready(&WaitReadyArgs {
-            workspace: root.clone(),
-            timeout: 0.01,
-            json: true,
-            team: None,
-        })
-        .expect("wait-ready should return JSON"),
-    );
-    assert_eq!(
-        out["ok"],
-        json!(true),
-        "wait-ready must treat selected-team fake running worker + MCP config as startup ready; task prompt delivery is a separate signal. out={out}"
-    );
-    assert_eq!(
-        out["readiness"]["process_started"],
-        json!(true),
-        "out={out}"
-    );
-    assert_eq!(out["readiness"]["mcp_ready"], json!(true), "out={out}");
-}
-
-#[test]
 fn cli_add_agent_without_explicit_team_persists_to_active_team() {
     let launch = source("src/lifecycle/launch.rs");
     let add_agent = source_section(
@@ -290,99 +251,6 @@ fn doctor_bogus_workspace_exits_nonzero_json_ok_false() {
         body["ok"],
         json!(false),
         "doctor must not fabricate ok=true for a workspace with no spec/runtime context; body={body}"
-    );
-}
-
-#[test]
-fn preflight_fake_team_without_profiles_passes_profile_not_required() {
-    let root = tmp_dir("preflight-fake");
-    let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
-
-    let out = json_result(
-        cmd_preflight(&PreflightArgs {
-            team: team.clone(),
-            json: true,
-        })
-        .expect("preflight should return JSON"),
-    );
-    assert_eq!(
-        out["ok"],
-        json!(true),
-        "fake teams do not require profiles; missing profile dirs are informational, not blockers. out={out}"
-    );
-    assert!(
-        !out["blockers"]
-            .as_array()
-            .is_some_and(|blockers| blockers.iter().any(|b| b["name"] == json!("profile_dir"))),
-        "profile_dir must not be a blocker for a fake team with no profiles; out={out}"
-    );
-}
-
-#[test]
-fn peek_help_and_parser_accept_head_search() {
-    let emit = source("src/cli/emit.rs");
-    let types = source("src/cli/types.rs");
-    let adapters = source("src/cli/adapters.rs");
-    let help = team_agent::cli::emit::__test_command_help(Some("peek"));
-    let parsed = source_section(&emit, "struct ParsedArgs", "fn parse_args");
-    let parser = source_section(&emit, "fn parse_args", "fn next_arg");
-    let peek_args = source_section(&emit, "fn peek_args", "fn run_coordinator");
-    let peek_type = source_section(&types, "pub struct PeekArgs", "/// `e2e`");
-    let handler = source_section(&adapters, "pub fn cmd_peek", "fn peek_unavailable");
-    let failures = [
-        (
-            !help.contains("team-agent --help")
-                || help.contains("--head")
-                || help.contains("--search"),
-            "Machine help must give Human navigation without private flags",
-        ),
-        (
-            !parsed.contains("head: Option<usize>") || !parsed.contains("search: Option<String>"),
-            "ParsedArgs must carry head/search",
-        ),
-        (
-            !parser.contains("\"--head\"") || !parser.contains("\"--search\""),
-            "parse_args must accept --head/--search",
-        ),
-        (
-            !peek_args.contains("head:") || !peek_args.contains("search:"),
-            "peek_args must transfer head/search",
-        ),
-        (
-            !peek_type.contains("pub head: Option<usize>")
-                || !peek_type.contains("pub search: Option<String>"),
-            "PeekArgs must expose head/search",
-        ),
-        (
-            !handler.contains("CaptureRange::Head") || !handler.contains("search"),
-            "cmd_peek must dispatch head/search behavior",
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(bad, msg)| bad.then_some(msg))
-    .collect::<Vec<_>>();
-    assert!(
-        failures.is_empty(),
-        "peek CLI parity is incomplete: {}\nhelp={help}\nPeekArgs={peek_type}\nhandler={handler}",
-        failures.join("; ")
-    );
-}
-
-#[test]
-fn peek_head_and_search_have_public_handler_contracts() {
-    let transport = source("src/transport.rs");
-    let adapters = source("src/cli/adapters.rs");
-    assert!(
-        transport.contains("Head(u32)") || transport.contains("Head(usize)"),
-        "transport CaptureRange must expose a head capture variant so peek --head is not faked by tail/full; transport={}",
-        source_section(&transport, "pub enum CaptureRange", "}")
-    );
-    let handler = source_section(&adapters, "pub fn cmd_peek", "fn peek_unavailable");
-    assert!(
-        (handler.contains("\"matches\"") || handler.contains("\"matching_lines\""))
-            && handler.contains("search")
-            && handler.contains("allow_raw_screen"),
-        "peek --search --json should return matching lines/metadata via a search-specific branch; handler={handler}"
     );
 }
 

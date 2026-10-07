@@ -527,7 +527,6 @@ pub enum StateWriteIntent<'a> {
     TaskRepair {
         team_key: Option<&'a str>,
     },
-    FakeE2eSeed,
     SelfMigration,
 }
 
@@ -743,10 +742,8 @@ fn route_direct(
         },
         // TaskRepair -> `save_team_scoped_state` (cli/adapters.rs:675).
         StateWriteIntent::TaskRepair { .. } => helper_write_team_scoped(workspace, state),
-        // FakeE2eSeed / SelfMigration are diagnostic seams. The current
-        // callsites live at cli/adapters.rs:1035/1070 and
-        // state/persist.rs:1127; S1a routes them to the root helper.
-        StateWriteIntent::FakeE2eSeed => helper_write_root(workspace, state),
+        // SelfMigration is a diagnostic seam. The current callsite lives at
+        // state/persist.rs:1127; S1a routes it to the root helper.
         StateWriteIntent::SelfMigration => helper_write_root(workspace, state),
     }
 }

@@ -29,4 +29,4 @@ Pending.
 
 ## Next Step
 
-- Run `team-agent validate team.spec.yaml`, review permissions, then run `team-agent launch team.spec.yaml --yes`.
+- Review permissions in the role files, then run `team-agent quick-start` from the team directory.

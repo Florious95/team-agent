@@ -1,4 +1,5 @@
-//! MED A-batch (1/3): data-panel diff contracts — slices A-1 / A-3 / A-4 / A-5.
+//! MED A-batch (1/3): data-panel diff contracts — slices A-1 / A-4 / A-5
+//! (A-3 retired with the `watch` command, #289).
 //!
 //! Triage doc (sole basis): `.team/artifacts/med-triage-fixed-failure-sweep.md`.
 //! Python truth source: 0.2.11 (`~/.team-agent/runtime/0.2.11/src/team_agent/`).
@@ -7,9 +8,6 @@
 //!     + constant `{ok:false,status:"not_required"}` vs Python results.py:157,176+
 //!     `_ensure_coordinator_after_collect` (real start_coordinator result when state has
 //!     a session_name; the literal not_required ONLY when ensure=False or no session).
-//! A-3 watch ignores team + store              — health.rs:493 `let _ = (store, team)` vs
-//!     Python watch/__init__.py:41-42 (event team filter + `_collect_result_lines` from
-//!     store.latest_results(owner_team_id=team)).
 //! A-4 status panel severed                    — status_port.rs:66 `latest_results: []`
 //!     constant vs Python queries.py:76; :20 `let _ = detail` vs Python commands.py:99
 //!     (`--json --detail` => compact=False, i.e. detail returns the FULL payload);
@@ -39,7 +37,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::coordinator::{collect_watch_lines, WatchCursor, WorkspacePath};
 use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 
@@ -85,67 +82,6 @@ fn a1_collect_without_ensure_returns_not_required_literal() {
         out.get("coordinator"),
         Some(&json!({"ok": false, "status": "not_required"})),
         "A-1 literal lock: ensure_coordinator=false must return the Python literal; out={out}"
-    );
-}
-
-/// A-3: collect_watch_lines must (a) filter events by team (Python watch/__init__.py:91
-/// `_event_team_id(event) != team -> continue`) and (b) emit result lines from
-/// store.latest_results scoped to the team (:100-111, `result_received: {agent} -> {summary}`).
-#[test]
-fn a3_watch_filters_by_team_and_emits_result_lines() {
-    let ws = tmp_ws("a3-watch");
-    let logs = ws.join(".team/logs");
-    std::fs::create_dir_all(&logs).unwrap();
-    std::fs::write(
-        logs.join("events.jsonl"),
-        concat!(
-            "{\"event\":\"send.failed\",\"recipient\":\"wa\",\"reason\":\"boom-a\",\"team_id\":\"team-a\"}\n",
-            "{\"event\":\"send.failed\",\"recipient\":\"wb\",\"reason\":\"boom-b\",\"team_id\":\"team-b\"}\n",
-        ),
-    )
-    .unwrap();
-    let store = MessageStore::open(&ws).unwrap();
-    insert_result(&store, "res-a", "team-a", "wa", "done A");
-
-    let mut cursor = WatchCursor::default();
-    let lines = collect_watch_lines(
-        &WorkspacePath::new(ws.clone()),
-        &mut cursor,
-        &store,
-        Some("team-a"),
-    )
-    .expect("collect_watch_lines should succeed");
-
-    let mut failures = Vec::new();
-    if !lines
-        .iter()
-        .any(|line| line.contains("wa") && line.contains("boom-a"))
-    {
-        failures.push("A-3: team-a event line missing".to_string());
-    }
-    if lines
-        .iter()
-        .any(|line| line.contains("wb") || line.contains("boom-b"))
-    {
-        failures.push(
-            "A-3: team-b event leaked into team-a watch (Python filters by _event_team_id, watch/__init__.py:91)"
-                .to_string(),
-        );
-    }
-    if !lines
-        .iter()
-        .any(|line| line.starts_with("result_received: wa") && line.contains("done A"))
-    {
-        failures.push(
-            "A-3: result line missing — Python appends `result_received: {agent} -> {summary}` \
-from store.latest_results(owner_team_id=team) (watch/__init__.py:100-116)"
-                .to_string(),
-        );
-    }
-    assert!(
-        failures.is_empty(),
-        "A-3 watch contract failed:\n{}\nlines={lines:?}",
-        failures.join("\n")
     );
 }
 

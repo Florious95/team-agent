@@ -1,4 +1,4 @@
-//! E2E-DIRTY-002 Missing tmux backing is reported by recovery/readiness paths.
+//! E2E-DIRTY-002 Missing tmux backing is reported by the surviving status readiness path.
 
 use crate::framework::*;
 
@@ -21,24 +21,30 @@ fn dirty_002_missing_tmux_socket_reports_not_ready() {
     );
     assert!(shut.is_success(), "shutdown stderr={}", shut.stderr);
 
+    // `wait-ready` retired (#289); the surviving readiness surface is `status`.
     let out = run_ta(
         &ws,
         &[
-            "wait-ready",
+            "status",
             "--workspace",
             ws.path().to_str().unwrap(),
-            "--timeout",
-            "0.1",
             "--json",
         ],
     );
+    assert!(out.is_success(), "status stderr={}", out.stderr);
     let j = out.json();
-    assert_json_field_eq_bool(&j, "/ok", false);
+    let runtime_status = j
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| node.get("name").and_then(|v| v.as_str()) == Some("a"))
+        })
+        .and_then(|node| node.get("runtime_status"))
+        .and_then(|v| v.as_str());
     assert!(
-        j.pointer("/readiness/process_started")
-            .and_then(|v| v.as_bool())
-            == Some(false)
-            || j.pointer("/readiness/ready").and_then(|v| v.as_bool()) == Some(false),
-        "missing tmux backing should not be ready: {j}"
+        runtime_status.is_some() && runtime_status != Some("running"),
+        "missing tmux backing should not be reported as a running worker: {j}"
     );
 }

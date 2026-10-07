@@ -19,15 +19,6 @@ fn default_tick_interval_is_five_seconds() {
 }
 
 #[test]
-fn rotation_marker_is_byte_exact() {
-    // watch.py:22 — byte-for-byte (note the U+2014 em dash).
-    assert_eq!(
-        ROTATION_MARKER,
-        "[watch] log rotated; archived segment events.jsonl.1 not replayed — historical replay deferred to a future --replay flag"
-    );
-}
-
-#[test]
 fn status_enums_serialize_to_exact_python_strings() {
     let cases: &[(String, &str)] = &[
         (

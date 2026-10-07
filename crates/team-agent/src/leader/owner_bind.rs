@@ -17,29 +17,7 @@ use super::{
     OwnerBindResult, TeamOwner,
 };
 
-// ── leader::identity — leader_identity / 身份上下文 ──
-
-/// `leader_identity`(card §47;`__init__.py:355`)。`team-agent identity` 入口。
-/// 返回 uuid_prefix + 身份字段(JSON dict,CLI 直出)。
-pub fn leader_identity(workspace: &Path, team: Option<&str>) -> Result<Value, LeaderError> {
-    let state = crate::state::persist::load_runtime_state(workspace)?;
-    let identity = leader_identity_context(workspace, team, Some(&state))?;
-    Ok(json!({
-        "ok": true,
-        "uuid_prefix": prefix(identity.leader_session_uuid.as_str(), 12),
-        "machine_fingerprint": identity.machine_fingerprint,
-        "workspace_abspath": identity.workspace_abspath.to_string_lossy(),
-        "os_user": identity.os_user,
-        "team_id": identity.team_id.as_str(),
-        "current_pane_id": std::env::var("TEAM_AGENT_LEADER_PANE_ID")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .or_else(|| std::env::var("TMUX_PANE").ok().filter(|v| !v.is_empty())),
-        "last_seen_at": get_path_str(&state, &["leader_receiver", "attached_at"])
-            .or_else(|| get_path_str(&state, &["leader_receiver", "last_seen_at"])),
-        "source": serde_json::to_value(identity.leader_session_uuid_source)?,
-    }))
-}
+// ── leader::identity — 身份上下文 ──
 
 /// `_leader_identity_context`(`__init__.py:192`)。派生 leader 身份上下文(override / state / derive)。
 pub fn leader_identity_context(

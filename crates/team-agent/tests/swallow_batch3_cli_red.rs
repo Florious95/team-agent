@@ -4,7 +4,7 @@
 //! contract with the three adjudicated probes folded together, per the "族级断言,
 //! 不逐条铺用例" rule). Python parity: cmd_doctor raises on an unknown gate
 //! (cli/commands.py:234-235 `unknown doctor gate`), send failures carry a reason
-//! field, and an unreadable state must never read as "ready".
+//! field. (The former `wait-ready` unreadable-state probe retired with the command, #289.)
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -19,14 +19,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use team_agent::messaging::send::{send_message, MessageTarget, SendOptions};
 
-/// Batch 3 family contract: the three exit-layer fake-greens.
+/// Batch 3 family contract: the surviving exit-layer fake-greens.
 /// ① `doctor --gate bogus` must refuse with `unknown_gate` + ok=false (today the
 ///    unknown gate silently falls through to the default doctor — empty green).
 /// ② an empty `--to` target list must fail WITH `reason="empty_target_list"`
 ///    (today: failed with no reason).
-/// ③ `wait-ready` over an unreadable state.json must report ready=false AND carry a
-///    non-null `state_read_error` (today the read error silently degrades to an
-///    empty state).
 #[test]
 fn b3_exit_layer_failures_are_explained_not_fake_green() {
     let mut failures = Vec::new();
@@ -70,24 +67,6 @@ fn b3_exit_layer_failures_are_explained_not_fake_green() {
                 ));
             }
         }
-    }
-
-    // ③ wait-ready over unreadable state
-    let ws = tmp_ws("b3-waitready");
-    let state_path = ws.join(".team/runtime/state.json");
-    std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-    std::fs::write(&state_path, "{ definitely not json").unwrap();
-    let report = run_cli(&ws, &["wait-ready", "--timeout", "1", "--json"]);
-    if !report.contains("state_read_error") {
-        failures.push(format!(
-            "③: wait-ready over an unreadable state.json must surface a non-null \
-`state_read_error` instead of silently degrading to an empty state; got {report}"
-        ));
-    }
-    if report.contains("\"ok\": true") || report.contains("\"ok\":true") {
-        failures.push(format!(
-            "③: an unverifiable state must never read as ready (truthfulness rule); got {report}"
-        ));
     }
 
     assert!(

@@ -398,61 +398,6 @@ fn claim_lease_no_incident_caller_not_live_refused_under_n_rn3_any_live_pane() {
     assert_eq!(r.reason, Some(LeaseReason::CallerPaneNotLive));
 }
 
-// ── 14b. leader_identity dict — workspace_abspath key (golden __init__.py:363) ──
-//
-// LOCK→RED: leader_identity IS implemented (owner_bind.rs:22) but its dict
-// OMITS the golden `workspace_abspath` key (probe_lid.py shows it sits between
-// machine_fingerprint and os_user). This pins the missing key so the porter
-// must add it. Fails today (key absent → null) = RED against the omission.
-#[test]
-#[serial_test::serial(env)]
-fn leader_identity_dict_includes_workspace_abspath_key() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
-    let ws = p2_temp_ws("lid_wsabs");
-    let v = leader_identity(&ws, None).unwrap();
-    let ctx = leader_identity_context(&ws, None, Some(&serde_json::json!({}))).unwrap();
-    // golden key present + equals the resolved workspace abspath from context.
-    assert!(
-        v.get("workspace_abspath").is_some(),
-        "golden leader_identity dict carries 'workspace_abspath' (probe_lid.py)"
-    );
-    assert_eq!(
-        v["workspace_abspath"].as_str().unwrap(),
-        ctx.workspace_abspath.to_string_lossy(),
-        "workspace_abspath must equal the context's resolved abspath"
-    );
-}
-
-// LOCK — leader_identity key ORDER & full key set (golden probe_lid.py):
-// [ok, uuid_prefix, machine_fingerprint, workspace_abspath, os_user, team_id,
-//  current_pane_id, last_seen_at, source]. Pins the 9-key surface CLI emits.
-#[test]
-#[serial_test::serial(env)]
-fn leader_identity_dict_has_exact_nine_golden_keys() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
-    let ws = p2_temp_ws("lid_keys");
-    let v = leader_identity(&ws, None).unwrap();
-    let obj = v.as_object().expect("leader_identity → JSON object");
-    for key in [
-        "ok",
-        "uuid_prefix",
-        "machine_fingerprint",
-        "workspace_abspath",
-        "os_user",
-        "team_id",
-        "current_pane_id",
-        "last_seen_at",
-        "source",
-    ] {
-        assert!(
-            obj.contains_key(key),
-            "golden leader_identity dict must carry '{key}'"
-        );
-    }
-}
-
 // ═════════════════════════════════════════════════════════════════════════
 // WAVE-2 Lane B — leader-lease DIVERGENCE round (adversarial review @ 2cd71ce).
 // The lease gate is green but NOT byte-parity. Golden: leader/__init__.py

@@ -67,7 +67,6 @@ pub mod delivery;
 pub mod helpers;
 pub mod leader_channel;
 pub mod leader_receiver;
-pub mod peers;
 pub mod persist;
 pub mod presentation;
 pub mod results;
@@ -96,7 +95,6 @@ pub use leader_receiver::{
     mirror_peer_message_to_leader, send_to_leader_receiver,
     send_to_leader_receiver_with_presentation,
 };
-pub use peers::allow_peer_talk;
 pub use persist::{
     persist_resolved_send, DeliveryBlocker, InitialDisposition, InternalSendKind,
     LogicalRecipient, PersistResolution, PersistedSend, ResolvedSendIntent, SendOrigin,

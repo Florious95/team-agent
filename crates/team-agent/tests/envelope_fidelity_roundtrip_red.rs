@@ -153,6 +153,58 @@ fn tooth2_auto_finalization_preserves_the_same_full_envelope_that_sqlite_persist
     );
 }
 
+// Migrated from the retired `results --case` reader contract (R1/R2): the
+// durable row itself must keep nested artifacts byte-for-byte and the worker's
+// own envelope status after auto-finalization rewrites the bookkeeping column.
+#[test]
+#[serial(envelope_fidelity)]
+fn tooth3_auto_finalization_keeps_nested_artifacts_and_envelope_status() {
+    let _hermetic = HermeticTestEnv::enter("envelope-fidelity-artifacts");
+    let harness = McpSimHarness::new();
+    harness.prepare_collect();
+    let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
+    let custom_status = "red_gate/等待复核";
+    let artifacts = json!([{
+        "path": "artifact://tooth3/report.json",
+        "description": "TOOTH3_DEEP_ARTIFACT_CANARY",
+        "custom": {"level1": {"level2": {"array": [1, true, null, {"leaf": "逐字保留🚀"}]}}}
+    }]);
+    let mut submitted = fidelity_envelope("ARTIFACTS");
+    let object = submitted.as_object_mut().expect("fixture envelope object");
+    object.insert("status".to_string(), json!(custom_status));
+    object.insert("artifacts".to_string(), artifacts.clone());
+
+    let call = worker.call_tool("report_result", json!({"envelope": submitted}));
+    assert!(
+        !call.is_error,
+        "tooth3 setup: report_result must reach persistence; body={} raw={}",
+        call.body, call.raw
+    );
+    let result_id = call.body["result_id"]
+        .as_str()
+        .expect("tooth3 backing: report_result returns result_id");
+    let row = harness
+        .result_row(result_id)
+        .expect("tooth3 backing: persisted result row exists");
+    let persisted: Value =
+        serde_json::from_str(&row.envelope).expect("tooth3 backing: persisted envelope is JSON");
+
+    assert_eq!(
+        row.status, "collected",
+        "tooth3 positive control: auto-finalization must mark the status column"
+    );
+    assert_eq!(
+        persisted["status"],
+        json!(custom_status),
+        "tooth3: the stored envelope must keep the worker's status, not the bookkeeping column"
+    );
+    assert_eq!(
+        serde_json::to_vec(&persisted["artifacts"]).unwrap(),
+        serde_json::to_vec(&artifacts).unwrap(),
+        "tooth3: nested artifacts must survive report_result persistence byte-for-byte"
+    );
+}
+
 #[test]
 #[serial(envelope_fidelity)]
 fn reverse_control_reserved_owner_scope_conflict_is_rejected_without_result_row() {

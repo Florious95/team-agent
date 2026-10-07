@@ -146,8 +146,8 @@ fn seed_leader_registry_entry(ws: &std::path::Path) {
 
 // =========================================================================
 // WAVE-2 NON-SUB CHECKPOINT — missing CLI subcommands (ABSENT from cli/emit.rs dispatch).
-// emit.rs `dispatch` has NO arm for sessions, peek, collect, e2e, diagnose,
-// preflight, wait-ready -> they fall to `_ => Ok(ExitCode::Error)`. These REDs
+// emit.rs `dispatch` had NO arm for collect / diagnose -> they fell to
+// `_ => Ok(ExitCode::Error)`. These REDs
 // assert the dispatch ROUTES each subcommand: `run([sub,...]) == ExitCode::Ok` for a golden
 // EXIT-0 scenario (today unrouted -> ExitCode::Error -> RED; green once the porter adds the
 // dispatch arm + handler). Golden exit codes + JSON shapes probed via `python3 -m team_agent <sub>`.
@@ -159,9 +159,7 @@ fn seed_leader_registry_entry(ws: &std::path::Path) {
 // follow-up can byte-lock output once each handler exists as a callable `cmd_*`/`*_port` symbol.
 //
 // Only golden-EXIT-0, tmux-SAFE scenarios make a clean RED (an exit-1 scenario's Error is
-// indistinguishable from the unknown-subcommand Error -> false-green, forbidden). preflight/
-// wait-ready/e2e/peek cannot reach golden-exit-0 on CI without real tmux/providers/a live team,
-// so they are #[ignore] real-effect seams (documented shape), NOT false-green exit-1 asserts.
+// indistinguishable from the unknown-subcommand Error -> false-green, forbidden).
 // =========================================================================
 
 fn cli_argv(items: &[&str]) -> Vec<String> {
@@ -274,25 +272,6 @@ fn seed_team_spec(ws: &std::path::Path) {
     std::fs::write(ws.join("team.spec.yaml"), spec).unwrap();
 }
 
-// ── sessions ── golden cli/parser.py:230 `cmd_sessions` -> runtime.sessions(ws). EXIT 0.
-// `team-agent sessions --workspace <ws> --json` on an empty ws ->
-//   {"ok":true,"sessions":[],"workspace":"<ws>"}  (--json sort_keys). RED: unrouted -> Error.
-#[test]
-fn dispatch_routes_sessions_subcommand() {
-    let ws = tmp_workspace();
-    let code = run(
-        &cli_argv(&["sessions", "--workspace", &ws.to_string_lossy(), "--json"]),
-        &ws,
-    );
-    assert_eq!(
-            code,
-            ExitCode::Ok,
-            "`sessions` must ROUTE to cmd_sessions (golden parser.py:230, exit 0 {{ok,sessions,workspace}}); \
-             today it falls to the unknown-subcommand arm (emit.rs:77) -> Error"
-        );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
 // ── diagnose ── attached is host-registry authority, not state.json self-sign.
 // Seed leader_receiver=attached + a ~/.team-agent/leaders/ row for this workspace
 // + NO session_name + NO agents -> issues=[] -> EXIT 0.
@@ -385,120 +364,6 @@ fn dispatch_routes_diagnose_self_signed_attached_without_registry_is_not_ok() {
         ExitCode::Ok,
         "self-signed state.json attached with no leaders/ row must not diagnose Ok (F2 lie is dead); \
          got {code:?}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-// ── preflight (#[ignore] real-machine) ── golden parser.py:160 `cmd_preflight` -> runtime.preflight
-// (Path(args.team)). Validates a team role-doc dir: checks compile(TEAM.md)/tmux/ghostty/rust_core/
-// profile_dir; golden -> {"blockers":[...],"checks":[...],"details_log":...,"next_actions":[...],
-// "ok":bool,"summary":...}. Reaches ok:true (exit 0) ONLY with a valid TEAM.md + ghostty installed,
-// which CI cannot supply (ghostty absent -> blocker) -> not a clean in-process exit-0 RED.
-#[test]
-#[ignore = "real-machine: `preflight --team <dir>` needs a valid TEAM.md role-doc dir + ghostty to \
-                reach ok:true; on CI it golden-exits 1 (compile/ghostty blockers) which is \
-                indistinguishable from the unknown-subcommand Error (false-green). Routes to cmd_preflight \
-                (parser.py:160); shape {blockers,checks,details_log,next_actions,ok,summary}"]
-fn dispatch_routes_preflight_real_machine() {
-    let ws = tmp_workspace();
-    let code = run(
-        &cli_argv(&["preflight", "--team", &ws.to_string_lossy(), "--json"]),
-        &ws,
-    );
-    assert_eq!(
-        code,
-        ExitCode::Ok,
-        "preflight must ROUTE + exit 0 on a valid team dir"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-// ── wait-ready (#[ignore] real-machine) ── golden parser.py:171 `cmd_wait_ready` -> runtime.wait_ready
-// (ws, timeout). Polls worker readiness; golden -> {"details_log":...,"next_actions":[...],"ok":bool,
-// "readiness":{cli_prompt_ready,mcp_ready,process_started,task_prompt_delivered},"summary":...}.
-// ok:true (exit 0) needs a LIVE ready team; CI has none -> golden-exits 1 (false-green vs unknown).
-#[test]
-#[ignore = "real-machine: `wait-ready` polls a LIVE team's readiness; with no workers golden-exits 1 \
-                (false-green vs unknown-subcommand Error). Routes to cmd_wait_ready (parser.py:171); shape \
-                {details_log,next_actions,ok,readiness{cli_prompt_ready,mcp_ready,process_started,task_prompt_delivered},summary}"]
-fn dispatch_routes_wait_ready_real_machine() {
-    let ws = tmp_workspace();
-    let code = run(
-        &cli_argv(&[
-            "wait-ready",
-            "--workspace",
-            &ws.to_string_lossy(),
-            "--timeout",
-            "1",
-            "--json",
-        ]),
-        &ws,
-    );
-    assert_eq!(
-        code,
-        ExitCode::Ok,
-        "wait-ready must ROUTE + exit 0 once the team is ready"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-// ── e2e --providers fake (#[ignore] real-machine) ── golden parser.py:449 `cmd_e2e` (cli/e2e.py:12).
-// `--providers fake` runs a REAL end-to-end: runtime.launch(spec, auto_approve=True) (spawns a tmux
-// team) -> send_message -> sleep -> collect -> shutdown. Result envelope (e2e.py:16,48-56):
-//   {"workspace":str,"providers":{"fake":{"ok":bool,"launch":{...},"send":{...},"collect":{...},
-//    "shutdown":{...}}},"ok":bool}. Real tmux spawn -> #[ignore] (NOT runnable in-process).
-#[test]
-#[ignore = "real-machine: `e2e --providers fake` calls runtime.launch -> spawns a REAL tmux team \
-                (send/collect/shutdown). Routes to cmd_e2e (parser.py:449 / e2e.py:12); envelope \
-                {workspace,providers:{fake:{ok,launch,send,collect,shutdown}},ok}"]
-fn dispatch_routes_e2e_fake_real_machine() {
-    let ws = tmp_workspace();
-    let code = run(
-        &cli_argv(&[
-            "e2e",
-            "--providers",
-            "fake",
-            "--workspace",
-            &ws.to_string_lossy(),
-            "--json",
-        ]),
-        &ws,
-    );
-    assert_eq!(
-        code,
-        ExitCode::Ok,
-        "e2e --providers fake must ROUTE + run the fake end-to-end (ok:true)"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
-
-// ── peek (#[ignore] real-machine) ── golden parser.py:201 `cmd_peek` (commands.py:118). Requires
-// `--allow-raw-screen` (else TeamAgentError) + a mutually-exclusive --head/--tail/--search; then
-// runtime.peek captures a LIVE tmux pane (tmux capture-pane). Real tmux -> #[ignore]. Routes to
-// cmd_peek; --json returns the peek dict (text + capture metadata).
-#[test]
-#[ignore = "real-machine: `peek <agent> --tail N --allow-raw-screen` captures a LIVE tmux pane \
-                (tmux capture-pane); needs a running worker pane. Routes to cmd_peek (parser.py:201); \
-                --json returns the peek dict (raw screen text + metadata)"]
-fn dispatch_routes_peek_real_machine() {
-    let ws = tmp_workspace();
-    let code = run(
-        &cli_argv(&[
-            "peek",
-            "fake_impl",
-            "--workspace",
-            &ws.to_string_lossy(),
-            "--tail",
-            "20",
-            "--allow-raw-screen",
-            "--json",
-        ]),
-        &ws,
-    );
-    assert_eq!(
-        code,
-        ExitCode::Ok,
-        "peek must ROUTE + capture the live pane (real machine)"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

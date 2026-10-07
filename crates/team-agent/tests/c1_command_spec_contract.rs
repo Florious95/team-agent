@@ -21,7 +21,7 @@ use team_agent::state::persist::save_runtime_state;
 
 #[path = "support/human_catalog.rs"]
 mod human_catalog;
-use human_catalog::{HUMAN_COMMANDS as DEFAULT_COMMANDS, MACHINE_COMMANDS};
+use human_catalog::{HUMAN_COMMANDS as DEFAULT_COMMANDS, MACHINE_COMMANDS, RETIRED_COMMANDS};
 
 const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "fallback-send-leader",
@@ -69,7 +69,7 @@ fn red1_default_help_contracts_to_core_guided_surface() {
 
     assert!(
         missing.is_empty() && leaked.is_empty() && extra.is_empty() && visible == expected,
-        "RED1: default help must match exactly Human30, never Machine entries or a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
+        "RED1: default help must match exactly Human29, never Machine entries or a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
         visible.len(),
         visible,
         missing,
@@ -82,6 +82,24 @@ fn red1_default_help_contracts_to_core_guided_surface() {
         lower.contains("codex") && lower.contains("claude") && lower.contains("copilot"),
         "RED1: Human catalog must discover the provider launchers as real commands; help=\n{help}"
     );
+}
+
+// Hidden is not removed: retired names must be ordinary unknown commands (exit 1),
+// not hidden Machine commands that still answer `--help` with Usage(2).
+#[test]
+fn red1b_retired_commands_are_unknown_not_hidden() {
+    let case = Case::new("red1b-retired");
+    for command in RETIRED_COMMANDS {
+        for argv in [vec![*command], vec![*command, "--help"]] {
+            let output = case.run_ta(&argv);
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "retired {argv:?} must exit as an unknown command; output={}",
+                output_text(&output)
+            );
+        }
+    }
 }
 
 #[test]
@@ -151,10 +169,10 @@ fn red2_command_registry_covers_current_dispatch_and_replaces_source_scans() {
 
     if spec_path.exists() {
         let spec = std::fs::read_to_string(&spec_path).expect("read public registry");
-        for private in MACHINE_COMMANDS {
+        for private in MACHINE_COMMANDS.iter().chain(RETIRED_COMMANDS) {
             assert!(
                 spec_block_for(&spec, private).is_none(),
-                "Machine must not re-enter public spec: {private}"
+                "Machine/retired command must not re-enter public spec: {private}"
             );
         }
     }
@@ -194,7 +212,6 @@ fn red3_observation_a_commands_have_terminal_tiers_not_placeholders() {
     );
     let spec = std::fs::read_to_string(&spec_path).expect("read cli/spec.rs");
     let expected = BTreeMap::from([
-        ("allow-peer-talk", "core"),
         ("approvals", "core"),
         ("profile", "core"),
         ("install-skill", "core"),

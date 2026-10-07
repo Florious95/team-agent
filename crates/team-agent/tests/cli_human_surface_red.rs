@@ -44,26 +44,25 @@ const HUMAN: &[&str] = &[
     "remove-agent",
     "fork-agent",
     "clone-agent",
-    "allow-peer-talk",
     "approvals",
     "route",
     "profile",
     "install-skill",
     "inbox",
 ];
-const MACHINE: &[&str] = &[
-    "results",
-    "wait",
-    "attach-app-server-leader",
-    "identity",
-    "watch",
-    "sessions",
-    "validate",
-    "preflight",
-    "wait-ready",
+const MACHINE: &[&str] = &["wait", "attach-app-server-leader", "coordinator"];
+// Issue #289: physically removed names. They are ordinary unknown commands, not hidden Machine ones.
+const RETIRED: &[&str] = &[
     "e2e",
+    "allow-peer-talk",
+    "results",
+    "validate",
+    "identity",
+    "sessions",
+    "watch",
     "peek",
-    "coordinator",
+    "wait-ready",
+    "preflight",
 ];
 const JARGON: &[&str] = &[
     "fully-qualified",
@@ -296,8 +295,8 @@ fn help_property(command: &str) {
         let references = Regex::new(r"team-agent\s+([a-z][a-z-]*)").unwrap();
         for reference in references.captures_iter(&help) {
             assert!(
-                !MACHINE.contains(&&reference[1]),
-                "H1 private command tutorial leaked: {help}"
+                !MACHINE.contains(&&reference[1]) && !RETIRED.contains(&&reference[1]),
+                "H1 private or retired command tutorial leaked: {help}"
             );
         }
     }
@@ -372,21 +371,21 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_thirty_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_twenty_nine_human_records_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        30,
+        29,
         "H1 physically remove Machine records, not only change visibility/tier"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
 }
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
+fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
     let env = HermeticTestEnv::enter("root-human");
     let cwd = env.workspace("empty");
     let out = env.run_cli(&cwd, &["--help"]);
@@ -396,12 +395,13 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
         .lines()
         .filter_map(|line| {
             let name = line.trim().split_whitespace().next()?;
-            (HUMAN.contains(&name) || MACHINE.contains(&name)).then_some(name)
+            (HUMAN.contains(&name) || MACHINE.contains(&name) || RETIRED.contains(&name))
+                .then_some(name)
         })
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        30,
+        29,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
@@ -411,6 +411,7 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
     let tokens = words(&help);
     let leaks = MACHINE
         .iter()
+        .chain(RETIRED)
         .filter(|name| tokens.contains(**name))
         .collect::<Vec<_>>();
     assert!(
@@ -462,6 +463,7 @@ fn h1_unknown_suggestions_and_full_user_index_never_offer_machine_commands() {
         );
         let leaks = MACHINE
             .iter()
+            .chain(RETIRED)
             .filter(|name| tokens.contains(**name))
             .collect::<Vec<_>>();
         assert!(
@@ -540,7 +542,7 @@ human_properties! {
     restart => "restart", shutdown => "shutdown", add_agent => "add-agent", start_agent => "start-agent",
     stop_agent => "stop-agent", reset_agent => "reset-agent", clone_agent => "clone-agent", fork_agent => "fork-agent",
     remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
-    allow_peer_talk => "allow-peer-talk", route => "route", profile => "profile", install_skill => "install-skill",
+    route => "route", profile => "profile", install_skill => "install-skill",
     claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
     pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", inbox => "inbox",
 }
@@ -550,7 +552,88 @@ macro_rules! hidden_properties {
     )+};
 }
 hidden_properties! {
-    h2_results => "results", h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader",
-    h2_identity => "identity", h2_watch => "watch", h2_sessions => "sessions", h2_validate => "validate",
-    h2_preflight => "preflight", h2_wait_ready => "wait-ready", h2_e2e => "e2e", h2_peek => "peek", h2_coordinator => "coordinator",
+    h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader", h2_coordinator => "coordinator",
+}
+// Every argv form of a retired name, including legacy-shaped arguments against legal
+// legacy inputs and an unreadable runtime state, is rejected as an ordinary unknown
+// command (exit 1) before anything is read, written, polled, or spawned.
+fn retired_unknown(command: &str) {
+    let env = HermeticTestEnv::enter(command);
+    let cwd = env.workspace("retired");
+    let path = canary_path(&env);
+    fs::write(cwd.join("TEAM.md"), "---\nname: retired-demo\n---\nFixture team.\n").unwrap();
+    fs::create_dir(cwd.join("agents")).unwrap();
+    fs::write(cwd.join("agents/worker.md"), "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReply to leader.\n").unwrap();
+    fs::write(cwd.join("team.spec.yaml"), "version: 1\nteam:\n  name: retired-demo\n").unwrap();
+    fs::create_dir_all(cwd.join(".team/runtime")).unwrap();
+    fs::write(cwd.join(".team/runtime/state.json"), "{unreadable state").unwrap();
+    let ws = cwd.to_str().unwrap().to_string();
+    let spec = cwd.join("team.spec.yaml").to_str().unwrap().to_string();
+    let mut forms: Vec<Vec<&str>> = vec![
+        vec![],
+        vec!["--json"],
+        vec!["--help"],
+        vec!["-h"],
+        vec!["--workspace", ws.as_str(), "--json"],
+    ];
+    forms.push(match command {
+        "e2e" => vec!["--providers", "fake", "--real"],
+        "allow-peer-talk" => vec!["alpha", "bravo", "--team", "t"],
+        "results" => vec!["--case", "c", "--team", "t"],
+        "validate" | "preflight" => vec![ws.as_str()],
+        "peek" => vec!["worker", "--allow-raw-screen", "--head", "2", "--tail", "5", "--search", "needle"],
+        "wait-ready" => vec!["--timeout", "0"],
+        _ => vec!["--team", "t"],
+    });
+    if command == "validate" {
+        forms.push(vec![spec.as_str()]);
+    }
+    let before = snapshot(env.root());
+    for form in forms {
+        let mut argv = vec![command];
+        argv.extend(form);
+        let out = env.run_cli_env(&cwd, &argv, &[("PATH", &path)]);
+        let output = text(&out);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "retired {argv:?} must be an ordinary unknown command: {output}"
+        );
+        assert!(out.stdout.is_empty(), "retired {argv:?} printed command output: {output}");
+        assert!(
+            output.contains(&format!("没有这个操作：'{command}'")),
+            "retired {argv:?} must use the generic unknown-command refusal: {output}"
+        );
+        let tokens = words(&output);
+        let leaks = MACHINE
+            .iter()
+            .chain(RETIRED.iter().filter(|name| **name != command))
+            .filter(|name| tokens.contains(**name))
+            .collect::<Vec<_>>();
+        assert!(leaks.is_empty(), "retired {argv:?} suggested {leaks:?}: {output}");
+        assert_eq!(
+            snapshot(env.root()),
+            before,
+            "retired {argv:?} wrote files, logs, state, or invoked a native tool: {output}"
+        );
+    }
+}
+macro_rules! retired_properties {
+    ($($id:ident => $command:literal),+ $(,)?) => {$ (
+        #[test] #[serial(env)] fn $id() { retired_unknown($command); }
+    )+};
+}
+retired_properties! {
+    r289_e2e => "e2e", r289_allow_peer_talk => "allow-peer-talk", r289_results => "results",
+    r289_validate => "validate", r289_identity => "identity", r289_sessions => "sessions",
+    r289_watch => "watch", r289_peek => "peek", r289_wait_ready => "wait-ready", r289_preflight => "preflight",
+}
+#[test]
+fn r289_retired_names_have_no_catalog_record() {
+    for command in RETIRED {
+        assert!(
+            catalog::COMMAND_SPECS.iter().all(|spec| spec.name != *command),
+            "retired `{command}` must not keep a CommandSpec"
+        );
+    }
 }
