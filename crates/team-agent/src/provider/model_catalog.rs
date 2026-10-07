@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::model::enums::Provider;
+use crate::provider::wire::provider_wire;
 
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
@@ -137,20 +138,6 @@ pub fn parse_catalog_provider(name: &str) -> Option<Provider> {
     }
 }
 
-fn provider_wire_name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Pi => "pi",
-        Provider::CursorAgent => "cursor_agent",
-        Provider::Codex => "codex",
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Grok => "grok",
-        Provider::Fake => "fake",
-    }
-}
-
 #[derive(Clone, Copy)]
 enum CatalogSource {
     Pi,
@@ -175,7 +162,7 @@ fn catalog_source(provider: Provider) -> Option<CatalogSource> {
 pub fn discover_model_catalog(provider_name: &str) -> Result<Vec<ModelRecord>, CatalogError> {
     let provider = parse_catalog_provider(provider_name).ok_or(CatalogError::UnsupportedProvider)?;
     let source = catalog_source(provider).ok_or(CatalogError::UnsupportedProvider)?;
-    let requested_provider = provider_wire_name(provider);
+    let requested_provider = provider_wire(provider);
     let records = match source {
         CatalogSource::Pi => {
             let bytes = run_native("pi", &["--list-models"], None, None, &[], CATALOG_TIMEOUT, MAX_CATALOG_BYTES, &mut NoopObserver)?;
@@ -881,10 +868,24 @@ mod tests {
 
     #[test]
     fn provider_capability_is_explicit_and_exact() {
-        assert_eq!(parse_catalog_provider("claude_code"), Some(Provider::ClaudeCode));
-        assert_eq!(parse_catalog_provider("cloud"), None);
-        assert!(catalog_source(Provider::Codex).is_some());
-        assert!(catalog_source(Provider::Fake).is_none());
+        for (name, provider) in [
+            ("pi", Provider::Pi),
+            ("cursor_agent", Provider::CursorAgent),
+            ("codex", Provider::Codex),
+            ("claude", Provider::Claude),
+            ("claude_code", Provider::ClaudeCode),
+            ("grok", Provider::Grok),
+        ] {
+            assert_eq!(parse_catalog_provider(name), Some(provider));
+            assert_eq!(provider_wire(provider), name);
+            assert!(catalog_source(provider).is_some());
+        }
+        for name in ["cloud", "cursor", "agent", "claude-code", "copilot", "gemini_cli", "fake"] {
+            assert_eq!(parse_catalog_provider(name), None);
+        }
+        for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
+            assert!(catalog_source(provider).is_none());
+        }
     }
 
     #[test]
