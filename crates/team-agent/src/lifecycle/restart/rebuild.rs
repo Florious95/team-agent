@@ -69,6 +69,14 @@ impl LifecyclePhase {
             Self::Completed => "completed",
         }
     }
+
+    /// Pure event formatting shared by launch/restart; no clock, I/O or readiness policy.
+    pub(crate) fn event_fields(self, elapsed_ms: u64) -> serde_json::Value {
+        serde_json::json!({
+            "phase": self.as_str(),
+            "elapsed_ms": elapsed_ms,
+        })
+    }
 }
 
 #[test]
@@ -85,6 +93,16 @@ fn lifecycle_phase_wire_labels_remain_stable() {
         (LifecyclePhase::Completed, "completed"),
     ] {
         assert_eq!(phase.as_str(), wire);
+        for elapsed_ms in [0, 123, u64::MAX] {
+            assert_eq!(phase.event_fields(elapsed_ms), serde_json::json!({
+                "phase": wire,
+                "elapsed_ms": elapsed_ms,
+            }));
+            assert_eq!(
+                serde_json::to_string(&phase.event_fields(elapsed_ms)).expect("phase JSON"),
+                format!("{{\"phase\":\"{wire}\",\"elapsed_ms\":{elapsed_ms}}}"),
+            );
+        }
     }
 }
 
@@ -120,13 +138,7 @@ impl RestartPhaseTimer {
 /// ---
     pub(crate) fn emit(&self, workspace: &Path, kind: &'static str, phase: LifecyclePhase) {
         let event_log = crate::event_log::EventLog::new(workspace);
-        let _ = event_log.write(
-            kind,
-            serde_json::json!({
-                "phase": phase.as_str(),
-                "elapsed_ms": self.elapsed_ms(),
-            }),
-        );
+        let _ = event_log.write(kind, phase.event_fields(self.elapsed_ms()));
     }
 }
 
