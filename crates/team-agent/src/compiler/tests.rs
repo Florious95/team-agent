@@ -7,6 +7,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+#[test]
+fn cursor_effort_is_rejected_by_shared_admission_for_every_level() {
+    for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+        let role = write_tmp("cursor.md", &format!("---\nprovider: cursor_agent\neffort: {effort}\n---\nRole\n"));
+        let error = compile_role_agent(&role, &Value::Map(Vec::new()), "/workspace")
+            .err()
+            .expect("Cursor must reject effort before command construction");
+        assert!(error.to_string().contains("cursor_agent does not support effort; the Cursor CLI has no --effort flag"));
+        fs::remove_dir_all(role.parent().unwrap()).unwrap();
+    }
+}
+
 fn unique_base() -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("ta_rs_compile_{}_{}", std::process::id(), n))

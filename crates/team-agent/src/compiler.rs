@@ -590,15 +590,6 @@ fn compile_role_agent_with_mode(
                 effort.as_str()
             )));
         }
-        if provider_enum == Provider::CursorAgent {
-            return Err(ModelError::Validation(format!(
-                "{}: cursor_agent does not support effort '{}'. \
-The Cursor CLI has no `--effort` flag; the framework must not drop the field and still launch. \
-Remove effort from the role file (do not map it into `--model[effort=]` until that form is measured).",
-                role_path.display(),
-                effort.as_str()
-            )));
-        }
         agent_items.push(("effort", Value::Str(effort.as_str().to_string())));
     }
     Ok(CompiledRole {
