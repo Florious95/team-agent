@@ -51,6 +51,7 @@ pub mod argv_route;
 /// 0.5.66 bypass 单源:provider → bypass argv flag 配置表(唯一权威)。
 pub(crate) mod bypass_flags;
 pub mod classify;
+pub(crate) mod command_helpers;
 pub mod faults;
 pub mod model_catalog;
 pub mod session;

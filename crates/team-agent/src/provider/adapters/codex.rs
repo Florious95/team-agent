@@ -8,6 +8,7 @@
 
 use crate::model::enums::AuthMode;
 use crate::provider::adapter::json_inline;
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
 use crate::provider::{McpConfig, ProviderCommandOverrides};
 
 pub(crate) fn codex_base_command(
@@ -36,24 +37,17 @@ pub(crate) fn codex_base_command(
         "--disable".to_string(),
         "apps".to_string(),
     ]);
-    if let Some(profile) = overrides.and_then(|o| o.codex_profile.as_deref()) {
-        argv.push("--profile".to_string());
-        argv.push(profile.to_string());
-    }
+    append_opt_pair(&mut argv, "--profile", overrides.and_then(|o| o.codex_profile.as_deref()));
     if dangerously_skip_permissions {
         // 0.5.66 bypass 单源:flag 由 provider_bypass_flag 表供给。
         let flag = crate::provider::bypass_flags::provider_bypass_flag(crate::model::enums::Provider::Codex)
             .expect("codex provider must define a bypass flag");
         argv.push(flag.to_string());
     }
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    append_opt_pair(&mut argv, "--model", model);
     if let Some(overrides) = overrides {
         for config in &overrides.codex_config {
-            argv.push("-c".to_string());
-            argv.push(config.clone());
+            append_pair(&mut argv, "-c", config.clone());
         }
     }
     if let Some(effort) = effort {
@@ -66,8 +60,7 @@ pub(crate) fn codex_base_command(
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\n', "\\n");
-        argv.push("-c".to_string());
-        argv.push(format!("developer_instructions=\"{escaped}\""));
+        append_pair(&mut argv, "-c", format!("developer_instructions=\"{escaped}\""));
     }
     if let Some(config) = mcp_config {
         append_codex_mcp_overrides(&mut argv, &config.raw);
@@ -91,8 +84,7 @@ pub(crate) fn append_codex_mcp_overrides(argv: &mut Vec<String>, raw: &serde_jso
             if key == "env" {
                 if let Some(env) = value.as_object() {
                     for (env_key, env_value) in env {
-                        argv.push("-c".to_string());
-                        argv.push(format!(
+                        append_pair(argv, "-c", format!(
                             "mcp_servers.{name}.env.{env_key}={}",
                             json_inline(env_value)
                         ));
@@ -100,12 +92,10 @@ pub(crate) fn append_codex_mcp_overrides(argv: &mut Vec<String>, raw: &serde_jso
                 }
                 continue;
             }
-            argv.push("-c".to_string());
-            argv.push(format!("mcp_servers.{name}.{key}={}", json_inline(value)));
+            append_pair(argv, "-c", format!("mcp_servers.{name}.{key}={}", json_inline(value)));
         }
         // Every MCP server gets a 600s tool timeout so long-running
         // team_orchestrator calls (report_result etc.) survive the codex default.
-        argv.push("-c".to_string());
-        argv.push(format!("mcp_servers.{name}.tool_timeout_sec=600.0"));
+        append_pair(argv, "-c", format!("mcp_servers.{name}.tool_timeout_sec=600.0"));
     }
 }

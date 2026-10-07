@@ -32,6 +32,7 @@
 
 use crate::provider::adapter::next_session_token;
 use crate::provider::ProviderError;
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
 
 pub(crate) fn grok_launch_command(
     system_prompt: Option<&str>,
@@ -39,8 +40,7 @@ pub(crate) fn grok_launch_command(
     dangerously_skip_permissions: bool,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = grok_base_command(system_prompt, model, dangerously_skip_permissions, None)?;
-    argv.push("--session-id".to_string());
-    argv.push(next_session_token());
+    append_pair(&mut argv, "--session-id", next_session_token());
     Ok(argv)
 }
 
@@ -54,19 +54,13 @@ pub(crate) fn grok_base_command(
     if dangerously_skip_permissions {
         argv.push("--always-approve".to_string());
     }
-    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    append_opt_pair(&mut argv, "--model", model.map(str::trim).filter(|value| !value.is_empty()));
     if let Some(effort) = effort {
         // Grok accepts `--effort` as alias for `--reasoning-effort`.
         argv.push("--effort".to_string());
         argv.push(effort.as_str().to_string());
     }
-    if let Some(prompt) = system_prompt {
-        argv.push("--rules".to_string());
-        argv.push(prompt.to_string());
-    }
+    append_opt_pair(&mut argv, "--rules", system_prompt);
     // Grok CLI has no `--mcp-config` flag — the claude inline-MCP block is
     // intentionally absent. Launch writes `<cwd>/.grok/config.toml`.
     Ok(argv)
