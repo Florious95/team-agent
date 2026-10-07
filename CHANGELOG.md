@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.111]
+
+- **Human-first CLI (Issue #286, PR #287):** separate the 30 public human commands from 12 retained machine/compatibility entries. Human guidance uses plain teammate names with explicit `--workspace`/`--team`, rather than physical terminal identifiers, fully qualified addressing jargon, or obsolete routing switches. Existing machine JSON fields and compatibility parsing remain available.
+- **Complete, actionable help:** every public command has a description, copyable examples, and a next action. Bare commands and missing inputs provide safe, non-mutating guidance instead of an opaque error. Empty-directory onboarding generates templates in place; role/provider/permission choices remain explicit rather than guessed.
+- **Recoverable addressing errors:** preserve the user's original spelling and concrete JSON error/action, retain the existing scope-safe candidate order, and show a quoted short-name send example plus navigation to the actual project's status. Cross-workspace inputs keep the resolved target scope; no candidate is silently selected, no private task body is echoed, and refusal remains non-successful. Control characters are escaped and existing redaction remains enabled.
+- **Truthful lifecycle and discovery guidance:** stale leaders no longer expose misleading Human send navigation. Remove the unsupported `start-agent --force` claim; explain reset's saved-session clearing/restart behavior and paused-agent exception; warn that takeover can act without `--confirm` when a usable team terminal exists, and provide explicitly authorized, team-scoped examples.
+- **Validation and delivery:** the accepted CLI candidate completed the finite Grok 14/14-unit verification portfolio and real-machine Luna blind CLI scenarios, including empty-project onboarding, safe bare-command help, concrete correction guidance, and privacy/isolation controls. These receipts describe the tested portfolio, not an unrestricted all-scenario guarantee. Formatting is scoped to the changed CLI presentation files, preserving unrelated historical source.
+- **Release metadata:** align the Rust workspace/lockfile, installer, three platform packages, and official publishing workflow at 0.5.111. Product source is the accepted main delivery; the formal tag workflow supplies the full Rust test and three-platform package gates.
+
 ## [0.5.110]
 
 - **Global native CLI argv routing (Issue #283, PR #284):** add opt-in, provider-isolated startup arguments in `~/.team-agent/argv-routing.json`. Default OFF; `TEAM_AGENT_CLI_ARGV_ROUTING` overrides the persisted switch. Claude/Claude Code share a mapping, Cursor aliases resolve to `cursor_agent`, and unmapped providers retain their original argv.
