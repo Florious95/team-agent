@@ -159,7 +159,7 @@ pub enum CmdOutput {
     Json(Value),
     /// 人读字符串(`emit` 非 dict 分支直接 print)。
     Human(String),
-    /// 无输出(passthrough/watch;不经 `emit`)。
+    /// 无输出(passthrough;不经 `emit`)。
     None,
 }
 
@@ -190,19 +190,6 @@ impl CmdResult {
             exit,
             as_json,
             preserve_json_order: false,
-        }
-    }
-    pub fn from_ordered_json(value: Value) -> Self {
-        let exit = if value.get("ok").and_then(Value::as_bool) == Some(false) {
-            ExitCode::Error
-        } else {
-            ExitCode::Ok
-        };
-        Self {
-            output: CmdOutput::Json(value),
-            exit,
-            as_json: true,
-            preserve_json_order: true,
         }
     }
     pub fn human(text: impl Into<String>) -> Self {
