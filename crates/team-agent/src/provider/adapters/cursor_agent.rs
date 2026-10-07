@@ -3,7 +3,7 @@
 //! contract:
 //!   provides:
 //!     - name: cursor_agent_base_command
-//!       what: 只组已实测文档化 flag；mcp_config 不入 argv，由 launch overlay 写盘
+//!       what: 只组已实测文档化 flag；MCP 由 launch overlay 写盘
 //! boundary:
 //!   - 不调未文档化 flag（--system-prompt / --allowed-tools）
 //!   - 不写 grok 那种 cwd 独占闸
@@ -22,39 +22,11 @@
 //! 随时可能消失。可以在注释里记录，代码里不许调。
 //! `--allowed-tools` 正反行为未验证，不写「支持工具白名单」。
 
-use crate::model::enums::AuthMode;
-use crate::provider::adapter::BasicProviderAdapter;
-use crate::provider::{McpConfig, ProviderError};
-
-pub(crate) fn cursor_agent_launch_command(
-    adapter: &BasicProviderAdapter,
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    dangerously_skip_permissions: bool,
-) -> Result<Vec<String>, ProviderError> {
-    cursor_agent_base_command(
-        adapter,
-        auth_mode,
-        mcp_config,
-        system_prompt,
-        model,
-        dangerously_skip_permissions,
-        false,
-        None,
-    )
-}
+use crate::provider::ProviderError;
 
 pub(crate) fn cursor_agent_base_command(
-    adapter: &BasicProviderAdapter,
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
     model: Option<&str>,
     dangerously_skip_permissions: bool,
-    managed_mcp_config: bool,
-    effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["agent".to_string()];
     if dangerously_skip_permissions {
@@ -68,13 +40,8 @@ pub(crate) fn cursor_agent_base_command(
         argv.push("--model".to_string());
         argv.push(model.to_string());
     }
-    // Cursor `--effort` flag 不存在；框架在调用方丢掉 effort。绝不发明 flag。
-    let _ = effort;
-    // system_prompt 不入 argv（help 无 --rules / --append-system-prompt）。
-    // launch 写 `<workspace>/.cursor/rules/team-agent-role-<agent_id>.mdc`。
-    // mcp_config 也不入 argv（无 --mcp-config）。launch 写 `.cursor/mcp.json`
-    // 并 `agent mcp enable team_orchestrator`。这里收下以免静默丢弃。
-    let _ = (adapter, auth_mode, mcp_config, managed_mcp_config, system_prompt);
+    // Cursor has no `--effort`, system-prompt, or MCP config flag.
+    // Launch materializes role rules and the `.cursor/mcp.json` overlay.
     argv.push("--workspace".to_string());
     argv.push("{workspace}".to_string());
     Ok(argv)

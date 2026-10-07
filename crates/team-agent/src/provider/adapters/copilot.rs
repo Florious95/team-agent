@@ -3,7 +3,7 @@
 //!
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure
 //! extraction — byte-identical to the original inline forms. Scope kept
-//! small: base command + resume + MCP type→transport
+//! small: base command + MCP type→transport
 //! translation. Auth hint (`copilot_auth_hint`) stays in `adapter.rs`;
 //! session-store scanning lives under `provider/session_scan/copilot.rs`.
 
@@ -76,17 +76,4 @@ pub(crate) fn copilot_translate_mcp_config(raw: &serde_json::Value) -> serde_jso
         translated.insert(name.clone(), serde_json::Value::Object(out));
     }
     serde_json::Value::Object(translated)
-}
-
-/// Resume path = base + `--resume <sid>` (drop --session-id); kept separate
-/// to avoid the plan accidentally emitting --session-id and --resume in the
-/// same frame.
-pub(crate) fn copilot_base_command_resume(
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    dangerously_skip_permissions: bool,
-) -> Vec<String> {
-    copilot_base_command(auth_mode, mcp_config, system_prompt, model, dangerously_skip_permissions)
 }
