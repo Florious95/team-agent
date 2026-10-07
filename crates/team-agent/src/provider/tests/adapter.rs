@@ -1,4 +1,74 @@
 #[test]
+fn trimmed_provider_builders_preserve_fresh_and_resume_argv() {
+    for (provider, base) in [
+        (
+            Provider::Grok,
+            vec!["grok", "--model", "test-model", "--rules", "role"],
+        ),
+        (
+            Provider::CursorAgent,
+            vec!["agent", "--model", "test-model", "--workspace", "{workspace}"],
+        ),
+        (
+            Provider::Copilot,
+            vec![
+                "copilot", "--no-color", "--no-auto-update", "--no-remote",
+                "--disable-builtin-mcps", "--allow-tool", "team_orchestrator",
+                "--model", "test-model",
+            ],
+        ),
+    ] {
+        let adapter = get_adapter(provider);
+        let ctx = ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: Some("role"),
+            model: Some("test-model"),
+            dangerously_skip_permissions: false,
+            profile_launch: None,
+            agent_id_hint: Some("worker"),
+            effort: None,
+        };
+        let mut expected = base.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let fresh = adapter.build_command_plan(ctx).expect("fresh plan");
+        if provider != Provider::CursorAgent {
+            expected.push("--session-id".to_string());
+            expected.push(
+                fresh.expected_session_id.as_ref().expect("session hint").as_str().to_string(),
+            );
+        } else {
+            assert!(fresh.expected_session_id.is_none());
+        }
+        assert_eq!(fresh.argv, expected, "{provider:?} fresh argv");
+        let session = SessionId::new("existing-session");
+        let mut expected = base.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        expected.extend(["--resume".to_string(), session.as_str().to_string()]);
+        assert_eq!(
+            adapter
+                .build_resume_command_plan(Some(&session), ctx)
+                .expect("resume plan")
+                .argv,
+            expected,
+            "{provider:?} resume argv"
+        );
+        if provider == Provider::CursorAgent {
+            let mut expected = base.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            expected.insert(1, "--resume".to_string());
+            expected.insert(2, session.as_str().to_string());
+            assert_eq!(
+                adapter
+                    .build_resume_command_with_context(
+                        Some(&session), ctx.auth_mode, None, ctx.system_prompt, ctx.model, false,
+                    )
+                    .expect("legacy resume"),
+                expected,
+                "legacy Cursor resume must retain its distinct flag order"
+            );
+        }
+    }
+}
+
+#[test]
 fn abnormal_dedup_key_uses_signature_and_optional_turn_id() {
     // probe(/tmp/probe_idle.py read_fault_facts): the C8 dedup key is
     // (Signature, Option<TurnId>). Golden facts below are the exact extraction.

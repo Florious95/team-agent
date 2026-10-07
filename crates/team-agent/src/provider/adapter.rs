@@ -480,22 +480,13 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(argv)
             }
             Provider::Grok => Ok(grok_launch_command(
-                self,
-                auth_mode,
-                mcp_config,
                 system_prompt,
                 model,
                 dangerously_skip_permissions,
             )?),
             Provider::CursorAgent => Ok(cursor_agent_base_command(
-                self,
-                auth_mode,
-                mcp_config,
-                system_prompt,
                 model,
                 dangerously_skip_permissions,
-                false,
-                None,
             )?),
             Provider::Pi => Err(ProviderError::Command(
                 "Pi commands require the shared lifecycle materializer".to_string(),
@@ -596,14 +587,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                 // never written and restart could not resume.
                 let expected = next_session_token();
                 let mut argv = grok_base_command(
-                    self,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
                     ctx.dangerously_skip_permissions,
-                    ctx.profile_launch
-                        .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
                 )?;
                 argv.push("--session-id".to_string());
@@ -637,15 +623,8 @@ impl ProviderAdapter for BasicProviderAdapter {
                 // U-01 create-chat 无登录超时；禁止发明 --session-id。
                 // pending 只能是 CLI chatId，本拍不造假 uuid。
                 let argv = cursor_agent_base_command(
-                    self,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
-                    ctx.system_prompt,
                     ctx.model,
                     ctx.dangerously_skip_permissions,
-                    ctx.profile_launch
-                        .is_some_and(|profile| profile.managed_mcp_config),
-                    ctx.effort,
                 )?;
                 Ok(CommandPlan {
                     argv,
@@ -816,7 +795,7 @@ impl ProviderAdapter for BasicProviderAdapter {
             // copilot --resume 接受 id|name)。
             Provider::Copilot => {
                 let mut argv =
-                    copilot_base_command_resume(auth_mode, mcp_config, system_prompt, model, dangerously_skip_permissions);
+                    copilot_base_command(auth_mode, mcp_config, system_prompt, model, dangerously_skip_permissions);
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -824,13 +803,9 @@ impl ProviderAdapter for BasicProviderAdapter {
             // Grok resume: base + `--resume <id>` (grok -r/--resume 接受 id|title)。
             Provider::Grok => {
                 let mut argv = grok_base_command(
-                    self,
-                    auth_mode,
-                    mcp_config,
                     system_prompt,
                     model,
                     dangerously_skip_permissions,
-                    false,
                     None,
                 )?;
                 argv.push("--resume".to_string());
@@ -839,16 +814,7 @@ impl ProviderAdapter for BasicProviderAdapter {
             }
             // Cursor resume: base + `--resume <chatId>`。
             Provider::CursorAgent => {
-                let mut argv = cursor_agent_base_command(
-                    self,
-                    auth_mode,
-                    mcp_config,
-                    system_prompt,
-                    model,
-                    dangerously_skip_permissions,
-                    false,
-                    None,
-                )?;
+                let mut argv = cursor_agent_base_command(model, dangerously_skip_permissions)?;
                 // Put --resume immediately after `agent` so the CLI treats it as
                 // the session mode rather than a trailing flag after --workspace.
                 argv.insert(1, "--resume".to_string());
@@ -941,14 +907,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ));
                 };
                 let mut argv = grok_base_command(
-                    self,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
                     ctx.dangerously_skip_permissions,
-                    ctx.profile_launch
-                        .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
                 )?;
                 argv.push("--resume".to_string());
@@ -968,15 +929,8 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ));
                 }
                 let mut argv = cursor_agent_base_command(
-                    self,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
-                    ctx.system_prompt,
                     ctx.model,
                     ctx.dangerously_skip_permissions,
-                    ctx.profile_launch
-                        .is_some_and(|profile| profile.managed_mcp_config),
-                    ctx.effort,
                 )?;
                 argv.push("--resume".to_string());
                 argv.push(raw.to_string());
@@ -1067,13 +1021,9 @@ impl ProviderAdapter for BasicProviderAdapter {
             // (grok help: --fork-session 需配合 --resume/--continue)。
             Provider::Grok => {
                 let mut argv = grok_base_command(
-                    self,
-                    auth_mode,
-                    mcp_config,
                     system_prompt,
                     model,
                     dangerously_skip_permissions,
-                    false,
                     None,
                 )?;
                 argv.push("--session-id".to_string());
@@ -1191,7 +1141,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     .ok_or_else(|| {
                         ProviderError::Command("copilot fork root was not materialized".to_string())
                     })?;
-                let mut argv = copilot_base_command_resume(
+                let mut argv = copilot_base_command(
                     ctx.auth_mode,
                     ctx.mcp_config,
                     ctx.system_prompt,
@@ -1214,14 +1164,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ));
                 };
                 let mut argv = grok_base_command(
-                    self,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
                     ctx.system_prompt,
                     ctx.model,
                     ctx.dangerously_skip_permissions,
-                    ctx.profile_launch
-                        .is_some_and(|profile| profile.managed_mcp_config),
                     ctx.effort,
                 )?;
                 argv.push("--session-id".to_string());
@@ -1405,7 +1350,7 @@ pub(crate) fn json_inline(value: &serde_json::Value) -> String {
 // the extracted base-command functions, not directly by this file.
 use super::adapters::claude::{claude_base_command, claude_launch_command};
 use super::adapters::codex::codex_base_command;
-use super::adapters::copilot::{copilot_base_command, copilot_base_command_resume};
+use super::adapters::copilot::copilot_base_command;
 use super::adapters::cursor_agent::cursor_agent_base_command;
 use super::adapters::fake::fake_worker_command;
 use super::adapters::grok::{grok_base_command, grok_launch_command};
