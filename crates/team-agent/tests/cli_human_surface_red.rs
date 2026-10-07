@@ -561,10 +561,18 @@ fn retired_unknown(command: &str) {
     let env = HermeticTestEnv::enter(command);
     let cwd = env.workspace("retired");
     let path = canary_path(&env);
-    fs::write(cwd.join("TEAM.md"), "---\nname: retired-demo\n---\nFixture team.\n").unwrap();
+    fs::write(
+        cwd.join("TEAM.md"),
+        "---\nname: retired-demo\n---\nFixture team.\n",
+    )
+    .unwrap();
     fs::create_dir(cwd.join("agents")).unwrap();
     fs::write(cwd.join("agents/worker.md"), "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nReply to leader.\n").unwrap();
-    fs::write(cwd.join("team.spec.yaml"), "version: 1\nteam:\n  name: retired-demo\n").unwrap();
+    fs::write(
+        cwd.join("team.spec.yaml"),
+        "version: 1\nteam:\n  name: retired-demo\n",
+    )
+    .unwrap();
     fs::create_dir_all(cwd.join(".team/runtime")).unwrap();
     fs::write(cwd.join(".team/runtime/state.json"), "{unreadable state").unwrap();
     let ws = cwd.to_str().unwrap().to_string();
@@ -581,7 +589,16 @@ fn retired_unknown(command: &str) {
         "allow-peer-talk" => vec!["alpha", "bravo", "--team", "t"],
         "results" => vec!["--case", "c", "--team", "t"],
         "validate" | "preflight" => vec![ws.as_str()],
-        "peek" => vec!["worker", "--allow-raw-screen", "--head", "2", "--tail", "5", "--search", "needle"],
+        "peek" => vec![
+            "worker",
+            "--allow-raw-screen",
+            "--head",
+            "2",
+            "--tail",
+            "5",
+            "--search",
+            "needle",
+        ],
         "wait-ready" => vec!["--timeout", "0"],
         _ => vec!["--team", "t"],
     });
@@ -599,7 +616,10 @@ fn retired_unknown(command: &str) {
             Some(1),
             "retired {argv:?} must be an ordinary unknown command: {output}"
         );
-        assert!(out.stdout.is_empty(), "retired {argv:?} printed command output: {output}");
+        assert!(
+            out.stdout.is_empty(),
+            "retired {argv:?} printed command output: {output}"
+        );
         assert!(
             output.contains(&format!("没有这个操作：'{command}'")),
             "retired {argv:?} must use the generic unknown-command refusal: {output}"
@@ -610,7 +630,10 @@ fn retired_unknown(command: &str) {
             .chain(RETIRED.iter().filter(|name| **name != command))
             .filter(|name| tokens.contains(**name))
             .collect::<Vec<_>>();
-        assert!(leaks.is_empty(), "retired {argv:?} suggested {leaks:?}: {output}");
+        assert!(
+            leaks.is_empty(),
+            "retired {argv:?} suggested {leaks:?}: {output}"
+        );
         assert_eq!(
             snapshot(env.root()),
             before,
@@ -632,7 +655,9 @@ retired_properties! {
 fn r289_retired_names_have_no_catalog_record() {
     for command in RETIRED {
         assert!(
-            catalog::COMMAND_SPECS.iter().all(|spec| spec.name != *command),
+            catalog::COMMAND_SPECS
+                .iter()
+                .all(|spec| spec.name != *command),
             "retired `{command}` must not keep a CommandSpec"
         );
     }

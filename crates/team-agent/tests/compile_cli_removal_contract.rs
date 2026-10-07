@@ -292,7 +292,10 @@ fn p3_invalid_role_remains_a_real_compile_diagnostic() {
     let body = json_stdout(&doctor);
     assert_eq!(body["ok"], false);
     assert_eq!(body["profile_smoke"]["ok"], false, "{body}");
-    assert!(body["profile_smoke"].to_string().contains("provider"), "{body}");
+    assert!(
+        body["profile_smoke"].to_string().contains("provider"),
+        "{body}"
+    );
 }
 
 #[test]

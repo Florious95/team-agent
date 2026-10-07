@@ -357,11 +357,7 @@ pub(crate) fn default_help() -> String {
             "remove-agent",
         ],
     );
-    append_help_section(
-        &mut out,
-        "观察与协作",
-        &["leaders", "doctor", "approvals"],
-    );
+    append_help_section(&mut out, "观察与协作", &["leaders", "doctor", "approvals"]);
     append_help_section(&mut out, "设置", &["route", "profile", "install-skill"]);
     append_help_section(
         &mut out,
@@ -2124,9 +2120,18 @@ mod tests {
     fn retired_commands_are_plain_unknown_commands() {
         let cwd = tmp_workspace();
         for command in RETIRED_COMMANDS {
-            assert!(command_spec(command).is_none(), "`{command}` must have no CommandSpec");
-            assert!(!is_machine_command(command), "`{command}` must not be a Machine command");
-            assert!(!is_known_subcommand(command), "`{command}` must not pass the help gate");
+            assert!(
+                command_spec(command).is_none(),
+                "`{command}` must have no CommandSpec"
+            );
+            assert!(
+                !is_machine_command(command),
+                "`{command}` must not be a Machine command"
+            );
+            assert!(
+                !is_known_subcommand(command),
+                "`{command}` must not pass the help gate"
+            );
             for args in [&[][..], &["--json"][..], &["--help"][..], &["-h"][..]] {
                 let mut argv = vec![(*command).to_string()];
                 argv.extend(args.iter().map(|arg| (*arg).to_string()));

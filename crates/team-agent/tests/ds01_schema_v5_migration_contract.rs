@@ -94,7 +94,9 @@ fn exact_v4_runtime_database_migrates_to_v5_without_losing_any_row() {
             Ok((row.get(0)?, row.get(1)?))
         })
         .unwrap_or_else(|error| {
-            panic!("{V4_UPGRADE_RISK}: legacy peer_allowlist rows must survive the upgrade: {error}")
+            panic!(
+                "{V4_UPGRADE_RISK}: legacy peer_allowlist rows must survive the upgrade: {error}"
+            )
         });
     assert_eq!(peer_row, ("worker".to_string(), "reviewer".to_string()));
     drop(after_conn);

@@ -716,7 +716,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             row,
-            ("worker".to_string(), "reviewer".to_string(), "v4".to_string())
+            (
+                "worker".to_string(),
+                "reviewer".to_string(),
+                "v4".to_string()
+            )
         );
         drop(conn);
         let d = schema_diagnosis(&path, SCHEMA_VERSION).unwrap();
