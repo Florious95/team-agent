@@ -435,9 +435,9 @@ mod tests {
         assert_eq!(idx, 6, "二次 init 后 6 个 named index 仍在");
     }
 
-    // 全 8 表逐列 (name, type, notnull, dflt, pk) golden(Python initialize_schema table_info)。
+    // Managed tables: (name, type, notnull, dflt, pk).
     #[test]
-    fn per_column_table_info_all_eight_tables() {
+    fn per_column_table_info_managed_tables() {
         type Col = (&'static str, &'static str, i64, Option<&'static str>, i64);
         let golden: &[(&str, &[Col])] = &[
             (

@@ -144,25 +144,7 @@ fn seed_leader_registry_entry(ws: &std::path::Path) {
     );
 }
 
-// =========================================================================
-// WAVE-2 NON-SUB CHECKPOINT — missing CLI subcommands (ABSENT from cli/emit.rs dispatch).
-// emit.rs `dispatch` has NO arm for sessions, peek, collect, e2e, diagnose,
-// preflight, wait-ready -> they fall to `_ => Ok(ExitCode::Error)`. These REDs
-// assert the dispatch ROUTES each subcommand: `run([sub,...]) == ExitCode::Ok` for a golden
-// EXIT-0 scenario (today unrouted -> ExitCode::Error -> RED; green once the porter adds the
-// dispatch arm + handler). Golden exit codes + JSON shapes probed via `python3 -m team_agent <sub>`.
-//
-// OBSERVABILITY NOTE: `run()` exposes only ExitCode (Ok=0/Error=1); it prints via println!, which
-// libtest intercepts (thread-local capture), so an fd-level stdout byte-capture is unreliable
-// under `cargo test`. The exact golden --json byte-shape is therefore LOCKED in each doc-comment
-// as the porter's parity obligation; the in-process assertion is the routing (exit code). A
-// follow-up can byte-lock output once each handler exists as a callable `cmd_*`/`*_port` symbol.
-//
-// Only golden-EXIT-0, tmux-SAFE scenarios make a clean RED (an exit-1 scenario's Error is
-// indistinguishable from the unknown-subcommand Error -> false-green, forbidden). preflight/
-// wait-ready/e2e/peek cannot reach golden-exit-0 on CI without real tmux/providers/a live team,
-// so they are #[ignore] real-effect seams (documented shape), NOT false-green exit-1 asserts.
-// =========================================================================
+// Retained doctor dispatch and shared status-readiness contracts.
 
 fn cli_argv(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| (*s).to_string()).collect()

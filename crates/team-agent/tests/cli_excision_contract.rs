@@ -38,10 +38,15 @@ fn retired_commands_refuse_without_touching_workspace() {
     std::fs::write(workspace.join("canary"), "must remain unchanged").unwrap();
     let before = files(&workspace);
     for command in RETIRED {
-        for flags in [vec![], vec!["--json"], vec!["--help"], vec!["-h"]] {
+        for flags in [
+            vec![],
+            vec!["--json"],
+            vec!["--help"],
+            vec!["-h"],
+            vec!["--workspace", workspace.to_str().unwrap(), "--team", "alpha", "--json"],
+        ] {
             let mut args = vec![*command];
             args.extend(flags);
-            args.extend(["--workspace", workspace.to_str().unwrap(), "--team", "alpha"]);
             let output = env.run_cli(&workspace, &args);
             let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             assert_eq!(output.status.code(), Some(1), "{args:?}: {text}");
