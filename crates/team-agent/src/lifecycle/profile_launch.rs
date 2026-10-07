@@ -31,6 +31,7 @@ use crate::lifecycle::LifecycleError;
 use crate::model::enums::{AuthMode, Provider};
 use crate::model::yaml::Value as YamlValue;
 use crate::provider::{McpConfig, ProviderCommandOverrides, ProviderProfileLaunch};
+use crate::provider::command_helpers::append_env_pair;
 
 const COMPATIBLE_NETWORK_ENV_KEYS: &[&str] = &[
     "HTTPS_PROXY",
@@ -463,40 +464,26 @@ fn provider_env_exports(
     }
     match provider {
         Provider::Claude | Provider::ClaudeCode => {
-            if let Some(value) = value_or_alternate(values, "ANTHROPIC_BASE_URL", "BASE_URL") {
-                exports.insert("ANTHROPIC_BASE_URL".to_string(), value.to_string());
-            }
+            append_env_pair(&mut exports, "ANTHROPIC_BASE_URL", value_or_alternate(values, "ANTHROPIC_BASE_URL", "BASE_URL"));
             if auth_mode == AuthMode::OfficialApi {
-                if let Some(value) = value_or_alternate(values, "ANTHROPIC_API_KEY", "API_KEY") {
-                    exports.insert("ANTHROPIC_API_KEY".to_string(), value.to_string());
-                }
+                append_env_pair(&mut exports, "ANTHROPIC_API_KEY", value_or_alternate(values, "ANTHROPIC_API_KEY", "API_KEY"));
             }
-            if let Some(value) = value_or_alternate(values, "ANTHROPIC_AUTH_TOKEN", "AUTH_TOKEN")
+            append_env_pair(&mut exports, "ANTHROPIC_AUTH_TOKEN", value_or_alternate(values, "ANTHROPIC_AUTH_TOKEN", "AUTH_TOKEN")
                 .or_else(|| {
                     (auth_mode == AuthMode::CompatibleApi)
                         .then(|| value_or_alternate(values, "ANTHROPIC_API_KEY", "API_KEY"))
                         .flatten()
-                })
-            {
-                exports.insert("ANTHROPIC_AUTH_TOKEN".to_string(), value.to_string());
-            }
-            if let Some(value) = profile_model(values) {
-                exports.insert("ANTHROPIC_MODEL".to_string(), value.to_string());
-            }
+                }));
+            append_env_pair(&mut exports, "ANTHROPIC_MODEL", profile_model(values));
         }
         Provider::Codex => {
-            if let Some(value) = value_or_alternate(values, "OPENAI_API_KEY", "API_KEY") {
-                exports.insert("TEAM_AGENT_PROVIDER_API_KEY".to_string(), value.to_string());
-                exports.insert("OPENAI_API_KEY".to_string(), value.to_string());
-            }
-            if let Some(value) = values.get("BASE_URL").filter(|value| !value.is_empty()) {
-                exports.insert("OPENAI_BASE_URL".to_string(), value.to_string());
-            }
+            let key = value_or_alternate(values, "OPENAI_API_KEY", "API_KEY");
+            append_env_pair(&mut exports, "TEAM_AGENT_PROVIDER_API_KEY", key);
+            append_env_pair(&mut exports, "OPENAI_API_KEY", key);
+            append_env_pair(&mut exports, "OPENAI_BASE_URL", values.get("BASE_URL").filter(|value| !value.is_empty()).map(String::as_str));
         }
         Provider::GeminiCli => {
-            if let Some(value) = value_or_alternate(values, "GEMINI_API_KEY", "API_KEY") {
-                exports.insert("GEMINI_API_KEY".to_string(), value.to_string());
-            }
+            append_env_pair(&mut exports, "GEMINI_API_KEY", value_or_alternate(values, "GEMINI_API_KEY", "API_KEY"));
         }
         // C-A-4 cr verdict v2 — copilot BYOK(== compatible_api 档,help-providers 原文
         // "GitHub authentication is not required" when COPILOT_PROVIDER_BASE_URL set):
@@ -506,28 +493,14 @@ fn provider_env_exports(
         // Subscription/OfficialApi 不导出 COPILOT_PROVIDER_*(避免误改 auth 通道)。
         Provider::Copilot => {
             if auth_mode == AuthMode::CompatibleApi {
-                if let Some(value) =
-                    value_or_alternate(values, "COPILOT_PROVIDER_BASE_URL", "BASE_URL")
-                {
-                    exports.insert("COPILOT_PROVIDER_BASE_URL".to_string(), value.to_string());
-                }
-                if let Some(value) =
-                    value_or_alternate(values, "COPILOT_PROVIDER_TYPE", "PROVIDER_TYPE")
-                {
-                    exports.insert("COPILOT_PROVIDER_TYPE".to_string(), value.to_string());
-                }
-                if let Some(value) =
-                    value_or_alternate(values, "COPILOT_PROVIDER_API_KEY", "API_KEY")
-                {
-                    exports.insert("COPILOT_PROVIDER_API_KEY".to_string(), value.to_string());
-                }
-                if let Some(value) =
-                    value_or_alternate(values, "COPILOT_PROVIDER_WIRE_API", "WIRE_API")
-                {
-                    exports.insert("COPILOT_PROVIDER_WIRE_API".to_string(), value.to_string());
-                }
-                if let Some(value) = value_or_alternate(values, "COPILOT_MODEL", "MODEL") {
-                    exports.insert("COPILOT_MODEL".to_string(), value.to_string());
+                for (key, alternate) in [
+                    ("COPILOT_PROVIDER_BASE_URL", "BASE_URL"),
+                    ("COPILOT_PROVIDER_TYPE", "PROVIDER_TYPE"),
+                    ("COPILOT_PROVIDER_API_KEY", "API_KEY"),
+                    ("COPILOT_PROVIDER_WIRE_API", "WIRE_API"),
+                    ("COPILOT_MODEL", "MODEL"),
+                ] {
+                    append_env_pair(&mut exports, key, value_or_alternate(values, key, alternate));
                 }
             }
         }
@@ -537,6 +510,45 @@ fn provider_env_exports(
         Provider::Fake => {}
     }
     exports
+}
+
+#[cfg(test)]
+mod append_env_contract {
+    use super::*;
+
+    #[test]
+    fn profile_append_keeps_native_keys_alternates_and_auth_gates() {
+        let values: BTreeMap<String, String> = [
+            ("API_KEY", "dummy"), ("BASE_URL", " raw\nbase "),
+            ("AUTH_TOKEN", "dummy-token"), ("MODEL", " raw model "),
+            ("PROVIDER_TYPE", "custom"), ("WIRE_API", "responses"),
+            ("OPENAI_API_KEY", "native-dummy"),
+        ].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        };
+        for provider in [Provider::Claude, Provider::ClaudeCode] {
+            assert_eq!(provider_env_exports(provider, AuthMode::OfficialApi, &values), map(&[
+                ("ANTHROPIC_BASE_URL", " raw\nbase "), ("ANTHROPIC_API_KEY", "dummy"),
+                ("ANTHROPIC_AUTH_TOKEN", "dummy-token"), ("ANTHROPIC_MODEL", " raw model "),
+            ]));
+        }
+        assert_eq!(provider_env_exports(Provider::Codex, AuthMode::CompatibleApi, &values), map(&[
+            ("TEAM_AGENT_PROVIDER_API_KEY", "native-dummy"), ("OPENAI_API_KEY", "native-dummy"),
+            ("OPENAI_BASE_URL", " raw\nbase "),
+        ]));
+        assert_eq!(provider_env_exports(Provider::GeminiCli, AuthMode::OfficialApi, &values), map(&[("GEMINI_API_KEY", "dummy")]));
+        assert_eq!(provider_env_exports(Provider::Copilot, AuthMode::CompatibleApi, &values), map(&[
+            ("COPILOT_PROVIDER_BASE_URL", " raw\nbase "), ("COPILOT_PROVIDER_TYPE", "custom"),
+            ("COPILOT_PROVIDER_API_KEY", "dummy"), ("COPILOT_PROVIDER_WIRE_API", "responses"),
+            ("COPILOT_MODEL", " raw model "),
+        ]));
+        assert!(provider_env_exports(Provider::Copilot, AuthMode::OfficialApi, &values).is_empty());
+        for provider in crate::provider::wire::all_providers() {
+            assert!(provider_env_exports(*provider, AuthMode::Subscription, &values).is_empty());
+            assert!(provider_env_exports(*provider, AuthMode::CompatibleApi, &BTreeMap::new()).is_empty());
+        }
+    }
 }
 
 /// ---

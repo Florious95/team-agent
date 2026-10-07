@@ -300,6 +300,10 @@ pub fn get_adapter(p: Provider) -> Box<dyn ProviderAdapter> {
     Box::new(BasicProviderAdapter { provider: p })
 }
 
+#[cfg(test)]
+#[path = "tests/command_helpers.rs"]
+mod command_helpers_tests;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BasicProviderAdapter {
     provider: Provider,

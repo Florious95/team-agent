@@ -23,6 +23,7 @@
 //! `--allowed-tools` 正反行为未验证，不写「支持工具白名单」。
 
 use crate::provider::ProviderError;
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
 
 pub(crate) fn cursor_agent_base_command(
     model: Option<&str>,
@@ -32,17 +33,12 @@ pub(crate) fn cursor_agent_base_command(
     if dangerously_skip_permissions {
         // Explicit bypass also opts into Cursor's trusted, unsandboxed launch.
         argv.push("--trust".to_string());
-        argv.push("--sandbox".to_string());
-        argv.push("disabled".to_string());
+        append_pair(&mut argv, "--sandbox", "disabled");
         argv.push("--force".to_string());
     }
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    append_opt_pair(&mut argv, "--model", model);
     // Cursor has no `--effort`, system-prompt, or MCP config flag.
     // Launch materializes role rules and the `.cursor/mcp.json` overlay.
-    argv.push("--workspace".to_string());
-    argv.push("{workspace}".to_string());
+    append_pair(&mut argv, "--workspace", "{workspace}");
     Ok(argv)
 }
