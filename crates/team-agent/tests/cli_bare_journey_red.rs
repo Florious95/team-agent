@@ -16,11 +16,9 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::sync::mpsc;
+use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 use team_agent::message_store::MessageStore;
@@ -163,7 +161,7 @@ missing_properties! {
     h5_send_missing => ["send"], h5_add_missing => ["add-agent"], h5_start_missing => ["start-agent"],
     h5_stop_missing => ["stop-agent"], h5_reset_missing => ["reset-agent"], h5_clone_missing => ["clone-agent"],
     h5_fork_missing => ["fork-agent"], h5_remove_missing => ["remove-agent"], h5_inbox_missing => ["inbox"],
-    h5_peer_missing => ["allow-peer-talk"], h5_profile_verb_missing => ["profile"],
+    h5_profile_verb_missing => ["profile"],
     h5_profile_name_missing => ["profile", "show"], h5_route_set_missing => ["route", "set", "pi"],
     h5_route_add_missing => ["route", "add", "pi"],
 }
@@ -257,7 +255,7 @@ fn strings(v: &Value, values: &mut Vec<String>) {
 }
 #[test]
 #[serial(env)]
-fn h6_json_templates_compile_and_private_preflight_pass_without_native_model_calls() {
+fn h6_json_templates_compile_and_validate_without_native_model_calls() {
     let env = HermeticTestEnv::enter("json-template");
     let ws = env.workspace("input");
     let before = snapshot(env.root());
@@ -310,17 +308,8 @@ fn h6_json_templates_compile_and_private_preflight_pass_without_native_model_cal
     let compiled = team_agent::compiler::compile_team(&retry)
         .expect("H6 displayed templates must compile, no test-authored substitute");
     assert!(compiled.get("agents").is_some());
-    let validated = env.run_cli(&retry, &["validate", ".", "--json"]);
-    assert_eq!(validated.status.code(), Some(0), "{}", text(&validated));
-    let preflight = ok(&env.run_cli(&retry, &["preflight", ".", "--json"]));
-    assert!(
-        preflight["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["name"] == "compile" && c["ok"] == true),
-        "{preflight}"
-    );
+    team_agent::model::spec::validate_spec(&compiled, &retry)
+        .expect("copied templates validate");
 }
 #[test]
 #[serial(env)]
@@ -346,33 +335,6 @@ fn h6_other_compile_errors_do_not_claim_empty_project_or_overwrite_inputs() {
 
 #[test]
 #[serial(env)]
-fn h8_results_retains_real_scoped_nested_result_reader() {
-    let env = HermeticTestEnv::enter("compat-results");
-    let ws = seeded(&env);
-    let v = ok(&env.run_cli(
-        &ws,
-        &[
-            "results",
-            "--case",
-            "case-286",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-            "--json",
-        ],
-    ));
-    assert_eq!(v["case_id"], "case-286");
-    assert_eq!(v["workspace"], ws.to_str().unwrap());
-    let rows = v["results"].as_array().unwrap();
-    assert_eq!(rows.len(), 1, "{v}");
-    assert_eq!(rows[0]["result_id"], "res-286");
-    assert!(
-        rows[0].to_string().contains("artifact://286") && rows[0].to_string().contains("preserve")
-    );
-}
-#[test]
-#[serial(env)]
 fn h8_wait_retains_real_completed_result_fifo_semantics() {
     let env = HermeticTestEnv::enter("compat-wait");
     let ws = seeded(&env);
@@ -391,178 +353,7 @@ fn h8_wait_retains_real_completed_result_fifo_semantics() {
     assert_eq!(v["result_id"], "res-286");
     assert_eq!(v["waited"], false);
 }
-#[test]
-#[serial(env)]
-fn h8_identity_retains_real_scoped_machine_fields() {
-    let env = HermeticTestEnv::enter("compat-identity");
-    let ws = seeded(&env);
-    let v = ok(&env.run_cli(
-        &ws,
-        &[
-            "identity",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-            "--json",
-        ],
-    ));
-    assert_eq!(v["team_id"], "alpha");
-    assert_eq!(v["workspace_abspath"], ws.to_str().unwrap());
-    assert!(v["uuid_prefix"].is_string());
-    assert!(v.get("current_pane_id").is_some());
-}
-#[test]
-#[serial(env)]
-fn h8_sessions_retains_actual_worker_and_context_machine_projection() {
-    let env = HermeticTestEnv::enter("compat-sessions");
-    let ws = seeded(&env);
-    let v = ok(&env.run_cli(
-        &ws,
-        &[
-            "sessions",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-            "--json",
-        ],
-    ));
-    assert_eq!(v["workspace"], ws.to_str().unwrap());
-    assert!(v["sessions"].to_string().contains("worker"), "{v}");
-}
-#[test]
-#[serial(env)]
-fn h8_validate_retains_real_compiler_function_not_help() {
-    let env = HermeticTestEnv::enter("compat-validate");
-    let ws = env.workspace("roles");
-    inputs(&ws);
-    let out = env.run_cli(&ws, &["validate", ".", "--json"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
-    assert!(body(&out).is_object());
-}
-#[test]
-#[serial(env)]
-fn h8_preflight_retains_real_compile_and_preparation_checks() {
-    let env = HermeticTestEnv::enter("compat-preflight");
-    let ws = env.workspace("roles");
-    inputs(&ws);
-    let v = ok(&env.run_cli(&ws, &["preflight", ".", "--json"]));
-    assert!(v["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["name"] == "compile" && c["ok"] == true));
-}
-#[test]
-#[serial(env)]
-fn h8_wait_ready_retains_timeout_and_false_readiness() {
-    let env = HermeticTestEnv::enter("compat-ready");
-    let ws = seeded(&env);
-    let v = body(&env.run_cli(
-        &ws,
-        &[
-            "wait-ready",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-            "--timeout",
-            "0",
-            "--json",
-        ],
-    ));
-    assert_eq!(v["ok"], false);
-    assert_eq!(v["readiness"]["ready"], false);
-    assert!(v["status"].is_string());
-    assert!(v["reason"].is_string());
-}
-#[test]
-#[serial(env)]
-fn h8_peek_retains_real_raw_screen_gate_and_scoped_unavailable_shape() {
-    let env = HermeticTestEnv::enter("compat-peek");
-    let ws = seeded(&env);
-    let denied = env.run_cli(
-        &ws,
-        &[
-            "peek",
-            "worker",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--json",
-        ],
-    );
-    // This machine safety refusal has always been a runtime error (exit1),
-    // not the new Human missing-input Usage contract.
-    assert_eq!(denied.status.code(), Some(1));
-    let denied_body = body(&denied);
-    assert_eq!(denied_body["ok"], false);
-    assert!(denied_body["error"]
-        .as_str()
-        .unwrap()
-        .contains("--allow-raw-screen"));
-    let v = body(&env.run_cli(
-        &ws,
-        &[
-            "peek",
-            "worker",
-            "--allow-raw-screen",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--json",
-        ],
-    ));
-    assert_eq!(v["agent_id"], "worker");
-    assert_eq!(v["ok"], false);
-    assert!(v.get("reason").is_some() || v.get("error").is_some(), "{v}");
-}
-struct OwnedChild(Child);
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        unsafe {
-            libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM);
-        }
-        let _ = self.0.wait();
-    }
-}
-#[test]
-#[serial(env)]
-fn h8_watch_retains_real_stream_of_scoped_result_events() {
-    let env = HermeticTestEnv::enter("compat-watch");
-    let ws = seeded(&env);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_team-agent"));
-    cmd.current_dir(&ws)
-        .args([
-            "watch",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--team",
-            "alpha",
-        ])
-        .env("HOME", env.home())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for key in hermetic::CALLER_IDENTITY_ENVS {
-        cmd.env_remove(key);
-    }
-    let mut child = OwnedChild(cmd.spawn().unwrap());
-    let stdout = child.0.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    let reader = thread::spawn(move || {
-        let mut line = String::new();
-        let result = BufReader::new(stdout).read_line(&mut line);
-        let _ = tx.send((result.is_ok(), line));
-    });
-    let (read_ok, line) = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("watch must emit seeded actual result without help");
-    assert!(
-        read_ok && line.contains("result_received") && line.contains("RESULT_COMPAT_286"),
-        "H8 watch: {line}"
-    );
-    drop(child);
-    reader.join().unwrap();
-}
+
 #[test]
 #[serial(env)]
 fn h8_coordinator_retains_real_single_tick_function() {
@@ -587,29 +378,7 @@ fn h8_coordinator_retains_real_single_tick_function() {
     );
     assert!(load_runtime_state(&ws).unwrap().is_object());
 }
-#[test]
-#[serial(env)]
-fn h8_e2e_retains_real_fake_provider_pipeline_and_result_fields() {
-    let env = HermeticTestEnv::enter("compat-e2e");
-    let ws = env.workspace("pipeline");
-    let v = ok(&env.run_cli(
-        &ws,
-        &[
-            "e2e",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--providers",
-            "fake",
-            "--json",
-        ],
-    ));
-    for field in ["launch", "send", "report", "shutdown"] {
-        assert!(
-            v["providers"]["fake"].get(field).is_some(),
-            "H8 e2e {field}: {v}"
-        );
-    }
-}
+
 #[test]
 #[serial(env)]
 fn h8_app_server_binding_retains_real_probe_and_owner_write() {
@@ -770,7 +539,6 @@ fn h3_actual_error_and_deprecation_collection_is_free_of_author_jargon() {
         vec!["fork-agent"],
         vec!["remove-agent"],
         vec!["inbox"],
-        vec!["allow-peer-talk"],
         vec!["profile"],
         vec!["profile", "show"],
         vec!["route", "set", "pi"],

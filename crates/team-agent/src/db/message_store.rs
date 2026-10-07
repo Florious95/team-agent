@@ -830,22 +830,6 @@ impl MessageStore {
         Ok(rows.into_iter().rev().collect())
     }
 
-    /// Allow direct peer messages in both directions. Golden stores `(a,b)` and
-    /// `(b,a)` so either sender/recipient lookup can use a single ordered key.
-    pub fn allow_peer(&self, a: &str, b: &str) -> Result<(), MessageStoreError> {
-        let conn = crate::db::schema::open_db(&self.path)?;
-        let now = now_ts();
-        conn.execute(
-            "insert or ignore into peer_allowlist(a, b, created_at) values (?1, ?2, ?3)",
-            params![a, b, now.as_str()],
-        )?;
-        conn.execute(
-            "insert or ignore into peer_allowlist(a, b, created_at) values (?1, ?2, ?3)",
-            params![b, a, now.as_str()],
-        )?;
-        Ok(())
-    }
-
     /// `claim_leader_notification_delivery` (`leader_notification_log.py:30-101`):
     /// `INSERT OR IGNORE` on PK `(result_id, owner_team_id, owner_epoch)`. rowcount==1
     /// → `claimed_by_you`; else read the existing winner row → `already_notified_by`.
@@ -1419,32 +1403,6 @@ mod tests {
         assert_eq!(legacy_epoch_from_uuid(Some("")), 0);
         assert_eq!(legacy_epoch_from_uuid(Some("uuid-AAA")), 926068568);
         assert_eq!(legacy_epoch_from_uuid(Some("uuid-BBB")), 122688376);
-    }
-
-    #[test]
-    fn allow_peer_inserts_bidirectional_rows_idempotently() {
-        let s = store();
-        s.allow_peer("alice", "bob").unwrap();
-        s.allow_peer("alice", "bob").unwrap();
-
-        let c = read(&s);
-        let mut rows = c
-            .prepare("select a, b from peer_allowlist order by a, b")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        rows.sort();
-        assert_eq!(
-            rows,
-            vec![
-                ("alice".to_string(), "bob".to_string()),
-                ("bob".to_string(), "alice".to_string()),
-            ]
-        );
     }
 
     // ════════════════════════ FIX-LOOP (wave-1) RED test ════════════════════════

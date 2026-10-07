@@ -263,28 +263,9 @@ fn p1_compiler_and_spec_validation_remain_available() {
 
 #[test]
 #[serial(env)]
-fn p2_preflight_and_doctor_still_execute_compile_checks() {
+fn p2_doctor_still_executes_compile_checks() {
     let env = HermeticTestEnv::enter("compile-p2");
     let team = fixture(&env, "team");
-
-    let preflight = run(
-        &env,
-        env.root(),
-        &["preflight", team.to_str().unwrap(), "--json"],
-    );
-    assert_eq!(
-        preflight.status.code(),
-        Some(0),
-        "preflight: {}",
-        stderr(&preflight)
-    );
-    let body = json_stdout(&preflight);
-    assert_eq!(body["ok"], true);
-    assert!(body["checks"].as_array().is_some_and(|checks| {
-        checks
-            .iter()
-            .any(|check| check["name"] == "compile" && check["ok"] == true)
-    }));
 
     let doctor = run(
         &env,
@@ -302,23 +283,18 @@ fn p2_preflight_and_doctor_still_execute_compile_checks() {
 fn p3_invalid_role_remains_a_real_compile_diagnostic() {
     let env = HermeticTestEnv::enter("compile-p3");
     let team = invalid_fixture(&env, "invalid role");
-    let preflight = run(
+    let error = team_agent::compiler::compile_team(&team).expect_err("invalid role must fail");
+    assert!(error.to_string().contains("provider"));
+    let doctor = run(
         &env,
         env.root(),
-        &["preflight", team.to_str().unwrap(), "--json"],
+        &["doctor", "--workspace", team.to_str().unwrap(), "--json"],
     );
-    assert_eq!(preflight.status.code(), Some(1));
-    let body = json_stdout(&preflight);
+    assert_eq!(doctor.status.code(), Some(1), "doctor: {}", stderr(&doctor));
+    let body = json_stdout(&doctor);
     assert_eq!(body["ok"], false);
-    assert!(body.to_string().contains("provider"));
-
-    let validate = run(
-        &env,
-        env.root(),
-        &["validate", team.to_str().unwrap(), "--json"],
-    );
-    assert_ne!(validate.status.code(), Some(0));
-    assert!(format!("{}{}", stdout(&validate), stderr(&validate)).contains("provider"));
+    assert_eq!(body["profile_smoke"]["ok"], false, "{body}");
+    assert!(body["profile_smoke"].to_string().contains("provider"), "{body}");
 }
 
 #[test]
@@ -386,34 +362,6 @@ fn p5_restart_and_add_agent_keep_real_lifecycle_paths() {
 
 #[test]
 #[serial(env)]
-fn p6_validate_keeps_internal_compiler_for_valid_and_invalid_team_dirs() {
-    let env = HermeticTestEnv::enter("compile-p6");
-    let valid = fixture(&env, "valid");
-    let output = run(
-        &env,
-        env.root(),
-        &["validate", valid.to_str().unwrap(), "--json"],
-    );
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "validate: {}",
-        stderr(&output)
-    );
-    assert_eq!(json_stdout(&output)["ok"], true);
-
-    let invalid = invalid_fixture(&env, "invalid");
-    let output = run(
-        &env,
-        env.root(),
-        &["validate", invalid.to_str().unwrap(), "--json"],
-    );
-    assert_ne!(output.status.code(), Some(0));
-    assert!(format!("{}{}", stdout(&output), stderr(&output)).contains("provider"));
-}
-
-#[test]
-#[serial(env)]
 fn p1_compiler_retains_core_shape_and_is_read_only() {
     let env = HermeticTestEnv::enter("compile-p1-shape");
     let team = fixture(&env, "team");
@@ -441,25 +389,6 @@ fn p1_compiler_retains_core_shape_and_is_read_only() {
         Some("codex")
     );
     assert_eq!(snapshot(env.root()), before);
-}
-
-#[test]
-#[serial(env)]
-fn p2_preflight_keeps_compile_check_name_for_invalid_inputs() {
-    let env = HermeticTestEnv::enter("compile-p2-invalid");
-    let team = invalid_fixture(&env, "invalid");
-    let body = json_stdout(&run(
-        &env,
-        env.root(),
-        &["preflight", team.to_str().unwrap(), "--json"],
-    ));
-    let compile = body["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "compile")
-        .expect("compile check");
-    assert_eq!(compile["ok"], false);
 }
 
 #[test]
@@ -502,8 +431,6 @@ fn p5_lifecycle_commands_remain_registered() {
     for (command, exit) in [
         ("restart", 0),
         ("add-agent", 0),
-        ("validate", 2),
-        ("preflight", 2),
         ("doctor", 0),
         ("quick-start", 0),
     ] {
@@ -515,14 +442,4 @@ fn p5_lifecycle_commands_remain_registered() {
             stderr(&output)
         );
     }
-}
-
-#[test]
-#[serial(env)]
-fn p6_validate_errors_are_not_unknown_command_errors() {
-    let env = HermeticTestEnv::enter("compile-p6-error");
-    let output = run(&env, env.root(), &["validate", "missing-team", "--json"]);
-    assert!(!stderr(&output).contains("invalid choice: 'validate'"));
-    assert!(!stderr(&output).contains("没有这个操作"));
-    assert_ne!(output.status.code(), Some(0));
 }

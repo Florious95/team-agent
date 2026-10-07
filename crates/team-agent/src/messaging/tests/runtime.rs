@@ -1090,52 +1090,6 @@ fn collect_rejects_message_scoped_result_without_matching_recipient() {
     );
 }
 
-#[test]
-fn allow_peer_talk_records_bidirectional_allowlist_and_event() {
-    let ws = tmp_ws("allowpeer");
-    let out = allow_peer_talk(&ws, "alice", "bob").unwrap();
-    assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(out.get("a").and_then(|v| v.as_str()), Some("alice"));
-    assert_eq!(out.get("b").and_then(|v| v.as_str()), Some("bob"));
-    assert_eq!(
-        out.get("status").and_then(|v| v.as_str()),
-        Some("compat_noop")
-    );
-    assert_eq!(
-        out.get("reason").and_then(|v| v.as_str()),
-        Some("team_scoped_peer_messages_enabled")
-    );
-
-    let store = store_for(&ws);
-    let conn = seed_conn(&store);
-    let rows = conn
-        .prepare("select a, b from peer_allowlist order by a, b")
-        .unwrap()
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(
-        rows,
-        vec![
-            ("alice".to_string(), "bob".to_string()),
-            ("bob".to_string(), "alice".to_string()),
-        ]
-    );
-
-    let events = EventLog::new(&ws).tail(10).unwrap();
-    let event = events
-        .iter()
-        .find(|event| {
-            event.get("event").and_then(|v| v.as_str()) == Some("communication.peer_allowed")
-        })
-        .expect("communication.peer_allowed event");
-    assert_eq!(event.get("a").and_then(|v| v.as_str()), Some("alice"));
-    assert_eq!(event.get("b").and_then(|v| v.as_str()), Some("bob"));
-}
-
 // ════════════════════════════════════════════════════════════════════════
 // GROUP R — run_comms_selftest: §84 / MUST-NOT-13 zero-provider-SDK gate.
 // diagnose/comms.py:21-47. The whole point: assert zero provider client calls.

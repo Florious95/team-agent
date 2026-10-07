@@ -88,7 +88,6 @@ pub const MANAGED_TABLE_LAYOUTS: &[(&str, &[&str])] = &[
             "updated_at",
         ],
     ),
-    ("peer_allowlist", &["a", "b", "created_at"]),
     (
         "result_watchers",
         &[
@@ -129,7 +128,6 @@ const CREATE_TABLE_TEMPLATES: &[(&str, &str)] = &[
     ("scheduled_events", "create table if not exists __TABLE__ (\n          id integer primary key,\n          owner_team_id text,\n          due_at text not null,\n          target text not null,\n          kind text not null,\n          payload_json text not null,\n          status text not null,\n          created_at text not null,\n          fired_at text,\n          result_json text\n        )"),
     ("delivery_tokens", "create table if not exists __TABLE__ (\n          message_id text primary key,\n          unique_token text not null,\n          injected_at text not null,\n          visible_at text,\n          consumed_at text,\n          failed_at text,\n          failure_reason text\n        )"),
     ("agent_health", "create table if not exists __TABLE__ (\n          owner_team_id text,\n          agent_id text not null,\n          status text not null,\n          last_output_at text,\n          context_usage_pct integer,\n          current_task_id text,\n          updated_at text not null,\n          unique(owner_team_id, agent_id)\n        )"),
-    ("peer_allowlist", "create table if not exists __TABLE__ (\n          a text not null,\n          b text not null,\n          created_at text not null,\n          primary key (a, b)\n        )"),
     ("result_watchers", "create table if not exists __TABLE__ (\n          watcher_id text primary key,\n          owner_team_id text,\n          task_id text,\n          agent_id text,\n          message_id text,\n          leader_id text not null,\n          recipient text,\n          status text not null,\n          created_at text not null,\n          completed_at text,\n          result_id text,\n          notified_message_id text,\n          error text\n        )"),
     ("leader_notification_log", "create table if not exists __TABLE__ (\n          result_id text not null,\n          owner_team_id text not null default '',\n          owner_epoch integer not null default 0,\n          leader_session_uuid text,\n          notified_message_id text not null,\n          notified_at text not null,\n          leader_pane_id_at_notify text,\n          envelope_content_hash text,\n          primary key (result_id, owner_team_id, owner_epoch)\n        )"),
 ];
@@ -630,12 +628,12 @@ mod tests {
         let path = temp_db();
         build_legacy(&path);
 
-        // 迁移前:diagnosis = schema_repair_available,全 8 表 diff(4 漂移 + 4 缺失)。
+        // 迁移前:diagnosis = schema_repair_available,全 7 表 diff(4 漂移 + 3 缺失)。
         let before = schema_diagnosis(&path, SCHEMA_VERSION).unwrap();
         assert_eq!(before.status, "schema_repair_available");
         assert!(!before.ok);
         assert_eq!(before.user_version, 1);
-        assert_eq!(before.layout_diffs.len(), 8);
+        assert_eq!(before.layout_diffs.len(), MANAGED_TABLE_LAYOUTS.len());
 
         // initialize_schema 走 ensure_table_layout(rebuild)+ 建表 + user_version=3。
         let conn = crate::db::schema::open_db(&path).unwrap();
@@ -697,6 +695,48 @@ mod tests {
         assert_eq!(d.user_version, SCHEMA_VERSION);
     }
 
+    // A drifted legacy peer table is inert: no diagnosis, rebuild, backup or row loss.
+    #[test]
+    fn legacy_peer_allowlist_is_inert_and_preserved() {
+        let path = temp_db();
+        let conn = crate::db::schema::open_db(&path).unwrap();
+        initialize_schema(&conn, Some(&path)).unwrap();
+        conn.execute_batch(
+            "create table peer_allowlist (created_at text not null, b text not null, a text not null, primary key (a, b));
+             insert into peer_allowlist(a, b, created_at) values ('worker', 'reviewer', 'v4');",
+        )
+        .unwrap();
+        assert!(layout_diffs(&conn).unwrap().is_empty());
+        initialize_schema(&conn, Some(&path)).unwrap();
+        assert_eq!(layout(&conn, "peer_allowlist"), ["created_at", "b", "a"]);
+        let row: (String, String, String) = conn
+            .query_row("select a, b, created_at from peer_allowlist", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "worker".to_string(),
+                "reviewer".to_string(),
+                "v4".to_string()
+            )
+        );
+        drop(conn);
+        let diagnosis = schema_diagnosis(&path, SCHEMA_VERSION).unwrap();
+        assert!(
+            diagnosis.ok,
+            "legacy peer table must remain inert: {diagnosis:?}"
+        );
+        assert!(
+            !std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.file_name().to_string_lossy().contains("pre-migration")),
+            "legacy peer table must not trigger a migration backup"
+        );
+    }
+
     #[test]
     fn diagnosis_missing_db() {
         let path = temp_db(); // 未创建文件
@@ -713,7 +753,7 @@ mod tests {
         build_legacy(&path);
         let conn = crate::db::schema::open_db(&path).unwrap();
         let events1 = ensure_table_layout(&conn, SCHEMA_VERSION, Some(&path)).unwrap();
-        assert_eq!(events1.len(), 8); // 4 漂移 rebuild + 4 缺失建表
+        assert_eq!(events1.len(), MANAGED_TABLE_LAYOUTS.len()); // 4 漂移 rebuild + 3 缺失建表
         for e in &events1 {
             assert_eq!(e.row_count_before, e.row_count_after);
         }
@@ -759,7 +799,7 @@ mod tests {
         build_legacy(&path);
         let conn = crate::db::schema::open_db(&path).unwrap();
         let events = ensure_table_layout(&conn, SCHEMA_VERSION, None).unwrap(); // None 不再 Err
-        assert_eq!(events.len(), 8);
+        assert_eq!(events.len(), MANAGED_TABLE_LAYOUTS.len());
         assert_eq!(
             table_layout(&conn, "messages").unwrap()[..2],
             ["message_id", "owner_team_id"]
@@ -871,7 +911,7 @@ mod tests {
             } => {
                 assert!(diagnosis.ok);
                 assert_eq!(diagnosis.user_version, SCHEMA_VERSION);
-                assert_eq!(rebuilds.len(), 8);
+                assert_eq!(rebuilds.len(), MANAGED_TABLE_LAYOUTS.len());
             }
             other => panic!("expected Fixed, got {other:?}"),
         }
@@ -921,8 +961,8 @@ mod tests {
             .collect();
         assert_eq!(
             rebuilds.len(),
-            8,
-            "8 张 managed 表各一条 schema.layout_rebuild"
+            MANAGED_TABLE_LAYOUTS.len(),
+            "每张 managed 表各一条 schema.layout_rebuild"
         );
         for e in &rebuilds {
             assert_eq!(

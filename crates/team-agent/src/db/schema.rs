@@ -1,7 +1,7 @@
 //!
 //! `team.db` schema 初始化(真相源 `message_store/schema.py` + `schema_migration.py`)。
 //!
-//! slice 1:fresh DB schema —— 8 表 DDL、6 索引、ALTER 式列迁移、agent_health 重建、
+//! slice 1:fresh DB schema —— 7 表 DDL、6 索引、ALTER 式列迁移、agent_health 重建、
 //! WAL/busy_timeout pragmas、`user_version = SCHEMA_VERSION`。
 //! slice 2(待做):列**顺序**漂移的整表 rebuild(`ensure_table_layout`/`_rebuild_tables`)
 //! 与 `schema_diagnosis`,验 legacy_team_db_fixture + schema_migration 契约。
@@ -15,14 +15,13 @@ use crate::db::DbError;
 /// `schema.py:90`。
 pub const SCHEMA_VERSION: i64 = 5;
 
-/// 8 张表的 DDL(逐字照搬 `schema.py:initialize_schema` 的内联建表;含 `if not exists`)。
+/// 7 张表的 DDL(逐字照搬 `schema.py:initialize_schema` 的内联建表;含 `if not exists`)。
 /// 顺序与 Python 一致(leader_notification_log 在 ensure 块后创建)。
 const CREATE_MESSAGES: &str = "create table if not exists messages (\n              message_id text primary key,\n              owner_team_id text,\n              task_id text,\n              sender text,\n              recipient text,\n              reply_to text,\n              requires_ack integer,\n              status text,\n              content text,\n              presentation text not null default '{\"sink\":\"leader\",\"class\":\"message\"}',\n              artifact_refs text,\n              created_at text,\n              updated_at text,\n              delivered_at text,\n              acknowledged_at text,\n              error text,\n              delivery_attempts integer not null default 0\n            )";
 const CREATE_RESULTS: &str = "create table if not exists results (\n              result_id text primary key,\n              owner_team_id text,\n              task_id text not null,\n              agent_id text not null,\n              envelope text not null,\n              status text not null,\n              created_at text not null\n            )";
 const CREATE_SCHEDULED_EVENTS: &str = "create table if not exists scheduled_events (\n              id integer primary key,\n              owner_team_id text,\n              due_at text not null,\n              target text not null,\n              kind text not null,\n              payload_json text not null,\n              status text not null,\n              created_at text not null,\n              fired_at text,\n              result_json text\n            )";
 const CREATE_DELIVERY_TOKENS: &str = "create table if not exists delivery_tokens (\n              message_id text primary key,\n              unique_token text not null,\n              injected_at text not null,\n              visible_at text,\n              consumed_at text,\n              failed_at text,\n              failure_reason text\n            )";
 const CREATE_AGENT_HEALTH: &str = "create table if not exists agent_health (\n              owner_team_id text,\n              agent_id text not null,\n              status text not null,\n              last_output_at text,\n              context_usage_pct integer,\n              current_task_id text,\n              updated_at text not null,\n              unique(owner_team_id, agent_id)\n            )";
-const CREATE_PEER_ALLOWLIST: &str = "create table if not exists peer_allowlist (\n              a text not null,\n              b text not null,\n              created_at text not null,\n              primary key (a, b)\n            )";
 const CREATE_RESULT_WATCHERS: &str = "create table if not exists result_watchers (\n              watcher_id text primary key,\n              owner_team_id text,\n              task_id text,\n              agent_id text,\n              message_id text,\n              leader_id text not null,\n              recipient text,\n              status text not null,\n              created_at text not null,\n              completed_at text,\n              result_id text,\n              notified_message_id text,\n              error text\n            )";
 const CREATE_LEADER_NOTIFICATION_LOG: &str = "create table if not exists leader_notification_log (\n              result_id text not null,\n              owner_team_id text not null default '',\n              owner_epoch integer not null default 0,\n              leader_session_uuid text,\n              notified_message_id text not null,\n              notified_at text not null,\n              leader_pane_id_at_notify text,\n              envelope_content_hash text,\n              primary key (result_id, owner_team_id, owner_epoch)\n            )";
 const CREATE_AGENT_HEALTH_NEW: &str = "create table agent_health_new (\n              owner_team_id text,\n              agent_id text not null,\n              status text not null,\n              last_output_at text,\n              context_usage_pct integer,\n              current_task_id text,\n              updated_at text not null,\n              unique(owner_team_id, agent_id)\n            )";
@@ -96,7 +95,6 @@ const AGENT_HEALTH_COLUMNS: &[&str] = &[
     "current_task_id",
     "updated_at",
 ];
-const PEER_ALLOWLIST_COLUMNS: &[&str] = &["a", "b", "created_at"];
 const RESULT_WATCHER_COLUMNS: &[&str] = &[
     "owner_team_id",
     "watcher_id",
@@ -249,7 +247,6 @@ pub fn initialize_schema(
         CREATE_SCHEDULED_EVENTS,
         CREATE_DELIVERY_TOKENS,
         CREATE_AGENT_HEALTH,
-        CREATE_PEER_ALLOWLIST,
         CREATE_RESULT_WATCHERS,
     ] {
         tx.execute(ddl, [])?;
@@ -293,7 +290,6 @@ pub fn initialize_schema(
     )?;
     ensure_table_columns(&tx, "delivery_tokens", DELIVERY_TOKEN_COLUMNS, &[])?;
     migrate_agent_health_owner_team_id(&tx)?;
-    ensure_table_columns(&tx, "peer_allowlist", PEER_ALLOWLIST_COLUMNS, &[])?;
     ensure_table_columns(
         &tx,
         "result_watchers",
@@ -333,7 +329,28 @@ mod tests {
         conn
     }
 
-    // golden 由 Python initialize_schema 新建 DB 取(team-agent-public@439bef8)。
+    #[test]
+    fn retired_peer_allowlist_is_neither_created_nor_managed() {
+        let conn = fresh();
+        assert!(table_layout(&conn, "peer_allowlist").unwrap().is_empty());
+        // Legacy residue may have an obsolete layout. Initialization must leave
+        // its data alone, not rebuild/drop it or require it for schema health.
+        conn.execute_batch(
+            "create table peer_allowlist (legacy_payload text);\n             insert into peer_allowlist values ('preserve-this-row');",
+        )
+        .unwrap();
+        initialize_schema(&conn, None).unwrap();
+        assert!(crate::db::migration::ensure_table_layout(&conn, SCHEMA_VERSION, None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(table_layout(&conn, "peer_allowlist").unwrap(), ["legacy_payload"]);
+        let value: String = conn.query_row("select legacy_payload from peer_allowlist", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, "preserve-this-row");
+        let version: i64 = conn.query_row("pragma user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, 5);
+    }
+
+    // Fresh managed schema, excluding retired legacy tables.
     #[test]
     fn fresh_schema_matches_python_sqlite_master() {
         let conn = fresh();
@@ -356,7 +373,6 @@ mod tests {
             ("idx_scheduled_events_owner_team_id", "index"),
             ("leader_notification_log", "table"),
             ("messages", "table"),
-            ("peer_allowlist", "table"),
             ("result_watchers", "table"),
             ("results", "table"),
             ("scheduled_events", "table"),
@@ -419,9 +435,9 @@ mod tests {
         assert_eq!(idx, 6, "二次 init 后 6 个 named index 仍在");
     }
 
-    // 全 8 表逐列 (name, type, notnull, dflt, pk) golden(Python initialize_schema table_info)。
+    // Managed tables: (name, type, notnull, dflt, pk).
     #[test]
-    fn per_column_table_info_all_eight_tables() {
+    fn per_column_table_info_managed_tables() {
         type Col = (&'static str, &'static str, i64, Option<&'static str>, i64);
         let golden: &[(&str, &[Col])] = &[
             (
@@ -504,14 +520,6 @@ mod tests {
                 ],
             ),
             (
-                "peer_allowlist",
-                &[
-                    ("a", "TEXT", 1, None, 1),
-                    ("b", "TEXT", 1, None, 2),
-                    ("created_at", "TEXT", 1, None, 0),
-                ],
-            ),
-            (
                 "result_watchers",
                 &[
                     ("watcher_id", "TEXT", 0, None, 1),
@@ -582,7 +590,7 @@ mod tests {
         ];
         let got: Vec<(&str, &str)> = idx.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
         assert_eq!(got, want);
-        // 7 个 sqlite_autoindex(每个有 pk/unique 约束的表各一)。
+        // 6 个 sqlite_autoindex(每个有 pk/unique 约束的表各一)。
         let auto: Vec<String> = conn
             .prepare(
                 "select name from sqlite_master where type='index' and sql is null order by name",
@@ -599,7 +607,6 @@ mod tests {
                 "sqlite_autoindex_delivery_tokens_1",
                 "sqlite_autoindex_leader_notification_log_1",
                 "sqlite_autoindex_messages_1",
-                "sqlite_autoindex_peer_allowlist_1",
                 "sqlite_autoindex_result_watchers_1",
                 "sqlite_autoindex_results_1",
             ]

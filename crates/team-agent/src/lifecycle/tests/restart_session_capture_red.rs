@@ -21,7 +21,6 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::{cmd_wait_ready, CmdOutput, WaitReadyArgs};
 use team_agent::lifecycle::{
     classify_restart_plan, restart_with_transport, RestartReport, ResumeDecision, StartMode,
 };
@@ -448,48 +447,7 @@ fn restart_refuses_first_send_at_null_running_resumable_session_incomplete_when_
 }
 
 #[test]
-#[ignore = "real-machine: provider session filesystem + restart/shutdown lifecycle convergence"]
-#[serial(env)]
-fn wait_ready_reports_session_capture_incomplete_for_running_resumable_worker_without_session() {
-    let fixture = RestartFixture::new("wait-ready-session-incomplete", "codex");
-    seed_running_state_without_session(&fixture.team, "codex", &fixture.spawn_cwd);
-    let mut state = load_runtime_state(&fixture.team).unwrap();
-    let mcp_config = fixture.team.join(".team/runtime/worker_a.mcp.json");
-    std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
-    std::fs::write(&mcp_config, "{}").unwrap();
-    state["agents"]["worker_a"]["pane_id"] = json!("%1");
-    state["agents"]["worker_a"]["mcp_config"] = json!(mcp_config.to_string_lossy().to_string());
-    save_runtime_state(&fixture.team, &state).unwrap();
-
-    let out = json_result(
-        cmd_wait_ready(&WaitReadyArgs {
-            workspace: fixture.team.clone(),
-            timeout: 0.0,
-            json: true,
-            team: None,
-        })
-        .expect("wait-ready should return structured JSON"),
-    );
-
-    assert_eq!(
-        out["ok"],
-        json!(false),
-        "wait-ready cannot report ready while a running Codex/Claude worker is missing captured session context; out={out}"
-    );
-    assert_eq!(
-        out["reason"],
-        json!("session_capture_incomplete"),
-        "readiness reason must distinguish missing resumable session from generic workers_not_ready; out={out}"
-    );
-    assert!(
-        out["readiness"]["session_capture_incomplete"].as_bool() == Some(true)
-            && out["readiness"]["all_resumable_have_session"].as_bool() == Some(false),
-        "readiness truth table must include all_resumable_have_session and session_capture_incomplete; out={out}"
-    );
-}
-
-#[test]
-fn status_quick_start_and_wait_ready_surfaces_include_session_capture_completeness() {
+fn status_and_quick_start_surfaces_include_session_capture_completeness() {
     let diagnose =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/diagnose.rs"))
             .unwrap();
@@ -500,7 +458,7 @@ fn status_quick_start_and_wait_ready_surfaces_include_session_capture_completene
             .unwrap();
 
     for (name, source) in [
-        ("wait-ready", diagnose.as_str()),
+        ("status readiness formula", diagnose.as_str()),
         ("status --json", status.as_str()),
         ("quick-start readiness", launch.as_str()),
         ("quick-start --json", adapters.as_str()),
@@ -943,13 +901,6 @@ fn assert_all_resume_decisions_are_session_backed<const N: usize>(
 
 fn read_events(team: &Path) -> String {
     std::fs::read_to_string(team.join(".team/logs/events.jsonl")).unwrap_or_default()
-}
-
-fn json_result(result: team_agent::cli::CmdResult) -> Value {
-    match result.output {
-        CmdOutput::Json(value) => value,
-        other => panic!("expected JSON command output, got {other:?}"),
-    }
 }
 
 fn assert_no_agent_attribution_ambiguous<const N: usize>(

@@ -23,38 +23,6 @@ fn leader_identity_context_derives_when_no_override_no_state() {
     assert_eq!(id.leader_session_uuid.as_str().len(), 32);
 }
 
-// leader_identity:CLI 直出 dict(__init__.py:355-369)。unimplemented → RED。
-// 强化:uuid_prefix 必须 == leader_identity_context 派生 uuid 的前 12 hex(绑到真值,
-// 而非任意 12 字符);整个 dict 的 machine_fingerprint/os_user/team_id/source 必须与 context 一致。
-#[test]
-#[serial_test::serial(env)]
-fn leader_identity_dict_ties_prefix_and_fields_to_derived_context() {
-    let ws = std::env::temp_dir().join(format!("ta_rs_lid_{}", std::process::id()));
-    std::fs::create_dir_all(&ws).unwrap();
-    // 空 state → context 走 derive(无 override/无 state uuid)。
-    let ctx = leader_identity_context(&ws, None, Some(&serde_json::json!({}))).unwrap();
-    let expected_prefix = &ctx.leader_session_uuid.as_str()[..12];
-    let v = leader_identity(&ws, None).unwrap();
-    assert_eq!(v["ok"], serde_json::json!(true));
-    // uuid_prefix 绑到派生真值的前 12 hex(错的 12 字符串会被抓)。
-    assert_eq!(v["uuid_prefix"].as_str().unwrap(), expected_prefix);
-    // 其余身份字段与 context 字节一致。
-    assert_eq!(
-        v["machine_fingerprint"].as_str().unwrap(),
-        ctx.machine_fingerprint
-    );
-    assert_eq!(v["os_user"].as_str().unwrap(), ctx.os_user);
-    assert_eq!(v["team_id"].as_str().unwrap(), ctx.team_id.as_str());
-    // source == 派生侧 "derived"(无 override → 不是 "override"/"env")。
-    assert_eq!(v["source"], serde_json::json!("derived"));
-    assert_eq!(
-        ctx.leader_session_uuid_source,
-        LeaderSessionUuidSource::Derived
-    );
-    // CLI 直出形态:current_pane_id / last_seen_at 在无 env/无 receiver 时为 null。
-    assert_eq!(v["last_seen_at"], serde_json::Value::Null);
-}
-
 // =====================================================================
 // 13. leader_start_plan(unimplemented → RED):钉 mode 选择 + leader_env 导出键。
 // =====================================================================

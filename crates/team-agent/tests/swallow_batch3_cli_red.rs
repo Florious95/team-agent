@@ -24,9 +24,8 @@ use team_agent::messaging::send::{send_message, MessageTarget, SendOptions};
 ///    unknown gate silently falls through to the default doctor — empty green).
 /// ② an empty `--to` target list must fail WITH `reason="empty_target_list"`
 ///    (today: failed with no reason).
-/// ③ `wait-ready` over an unreadable state.json must report ready=false AND carry a
-///    non-null `state_read_error` (today the read error silently degrades to an
-///    empty state).
+/// ③ The canonical state reader must reject unreadable state.json, not substitute
+///    an empty ready state.
 #[test]
 fn b3_exit_layer_failures_are_explained_not_fake_green() {
     let mut failures = Vec::new();
@@ -72,22 +71,13 @@ fn b3_exit_layer_failures_are_explained_not_fake_green() {
         }
     }
 
-    // ③ wait-ready over unreadable state
-    let ws = tmp_ws("b3-waitready");
+    // ③ canonical reader over unreadable state
+    let ws = tmp_ws("b3-unreadable-state");
     let state_path = ws.join(".team/runtime/state.json");
     std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
     std::fs::write(&state_path, "{ definitely not json").unwrap();
-    let report = run_cli(&ws, &["wait-ready", "--timeout", "1", "--json"]);
-    if !report.contains("state_read_error") {
-        failures.push(format!(
-            "③: wait-ready over an unreadable state.json must surface a non-null \
-`state_read_error` instead of silently degrading to an empty state; got {report}"
-        ));
-    }
-    if report.contains("\"ok\": true") || report.contains("\"ok\":true") {
-        failures.push(format!(
-            "③: an unverifiable state must never read as ready (truthfulness rule); got {report}"
-        ));
+    if team_agent::state::persist::load_runtime_state(&ws).is_ok() {
+        failures.push("③: unreadable state must fail instead of becoming an empty ready state".to_string());
     }
 
     assert!(

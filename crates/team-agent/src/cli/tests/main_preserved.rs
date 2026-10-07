@@ -175,58 +175,7 @@ fn inbox_matches_sender_or_recipient_and_excludes_others() {
         );
     let _ = std::fs::remove_dir_all(&ws);
 }
-// ── BUG-4 [real bug] — peek must resolve the agent terminal via state `session:window` (golden),
-// NOT a stored `pane_id` field. A live worker present in state (with a `window`, on the team's `-L`
-// socket) must NOT be fabricated as "agent pane not found". ──────────────────────────────────────
-// Golden status/peek.py:35-44: agent = state["agents"][id]; window = agent.get("window", id);
-//   if not session_name or not _tmux_window_exists(session_name, window): raise "agent terminal is
-//   not available: <id>"; else `tmux capture-pane -t session:window`. It NEVER reads a stored pane_id.
-// Probed live (/tmp/probe_peek.py): a present worker whose window is absent on the socket raises
-// `agent terminal is not available: w1`; a missing agent raises `unknown agent id: <id>`. Rust
-// cmd_peek (adapters.rs:231 + agent_pane_id:279) keys off agent_state pane_id/pane/tmux_pane_id and
-// returns {ok:false,error:"agent pane not found"} when absent — so a NORMAL live worker (window in
-// state, no pane_id field) is mis-reported as not found. That is the CP-1 pane-resolution divergence.
-//
-// Deterministic without real tmux: on a host with no live session, the golden-correct peek resolves
-// session:window, finds the window absent on the socket, and yields "agent terminal is not available:
-// w1" — NOT "agent pane not found". (The window-on-socket -> real raw-screen capture positive case is
-// real-machine; see the #[ignore] dispatch_routes_peek_real_machine.)
-#[test]
-fn peek_resolves_live_worker_via_session_window_not_pane_id_field() {
-    let ws = tmp_workspace();
-    // a live worker: present in state with a `window`, session_name set, but NO stored pane_id field.
-    // session name is unique so a real tmux session on the dev host can't accidentally satisfy it.
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &json!({
-            "session_name": "team-peek-red-probe-x9q",
-            "agents": {"w1": {"status": "running", "provider": "codex", "window": "w1"}}
-        }),
-    )
-    .unwrap();
-    let args = PeekArgs {
-        agent: "w1".to_string(),
-        workspace: ws.clone(),
-        tail: 20,
-        head: None,
-        search: None,
-        allow_raw_screen: true,
-        json: true,
-    };
-    let text = outcome_text(cmd_peek(&args));
-    assert!(
-            !text.contains("agent pane not found"),
-            "peek keys off a stored pane_id field and fabricates 'agent pane not found' for a live worker \
-             that has a `window` in state; golden resolves session:window and never reads pane_id. got: {text}"
-        );
-    assert!(
-        text.contains("agent terminal is not available: w1"),
-        "golden status/peek.py: a worker whose window is not on the socket yields \
-             'agent terminal is not available: w1' (window-existence via session:window), NOT a \
-             pane_id-keyed error. got: {text}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
-}
+
 #[test]
 fn ux_doctor_secret_scan_is_present_and_non_triggering_for_normal_paths() {
     let ws = tmp_workspace();
@@ -295,44 +244,16 @@ fn ux_doctor_secret_scan_findings_name_the_exact_trigger() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 #[test]
-fn ux_wait_ready_does_not_report_ready_true_without_ready_runtime_state() {
-    let ws = tmp_workspace();
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &json!({
-            "active_team_key": "wait-ready",
-            "agents": {"w1": {"status": "starting"}},
-            "tasks": [{"id": "t1", "assignee": "w1", "status": "pending"}],
-            "leader_receiver": {"status": "attached"},
-        }),
-    )
-    .unwrap();
-    let value = json_output(
-        cmd_wait_ready(&WaitReadyArgs {
-            workspace: ws.clone(),
-            timeout: 0.0,
-            json: true,
-            team: None,
-        })
-        .expect("wait-ready"),
-    );
-    assert_eq!(
-        value["ok"],
-        json!(false),
-        "wait-ready must not fake success before workers are ready"
-    );
-    assert_eq!(value.pointer("/readiness/ready"), Some(&json!(false)));
-    assert!(
-        value["summary"]
-            .as_str()
-            .unwrap_or("")
-            .contains("not ready"),
-        "wait-ready false state should explain not-ready status, got {value:?}"
-    );
-    let _ = std::fs::remove_dir_all(&ws);
+fn runtime_readiness_rejects_starting_workers() {
+    let value = crate::cli::diagnose::wait_readiness(&json!({
+        "agents": {"w1": {"status": "starting"}},
+        "leader_receiver": {"status": "attached"},
+    }));
+    assert_eq!(value["ready"], json!(false));
+    assert_eq!(value["all_spawned"], json!(false));
 }
 #[test]
-fn wait_ready_fake_quick_start_counts_mcp_config_and_task_prompt_delivery() {
+fn runtime_readiness_counts_mcp_config_and_task_prompt_delivery() {
     let ws = tmp_workspace();
     let mcp_config = ws
         .join(".team")
@@ -342,10 +263,9 @@ fn wait_ready_fake_quick_start_counts_mcp_config_and_task_prompt_delivery() {
         .join("mcp_config.json");
     std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
     std::fs::write(&mcp_config, r#"{"mcpServers":{"team-agent":{}}}"#).unwrap();
-    crate::state::persist::save_runtime_state(
-        &ws,
-        &json!({
+    let state = json!({
             "session_name": "team-fake-ready",
+            "messages": {"delivered": 1},
             "agents": {
                 "fake_impl": {
                     "status": "running",
@@ -359,30 +279,9 @@ fn wait_ready_fake_quick_start_counts_mcp_config_and_task_prompt_delivery() {
                 "status": "pending",
             }],
             "leader_receiver": {"status": "attached"},
-        }),
-    )
-    .unwrap();
-    let store = crate::message_store::MessageStore::open(&ws).unwrap();
-    store
-        .create_message(
-            Some("task_impl"),
-            "leader",
-            "fake_impl",
-            "initial task prompt",
-            None,
-            true,
-            None,
-        )
-        .unwrap();
-    let value = json_output(
-        cmd_wait_ready(&WaitReadyArgs {
-            workspace: ws.clone(),
-            timeout: 0.0,
-            json: true,
-            team: None,
-        })
-        .expect("wait-ready"),
-    );
+        });
+    let readiness = crate::cli::diagnose::wait_readiness(&state);
+    let value = json!({"readiness": readiness});
     assert_eq!(
         value.pointer("/readiness/mcp_ready"),
         Some(&json!(true)),
@@ -400,31 +299,7 @@ fn wait_ready_fake_quick_start_counts_mcp_config_and_task_prompt_delivery() {
         );
     let _ = std::fs::remove_dir_all(&ws);
 }
-fn valid_result_envelope() -> serde_json::Value {
-    json!({
-        "schema_version": "result_envelope_v1",
-        "task_id": "task_impl",
-        "agent_id": "fake_impl",
-        "status": "success",
-        "summary": "done",
-        "artifacts": [],
-        "changes": [],
-        "tests": [{"command": "cargo test", "status": "passed"}],
-        "risks": [],
-        "next_actions": []
-    })
-}
-fn seed_uncollected_result(ws: &std::path::Path, result_id: &str) {
-    let store = crate::message_store::MessageStore::open(ws).unwrap();
-    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute(
-            "insert into results(
-                result_id, owner_team_id, task_id, agent_id, envelope, status, created_at
-             ) values (?1, null, 'task_impl', 'fake_impl', ?2, 'success', '2026-06-02T10:00:00+00:00')",
-            rusqlite::params![result_id, valid_result_envelope().to_string()],
-        )
-        .unwrap();
-}
+
 fn json_output(result: CmdResult) -> serde_json::Value {
     match result.output {
         CmdOutput::Json(v) => v,

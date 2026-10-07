@@ -235,20 +235,3 @@ fn p2_pid_is_running_false_for_cross_user_pid() {
         );
     }
 }
-
-// P1 — render_event_line(result_received) truncates the summary to 80 chars
-// (watch.py:115-116 `_clean(summary)[:80]`).
-#[test]
-fn p2_render_result_received_truncates_summary_to_80_chars() {
-    let long = "x".repeat(200);
-    let e = serde_json::json!({"event":"result_received","agent_id":"w1","summary": long});
-    let line = render_event_line(&e).expect("renders");
-    assert!(
-        line.contains(&"x".repeat(80)),
-        "first 80 summary chars are kept"
-    );
-    assert!(
-        !line.contains(&"x".repeat(81)),
-        "summary must be truncated to 80 chars"
-    );
-}

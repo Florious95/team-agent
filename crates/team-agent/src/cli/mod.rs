@@ -5629,8 +5629,8 @@ pub mod diagnose_port {
     }
 }
 
-/// PLACEHOLDER → leader lane(`runtime.{takeover,claim_leader,leader_identity}` 的 CLI 视图)。
-/// leader.rs 已有 `claim_leader`/`leader_identity`(返 `LeaseResult`/`Value`);CLI 需 `takeover` +
+/// PLACEHOLDER → leader lane(`runtime.{takeover,claim_leader}` 的 CLI 视图)。
+/// leader.rs 已有 `claim_leader`(返 `LeaseResult`);CLI 需 `takeover` +
 /// 把 `LeaseResult` 投影成稳定 `--json` 形状。这两步由 leader 集成收口,本层仅声明 CLI 委派面。
 pub mod leader_port {
     use super::*;
@@ -5767,13 +5767,6 @@ pub mod leader_port {
             register_after_binding_success(workspace, team, "attach-leader", &mut value);
         }
         Ok(value)
-    }
-
-    ///
-    /// `runtime.leader_identity(workspace, team)`(`cmd_identity`)。
-    pub fn leader_identity(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
-        crate::leader::leader_identity(workspace, team)
-            .map_err(|e| CliError::Runtime(e.to_string()))
     }
 
     /// E7 (0.5.9 host-leader-registry-design §14 step 3): after a

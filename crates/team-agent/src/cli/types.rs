@@ -37,8 +37,8 @@ pub enum CliError {
     /// 委派的 runtime/lifecycle/state 错误(对应 Python `TeamAgentError`)。message == `str(exc)`。
     #[error("{0}")]
     Runtime(String),
-    /// argparse 风格用法错误 / 互斥违反(如 `--summary` + `--json`、`--fix` 缺 `--gate`、
-    /// `peek` 缺 `--allow-raw-screen`)。对应 Python 抛 `TeamAgentError` 或 parser.error。
+    /// argparse 风格用法错误 / 互斥违反(如 `--summary` + `--json`、`--fix` 缺 `--gate`)。
+    /// 对应 Python 抛 `TeamAgentError` 或 parser.error。
     #[error("usage error: {0}")]
     Usage(String),
     /// Preserve the original refusal for audit while carrying safe human guidance.
@@ -127,7 +127,6 @@ impl CliError {
 }
 
 /// CLI 进程退出码(`main`:`result.ok is False` 或异常 → `SystemExit(1)`,否则 0)。
-/// `watch` 路径直接 `SystemExit(0)`(`cmd_watch`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     Ok,
@@ -153,14 +152,14 @@ impl ExitCode {
 /// Python `cmd_*` 返回 `dict | str | None`:
 ///   - `Json(Value)` ← 委派 runtime 的稳定 `{ok, ...}` dict(`--json` 序列化 sort_keys+indent=2)。
 ///   - `Human(String)` ← 人读渲染(`format_status`/`cmd_advanced`/五行 summary/comms boundary text)。
-///   - `None` ← passthrough/watch 命令(`cmd_codex`/`cmd_claude`/`cmd_watch`,直接 SystemExit,无 emit)。
+///   - `None` ← passthrough 命令(`cmd_codex`/`cmd_claude`,直接 SystemExit,无 emit)。
 #[derive(Debug, Clone, PartialEq)]
 pub enum CmdOutput {
     /// 机器可读稳定 dict(`--json` 路径或 `result.get("ok") is False` 路径)。
     Json(Value),
     /// 人读字符串(`emit` 非 dict 分支直接 print)。
     Human(String),
-    /// 无输出(passthrough/watch;不经 `emit`)。
+    /// 无输出(passthrough;不经 `emit`)。
     None,
 }
 
@@ -191,19 +190,6 @@ impl CmdResult {
             exit,
             as_json,
             preserve_json_order: false,
-        }
-    }
-    pub fn from_ordered_json(value: Value) -> Self {
-        let exit = if value.get("ok").and_then(Value::as_bool) == Some(false) {
-            ExitCode::Error
-        } else {
-            ExitCode::Ok
-        };
-        Self {
-            output: CmdOutput::Json(value),
-            exit,
-            as_json: true,
-            preserve_json_order: true,
         }
     }
     pub fn human(text: impl Into<String>) -> Self {
@@ -357,18 +343,6 @@ pub struct SendArgs {
     pub to_leader: Option<String>,
 }
 
-/// `allow-peer-talk`(`parser.py`): allow direct peer communication between two agents.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AllowPeerTalkArgs {
-    pub a: String,
-    pub b: String,
-    pub workspace: PathBuf,
-    pub json: bool,
-    /// Parsed but rejected until peer allowlist storage grows a team-scoped
-    /// backend column.
-    pub team: Option<String>,
-}
-
 /// `status`(`parser.py:182`)。`--summary`/`--json`/`--detail` 三态(summary xor json,见 `cmd_status`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusArgs {
@@ -379,13 +353,6 @@ pub struct StatusArgs {
     pub json: bool,
     /// Stage 4: explicit `--team` scope (read-only command; multi-team
     /// workspaces use this for filtering, not for refusal).
-    pub team: Option<String>,
-}
-
-/// `watch`(`parser.py:190`)。无 `--json`(纯 stream 到 SystemExit)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WatchArgs {
-    pub workspace: PathBuf,
     pub team: Option<String>,
 }
 
@@ -449,14 +416,6 @@ pub struct AttachAppServerLeaderArgs {
     pub team: Option<String>,
     pub socket: String,
     pub thread_id: String,
-    pub json: bool,
-}
-
-/// `identity`(`parser.py:256`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdentityArgs {
-    pub workspace: PathBuf,
-    pub team: Option<String>,
     pub json: bool,
 }
 
@@ -584,15 +543,6 @@ pub enum DoctorGate {
     Unknown(String),
 }
 
-/// `sessions`(`parser.py:230`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionsArgs {
-    pub workspace: PathBuf,
-    pub json: bool,
-    /// Stage 4: explicit `--team` scope (read-only enumeration).
-    pub team: Option<String>,
-}
-
 /// E7 (0.5.9 host-leader-registry-design §4.1): `team-agent leaders`
 /// enumerates the host discovery index and classifies each entry as
 /// LIVE, STALE, or AMBIGUOUS after re-validating against canonical
@@ -621,13 +571,6 @@ pub struct ModelsArgs {
     pub json: bool,
 }
 
-/// `validate [spec=team.spec.yaml] --json`(`parser.py:120`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidateArgs {
-    pub spec: PathBuf,
-    pub json: bool,
-}
-
 /// `profile {init,doctor,show}`(`parser.py:131`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileArgs {
@@ -640,56 +583,9 @@ pub struct ProfileArgs {
     pub json: bool,
 }
 
-/// Read-only lookup of all stored result envelopes for one case.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultsArgs {
-    pub case_id: String,
-    pub workspace: PathBuf,
-    pub team: Option<String>,
-    pub json: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitArgs {
     pub task_id: String,
     pub workspace: PathBuf,
-    pub json: bool,
-}
-
-/// `preflight`(`parser.py:160`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreflightArgs {
-    pub team: PathBuf,
-    pub json: bool,
-}
-
-/// `wait-ready`(`parser.py:171`)。
-#[derive(Debug, Clone, PartialEq)]
-pub struct WaitReadyArgs {
-    pub workspace: PathBuf,
-    pub timeout: f64,
-    pub json: bool,
-    /// Stage 4: explicit `--team` scope (read-only readiness probe).
-    pub team: Option<String>,
-}
-
-/// `e2e`(`parser.py:449`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct E2eArgs {
-    pub workspace: PathBuf,
-    pub providers: Vec<String>,
-    pub real: bool,
-    pub json: bool,
-}
-
-/// `peek`(`parser.py:201`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeekArgs {
-    pub agent: String,
-    pub workspace: PathBuf,
-    pub tail: usize,
-    pub head: Option<usize>,
-    pub search: Option<String>,
-    pub allow_raw_screen: bool,
     pub json: bool,
 }
