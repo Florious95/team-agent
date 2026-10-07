@@ -1,5 +1,5 @@
 //! ---
-//! purpose: coordinator daemon 的健康判定、幂等启停与只读观测面——pid/metadata/schema 三合一健康、spawn 与终止、runtime 路径、以及 team-agent watch 的事件渲染
+//! purpose: coordinator daemon 的健康判定、幂等启停与只读观测面——pid/metadata/schema 三合一健康、spawn 与终止与 runtime 路径
 //! contract:
 //!   provides:
 //!     - name: coordinator_health
@@ -10,12 +10,6 @@
 //!       what: 同上，并把 team_key 以 --team 传给子进程，免得 daemon 自己从 state 推
 //!     - name: stop_coordinator
 //!       what: 终止 daemon 并清 pid/meta；pid 文件缺失时用 ps 扫描发现流浪 coordinator
-//!     - name: collect_watch_lines
-//!       what: 从 events.jsonl 与结果表增量取出可渲染行，并推进 WatchCursor
-//!     - name: render_event_line
-//!       what: 把一条结构化事件渲染成人类可读行，不认识的事件返回 None
-//!     - name: run_watch
-//!       what: team-agent watch 主循环：反复 collect 后输出并 sleep
 //!     - name: coordinator_pid_path
 //!       what: coordinator.pid 的位置
 //!     - name: coordinator_meta_path
@@ -35,21 +29,16 @@
 //!   - 不做 tick 编排，也不投递任何消息
 //!   - 不读 provider 凭据、不碰 .env；身份只取自当前可执行文件与已落盘 metadata
 //!   - 终止进程限定本 workspace：优先按本次判定拿到的精确 pid；pid 文件缺失时的流浪回收会按 ps 命令行匹配「coordinator --workspace <本 ws>」发现目标，仍不做跨 workspace 的 pkill/killall 泛清
-//!   - watch 侧只读：不重放已归档段，rotation 只插一条 marker 并重置 offset
 //! maturity: wired
 //! ---
 //!
-//! coordinator 健康/身份 & 只读可观测面:metadata 身份原语 + coordinator 路径 + watch 实时流。
+//! coordinator 健康/身份 & 只读可观测面:metadata 身份原语 + coordinator 路径。
 
-use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-
-use serde_json::Value;
-use thiserror::Error;
 
 use crate::message_store::MessageStore;
 
@@ -57,7 +46,7 @@ use super::types::{
     CoordinatorBinaryIdentity, CoordinatorBinaryIdentityRelation, CoordinatorHealthStatus,
     CoordinatorMetadata, CoordinatorMetadataMismatchReason, HealthReport, MetadataSource, Pid,
     SchemaError, SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome,
-    StopReport, WatchCursor, WorkspacePath, PROTOCOL_VERSION, ROTATION_MARKER,
+    StopReport, WorkspacePath, PROTOCOL_VERSION,
 };
 
 // ===========================================================================
@@ -1155,275 +1144,6 @@ pub fn coordinator_meta_path(workspace: &WorkspacePath) -> PathBuf {
 /// ---
 pub fn coordinator_log_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator.log")
-}
-
-// ===========================================================================
-// watch 实时流(watch/__init__.py)—— `team-agent watch`
-// ===========================================================================
-
-/// `collect_watch_lines`(`watch.py:40`)。tail events.jsonl(过滤 team)+ latest_results,
-/// 渲染人类可读行;处理 log rotation(ROTATION_MARKER + offset 重置,不重放历史段)。
-/// 推进 `cursor`。
-/// ---
-/// purpose: 增量取出自上次游标以来的可渲染 watch 行（事件 + 结果两路）
-/// params:
-///   workspace: workspace 根
-///   cursor: 可变游标，函数会推进 offset、已见结果 id 集合与归档签名
-///   store: 已打开的 message store，用于取结果行
-///   team: 只看这个 team 的事件；None 表示不过滤
-/// returns: 本次新增的渲染行，事件行在前、结果行在后；无新内容时为空 Vec
-/// errors: 读事件文件或查库失败时返回 WatchError
-/// ---
-pub fn collect_watch_lines(
-    workspace: &WorkspacePath,
-    cursor: &mut WatchCursor,
-    store: &MessageStore,
-    team: Option<&str>,
-) -> Result<Vec<String>, WatchError> {
-    let mut lines = collect_event_lines(workspace, cursor, team)?;
-    lines.extend(collect_result_lines(workspace, cursor, store, team)?);
-    Ok(lines)
-}
-
-/// `_collect_event_lines`(`watch.py:66-97`):tail events.jsonl,按 team 过滤。
-fn collect_event_lines(
-    workspace: &WorkspacePath,
-    cursor: &mut WatchCursor,
-    team: Option<&str>,
-) -> Result<Vec<String>, WatchError> {
-    let logs = crate::model::paths::logs_dir(workspace.as_path());
-    let events_path = logs.join("events.jsonl");
-    let archive_path = logs.join("events.jsonl.1");
-    let archive_signature = file_signature(&archive_path)?;
-    let mut lines = Vec::new();
-
-    let size = std::fs::metadata(&events_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let rotated = cursor.initialized
-        && (cursor.archive_signature != archive_signature || cursor.event_offset > size);
-    if rotated {
-        lines.push(ROTATION_MARKER.to_string());
-        cursor.event_offset = 0;
-    }
-    cursor.archive_signature = archive_signature;
-
-    let mut file = match std::fs::File::open(&events_path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            cursor.initialized = true;
-            return Ok(lines);
-        }
-        Err(e) => return Err(WatchError::Io(e)),
-    };
-    file.seek(SeekFrom::Start(cursor.event_offset))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    cursor.event_offset = file.stream_position()?;
-    cursor.initialized = true;
-    for line in text.lines() {
-        if let Ok(event) = serde_json::from_str::<Value>(line) {
-            // watch.py:91 — `if team and _event_team_id(event) != team: continue`.
-            if team.is_some() && event_team_id(&event).as_deref() != team {
-                continue;
-            }
-            if let Some(rendered) = render_event_line(&event) {
-                lines.push(rendered);
-            }
-        }
-    }
-    Ok(lines)
-}
-
-/// `_event_team_id`(`watch.py:132-134`)。
-fn event_team_id(event: &Value) -> Option<String> {
-    ["team_id", "owner_team_id", "team"]
-        .iter()
-        .find_map(|key| event.get(*key))
-        .and_then(|value| match value {
-            Value::String(s) if !s.is_empty() => Some(s.clone()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => None,
-        })
-}
-
-/// `_collect_result_lines`(`watch.py:100-112`):store.latest_results(owner_team_id=team)
-/// 出 `result_received: {agent} -> {summary}` 行;按 cursor.seen_result_ids 去重。
-fn collect_result_lines(
-    workspace: &WorkspacePath,
-    cursor: &mut WatchCursor,
-    store: &MessageStore,
-    team: Option<&str>,
-) -> Result<Vec<String>, WatchError> {
-    let db_path = crate::model::paths::runtime_dir(workspace.as_path()).join("team.db");
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
-    let mut lines = Vec::new();
-    for row in store.latest_results(20, team)? {
-        let Some(result_id) = row
-            .get("result_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        if !cursor.seen_result_ids.insert(result_id) {
-            continue;
-        }
-        let mut summary = crate::message_store::result_summary_from_row(&row)
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(obj) = summary.as_object_mut() {
-            obj.insert(
-                "event".to_string(),
-                Value::String("result_received".to_string()),
-            );
-        }
-        if let Some(rendered) = render_event_line(&summary) {
-            lines.push(rendered);
-        }
-    }
-    Ok(lines)
-}
-
-/// `render_event_line`(`watch.py:46-63`)。把一条 step 4 事件渲染成人类可读行;非可渲染事件 → `None`。
-/// 消费的事件类型:`result_received` / `leader_receiver.{injected,submitted}` / `send.failed` /
-/// `leader_receiver.rebind_required` / `leader.api_error`(card 表)。
-/// ---
-/// purpose: 把一条结构化事件渲染成一行人类可读文本
-/// params:
-///   event: 事件 JSON 对象；靠其中的 event 字段分派
-/// returns: 已知事件类型返回渲染行，其余一律 None（不猜、不打印原始 JSON）。摘要字段做长度截断
-/// ---
-pub fn render_event_line(event: &Value) -> Option<String> {
-    let event_name = event.get("event").and_then(Value::as_str)?;
-    match event_name {
-        "result_received" => Some(format!(
-            "result_received: {} -> {}",
-            clean_field(event, &["agent_id"], "-"),
-            prefix_chars(&clean_field(event, &["summary"], "-"), 80)
-        )),
-        "leader_receiver.injected" | "leader_receiver.submitted" => {
-            let id = first_field(event, &["message_id", "msg_id"]).unwrap_or("-");
-            let id = prefix_chars(id, 12);
-            Some(format!(
-                "leader_receiver.injected: {} -> {}",
-                id,
-                clean_field(event, &["recipient", "to"], "-")
-            ))
-        }
-        "send.failed" => Some(format!(
-            "send.failed: {} reason={}",
-            clean_field(event, &["recipient", "to", "target"], "-"),
-            clean_field(event, &["reason", "error"], "-")
-        )),
-        "leader_receiver.rebind_required" => Some(format!(
-            "leader_receiver.rebind_required: pane={} reason={}",
-            clean_field(event, &["old_pane_id", "pane_id", "target"], "-"),
-            clean_field(event, &["reason", "rediscovery_status"], "-")
-        )),
-        "leader.api_error" => Some(format!(
-            "leader.api_error: {} provider={} snippet={}",
-            clean_field(event, &["error_class"], "Unknown"),
-            clean_field(event, &["provider"], "-"),
-            clean_field(event, &["matched_pattern_snippet", "snippet"], "-")
-        )),
-        "result_wake.registered" => Some(format!(
-            "result_wake.registered: task={} watcher={}",
-            clean_field(event, &["task_id"], "-"),
-            clean_field(event, &["watcher_id"], "-")
-        )),
-        "result_wake.notified" => Some(format!(
-            "result_wake.notified: task={} result={} watcher={}",
-            clean_field(event, &["task_id"], "-"),
-            clean_field(event, &["result_id"], "-"),
-            clean_field(event, &["watcher_id"], "-")
-        )),
-        "result_wake.notify_failed" => Some(format!(
-            "result_wake.notify_failed: task={} watcher={} reason={}",
-            clean_field(event, &["task_id"], "-"),
-            clean_field(event, &["watcher_id"], "-"),
-            clean_field(event, &["reason", "error"], "-")
-        )),
-        _ => None,
-    }
-}
-
-/// `run_watch`(`watch.py:25`)。`team-agent watch` 主循环:反复 `collect_watch_lines` + 输出 + sleep。
-/// `output`/`sleep` 注入便于测试。§10 返 Result。
-/// ---
-/// purpose: team-agent watch 的主循环：反复增量收集、输出、休眠
-/// params:
-///   workspace: workspace 根
-///   team: 只看这个 team；None 表示不过滤
-///   interval_sec: 轮询间隔；非有限值或非正数时回落到内置默认
-///   output: 输出回调，注入以便测试；本函数自己不写 stdout
-/// returns: 循环结束时为 Ok。这是个长跑循环，正常运行期间不返回
-/// errors: 打开 message store 或某轮收集失败时返回 WatchError
-/// ---
-pub fn run_watch(
-    workspace: &WorkspacePath,
-    team: Option<&str>,
-    interval_sec: f64,
-    output: &mut dyn FnMut(&str),
-) -> Result<(), WatchError> {
-    let store = MessageStore::open(workspace.as_path())?;
-    let mut cursor = WatchCursor::default();
-    let interval = if interval_sec.is_finite() && interval_sec > 0.0 {
-        std::time::Duration::from_secs_f64(interval_sec)
-    } else {
-        std::time::Duration::from_millis(100)
-    };
-    loop {
-        for line in collect_watch_lines(workspace, &mut cursor, &store, team)? {
-            output(&line);
-        }
-        std::thread::sleep(interval);
-    }
-}
-
-/// watch 错误(读 events.jsonl / latest_results)。
-#[derive(Debug, Error)]
-pub enum WatchError {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("message store: {0}")]
-    MessageStore(#[from] crate::message_store::MessageStoreError),
-}
-
-fn file_signature(path: &Path) -> Result<Option<(u64, i128)>, WatchError> {
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(WatchError::Io(e)),
-    };
-    let modified = meta.modified().ok();
-    let nanos = modified
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|d| i128::try_from(d.as_nanos()).ok())
-        .unwrap_or(0);
-    Ok(Some((meta.len(), nanos)))
-}
-
-fn first_field<'a>(event: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| event.get(*key).and_then(Value::as_str))
-}
-
-fn clean_field(event: &Value, keys: &[&str], default: &str) -> String {
-    first_field(event, keys)
-        .map(clean_text)
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default.to_string())
-}
-
-fn clean_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn prefix_chars(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
 }
 
 #[cfg(all(test, unix))]

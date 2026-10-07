@@ -20,9 +20,8 @@
 //! ---
 //!
 //! coordinator 共享数据面:常量 / newtype / 穷尽 enum / metadata / schema health /
-//! report 结构 / abnormal-track 数据型 / WatchCursor / cross-dep 占位。
+//! report 结构 / abnormal-track 数据型 / cross-dep 占位。
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -48,10 +47,6 @@ pub const DEFAULT_TICK_INTERVAL_SEC: f64 = 5.0;
 
 /// 指数退避封顶(`__main__.py:65` `min(.., 60.0)`)。bug-084 崩溃循环防护。
 pub const BACKOFF_MAX_SEC: f64 = 60.0;
-
-/// watch log rotation marker(`watch.py:22`,字节级一致 —— 测试钉死)。
-pub const ROTATION_MARKER: &str =
-    "[watch] log rotated; archived segment events.jsonl.1 not replayed — historical replay deferred to a future --replay flag";
 
 // ===========================================================================
 // NEWTYPES(§3:Pid / WorkspacePath 不与裸 int/PathBuf 混传)
@@ -443,21 +438,6 @@ pub struct TeamPresenceSnapshot {
     pub tmux_sessions_present: bool,
     pub clean_shutdown: bool,
     pub restart_in_progress: bool,
-}
-
-// ===========================================================================
-// WatchCursor(watch/__init__.py)
-// ===========================================================================
-
-/// watch tail 游标(`watch.py:14-19`)。rotation 检测靠 `archive_signature` 变化 + `offset > size`
-/// (`watch.py:73-83`)。`archive_signature = Some((size, mtime_ns))`。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WatchCursor {
-    pub event_offset: u64,
-    pub seen_result_ids: BTreeSet<String>,
-    pub initialized: bool,
-    /// `(size, mtime_ns)`;`mtime_ns: i128`(防溢出)。
-    pub archive_signature: Option<(u64, i128)>,
 }
 
 // ===========================================================================

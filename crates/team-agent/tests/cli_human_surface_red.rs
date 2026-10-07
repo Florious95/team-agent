@@ -44,7 +44,6 @@ const HUMAN: &[&str] = &[
     "remove-agent",
     "fork-agent",
     "clone-agent",
-    "allow-peer-talk",
     "approvals",
     "route",
     "profile",
@@ -52,17 +51,8 @@ const HUMAN: &[&str] = &[
     "inbox",
 ];
 const MACHINE: &[&str] = &[
-    "results",
     "wait",
     "attach-app-server-leader",
-    "identity",
-    "watch",
-    "sessions",
-    "validate",
-    "preflight",
-    "wait-ready",
-    "e2e",
-    "peek",
     "coordinator",
 ];
 const JARGON: &[&str] = &[
@@ -372,21 +362,21 @@ fn examples_property(command: &str) {
 }
 
 #[test]
-fn h1_public_catalog_is_exactly_thirty_human_records_and_no_machine_record() {
+fn h1_public_catalog_is_exactly_twenty_nine_human_records_and_no_machine_record() {
     let actual = catalog::COMMAND_SPECS
         .iter()
         .map(|s| s.name)
         .collect::<BTreeSet<_>>();
     assert_eq!(
         catalog::COMMAND_SPECS.len(),
-        30,
+        29,
         "H1 physically remove Machine records, not only change visibility/tier"
     );
     assert_eq!(actual, HUMAN.iter().copied().collect());
 }
 #[test]
 #[serial(env)]
-fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
+fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
     let env = HermeticTestEnv::enter("root-human");
     let cwd = env.workspace("empty");
     let out = env.run_cli(&cwd, &["--help"]);
@@ -401,7 +391,7 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
         .collect::<Vec<_>>();
     assert_eq!(
         visible.len(),
-        30,
+        29,
         "H1 root command list: {visible:?}\n{help}"
     );
     assert_eq!(
@@ -540,7 +530,7 @@ human_properties! {
     restart => "restart", shutdown => "shutdown", add_agent => "add-agent", start_agent => "start-agent",
     stop_agent => "stop-agent", reset_agent => "reset-agent", clone_agent => "clone-agent", fork_agent => "fork-agent",
     remove_agent => "remove-agent", doctor => "doctor", approvals => "approvals", leaders => "leaders",
-    allow_peer_talk => "allow-peer-talk", route => "route", profile => "profile", install_skill => "install-skill",
+    route => "route", profile => "profile", install_skill => "install-skill",
     claim_leader => "claim-leader", takeover => "takeover", attach_leader => "attach-leader",
     pi => "pi", codex => "codex", claude => "claude", copilot => "copilot", grok => "grok", cursor => "cursor", inbox => "inbox",
 }
@@ -550,7 +540,5 @@ macro_rules! hidden_properties {
     )+};
 }
 hidden_properties! {
-    h2_results => "results", h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader",
-    h2_identity => "identity", h2_watch => "watch", h2_sessions => "sessions", h2_validate => "validate",
-    h2_preflight => "preflight", h2_wait_ready => "wait-ready", h2_e2e => "e2e", h2_peek => "peek", h2_coordinator => "coordinator",
+    h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader", h2_coordinator => "coordinator",
 }

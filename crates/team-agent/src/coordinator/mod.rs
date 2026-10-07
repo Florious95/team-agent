@@ -10,8 +10,6 @@
 //!       what: 幂等启动 daemon 子进程
 //!     - name: stop_coordinator
 //!       what: 停 daemon 并清 pid/meta
-//!     - name: run_watch
-//!       what: team-agent watch 的只读事件流主循环
 //!     - name: detect_whole_team_gone
 //!       what: 不依赖 coordinator 存活的整队消失判定
 //!   depends:
@@ -41,7 +39,6 @@
 //!   - `coordinator/lifecycle.py`    (health / start / stop / tick orchestration + schema health)
 //!   - `coordinator/metadata.py`     (COORDINATOR_PROTOCOL_VERSION=2, pid_is_running, read/write/ok meta)
 //!   - `coordinator/paths.py`        (coordinator.pid / coordinator.json / coordinator.log paths)
-//!   - `watch/__init__.py`           (run_watch / collect_watch_lines / render_event_line / WatchCursor)
 //!   - `abnormal_track.py`           (Gap 32 §4 provider-neutral whole-team-gone detection)
 //!
 //! 职责(card §职责):per-workspace daemon 生命周期 + 单次 tick 编排。tick 按固定顺序把
@@ -70,8 +67,6 @@
 //!     仅 unexpected exit 写 durable marker + 延迟到下条 leader 命令再 escalate。
 //!   - **abnormal track 不读屏/不命名 provider**:只消费结构化 fault fact + 进程身份;
 //!     `(signature, turn_id)` 去重,turn_id 缺失退化为 per-record fingerprint 桶。
-//!   - **watch rotation**:archive_signature 变化或 offset>size 即插 ROTATION_MARKER 并重置 offset,
-//!     不重放历史段。
 //!
 //! ROUND-0:仅类型 + struct/enum + fn/trait/method 签名。所有 body =
 //! `unimplemented!("step12 port: <what>")`。fallible 路径返 `Result`/`Option`(§10 实现层禁

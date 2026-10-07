@@ -29,4 +29,4 @@ Pending.
 
 ## Next Step
 
-- Run `team-agent validate team.spec.yaml`, review permissions, then run `team-agent launch team.spec.yaml --yes`.
+- Review role files and permissions, then run `team-agent quick-start`; use `team-agent doctor` to diagnose the team.

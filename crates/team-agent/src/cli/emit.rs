@@ -251,7 +251,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
                 | "clone-agent"
                 | "fork-agent"
                 | "remove-agent"
-                | "allow-peer-talk"
                 | "profile"
         )
     {
@@ -262,9 +261,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     match command {
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
-        "allow-peer-talk" => {
-            cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result)
-        }
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
@@ -306,33 +302,13 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 fn is_machine_command(command: &str) -> bool {
     matches!(
         command,
-        "results"
-            | "wait"
-            | "wait-ready"
-            | "preflight"
-            | "validate"
-            | "identity"
-            | "sessions"
-            | "watch"
-            | "e2e"
-            | "peek"
-            | "coordinator"
-            | "attach-app-server-leader"
+        "wait" | "coordinator" | "attach-app-server-leader"
     )
 }
 
 fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     match command {
-        "results" => cmd_results(&results_args(args, cwd)?).map(emit_result),
         "wait" => cmd_wait(&wait_args(args, cwd)?).map(emit_result),
-        "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
-        "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
-        "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
-        "identity" => cmd_identity(&identity_args(args, cwd)).map(emit_result),
-        "sessions" => cmd_sessions(&sessions_args(args, cwd)).map(emit_result),
-        "watch" => cmd_watch(&watch_args(args, cwd)).map(emit_result),
-        "e2e" => cmd_e2e(&e2e_args(args, cwd)).map(emit_result),
-        "peek" => cmd_peek(&peek_args(args, cwd)?).map(emit_result),
         "coordinator" => run_coordinator(args, cwd),
         "attach-app-server-leader" => {
             cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
@@ -387,7 +363,7 @@ pub(crate) fn default_help() -> String {
     append_help_section(
         &mut out,
         "观察与协作",
-        &["leaders", "doctor", "approvals", "allow-peer-talk"],
+        &["leaders", "doctor", "approvals"],
     );
     append_help_section(&mut out, "设置", &["route", "profile", "install-skill"]);
     append_help_section(
@@ -487,8 +463,6 @@ pub(super) fn command_help(command: Option<&str>) -> String {
             "team-agent doctor --workspace .\nteam-agent doctor --workspace . --team help-demo --json", "按实际问题与所选队伍范围处理；不要把体检建议当成已执行的修复。"),
         "approvals" => ("可选 <agent> 查看一位队友；仅观察权限询问，不自动批准。",
             "team-agent approvals\nteam-agent approvals worker --json", "确认权限用途后，在工具的实际权限询问处处理，再看 status。"),
-        "allow-peer-talk" => ("指定两位现有队友；--workspace 选择项目。此命令不支持 --team。",
-            "team-agent allow-peer-talk worker reviewer\nteam-agent allow-peer-talk worker reviewer --workspace . --json", "再向队友发送交流任务；允许交流不等于已经互发消息。"),
         "profile" => ("init 创建配置，doctor 检查配置，show 显示设置；NAME 是配置名。\n--auth-mode 登录方式；--proxy-mode direct 不走代理、inherit 沿用环境代理。\n配置存放在所选工作区，不因 --team 自动变成队伍独立配置；不要输出凭证。",
             "team-agent profile init local --auth-mode subscription\nteam-agent profile doctor local\nteam-agent profile show local", "检查通过后用 add-agent/start-agent --profile local；需要登录时使用工具原生登录入口。"),
         "install-skill" => ("--source 必须是已核实的指南目录；--target 选择 codex/claude/copilot/all。\n--dest 覆盖安装位置；--dry-run 只预览；--uninstall 移除目标指南。此项不是起队前提。",
@@ -572,7 +546,6 @@ fn emit_usage_error(message: &str) {
     eprintln!("错误：{message}");
 }
 
-/// `cmd_validate` delegates to runtime validate_file.
 /// `install-skill` 参数(RED-1 根治:把 skill 安装单源收敛到二进制,install.mjs 调它)。
 struct InstallSkillArgs {
     target: crate::packaging::SkillTarget,
@@ -688,91 +661,8 @@ fn cmd_install_skill(args: &InstallSkillArgs) -> Result<CmdResult, CliError> {
     ))
 }
 
-pub fn cmd_validate(args: &ValidateArgs) -> Result<CmdResult, CliError> {
-    let spec = resolve_path(&args.spec);
-    let value = if spec.is_dir() {
-        validate_team_dir(&spec)?
-    } else {
-        validate_spec_file(&spec)?
-    };
-    Ok(CmdResult::from_json(value, args.json))
-}
-
-fn validate_spec_file(spec_path: &Path) -> Result<Value, CliError> {
-    let text = std::fs::read_to_string(spec_path)?;
-    let base_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    let spec =
-        crate::model::spec::load_and_validate_spec(&text, base_dir).map_err(model_error_to_cli)?;
-    let team = spec
-        .get("team")
-        .and_then(|team| team.get("name"))
-        .and_then(crate::model::yaml::Value::as_str)
-        .unwrap_or("");
-    let workspace = spec
-        .get("team")
-        .and_then(|team| team.get("workspace"))
-        .and_then(crate::model::yaml::Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| base_dir.to_path_buf());
-    let mut obj = Map::new();
-    obj.insert("ok".to_string(), Value::Bool(true));
-    obj.insert("team".to_string(), Value::String(team.to_string()));
-    obj.insert(
-        "workspace".to_string(),
-        Value::String(workspace.to_string_lossy().to_string()),
-    );
-    Ok(Value::Object(obj))
-}
-
-fn validate_team_dir(team_dir: &Path) -> Result<Value, CliError> {
-    let spec = crate::compiler::compile_team(team_dir).map_err(model_error_to_cli)?;
-    let team = spec
-        .get("team")
-        .and_then(|team| team.get("name"))
-        .and_then(crate::model::yaml::Value::as_str)
-        .unwrap_or("");
-    let workspace = spec
-        .get("team")
-        .and_then(|team| team.get("workspace"))
-        .and_then(crate::model::yaml::Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| team_dir.to_path_buf());
-    let agents = spec
-        .get("agents")
-        .and_then(crate::model::yaml::Value::as_list)
-        .map(|agents| {
-            agents
-                .iter()
-                .filter_map(|agent| {
-                    agent
-                        .get("id")
-                        .and_then(crate::model::yaml::Value::as_str)
-                        .map(|id| Value::String(id.to_string()))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let mut obj = Map::new();
-    obj.insert("ok".to_string(), Value::Bool(true));
-    obj.insert("type".to_string(), Value::String("team_dir".to_string()));
-    obj.insert(
-        "workspace".to_string(),
-        Value::String(workspace.to_string_lossy().to_string()),
-    );
-    obj.insert("team".to_string(), Value::String(team.to_string()));
-    obj.insert("agents".to_string(), Value::Array(agents));
-    Ok(Value::Object(obj))
-}
-
 fn resolve_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn model_error_to_cli(error: crate::model::errors::ModelError) -> CliError {
-    match error {
-        crate::model::errors::ModelError::Validation(message) => CliError::Runtime(message),
-        other => CliError::Runtime(other.to_string()),
-    }
 }
 
 fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) -> ExitCode {
@@ -951,14 +841,9 @@ struct ParsedArgs {
     once: bool,
     tick_interval: Option<f64>,
     status_value: Option<String>,
-    providers: Option<String>,
-    allow_raw_screen: bool,
-    tail: Option<usize>,
-    head: Option<usize>,
     search: Option<String>,
     file: Option<PathBuf>,
     result: Option<String>,
-    real: bool,
     assignee: Option<String>,
     auth_mode: Option<String>,
     proxy_mode: Option<String>,
@@ -1045,14 +930,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
                 parsed.tick_interval = next_arg(args, &mut i).and_then(|v| v.parse::<f64>().ok())
             }
             "--status" => parsed.status_value = next_arg(args, &mut i),
-            "--providers" => parsed.providers = next_arg(args, &mut i),
-            "--allow-raw-screen" => parsed.allow_raw_screen = true,
-            "--tail" => parsed.tail = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
-            "--head" => parsed.head = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
             "--search" => parsed.search = next_arg(args, &mut i),
             "--file" => parsed.file = next_arg(args, &mut i).map(PathBuf::from),
             "--result" => parsed.result = next_arg(args, &mut i),
-            "--real" => parsed.real = true,
             "--assignee" => parsed.assignee = next_arg(args, &mut i),
             "--auth-mode" => parsed.auth_mode = next_arg(args, &mut i),
             "--proxy-mode" => parsed.proxy_mode = next_arg(args, &mut i),
@@ -1458,17 +1338,6 @@ fn refuse_if_multi_alive_team_missing_scope(
     Ok(())
 }
 
-fn allow_peer_talk_args(args: &[String], cwd: &Path) -> Result<AllowPeerTalkArgs, CliError> {
-    let parsed = parse_args(args);
-    Ok(AllowPeerTalkArgs {
-        a: required_pos(&parsed, 0, "a")?,
-        b: required_pos(&parsed, 1, "b")?,
-        workspace: workspace(&parsed, cwd),
-        json: parsed.json,
-        team: parsed.team,
-    })
-}
-
 fn status_args(args: &[String], cwd: &Path) -> StatusArgs {
     let parsed = parse_args(args);
     StatusArgs {
@@ -1477,14 +1346,6 @@ fn status_args(args: &[String], cwd: &Path) -> StatusArgs {
         detail: parsed.detail,
         summary: parsed.summary,
         json: parsed.json,
-        team: parsed.team,
-    }
-}
-
-fn watch_args(args: &[String], cwd: &Path) -> WatchArgs {
-    let parsed = parse_args(args);
-    WatchArgs {
-        workspace: workspace(&parsed, cwd),
         team: parsed.team,
     }
 }
@@ -1584,15 +1445,6 @@ fn attach_app_server_leader_args(
             .ok_or_else(|| CliError::Usage("missing --thread-id".to_string()))?,
         json: parsed.json,
     })
-}
-
-fn identity_args(args: &[String], cwd: &Path) -> IdentityArgs {
-    let parsed = parse_args(args);
-    IdentityArgs {
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        json: parsed.json,
-    }
 }
 
 fn shutdown_args(args: &[String], cwd: &Path) -> Result<ShutdownArgs, CliError> {
@@ -1917,15 +1769,6 @@ fn doctor_gate(raw: Option<&str>) -> Option<DoctorGate> {
     }
 }
 
-fn sessions_args(args: &[String], cwd: &Path) -> SessionsArgs {
-    let parsed = parse_args(args);
-    SessionsArgs {
-        workspace: workspace(&parsed, cwd),
-        json: parsed.json,
-        team: parsed.team,
-    }
-}
-
 fn leaders_args(args: &[String], _cwd: &Path) -> Result<LeadersArgs, CliError> {
     let mut view = None;
     let mut query = None;
@@ -2031,18 +1874,6 @@ fn leaders_args(args: &[String], _cwd: &Path) -> Result<LeadersArgs, CliError> {
     })
 }
 
-fn validate_args(args: &[String], cwd: &Path) -> ValidateArgs {
-    let parsed = parse_args(args);
-    ValidateArgs {
-        spec: parsed
-            .positionals
-            .first()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| cwd.join("team.spec.yaml")),
-        json: parsed.json,
-    }
-}
-
 fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
     let parsed = parse_args(args);
     let workspace = resolve_cli_path(cwd, &workspace(&parsed, cwd));
@@ -2057,106 +1888,6 @@ fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
     })
 }
 
-fn results_args(args: &[String], cwd: &Path) -> Result<ResultsArgs, CliError> {
-    if args
-        .iter()
-        .any(|arg| arg == "--to" || arg.starts_with("--to="))
-    {
-        return Err(CliError::Usage(
-            "results does not accept --to; it is a read-only command".to_string(),
-        ));
-    }
-    let parsed = parse_args(args);
-    let case_id = option_value(args, "--case")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| CliError::Usage("missing --case".to_string()))?;
-    Ok(ResultsArgs {
-        case_id,
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        json: parsed.json,
-    })
-}
-
-fn option_value(args: &[String], flag: &str) -> Option<String> {
-    let prefix = format!("{flag}=");
-    let mut i = 0usize;
-    while i < args.len() {
-        let arg = args.get(i)?;
-        if let Some(value) = arg.strip_prefix(&prefix) {
-            return Some(value.to_string());
-        }
-        if arg == flag {
-            return args
-                .get(i.saturating_add(1))
-                .filter(|value| !value.starts_with('-'))
-                .cloned();
-        }
-        i = i.saturating_add(1);
-    }
-    None
-}
-
-fn preflight_args(args: &[String], cwd: &Path) -> PreflightArgs {
-    let parsed = parse_args(args);
-    let team = parsed
-        .team
-        .as_deref()
-        .map(PathBuf::from)
-        .or_else(|| parsed.positionals.first().map(PathBuf::from))
-        .unwrap_or_else(|| cwd.to_path_buf());
-    PreflightArgs {
-        team,
-        json: parsed.json,
-    }
-}
-
-fn wait_ready_args(args: &[String], cwd: &Path) -> WaitReadyArgs {
-    let parsed = parse_args(args);
-    WaitReadyArgs {
-        workspace: workspace(&parsed, cwd),
-        timeout: parsed.timeout.unwrap_or(60.0),
-        json: parsed.json,
-        team: parsed.team,
-    }
-}
-
-fn e2e_args(args: &[String], cwd: &Path) -> E2eArgs {
-    let parsed = parse_args(args);
-    let providers = parsed
-        .providers
-        .as_deref()
-        .unwrap_or("fake")
-        .split(',')
-        .filter_map(|p| {
-            let trimmed = p.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        })
-        .collect();
-    E2eArgs {
-        workspace: workspace(&parsed, cwd),
-        providers,
-        real: parsed.real,
-        json: parsed.json,
-    }
-}
-
-fn peek_args(args: &[String], cwd: &Path) -> Result<PeekArgs, CliError> {
-    let parsed = parse_args(args);
-    Ok(PeekArgs {
-        agent: required_pos(&parsed, 0, "agent")?,
-        workspace: workspace(&parsed, cwd),
-        tail: parsed.tail.unwrap_or(80),
-        head: parsed.head,
-        search: parsed.search,
-        allow_raw_screen: parsed.allow_raw_screen,
-        json: parsed.json,
-    })
-}
 fn run_coordinator(args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     let parsed = parse_args(args);
     let workspace = crate::coordinator::WorkspacePath::new(workspace(&parsed, cwd));
@@ -2343,7 +2074,7 @@ mod tests {
             .filter(|spec| spec.default_help)
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(expected.len(), 30, "the public catalog is Human30");
+        assert_eq!(expected.len(), 29, "the public catalog is Human29");
         for spec_name in &expected {
             assert!(
                 visible.iter().any(|command| command == spec_name),
@@ -2357,7 +2088,7 @@ mod tests {
         expected_sorted.sort();
         assert_eq!(
             actual, expected_sorted,
-            "default help must match the exact Human30 public spec set, not a slack threshold; got {visible:?}"
+            "default help must match the exact Human29 public spec set, not a slack threshold; got {visible:?}"
         );
         assert!(
             top_help.contains("copilot"),
@@ -2405,7 +2136,6 @@ mod tests {
     #[test]
     fn observation_a_commands_have_terminal_tiers() {
         for (command, tier) in [
-            ("allow-peer-talk", CommandTier::Core),
             ("approvals", CommandTier::Core),
             ("profile", CommandTier::Core),
             ("install-skill", CommandTier::Core),
@@ -2547,7 +2277,7 @@ mod tests {
             }
         }
         let cwd = tmp_workspace();
-        for command in ["sessions", "wait-ready", "peek", "coordinator"] {
+        for command in ["wait", "attach-app-server-leader", "coordinator"] {
             assert_eq!(
                 run(&cli_argv(&[command, "--help"]), &cwd),
                 ExitCode::Usage,

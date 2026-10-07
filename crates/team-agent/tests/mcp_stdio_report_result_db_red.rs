@@ -12,6 +12,11 @@ fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
     let harness = McpSimHarness::new();
     let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
     let canary = "MCP_STDIO_DB_PROBE_CANARY";
+    let artifacts = json!([{
+        "path": "artifact://nested/证据",
+        "metadata": {"attempt": 2, "passed": true, "optional": null},
+        "details": ["line one\nline two", {"count": 3}]
+    }]);
 
     let call = worker.call_tool(
         "report_result",
@@ -19,7 +24,8 @@ fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
             "task_id": "task_mcp",
             "agent_id": "worker_a",
             "status": "success",
-            "summary": canary
+            "summary": canary,
+            "artifacts": artifacts.clone()
         }),
     );
 
@@ -48,8 +54,13 @@ fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
         Some("teamA"),
         "DB result row must preserve spawn-time TEAM_AGENT_OWNER_TEAM_ID scope; row={row:?}"
     );
-    assert!(
-        row.envelope.contains(canary),
-        "DB result row envelope must contain the report_result summary canary; row={row:?}"
+    let envelope: serde_json::Value = serde_json::from_str(&row.envelope).unwrap();
+    assert_eq!(envelope["summary"], canary);
+    assert_eq!(
+        serde_json::to_vec(&envelope["artifacts"]).unwrap(),
+        serde_json::to_vec(&artifacts).unwrap(),
+        "nested artifacts must survive the real MCP ingress and SQLite persistence unchanged"
     );
+    assert_eq!(envelope["status"], "success");
+    assert_eq!(row.status, "collected", "auto-finalization remains active");
 }

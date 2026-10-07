@@ -353,23 +353,3 @@ fn attach_leader_to_state_nonfirst_does_not_overwrite_owner_or_advance_epoch() {
         "non-first-time attach must NOT advance owner_epoch (golden keeps 3); Rust bumps to 4"
     );
 }
-
-// C3 [WARN] — leader_identity.current_pane_id honors TEAM_AGENT_LEADER_PANE_ID priority (golden
-// :366 = env(TEAM_AGENT_LEADER_PANE_ID) or env(TMUX_PANE) or None). Rust owner_bind.rs:32 reads
-// TMUX_PANE only. RED: with TEAM_AGENT_LEADER_PANE_ID set + TMUX_PANE unset, current_pane_id must be
-// the LEADER_PANE_ID. (Sibling gap, noted: last_seen_at = receiver.attached_at OR receiver.last_seen_at;
-// Rust reads attached_at only.)
-#[test]
-#[serial_test::serial(env)]
-fn c3_leader_identity_current_pane_honors_leader_pane_id_env() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let _e = EnvGuard::apply(&[
-        ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
-        ("TEAM_AGENT_LEADER_PANE_ID", Some("%foo")),
-        ("TMUX_PANE", None),
-    ]);
-    let ws = p2_temp_ws("c3_pane_env");
-    let v = leader_identity(&ws, None).unwrap();
-    assert_eq!(v["current_pane_id"], serde_json::json!("%foo"),
-            "golden :366 current_pane_id = TEAM_AGENT_LEADER_PANE_ID or TMUX_PANE or None; Rust reads TMUX_PANE only");
-}

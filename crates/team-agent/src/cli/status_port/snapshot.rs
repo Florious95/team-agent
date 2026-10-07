@@ -90,7 +90,7 @@ impl RuntimeSnapshot {
                 serde_json::json!(tmux_present),
             );
         }
-        let mut readiness = crate::cli::diagnose::wait_readiness(&readiness_state);
+        let mut readiness = crate::cli::diagnose::runtime_readiness(&readiness_state);
         let team_key = owner_team_id
             .filter(|team| !team.is_empty())
             .map(str::to_string)

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::cli::{cmd_preflight, emit, CmdOutput, PreflightArgs};
+use team_agent::cli::{cmd_doctor, emit, CmdOutput, DoctorArgs};
 use team_agent::event_log::EventLog;
 use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
@@ -334,11 +334,10 @@ fn red6_cli_restart_reports_and_top_level_error_logs_are_redacted() {
     env.scrub_tmux();
     env.assert_no_real_tmux();
     let workspace = env.workspace("red6");
-    let spec = write_invalid_validate_spec(&workspace, &marker);
     let mut combined = String::new();
     for json_mode in [true, false] {
         let mut command = Command::new(crate::lifecycle::tests::test_binary_path());
-        command.arg("validate").arg(&spec);
+        command.arg("profile").arg(credential_url(&marker)).arg("synthetic-profile");
         if json_mode {
             command.arg("--json");
         }
@@ -351,7 +350,7 @@ fn red6_cli_restart_reports_and_top_level_error_logs_are_redacted() {
             .expect("run top-level CLI error boundary");
         assert!(
             !output.status.success(),
-            "invalid spec must reach CLI error"
+            "invalid profile subcommand must reach CLI error"
         );
         combined.push_str(&String::from_utf8_lossy(&output.stdout));
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -391,11 +390,22 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
     let env = hermetic_guard::HermeticTestEnv::enter("redact-red7");
     let pane_policy_preserved = pane_excerpt_uses_shared_redaction(&env, &marker);
     let team = write_profile_fixture(env.root(), server.base_url(), &profile_token);
-    let result = cmd_preflight(&PreflightArgs { team, json: true })
+    let result = cmd_doctor(&DoctorArgs {
+        spec: Some(team.join("TEAM.md")),
+        workspace: team,
+        gate: None,
+        comms: false,
+        team: None,
+        fix: false,
+        fix_schema: false,
+        cleanup_orphans: false,
+        confirm: false,
+        json: true,
+    })
         .expect("profile smoke returns a diagnostic report");
     let report = match result.output {
         CmdOutput::Json(value) => value,
-        other => panic!("expected JSON preflight output, got {other:?}"),
+        other => panic!("expected JSON doctor output, got {other:?}"),
     };
     let text = report.to_string();
     let profile_policy_preserved = !text.contains(&marker)
@@ -553,20 +563,6 @@ fn run_mcp_status_frames(
         .lines()
         .map(|line| serde_json::from_str(line).expect("MCP response JSON"))
         .collect()
-}
-
-fn write_invalid_validate_spec(workspace: &Path, marker: &str) -> PathBuf {
-    let path = workspace.join("invalid-provider.spec.yaml");
-    fs::write(
-        &path,
-        format!(
-            "version: 1\nteam:\n  id: current\n  name: current\n  session_name: team-redaction-contract\n  workspace: \"{}\"\nleader:\n  provider: \"{}\"\nagents:\n  - id: worker\n    provider: fake\n    model: fake\n    role: Worker\n    window: worker\ntasks: []\n",
-            workspace.display(),
-            credential_url(marker)
-        ),
-    )
-    .unwrap();
-    path
 }
 
 fn read_cli_error_logs(workspace: &Path) -> String {

@@ -100,11 +100,10 @@ fn cli_shutdown_kills_team_session_real_teardown() {
 
 // =========================================================================
 // WAVE-2 Lane B — CLI leader handler delegation byte-parity (leader_port::*).
-//   The three CLI verbs are thin pass-throughs (cli/commands.py:152-161):
+//   The retained CLI verbs are thin pass-throughs (cli/commands.py:152-157):
 //     cmd_takeover     -> runtime.takeover(ws, team, confirm)
 //     cmd_claim_leader -> runtime.claim_leader(ws, team, confirm)  (Family A)
-//     cmd_identity     -> runtime.leader_identity(ws, team)
-//   leader_port::{takeover,claim_leader,leader_identity} are STUBS returning
+//   leader_port::{takeover,claim_leader} are STUBS returning
 //   the WRONG shape today -> these LOCK the golden dict so the porter wires
 //   them into leader::* / runtime.* and matches byte-for-byte.
 //   Golden re-probed @ team-agent-public (probe_claim.py / probe_rtclaim.py /
@@ -294,89 +293,6 @@ fn leader_port_claim_leader_no_pane_refuses_caller_pane_missing_family_a() {
     assert_eq!(
             v["hint"],
             json!("run team-agent from inside your leader pane (the tmux pane you want to own this team).")
-        );
-}
-
-// RED — leader_identity(): CLI directly emits leader.leader_identity's 9-key
-// dict (runtime.leader_identity is imported from leader). golden probe_lid.py
-// keys: ok, uuid_prefix, machine_fingerprint, workspace_abspath, os_user,
-// team_id, current_pane_id, last_seen_at, source. Current stub returns
-// {ok:true, team:...} (wrong shape) -> RED.
-#[test]
-fn leader_port_leader_identity_emits_nine_key_dict() {
-    let ws = leader_port_ws("identity");
-    std::fs::create_dir_all(crate::model::paths::runtime_dir(&ws)).unwrap();
-    let v = super::leader_port::leader_identity(&ws, None).unwrap();
-    assert_eq!(v["ok"], json!(true));
-    let obj = v.as_object().expect("identity → JSON object");
-    for key in [
-        "ok",
-        "uuid_prefix",
-        "machine_fingerprint",
-        "workspace_abspath",
-        "os_user",
-        "team_id",
-        "current_pane_id",
-        "last_seen_at",
-        "source",
-    ] {
-        assert!(
-            obj.contains_key(key),
-            "golden identity dict must carry '{key}', got {obj:?}"
-        );
-    }
-    // no override/state uuid → source is the leader-plan "derived" string.
-    assert_eq!(v["source"], json!("derived"));
-    // uuid_prefix is exactly 12 hex chars (derive[:12]).
-    let prefix = v["uuid_prefix"].as_str().expect("uuid_prefix str");
-    assert_eq!(prefix.len(), 12, "uuid_prefix == derived[:12]");
-    assert!(prefix.chars().all(|c| c.is_ascii_hexdigit()));
-    // no team registered + no TMUX_PANE/receiver → these are JSON null.
-    if std::env::var_os("TMUX_PANE").is_none() {
-        assert_eq!(v["current_pane_id"], serde_json::Value::Null);
-    }
-    assert_eq!(v["last_seen_at"], serde_json::Value::Null);
-}
-
-// ── cmd_watch (cli/adapters.rs:58) [RED] — today a CmdResult::none() no-op ───────────────────────
-// Golden cmd_watch (cli/commands.py:103-109) DELEGATES to run_watch(workspace.resolve(), team) and
-// exits 0. Golden run_watch (watch/__init__.py:25-37) is a `while True` LIVE TAIL that streams
-// render_event_line output (collect_watch_lines) for the watched team. The Rust cmd_watch returns
-// CmdResult::none() — a no-op that never touches the watch subsystem. The watch LINE SHAPE is itself
-// byte-locked by coordinator::render_event_line (coordinator/tests.rs GROUP H); the cli contract here
-// is that cmd_watch must DELEGATE and surface those rendered lines. Seeded a result_received event ->
-// golden render = "result_received: <agent> -> <summary>" (render_event_line: agent_id + summary[:80]).
-//
-// RED confirmed TODAY: cmd_watch=none() returns immediately (no watch line) -> the assertion fails
-// (and does NOT hang). PORTER: wire cmd_watch -> coordinator::run_watch(resolved workspace, team,
-// interval, sink). Since golden's tail is `while True`, the cli port needs a TERMINATING / bounded
-// entry to be both byte-parity AND unit-testable (collect the current watch lines into the CmdResult,
-// or stream to stdout with a bounded test seam) — a blocking unit test is unacceptable.
-#[test]
-fn cmd_watch_delegates_and_surfaces_rendered_watch_lines_not_noop() {
-    let ws = tmp_workspace();
-    let logs = crate::model::paths::logs_dir(&ws);
-    std::fs::create_dir_all(&logs).unwrap();
-    std::fs::write(
-        logs.join("events.jsonl"),
-        "{\"event\":\"result_received\",\"agent_id\":\"alpha\",\"summary\":\"did the thing\"}\n",
-    )
-    .unwrap();
-    let r = cmd_watch(&WatchArgs {
-        workspace: ws.clone(),
-        team: None,
-    })
-    .expect("cmd_watch returns a CmdResult");
-    let text = match &r.output {
-        CmdOutput::Human(s) => s.clone(),
-        CmdOutput::Json(v) => v.to_string(),
-        CmdOutput::None => String::new(),
-    };
-    assert!(
-            text.contains("result_received: alpha -> did the thing"),
-            "cmd_watch must DELEGATE to the watch subsystem (run_watch -> render_event_line) and surface the \
-             rendered watch line; today it is a CmdResult::none() no-op. got output={:?}",
-            r.output
         );
 }
 

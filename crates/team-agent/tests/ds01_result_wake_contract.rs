@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use team_agent::coordinator::render_event_line;
 use team_agent::message_store::MessageStore;
 use team_agent::messaging::report_result;
 
@@ -400,29 +399,4 @@ fn ds01_duplicate_result_id_does_not_wake_a_late_manual_waiter() {
         "duplicate must not write FIFO"
     );
     assert_eq!(waiter_rows(ws.path(), task_id).len(), 1);
-}
-
-#[test]
-fn ds01_three_wake_events_are_human_visible() {
-    let registered = render_event_line(&json!({
-        "event": "result_wake.registered",
-        "task_id": "task-1",
-        "watcher_id": "wait-1",
-    }));
-    let notified = render_event_line(&json!({
-        "event": "result_wake.notified",
-        "task_id": "task-1",
-        "result_id": "res-1",
-        "watcher_id": "wait-1",
-    }));
-    let failed = render_event_line(&json!({
-        "event": "result_wake.notify_failed",
-        "task_id": "task-1",
-        "watcher_id": "wait-1",
-        "reason": "ENXIO",
-    }));
-
-    assert!(registered.is_some(), "registration event must be rendered");
-    assert!(notified.is_some(), "notification event must be rendered");
-    assert!(failed.as_deref().is_some_and(|line| line.contains("ENXIO")));
 }

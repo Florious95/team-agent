@@ -28,7 +28,6 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "remove-agent",
     "fork-agent",
     "clone-agent",
-    "allow-peer-talk",
     "approvals",
     "route",
     "profile",
@@ -36,17 +35,8 @@ pub const HUMAN_COMMANDS: &[&str] = &[
     "inbox",
 ];
 pub const MACHINE_COMMANDS: &[&str] = &[
-    "results",
     "wait",
     "attach-app-server-leader",
-    "identity",
-    "watch",
-    "sessions",
-    "validate",
-    "preflight",
-    "wait-ready",
-    "e2e",
-    "peek",
     "coordinator",
 ];
 

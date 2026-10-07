@@ -69,7 +69,7 @@ fn red1_default_help_contracts_to_core_guided_surface() {
 
     assert!(
         missing.is_empty() && leaked.is_empty() && extra.is_empty() && visible == expected,
-        "RED1: default help must match exactly Human30, never Machine entries or a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
+        "RED1: default help must match exactly Human29, never Machine entries or a slack threshold.\nvisible_count={}\nvisible={:?}\nmissing_required={:?}\nleaked_hidden={:?}\nextra={:?}\nhelp=\n{}",
         visible.len(),
         visible,
         missing,
@@ -194,7 +194,6 @@ fn red3_observation_a_commands_have_terminal_tiers_not_placeholders() {
     );
     let spec = std::fs::read_to_string(&spec_path).expect("read cli/spec.rs");
     let expected = BTreeMap::from([
-        ("allow-peer-talk", "core"),
         ("approvals", "core"),
         ("profile", "core"),
         ("install-skill", "core"),
