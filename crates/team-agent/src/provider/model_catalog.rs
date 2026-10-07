@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::model::enums::Provider;
-use crate::provider::wire::provider_wire;
+use crate::provider::wire::{parse_canonical_provider, provider_wire};
 
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
@@ -127,15 +127,7 @@ fn display_provider(provider: &str) -> &str {
 
 /// Only the documented catalog names are accepted; launch aliases stay unchanged.
 pub fn parse_catalog_provider(name: &str) -> Option<Provider> {
-    match name {
-        "pi" => Some(Provider::Pi),
-        "cursor_agent" => Some(Provider::CursorAgent),
-        "codex" => Some(Provider::Codex),
-        "claude" => Some(Provider::Claude),
-        "claude_code" => Some(Provider::ClaudeCode),
-        "grok" => Some(Provider::Grok),
-        _ => None,
-    }
+    parse_canonical_provider(name).filter(|provider| catalog_source(*provider).is_some())
 }
 
 #[derive(Clone, Copy)]
@@ -880,7 +872,7 @@ mod tests {
             assert_eq!(provider_wire(provider), name);
             assert!(catalog_source(provider).is_some());
         }
-        for name in ["cloud", "cursor", "agent", "claude-code", "copilot", "gemini_cli", "fake"] {
+        for name in ["", "cloud", "cursor", "agent", "claude-code", "copilot", "gemini_cli", "fake", "Pi", "CODEX", " pi", "pi ", "pi/model", "codex:model", "claude_code_extra"] {
             assert_eq!(parse_catalog_provider(name), None);
         }
         for provider in [Provider::Copilot, Provider::GeminiCli, Provider::Fake] {
