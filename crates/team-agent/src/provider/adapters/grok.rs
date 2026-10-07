@@ -30,41 +30,24 @@
 //! → `native_mcp_config: false`; MCP reaches the worker via launch-path
 //! `<cwd>/.grok/config.toml` (`apply_grok_mcp_overlay`).
 
-use crate::model::enums::AuthMode;
-use crate::provider::adapter::{next_session_token, BasicProviderAdapter};
-use crate::provider::{McpConfig, ProviderError};
+use crate::provider::adapter::next_session_token;
+use crate::provider::ProviderError;
 
 pub(crate) fn grok_launch_command(
-    adapter: &BasicProviderAdapter,
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
     dangerously_skip_permissions: bool,
 ) -> Result<Vec<String>, ProviderError> {
-    let mut argv = grok_base_command(
-        adapter,
-        auth_mode,
-        mcp_config,
-        system_prompt,
-        model,
-        dangerously_skip_permissions,
-        false,
-        None,
-    )?;
+    let mut argv = grok_base_command(system_prompt, model, dangerously_skip_permissions, None)?;
     argv.push("--session-id".to_string());
     argv.push(next_session_token());
     Ok(argv)
 }
 
 pub(crate) fn grok_base_command(
-    adapter: &BasicProviderAdapter,
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
     dangerously_skip_permissions: bool,
-    managed_mcp_config: bool,
     effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["grok".to_string()];
@@ -86,6 +69,5 @@ pub(crate) fn grok_base_command(
     }
     // Grok CLI has no `--mcp-config` flag — the claude inline-MCP block is
     // intentionally absent. Launch writes `<cwd>/.grok/config.toml`.
-    let _ = (adapter, auth_mode, mcp_config, managed_mcp_config);
     Ok(argv)
 }
