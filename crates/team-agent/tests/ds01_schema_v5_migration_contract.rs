@@ -81,6 +81,18 @@ fn exact_v4_runtime_database_migrates_to_v5_without_losing_any_row() {
         after_rows, before_rows,
         "{V4_UPGRADE_RISK}: every original column of every managed table must preserve every row"
     );
+    // Retiring peer management must not destroy a historical v4 peer row.
+    assert!(MANAGED_TABLE_LAYOUTS
+        .iter()
+        .all(|(table, _)| *table != "peer_allowlist"));
+    let peer_row: (String, String) = after_conn
+        .query_row("select a, b from peer_allowlist", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap_or_else(|error| {
+            panic!("{V4_UPGRADE_RISK}: legacy peer rows must survive the upgrade: {error}")
+        });
+    assert_eq!(peer_row, ("worker".to_string(), "reviewer".to_string()));
     drop(after_conn);
 
     let backups = migration_backups(&db_path);

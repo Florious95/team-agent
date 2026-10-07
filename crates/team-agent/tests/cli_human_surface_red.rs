@@ -1,5 +1,5 @@
 //! Issue #286 independent Human catalog / hidden discovery / actual help properties.
-//! Frozen product: 768c9352. Developer implementations are not an input to this suite.
+//! Original frozen product: 768c9352; #289 additions are implementation-owned regression properties.
 //! Equivalent real-machine isolation: HermeticTestEnv owns HOME/cwd and scrubs
 //! all caller identities; native canaries belong only to each fixture.
 #![cfg(unix)]
@@ -9,8 +9,11 @@
 mod catalog;
 #[path = "support/hermetic.rs"]
 mod hermetic;
+#[path = "support/human_catalog.rs"]
+mod human_catalog;
 
 use hermetic::HermeticTestEnv;
+use human_catalog::RETIRED_COMMANDS as RETIRED;
 use regex::Regex;
 use serial_test::serial;
 use std::collections::{BTreeMap, BTreeSet};
@@ -286,8 +289,8 @@ fn help_property(command: &str) {
         let references = Regex::new(r"team-agent\s+([a-z][a-z-]*)").unwrap();
         for reference in references.captures_iter(&help) {
             assert!(
-                !MACHINE.contains(&&reference[1]),
-                "H1 private command tutorial leaked: {help}"
+                !MACHINE.contains(&&reference[1]) && !RETIRED.contains(&&reference[1]),
+                "H1 private or retired command tutorial leaked: {help}"
             );
         }
     }
@@ -386,7 +389,8 @@ fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
         .lines()
         .filter_map(|line| {
             let name = line.trim().split_whitespace().next()?;
-            (HUMAN.contains(&name) || MACHINE.contains(&name)).then_some(name)
+            (HUMAN.contains(&name) || MACHINE.contains(&name) || RETIRED.contains(&name))
+                .then_some(name)
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -401,6 +405,7 @@ fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
     let tokens = words(&help);
     let leaks = MACHINE
         .iter()
+        .chain(RETIRED)
         .filter(|name| tokens.contains(**name))
         .collect::<Vec<_>>();
     assert!(
@@ -452,6 +457,7 @@ fn h1_unknown_suggestions_and_full_user_index_never_offer_machine_commands() {
         );
         let leaks = MACHINE
             .iter()
+            .chain(RETIRED)
             .filter(|name| tokens.contains(**name))
             .collect::<Vec<_>>();
         assert!(
@@ -541,4 +547,110 @@ macro_rules! hidden_properties {
 }
 hidden_properties! {
     h2_wait => "wait", h2_attach_app_server_leader => "attach-app-server-leader", h2_coordinator => "coordinator",
+}
+
+// Retired commands reject all argv forms even with a valid legacy spec and
+// unreadable runtime state, without workspace/native-tool side effects.
+fn retired_unknown(command: &str) {
+    let env = HermeticTestEnv::enter(command);
+    let cwd = env.workspace("retired");
+    let path = canary_path(&env);
+    fs::write(
+        cwd.join("TEAM.md"),
+        "---\nname: retired-demo\nobjective: Retired command fixture.\nprovider: pi\nmodel: openai-codex/gpt-6-luna\n---\nFixture team.\n",
+    )
+    .unwrap();
+    fs::create_dir(cwd.join("agents")).unwrap();
+    fs::write(cwd.join("agents/worker.md"), "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\nReply to leader.\n").unwrap();
+    let compiled = team_agent::compiler::compile_team(&cwd).expect("valid retired-command fixture");
+    team_agent::model::spec::validate_spec(&compiled, &cwd).expect("valid legacy spec");
+    fs::write(
+        cwd.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&compiled),
+    )
+    .unwrap();
+    fs::create_dir_all(cwd.join(".team/runtime")).unwrap();
+    fs::write(cwd.join(".team/runtime/state.json"), "{unreadable state").unwrap();
+    let ws = cwd.to_str().unwrap().to_string();
+    let spec = cwd.join("team.spec.yaml").to_str().unwrap().to_string();
+    let mut forms: Vec<Vec<&str>> = vec![
+        vec![],
+        vec!["--json"],
+        vec!["--help"],
+        vec!["-h"],
+        vec!["--workspace", ws.as_str(), "--team", "t", "--json"],
+    ];
+    forms.push(match command {
+        "e2e" => vec!["--providers", "fake", "--real"],
+        "allow-peer-talk" => vec!["alpha", "bravo", "--team", "t"],
+        "results" => vec!["--case", "c", "--team", "t"],
+        "validate" | "preflight" => vec![ws.as_str()],
+        "peek" => vec![
+            "worker", "--allow-raw-screen", "--head", "2", "--tail", "5", "--search", "needle",
+        ],
+        "wait-ready" => vec!["--timeout", "0"],
+        _ => vec!["--team", "t"],
+    });
+    if command == "validate" {
+        forms.push(vec![spec.as_str()]);
+    }
+    let before = snapshot(env.root());
+    for form in forms {
+        let mut argv = vec![command];
+        argv.extend(form);
+        let out = env.run_cli_env(&cwd, &argv, &[("PATH", &path)]);
+        let output = text(&out);
+        assert_eq!(out.status.code(), Some(1), "retired {argv:?}: {output}");
+        assert!(
+            out.stdout.is_empty(),
+            "retired {argv:?} printed output: {output}"
+        );
+        assert!(
+            output.contains(&format!("没有这个操作：'{command}'")),
+            "retired {argv:?} must use the generic unknown-command refusal: {output}"
+        );
+        assert!(output.contains("team-agent --help"), "{output}");
+        assert!(
+            !output.contains(&format!("team-agent {command}")),
+            "retired usage leaked: {output}"
+        );
+        let tokens = words(&output);
+        let leaks = MACHINE
+            .iter()
+            .chain(RETIRED.iter().filter(|name| **name != command))
+            .filter(|name| tokens.contains(**name))
+            .collect::<Vec<_>>();
+        assert!(
+            leaks.is_empty(),
+            "retired {argv:?} suggested {leaks:?}: {output}"
+        );
+        assert_eq!(
+            snapshot(env.root()),
+            before,
+            "retired {argv:?} changed files or invoked a native tool: {output}"
+        );
+    }
+    let typo = format!("{command}x");
+    let out = env.run_cli_env(&cwd, &[&typo], &[("PATH", &path)]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!text(&out).contains(&format!("team-agent {command}")));
+    assert_eq!(snapshot(env.root()), before, "retired typo changed fixture");
+}
+
+macro_rules! retired_properties {
+    ($($id:ident => $command:literal),+ $(,)?) => {$ (
+        #[test] #[serial(env)] fn $id() { retired_unknown($command); }
+    )+};
+}
+retired_properties! {
+    r289_e2e => "e2e", r289_allow_peer_talk => "allow-peer-talk", r289_results => "results",
+    r289_validate => "validate", r289_identity => "identity", r289_sessions => "sessions",
+    r289_watch => "watch", r289_peek => "peek", r289_wait_ready => "wait-ready", r289_preflight => "preflight",
+}
+
+#[test]
+fn r289_retired_names_have_no_catalog_record() {
+    for command in RETIRED {
+        assert!(catalog::COMMAND_SPECS.iter().all(|spec| spec.name != *command));
+    }
 }

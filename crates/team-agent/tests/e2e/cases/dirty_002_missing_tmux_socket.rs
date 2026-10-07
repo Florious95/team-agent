@@ -36,4 +36,24 @@ fn dirty_002_shutdown_runtime_is_not_present() {
         Some("not_present"),
         "a shut-down team must not be reported as a running runtime: {j}"
     );
+    let status = run_ta(
+        &ws,
+        &["status", "--workspace", ws.path().to_str().unwrap(), "--json"],
+    );
+    assert!(status.is_success(), "status stderr={}", status.stderr);
+    let status = status.json();
+    let runtime_status = status
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| node.get("name").and_then(|v| v.as_str()) == Some("a"))
+        })
+        .and_then(|node| node.get("runtime_status"))
+        .and_then(|value| value.as_str());
+    assert!(
+        runtime_status.is_some() && runtime_status != Some("running"),
+        "status must also retain the missing-runtime fact: {status}"
+    );
 }

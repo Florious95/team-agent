@@ -40,6 +40,20 @@ pub const MACHINE_COMMANDS: &[&str] = &[
     "coordinator",
 ];
 
+/// Physically removed commands, not hidden Machine commands.
+pub const RETIRED_COMMANDS: &[&str] = &[
+    "e2e",
+    "allow-peer-talk",
+    "results",
+    "validate",
+    "identity",
+    "sessions",
+    "watch",
+    "peek",
+    "wait-ready",
+    "preflight",
+];
+
 pub fn expected_human_commands() -> BTreeSet<String> {
     HUMAN_COMMANDS
         .iter()

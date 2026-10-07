@@ -245,7 +245,7 @@ fn ux_doctor_secret_scan_findings_name_the_exact_trigger() {
 }
 #[test]
 fn runtime_readiness_rejects_starting_workers() {
-    let value = crate::cli::diagnose::runtime_readiness(&json!({
+    let value = crate::cli::diagnose::wait_readiness(&json!({
         "agents": {"w1": {"status": "starting"}},
         "leader_receiver": {"status": "attached"},
     }));
@@ -280,7 +280,7 @@ fn runtime_readiness_counts_mcp_config_and_task_prompt_delivery() {
             }],
             "leader_receiver": {"status": "attached"},
         });
-    let readiness = crate::cli::diagnose::runtime_readiness(&state);
+    let readiness = crate::cli::diagnose::wait_readiness(&state);
     let value = json!({"readiness": readiness});
     assert_eq!(
         value.pointer("/readiness/mcp_ready"),

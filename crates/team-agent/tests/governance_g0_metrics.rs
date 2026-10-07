@@ -1,4 +1,4 @@
-//! G0 hard discovery gate, aligned with Issue #286 Human30/Machine12 separation.
+//! G0 hard discovery gate, aligned with Issue #289 Human29/Machine3 separation.
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
@@ -37,6 +37,6 @@ fn visible_command_count_stays_within_g0_limit() {
     );
     assert_eq!(
         commands, expected,
-        "G0 must equal the exact Human30 published set, including launchers and excluding Machine12"
+        "G0 must equal the exact Human29 published set, including launchers and excluding Machine3"
     );
 }

@@ -246,7 +246,7 @@ fn dispatch_routes_diagnose_self_signed_attached_without_registry_is_not_ok() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// CONTRACT (shared-root, real-machine-driven; golden = correct-behavior baseline): runtime_readiness
+// CONTRACT (shared-root, real-machine-driven; golden = correct-behavior baseline): wait_readiness
 // derives cli_prompt_ready from the LIFECYCLE status — an alive worker (status="running") IS
 // cli_prompt_ready (golden quick_start.py:173 `status ∈ {running, busy}`). Rust (diagnose.rs:280)
 // requires cli_prompt_ready flag / startup_prompts=="complete" / status=="ready" and does NOT accept
@@ -267,7 +267,7 @@ fn contract_alive_worker_running_is_cli_prompt_ready_and_ready() {
         "mcp_ready": true,
         "first_send_at": "2026-01-01T00:00:00Z"
     }}});
-    let r = crate::cli::diagnose::runtime_readiness(&state);
+    let r = crate::cli::diagnose::wait_readiness(&state);
     assert_eq!(
             r.get("cli_prompt_ready").and_then(serde_json::Value::as_bool),
             Some(true),
@@ -285,7 +285,7 @@ fn contract_alive_worker_running_is_cli_prompt_ready_and_ready() {
 //   process_started = bool(last["tmux_session_present"])  (the live tmux session exists)
 //   mcp_ready       = all(Path(agent["mcp_config"]).exists())  (each agent's mcp_config FILE exists)
 // The Rust launch (launch.rs:220-228) persists status="running" + mcp_config (path) but NO pane_id/pid
-// and NO mcp_ready flag. runtime_readiness reads per-agent pane_id/pid for process_started (-> false) and an
+// and NO mcp_ready flag. wait_readiness reads per-agent pane_id/pid for process_started (-> false) and an
 // mcp_ready FLAG for mcp_ready (-> false), so a live worker never becomes ready. The shared-root fix only
 // corrected cli_prompt_ready (status=running); these two signals still read the wrong source. This RED
 // uses the REALISTIC post-launch state (no synthetic pane_id / mcp_ready flag).
@@ -313,7 +313,7 @@ fn contract_wait_ready_derives_process_started_from_session_and_mcp_ready_from_f
             "first_send_at": "2026-01-01T00:00:00Z"
         }}
     });
-    let r = crate::cli::diagnose::runtime_readiness(&state);
+    let r = crate::cli::diagnose::wait_readiness(&state);
     assert_eq!(
             r.get("process_started").and_then(serde_json::Value::as_bool),
             Some(true),

@@ -285,6 +285,16 @@ fn p3_invalid_role_remains_a_real_compile_diagnostic() {
     let team = invalid_fixture(&env, "invalid role");
     let error = team_agent::compiler::compile_team(&team).expect_err("invalid role must fail");
     assert!(error.to_string().contains("provider"));
+    let doctor = run(
+        &env,
+        env.root(),
+        &["doctor", "--workspace", team.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(doctor.status.code(), Some(1), "doctor: {}", stderr(&doctor));
+    let body = json_stdout(&doctor);
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["profile_smoke"]["ok"], false, "{body}");
+    assert!(body["profile_smoke"].to_string().contains("provider"), "{body}");
 }
 
 #[test]

@@ -407,9 +407,13 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
         CmdOutput::Json(value) => value,
         other => panic!("expected JSON doctor output, got {other:?}"),
     };
-    let text = report.to_string();
-    let profile_policy_preserved = !text.contains(&marker)
-        && !text.contains(&profile_token)
+    let report_text = report.to_string();
+    let text = report
+        .get("profile_smoke")
+        .unwrap_or_else(|| panic!("doctor must expose profile_smoke; report={report}"))
+        .to_string();
+    let profile_policy_preserved = !report_text.contains(&marker)
+        && !report_text.contains(&profile_token)
         && !text.contains(tail_sentinel)
         && text.contains(REDACTED)
         && text.contains("proxy.invalid:8443/path")

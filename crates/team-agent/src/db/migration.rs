@@ -695,6 +695,48 @@ mod tests {
         assert_eq!(d.user_version, SCHEMA_VERSION);
     }
 
+    // A drifted legacy peer table is inert: no diagnosis, rebuild, backup or row loss.
+    #[test]
+    fn legacy_peer_allowlist_is_inert_and_preserved() {
+        let path = temp_db();
+        let conn = crate::db::schema::open_db(&path).unwrap();
+        initialize_schema(&conn, Some(&path)).unwrap();
+        conn.execute_batch(
+            "create table peer_allowlist (created_at text not null, b text not null, a text not null, primary key (a, b));
+             insert into peer_allowlist(a, b, created_at) values ('worker', 'reviewer', 'v4');",
+        )
+        .unwrap();
+        assert!(layout_diffs(&conn).unwrap().is_empty());
+        initialize_schema(&conn, Some(&path)).unwrap();
+        assert_eq!(layout(&conn, "peer_allowlist"), ["created_at", "b", "a"]);
+        let row: (String, String, String) = conn
+            .query_row("select a, b, created_at from peer_allowlist", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "worker".to_string(),
+                "reviewer".to_string(),
+                "v4".to_string()
+            )
+        );
+        drop(conn);
+        let diagnosis = schema_diagnosis(&path, SCHEMA_VERSION).unwrap();
+        assert!(
+            diagnosis.ok,
+            "legacy peer table must remain inert: {diagnosis:?}"
+        );
+        assert!(
+            !std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .any(|entry| entry.file_name().to_string_lossy().contains("pre-migration")),
+            "legacy peer table must not trigger a migration backup"
+        );
+    }
+
     #[test]
     fn diagnosis_missing_db() {
         let path = temp_db(); // 未创建文件

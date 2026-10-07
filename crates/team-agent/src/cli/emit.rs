@@ -2124,6 +2124,32 @@ mod tests {
     }
 
     #[test]
+    fn retired_commands_have_no_catalog_machine_or_help_gate() {
+        for command in [
+            "e2e",
+            "allow-peer-talk",
+            "results",
+            "validate",
+            "identity",
+            "sessions",
+            "watch",
+            "peek",
+            "wait-ready",
+            "preflight",
+        ] {
+            assert!(
+                command_spec(command).is_none(),
+                "retired catalog entry: {command}"
+            );
+            assert!(
+                !is_machine_command(command),
+                "retired Machine route: {command}"
+            );
+            assert!(!is_known_subcommand(command), "retired help gate: {command}");
+        }
+    }
+
+    #[test]
     fn leaders_help_publishes_selectors_and_prune() {
         let help = command_help(Some("leaders"));
         assert!(help.contains("--all"));

@@ -1,4 +1,5 @@
-//! MED A-batch (1/3): data-panel diff contracts — slices A-1 / A-3 / A-4 / A-5.
+//! MED A-batch (1/3): data-panel diff contracts — slices A-1 / A-4 / A-5.
+//! A-3 retired with the watch command.
 //!
 //! Triage doc (sole basis): `.team/artifacts/med-triage-fixed-failure-sweep.md`.
 //! Python truth source: 0.2.11 (`~/.team-agent/runtime/0.2.11/src/team_agent/`).
@@ -7,9 +8,6 @@
 //!     + constant `{ok:false,status:"not_required"}` vs Python results.py:157,176+
 //!     `_ensure_coordinator_after_collect` (real start_coordinator result when state has
 //!     a session_name; the literal not_required ONLY when ensure=False or no session).
-//! A-3 watch ignores team + store              — health.rs:493 `let _ = (store, team)` vs
-//!     Python watch/__init__.py:41-42 (event team filter + `_collect_result_lines` from
-//!     store.latest_results(owner_team_id=team)).
 //! A-4 status panel severed                    — status_port.rs:66 `latest_results: []`
 //!     constant vs Python queries.py:76; :20 `let _ = detail` vs Python commands.py:99
 //!     (`--json --detail` => compact=False, i.e. detail returns the FULL payload);
@@ -39,7 +37,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::params;
 use serde_json::{json, Value};
-use team_agent::coordinator::WorkspacePath;
 use team_agent::message_store::MessageStore;
 use team_agent::state::persist::save_runtime_state;
 

@@ -19,7 +19,7 @@ fn doctor_compatible_api_profile_smoke_passes_only_after_real_http_probe() {
     );
     let fixture = ProfileFixture::new("smoke-pass", server.base_url(), "local-secret");
 
-    let report = doctor_json(&fixture.team);
+    let (_, report) = doctor_report(&fixture.team);
     let check = profile_smoke_check(&report);
 
     assert_eq!(
@@ -60,18 +60,13 @@ fn doctor_compatible_api_profile_smoke_401_fails_honestly_with_diagnostics() {
     );
     let fixture = ProfileFixture::new("smoke-401", server.base_url(), "wrong-secret");
 
-    let result = cmd_doctor(&doctor_args(&fixture.team))
-    .expect("doctor should return a JSON report, not panic, when smoke endpoint is 401");
-    let report = match &result.output {
-        CmdOutput::Json(value) => value.clone(),
-        other => panic!("expected JSON doctor report, got {other:?}"),
-    };
+    let (exit, report) = doctor_report(&fixture.team);
     let check = profile_smoke_check(&report);
 
     assert_eq!(
-        result.exit,
+        exit,
         ExitCode::Error,
-        "compatible_api HTTP 401 must make doctor fail before worker launch; report={report}"
+        "compatible_api HTTP 401 must make doctor fail honestly; report={report}"
     );
     assert_eq!(
         check.get("ok").and_then(Value::as_bool),
@@ -95,6 +90,15 @@ fn doctor_compatible_api_profile_smoke_401_fails_honestly_with_diagnostics() {
     );
     assert_eq!(report["ok"], false, "profile smoke failure must fail doctor");
     assert!(
+        report
+            .get("issues")
+            .and_then(Value::as_array)
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue.to_string().contains("profile_smoke"))),
+        "profile smoke failure must remain a doctor issue: {report}"
+    );
+    assert!(
         server.was_called(),
         "doctor must hit the mock endpoint before reporting 401; report={report}"
     );
@@ -104,74 +108,8 @@ fn doctor_compatible_api_profile_smoke_401_fails_honestly_with_diagnostics() {
     );
 }
 
-#[test]
-fn doctor_reports_compatible_api_profile_smoke_failure() {
-    let server = MockLlmServer::new(
-        401,
-        r#"{"error":{"message":"bad token should be redacted"}}"#,
-    );
-    let fixture = ProfileFixture::new("doctor-smoke", server.base_url(), "doctor-wrong-secret");
-
+fn doctor_report(team: &Path) -> (ExitCode, Value) {
     let result = cmd_doctor(&DoctorArgs {
-        spec: Some(fixture.team.join("TEAM.md")),
-        workspace: fixture.team.clone(),
-        gate: None,
-        comms: false,
-        team: None,
-        fix: false,
-        fix_schema: false,
-        cleanup_orphans: false,
-        confirm: false,
-        json: true,
-    })
-    .expect("doctor should return a JSON report when compatible_api smoke fails");
-    let report = match &result.output {
-        CmdOutput::Json(value) => value.clone(),
-        other => panic!("expected JSON doctor report, got {other:?}"),
-    };
-
-    let smoke = report
-        .pointer("/profile_smoke")
-        .or_else(|| report.pointer("/checks/profile_smoke"))
-        .or_else(|| {
-            report
-                .get("checks")
-                .and_then(Value::as_array)
-                .and_then(|checks| checks.iter().find(|check| check.get("name").and_then(Value::as_str) == Some("profile_smoke")))
-        })
-        .unwrap_or_else(|| panic!("doctor must expose compatible_api profile_smoke, not omit the gate; report={report}"));
-    assert_eq!(
-        result.exit,
-        ExitCode::Error,
-        "doctor must fail honestly when compatible_api profile smoke fails; report={report}"
-    );
-    assert_eq!(
-        smoke.get("ok").and_then(Value::as_bool),
-        Some(false),
-        "smoke={smoke} report={report}"
-    );
-    assert_eq!(
-        smoke.get("status").and_then(Value::as_str),
-        Some("smoke_failed"),
-        "smoke={smoke}"
-    );
-    assert_eq!(
-        smoke.get("http_status").and_then(Value::as_u64),
-        Some(401),
-        "smoke={smoke}"
-    );
-    assert!(
-        server.was_called(),
-        "doctor must perform the same bounded HTTP smoke as doctor; report={report}"
-    );
-    assert!(
-        !report.to_string().contains("doctor-wrong-secret"),
-        "doctor smoke diagnostics must redact auth tokens; report={report}"
-    );
-}
-
-fn doctor_args(team: &Path) -> DoctorArgs {
-    DoctorArgs {
         spec: Some(team.join("TEAM.md")),
         workspace: team.to_path_buf(),
         gate: None,
@@ -182,14 +120,10 @@ fn doctor_args(team: &Path) -> DoctorArgs {
         cleanup_orphans: false,
         confirm: false,
         json: true,
-    }
-}
-
-fn doctor_json(team: &Path) -> Value {
-    let result = cmd_doctor(&doctor_args(team))
-    .expect("doctor should return JSON");
+    })
+    .expect("doctor should return a JSON report");
     match result.output {
-        CmdOutput::Json(value) => value,
+        CmdOutput::Json(value) => (result.exit, value),
         other => panic!("expected JSON doctor report, got {other:?}"),
     }
 }

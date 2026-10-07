@@ -1402,7 +1402,7 @@ fn copy_optional_field(from: &Value, to: &mut Value, key: &str) {
 }
 
 /// Shared status facts, independent of any polling command.
-pub(crate) fn runtime_readiness(state: &Value) -> Value {
+pub(crate) fn wait_readiness(state: &Value) -> Value {
     let agents = state.get("agents").and_then(Value::as_object);
     let mut process_started = false;
     let mut cli_prompt_ready = false;
@@ -1410,7 +1410,8 @@ pub(crate) fn runtime_readiness(state: &Value) -> Value {
     let mut task_prompt_delivered = false;
     let mut awaiting_trust_prompt = false;
     let mut incomplete_sessions = Vec::new();
-    // A missing/unreadable leader_receiver must NOT count as attached.
+    // A-5: a missing/unreadable leader_receiver must NOT count as attached —
+    // "unreadable is never ready" (doctor/wait-ready truthfulness rule).
     let all_attached_receiver = state
         .get("leader_receiver")
         .and_then(Value::as_object)

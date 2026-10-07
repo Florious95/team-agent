@@ -427,28 +427,27 @@ fn contract_a_runtime_readiness_is_false_while_actionable_trust_remains() {
     let mcp_config = ws.join(".team").join("runtime").join("mcp").join("w1.json");
     std::fs::create_dir_all(mcp_config.parent().unwrap()).unwrap();
     std::fs::write(&mcp_config, "{}").unwrap();
-    team_agent::state::persist::save_runtime_state(
-        &ws,
-        &json!({
-            "session_name": "team-subprep",
-            "agents": {
-                "w1": {
-                    "provider": "codex",
-                    "status": "awaiting_trust_prompt",
-                    "startup_prompt_status": "awaiting_trust_prompt",
-                    "startup_prompts": "awaiting_trust_prompt",
-                    "pane_id": "%7",
-                    "window": "w1",
-                    "mcp_config": mcp_config.to_string_lossy().to_string(),
-                    "task_prompt_delivered": true
-                }
+    // Keep every other readiness gate satisfied; an unattached leader would
+    // make ready=false independently of the trust prompt under test.
+    let mut state = json!({
+        "session_name": "team-subprep",
+        "tmux_session_present": true,
+        "leader_receiver": {"status": "attached", "pane_id": "%9"},
+        "agents": {
+            "w1": {
+                "provider": "codex",
+                "status": "awaiting_trust_prompt",
+                "startup_prompt_status": "awaiting_trust_prompt",
+                "startup_prompts": "awaiting_trust_prompt",
+                "pane_id": "%7",
+                "window": "w1",
+                "mcp_config": mcp_config.to_string_lossy().to_string(),
+                "task_prompt_delivered": true
             }
-        }),
-    )
-    .unwrap();
+        }
+    });
 
-    let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
-    let value = crate::cli::diagnose::runtime_readiness(&state);
+    let value = crate::cli::diagnose::wait_readiness(&state);
     assert_eq!(
         value["awaiting_trust_prompt"],
         json!(true),
@@ -459,6 +458,12 @@ fn contract_a_runtime_readiness_is_false_while_actionable_trust_remains() {
         json!(false),
         "Contract A: ready must stay false until the actionable trust prompt is cleared; got {value}"
     );
+    state["agents"]["w1"]["status"] = json!("running");
+    state["agents"]["w1"]["startup_prompt_status"] = json!("complete");
+    state["agents"]["w1"]["startup_prompts"] = json!("complete");
+    let cleared = crate::cli::diagnose::wait_readiness(&state);
+    assert_eq!(cleared["awaiting_trust_prompt"], json!(false));
+    assert_eq!(cleared["ready"], json!(true), "positive control: {cleared}");
 }
 
 #[test]

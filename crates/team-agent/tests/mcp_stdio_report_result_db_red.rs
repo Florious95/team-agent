@@ -12,6 +12,7 @@ fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
     let harness = McpSimHarness::new();
     let mut worker = harness.spawn_mcp_client("worker_a", "teamA");
     let canary = "MCP_STDIO_DB_PROBE_CANARY";
+    let worker_status = "red_gate/等待复核";
     let artifacts = json!([{
         "path": "artifact://nested/证据",
         "metadata": {"attempt": 2, "passed": true, "optional": null},
@@ -23,7 +24,7 @@ fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
         json!({
             "task_id": "task_mcp",
             "agent_id": "worker_a",
-            "status": "success",
+            "status": worker_status,
             "summary": canary,
             "artifacts": artifacts.clone()
         }),
@@ -61,6 +62,6 @@ fn mcp_stdio_report_result_persists_result_row_in_same_workspace_db() {
         serde_json::to_vec(&artifacts).unwrap(),
         "nested artifacts must survive the real MCP ingress and SQLite persistence unchanged"
     );
-    assert_eq!(envelope["status"], "success");
+    assert_eq!(envelope["status"], worker_status);
     assert_eq!(row.status, "collected", "auto-finalization remains active");
 }

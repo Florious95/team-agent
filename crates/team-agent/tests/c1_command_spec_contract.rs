@@ -21,7 +21,7 @@ use team_agent::state::persist::save_runtime_state;
 
 #[path = "support/human_catalog.rs"]
 mod human_catalog;
-use human_catalog::{HUMAN_COMMANDS as DEFAULT_COMMANDS, MACHINE_COMMANDS};
+use human_catalog::{HUMAN_COMMANDS as DEFAULT_COMMANDS, MACHINE_COMMANDS, RETIRED_COMMANDS};
 
 const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
     "fallback-send-leader",
@@ -151,10 +151,10 @@ fn red2_command_registry_covers_current_dispatch_and_replaces_source_scans() {
 
     if spec_path.exists() {
         let spec = std::fs::read_to_string(&spec_path).expect("read public registry");
-        for private in MACHINE_COMMANDS {
+        for private in MACHINE_COMMANDS.iter().chain(RETIRED_COMMANDS) {
             assert!(
                 spec_block_for(&spec, private).is_none(),
-                "Machine must not re-enter public spec: {private}"
+                "Machine/retired command must not re-enter public spec: {private}"
             );
         }
     }

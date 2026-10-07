@@ -37,8 +37,8 @@ pub enum CliError {
     /// 委派的 runtime/lifecycle/state 错误(对应 Python `TeamAgentError`)。message == `str(exc)`。
     #[error("{0}")]
     Runtime(String),
-    /// argparse 风格用法错误 / 互斥违反(如 `--summary` + `--json`、`--fix` 缺 `--gate`、
-    /// `peek` 缺 `--allow-raw-screen`)。对应 Python 抛 `TeamAgentError` 或 parser.error。
+    /// argparse 风格用法错误 / 互斥违反(如 `--summary` + `--json`、`--fix` 缺 `--gate`)。
+    /// 对应 Python 抛 `TeamAgentError` 或 parser.error。
     #[error("usage error: {0}")]
     Usage(String),
     /// Preserve the original refusal for audit while carrying safe human guidance.

@@ -448,6 +448,9 @@ fn restart_refuses_first_send_at_null_running_resumable_session_incomplete_when_
 
 #[test]
 fn status_and_quick_start_surfaces_include_session_capture_completeness() {
+    let diagnose =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/diagnose.rs"))
+            .unwrap();
     let status = composite_source::composite_source("src/cli/status_port.rs");
     let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     let adapters =
@@ -455,6 +458,7 @@ fn status_and_quick_start_surfaces_include_session_capture_completeness() {
             .unwrap();
 
     for (name, source) in [
+        ("status readiness formula", diagnose.as_str()),
         ("status --json", status.as_str()),
         ("quick-start readiness", launch.as_str()),
         ("quick-start --json", adapters.as_str()),
