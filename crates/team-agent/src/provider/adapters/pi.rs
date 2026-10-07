@@ -14,6 +14,7 @@ use std::path::Path;
 
 use crate::model::enums::ProviderEffort;
 use crate::provider::ProviderError;
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PiSessionSelector<'a> {
@@ -60,38 +61,27 @@ pub(crate) fn build_pi_command_argv(
         "-e".to_string(),
         request.extension.to_string_lossy().into_owned(),
     ];
-    if let Some(model) = request.model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    append_opt_pair(&mut argv, "--model", request.model);
     if let Some(effort) = request.effort {
         argv.push("--thinking".to_string());
         argv.push(effort.as_str().to_string());
     }
-    argv.extend([
-        "--append-system-prompt".to_string(),
-        request.system_prompt.to_string(),
-    ]);
+    append_pair(&mut argv, "--append-system-prompt", request.system_prompt);
     if let Some(session_dir) = request.session_dir {
-        argv.extend([
-            "--session-dir".to_string(),
-            session_dir.to_string_lossy().into_owned(),
-        ]);
+        append_pair(&mut argv, "--session-dir", session_dir.to_string_lossy().into_owned());
     }
     // The shared lifecycle materializer always revalidates resume root/path/header.
     // Keep the pure argv builder usable before a fixture root is materialized, while
     // refusing a missing exact file once the recorded path's parent exists.
     match request.session {
         PiSessionSelector::Fresh { session_id } if !session_id.trim().is_empty() => {
-            argv.push("--session-id".to_string());
-            argv.push(session_id.to_string());
+            append_pair(&mut argv, "--session-id", session_id);
         }
         PiSessionSelector::Resume { path }
             if !path.as_os_str().is_empty()
                 && (!path.parent().is_some_and(Path::is_dir) || path.is_file()) =>
         {
-            argv.push("--session".to_string());
-            argv.push(path.to_string_lossy().into_owned());
+            append_pair(&mut argv, "--session", path.to_string_lossy().into_owned());
         }
         PiSessionSelector::Resume { path } if !path.as_os_str().is_empty() => {
             return Err(ProviderError::ResumeUnavailable(format!(
@@ -105,7 +95,6 @@ pub(crate) fn build_pi_command_argv(
             ));
         }
     }
-    argv.push("--name".to_string());
-    argv.push(request.agent_id.to_string());
+    append_pair(&mut argv, "--name", request.agent_id);
     Ok(argv)
 }

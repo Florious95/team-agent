@@ -9,6 +9,7 @@
 
 use crate::model::enums::AuthMode;
 use crate::provider::McpConfig;
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
 
 pub(crate) fn copilot_base_command(
     auth_mode: AuthMode,
@@ -35,18 +36,13 @@ pub(crate) fn copilot_base_command(
         argv.push(flag.to_string());
     }
     // mcp_team ∈ canonical → approval-free (whole-server pattern).
-    argv.push("--allow-tool".to_string());
-    argv.push("team_orchestrator".to_string());
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    append_pair(&mut argv, "--allow-tool", "team_orchestrator");
+    append_opt_pair(&mut argv, "--model", model);
     if let Some(config) = mcp_config {
         // Copilot mcp config schema field is `transport` (stdio|http|sse),
         // not the canonical `type`. McpConfig.raw is canonical; only copilot
         // translates type→transport for --additional-mcp-config.
-        argv.push("--additional-mcp-config".to_string());
-        argv.push(copilot_translate_mcp_config(&config.raw).to_string());
+        append_pair(&mut argv, "--additional-mcp-config", copilot_translate_mcp_config(&config.raw).to_string());
     }
     argv
 }

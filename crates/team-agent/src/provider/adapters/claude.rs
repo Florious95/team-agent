@@ -11,6 +11,7 @@
 use crate::model::enums::{AuthMode, Provider};
 use crate::provider::adapter::{next_session_token, prompt_needs_native_mcp, BasicProviderAdapter};
 use crate::provider::{McpConfig, ProviderAdapter, ProviderError};
+use crate::provider::command_helpers::{append_opt_pair, append_pair};
 
 pub(crate) fn claude_launch_command(
     adapter: &BasicProviderAdapter,
@@ -30,8 +31,7 @@ pub(crate) fn claude_launch_command(
         false,
         None,
     )?;
-    argv.push("--session-id".to_string());
-    argv.push(next_session_token());
+    append_pair(&mut argv, "--session-id", next_session_token());
     Ok(argv)
 }
 
@@ -54,21 +54,14 @@ pub(crate) fn claude_base_command(
             .expect("claude provider must define a bypass flag");
         argv.push(flag.to_string());
     } else {
-        argv.push("--permission-mode".to_string());
-        argv.push("default".to_string());
+        append_pair(&mut argv, "--permission-mode", "default");
     }
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
+    append_opt_pair(&mut argv, "--model", model);
     if let Some(effort) = effort {
         argv.push("--effort".to_string());
         argv.push(effort.as_str().to_string());
     }
-    if let Some(prompt) = system_prompt {
-        argv.push("--append-system-prompt".to_string());
-        argv.push(prompt.to_string());
-    }
+    append_opt_pair(&mut argv, "--append-system-prompt", system_prompt);
     if !managed_mcp_config
         && (mcp_config.is_some()
             || auth_mode == AuthMode::CompatibleApi
@@ -79,8 +72,7 @@ pub(crate) fn claude_base_command(
         } else {
             serde_json::json!({"mcpServers": adapter.mcp_config(auth_mode)?.raw})
         };
-        argv.push("--mcp-config".to_string());
-        argv.push(raw.to_string());
+        append_pair(&mut argv, "--mcp-config", raw.to_string());
     }
     Ok(argv)
 }
