@@ -78,16 +78,16 @@ pub(crate) struct NamedAddressError {
 
 pub(crate) fn human_address_reason(reason: &str) -> Option<&'static str> {
     Some(match reason {
-        "name_invalid" => "收信队友名不正确；请使用队友列表中的名称。",
-        "workspace_not_found" => "所选项目目录不存在；请核对项目路径。",
+        "name_invalid" => "Invalid recipient name; use a name from the agent list.",
+        "workspace_not_found" => "The selected workspace directory does not exist; verify the path.",
         "state_not_found" | "workspace_no_state" => {
-            "所选项目还没有可用队伍；首次起队用 quick-start，已有队伍恢复用 restart。"
+            "No usable team exists in the selected workspace; use quick-start for initial creation or restart for an initialized team."
         }
-        "team_key_not_found" => "所选项目没有这支队伍；请核对 --workspace 和 --team。",
-        "leader_not_attached" => "主控还没有连接到这支队伍；请先体检，按提示恢复连接。",
-        "name_not_resolvable" => "当前队伍没有这个队友；请先查看队友列表。",
-        "name_not_live" => "该队友当前未运行或连接已失效；请查看状态再恢复。",
-        "name_ambiguous" => "有多个同名对象；请明确选择项目和队伍，不猜对象。",
+        "team_key_not_found" => "The selected workspace has no such team; verify --workspace and --team.",
+        "leader_not_attached" => "No leader is attached to this team; diagnose it and follow the recovery action.",
+        "name_not_resolvable" => "This team has no such agent; check the agent list.",
+        "name_not_live" => "The agent is not running or its channel is stale; check status before recovery.",
+        "name_ambiguous" => "Multiple targets share this name; select an explicit workspace and team.",
         _ => return None,
     })
 }
@@ -121,23 +121,24 @@ impl NamedAddressError {
     pub(crate) fn human_guidance(&self, requested: &str) -> (String, String) {
         let workspace = self.human_scope.as_deref();
         let mut message = format!(
-            "{}\n你刚才填写的是 {requested:?}。",
-            human_address_reason(self.kind.as_str()).unwrap_or("未能找到可用的收信队友。")
+            "{}\nRequested recipient: {requested:?}\nReason: {}",
+            human_address_reason(self.kind.as_str()).unwrap_or("No usable recipient could be resolved."),
+            self.message
         );
         if let Some(workspace) = workspace {
-            message.push_str(&format!("\n所选项目：{:?}。", workspace.to_string_lossy()));
+            message.push_str(&format!("\nSelected workspace: {:?}", workspace.to_string_lossy()));
         }
         if let Some(team) = self.human_team.as_deref() {
-            message.push_str(&format!("\n所选队伍：{team:?}。"));
+            message.push_str(&format!("\nSelected team: {team:?}"));
         }
-        let mut action = "没有可靠的拼写建议；请先核对项目和队伍，不猜对象。".to_string();
+        let mut action = "No reliable spelling suggestion is available; verify the workspace and team before choosing a target.".to_string();
         for candidate in &self.candidates {
             if let (Some(agent), Some(team)) = (
                 candidate.get("agent_id").and_then(Value::as_str),
                 candidate.get("team_key").and_then(Value::as_str),
             ) {
                 message.push_str(&format!(
-                    "\n候选队伍 {team:?}，队友 {agent:?}；请确认是否是你要找的对象。"
+                    "\nCandidate team {team:?}, agent {agent:?}; confirm the intended target."
                 ));
             }
         }
@@ -162,7 +163,7 @@ impl NamedAddressError {
                     if let Some(command) =
                         super::adapters::send_command(agent, workspace, Some(team))
                     {
-                        action = format!("你是否想发给 {agent:?}、队伍 {team:?}？确认后将任务内容替换到这个例子；本次没有发送：\n{command}");
+                        action = format!("Did you mean agent {agent:?} in team {team:?}? After confirmation, replace the example message below. Nothing was sent:\n{command}");
                     }
                 }
             }
@@ -171,7 +172,7 @@ impl NamedAddressError {
             workspace.filter(|path| !path.to_string_lossy().chars().any(char::is_control))
         {
             action.push_str(&format!(
-                "\n也可查看可用队友列表：\nteam-agent status --workspace {}",
+                "\nList available agents with:\nteam-agent status --workspace {}",
                 super::adapters::shell_quote(&workspace.to_string_lossy())
             ));
         }

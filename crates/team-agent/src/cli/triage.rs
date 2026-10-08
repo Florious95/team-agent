@@ -56,7 +56,32 @@ pub(crate) fn render(command: &str, report: &Value) -> String {
     for repair in repairs {
         lines.push(bounded(format!("repair: {}", summarize(repair, true))));
     }
+    // Short triage lines are navigation, not the authoritative refusal. Retain
+    // complete causes/actions as JSON, without dumping unrelated runtime or
+    // provider diagnostics. Values have already crossed the redaction boundary.
+    let details = diagnostic_details(&report);
+    if details.as_object().is_some_and(|details| !details.is_empty()) {
+        lines.push(format!("details: {details}"));
+    }
     lines.join("\n")
+}
+
+// Shared by doctor/diagnose and send. Never include message bodies, profiles or
+// unrelated runtime/provider dumps in a command's diagnostic output.
+pub(crate) fn diagnostic_details(report: &Value) -> Value {
+    let report = crate::redaction::redact_external_value(report);
+    let mut details = serde_json::Map::new();
+    for key in [
+        "error", "status", "summary", "reason", "blockers", "action",
+        "next_action", "next_actions", "issues", "suggested_repairs",
+        "state_path", "log", "schema_error", "stage", "delivery_status",
+        "message_status", "verification", "channel", "turn_verification",
+    ] {
+        if let Some(value) = report.get(key) {
+            details.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(details)
 }
 
 fn array_items(value: Option<&Value>) -> &[Value] {
@@ -126,6 +151,7 @@ fn bounded(line: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     use serde_json::json;
 
@@ -149,9 +175,34 @@ mod tests {
     #[test]
     fn renderer_sanitizes_and_bounds_utf8_lines() {
         let report = json!({"ok": false, "issues": ["问题\n".to_string() + &"x".repeat(200)]});
-        for line in render("doctor", &report).lines() {
-            assert!(line.len() <= LINE_LIMIT_BYTES);
+        let output = render("doctor", &report);
+        for line in output.lines() {
+            if let Some(details) = line.strip_prefix("details: ") {
+                let parsed: Value = serde_json::from_str(details).unwrap();
+                assert_eq!(parsed.get("issues"), report.get("issues"));
+            } else {
+                assert!(line.len() <= LINE_LIMIT_BYTES);
+            }
             assert!(!line.chars().any(char::is_control));
+        }
+    }
+
+    #[test]
+    fn renderer_preserves_typed_failure_details_and_long_actions() {
+        let action = "inspect the precise failure ".repeat(20);
+        let report = json!({
+            "ok": false,
+            "status": "preflight_blocked",
+            "reason": "exact refusal",
+            "blockers": [{"stage": "database", "reason": "permission denied"}],
+            "next_actions": [action],
+            "state_path": "/tmp/workspace/.team/runtime/state.json"
+        });
+        let output = render("doctor", &report);
+        let details = output.lines().find_map(|line| line.strip_prefix("details: ")).unwrap();
+        let parsed: Value = serde_json::from_str(details).unwrap();
+        for key in ["status", "reason", "blockers", "next_actions", "state_path"] {
+            assert_eq!(parsed.get(key), report.get(key), "lost {key}");
         }
     }
 

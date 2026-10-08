@@ -1286,6 +1286,7 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         )));
     }
     let state_path = crate::state::persist::runtime_state_path(&workspace);
+    let mut leader_bootstrap = None;
     if state_path.exists() {
         let state = crate::state::persist::load_runtime_state(&workspace)
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -1363,6 +1364,16 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
                 agent_ids,
             });
         }
+        let entry = state
+            .get("teams")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|teams| teams.get(&canonical_team_key))
+            .unwrap_or(&state);
+        if is_quick_start_leader_bootstrap(entry) {
+            let mut bootstrap = entry.clone();
+            bootstrap["team_key"] = serde_json::json!(canonical_team_key);
+            leader_bootstrap = Some(bootstrap);
+        }
     }
     // CR-040/042: repeated quick-start from one template with distinct --team-id/--name
     // must NOT collide on the template-derived tmux session. Override the compiled
@@ -1384,12 +1395,20 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
             attach_commands: Vec::new(),
         });
     }
+    if let Some(bootstrap) = &leader_bootstrap {
+        // Allow initialization, not takeover of the existing leader binding.
+        ensure_owner_allowed_for_state(bootstrap, None)?;
+    }
     // E5 spec 迁移:spec 写到 .team/runtime/<team_key>/(中间产物,绝不落用户目录 agents_dir)。
     // Bug2:原子写(tmp+rename),避免半截 spec。
     let spec_path = crate::model::paths::runtime_spec_path(&workspace, &state_team_key);
     write_spec_atomic(&spec_path, &spec)?;
-    let _store = crate::message_store::MessageStore::open(&workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let _store = crate::message_store::MessageStore::open(&workspace).map_err(|error| {
+        LifecycleError::StatePersist(format!(
+            "database initialization failed at {}: {error}; coordinator start was not attempted",
+            workspace.join(".team/team.db").display()
+        ))
+    })?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let scoped_endpoint = transport.tmux_endpoint();
@@ -1401,6 +1420,9 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         &state_team_key,
         scoped_endpoint.as_deref(),
     );
+    if let Some(bootstrap) = &leader_bootstrap {
+        preserve_quick_start_bootstrap_binding(&mut state, bootstrap, &state_team_key);
+    }
     // Keep this attempt-local seed separate from persisted `claimed_via`;
     // historical quick-start rows are never sufficient cleanup authority.
     let seeded_owner = state
@@ -1475,15 +1497,15 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     launch.session_capture_incomplete_agents =
         quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
-    let coordinator_started = crate::coordinator::start_coordinator(&coordinator_workspace)
-        .map(|report| report.ok)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let coordinator_report = crate::coordinator::start_coordinator(&coordinator_workspace)
+        .map_err(|error| LifecycleError::StatePersist(format!(
+            "coordinator start failed for {}: {error}; inspect {} before retrying",
+            workspace.display(),
+            crate::coordinator::coordinator_log_path(&coordinator_workspace).display()
+        )))?;
     quick_start_phase_timer.emit(&workspace, "launch.phase", crate::lifecycle::restart::LifecyclePhase::CoordinatorStart);
-    let coordinator_action = if coordinator_started {
-        "coordinator started"
-    } else {
-        "coordinator not started"
-    };
+    require_quick_start_coordinator_started(&coordinator_report, &workspace)?;
+    let coordinator_action = "coordinator started";
     // BUG-7: build an honest readiness verdict from the post-spawn runtime state.
     // - If persist_spawn_agent_state (BUG-2 fix) marked any agent non-running, the
     //   team is observably Degraded.
@@ -1542,8 +1564,63 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
     })
 }
 
+fn preserve_quick_start_bootstrap_binding(
+    state: &mut serde_json::Value,
+    bootstrap: &serde_json::Value,
+    team_key: &str,
+) {
+    let mut binding = crate::state::ownership::OwnershipWrite::new();
+    if let Some(owner) = bootstrap.get("team_owner") {
+        binding = binding.with_team_owner(owner.clone());
+    }
+    if let Some(receiver) = bootstrap.get("leader_receiver") {
+        binding = binding.with_leader_receiver(receiver.clone());
+    }
+    if let Some(epoch) = bootstrap.get("owner_epoch").and_then(serde_json::Value::as_u64)
+        .or_else(|| bootstrap.get("team_owner").and_then(|owner| owner.get("owner_epoch")).and_then(serde_json::Value::as_u64))
+    {
+        binding = binding.with_owner_epoch(epoch);
+    }
+    crate::state::ownership::write_owner(state, team_key, binding);
+    for key in ["leader_client", "is_external_leader"] {
+        if let Some(value) = bootstrap.get(key) {
+            state[key] = value.clone();
+        }
+    }
+}
+
+fn require_quick_start_coordinator_started(
+    report: &crate::coordinator::StartReport,
+    workspace: &Path,
+) -> Result<(), LifecycleError> {
+    if report.ok {
+        return Ok(());
+    }
+    let details = serde_json::json!({
+        "ok": report.ok,
+        "status": report.status,
+        "pid": report.pid,
+        "previous_pid": report.previous_pid,
+        "binary_path": report.binary_path,
+        "binary_version": report.binary_version,
+        "rotation_reason": report.rotation_reason,
+        "binary_identity_relation": report.binary_identity_relation,
+        "log": report.log,
+        "schema_error": report.schema_error.as_ref().map(|error| format!("{error:?}")),
+        "action": report.action,
+        "workspace": workspace,
+        "coordinator_log_path": crate::coordinator::coordinator_log_path(
+            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
+        ),
+    });
+    Err(LifecycleError::StatePersist(format!(
+        "coordinator start refused: {details}; workers may already be started; inspect the report before retrying quick-start"
+    )))
+}
+
 #[cfg(test)]
 mod fresh_quick_start_leader_binding_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::layout::worker_env::{CALLER_ENDPOINT_ENV, CALLER_PANE_ENV, CALLER_PROVIDER_ENV};
     use crate::transport::test_support::OfflineTransport;
@@ -1555,6 +1632,98 @@ mod fresh_quick_start_leader_binding_tests {
     use super::hermetic::HermeticTestEnv;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn bootstrap_binding_is_preserved_without_epoch_reset_or_takeover() {
+        let bootstrap = json!({
+            "team_owner": {"pane_id": "%0", "provider": "pi", "owner_epoch": 7, "claimed_via": "claim-leader"},
+            "leader_receiver": {"pane_id": "%0", "status": "attached", "owner_epoch": 7},
+            "owner_epoch": 7,
+            "leader_client": {"diagnostic_only": true},
+            "is_external_leader": true
+        });
+        let mut launched = json!({
+            "team_key": "current", "agents": {"worker": {}},
+            "team_owner": {"owner_epoch": 1, "claimed_via": "quick-start"},
+            "leader_receiver": {"status": "pending"}, "owner_epoch": 1,
+            "is_external_leader": false
+        });
+        preserve_quick_start_bootstrap_binding(&mut launched, &bootstrap, "current");
+        for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+            assert_eq!(launched.get(key), bootstrap.get(key));
+            assert_eq!(launched["teams"]["current"].get(key), bootstrap.get(key));
+        }
+        assert_eq!(launched.get("leader_client"), bootstrap.get("leader_client"));
+        assert_eq!(launched.get("is_external_leader"), Some(&json!(true)));
+        assert_eq!(launched["agents"], json!({"worker": {}}));
+    }
+
+    #[test]
+    fn coordinator_negative_report_retains_actual_details_and_does_not_become_ready() {
+        let mut report = crate::coordinator::StartReport {
+            ok: false,
+            pid: None,
+            status: crate::coordinator::StartOutcome::SchemaIncompatible,
+            previous_pid: Some(crate::coordinator::Pid(17)),
+            binary_path: Some("/tmp/candidate/team-agent".to_string()),
+            binary_version: Some("0.5.112".to_string()),
+            rotation_reason: Some("original rotation reason".to_string()),
+            binary_identity_relation: crate::coordinator::CoordinatorBinaryIdentityRelation::Unknown,
+            log: Some(PathBuf::from("/tmp/current/.team/runtime/coordinator.log")),
+            schema_error: Some(crate::coordinator::SchemaError::InitFailed { message: "original database permission denied".to_string() }),
+            action: Some("repair the exact database permissions".to_string()),
+        };
+        let error = require_quick_start_coordinator_started(&report, Path::new("/tmp/current"))
+            .unwrap_err().to_string();
+        for detail in ["schema_incompatible", "original database permission denied", "repair the exact database permissions", "/tmp/candidate/team-agent", "/tmp/current/.team/runtime/coordinator.log", "workers may already be started"] {
+            assert!(error.contains(detail), "lost {detail}: {error}");
+        }
+        report.ok = true;
+        report.status = crate::coordinator::StartOutcome::AlreadyRunning;
+        report.binary_identity_relation = crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller;
+        assert!(require_quick_start_coordinator_started(&report, Path::new("/tmp/current")).is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn same_current_leader_bootstrap_reaches_fresh_preflight_without_mutating_seed() {
+        let env = HermeticTestEnv::enter("current-bootstrap-preflight");
+        env.scrub_tmux();
+        env.assert_no_real_tmux();
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-current-bootstrap-{}-{}", std::process::id(), SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let team = workspace.join(".team/current");
+        std::fs::create_dir_all(team.join("agents")).unwrap();
+        std::fs::write(team.join("TEAM.md"), "---\nname: current\nobjective: Bootstrap fixture.\n---\n").unwrap();
+        std::fs::write(team.join("agents/worker.md"), "---\nname: worker\nrole: Worker\nprovider: codex\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nBounded fixture.\n").unwrap();
+        let state_path = crate::state::persist::runtime_state_path(&workspace);
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        let state = json!({
+            "active_team_key": "current", "team_key": "current",
+            "teams": {"current": {
+                "agents": {}, "session_name": null,
+                "team_owner": {"pane_id": "%0", "provider": "pi", "owner_epoch": 1},
+                "leader_receiver": {"pane_id": "%0", "status": "attached"}
+            }}
+        });
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let before = std::fs::read(&state_path).unwrap();
+        // The real entrypoint must reach its existing strict identity preflight,
+        // not return ExistingRuntime merely because the launcher registered current.
+        std::env::set_var("TMUX", "/private/tmp/bootstrap-test/default,1,0");
+        std::env::set_var("TMUX_PANE", "%0");
+        std::env::set_var(CALLER_PANE_ENV, "%0");
+        std::env::set_var(CALLER_PROVIDER_ENV, "pi");
+        std::env::set_var(CALLER_ENDPOINT_ENV, "/private/tmp/different-bootstrap/default");
+        let transport = OfflineTransport::new().with_tmux_endpoint("/private/tmp/bootstrap-test/default");
+        let result = quick_start_with_transport_in_workspace(&workspace, &team, None, true, None, &transport).unwrap();
+        assert!(matches!(result, QuickStartReport::PreflightBlocked { .. }), "unexpected outcome: {result:?}");
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+        assert!(!workspace.join(".team/team.db").exists());
+        assert!(!crate::model::paths::runtime_spec_path(&workspace, "current").exists());
+        std::fs::remove_dir_all(&workspace).unwrap();
+    }
 
     fn workspace_with_provider(tag: &str, provider: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(

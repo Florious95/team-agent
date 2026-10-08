@@ -41,20 +41,20 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             || args.to_leader.is_some()
         {
             let message = if args.to_name.is_some() {
-                "队友名与 --to-name/--pane/--to 不能同时使用；请只选一种收信方式"
+                "An agent name cannot be combined with --to-name/--pane/--to; choose one addressing mode"
             } else {
-                "--pane 不能与队友名、--to 或 --to-leader 同时使用"
+                "--pane cannot be combined with an agent name, --to or --to-leader"
             };
             return Err(CliError::Usage(message.to_string()));
         }
         let content = args.message.join(" ");
         if content.is_empty() {
             return Err(CliError::Usage(
-                "请填写任务内容；--pane 不能发送空消息".to_string(),
+                "Provide a task message; --pane cannot send an empty message".to_string(),
             ));
         }
         return Err(CliError::Usage(format!(
-            "--pane {pane_id} 已不再支持；请用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选择项目和队伍"
+            "--pane {pane_id} is no longer supported; use team-agent send <agent> 'task message' with --workspace/--team to select scope"
         )));
     }
     if args.targets.is_some() {

@@ -209,7 +209,7 @@ fn csv_agent_status(
     health: Option<&serde_json::Map<String, Value>>,
 ) -> &'static str {
     if stale_agent_bucket(agent).is_some() {
-        return "错误";
+        return "error";
     }
     let raw = agent
         .get("status")
@@ -226,7 +226,7 @@ fn csv_agent_status(
         || matches!(hstatus.as_str(), "failed" | "error" | "spawn_failed")
         || matches!(raw.as_str(), "stopped" | "done")
     {
-        return "错误";
+        return "error";
     }
     let pane_present = agent
         .get("pane_id")
@@ -239,21 +239,21 @@ fn csv_agent_status(
             .filter(|pane| !pane.is_empty())
             .is_some();
     if matches!(raw.as_str(), "running" | "busy" | "working") && !pane_present {
-        return "错误";
+        return "error";
     }
     // 0.5.35 R4: canonical UNKNOWN beats legacy WORKING in human CSV too.
     if canonical_worker_state_is_unknown(agent) {
-        return "未知";
+        return "unknown";
     }
     if raw == "idle" || hstatus == "idle" {
-        return "空闲";
+        return "idle";
     }
     if matches!(raw.as_str(), "running" | "busy" | "working")
         || matches!(hstatus.as_str(), "running" | "working" | "busy")
     {
-        return "工作";
+        return "working";
     }
-    "错误"
+    "error"
 }
 
 /// `_latest_result_line`(`commands.py:333-337`):agent_id/summary/created_at 渲染单行。
