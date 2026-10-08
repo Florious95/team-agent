@@ -1715,9 +1715,9 @@ mod fresh_quick_start_leader_binding_tests {
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         let state = json!({
-            "active_team_key": "current", "team_key": "current",
+            "active_team_key": "current", "team_key": "current", "tasks": [],
             "teams": {"current": {
-                "agents": {}, "session_name": null,
+                "agents": {}, "tasks": [], "session_name": null,
                 "team_owner": {"pane_id": "%0", "provider": "pi", "owner_epoch": 1},
                 "leader_receiver": {"pane_id": "%0", "status": "attached"}
             }}

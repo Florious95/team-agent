@@ -516,7 +516,10 @@ pub(super) fn is_quick_start_leader_bootstrap(state: &serde_json::Value) -> bool
         || state.get("spec_path").is_some()
         || state.get("team_dir").is_some_and(|dir| !dir.is_null())
         || state.get("session_name").is_some_and(|session| !session.is_null())
-        || state.get("tasks").is_some_and(|tasks| !tasks.as_object().is_some_and(|tasks| tasks.is_empty()))
+        || state.get("tasks").is_some_and(|tasks| {
+            !tasks.as_object().is_some_and(|tasks| tasks.is_empty())
+                && !tasks.as_array().is_some_and(|tasks| tasks.is_empty())
+        })
         || state.get("status").is_some_and(|status| status.as_str() != Some("alive"))
         || state.get("archived_at").is_some_and(|value| !value.is_null())
     {
@@ -573,6 +576,28 @@ mod quick_start_runtime_identity_tests {
     }
 
     #[test]
+    fn real_native_managed_launcher_empty_array_shape_is_fresh_and_unchanged() {
+        let mut entry = leader_bootstrap();
+        entry["tasks"] = json!([]);
+        entry["is_external_leader"] = json!(false);
+        entry["team_key"] = json!("current");
+        entry["tmux_socket"] = json!("/private/tmp/fixture-native-leader");
+        entry["owner_epoch"] = json!(1);
+        entry["team_owner"]["machine_fingerprint"] = json!("");
+        entry["team_owner"]["leader_session_uuid"] = json!("fixture-native-uuid");
+        entry["leader_receiver"]["owner_epoch"] = json!(1);
+        entry["leader_receiver"]["leader_session_uuid"] = json!("fixture-native-uuid");
+        let state = json!({
+            "agents": {}, "tasks": [], "session_name": null,
+            "active_team_key": "current", "team_key": "current",
+            "teams": {"current": entry}
+        });
+        let before = state.clone();
+        assert!(!runtime_state_has_quick_start_team(&state, "current"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
     fn legacy_flat_leader_binding_can_initialize() {
         let mut state = leader_bootstrap();
         state["active_team_key"] = json!("current");
@@ -589,6 +614,11 @@ mod quick_start_runtime_identity_tests {
             ("session_name", json!("team-current")),
             ("session_name", json!("team-agent-leader-stale-worker-field")),
             ("tasks", json!({"finished_task": {"status": "done"}})),
+            ("tasks", json!([{"status": "done"}])),
+            ("tasks", Value::Null),
+            ("tasks", json!("unknown")),
+            ("tasks", json!(false)),
+            ("tasks", json!(0)),
             ("status", json!("stopped")),
             ("archived_at", json!("2026-10-08")),
             ("agents", Value::Null),
