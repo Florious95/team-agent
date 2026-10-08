@@ -1,8 +1,12 @@
 use super::delivery::DeliveryEffect;
-use super::descriptor::{AuthMode, ProviderDescriptor, ResourceDisposition, ResourceKind, ResumeMode};
+use super::descriptor::{
+    AuthMode, ProviderDescriptor, ResourceDisposition, ResourceKind, ResumeMode,
+};
 use super::hooks::ProviderHooks;
 use super::plan::MaterializeReceipt;
-use super::session::{validate_resume, CaptureOrigin, CwdIdentity, NativeSessionId, ResumeBinding, ResumeExpectation};
+use super::session::{
+    validate_resume, CaptureOrigin, CwdIdentity, NativeSessionId, ResumeBinding, ResumeExpectation,
+};
 use super::types::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,28 +103,58 @@ pub fn resolve_fork(
     match request.mode {
         ForkMode::InWindowBranch => {
             if request.target_native_session.is_some() || request.target_backing.is_some() {
-                return Err(ContractError::Invalid("in-window branch cannot allocate a seat snapshot"));
+                return Err(ContractError::Invalid(
+                    "in-window branch cannot allocate a seat snapshot",
+                ));
             }
-            descriptor.input.resolve(&request.native,
-                request.input_profile.as_deref().ok_or(ContractError::ProfileUnavailable)?,
-                Operation::InWindowBranch, request.channel)?;
+            descriptor.input.resolve(
+                &request.native,
+                request
+                    .input_profile
+                    .as_deref()
+                    .ok_or(ContractError::ProfileUnavailable)?,
+                Operation::InWindowBranch,
+                request.channel,
+            )?;
         }
         ForkMode::NewSeatFullSnapshot => {
-            descriptor.session.resume.require("snapshot target resume")?;
-            let session = request.target_native_session.as_ref()
-                .ok_or(ContractError::Invalid("snapshot target session must be preallocated"))?;
-            let path = request.target_backing.as_ref()
-                .ok_or(ContractError::Invalid("snapshot target path must be preallocated"))?;
-            if session == &request.source.native_session || Some(path.path()) == request.source.backing {
-                return Err(ContractError::Mismatch("snapshot target must not replace source"));
+            descriptor
+                .session
+                .resume
+                .require("snapshot target resume")?;
+            let session = request
+                .target_native_session
+                .as_ref()
+                .ok_or(ContractError::Invalid(
+                    "snapshot target session must be preallocated",
+                ))?;
+            let path = request
+                .target_backing
+                .as_ref()
+                .ok_or(ContractError::Invalid(
+                    "snapshot target path must be preallocated",
+                ))?;
+            if session == &request.source.native_session
+                || Some(path.path()) == request.source.backing
+            {
+                return Err(ContractError::Mismatch(
+                    "snapshot target must not replace source",
+                ));
             }
             if request.selected_turn.is_some() {
-                return Err(ContractError::Invalid("full snapshot is not a selected-turn branch"));
+                return Err(ContractError::Invalid(
+                    "full snapshot is not a selected-turn branch",
+                ));
             }
         }
         ForkMode::NativeNewSeat => {
-            if request.target_native_session.is_some() || request.target_backing.is_some() || request.selected_turn.is_some() {
-                return Err(ContractError::Invalid("native new seat captures its own child session"));
+            if request.target_native_session.is_some()
+                || request.target_backing.is_some()
+                || request.selected_turn.is_some()
+            {
+                return Err(ContractError::Invalid(
+                    "native new seat captures its own child session",
+                ));
             }
         }
     }
@@ -143,30 +177,51 @@ pub enum NativeControl {
 /// This is not a committed fork or a readiness receipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeForkPlan {
-    InWindow { control: NativeControl },
+    InWindow {
+        control: NativeControl,
+    },
     FullSnapshot {
         source: Box<ResumeBinding>,
         target: Box<ResumeBinding>,
         staging: MaterializeReceipt,
     },
-    NativeNewSeat { source: Box<ResumeBinding>, target: InstanceIdentity },
+    NativeNewSeat {
+        source: Box<ResumeBinding>,
+        target: InstanceIdentity,
+    },
 }
 
 /// Checks H7's result before register/spawn. Failure does not undo stage effects:
 /// the caller must retain the returned plan/owned-I/O journal for compensation.
 pub fn validate_native_fork_plan(
-    resolved: &ResolvedFork, plan: &NativeForkPlan,
+    resolved: &ResolvedFork,
+    plan: &NativeForkPlan,
 ) -> Result<(), ContractError> {
     let request = resolved.request();
     match (request.mode, plan) {
         (ForkMode::InWindowBranch, NativeForkPlan::InWindow { control }) => {
-            let expected = request.selected_turn.map(NativeControl::BranchToTurn)
+            let expected = request
+                .selected_turn
+                .map(NativeControl::BranchToTurn)
                 .unwrap_or(NativeControl::BranchCurrent);
-            if control != &expected { return Err(ContractError::Mismatch("in-window control")); }
+            if control != &expected {
+                return Err(ContractError::Mismatch("in-window control"));
+            }
         }
-        (ForkMode::NewSeatFullSnapshot, NativeForkPlan::FullSnapshot { source, target, staging }) => {
-            if source.as_ref() != &request.source { return Err(ContractError::Mismatch("snapshot source")); }
-            let path = request.target_backing.as_ref()
+        (
+            ForkMode::NewSeatFullSnapshot,
+            NativeForkPlan::FullSnapshot {
+                source,
+                target,
+                staging,
+            },
+        ) => {
+            if source.as_ref() != &request.source {
+                return Err(ContractError::Mismatch("snapshot source"));
+            }
+            let path = request
+                .target_backing
+                .as_ref()
                 .ok_or(ContractError::Invalid("snapshot target path"))?;
             if Some(&target.native_session) != request.target_native_session.as_ref()
                 || target.backing.as_ref() != Some(&path.path())
@@ -174,19 +229,33 @@ pub fn validate_native_fork_plan(
             {
                 return Err(ContractError::Mismatch("staged snapshot binding"));
             }
-            validate_resume(target, &ResumeExpectation {
-                provider: &request.source.provider, source: &request.target,
-                cwd: &request.cwd, native: &request.native,
-                evidence_kind: request.evidence_kind, mode: ResumeMode::ExactPath,
-            })?;
+            validate_resume(
+                target,
+                &ResumeExpectation {
+                    provider: &request.source.provider,
+                    source: &request.target,
+                    cwd: &request.cwd,
+                    native: &request.native,
+                    evidence_kind: request.evidence_kind,
+                    mode: ResumeMode::ExactPath,
+                },
+            )?;
             let mut paths = Vec::new();
             let mut has_backing = false;
             for resource in &staging.resources {
-                if resource.owner != request.target || resource.operation != request.operation_id
-                    || resource.path.root() != path.root() || !resource.exclusive
+                if resource.owner != request.target
+                    || resource.operation != request.operation_id
+                    || resource.path.root() != path.root()
+                    || !resource.exclusive
                     || paths.contains(&resource.path)
-                    || matches!(resource.kind, ResourceKind::GlobalSettings | ResourceKind::NativeDatabase)
-                    || !matches!(resource.disposition, ResourceDisposition::OwnedPreserved | ResourceDisposition::OwnedRemovable)
+                    || matches!(
+                        resource.kind,
+                        ResourceKind::GlobalSettings | ResourceKind::NativeDatabase
+                    )
+                    || !matches!(
+                        resource.disposition,
+                        ResourceDisposition::OwnedPreserved | ResourceDisposition::OwnedRemovable
+                    )
                 {
                     return Err(ContractError::Mismatch("snapshot stage ownership"));
                 }
@@ -201,7 +270,9 @@ pub fn validate_native_fork_plan(
                 }
                 paths.push(resource.path.clone());
             }
-            if !has_backing { return Err(ContractError::Invalid("snapshot backing receipt required")); }
+            if !has_backing {
+                return Err(ContractError::Invalid("snapshot backing receipt required"));
+            }
         }
         (ForkMode::NativeNewSeat, NativeForkPlan::NativeNewSeat { source, target }) => {
             if source.as_ref() != &request.source || target != &request.target {

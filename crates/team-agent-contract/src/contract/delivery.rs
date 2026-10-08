@@ -232,7 +232,12 @@ pub fn resolve_submit_policy<'a>(
     if request.provider != descriptor.identity.id {
         return Err(ContractError::UnknownProvider);
     }
-    let profile = descriptor.input.resolve(request.native, request.profile_id, request.operation, request.channel)?;
+    let profile = descriptor.input.resolve(
+        request.native,
+        request.profile_id,
+        request.operation,
+        request.channel,
+    )?;
     let policy = profile.policy.require("input profile")?;
     let evidence = request.evidence;
     if evidence.provider.as_str() != request.provider

@@ -109,7 +109,13 @@ pub fn resolve_launch(
     if request.provider != descriptor.identity.id {
         return Err(ContractError::UnknownProvider);
     }
-    if !matches!(request.operation, Operation::Fresh | Operation::Resume | Operation::NewSeatFullSnapshot | Operation::NativeNewSeat) {
+    if !matches!(
+        request.operation,
+        Operation::Fresh
+            | Operation::Resume
+            | Operation::NewSeatFullSnapshot
+            | Operation::NativeNewSeat
+    ) {
         return Err(ContractError::Invalid("launch operation"));
     }
     validate_descriptor(descriptor, hooks, request.operation)?;
@@ -162,11 +168,15 @@ pub fn resolve_launch(
             return Err(ContractError::AmbiguousModel);
         }
     }
-    let effort_text = request.role_effort.as_deref().or(if descriptor.effort.inherit_team_default {
-        request.team_effort.as_deref()
-    } else {
-        None
-    });
+    let effort_text =
+        request
+            .role_effort
+            .as_deref()
+            .or(if descriptor.effort.inherit_team_default {
+                request.team_effort.as_deref()
+            } else {
+                None
+            });
     let effort = if let Some(raw) = effort_text {
         let effort = Effort::parse(raw)?;
         match &descriptor.effort.admission[effort.index()] {
@@ -226,7 +236,9 @@ pub fn resolve_launch(
             .ok_or(ContractError::ProfileUnavailable)?;
         hooks.interaction.require("H6 InteractionHook")?;
         for operation in [Operation::FirstBusiness, Operation::OrdinarySend] {
-            descriptor.input.resolve(&request.native, profile_id, operation, request.channel)?;
+            descriptor
+                .input
+                .resolve(&request.native, profile_id, operation, request.channel)?;
         }
     }
     // Global installers require a separate authorization path not present in this package.
@@ -244,29 +256,50 @@ pub fn resolve_launch(
     let expected_session = match request.operation {
         Operation::Fresh => {
             if request.resume.is_some() || request.fork.is_some() {
-                return Err(ContractError::Invalid("fresh launch cannot consume resume or fork intent"));
+                return Err(ContractError::Invalid(
+                    "fresh launch cannot consume resume or fork intent",
+                ));
             }
-            if (descriptor.session.fresh == FreshSession::Preassigned) != request.preassigned_session.is_some() {
+            if (descriptor.session.fresh == FreshSession::Preassigned)
+                != request.preassigned_session.is_some()
+            {
                 return Err(ContractError::Invalid("preassigned session"));
             }
             match descriptor.session.fresh {
-                FreshSession::Preassigned => ExpectedSession::Preassigned(request.preassigned_session.clone()
-                    .ok_or(ContractError::Invalid("preassigned session"))?),
+                FreshSession::Preassigned => ExpectedSession::Preassigned(
+                    request
+                        .preassigned_session
+                        .clone()
+                        .ok_or(ContractError::Invalid("preassigned session"))?,
+                ),
                 FreshSession::CaptureAfterLaunch => ExpectedSession::CaptureAfterLaunch,
                 FreshSession::NotApplicable => ExpectedSession::NotApplicable,
             }
         }
         Operation::Resume => {
             if request.preassigned_session.is_some() || request.fork.is_some() {
-                return Err(ContractError::Invalid("restart cannot allocate a new session or fork"));
+                return Err(ContractError::Invalid(
+                    "restart cannot allocate a new session or fork",
+                ));
             }
-            let resume = request.resume.as_ref().ok_or(ContractError::Invalid("resume binding required"))?;
+            let resume = request
+                .resume
+                .as_ref()
+                .ok_or(ContractError::Invalid("resume binding required"))?;
             let mode = *descriptor.session.resume.require("resume")?;
-            validate_resume(&resume.binding, &ResumeExpectation {
-                provider: &provider, source: &resume.expected_source, cwd: &request.paths.cwd,
-                native: &request.native, evidence_kind: request.evidence_kind, mode,
-            })?;
-            if request.identity.scope != resume.expected_source.scope || request.identity.seat != resume.expected_source.seat
+            validate_resume(
+                &resume.binding,
+                &ResumeExpectation {
+                    provider: &provider,
+                    source: &resume.expected_source,
+                    cwd: &request.paths.cwd,
+                    native: &request.native,
+                    evidence_kind: request.evidence_kind,
+                    mode,
+                },
+            )?;
+            if request.identity.scope != resume.expected_source.scope
+                || request.identity.seat != resume.expected_source.seat
                 || request.identity.generation <= resume.expected_source.generation
             {
                 return Err(ContractError::Mismatch("restart generation"));
@@ -275,39 +308,73 @@ pub fn resolve_launch(
         }
         Operation::NewSeatFullSnapshot | Operation::NativeNewSeat => {
             if request.mode != LaunchMode::FullWorker {
-                return Err(ContractError::Invalid("new-seat fork requires full worker carriers"));
+                return Err(ContractError::Invalid(
+                    "new-seat fork requires full worker carriers",
+                ));
             }
             if request.resume.is_some() || request.preassigned_session.is_some() {
-                return Err(ContractError::Invalid("fork launch cannot be relabelled as restart or fresh"));
+                return Err(ContractError::Invalid(
+                    "fork launch cannot be relabelled as restart or fresh",
+                ));
             }
-            let fork = request.fork.as_ref().ok_or(ContractError::Invalid("resolved fork required"))?;
+            let fork = request
+                .fork
+                .as_ref()
+                .ok_or(ContractError::Invalid("resolved fork required"))?;
             let fork = fork.request();
-            if fork.mode.operation() != request.operation || fork.target != request.identity
-                || fork.source.provider != provider || fork.cwd != request.paths.cwd || fork.native != request.native
-                || fork.auth != request.auth || fork.evidence_kind != request.evidence_kind
-                || fork.channel != request.channel || fork.input_profile != request.input_profile
+            if fork.mode.operation() != request.operation
+                || fork.target != request.identity
+                || fork.source.provider != provider
+                || fork.cwd != request.paths.cwd
+                || fork.native != request.native
+                || fork.auth != request.auth
+                || fork.evidence_kind != request.evidence_kind
+                || fork.channel != request.channel
+                || fork.input_profile != request.input_profile
             {
                 return Err(ContractError::Mismatch("fork launch context"));
             }
             match fork.mode {
                 ForkMode::NewSeatFullSnapshot => {
-                    descriptor.session.resume.require("snapshot target resume")?;
-                    let backing = fork.target_backing.as_ref().ok_or(ContractError::Invalid("snapshot target path"))?;
+                    descriptor
+                        .session
+                        .resume
+                        .require("snapshot target resume")?;
+                    let backing = fork
+                        .target_backing
+                        .as_ref()
+                        .ok_or(ContractError::Invalid("snapshot target path"))?;
                     if backing.root() != request.paths.runtime_root.as_path() {
                         return Err(ContractError::Mismatch("snapshot target root"));
                     }
                     ExpectedSession::SnapshotTarget {
-                        session: fork.target_native_session.clone().ok_or(ContractError::Invalid("snapshot target session"))?,
-                        backing: backing.clone(), parent: fork.source.native_session.clone(),
+                        session: fork
+                            .target_native_session
+                            .clone()
+                            .ok_or(ContractError::Invalid("snapshot target session"))?,
+                        backing: backing.clone(),
+                        parent: fork.source.native_session.clone(),
                     }
                 }
-                ForkMode::NativeNewSeat => ExpectedSession::CaptureAfterNativeFork { parent: fork.source.native_session.clone() },
-                ForkMode::InWindowBranch => return Err(ContractError::Invalid("in-window branch does not launch a seat")),
+                ForkMode::NativeNewSeat => ExpectedSession::CaptureAfterNativeFork {
+                    parent: fork.source.native_session.clone(),
+                },
+                ForkMode::InWindowBranch => {
+                    return Err(ContractError::Invalid(
+                        "in-window branch does not launch a seat",
+                    ))
+                }
             }
         }
         _ => return Err(ContractError::Invalid("launch operation")),
     };
-    Ok(ResolvedLaunch { request: request.clone(), provider, model, effort, expected_session })
+    Ok(ResolvedLaunch {
+        request: request.clone(),
+        provider,
+        model,
+        effort,
+        expected_session,
+    })
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -377,8 +444,14 @@ pub enum ExpectedSession {
     CaptureAfterLaunch,
     Resume(Box<ResumeBinding>),
     /// Allocated expectation, not a fabricated pre-spawn capture or restart binding.
-    SnapshotTarget { session: NativeSessionId, backing: OwnedPath, parent: NativeSessionId },
-    CaptureAfterNativeFork { parent: NativeSessionId },
+    SnapshotTarget {
+        session: NativeSessionId,
+        backing: OwnedPath,
+        parent: NativeSessionId,
+    },
+    CaptureAfterNativeFork {
+        parent: NativeSessionId,
+    },
     NotApplicable,
 }
 
