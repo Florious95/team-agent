@@ -1,8 +1,8 @@
-# Team Agent Contract — K1
+# Team Agent Contract — K1 / K2
 
-独立的、仅依赖 Rust 标准库的契约 library。此包是自己的 nested Cargo workspace；不加入旧 workspace，不依赖旧 `team-agent` crate，不注册任何 provider，也不提供 executable。
+此包是独立 nested Cargo workspace，不加入旧 workspace、不依赖旧 `team-agent` crate、不注册 provider，也不提供 executable。`contract` 保持纯函数；K2 的 `host` / `runtime` 增加受限 OS/tmux、唯一物理 executor、journal 和探针采集，保持 `unsafe_code=forbid`。
 
-**当前不是 Kiro 适配器或可运行 Team。** 没有 Kiro profile、默认 provider、Host executor、store、MCP server、CLI、真实 Fork 事务或原生验收。测试中的 `fixture` 不是 Kiro。
+**当前不是 Kiro 适配器或可运行 Team。** 没有 Kiro profile、默认 provider、store、MCP server、supervisor、CLI、真实 Fork 事务或原生 Kiro 验收。测试中的 `fixture` 不是 Kiro。K2 的边界、调用链与验证准备见 [物理执行器指南](docs/physical-executor.md)。
 
 设计输入：黄金 [`provider-contract-spec.md`](../../docs/reference/provider-contract-spec.md)，以及 Kiro 独立框架任务书的 K1 边界。旧六家、根 manifest/lockfile 与所有既有 tracked 文件必须保持不变。
 
@@ -51,7 +51,7 @@ Full snapshot 的目标 SID/path 由框架预分配。`ExpectedSession::Snapshot
 
 ### 后续 owner 的硬边界
 
-K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；K3 实现 store/lifecycle/MCP/Fork 事务；K4 才能添加经 R0 验证的 Kiro descriptor/hooks/profile。K1 的 port/receipt 类型不是这些实现的替代品。
+K2 已增加 Host/IO/唯一 executor、采样和 journal，实际验证状态随 PR 收据记录；K3 仍需实现 store/lifecycle/MCP/Fork 事务；K4 才能添加经 R0 验证的 Kiro descriptor/hooks/profile。K1/K2 不替代这些后续实现。
 
 资源写入收据区分 `ResourceWriteEffect::Written { bytes_sha256 }` 与 `MayHaveWritten`。写入可能发生但观测/hash 失败时，PartialFailure 必须保留该路径与可能 effects，不填虚构 hash 或返回空收据。Fork stage validator 拒绝任何不确定写入（包括 backing 以外的辅助文件），不把它升级成完整 snapshot；已有收据也不是后续删除授权。
 
@@ -62,6 +62,11 @@ K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；K3 实现
 Cargo/rustc/rustfmt/clippy 仅在 Grok Bot 或授权 CI 执行（Rust 1.95）。首次在该环境生成并提交本包 lockfile；后续使用 `--locked`：
 
 ```sh
+# 准备者只在 Grok / 授权 CI 核定这些绝对路径；受控 fixture 不是 Kiro。
+export CONTRACT_TMUX="$(command -v tmux)"
+export CONTRACT_PYTHON="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+export CONTRACT_OLD_SCOPE=fixture-old-scope
+export TEAM_AGENT_K2_FOREIGN_PROBE=fixture-foreign-team
 cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets
 cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings
 cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check

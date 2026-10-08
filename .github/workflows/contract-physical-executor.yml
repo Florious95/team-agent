@@ -1,0 +1,94 @@
+name: Contract physical executor (controlled macOS fixtures)
+
+on:
+  pull_request:
+    paths:
+      - "crates/team-agent-contract/**"
+      - ".github/workflows/contract-physical-executor.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-fixtures:
+    runs-on: macos-14
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
+      CONTRACT_OLD_SCOPE: "fixture-old-scope"
+      TEAM_AGENT_K2_FOREIGN_PROBE: "fixture-foreign-team"
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CARGO_TARGET_DIR: ${{ runner.temp }}/contract-physical-target
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare fixed toolchain and controlled fixture executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          if ! command -v tmux >/dev/null; then brew install tmux; fi
+          printf 'CONTRACT_TMUX=%s\n' "$(command -v tmux)" >> "$GITHUB_ENV"
+          printf 'CONTRACT_PYTHON=%s\n' "$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')" >> "$GITHUB_ENV"
+          mkdir contract-evidence
+          git rev-parse HEAD 'HEAD^{tree}' > contract-evidence/source.txt
+          rustc -vV > contract-evidence/toolchain.txt
+          cargo --version >> contract-evidence/toolchain.txt
+          tmux -V >> contract-evidence/toolchain.txt
+          python3 --version >> contract-evidence/toolchain.txt
+      - name: Execute contract and real-tmux fake-process tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --nocapture 2>&1 | tee contract-evidence/test.log
+          statuses=("${PIPESTATUS[@]}")
+          printf '%s\n' "${statuses[0]}" > contract-evidence/test.exit
+          test "${statuses[1]}" -eq 0 || exit 125
+          exit "${statuses[0]}"
+      - name: Clippy
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo clippy --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- -D warnings 2>&1 | tee contract-evidence/clippy.log
+          statuses=("${PIPESTATUS[@]}")
+          printf '%s\n' "${statuses[0]}" > contract-evidence/clippy.exit
+          test "${statuses[1]}" -eq 0 || exit 125
+          exit "${statuses[0]}"
+      - name: Format and legacy byte-freeze
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path crates/team-agent-contract/Cargo.toml --check
+          git diff --exit-code
+          python3 - <<'PY'
+          import json, subprocess
+          def entries(ref):
+              return {p: m for row in subprocess.check_output(['git','ls-tree','-rz',ref]).split(b'\0') if row for m,p in [row.split(b'\t',1)]}
+          base=entries('508f37bf8884f6c4c6288ae00bab2938d9300ed3')
+          head=entries('HEAD')
+          changed=[p.decode() for p,m in base.items() if head.get(p)!=m]
+          proof={'baseline_entries':len(base),'changed':changed}
+          print(json.dumps(proof))
+          assert not changed
+          with open('contract-evidence/byte-freeze.json','w') as f: json.dump(proof,f)
+          PY
+      - name: Preserve exact logs and receipt hashes
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d contract-evidence; then
+            (cd contract-evidence && shasum -a 256 ./* > artifact-sha256.txt)
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: contract-physical-${{ github.run_id }}-${{ github.run_attempt }}
+          path: contract-evidence/
+          if-no-files-found: error
+          retention-days: 14
