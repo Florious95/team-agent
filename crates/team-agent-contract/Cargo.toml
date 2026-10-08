@@ -1,0 +1,21 @@
+[package]
+name = "team-agent-contract"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "AGPL-3.0"
+description = "Isolated, provider-neutral Team Agent adaptation contracts"
+publish = false
+
+# Deliberately independent of the legacy workspace and its lockfile.
+[workspace]
+resolver = "2"
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
