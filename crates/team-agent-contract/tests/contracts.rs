@@ -1254,7 +1254,7 @@ fn staged_snapshot(fork: &ResolvedFork) -> NativeForkPlan {
                 operation: r.operation_id.clone(),
                 kind: ResourceKind::SessionBacking,
                 disposition: ResourceDisposition::OwnedPreserved,
-                bytes_sha256: POLICY_HASH,
+                write_effect: ResourceWriteEffect::Written { bytes_sha256: POLICY_HASH },
                 exclusive: true,
             }],
         },
@@ -1378,7 +1378,7 @@ fn snapshot_stage_requires_exact_binding_owned_receipt_and_backing_digest() {
     assert!(validate_native_fork_plan(&fork, &bad).is_err());
     bad = original;
     if let NativeForkPlan::FullSnapshot { staging, .. } = &mut bad {
-        staging.resources[0].bytes_sha256 = HASH;
+        staging.resources[0].write_effect = ResourceWriteEffect::Written { bytes_sha256: HASH };
     }
     assert!(validate_native_fork_plan(&fork, &bad).is_err());
 }
@@ -1462,6 +1462,33 @@ fn terminal_policy_rejects_rpc_and_worker_input_still_requires_h6_without_startu
         resolve_launch(&d, &h, &r, Some(&catalog())),
         Err(ContractError::MissingHook("H6 InteractionHook"))
     ));
+}
+
+#[test]
+fn uncertain_writes_remain_in_partial_receipts_and_never_complete_snapshot_stage() {
+    let d = fork_descriptor();
+    let fork = resolve_fork(&d, &hooks(), &new_seat_fork(ForkMode::NewSeatFullSnapshot)).unwrap();
+    for auxiliary in [false, true] {
+        let mut plan = staged_snapshot(&fork);
+        if let NativeForkPlan::FullSnapshot { staging, .. } = &mut plan {
+            if auxiliary {
+                let mut uncertain = staging.resources[0].clone();
+                uncertain.path = OwnedPath::new(request().paths.runtime_root, "sidecar".into()).unwrap();
+                uncertain.kind = ResourceKind::Prompt;
+                uncertain.disposition = ResourceDisposition::OwnedRemovable;
+                uncertain.write_effect = ResourceWriteEffect::MayHaveWritten;
+                staging.resources.push(uncertain);
+            } else {
+                staging.resources[0].write_effect = ResourceWriteEffect::MayHaveWritten;
+            }
+            let failure = PartialFailure {
+                error: ContractError::Invalid("write observation failed"),
+                receipt: staging.clone(),
+            };
+            assert!(failure.receipt.resources.iter().any(|r| r.write_effect == ResourceWriteEffect::MayHaveWritten));
+        }
+        assert_eq!(validate_native_fork_plan(&fork, &plan), Err(ContractError::Invalid("snapshot stage has uncertain writes")));
+    }
 }
 
 #[test]

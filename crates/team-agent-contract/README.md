@@ -53,6 +53,8 @@ Full snapshot 的目标 SID/path 由框架预分配。`ExpectedSession::Snapshot
 
 K2 实现真正有界的 Host/IO/唯一 executor、采样和 journal；K3 实现 store/lifecycle/MCP/Fork 事务；K4 才能添加经 R0 验证的 Kiro descriptor/hooks/profile。K1 的 port/receipt 类型不是这些实现的替代品。
 
+资源写入收据区分 `ResourceWriteEffect::Written { bytes_sha256 }` 与 `MayHaveWritten`。写入可能发生但观测/hash 失败时，PartialFailure 必须保留该路径与可能 effects，不填虚构 hash 或返回空收据。Fork stage validator 拒绝任何不确定写入（包括 backing 以外的辅助文件），不把它升级成完整 snapshot；已有收据也不是后续删除授权。
+
 `OwnedPath` 只有 lexical 约束，不证明没有 symlink、并发 writer 或复用 PID。实际端口必须按自身 captured grant 核 root/owner/generation、no-follow/exclusive-create、输出/deadline 和 partial effects；不能把传入对象视作权限。常规物化不允许 global settings/native database。清场还需 fresh ownership/CAS/共享资源判断，不能仅凭 `OwnedRemovable` 删除。
 
 ## 验证

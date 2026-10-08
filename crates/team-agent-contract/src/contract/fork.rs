@@ -3,7 +3,7 @@ use super::descriptor::{
     AuthMode, ProviderDescriptor, ResourceDisposition, ResourceKind, ResumeMode,
 };
 use super::hooks::ProviderHooks;
-use super::plan::MaterializeReceipt;
+use super::plan::{MaterializeReceipt, ResourceWriteEffect};
 use super::session::{
     validate_resume, CaptureOrigin, CwdIdentity, NativeSessionId, ResumeBinding, ResumeExpectation,
 };
@@ -243,6 +243,10 @@ pub fn validate_native_fork_plan(
             let mut paths = Vec::new();
             let mut has_backing = false;
             for resource in &staging.resources {
+                let bytes_sha256 = match resource.write_effect {
+                    ResourceWriteEffect::Written { bytes_sha256 } => bytes_sha256,
+                    ResourceWriteEffect::MayHaveWritten => return Err(ContractError::Invalid("snapshot stage has uncertain writes")),
+                };
                 if resource.owner != request.target
                     || resource.operation != request.operation_id
                     || resource.path.root() != path.root()
@@ -262,7 +266,7 @@ pub fn validate_native_fork_plan(
                 if &resource.path == path {
                     if resource.kind != ResourceKind::SessionBacking
                         || resource.disposition != ResourceDisposition::OwnedPreserved
-                        || resource.bytes_sha256 != target.evidence_sha256
+                        || bytes_sha256 != target.evidence_sha256
                     {
                         return Err(ContractError::Mismatch("snapshot backing receipt"));
                     }
