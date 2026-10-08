@@ -220,6 +220,29 @@ pub struct InputFacet {
     pub profiles: Support<&'static [InputProfile]>,
 }
 
+impl InputFacet {
+    /// Terminal policy selection, not native acceptance. RPC is a separate, zero-key route.
+    pub fn resolve(
+        &self, native: &NativeIdentity, profile_id: &str, operation: Operation, channel: Channel,
+    ) -> Result<&'static InputProfile, ContractError> {
+        native.validate()?;
+        if channel != Channel::Tmux {
+            return Err(ContractError::Unsupported {
+                field: "terminal channel",
+                reason: Reason { code: "not-a-tmux-channel", message: "This terminal contract does not execute RPC or direct stdin" },
+            });
+        }
+        let profiles = *self.profiles.require("input profiles")?;
+        let mut matches = profiles.iter().filter(|profile| profile.id == profile_id
+            && profile.matches_native(native) && profile.channel == channel
+            && profile.operations.contains(&operation));
+        let profile = matches.next().ok_or(ContractError::ProfileUnavailable)?;
+        if matches.next().is_some() { return Err(ContractError::AmbiguousProfile); }
+        profile.policy.require("input profile")?.validate()?;
+        Ok(profile)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartupFacet {
     pub interactive: bool,
@@ -426,6 +449,9 @@ pub fn validate_descriptor(
             }
             ids.push(profile.id);
             if let Support::Supported(policy) = &profile.policy {
+                if profile.channel != Channel::Tmux {
+                    return Err(ContractError::Invalid("nonterminal submit profile"));
+                }
                 policy.validate()?;
             }
         }
@@ -507,7 +533,7 @@ pub fn validate_descriptor(
             | Operation::StartupBypassAck
             | Operation::SessionInspect
             | Operation::InWindowBranch
-    ) || (matches!(operation, Operation::Fresh | Operation::Resume) && d.startup.interactive)
+    ) || (matches!(operation, Operation::Fresh | Operation::Resume | Operation::NewSeatFullSnapshot | Operation::NativeNewSeat) && d.startup.interactive)
     {
         hooks.interaction.require("H6 InteractionHook")?;
     }

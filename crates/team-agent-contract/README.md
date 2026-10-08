@@ -29,7 +29,10 @@
 2. `resolve_launch` 校验 descriptor/bindings、绝对路径、catalog/native identity、model/effort、auth/bypass、完整 worker 的 prompt/MCP/profile，以及 fresh/resume 的互斥。
 3. H2 `PlanHook::plan(&ResolvedLaunch)` 只产生计划；随后必须调用 `validate_launch_plan`。H2 不拥有时钟、ID 分配、物化、shell quoting 或 spawn。
 4. 后续生命周期再把 owned requests 交 H3/框架端口。`Specified` 只证明计划报告了载体位置，不等于 Materialized 或 NativeConsumed。
-5. 输入前用 `resolve_submit_policy` 固定 operation/channel/native/profile/证据引用，使用当前 probes 判定业务输入资格。Native control/startup 使用独立 operation guard，但必须由 K2 的同一物理 executor 执行。
+5. 输入前用 `resolve_submit_policy` 固定 operation/channel/native/profile/证据引用，使用当前 probes 判定业务输入资格。Native control/startup 使用独立 operation guard，但必须由 K2 的同一物理 executor 执行。terminal policy 不接受 ACP/direct stdin；RPC 必须是独立的零按键路径，当前包未实现。
+6. Fork 的 F0 先 `resolve_fork`；新席把 sealed `ResolvedFork` 传给普通 `resolve_launch` / H2，**在 H7 写任何文件前**检查目标 model/effort/MCP 和 launch plan。H7 只返回 backing/intent，不包含 `LaunchPlan` 或 argv；其结果须通过 `validate_native_fork_plan`，随后 K3 才可 register/spawn。validator 失败不能抹掉已发生的 staging effects，调用方须保留 plan/owned-I/O journal。
+
+Full snapshot 的目标 SID/path 由框架预分配。`ExpectedSession::SnapshotTarget` 只是预期，不伪造捕获过的 ResumeBinding；H7 返回的 ExactBacking binding、owner/generation、operation、独占 backing receipt/hash 必须一致。新席首次启动使用已分配的 target generation，不冒充 restart；普通 `Resume` 仍要求比 source 更晚的 generation。`NativeNewSeat` 预期捕获不同于 parent 的 child SID，不等于恢复 parent；InWindowBranch 不走 launch 路径。
 
 `FullWorker` 不能静默降成 `LaunchOnly`。模型 ID 原样保留，ExactCatalogId 只做精确匹配；opaque ID 只能在 descriptor 明确声明时使用。effort 的统一语法只允许六个小写值，按黄金规范允许外围 whitespace trim，不降档或改写未知值。team 默认值只有 `inherit_team_default=true` 才继承；Ignore 必须有理由并反映到 carrier report。
 
@@ -42,7 +45,7 @@
 - H6 只解释传入的 frame/baseline/current typed identity/paste latch，不保存全局 attempt 状态。业务正文里的 token 不能重新定义 message ID。
 - `DeliveryEffect::retain_floor` 单调保留已达 effect。未来 executor/journal 必须实际应用它：post-key timeout、observer/persistence failure 不能降成 NoEffect 或重贴。
 - Probe 的 Observed/Pending/Negative/Unknown/Unsupported/TimedOut/Error 保留区别；没有由一个层级隐式转换成另一层的 API。
-- 业务 gate 要求当前 T1、确切 composer、当前 tool binding。显式的一次 FirstBusiness bootstrap 只豁免 Pending/Unknown binding；不能绕过 process/composer/freshness 失败。返回 `consume_bootstrap` 是状态持久化方的责任，不会在纯函数里消费或自动续发。
+- 业务 gate 要求当前 T1、确切 composer、当前 tool binding；K2 的组合 startup gate 还须应用 profile 所需 server/startup 门与当前反证，不能丢弃未传给此函数的分层事实。显式的一次 FirstBusiness bootstrap 只豁免 Pending/Unknown binding；不能绕过 process/composer/freshness 失败。返回 `consume_bootstrap` 是状态持久化方的责任，不会在纯函数里消费或自动续发。
 - T3c 不参与首条消息输入 gate，避免等待自己的回复。server invocation、response write、client consumption、caller presentation 是不同 facts，不能以排序自动推导。
 - `CapabilityEvidence` 是外部证据的 scoped reference，不是这个 library 签发的真实性证明。policy resolver 检查版本/engine/UI/OS/binary/profile/candidate/operation/channel/evidence kind 的一致性；它不读取证据文件，也不能把 fixture 变成 native 验收。
 

@@ -20,6 +20,12 @@ const NO: Reason = Reason {
 const HASH: Digest = Digest([1; 32]);
 const POLICY_HASH: Digest = Digest([2; 32]);
 const CANDIDATE_HASH: Digest = Digest([3; 32]);
+static CONFIRMATIONS: [ConfirmationStep; 1] = [ConfirmationStep {
+    predicate: "current-confirmation", key: PhysicalKey::Enter, deadline: Duration::from_millis(100),
+}];
+static QUEUE_ACTIONS: [QueueAction; 1] = [QueueAction {
+    predicate: "current-queue", key: PhysicalKey::Enter, max_presses: 8, interval: Duration::from_millis(10),
+}];
 static PROFILES: [InputProfile; 1] = [InputProfile {
     id: "fixture-tui",
     version: "1.0",
@@ -209,6 +215,17 @@ impl PlanHook for Fixture {
                 CarrierUse::Specified(CarrierRef::Arguments(vec![index, index + 1]))
             }
         };
+        match resolved.expected_session() {
+            ExpectedSession::SnapshotTarget { backing, .. } => {
+                arguments.push("--resume-path".into());
+                arguments.push(backing.path().into_os_string());
+            }
+            ExpectedSession::CaptureAfterNativeFork { parent } => {
+                arguments.push("--fork-parent".into());
+                arguments.push(parent.as_str().into());
+            }
+            _ => {},
+        }
         Ok(LaunchPlan {
             executable: request.paths.executable.clone(),
             arguments,
@@ -217,11 +234,7 @@ impl PlanHook for Fixture {
                 remove: BTreeSet::new(),
                 set: BTreeMap::new(),
             },
-            expected_session: request
-                .resume
-                .as_ref()
-                .map(|r| ExpectedSession::Resume(Box::new(r.binding.clone())))
-                .unwrap_or(ExpectedSession::CaptureAfterLaunch),
+            expected_session: resolved.expected_session().clone(),
             materialization: vec![],
             carriers: CarrierReport {
                 model,
@@ -354,6 +367,7 @@ fn request() -> LaunchRequest {
         evidence_kind: EvidenceKind::Fixture,
         preassigned_session: None,
         resume: None,
+        fork: None,
     }
 }
 fn catalog() -> CatalogObservation {
@@ -668,11 +682,7 @@ fn ownership_paths_and_resource_classification_fail_closed() {
 fn submit_budgets_separate_confirmation_retry_wrap_and_queue() {
     let mut p = policy();
     assert_eq!(p.key_upper_bound(), Ok(1));
-    p.confirmation_steps = &[ConfirmationStep {
-        predicate: "current-confirmation",
-        key: PhysicalKey::Enter,
-        deadline: Duration::from_millis(100),
-    }];
+    p.confirmation_steps = &CONFIRMATIONS;
     p.max_submit_keys = 2;
     assert_eq!(p.key_upper_bound(), Ok(2));
     assert!(p.validate().is_ok());
@@ -683,12 +693,7 @@ fn submit_budgets_separate_confirmation_retry_wrap_and_queue() {
     };
     assert!(p.validate().is_err());
     p.confirmation_steps = &[];
-    p.queue_flush = &[QueueAction {
-        predicate: "current-queue",
-        key: PhysicalKey::Enter,
-        max_presses: 8,
-        interval: Duration::from_millis(10),
-    }];
+    p.queue_flush = &QUEUE_ACTIONS;
     p.max_submit_keys = 12;
     assert_eq!(p.key_upper_bound(), Ok(12));
     assert!(p.validate().is_ok());
@@ -824,6 +829,10 @@ fn fork_request(mode: ForkMode) -> ForkRequest {
         source: binding(),
         expected_source: identity(),
         target: identity(),
+        target_native_session: None,
+        target_backing: None,
+        channel: Channel::Tmux,
+        input_profile: Some("fixture-tui".into()),
         cwd: request().paths.cwd,
         native: native(),
         evidence_kind: EvidenceKind::Fixture,
@@ -1189,6 +1198,168 @@ fn independent_protocol_facts_are_preserved_when_process_probe_fails() {
             .facts
             .contains(&RoundTripFact::ClientConsumptionObserved));
     }
+}
+
+fn new_seat_fork(mode: ForkMode) -> ForkRequest {
+    let mut r = fork_request(mode);
+    r.target.seat = SeatId::new("child-seat").unwrap();
+    r.target.instance = InstanceId::new("child-instance").unwrap();
+    r.selected_turn = None;
+    if mode == ForkMode::NewSeatFullSnapshot {
+        r.source.backing = Some("/tmp/source/session.jsonl".into());
+        r.target_native_session = Some(NativeSessionId::new("native-child").unwrap());
+        r.target_backing = Some(OwnedPath::new(request().paths.runtime_root, "child/session.jsonl".into()).unwrap());
+    }
+    r
+}
+
+fn fork_descriptor() -> ProviderDescriptor {
+    let mut d = descriptor();
+    d.fork.full_snapshot = Support::Supported(());
+    d.fork.native_new_seat = Support::Supported(());
+    d
+}
+
+fn fork_launch(fork: &ResolvedFork) -> LaunchRequest {
+    let mut r = request();
+    r.operation = fork.request().mode.operation();
+    r.identity = fork.request().target.clone();
+    r.fork = Some(Box::new(fork.clone()));
+    r
+}
+
+fn staged_snapshot(fork: &ResolvedFork) -> NativeForkPlan {
+    let r = fork.request();
+    let path = r.target_backing.clone().unwrap();
+    let mut target = r.source.clone();
+    target.source = r.target.clone();
+    target.native_session = r.target_native_session.clone().unwrap();
+    target.backing = Some(path.path());
+    target.origin = CaptureOrigin::ExactBacking;
+    target.evidence_sha256 = POLICY_HASH;
+    NativeForkPlan::FullSnapshot {
+        source: Box::new(r.source.clone()), target: Box::new(target),
+        staging: MaterializeReceipt { resources: vec![OwnedResourceReceipt {
+            path, owner: r.target.clone(), operation: r.operation_id.clone(),
+            kind: ResourceKind::SessionBacking, disposition: ResourceDisposition::OwnedPreserved,
+            bytes_sha256: POLICY_HASH, exclusive: true,
+        }] },
+    }
+}
+
+#[test]
+fn fork_launch_preflight_uses_only_h2_without_staging_or_false_restart() {
+    let d = fork_descriptor();
+    let fork = resolve_fork(&d, &hooks(), &new_seat_fork(ForkMode::NewSeatFullSnapshot)).unwrap();
+    let r = fork_launch(&fork);
+    // H7 fixture always returns an error; this successful F0/H2 path cannot have called it.
+    let launch = resolve_launch(&d, &hooks(), &r, Some(&catalog())).unwrap();
+    assert_eq!(launch.request().identity.generation, fork.request().target.generation);
+    assert!(matches!(launch.expected_session(), ExpectedSession::SnapshotTarget { .. }));
+    let p = FIXTURE.plan(&launch).unwrap();
+    assert!(p.arguments.contains(&OsString::from("--resume-path")));
+    assert!(p.arguments.contains(&fork.request().target_backing.as_ref().unwrap().path().into_os_string()));
+    assert!(validate_launch_plan(&d, &launch, &p).is_ok());
+}
+
+#[test]
+fn snapshot_target_allocation_is_distinct_and_not_a_turn_branch() {
+    let d = fork_descriptor();
+    let original = new_seat_fork(ForkMode::NewSeatFullSnapshot);
+    let mut r = original.clone(); r.target_native_session = None;
+    assert!(resolve_fork(&d, &hooks(), &r).is_err());
+    r = original.clone(); r.target_backing = None;
+    assert!(resolve_fork(&d, &hooks(), &r).is_err());
+    r = original.clone(); r.target_native_session = Some(r.source.native_session.clone());
+    assert!(resolve_fork(&d, &hooks(), &r).is_err());
+    r = original.clone(); r.target_backing = Some(OwnedPath::new("/tmp/source".into(), "session.jsonl".into()).unwrap());
+    assert!(resolve_fork(&d, &hooks(), &r).is_err());
+    r = original; r.selected_turn = Some(1);
+    assert!(resolve_fork(&d, &hooks(), &r).is_err());
+}
+
+#[test]
+fn fork_launch_rejects_missing_mixed_or_mismatched_context_before_staging() {
+    let d = fork_descriptor();
+    let fork = resolve_fork(&d, &hooks(), &new_seat_fork(ForkMode::NewSeatFullSnapshot)).unwrap();
+    let original = fork_launch(&fork);
+    let mut r = original.clone(); r.fork = None;
+    assert!(resolve_launch(&d, &hooks(), &r, Some(&catalog())).is_err());
+    r = original.clone(); r.operation = Operation::Fresh;
+    assert!(resolve_launch(&d, &hooks(), &r, Some(&catalog())).is_err());
+    r = original.clone(); r.mode = LaunchMode::LaunchOnly;
+    assert!(resolve_launch(&d, &hooks(), &r, Some(&catalog())).is_err());
+    r = original.clone(); r.identity.generation = Generation(2);
+    assert!(resolve_launch(&d, &hooks(), &r, Some(&catalog())).is_err());
+    r = original.clone(); r.resume = Some(ResumeRequest { binding: binding(), expected_source: identity() });
+    assert!(resolve_launch(&d, &hooks(), &r, Some(&catalog())).is_err());
+    r = original.clone(); r.paths.runtime_root = "/wrong-root".into();
+    assert!(resolve_launch(&d, &hooks(), &r, Some(&catalog())).is_err());
+    r = original; r.model = Some("unknown-model".into());
+    assert!(matches!(resolve_launch(&d, &hooks(), &r, Some(&catalog())), Err(ContractError::UnknownModel)));
+}
+
+#[test]
+fn snapshot_stage_requires_exact_binding_owned_receipt_and_backing_digest() {
+    let d = fork_descriptor();
+    let fork = resolve_fork(&d, &hooks(), &new_seat_fork(ForkMode::NewSeatFullSnapshot)).unwrap();
+    let original = staged_snapshot(&fork);
+    assert!(validate_native_fork_plan(&fork, &original).is_ok());
+    let mut bad = original.clone();
+    if let NativeForkPlan::FullSnapshot { staging, .. } = &mut bad { staging.resources.clear(); }
+    assert!(validate_native_fork_plan(&fork, &bad).is_err());
+    bad = original.clone();
+    if let NativeForkPlan::FullSnapshot { target, .. } = &mut bad { target.native_session = NativeSessionId::new("wrong-child").unwrap(); }
+    assert!(validate_native_fork_plan(&fork, &bad).is_err());
+    bad = original.clone();
+    if let NativeForkPlan::FullSnapshot { target, .. } = &mut bad { target.origin = CaptureOrigin::CurrentNativeSession; }
+    assert!(validate_native_fork_plan(&fork, &bad).is_err());
+    bad = original.clone();
+    if let NativeForkPlan::FullSnapshot { staging, .. } = &mut bad { staging.resources[0].owner = identity(); }
+    assert!(validate_native_fork_plan(&fork, &bad).is_err());
+    bad = original.clone();
+    if let NativeForkPlan::FullSnapshot { staging, .. } = &mut bad { staging.resources[0].exclusive = false; }
+    assert!(validate_native_fork_plan(&fork, &bad).is_err());
+    bad = original;
+    if let NativeForkPlan::FullSnapshot { staging, .. } = &mut bad { staging.resources[0].bytes_sha256 = HASH; }
+    assert!(validate_native_fork_plan(&fork, &bad).is_err());
+}
+
+#[test]
+fn in_window_stage_cannot_become_a_new_seat_or_exit_command() {
+    let d = descriptor();
+    let fork = resolve_fork(&d, &hooks(), &fork_request(ForkMode::InWindowBranch)).unwrap();
+    assert!(validate_native_fork_plan(&fork, &NativeForkPlan::InWindow { control: NativeControl::BranchToTurn(1) }).is_ok());
+    assert!(validate_native_fork_plan(&fork, &NativeForkPlan::InWindow { control: NativeControl::Exit }).is_err());
+    assert!(validate_native_fork_plan(&fork, &NativeForkPlan::InWindow { control: NativeControl::BranchCurrent }).is_err());
+    assert!(resolve_launch(&d, &hooks(), &fork_launch(&fork), Some(&catalog())).is_err());
+    let mut d = descriptor(); d.input.profiles = Support::Unverified(NO);
+    assert!(matches!(resolve_fork(&d, &hooks(), &fork_request(ForkMode::InWindowBranch)), Err(ContractError::Unverified { .. })));
+}
+
+#[test]
+fn native_new_seat_plans_parent_argument_but_does_not_resume_parent() {
+    let d = fork_descriptor();
+    let fork = resolve_fork(&d, &hooks(), &new_seat_fork(ForkMode::NativeNewSeat)).unwrap();
+    let stage = NativeForkPlan::NativeNewSeat { source: Box::new(fork.request().source.clone()), target: fork.request().target.clone() };
+    assert!(validate_native_fork_plan(&fork, &stage).is_ok());
+    let launch = resolve_launch(&d, &hooks(), &fork_launch(&fork), Some(&catalog())).unwrap();
+    assert_eq!(launch.expected_session(), &ExpectedSession::CaptureAfterNativeFork { parent: fork.request().source.native_session.clone() });
+    let mut p = FIXTURE.plan(&launch).unwrap();
+    assert!(p.arguments.contains(&OsString::from("--fork-parent")));
+    assert!(validate_launch_plan(&d, &launch, &p).is_ok());
+    p.expected_session = ExpectedSession::Resume(Box::new(fork.request().source.clone()));
+    assert!(validate_launch_plan(&d, &launch, &p).is_err());
+}
+
+#[test]
+fn terminal_policy_rejects_rpc_and_worker_input_still_requires_h6_without_startup_modals() {
+    let d = descriptor();
+    assert!(matches!(d.input.resolve(&native(), "fixture-tui", Operation::OrdinarySend, Channel::Acp), Err(ContractError::Unsupported { .. })));
+    let mut d = descriptor(); d.startup.interactive = false;
+    let mut h = hooks(); h.interaction = HookBinding::NotRequired(NO);
+    let mut r = request(); r.bypass = false;
+    assert!(matches!(resolve_launch(&d, &h, &r, Some(&catalog())), Err(ContractError::MissingHook("H6 InteractionHook"))));
 }
 
 #[test]

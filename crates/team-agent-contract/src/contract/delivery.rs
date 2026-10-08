@@ -232,17 +232,7 @@ pub fn resolve_submit_policy<'a>(
     if request.provider != descriptor.identity.id {
         return Err(ContractError::UnknownProvider);
     }
-    let profiles = descriptor.input.profiles.require("input profiles")?;
-    let mut matches = profiles.iter().filter(|profile| {
-        profile.id == request.profile_id
-            && profile.matches_native(request.native)
-            && profile.channel == request.channel
-            && profile.operations.contains(&request.operation)
-    });
-    let profile = matches.next().ok_or(ContractError::ProfileUnavailable)?;
-    if matches.next().is_some() {
-        return Err(ContractError::AmbiguousProfile);
-    }
+    let profile = descriptor.input.resolve(request.native, request.profile_id, request.operation, request.channel)?;
     let policy = profile.policy.require("input profile")?;
     let evidence = request.evidence;
     if evidence.provider.as_str() != request.provider
