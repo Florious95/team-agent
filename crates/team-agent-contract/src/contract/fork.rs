@@ -245,7 +245,11 @@ pub fn validate_native_fork_plan(
             for resource in &staging.resources {
                 let bytes_sha256 = match resource.write_effect {
                     ResourceWriteEffect::Written { bytes_sha256 } => bytes_sha256,
-                    ResourceWriteEffect::MayHaveWritten => return Err(ContractError::Invalid("snapshot stage has uncertain writes")),
+                    ResourceWriteEffect::MayHaveWritten => {
+                        return Err(ContractError::Invalid(
+                            "snapshot stage has uncertain writes",
+                        ))
+                    }
                 };
                 if resource.owner != request.target
                     || resource.operation != request.operation_id
