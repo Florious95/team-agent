@@ -397,6 +397,25 @@ fn same_workspace(left: &Path, right: &Path) -> bool {
         == std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf())
 }
 
+fn quick_start_tmux_endpoints_match(bound: &str, endpoint: &str) -> bool {
+    if bound == endpoint {
+        return true;
+    }
+    // A workspace transport uses a short `-L` name, while the native launcher
+    // persists an absolute `-S` path. Compare full resolved paths, never basenames.
+    let socket_path = |value: &str| {
+        let path = if Path::new(value).is_absolute() {
+            Some(PathBuf::from(value))
+        } else {
+            crate::tmux_backend::socket_path_for_name(value)
+        };
+        path.map(|path| crate::state::owner_gate::realpath_like(&path))
+    };
+    socket_path(bound)
+        .zip(socket_path(endpoint))
+        .is_some_and(|(bound, endpoint)| bound == endpoint)
+}
+
 fn persisted_binding_matches_verified_pane(
     state: &serde_json::Value,
     workspace: &Path,
@@ -455,7 +474,7 @@ fn persisted_binding_matches_verified_pane(
         && receiver
             .get("tmux_socket")
             .and_then(serde_json::Value::as_str)
-            == Some(endpoint)
+            .is_some_and(|bound| quick_start_tmux_endpoints_match(bound, endpoint))
         && receiver
             .get("authorized_team_workspace")
             .and_then(serde_json::Value::as_str)
@@ -3045,6 +3064,114 @@ mod fresh_quick_start_leader_binding_tests {
             "owner_epoch": epoch,
             "tmux_socket": socket
         })
+    }
+
+    fn native_persisted_binding(workspace: &Path, socket: &str) -> serde_json::Value {
+        let uuid = "9e1ceba443966bc206a776a7c621e808";
+        json!({
+            "workspace": workspace,
+            "agents": {}, "tasks": [], "session_name": null,
+            "team_owner": complete_owner("%0", "pi", uuid, 1),
+            "leader_receiver": complete_receiver("%0", "pi", uuid, 1, socket)
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn native_persisted_binding_matches_workspace_short_socket_without_weakening_identity() {
+        let hermetic = HermeticTestEnv::enter("native-persisted-socket");
+        let workspace = hermetic.root();
+        let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+        let endpoint = transport.tmux_endpoint().unwrap();
+        let socket = crate::tmux_backend::socket_path_for_workspace(workspace).unwrap();
+        let state = native_persisted_binding(workspace, socket.to_str().unwrap());
+        let before = state.clone();
+        let pane = PaneId::new("%0");
+        assert_ne!(socket.to_str(), Some(endpoint.as_str()));
+        assert!(persisted_binding_matches_verified_pane(
+            &state, workspace, &pane, Provider::Pi, Some(&endpoint),
+        ));
+        assert_eq!(state, before);
+        assert!(!persisted_binding_matches_verified_pane(
+            &state, workspace, &PaneId::new("%1"), Provider::Pi, Some(&endpoint),
+        ));
+        assert!(!persisted_binding_matches_verified_pane(
+            &state, workspace, &pane, Provider::Codex, Some(&endpoint),
+        ));
+        for endpoint in [None, Some("")] {
+            assert!(!persisted_binding_matches_verified_pane(
+                &state, workspace, &pane, Provider::Pi, endpoint,
+            ));
+        }
+        for (field, value) in [
+            ("/team_owner/pane_id", json!("%1")),
+            ("/leader_receiver/pane_id", json!("%1")),
+            ("/team_owner/provider", json!("codex")),
+            ("/leader_receiver/provider", json!("codex")),
+            ("/team_owner/owner_epoch", json!(0)),
+            ("/leader_receiver/owner_epoch", json!(2)),
+            ("/team_owner/leader_session_uuid", json!("")),
+            ("/leader_receiver/leader_session_uuid", json!("foreign")),
+            ("/leader_receiver/status", json!("pending")),
+            ("/leader_receiver/mode", json!("external")),
+            ("/leader_receiver/tmux_socket", json!(null)),
+            ("/leader_receiver/tmux_socket", json!("")),
+            ("/workspace", json!(workspace.join("foreign"))),
+        ] {
+            let mut conflict = state.clone();
+            *conflict.pointer_mut(field).unwrap() = value;
+            assert!(!persisted_binding_matches_verified_pane(
+                &conflict, workspace, &pane, Provider::Pi, Some(&endpoint),
+            ), "conflicting {field} must refuse");
+        }
+        let mut unauthorized = state.clone();
+        unauthorized["leader_receiver"]["authorized_team_workspace"] =
+            json!(workspace.join("foreign"));
+        assert!(!persisted_binding_matches_verified_pane(
+            &unauthorized, workspace, &pane, Provider::Pi, Some(&endpoint),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn native_persisted_binding_rejects_same_socket_basename_in_foreign_root() {
+        let hermetic = HermeticTestEnv::enter("native-persisted-foreign-root");
+        let workspace = hermetic.root();
+        let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+        let endpoint = transport.tmux_endpoint().unwrap();
+        let foreign_socket = workspace.join("foreign-socket-root").join(&endpoint);
+        let state = native_persisted_binding(workspace, foreign_socket.to_str().unwrap());
+        assert_eq!(foreign_socket.file_name().unwrap().to_str(), Some(endpoint.as_str()));
+        assert!(!persisted_binding_matches_verified_pane(
+            &state, workspace, &PaneId::new("%0"), Provider::Pi, Some(&endpoint),
+        ));
+        assert!(!quick_start_tmux_endpoints_match(
+            foreign_socket.to_str().unwrap(), "default",
+        ));
+        assert!(!quick_start_tmux_endpoints_match(
+            foreign_socket.to_str().unwrap(), "",
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(env)]
+    fn native_persisted_binding_matches_full_socket_path_symlink_alias() {
+        let hermetic = HermeticTestEnv::enter("native-persisted-path-alias");
+        let workspace = hermetic.root();
+        let root = workspace.join("socket-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let alias = workspace.join("socket-alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let socket = root.join("ta-native.sock");
+        std::fs::write(&socket, "fixture endpoint; no tmux server").unwrap();
+        let state = native_persisted_binding(workspace, socket.to_str().unwrap());
+        assert!(persisted_binding_matches_verified_pane(
+            &state, workspace, &PaneId::new("%0"), Provider::Pi,
+            alias.join("ta-native.sock").to_str(),
+        ));
     }
 
     fn commit_fresh_binding(
