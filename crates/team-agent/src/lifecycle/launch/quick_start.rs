@@ -1582,6 +1582,16 @@ fn preserve_quick_start_bootstrap_binding(
         binding = binding.with_owner_epoch(epoch);
     }
     crate::state::ownership::write_owner(state, team_key, binding);
+    // This is the new launch's transient view, not the persisted bootstrap.
+    // The canonical writer intentionally leaves root fields alone; remove the
+    // provisional epoch-1 seed so save_launched_team_state cannot merge it back
+    // over the preserved canonical binding. Reuse its existing view promotion.
+    if let Some(root) = state.as_object_mut() {
+        for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+            root.remove(key);
+        }
+    }
+    super::state_projection::promote_launched_binding_from_team_entry(state, team_key);
     for key in ["leader_client", "is_external_leader"] {
         if let Some(value) = bootstrap.get(key) {
             state[key] = value.clone();
@@ -1656,6 +1666,11 @@ mod fresh_quick_start_leader_binding_tests {
         assert_eq!(launched.get("leader_client"), bootstrap.get("leader_client"));
         assert_eq!(launched.get("is_external_leader"), Some(&json!(true)));
         assert_eq!(launched["agents"], json!({"worker": {}}));
+        let merged = super::super::state_projection::merge_workspace_team_state_with_key(
+            &bootstrap, &launched, "current",
+        );
+        assert_eq!(merged["teams"]["current"]["team_owner"], bootstrap["team_owner"]);
+        assert_eq!(merged["teams"]["current"]["owner_epoch"], json!(7));
     }
 
     #[test]
