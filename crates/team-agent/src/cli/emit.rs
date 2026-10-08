@@ -411,7 +411,7 @@ pub fn __test_quick_start_args(
 }
 
 pub(super) const TEAM_TEMPLATE: &str =
-    "---\nname: help-demo\n---\nA small team for a command-line example.\n";
+    "---\nname: current\n---\nA small team for a command-line example.\n";
 pub(super) const WORKER_TEMPLATE: &str = "---\nname: worker\nrole: assistant\nprovider: pi\nmodel: openai-codex/gpt-6-luna\nauth_mode: subscription\ndangerously_skip_permissions: false\n---\nComplete the task and send a concise reply to the leader.\n";
 const HUMAN_NAVIGATION: &str = "Use team-agent --help to list available commands.";
 
@@ -2326,6 +2326,7 @@ mod tests {
             );
         }
         assert_english(&default_help());
+        assert_eq!(TEAM_TEMPLATE.lines().nth(1), Some("name: current"));
         for spec in COMMAND_SPECS {
             assert_english(spec.summary);
             assert_english(&command_help(Some(spec.name)));
