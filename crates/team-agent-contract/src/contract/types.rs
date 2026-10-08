@@ -19,8 +19,14 @@ impl<T> Support<T> {
     pub fn require(&self, field: &'static str) -> Result<&T, ContractError> {
         match self {
             Self::Supported(value) => Ok(value),
-            Self::Unsupported(reason) => Err(ContractError::Unsupported { field, reason: *reason }),
-            Self::Unverified(reason) => Err(ContractError::Unverified { field, reason: *reason }),
+            Self::Unsupported(reason) => Err(ContractError::Unsupported {
+                field,
+                reason: *reason,
+            }),
+            Self::Unverified(reason) => Err(ContractError::Unverified {
+                field,
+                reason: *reason,
+            }),
         }
     }
 
@@ -42,8 +48,14 @@ impl<T> HookBinding<T> {
         match self {
             Self::Bound(value) => Ok(value),
             Self::NotRequired(_) => Err(ContractError::MissingHook(hook)),
-            Self::Unsupported(reason) => Err(ContractError::Unsupported { field: hook, reason: *reason }),
-            Self::Unverified(reason) => Err(ContractError::Unverified { field: hook, reason: *reason }),
+            Self::Unsupported(reason) => Err(ContractError::Unsupported {
+                field: hook,
+                reason: *reason,
+            }),
+            Self::Unverified(reason) => Err(ContractError::Unverified {
+                field: hook,
+                reason: *reason,
+            }),
         }
     }
 }
@@ -81,13 +93,18 @@ pub(crate) fn nonblank(value: &str) -> bool {
 }
 
 pub(crate) fn valid_env_key(key: &str) -> bool {
-    !key.is_empty() && key.bytes().enumerate().all(|(i, b)|
-        b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+    !key.is_empty()
+        && key
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
 }
 
 pub(crate) fn valid_id(value: &str) -> bool {
     !value.is_empty()
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 macro_rules! id_type {
@@ -107,7 +124,14 @@ macro_rules! id_type {
     )+ };
 }
 
-id_type!(ScopeId, SeatId, InstanceId, MessageId, AttemptId, OperationId);
+id_type!(
+    ScopeId,
+    SeatId,
+    InstanceId,
+    MessageId,
+    AttemptId,
+    OperationId
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProviderId(String);
@@ -121,7 +145,9 @@ impl ProviderId {
         Ok(Self(value))
     }
 
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -139,7 +165,11 @@ pub struct InstanceIdentity {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Platform { MacOs, Linux, Windows }
+pub enum Platform {
+    MacOs,
+    Linux,
+    Windows,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeIdentity {
@@ -152,7 +182,10 @@ pub struct NativeIdentity {
 
 impl NativeIdentity {
     pub fn validate(&self) -> Result<(), ContractError> {
-        if [&self.version, &self.harness, &self.ui].into_iter().all(|s| nonblank(s)) {
+        if [&self.version, &self.harness, &self.ui]
+            .into_iter()
+            .all(|s| nonblank(s))
+        {
             Ok(())
         } else {
             Err(ContractError::Invalid("native identity"))
@@ -162,22 +195,45 @@ impl NativeIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
-    Catalog, Fresh, Resume, FirstBusiness, OrdinarySend, StartupBypassAck,
-    SessionInspect, InWindowBranch, NewSeatFullSnapshot, NativeNewSeat, Stop, Shutdown,
+    Catalog,
+    Fresh,
+    Resume,
+    FirstBusiness,
+    OrdinarySend,
+    StartupBypassAck,
+    SessionInspect,
+    InWindowBranch,
+    NewSeatFullSnapshot,
+    NativeNewSeat,
+    Stop,
+    Shutdown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Channel { Tmux, Acp, DirectStdin }
+pub enum Channel {
+    Tmux,
+    Acp,
+    DirectStdin,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum LogicalTool { SendMessage, ReportResult, GetTeamStatus }
+pub enum LogicalTool {
+    SendMessage,
+    ReportResult,
+    GetTeamStatus,
+}
 
 pub const TEAM_TOOLS: [LogicalTool; 3] = [
-    LogicalTool::SendMessage, LogicalTool::ReportResult, LogicalTool::GetTeamStatus,
+    LogicalTool::SendMessage,
+    LogicalTool::ReportResult,
+    LogicalTool::GetTeamStatus,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EvidenceKind { Fixture, Native }
+pub enum EvidenceKind {
+    Fixture,
+    Native,
+}
 
 /// Acceptance is a separate, scoped record, never a mutable descriptor field.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,14 +273,22 @@ impl OwnedPath {
         require_absolute(&root, "owned root")?;
         if relative.as_os_str().is_empty()
             || relative.as_os_str().as_encoded_bytes().contains(&0)
-            || relative.components().any(|c| !matches!(c, Component::Normal(_)))
+            || relative
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_)))
         {
             return Err(ContractError::Invalid("owned relative path"));
         }
         Ok(Self { root, relative })
     }
 
-    pub fn root(&self) -> &Path { &self.root }
-    pub fn relative(&self) -> &Path { &self.relative }
-    pub fn path(&self) -> PathBuf { self.root.join(&self.relative) }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn relative(&self) -> &Path {
+        &self.relative
+    }
+    pub fn path(&self) -> PathBuf {
+        self.root.join(&self.relative)
+    }
 }

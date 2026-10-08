@@ -10,13 +10,18 @@ use super::session::{CaptureOrigin, CwdIdentity, ResumeBinding};
 use super::types::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReadBounds { pub deadline: Duration, pub max_output_bytes: usize }
+pub struct ReadBounds {
+    pub deadline: Duration,
+    pub max_output_bytes: usize,
+}
 
 impl ReadBounds {
     pub fn validate(&self) -> Result<(), ContractError> {
         if self.deadline.is_zero() || self.max_output_bytes == 0 {
             Err(ContractError::Invalid("read bounds"))
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -40,7 +45,11 @@ pub enum ReadFailure {
 }
 
 /// Bounded raw output has no Debug implementation, so it is not accidentally logged.
-pub struct ReadOutput { pub stdout: Vec<u8>, pub elapsed: Duration, pub exit_code: i32 }
+pub struct ReadOutput {
+    pub stdout: Vec<u8>,
+    pub elapsed: Duration,
+    pub exit_code: i32,
+}
 
 /// A host implementation enforces its captured command whitelist and absolute deadline.
 /// This port is not an eighth provider hook and does not expose a shell runner.
@@ -57,9 +66,19 @@ pub struct OwnedValidationRequest {
 /// Implementations enforce captured scope/root/owner grants, no-follow, exclusive create,
 /// bounded reads, and partial-effect receipts. Merely constructing OwnedPath grants no I/O.
 pub trait OwnedIo {
-    fn create_exclusive(&mut self, request: &OwnedResourceRequest) -> Result<OwnedResourceReceipt, PartialFailure>;
-    fn read_bound_session(&mut self, binding: &ResumeBinding, bounds: ReadBounds) -> Result<ReadOutput, ReadFailure>;
-    fn validate_configuration(&mut self, request: &OwnedValidationRequest) -> Result<ReadOutput, ReadFailure>;
+    fn create_exclusive(
+        &mut self,
+        request: &OwnedResourceRequest,
+    ) -> Result<OwnedResourceReceipt, PartialFailure>;
+    fn read_bound_session(
+        &mut self,
+        binding: &ResumeBinding,
+        bounds: ReadBounds,
+    ) -> Result<ReadOutput, ReadFailure>;
+    fn validate_configuration(
+        &mut self,
+        request: &OwnedValidationRequest,
+    ) -> Result<ReadOutput, ReadFailure>;
 }
 
 pub struct ScopedSessionEvidence {
@@ -74,7 +93,11 @@ pub struct ScopedSessionEvidence {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NativeRecordKind { Surface, Protocol, Session }
+pub enum NativeRecordKind {
+    Surface,
+    Protocol,
+    Session,
+}
 
 pub struct NativeRecord {
     pub scope: EvidenceScope,
@@ -84,7 +107,11 @@ pub struct NativeRecord {
 
 // Exactly seven provider behavior interfaces. None has a default implementation.
 pub trait CatalogHook: Send + Sync {
-    fn discover(&self, request: &CatalogRequest, host: &mut dyn BoundedReadHost) -> Result<CatalogObservation, ReadFailure>;
+    fn discover(
+        &self,
+        request: &CatalogRequest,
+        host: &mut dyn BoundedReadHost,
+    ) -> Result<CatalogObservation, ReadFailure>;
 }
 
 pub trait PlanHook: Send + Sync {
@@ -92,7 +119,11 @@ pub trait PlanHook: Send + Sync {
 }
 
 pub trait MaterializeHook: Send + Sync {
-    fn materialize(&self, requests: &[OwnedResourceRequest], io: &mut dyn OwnedIo) -> Result<MaterializeReceipt, PartialFailure>;
+    fn materialize(
+        &self,
+        requests: &[OwnedResourceRequest],
+        io: &mut dyn OwnedIo,
+    ) -> Result<MaterializeReceipt, PartialFailure>;
 }
 
 pub trait SessionHook: Send + Sync {
@@ -108,7 +139,11 @@ pub trait InteractionHook: Send + Sync {
 }
 
 pub trait ForkHook: Send + Sync {
-    fn stage(&self, request: &ResolvedFork, io: &mut dyn OwnedIo) -> Result<NativeForkPlan, PartialFailure>;
+    fn stage(
+        &self,
+        request: &ResolvedFork,
+        io: &mut dyn OwnedIo,
+    ) -> Result<NativeForkPlan, PartialFailure>;
 }
 
 /// Behavior bindings are separate from the fifteen-facet data descriptor.

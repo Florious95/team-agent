@@ -37,7 +37,10 @@ pub enum ProbeOutcome<E> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Probe<E> { pub scope: EvidenceScope, pub outcome: ProbeOutcome<E> }
+pub struct Probe<E> {
+    pub scope: EvidenceScope,
+    pub outcome: ProbeOutcome<E>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessIdentity {
@@ -48,10 +51,15 @@ pub struct ProcessIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProcessAliveEvidence { pub process: ProcessIdentity }
+pub struct ProcessAliveEvidence {
+    pub process: ProcessIdentity,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaneReadyEvidence { pub profile_id: String, pub surface: InputSurface }
+pub struct PaneReadyEvidence {
+    pub profile_id: String,
+    pub surface: InputSurface,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerHandshakeEvidence {
@@ -61,7 +69,10 @@ pub struct ServerHandshakeEvidence {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClientBindingSource { NativeRegistry, NativeClientDiscovery }
+pub enum ClientBindingSource {
+    NativeRegistry,
+    NativeClientDiscovery,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientBindingEvidence {
@@ -71,7 +82,12 @@ pub struct ClientBindingEvidence {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RoundTripFact { InvocationReceived, ResponseWritten, ClientConsumptionObserved, PresentationObserved }
+pub enum RoundTripFact {
+    InvocationReceived,
+    ResponseWritten,
+    ClientConsumptionObserved,
+    PresentationObserved,
+}
 
 /// Facts are a set, not a rank. ResponseWritten never implies client consumption.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +100,11 @@ pub struct NativeRoundTripEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SemanticEvidence { Busy, Idle, Fault { code: String } }
+pub enum SemanticEvidence {
+    Busy,
+    Idle,
+    Fault { code: String },
+}
 
 pub struct EvidenceExpectation<'a> {
     pub identity: &'a InstanceIdentity,
@@ -101,32 +121,68 @@ pub struct EvidenceExpectation<'a> {
 
 impl EvidenceScope {
     pub fn is_current(&self, expected: &EvidenceExpectation<'_>) -> bool {
-        &self.identity == expected.identity && self.endpoint == expected.endpoint
-            && self.pane == expected.pane && self.binding == expected.binding
-            && self.session.as_ref() == expected.session && self.sequence >= expected.minimum_sequence
-            && nonblank(&self.endpoint) && nonblank(&self.pane) && nonblank(&self.binding)
-            && nonblank(&self.source) && self.observed_at <= expected.now
+        &self.identity == expected.identity
+            && self.endpoint == expected.endpoint
+            && self.pane == expected.pane
+            && self.binding == expected.binding
+            && self.session.as_ref() == expected.session
+            && self.sequence >= expected.minimum_sequence
+            && nonblank(&self.endpoint)
+            && nonblank(&self.pane)
+            && nonblank(&self.binding)
+            && nonblank(&self.source)
+            && self.observed_at <= expected.now
             && expected.now - self.observed_at <= self.valid_for
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeLayer { Process, Pane, ClientBinding }
+pub enum ProbeLayer {
+    Process,
+    Pane,
+    ClientBinding,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GateFailure { StaleOrMismatched, Pending, Negative, Unknown, Unsupported, TimedOut, Error, WrongProcess, NotComposer, WrongTools, NotBusinessOperation }
+pub enum GateFailure {
+    StaleOrMismatched,
+    Pending,
+    Negative,
+    Unknown,
+    Unsupported,
+    TimedOut,
+    Error,
+    WrongProcess,
+    NotComposer,
+    WrongTools,
+    NotBusinessOperation,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GateIssue { pub layer: ProbeLayer, pub failure: GateFailure }
+pub struct GateIssue {
+    pub layer: ProbeLayer,
+    pub failure: GateFailure,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BootstrapAllowance { Disabled, AuthorizedFirstBusinessOnce { remaining: u8 } }
+pub enum BootstrapAllowance {
+    Disabled,
+    AuthorizedFirstBusinessOnce { remaining: u8 },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SendGate { ReadyForInput { consume_bootstrap: bool }, Blocked(Vec<GateIssue>) }
+pub enum SendGate {
+    ReadyForInput { consume_bootstrap: bool },
+    Blocked(Vec<GateIssue>),
+}
 
-fn current<'a, E>(probe: &'a Probe<E>, expected: &EvidenceExpectation<'_>) -> Result<&'a E, GateFailure> {
-    if !probe.scope.is_current(expected) { return Err(GateFailure::StaleOrMismatched); }
+fn current<'a, E>(
+    probe: &'a Probe<E>,
+    expected: &EvidenceExpectation<'_>,
+) -> Result<&'a E, GateFailure> {
+    if !probe.scope.is_current(expected) {
+        return Err(GateFailure::StaleOrMismatched);
+    }
     match &probe.outcome {
         ProbeOutcome::Observed(evidence) => Ok(evidence),
         ProbeOutcome::Pending { .. } => Err(GateFailure::Pending),
@@ -142,36 +198,83 @@ fn current<'a, E>(probe: &'a Probe<E>, expected: &EvidenceExpectation<'_>) -> Re
 /// Neither consumes a bootstrap allowance nor promotes any probe.
 /// T3c is deliberately not an input: the first business message must not wait for its reply.
 pub fn evaluate_send_gate(
-    process: &Probe<ProcessAliveEvidence>, pane: &Probe<PaneReadyEvidence>,
-    binding: &Probe<ClientBindingEvidence>, expected: &EvidenceExpectation<'_>,
-    operation: Operation, bootstrap: BootstrapAllowance,
+    process: &Probe<ProcessAliveEvidence>,
+    pane: &Probe<PaneReadyEvidence>,
+    binding: &Probe<ClientBindingEvidence>,
+    expected: &EvidenceExpectation<'_>,
+    operation: Operation,
+    bootstrap: BootstrapAllowance,
 ) -> SendGate {
-    if !matches!(operation, Operation::FirstBusiness | Operation::OrdinarySend) {
-        return SendGate::Blocked(vec![GateIssue { layer: ProbeLayer::Pane, failure: GateFailure::NotBusinessOperation }]);
+    if !matches!(
+        operation,
+        Operation::FirstBusiness | Operation::OrdinarySend
+    ) {
+        return SendGate::Blocked(vec![GateIssue {
+            layer: ProbeLayer::Pane,
+            failure: GateFailure::NotBusinessOperation,
+        }]);
     }
     let mut issues = Vec::new();
     let process_result = current(process, expected).and_then(|e| {
-        if e.process == *expected.process && e.process.pid > 0
-            && nonblank(&e.process.birth_identity) && e.process.executable.is_absolute()
-        { Ok(()) } else { Err(GateFailure::WrongProcess) }
+        if e.process == *expected.process
+            && e.process.pid > 0
+            && nonblank(&e.process.birth_identity)
+            && e.process.executable.is_absolute()
+        {
+            Ok(())
+        } else {
+            Err(GateFailure::WrongProcess)
+        }
     });
-    if let Err(failure) = process_result { issues.push(GateIssue { layer: ProbeLayer::Process, failure }); }
+    if let Err(failure) = process_result {
+        issues.push(GateIssue {
+            layer: ProbeLayer::Process,
+            failure,
+        });
+    }
     let pane_result = current(pane, expected).and_then(|e| {
         if e.profile_id == expected.profile_id && e.surface == InputSurface::ComposerReady {
             Ok(())
-        } else { Err(GateFailure::NotComposer) }
+        } else {
+            Err(GateFailure::NotComposer)
+        }
     });
-    if let Err(failure) = pane_result { issues.push(GateIssue { layer: ProbeLayer::Pane, failure }); }
-    let binding_result = current(binding, expected).and_then(|e| {
-        if e.server_key == expected.server_key && nonblank(&e.server_key)
-            && e.tools.len() == TEAM_TOOLS.len() && TEAM_TOOLS.iter().all(|t| e.tools.contains(t))
-        { Ok(()) } else { Err(GateFailure::WrongTools) }
-    });
-    let consume_bootstrap = matches!(bootstrap, BootstrapAllowance::AuthorizedFirstBusinessOnce { remaining: 1 })
-        && operation == Operation::FirstBusiness
-        && matches!(binding_result, Err(GateFailure::Pending | GateFailure::Unknown));
-    if !consume_bootstrap {
-        if let Err(failure) = binding_result { issues.push(GateIssue { layer: ProbeLayer::ClientBinding, failure }); }
+    if let Err(failure) = pane_result {
+        issues.push(GateIssue {
+            layer: ProbeLayer::Pane,
+            failure,
+        });
     }
-    if issues.is_empty() { SendGate::ReadyForInput { consume_bootstrap } } else { SendGate::Blocked(issues) }
+    let binding_result = current(binding, expected).and_then(|e| {
+        if e.server_key == expected.server_key
+            && nonblank(&e.server_key)
+            && e.tools.len() == TEAM_TOOLS.len()
+            && TEAM_TOOLS.iter().all(|t| e.tools.contains(t))
+        {
+            Ok(())
+        } else {
+            Err(GateFailure::WrongTools)
+        }
+    });
+    let consume_bootstrap = matches!(
+        bootstrap,
+        BootstrapAllowance::AuthorizedFirstBusinessOnce { remaining: 1 }
+    ) && operation == Operation::FirstBusiness
+        && matches!(
+            binding_result,
+            Err(GateFailure::Pending | GateFailure::Unknown)
+        );
+    if !consume_bootstrap {
+        if let Err(failure) = binding_result {
+            issues.push(GateIssue {
+                layer: ProbeLayer::ClientBinding,
+                failure,
+            });
+        }
+    }
+    if issues.is_empty() {
+        SendGate::ReadyForInput { consume_bootstrap }
+    } else {
+        SendGate::Blocked(issues)
+    }
 }

@@ -12,10 +12,16 @@ pub struct IdentityFacet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModelSelection { NativeDefaultOrOpaqueId, ExactCatalogId }
+pub enum ModelSelection {
+    NativeDefaultOrOpaqueId,
+    ExactCatalogId,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OmittedModel { NativeDefault, Reject }
+pub enum OmittedModel {
+    NativeDefault,
+    Reject,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CatalogSource {
@@ -31,30 +37,59 @@ pub struct ModelFacet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effort { Low, Medium, High, Xhigh, Max, Ultra }
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+    Ultra,
+}
 
 impl Effort {
-    pub const ALL: [Self; 6] = [Self::Low, Self::Medium, Self::High, Self::Xhigh, Self::Max, Self::Ultra];
+    pub const ALL: [Self; 6] = [
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Xhigh,
+        Self::Max,
+        Self::Ultra,
+    ];
     pub fn parse(raw: &str) -> Result<Self, ContractError> {
-        Self::ALL.into_iter().find(|effort| effort.as_str() == raw.trim())
+        Self::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == raw.trim())
             .ok_or(ContractError::UnknownEffort)
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Low => "low", Self::Medium => "medium", Self::High => "high",
-            Self::Xhigh => "xhigh", Self::Max => "max", Self::Ultra => "ultra",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
-    pub fn index(self) -> usize { self as usize }
+    pub fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EffortAdmission { Pass, IgnoreWithReason(Reason), Reject(Reason) }
+pub enum EffortAdmission {
+    Pass,
+    IgnoreWithReason(Reason),
+    Reject(Reason),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueCarrier {
     Flag(&'static str),
-    ConfigArgument { flag: &'static str, key: &'static str },
+    ConfigArgument {
+        flag: &'static str,
+        key: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,10 +101,17 @@ pub struct EffortFacet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthMode { NativeSubscription, OfficialApi, CompatibleApi }
+pub enum AuthMode {
+    NativeSubscription,
+    OfficialApi,
+    CompatibleApi,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AuthMechanism { NativeExistingSession, ExplicitEnvironment(&'static [&'static str]) }
+pub enum AuthMechanism {
+    NativeExistingSession,
+    ExplicitEnvironment(&'static [&'static str]),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthFacet {
@@ -95,19 +137,37 @@ pub struct BypassPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BypassFacet { pub intent: Support<BypassPolicy> }
+pub struct BypassFacet {
+    pub intent: Support<BypassPolicy>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptCarrier { Argv, ScopedFile, ConfigField, RuntimeBridge }
+pub enum PromptCarrier {
+    Argv,
+    ScopedFile,
+    ConfigField,
+    RuntimeBridge,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PromptFacet { pub carrier: Support<PromptCarrier> }
+pub struct PromptFacet {
+    pub carrier: Support<PromptCarrier>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum McpCarrier { Argv, ScopedConfig, RuntimeBridge, GlobalInstaller }
+pub enum McpCarrier {
+    Argv,
+    ScopedConfig,
+    RuntimeBridge,
+    GlobalInstaller,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResourceScope { RuntimeRoot, WorkingDirectory, Global }
+pub enum ResourceScope {
+    RuntimeRoot,
+    WorkingDirectory,
+    Global,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpFacet {
@@ -118,16 +178,28 @@ pub struct McpFacet {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ToolNaming { RuntimeBound, StaticServer { key: &'static str } }
+pub enum ToolNaming {
+    RuntimeBound,
+    StaticServer { key: &'static str },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolNameFacet { pub naming: Support<ToolNaming> }
+pub struct ToolNameFacet {
+    pub naming: Support<ToolNaming>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FreshSession { CaptureAfterLaunch, Preassigned, NotApplicable }
+pub enum FreshSession {
+    CaptureAfterLaunch,
+    Preassigned,
+    NotApplicable,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResumeMode { ExactId, ExactPath }
+pub enum ResumeMode {
+    ExactId,
+    ExactPath,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionFacet {
@@ -144,7 +216,9 @@ pub struct ForkFacet {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InputFacet { pub profiles: Support<&'static [InputProfile]> }
+pub struct InputFacet {
+    pub profiles: Support<&'static [InputProfile]>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartupFacet {
@@ -153,7 +227,13 @@ pub struct StartupFacet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeSource { Host, NativeSurface, NativeRuntime, ServerLifecycle, SessionRecords }
+pub enum ProbeSource {
+    Host,
+    NativeSurface,
+    NativeRuntime,
+    ServerLifecycle,
+    SessionRecords,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeSourcesFacet {
@@ -173,16 +253,34 @@ pub struct WorkspaceFacet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResourceKind { Prompt, AgentConfig, McpConfig, RuntimeBridge, SessionBacking, GlobalSettings, NativeDatabase }
+pub enum ResourceKind {
+    Prompt,
+    AgentConfig,
+    McpConfig,
+    RuntimeBridge,
+    SessionBacking,
+    GlobalSettings,
+    NativeDatabase,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResourceDisposition { OwnedRemovable, OwnedPreserved, Shared, Forbidden }
+pub enum ResourceDisposition {
+    OwnedRemovable,
+    OwnedPreserved,
+    Shared,
+    Forbidden,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResourcePolicy { pub kind: ResourceKind, pub disposition: ResourceDisposition }
+pub struct ResourcePolicy {
+    pub kind: ResourceKind,
+    pub disposition: ResourceDisposition,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TeardownFacet { pub resources: &'static [ResourcePolicy] }
+pub struct TeardownFacet {
+    pub resources: &'static [ResourcePolicy],
+}
 
 /// Exactly fifteen mandatory data facets. There are no executable callbacks here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,22 +303,31 @@ pub struct ProviderDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NameMode { CanonicalOnly, ExplicitAliases }
+pub enum NameMode {
+    CanonicalOnly,
+    ExplicitAliases,
+}
 
 pub fn resolve_provider<'a>(
-    registry: &'a [&'a ProviderDescriptor], raw: &str, mode: NameMode,
+    registry: &'a [&'a ProviderDescriptor],
+    raw: &str,
+    mode: NameMode,
 ) -> Result<&'a ProviderDescriptor, ContractError> {
     let mut matches = registry.iter().copied().filter(|descriptor| {
         raw == descriptor.identity.id
             || (mode == NameMode::ExplicitAliases && descriptor.identity.aliases.contains(&raw))
     });
     let descriptor = matches.next().ok_or(ContractError::UnknownProvider)?;
-    if matches.next().is_some() { return Err(ContractError::AmbiguousProvider); }
+    if matches.next().is_some() {
+        return Err(ContractError::AmbiguousProvider);
+    }
     Ok(descriptor)
 }
 
 pub fn validate_descriptor(
-    descriptor: &ProviderDescriptor, hooks: &ProviderHooks<'_>, operation: Operation,
+    descriptor: &ProviderDescriptor,
+    hooks: &ProviderHooks<'_>,
+    operation: Operation,
 ) -> Result<(), ContractError> {
     let d = descriptor;
     ProviderId::new(d.identity.id)?;
@@ -240,64 +347,103 @@ pub fn validate_descriptor(
         }
     }
     for admission in &d.effort.admission {
-        if let EffortAdmission::IgnoreWithReason(reason) | EffortAdmission::Reject(reason) = admission {
+        if let EffortAdmission::IgnoreWithReason(reason) | EffortAdmission::Reject(reason) =
+            admission
+        {
             if !nonblank(reason.code) || !nonblank(reason.message) {
                 return Err(ContractError::Invalid("effort disposition reason"));
             }
         }
     }
-    for mechanism in [&d.auth.subscription, &d.auth.official_api, &d.auth.compatible_api] {
+    for mechanism in [
+        &d.auth.subscription,
+        &d.auth.official_api,
+        &d.auth.compatible_api,
+    ] {
         if let Support::Supported(AuthMechanism::ExplicitEnvironment(keys)) = mechanism {
-            if keys.is_empty() || keys.iter().any(|key| !valid_env_key(key))
-            {
+            if keys.is_empty() || keys.iter().any(|key| !valid_env_key(key)) {
                 return Err(ContractError::Invalid("authentication environment mapping"));
             }
         }
     }
-    if d.effort.admission.iter().any(|a| matches!(a, EffortAdmission::Pass)) {
+    if d.effort
+        .admission
+        .iter()
+        .any(|a| matches!(a, EffortAdmission::Pass))
+    {
         match d.effort.carrier.require("effort carrier")? {
-            ValueCarrier::Flag(flag) if nonblank(flag) => {},
-            ValueCarrier::ConfigArgument { flag, key } if nonblank(flag) && nonblank(key) => {},
+            ValueCarrier::Flag(flag) if nonblank(flag) => {}
+            ValueCarrier::ConfigArgument { flag, key } if nonblank(flag) && nonblank(key) => {}
             _ => return Err(ContractError::Invalid("effort carrier")),
         }
     }
     if d.mcp.carrier.is_supported() {
-        if d.mcp.tools.len() != TEAM_TOOLS.len() || TEAM_TOOLS.iter().any(|t| !d.mcp.tools.contains(t)) {
+        if d.mcp.tools.len() != TEAM_TOOLS.len()
+            || TEAM_TOOLS.iter().any(|t| !d.mcp.tools.contains(t))
+        {
             return Err(ContractError::Invalid("three logical MCP tools"));
         }
         match d.tool_names.naming.require("tool naming")? {
-            ToolNaming::StaticServer { key } if !nonblank(key) => return Err(ContractError::Invalid("server key")),
-            _ => {},
+            ToolNaming::StaticServer { key } if !nonblank(key) => {
+                return Err(ContractError::Invalid("server key"))
+            }
+            _ => {}
         }
     }
-    if d.workspace.shared_cwd && d.workspace.config_scope == ResourceScope::WorkingDirectory
+    if d.workspace.shared_cwd
+        && d.workspace.config_scope == ResourceScope::WorkingDirectory
         && !d.workspace.requires_materialization_lease
     {
-        return Err(ContractError::Invalid("shared cwd requires a materialization lease"));
+        return Err(ContractError::Invalid(
+            "shared cwd requires a materialization lease",
+        ));
     }
     if let Support::Supported(profiles) = &d.input.profiles {
-        if profiles.is_empty() { return Err(ContractError::Invalid("empty supported profiles")); }
+        if profiles.is_empty() {
+            return Err(ContractError::Invalid("empty supported profiles"));
+        }
         let mut ids = Vec::new();
         for profile in *profiles {
-            if [&profile.id, &profile.version, &profile.harness, &profile.ui].into_iter().any(|s| !nonblank(s))
-                || profile.operations.is_empty() || ids.contains(&profile.id)
-                || profile.operations.iter().any(|operation| !matches!(operation,
-                    Operation::FirstBusiness | Operation::OrdinarySend | Operation::StartupBypassAck
-                    | Operation::SessionInspect | Operation::InWindowBranch | Operation::Stop | Operation::Shutdown))
+            if [&profile.id, &profile.version, &profile.harness, &profile.ui]
+                .into_iter()
+                .any(|s| !nonblank(s))
+                || profile.operations.is_empty()
+                || ids.contains(&profile.id)
+                || profile.operations.iter().any(|operation| {
+                    !matches!(
+                        operation,
+                        Operation::FirstBusiness
+                            | Operation::OrdinarySend
+                            | Operation::StartupBypassAck
+                            | Operation::SessionInspect
+                            | Operation::InWindowBranch
+                            | Operation::Stop
+                            | Operation::Shutdown
+                    )
+                })
             {
                 return Err(ContractError::Invalid("input profile identity"));
             }
             ids.push(profile.id);
-            if let Support::Supported(policy) = &profile.policy { policy.validate()?; }
+            if let Support::Supported(policy) = &profile.policy {
+                policy.validate()?;
+            }
         }
     }
     let mut kinds = Vec::new();
     for resource in d.teardown.resources {
         if kinds.contains(&resource.kind)
-            || (matches!(resource.kind, ResourceKind::GlobalSettings | ResourceKind::NativeDatabase)
-                && resource.disposition != ResourceDisposition::Forbidden)
+            || (matches!(
+                resource.kind,
+                ResourceKind::GlobalSettings | ResourceKind::NativeDatabase
+            ) && resource.disposition != ResourceDisposition::Forbidden)
             || (resource.disposition == ResourceDisposition::OwnedRemovable
-                && matches!(resource.kind, ResourceKind::SessionBacking | ResourceKind::GlobalSettings | ResourceKind::NativeDatabase))
+                && matches!(
+                    resource.kind,
+                    ResourceKind::SessionBacking
+                        | ResourceKind::GlobalSettings
+                        | ResourceKind::NativeDatabase
+                ))
         {
             return Err(ContractError::Invalid("resource disposition"));
         }
@@ -308,24 +454,60 @@ pub fn validate_descriptor(
         d.model.catalog.require("catalog")?;
         hooks.catalog.require("H1 CatalogHook")?;
     }
-    if matches!(operation, Operation::Fresh | Operation::Resume | Operation::NewSeatFullSnapshot | Operation::NativeNewSeat) {
+    if matches!(
+        operation,
+        Operation::Fresh
+            | Operation::Resume
+            | Operation::NewSeatFullSnapshot
+            | Operation::NativeNewSeat
+    ) {
         hooks.plan.require("H2 PlanHook")?;
-        if matches!(d.model.selection, Support::Supported(ModelSelection::ExactCatalogId)) {
+        if matches!(
+            d.model.selection,
+            Support::Supported(ModelSelection::ExactCatalogId)
+        ) {
             d.model.catalog.require("catalog")?;
             hooks.catalog.require("H1 CatalogHook")?;
         }
-        let materializes = matches!(d.prompt.carrier, Support::Supported(PromptCarrier::ScopedFile | PromptCarrier::ConfigField | PromptCarrier::RuntimeBridge))
-            || matches!(d.mcp.carrier, Support::Supported(McpCarrier::ScopedConfig | McpCarrier::RuntimeBridge | McpCarrier::GlobalInstaller));
-        if materializes { hooks.materialize.require("H3 MaterializeHook")?; }
+        let materializes = matches!(
+            d.prompt.carrier,
+            Support::Supported(
+                PromptCarrier::ScopedFile
+                    | PromptCarrier::ConfigField
+                    | PromptCarrier::RuntimeBridge
+            )
+        ) || matches!(
+            d.mcp.carrier,
+            Support::Supported(
+                McpCarrier::ScopedConfig | McpCarrier::RuntimeBridge | McpCarrier::GlobalInstaller
+            )
+        );
+        if materializes {
+            hooks.materialize.require("H3 MaterializeHook")?;
+        }
     }
-    if matches!(operation, Operation::Resume | Operation::SessionInspect | Operation::InWindowBranch | Operation::NewSeatFullSnapshot | Operation::NativeNewSeat)
-        || (operation == Operation::Fresh && d.session.fresh == FreshSession::CaptureAfterLaunch)
+    if matches!(
+        operation,
+        Operation::Resume
+            | Operation::SessionInspect
+            | Operation::InWindowBranch
+            | Operation::NewSeatFullSnapshot
+            | Operation::NativeNewSeat
+    ) || (operation == Operation::Fresh && d.session.fresh == FreshSession::CaptureAfterLaunch)
     {
         hooks.session.require("H4 SessionHook")?;
     }
-    if d.probe_sources.semantic.is_supported() { hooks.semantic.require("H5 SemanticReader")?; }
-    if matches!(operation, Operation::FirstBusiness | Operation::OrdinarySend | Operation::StartupBypassAck | Operation::SessionInspect | Operation::InWindowBranch)
-        || (matches!(operation, Operation::Fresh | Operation::Resume) && d.startup.interactive)
+    if d.probe_sources.semantic.is_supported() {
+        hooks.semantic.require("H5 SemanticReader")?;
+    }
+    if matches!(
+        operation,
+        Operation::FirstBusiness
+            | Operation::OrdinarySend
+            | Operation::StartupBypassAck
+            | Operation::SessionInspect
+            | Operation::InWindowBranch
+    ) || (matches!(operation, Operation::Fresh | Operation::Resume) && d.startup.interactive)
     {
         hooks.interaction.require("H6 InteractionHook")?;
     }

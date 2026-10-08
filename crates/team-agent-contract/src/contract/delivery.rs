@@ -6,15 +6,28 @@ use super::probe::EvidenceScope;
 use super::types::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PhysicalKey { Enter, LineFeed, CtrlJ, Up, Down, Tab }
+pub enum PhysicalKey {
+    Enter,
+    LineFeed,
+    CtrlJ,
+    Up,
+    Down,
+    Tab,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PasteMode { Bracketed, Plain }
+pub enum PasteMode {
+    Bracketed,
+    Plain,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PayloadTrailer {
     None,
-    VerifiedBytes { bytes: &'static [u8], evidence: &'static str },
+    VerifiedBytes {
+        bytes: &'static [u8],
+        evidence: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +40,11 @@ pub struct ConfirmationStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetryBudget {
     Never,
-    Guarded { predicate: &'static str, additional: u16, wrap_gap: u16 },
+    Guarded {
+        predicate: &'static str,
+        additional: u16,
+        wrap_gap: u16,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,23 +82,35 @@ impl SubmitPolicy {
             .map_err(|_| ContractError::BudgetOverflow)?;
         let (retry, wrap) = match self.retry_budget {
             RetryBudget::Never => (0, 0),
-            RetryBudget::Guarded { additional, wrap_gap, .. } => (additional, wrap_gap),
+            RetryBudget::Guarded {
+                additional,
+                wrap_gap,
+                ..
+            } => (additional, wrap_gap),
         };
-        let mut total = 1_u16.checked_add(confirmations)
+        let mut total = 1_u16
+            .checked_add(confirmations)
             .and_then(|n| n.checked_add(retry))
             .and_then(|n| n.checked_add(wrap))
             .ok_or(ContractError::BudgetOverflow)?;
         for action in self.queue_flush {
-            total = total.checked_add(action.max_presses).ok_or(ContractError::BudgetOverflow)?;
+            total = total
+                .checked_add(action.max_presses)
+                .ok_or(ContractError::BudgetOverflow)?;
         }
         Ok(total)
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
         if self.initial_submit != PhysicalKey::Enter
-            || self.confirmation_steps.iter().any(|step| step.key != PhysicalKey::Enter)
+            || self
+                .confirmation_steps
+                .iter()
+                .any(|step| step.key != PhysicalKey::Enter)
         {
-            return Err(ContractError::Invalid("submit uses a logical Enter, not a newline byte"));
+            return Err(ContractError::Invalid(
+                "submit uses a logical Enter, not a newline byte",
+            ));
         }
         if self.timing.capture_interval.is_zero()
             || self.timing.deadline.is_zero()
@@ -97,25 +126,36 @@ impl SubmitPolicy {
             }
         }
         if !self.confirmation_steps.is_empty() && !matches!(self.retry_budget, RetryBudget::Never) {
-            return Err(ContractError::Invalid("confirmation cannot fall back to retry"));
+            return Err(ContractError::Invalid(
+                "confirmation cannot fall back to retry",
+            ));
         }
-        if let RetryBudget::Guarded { predicate, additional, wrap_gap } = self.retry_budget {
+        if let RetryBudget::Guarded {
+            predicate,
+            additional,
+            wrap_gap,
+        } = self.retry_budget
+        {
             if !nonblank(predicate) || (additional == 0 && wrap_gap == 0) {
                 return Err(ContractError::Invalid("retry guard"));
             }
         }
         let mut predicates = Vec::new();
         for step in self.confirmation_steps {
-            if !nonblank(step.predicate) || predicates.contains(&step.predicate)
-                || step.deadline.is_zero() || step.deadline > self.timing.deadline
+            if !nonblank(step.predicate)
+                || predicates.contains(&step.predicate)
+                || step.deadline.is_zero()
+                || step.deadline > self.timing.deadline
             {
                 return Err(ContractError::Invalid("confirmation step"));
             }
             predicates.push(step.predicate);
         }
         for action in self.queue_flush {
-            if !nonblank(action.predicate) || predicates.contains(&action.predicate)
-                || action.max_presses == 0 || action.interval.is_zero()
+            if !nonblank(action.predicate)
+                || predicates.contains(&action.predicate)
+                || action.max_presses == 0
+                || action.interval.is_zero()
                 || action.interval > self.timing.deadline
             {
                 return Err(ContractError::Invalid("queue action"));
@@ -145,8 +185,10 @@ pub struct InputProfile {
 
 impl InputProfile {
     pub fn matches_native(&self, native: &NativeIdentity) -> bool {
-        self.version == native.version && self.harness == native.harness
-            && self.ui == native.ui && self.platform == native.platform
+        self.version == native.version
+            && self.harness == native.harness
+            && self.ui == native.ui
+            && self.platform == native.platform
             && self.executable_sha256 == native.executable_sha256
     }
 }
@@ -169,9 +211,15 @@ pub struct ResolvedSubmitPolicy<'a> {
 }
 
 impl<'a> ResolvedSubmitPolicy<'a> {
-    pub fn profile(&self) -> &InputProfile { self.profile }
-    pub fn policy(&self) -> &SubmitPolicy { self.policy }
-    pub fn interaction(&self) -> &dyn InteractionHook { self.interaction }
+    pub fn profile(&self) -> &InputProfile {
+        self.profile
+    }
+    pub fn policy(&self) -> &SubmitPolicy {
+        self.policy
+    }
+    pub fn interaction(&self) -> &dyn InteractionHook {
+        self.interaction
+    }
 }
 
 pub fn resolve_submit_policy<'a>(
@@ -181,25 +229,38 @@ pub fn resolve_submit_policy<'a>(
 ) -> Result<ResolvedSubmitPolicy<'a>, ContractError> {
     super::descriptor::validate_descriptor(descriptor, hooks, request.operation)?;
     request.native.validate()?;
-    if request.provider != descriptor.identity.id { return Err(ContractError::UnknownProvider); }
+    if request.provider != descriptor.identity.id {
+        return Err(ContractError::UnknownProvider);
+    }
     let profiles = descriptor.input.profiles.require("input profiles")?;
     let mut matches = profiles.iter().filter(|profile| {
-        profile.id == request.profile_id && profile.matches_native(request.native)
-            && profile.channel == request.channel && profile.operations.contains(&request.operation)
+        profile.id == request.profile_id
+            && profile.matches_native(request.native)
+            && profile.channel == request.channel
+            && profile.operations.contains(&request.operation)
     });
     let profile = matches.next().ok_or(ContractError::ProfileUnavailable)?;
-    if matches.next().is_some() { return Err(ContractError::AmbiguousProfile); }
+    if matches.next().is_some() {
+        return Err(ContractError::AmbiguousProfile);
+    }
     let policy = profile.policy.require("input profile")?;
     let evidence = request.evidence;
-    if evidence.provider.as_str() != request.provider || evidence.native != *request.native
-        || evidence.profile_id != profile.id || evidence.policy_sha256 != profile.policy_sha256
-        || evidence.channel != request.channel || evidence.operation != request.operation
+    if evidence.provider.as_str() != request.provider
+        || evidence.native != *request.native
+        || evidence.profile_id != profile.id
+        || evidence.policy_sha256 != profile.policy_sha256
+        || evidence.channel != request.channel
+        || evidence.operation != request.operation
         || evidence.kind != request.required_evidence_kind
         || evidence.candidate_sha256 != request.candidate_sha256
     {
         return Err(ContractError::Mismatch("input profile evidence"));
     }
-    Ok(ResolvedSubmitPolicy { profile, policy, interaction: *hooks.interaction.require("H6 InteractionHook")? })
+    Ok(ResolvedSubmitPolicy {
+        profile,
+        policy,
+        interaction: *hooks.interaction.require("H6 InteractionHook")?,
+    })
 }
 
 /// The trusted marker is carried beside immutable rendered bytes, never parsed from content.
@@ -214,15 +275,29 @@ pub struct LogicalEnvelope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputSurface {
-    ShellOrUnknown, Starting, StartupRiskWarning, ComposerReady,
-    ComposerContainsPaste, Busy, Queued, NativeAccepted, Fault,
+    ShellOrUnknown,
+    Starting,
+    StartupRiskWarning,
+    ComposerReady,
+    ComposerContainsPaste,
+    Busy,
+    Queued,
+    NativeAccepted,
+    Fault,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PasteLatch { NeverSeen, Seen { native_identity: String }, Gone { native_identity: String } }
+pub enum PasteLatch {
+    NeverSeen,
+    Seen { native_identity: String },
+    Gone { native_identity: String },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CaptureBaseline { pub scope: EvidenceScope, pub text: String }
+pub struct CaptureBaseline {
+    pub scope: EvidenceScope,
+    pub text: String,
+}
 
 /// All context comes from this serialized attempt; H6 needs no mutable global state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,19 +325,37 @@ pub struct InteractionObservation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DeliveryEffect {
-    NoEffect, MayHavePasted, PastedUnsubmitted, MayHaveSubmitted, Submitted,
+    NoEffect,
+    MayHavePasted,
+    PastedUnsubmitted,
+    MayHaveSubmitted,
+    Submitted,
 }
 
 impl DeliveryEffect {
     /// Observation/audit failure cannot lower an already reached effect floor.
-    pub fn retain_floor(self, later: Self) -> Self { self.max(later) }
+    pub fn retain_floor(self, later: Self) -> Self {
+        self.max(later)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StepKind { Paste, InitialSubmit, Confirmation, Retry, WrapGap, QueueFlush, StartupAck }
+pub enum StepKind {
+    Paste,
+    InitialSubmit,
+    Confirmation,
+    Retry,
+    WrapGap,
+    QueueFlush,
+    StartupAck,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StepOutcome { Confirmed, NoEffect, MayHaveOccurred }
+pub enum StepOutcome {
+    Confirmed,
+    NoEffect,
+    MayHaveOccurred,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PhysicalStep {
@@ -276,7 +369,12 @@ pub struct PhysicalStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeliveryEvent {
     PhysicalStep(PhysicalStep),
-    NativeAcceptance { scope: EvidenceScope, message: MessageId, attempt: AttemptId, source: String },
+    NativeAcceptance {
+        scope: EvidenceScope,
+        message: MessageId,
+        attempt: AttemptId,
+        source: String,
+    },
 }
 
 pub trait DeliveryObserver {
@@ -298,4 +396,8 @@ pub struct DeliveryReceipt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PersistenceState { Durable, Pending, Failed }
+pub enum PersistenceState {
+    Durable,
+    Pending,
+    Failed,
+}

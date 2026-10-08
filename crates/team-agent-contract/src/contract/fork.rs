@@ -6,7 +6,11 @@ use super::session::{validate_resume, CwdIdentity, ResumeBinding, ResumeExpectat
 use super::types::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForkMode { InWindowBranch, NewSeatFullSnapshot, NativeNewSeat }
+pub enum ForkMode {
+    InWindowBranch,
+    NewSeatFullSnapshot,
+    NativeNewSeat,
+}
 
 impl ForkMode {
     pub fn operation(self) -> Operation {
@@ -33,11 +37,21 @@ pub struct ForkRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedFork { request: ForkRequest }
+pub struct ResolvedFork {
+    request: ForkRequest,
+}
 
-impl ResolvedFork { pub fn request(&self) -> &ForkRequest { &self.request } }
+impl ResolvedFork {
+    pub fn request(&self) -> &ForkRequest {
+        &self.request
+    }
+}
 
-pub fn resolve_fork(descriptor: &ProviderDescriptor, hooks: &ProviderHooks<'_>, request: &ForkRequest) -> Result<ResolvedFork, ContractError> {
+pub fn resolve_fork(
+    descriptor: &ProviderDescriptor,
+    hooks: &ProviderHooks<'_>,
+    request: &ForkRequest,
+) -> Result<ResolvedFork, ContractError> {
     // Capability rejection precedes hook invocation, staging, commands or new-seat effects.
     match request.mode {
         ForkMode::InWindowBranch => descriptor.fork.in_window.require("in-window branch")?,
@@ -47,44 +61,91 @@ pub fn resolve_fork(descriptor: &ProviderDescriptor, hooks: &ProviderHooks<'_>, 
     if !descriptor.fork.allowed_auth.contains(&request.auth) {
         return Err(ContractError::Invalid("fork authentication mode"));
     }
-    descriptor.auth.mechanism(request.auth).require("authentication mode")?;
+    descriptor
+        .auth
+        .mechanism(request.auth)
+        .require("authentication mode")?;
     super::descriptor::validate_descriptor(descriptor, hooks, request.mode.operation())?;
     let provider = ProviderId::new(descriptor.identity.id)?;
-    let mode = if request.mode == ForkMode::NewSeatFullSnapshot { ResumeMode::ExactPath } else { ResumeMode::ExactId };
-    validate_resume(&request.source, &ResumeExpectation {
-        provider: &provider, source: &request.expected_source, cwd: &request.cwd,
-        native: &request.native, evidence_kind: request.evidence_kind, mode,
-    })?;
+    let mode = if request.mode == ForkMode::NewSeatFullSnapshot {
+        ResumeMode::ExactPath
+    } else {
+        ResumeMode::ExactId
+    };
+    validate_resume(
+        &request.source,
+        &ResumeExpectation {
+            provider: &provider,
+            source: &request.expected_source,
+            cwd: &request.cwd,
+            native: &request.native,
+            evidence_kind: request.evidence_kind,
+            mode,
+        },
+    )?;
     let same = request.target == request.expected_source;
     if request.target.scope != request.expected_source.scope
         || (request.mode == ForkMode::InWindowBranch && !same)
-        || (request.mode != ForkMode::InWindowBranch && (request.target.seat == request.expected_source.seat || request.target.instance == request.expected_source.instance))
+        || (request.mode != ForkMode::InWindowBranch
+            && (request.target.seat == request.expected_source.seat
+                || request.target.instance == request.expected_source.instance))
     {
         return Err(ContractError::Mismatch("fork target identity"));
     }
-    Ok(ResolvedFork { request: request.clone() })
+    Ok(ResolvedFork {
+        request: request.clone(),
+    })
 }
 
 /// A restricted native intent, not arbitrary terminal text and never a Team-token envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NativeControl { InspectSession, BranchToTurn(u64), Exit }
+pub enum NativeControl {
+    InspectSession,
+    BranchToTurn(u64),
+    Exit,
+}
 
 /// A plan is not a committed fork. Only the lifecycle executor may produce a receipt.
 #[derive(Clone, PartialEq, Eq)]
 pub enum NativeForkPlan {
-    InWindow { control: NativeControl },
-    FullSnapshot { staging: MaterializeReceipt, launch: LaunchPlan },
-    NativeNewSeat { launch: LaunchPlan },
+    InWindow {
+        control: NativeControl,
+    },
+    FullSnapshot {
+        staging: MaterializeReceipt,
+        launch: LaunchPlan,
+    },
+    NativeNewSeat {
+        launch: LaunchPlan,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForkPhase { Preflight, Stage, Register, Spawn, Commit, Receipt }
+pub enum ForkPhase {
+    Preflight,
+    Stage,
+    Register,
+    Spawn,
+    Commit,
+    Receipt,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackingState { NotApplicable, Staged, Verified, Unknown }
+pub enum BackingState {
+    NotApplicable,
+    Staged,
+    Verified,
+    Unknown,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompensationStatus { NotNeeded, Completed, Partial, Preserved, Unknown }
+pub enum CompensationStatus {
+    NotNeeded,
+    Completed,
+    Partial,
+    Preserved,
+    Unknown,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForkReceipt {
@@ -105,8 +166,15 @@ pub struct ForkReceipt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ForkReadiness { Pending, ReadyForInput, Unknown }
+pub enum ForkReadiness {
+    Pending,
+    ReadyForInput,
+    Unknown,
+}
 
 /// Deliberately outside ForkMode: derived text is not a full-session snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContextClone { pub source: InstanceIdentity, pub text: String }
+pub struct ContextClone {
+    pub source: InstanceIdentity,
+    pub text: String,
+}
