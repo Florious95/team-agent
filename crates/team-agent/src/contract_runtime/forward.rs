@@ -34,6 +34,21 @@ impl FrameworkContext {
     }
 }
 
+fn framework_result(result_id: &str, source: &str, envelope: &Value) -> Result<Value, Error> {
+    if envelope.get("agent_id").and_then(Value::as_str) != Some(source)
+        || envelope.get("task_id").and_then(Value::as_str).is_none_or(|task| task.trim().is_empty()) {
+        return Err(Error::Fence);
+    }
+    // K3's compact wire (schema 1 / completed) is not the root business envelope.
+    // Reuse the shared normalizer rather than maintaining a second alias/schema
+    // implementation or claiming that a persisted K3 result was forwarded.
+    let normalized = crate::mcp_server::normalize::normalize_report_envelope(envelope);
+    if normalized.presentation_error.is_some() { return Err(Error::Invalid("result presentation")); }
+    let mut value = serde_json::to_value(normalized)?;
+    value["result_id"] = json!(result_id);
+    Ok(value)
+}
+
 /// Reuses the common root send/result operations. No provider implementation is
 /// selected here; the common per-recipient dispatcher remains authoritative.
 fn forward_one(context: &FrameworkContext, intent: &ForwardIntent) -> (ForwardState, Value) {
@@ -72,14 +87,10 @@ fn forward_one(context: &FrameworkContext, intent: &ForwardIntent) -> (ForwardSt
             }
         }
         ForwardPayload::Result { result_id, envelope } => {
-            let mut envelope = envelope.clone();
-            let Some(object) = envelope.as_object_mut() else {
-                return (ForwardState::Refused, json!({"code":"invalid_result_envelope"}));
+            let envelope = match framework_result(result_id, intent.source.seat.as_str(), envelope) {
+                Ok(envelope) => envelope,
+                Err(_) => return (ForwardState::Refused, json!({"code":"invalid_result_envelope"})),
             };
-            if object.get("agent_id").and_then(Value::as_str) != Some(intent.source.seat.as_str()) {
-                return (ForwardState::Refused, json!({"code":"result_source_mismatch"}));
-            }
-            object.insert("result_id".into(), json!(result_id));
             match messaging::results::report_result_for_owner_team(&context.workspace.path, &envelope, Some(&context.team)) {
                 Ok(receipt) => (ForwardState::Accepted, receipt),
                 Err(_) => (ForwardState::Unknown, json!({"code":"framework_result_outcome_unknown"})),
@@ -114,4 +125,22 @@ pub fn drain(context: &FrameworkContext, store: &mut ContractStore, limit: usize
         completed += 1;
     }
     Ok(completed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn compact_native_result_becomes_the_existing_framework_business_schema() {
+        let compact = json!({"schema_version":1,"agent_id":"worker","task_id":"msg-bound","status":"completed","summary":"5535"});
+        let result = framework_result("result-fixed", "worker", &compact).unwrap();
+        assert_eq!(result["schema_version"], "result_envelope_v1");
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["task_id"], "msg-bound");
+        assert_eq!(result["summary"], "5535");
+        assert_eq!(result["result_id"], "result-fixed");
+        for field in ["changes", "tests", "risks", "artifacts", "next_actions"] { assert!(result[field].is_array()); }
+        crate::messaging::helpers::validate_result_envelope(&result).unwrap();
+        assert!(framework_result("result-fixed", "other", &compact).is_err());
+    }
 }

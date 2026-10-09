@@ -1275,6 +1275,15 @@ pub(crate) fn quick_start_with_transport_in_workspace_pi_preflight(
         )));
     }
     crate::lifecycle::launch::run_pi_catalog_preflight(agents_dir, discover)?;
+    #[cfg(unix)]
+    {
+        let input = crate::cli::QuickStartArgs { workspace:workspace.into(), agents_dir:agents_dir.into(), name:name.map(str::to_owned),
+            team_id:team_id.map(str::to_owned), yes:false, json:false, detail:false,
+            backend:Some(if matches!(transport.kind(), crate::transport::BackendKind::Tmux) { "tmux" } else { "conpty" }.into()) };
+        if let Some(config) = crate::contract_runtime::config::read_team(&input).map_err(|error| LifecycleError::Compile(error.to_string()))? {
+            crate::contract_runtime::backend::preflight(&config).map_err(|error| LifecycleError::Provider(error.to_string()))?;
+        }
+    }
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;

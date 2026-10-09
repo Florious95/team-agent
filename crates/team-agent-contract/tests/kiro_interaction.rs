@@ -88,8 +88,9 @@ fn mock_two_tool_registration_does_not_claim_three_tool_team_binding() {
     assert_eq!(registry_tools(panel, "team-agent-mock").unwrap().len(), 2);
     assert!(registry_tools(panel, "team").unwrap().is_empty());
     assert_eq!(adapter().interpret(&frame(panel)).predicate.as_deref(), Some("kiro-tools-panel"));
-    let team = format!("{}\nget_team_status mcp:team ◌ approval required", panel.replace("team-agent-mock", "team"));
+    let team = panel.replace("team-agent-mock", "team").replace("esc to close", "get_team_status mcp:team ◌ approval required\nesc to close");
     assert_eq!(registry_tools(&team, "team").unwrap().len(), 3);
     assert_eq!(adapter().interpret(&frame(&team)).predicate.as_deref(), Some("kiro-team-tools-bound"));
     assert!(registry_tools("send_message mcp:team report_result get_team_status", "team").is_none());
+    assert!(registry_tools(&format!("{team}\n{READY}"), "team").is_none());
 }

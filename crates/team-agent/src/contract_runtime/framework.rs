@@ -16,6 +16,30 @@ pub fn has_contract(state: &Value) -> bool {
 pub fn only_contract(state: &Value) -> bool {
     state.get("agents").and_then(Value::as_object).is_some_and(|agents| !agents.is_empty() && agents.values().all(is_contract))
 }
+/// Unsupported lifecycle operations must stop before the legacy provider enum
+/// can turn an unknown native seat into its historical Codex fallback.
+pub fn require_legacy_lifecycle(workspace: &Path, team: Option<&str>, agent: Option<&str>, operation: &str) -> Result<(), crate::cli::CliError> {
+    let Ok(selected) = crate::state::selector::resolve_active_team_readonly(workspace, team, crate::state::selector::SelectorMode::RuntimeOnly) else { return Ok(()); };
+    let selected_native = match agent {
+        Some(id) => selected.state.get("agents").and_then(|agents| agents.get(id)).is_some_and(is_contract),
+        None => has_contract(&selected.state),
+    };
+    let configured_native = selected.state.get("team_dir").and_then(Value::as_str)
+        .and_then(|directory| team_config(&selected.run_workspace, Path::new(directory), &selected.team_key).ok().flatten())
+        .is_some_and(|config| match agent { Some(id) => config.roles.iter().any(|role| role.id.as_str() == id), None => !config.roles.is_empty() });
+    if selected_native || configured_native {
+        return Err(crate::cli::CliError::Runtime(format!("contract_capability_unverified: {operation} is not admitted for Kiro; no legacy fallback or fresh replacement was performed")));
+    }
+    Ok(())
+}
+pub fn require_legacy_role(path: Option<&Path>, provider: Option<&str>) -> Result<(), crate::cli::CliError> {
+    let declared = path.and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| crate::compiler::split_front_matter(&raw).0.get("provider").and_then(crate::model::yaml::Value::as_str).map(str::to_owned));
+    if provider.or(declared.as_deref()).is_some_and(super::registry::recognizes) {
+        return Err(crate::cli::CliError::Runtime("contract_capability_unverified: mutable Kiro role lifecycle is not admitted; use initial quick-start; no role file was changed".into()));
+    }
+    Ok(())
+}
 pub fn team_config(workspace: &Path, directory: &Path, team: &str) -> Result<Option<config::TeamConfig>, config::ConfigError> {
     config::read_team(&crate::cli::QuickStartArgs { workspace:workspace.into(), agents_dir:directory.into(),
         name:None, team_id:Some(team.into()), yes:false, json:false, detail:false, backend:Some("tmux".into()) })

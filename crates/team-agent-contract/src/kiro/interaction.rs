@@ -36,8 +36,9 @@ pub static TOOL_PANEL: crate::runtime::native_panel::NativePanelPolicy = crate::
 /// tools in the exact bound server column count; descriptions and builtin names
 /// cannot establish registry membership. Missing/scrolled-off rows stay unknown.
 pub fn registry_tools(text: &str, server: &str) -> Option<Vec<LogicalTool>> {
-    if !text.lines().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["Name", "Source", "Status", "Description"])
-        || !text.lines().any(|line| line.trim() == "esc to close · ↑↓ to scroll") { return None; }
+    if composer(text).is_some()
+        || !text.lines().any(|line| line.split_whitespace().collect::<Vec<_>>() == ["Name", "Source", "Status", "Description"])
+        || text.lines().map(str::trim).filter(|line| !line.is_empty()).next_back() != Some("esc to close · ↑↓ to scroll") { return None; }
     let source = format!("mcp:{server}");
     let mut tools = Vec::new();
     for line in text.lines() {

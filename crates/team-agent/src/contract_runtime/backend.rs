@@ -157,6 +157,25 @@ fn request(binding: &Binding, role: &RoleConfig, identity: InstanceIdentity, dis
         preassigned_session:None, resume:None, fork:None })
 }
 
+/// Team-wide native discovery/admission before the shared launcher creates any
+/// seats (including legacy peers). No store, config, socket or process is made.
+pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
+    let discovered = discovery::discover(&team.workspace.path)?;
+    let candidate = std::env::current_exe()?.canonicalize()?;
+    let candidate_sha256 = fingerprint_file(&candidate, 1024*1024*1024, Duration::from_secs(10))?;
+    let binding = Binding { version:1, workspace:team.workspace.clone(), team:team.selector.clone(), scope:team.scope.clone(),
+        endpoint:endpoint(&team.scope), candidate, candidate_sha256, tmux:discovery::executable("tmux")?, transport_root:"/tmp/preflight-no-write".into() };
+    for role in &team.roles {
+        let identity = InstanceIdentity { scope:team.scope.clone(), seat:role.id.clone(), instance:InstanceId::new("preflight")?, generation:Generation(1) };
+        let adapter = adapter(&binding, &identity)?;
+        let hooks = adapter.hooks();
+        let request = request(&binding, role, identity, &discovered)?;
+        let resolved = resolve_launch(&KIRO_DESCRIPTOR, &hooks, &request, Some(&discovered.catalog))?;
+        validate_launch_plan(&KIRO_DESCRIPTOR, &resolved, &adapter.plan(&resolved)?)?;
+    }
+    Ok(())
+}
+
 /// This first wiring is fresh-only. Resume/fork must use their typed contracts;
 /// missing evidence cannot be bypassed by silently launching another fresh seat.
 pub fn start(workspace: &Path, team: &str, role: &RoleConfig, members: &[MemberRoute]) -> Result<(Binding, OperationRecord), BackendError> {
@@ -185,7 +204,7 @@ pub fn start(workspace: &Path, team: &str, role: &RoleConfig, members: &[MemberR
     use std::os::unix::fs::OpenOptionsExt;
     let snapshot = serde_json::to_vec(role).map_err(|_| BackendError::Metadata)?;
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .open(root_for(workspace, &backend.binding.scope).join(format!("role-{}.json", role.id.as_str())))?;
+        .open(root_for(&backend.binding.workspace.path, &backend.binding.scope).join(format!("role-{}.json", role.id.as_str())))?;
     file.write_all(&snapshot)?; file.sync_all()?;
     let route = backend.binding.framework().route()?;
     let mut peers:Vec<_> = members.iter().filter(|member| member.runtime == RuntimeFamily::Legacy)

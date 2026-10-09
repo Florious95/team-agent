@@ -28,6 +28,32 @@ fn role(args: &QuickStartArgs, name: &str, provider: &str) {
 }
 
 #[test]
+fn public_compiler_accepts_kiro_without_legacy_effort_inheritance() {
+    use team_agent::model::yaml::Value;
+    let (_sandbox, args) = fixture();
+    std::fs::write(args.agents_dir.join("TEAM.md"), "---\nname: demo\nprovider_effort: ultra\n---\nA bounded task.\n").unwrap();
+    role(&args, "worker", "kiro");
+    let spec = team_agent::compiler::compile_team(&args.agents_dir).unwrap();
+    let worker = &spec.get("agents").and_then(Value::as_list).unwrap()[0];
+    assert_eq!(worker.get("provider").and_then(Value::as_str), Some("kiro"));
+    assert!(worker.get("effort").is_none());
+    assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
+fn mutable_kiro_role_is_refused_before_legacy_fallback_or_role_writes() {
+    let (_sandbox, args) = fixture();
+    role(&args, "worker", "kiro");
+    let path = args.agents_dir.join("agents/worker.md");
+    let before = std::fs::read(&path).unwrap();
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(Some(&path), None).is_err());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("kiro")).is_err());
+    assert!(team_agent::contract_runtime::framework::require_legacy_role(None, Some("pi")).is_ok());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!args.workspace.join(".team").exists());
+}
+
+#[test]
 fn kiro_selection_preserves_role_bytes_and_has_no_runtime_effects() {
     let (_sandbox, args) = fixture();
     role(&args, "worker", "kiro");
