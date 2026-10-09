@@ -142,17 +142,22 @@ id_type!(
     OperationId
 );
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(try_from = "String", into = "String")]
 pub struct ProviderId(String);
 
 impl TryFrom<String> for ProviderId {
     type Error = ContractError;
-    fn try_from(value: String) -> Result<Self, Self::Error> { Self::new(value) }
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
 }
 impl From<ProviderId> for String {
-    fn from(value: ProviderId) -> Self { value.0 }
+    fn from(value: ProviderId) -> Self {
+        value.0
+    }
 }
 
 impl ProviderId {
@@ -169,16 +174,15 @@ impl ProviderId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Generation(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Digest(pub [u8; 32]);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstanceIdentity {
     pub scope: ScopeId,
     pub seat: SeatId,
@@ -186,16 +190,14 @@ pub struct InstanceIdentity {
     pub generation: Generation,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Platform {
     MacOs,
     Linux,
     Windows,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NativeIdentity {
     pub version: String,
     pub harness: String,
@@ -253,8 +255,7 @@ pub const TEAM_TOOLS: [LogicalTool; 3] = [
     LogicalTool::GetTeamStatus,
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EvidenceKind {
     Fixture,
     Native,
@@ -287,8 +288,7 @@ pub fn require_absolute(path: &Path, field: &'static str) -> Result<(), Contract
 
 /// Lexically constrained request, NOT a proof against symlinks or concurrent writers.
 /// The future owned-I/O implementation must additionally enforce no-follow and ownership.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "(PathBuf, PathBuf)", into = "(PathBuf, PathBuf)")]
 pub struct OwnedPath {
     root: PathBuf,
@@ -302,7 +302,9 @@ impl TryFrom<(PathBuf, PathBuf)> for OwnedPath {
     }
 }
 impl From<OwnedPath> for (PathBuf, PathBuf) {
-    fn from(value: OwnedPath) -> Self { (value.root, value.relative) }
+    fn from(value: OwnedPath) -> Self {
+        (value.root, value.relative)
+    }
 }
 
 impl OwnedPath {

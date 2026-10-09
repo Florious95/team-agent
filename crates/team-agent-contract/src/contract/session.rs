@@ -3,17 +3,20 @@ use std::path::PathBuf;
 use super::descriptor::ResumeMode;
 use super::types::*;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct NativeSessionId(String);
 
 impl TryFrom<String> for NativeSessionId {
     type Error = ContractError;
-    fn try_from(value: String) -> Result<Self, Self::Error> { Self::new(value) }
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
 }
 impl From<NativeSessionId> for String {
-    fn from(value: NativeSessionId) -> Self { value.0 }
+    fn from(value: NativeSessionId) -> Self {
+        value.0
+    }
 }
 
 impl NativeSessionId {
@@ -29,30 +32,26 @@ impl NativeSessionId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CwdIdentity {
     pub path: PathBuf,
     pub identity: Digest,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SessionStorage {
     Local,
     Cloud,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CaptureOrigin {
     CurrentNativeSession,
     OwnedExitHint,
     ExactBacking,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeBinding {
     pub provider: ProviderId,
     pub native_session: NativeSessionId,

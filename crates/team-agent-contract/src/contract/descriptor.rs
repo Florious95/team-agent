@@ -287,8 +287,7 @@ pub struct WorkspaceFacet {
     pub requires_materialization_lease: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceKind {
     Prompt,
     AgentConfig,
@@ -299,8 +298,7 @@ pub enum ResourceKind {
     NativeDatabase,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceDisposition {
     OwnedRemovable,
     OwnedPreserved,
