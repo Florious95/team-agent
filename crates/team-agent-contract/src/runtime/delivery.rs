@@ -81,6 +81,12 @@ pub enum ControlKind {
     Exit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlInputMode {
+    ProfilePaste,
+    DirectTyping,
+}
+
 /// Native encoding is reviewable profile data, not an eighth executable provider hook.
 /// The full profile hash must cover these definitions as well as its submit policy.
 pub struct ControlDefinition {
@@ -89,6 +95,7 @@ pub struct ControlDefinition {
     pub operation: Operation,
     pub kind: ControlKind,
     pub command: &'static str,
+    pub input_mode: ControlInputMode,
 }
 
 pub struct StartupDefinition {
@@ -117,6 +124,7 @@ enum InputPurpose {
         profile: String,
         hash: Digest,
         operation: Operation,
+        input_mode: ControlInputMode,
     },
     Startup {
         owner: InstanceIdentity,
@@ -185,6 +193,7 @@ impl PreparedInput {
                 profile: definition.profile_id.into(),
                 hash: definition.policy_sha256,
                 operation: definition.operation,
+                input_mode: definition.input_mode,
             },
         })
     }
@@ -472,14 +481,9 @@ pub fn inject_with_contract<'a, 'bootstrap: 'a>(
                 InjectionDisposition::Refused
             };
         }
+        let code = problem.code;
         run.report.problems.push(problem);
-        let _ = run.record(
-            JournalKind::Failure,
-            None,
-            None,
-            None,
-            Some("execution-stopped"),
-        );
+        let _ = run.record(JournalKind::Failure, None, None, None, Some(code));
     }
     run.release_buffer();
     if run.journal_started && run.report.persistence != PersistenceState::Failed {
@@ -983,8 +987,26 @@ impl Run<'_, '_> {
         policy
             .validate()
             .map_err(|_| ExecutionProblem::code("invalid-submit-policy"))?;
+        // Control intent comes from the sealed registered definition, never a
+        // '/' prefix in arbitrary business text. Keep the same lane and guards.
+        let direct_control = matches!(
+            self.request.input.purpose,
+            InputPurpose::Control {
+                input_mode: ControlInputMode::DirectTyping,
+                ..
+            }
+        );
+        let paste_mode = if direct_control {
+            if policy.payload_trailer != PayloadTrailer::None {
+                return Err(ExecutionProblem::code("direct-control-trailer-unsupported"));
+            }
+            PasteMode::DirectTyping
+        } else {
+            policy.paste_mode
+        };
         if !matches!(self.request.input.purpose, InputPurpose::Startup { .. })
-            && policy.paste_mode != PasteMode::Bracketed
+            && paste_mode != PasteMode::Bracketed
+            && !direct_control
         {
             return Err(ExecutionProblem::code(
                 "unframed-terminal-paste-unsupported",
@@ -1024,6 +1046,7 @@ impl Run<'_, '_> {
                 profile: id,
                 hash,
                 operation,
+                ..
             } if id != profile.id
                 || *hash != profile.policy_sha256
                 || *operation != self.request.operation =>
@@ -1116,7 +1139,7 @@ impl Run<'_, '_> {
             self.request.target,
             &name,
             &bytes,
-            policy.paste_mode,
+            paste_mode,
             self.clock,
             self.request.deadline,
         );
@@ -1164,7 +1187,7 @@ impl Run<'_, '_> {
         let pasted = self.transport.paste_buffer(
             self.request.target,
             &name,
-            policy.paste_mode,
+            paste_mode,
             self.clock,
             self.request.deadline,
         );

@@ -391,7 +391,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             self.clock,
         );
         if report.persistence != PersistenceState::Durable || !report.problems.is_empty() {
-            return Err(Error::Host("native control outcome uncertain"));
+            return Err(Error::NativeControl(Box::new(report)));
         }
         Ok(report.effect_floor)
     }

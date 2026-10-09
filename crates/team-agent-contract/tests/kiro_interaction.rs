@@ -90,6 +90,12 @@ fn recipe_has_one_enter_no_payload_trailer_retry_or_queue_keys() {
     assert!(policy.queue_flush.is_empty());
     assert_eq!(PROFILES[0].identity, ProfileIdentity::RuntimeCaptured);
     assert_eq!(PROFILES[0].harness, "v2");
+    assert_eq!(policy.paste_mode, PasteMode::Bracketed);
+    assert!(CONTROLS.iter().all(|control| {
+        control.input_mode
+            == team_agent_contract::runtime::delivery::ControlInputMode::DirectTyping
+            && control.policy_sha256 == POLICY
+    }));
 }
 #[test]
 fn accepted_message_requires_current_paste_and_transcript_token_not_disappearance() {
@@ -143,6 +149,29 @@ fn session_parser_requires_label_matching_hint_and_one_uuid() {
     assert!(session_id(&format!("{SID}\n{SID}")).is_err());
     assert!(session_id(&SID.replace("Resume with:", "arbitrary reply:")).is_err());
 }
+#[test]
+fn r0_session_response_is_accepted_only_after_the_current_control_and_enter() {
+    let adapter = adapter();
+    let mut capture = frame("› /session-id");
+    capture.operation = Operation::SessionInspect;
+    capture.attempt = Some(AttemptId::new("session-control").unwrap());
+    capture.baseline = Some(CaptureBaseline {
+        scope: scope(),
+        text: READY.into(),
+    });
+    capture.after_step = Some(StepKind::Paste);
+    let typed = adapter.interpret(&capture);
+    assert!(matches!(typed.paste_latch, PasteLatch::Seen { .. }));
+    capture.paste_latch = typed.paste_latch;
+    capture.after_step = Some(StepKind::InitialSubmit);
+    capture.text = format!("{SID}\n{READY}");
+    let accepted = adapter.interpret(&capture);
+    assert_eq!(accepted.surface, InputSurface::NativeAccepted);
+    assert_eq!(accepted.current_attempt, capture.attempt);
+    capture.paste_latch = PasteLatch::NeverSeen;
+    assert_ne!(adapter.interpret(&capture).surface, InputSurface::NativeAccepted);
+}
+
 #[test]
 fn session_hook_preserves_scope_hash_and_never_lists_newest_session() {
     let native = NativeIdentity {

@@ -566,6 +566,7 @@ pub struct FakeTransport {
     pub message: String,
     pub sequence: u64,
     pub buffer: Option<Vec<u8>>,
+    pub staged_modes: Vec<PasteMode>,
     pub pasted: Vec<Vec<u8>>,
     pub keys: Vec<PhysicalKey>,
     pub key_times: Vec<Duration>,
@@ -595,6 +596,7 @@ impl FakeTransport {
             message: message.into(),
             sequence: 0,
             buffer: None,
+            staged_modes: Vec::new(),
             pasted: Vec::new(),
             keys: Vec::new(),
             key_times: Vec::new(),
@@ -709,10 +711,11 @@ impl PhysicalTransport for FakeTransport {
         _: &TargetReceipt,
         _: &str,
         bytes: &[u8],
-        _: PasteMode,
+        mode: PasteMode,
         _: &dyn Clock,
         _: Duration,
     ) -> ActionResult {
+        self.staged_modes.push(mode);
         self.buffer = Some(bytes.to_vec());
         ActionResult::confirmed()
     }

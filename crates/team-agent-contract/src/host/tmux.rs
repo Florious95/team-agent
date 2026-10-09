@@ -1038,17 +1038,63 @@ impl<R: CommandRunner> PhysicalTransport for TmuxHost<R> {
         if let Err(error) = self.check_bound(target, clock, deadline, true) {
             return ActionResult::refused(error);
         }
-        // -r preserves LF; tmux otherwise silently substitutes CR for each LF.
-        let args = vec![
-            "paste-buffer".into(),
-            "-r".into(),
-            "-b".into(),
-            name.into(),
-            "-t".into(),
-            target.pane.clone().into(),
-        ];
+        let args = if mode == PasteMode::DirectTyping {
+            // Read only this attempt's staged buffer. Literal typing contains no
+            // terminal control bytes and does NOT include the submit key.
+            let result = match self.command(
+                vec!["save-buffer".into(), "-b".into(), name.into(), "-".into()],
+                None,
+                clock,
+                deadline,
+            ) {
+                Ok(result) if result.success() => result,
+                Ok(result) => {
+                    return ActionResult::refused(command_error(
+                        &result,
+                        "read owned control buffer",
+                    ))
+                }
+                Err(error) => return ActionResult::refused(error),
+            };
+            let text = match std::str::from_utf8(&result.stdout) {
+                Ok(text)
+                    if !text.is_empty()
+                        && text.len() <= self.limits.max_payload_bytes
+                        && text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) =>
+                {
+                    text
+                }
+                _ => {
+                    return ActionResult::refused(HostError::new(
+                        "literal control bytes",
+                        HostErrorKind::Invalid,
+                    ))
+                }
+            };
+            if let Err(error) = self.check_bound(target, clock, deadline, true) {
+                return ActionResult::refused(error);
+            }
+            vec![
+                "send-keys".into(),
+                "-l".into(),
+                "-t".into(),
+                target.pane.clone().into(),
+                "--".into(),
+                text.into(),
+            ]
+        } else {
+            // -r preserves LF; tmux otherwise silently substitutes CR for each LF.
+            vec![
+                "paste-buffer".into(),
+                "-r".into(),
+                "-b".into(),
+                name.into(),
+                "-t".into(),
+                target.pane.clone().into(),
+            ]
+        };
         match self.command(args, None, clock, deadline) {
-            Ok(result) => action_result(result, "paste owned buffer"),
+            Ok(result) => action_result(result, "insert owned input"),
             Err(error) => ActionResult::refused(error),
         }
     }

@@ -11,7 +11,7 @@ import termios
 import tty
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--mode", choices=["single", "confirm", "confirm-two", "retry", "queue", "startup"], default="single")
+parser.add_argument("--mode", choices=["single", "confirm", "confirm-two", "retry", "queue", "startup", "literal-control"], default="single")
 parser.add_argument("--events", required=True)
 parser.add_argument("--prompt", default="")
 parser.add_argument("--server", default="")
@@ -93,6 +93,11 @@ try:
                 else:
                     event("native_accepted", message=message)
                     surface("ACCEPTED", message)
+            elif args.mode == "literal-control" and 0x20 <= byte < 0x7f:
+                payload += bytes([byte])
+                event("typed_byte", byte=byte)
+                if payload == b"/fixture-session":
+                    surface("PASTED", message)
             else:
                 event("unexpected_byte", byte=byte)
 finally:

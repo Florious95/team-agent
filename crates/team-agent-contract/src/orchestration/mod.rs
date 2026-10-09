@@ -13,6 +13,7 @@ use crate::contract::types::ContractError;
 
 /// Errors exclude SQL values, prompt/config bytes and native screen captures.
 /// HostDiagnostic preserves only bounded, escaped tmux metadata diagnostics.
+/// NativeControl renders execution facts and problem codes, never input/capture bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Contract(ContractError),
@@ -24,12 +25,23 @@ pub enum Error {
     Io(std::io::ErrorKind),
     Host(&'static str),
     HostDiagnostic(crate::host::HostError),
+    NativeControl(Box<crate::runtime::delivery::InjectionReport>),
     NeedsRecovery,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HostDiagnostic(error) => std::fmt::Display::fmt(error, f),
+            Self::NativeControl(report) => write!(
+                f,
+                "native control {:?}: disposition={:?}; persistence={:?}; effect_floor={:?}; counts={:?}; problems={:?}",
+                report.metadata.operation,
+                report.disposition,
+                report.persistence,
+                report.effect_floor,
+                report.counts,
+                report.problems
+            ),
             _ => write!(f, "{self:?}"),
         }
     }

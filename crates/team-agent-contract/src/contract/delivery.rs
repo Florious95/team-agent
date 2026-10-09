@@ -20,6 +20,8 @@ pub enum PhysicalKey {
 pub enum PasteMode {
     Bracketed,
     Plain,
+    /// Literal text insertion, admitted only for a registered native control.
+    DirectTyping,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

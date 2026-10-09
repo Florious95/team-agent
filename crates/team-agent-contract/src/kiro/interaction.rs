@@ -4,13 +4,14 @@
 use super::KiroAdapter;
 use crate::contract::{delivery::*, hooks::*, probe::*, session::*, types::*};
 use crate::host::digest;
-use crate::runtime::delivery::{ControlDefinition, ControlKind};
+use crate::runtime::delivery::{ControlDefinition, ControlInputMode, ControlKind};
 use std::time::Duration;
 
 pub const PROFILE: &str = "kiro-v2-tui-macos";
+// r2 fences the explicit direct-typing controls from the former bracketed recipe.
 pub const POLICY: Digest = Digest([
-    164, 212, 44, 211, 110, 104, 19, 79, 151, 125, 118, 45, 26, 228, 173, 129, 13, 207, 154, 246,
-    237, 237, 197, 25, 27, 160, 229, 245, 129, 12, 178, 213,
+    114, 26, 41, 193, 29, 142, 35, 189, 189, 16, 144, 86, 23, 78, 224, 51, 197, 200, 250, 200,
+    231, 202, 189, 146, 232, 46, 238, 132, 154, 230, 23, 231,
 ]);
 pub static PROFILES: &[InputProfile] = &[InputProfile {
     id: PROFILE,
@@ -49,6 +50,7 @@ pub static CONTROLS: &[ControlDefinition] = &[
         operation: Operation::SessionInspect,
         kind: ControlKind::InspectSession,
         command: "/session-id",
+        input_mode: ControlInputMode::DirectTyping,
     },
     ControlDefinition {
         profile_id: PROFILE,
@@ -56,6 +58,7 @@ pub static CONTROLS: &[ControlDefinition] = &[
         operation: Operation::ToolInspect,
         kind: ControlKind::InspectTools,
         command: "/tools",
+        input_mode: ControlInputMode::DirectTyping,
     },
 ];
 pub static TOOL_PANEL: crate::runtime::native_panel::NativePanelPolicy =
