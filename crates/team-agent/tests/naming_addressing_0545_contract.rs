@@ -291,7 +291,7 @@ fn red_3_positional_human_refusal_keeps_typo_and_copyable_suggestion() {
         "RED-3: original typo missing: {human}"
     );
     assert!(
-        human.contains("你是否想发给") && human.contains("本次没有发送"),
+        human.contains("Did you mean") && human.contains("Nothing was sent"),
         "RED-3: {human}"
     );
     assert!(
@@ -345,11 +345,11 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
     let help = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
     for required in [
         "team-agent send <agent>",
-        "队友名",
+        "agent name",
         "--mailbox",
-        "只留言，不发送到当前对话",
-        "默认发送到队友对话",
-        "已收下任务不等于送达或完成",
+        "stores a message without injecting it into the current conversation",
+        "default delivery targets the agent conversation",
+        "acceptance is not delivery or completion",
     ] {
         assert!(
             help.contains(required),
@@ -373,7 +373,7 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
 
     let specs = source("src/cli/spec.rs").to_ascii_lowercase();
     let send_spec = command_spec(&specs, "name: \"send\"");
-    for required in ["队友", "任务", "team-agent send <agent>", "--mailbox"] {
+    for required in ["agent", "task", "team-agent send <agent>", "--mailbox"] {
         assert!(
             send_spec.contains(required),
             "RED-4: COMMAND_SPECS/help drift; missing {required}; spec={send_spec}"
@@ -1206,7 +1206,7 @@ fn assert_named_human_refusal(output: &Output, typo: &str, suggestion: &str) {
         "RED-3: original typo missing: {human}"
     );
     assert!(
-        human.contains("你是否想发给") && human.contains("本次没有发送"),
+        human.contains("Did you mean") && human.contains("Nothing was sent"),
         "RED-3: {human}"
     );
     assert!(

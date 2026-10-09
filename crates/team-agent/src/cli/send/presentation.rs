@@ -20,7 +20,7 @@ pub(super) fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> V
         "watcher_id": format!("watch-{agent_id}"),
         "task_id": opts.task_id.as_ref().map(|t| t.as_str().to_string()),
         "agent_id": agent_id,
-        "notice": "队友回复后会通知主控；用 team-agent inbox leader -n 3 查看。"
+        "notice": "The leader is notified when the agent replies; use team-agent inbox leader -n 3."
     })
 }
 
@@ -188,50 +188,51 @@ pub(super) fn send_human_output(value: &Value) -> String {
         let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
         let explanation =
             crate::cli::named_address::human_address_reason(reason).unwrap_or(match reason {
-                "target_not_in_team" | "unknown_recipient" => "当前队伍没有这个队友。",
+                "target_not_in_team" | "unknown_recipient" => "The selected team has no such agent.",
                 "missing_permissions" | "human_confirmation_required" => {
-                    "发送被拒绝：需要先确认交流权限。"
+                    "Send refused: communication permission or human confirmation is required."
                 }
                 "recipient_busy" | "recipient_pane_in_non_input_mode" => {
-                    "队友当前不能接收任务；请先查看其状态。"
+                    "The agent cannot receive a task now; check its status."
                 }
                 "routing_ambiguous" | "empty_target_list" | "ambiguous" => {
-                    "没有明确选定收信队友；请填写队友名和任务内容。"
+                    "No recipient was selected unambiguously; provide an agent name and task message."
                 }
                 "team_owner_mismatch" | "PaneWorkspaceMismatch" | "session_drift" => {
-                    "队伍或终端归属不匹配；已停止发送。"
+                    "Team or pane ownership mismatch; sending was refused."
                 }
                 "coordinator_unavailable" | "tmux_target_missing" => {
-                    "队伍连接暂不可用；本次没有确认送达。"
+                    "The team channel is unavailable; delivery was not confirmed."
                 }
                 "message_already_claimed" | "duplicate" => {
-                    "这条消息已由其他发送处理接收；不要重复发送。"
+                    "This message is already claimed or duplicated; do not resend."
                 }
-                "no_caller_pane" => "当前终端没有可用的队伍连接；请在主控的命令行/工具上下文发送。",
+                "no_caller_pane" => "The current terminal has no usable team channel; send from the leader's tool context.",
                 _ => value
                     .get("error")
                     .and_then(Value::as_str)
-                    .unwrap_or("发送未成功；没有确认任务已送达。"),
+                    .unwrap_or("Send was unsuccessful; task delivery was not confirmed."),
             });
-        let mut out = format!("{explanation}\n下一步：先运行 team-agent status，使用列表中的队友名；连接问题用 team-agent doctor --workspace .。不要反复重发。");
+        let details = crate::cli::triage::diagnostic_details(value);
+        let mut out = format!("{explanation}\nReport: {details}\nAdditional diagnosis: use team-agent status for agent names or team-agent doctor --workspace . for channel problems. Do not resend repeatedly.");
         if let Some(suggested) = value
             .get("suggested_name")
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty() && !name.contains(['/', ':', ',', '\n', '\r']))
         {
             out.push_str(&format!(
-                "\n你是否想发给 {suggested}？确认后使用这个队友名。"
+                "\nDid you mean {suggested}? Confirm before using that agent name."
             ));
         }
         return out;
     }
     if value.get("status").and_then(Value::as_str) == Some("stored_only") {
-        return format!("已给{agent}留下消息；本次没有发送到当前对话。\n下一步：用 team-agent inbox leader -n 3 查看回复；留言不保证自动执行。");
+        return format!("Message stored for {agent}; it was not injected into the current conversation.\nNext: use team-agent inbox leader -n 3 for replies. Mailbox storage does not guarantee execution.");
     }
     if value.get("delivered").and_then(Value::as_bool) == Some(true) {
-        format!("已发给{agent}。{}", crate::cli::SEND_REMINDER)
+        format!("Delivered to {agent}. {}", crate::cli::SEND_REMINDER)
     } else {
-        "任务已收下，但还未送到队友的对话。\n下一步：查看 team-agent status 或 team-agent doctor --workspace .，等真实回复，不反复重发。".to_string()
+        "Task accepted, but delivery to the agent's conversation is still pending.\nNext: check team-agent status or team-agent doctor --workspace .; wait for an actual reply without repeated sends.".to_string()
     }
 }
 
@@ -251,7 +252,7 @@ pub(super) fn send_human_target(value: &Value) -> String {
             !name.is_empty() && *name != "*" && !name.contains(['/', ':', ',', '\n', '\r'])
         })
         .map(str::to_string)
-        .unwrap_or_else(|| "该队友".to_string())
+        .unwrap_or_else(|| "the recipient".to_string())
 }
 
 pub(super) fn send_human_status(value: &Value) -> String {
@@ -286,11 +287,11 @@ pub(super) fn send_reminder_for_value(value: &Value) -> &'static str {
     let status = value.get("status").and_then(Value::as_str);
     let delivery_status = value.get("delivery_status").and_then(Value::as_str);
     if status == Some("stored_only") {
-        "本次只留言，没有发送到当前对话；留言不保证自动执行。"
+        "Mailbox-only: not injected into the current conversation; storage does not guarantee execution."
     } else if delivered == Some(true) && delivery_status != Some("pending") {
         crate::cli::SEND_REMINDER
     } else {
-        "任务已收下，但还未确认送到队友对话。查看 team-agent status/doctor，等真实回复，不反复重发。"
+        "Task accepted, but delivery is unconfirmed. Check team-agent status/doctor; wait for an actual reply without repeated sends."
     }
 }
 

@@ -641,11 +641,11 @@ fn cmd_send_joins_message_with_single_space() {
                 // 应立即失败以强制重新审视，而不是悄悄跑一条从未验过的分支。
                 assert!(
                     !delivered,
-                    "hermetic seed 不应产生 delivered=true；tier 假设变了"
+                    "hermetic seed must not produce delivered=true; the fixture assumption changed"
                 );
                 assert_eq!(
                     v.get("reminder").and_then(|reminder| reminder.as_str()),
-                    Some("任务已收下，但还未确认送到队友对话。查看 team-agent status/doctor，等真实回复，不反复重发。")
+                    Some("Task accepted, but delivery is unconfirmed. Check team-agent status/doctor; wait for an actual reply without repeated sends.")
                 );
             }
         }
@@ -665,15 +665,15 @@ fn cmd_send_default_human_output_is_brief_without_false_delivered() {
         "send must separate outcome and next action: {text}"
     );
     assert!(
-        lines[0].contains("任务已收下") && lines[0].contains("还未送到队友的对话"),
+        lines[0].contains("Task accepted") && lines[0].contains("delivery to the agent's conversation is still pending"),
         "queued send must report its true pending outcome: {text}"
     );
     assert!(
-        lines[1].contains("下一步")
+        lines[1].contains("Next:")
             && lines[1].contains("team-agent status")
             && lines[1].contains("doctor")
-            && lines[1].contains("等真实回复")
-            && lines[1].contains("不反复重发"),
+            && lines[1].contains("wait for an actual reply")
+            && lines[1].contains("without repeated sends"),
         "queued send must give honest next steps: {text}"
     );
     assert!(
@@ -951,7 +951,7 @@ fn cmd_send_unknown_task_surfaces_golden_error_envelope_not_silent() {
     );
     assert_eq!(
         payload.action,
-        "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
+        "Run team-agent doctor --workspace . for the selected team, or inspect the error log shown here."
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

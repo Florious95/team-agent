@@ -246,36 +246,25 @@ fn help_property(command: &str) {
             !help.trim().is_empty(),
             "H4/H5 empty launcher help: {command} {flag}"
         );
-        let sections =
-            Regex::new(r"(?m)^\s*(?:怎么用|关键参数|参数|选项|示例|Examples|下一步)[：:]").unwrap();
+        let sections = Regex::new(r"(?m)^\s*(?:Usage|Options|Examples|Next Action):").unwrap();
         let description = sections
             .find(&help)
             .map(|m| &help[..m.start()])
             .unwrap_or(&help);
         assert!(
-            description
-                .chars()
-                .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
-                .count()
-                >= 4,
-            "H4 plain Chinese description missing before Args/Examples: {help}"
+            description.strip_prefix("Purpose:").is_some_and(|purpose| {
+                purpose.chars().filter(char::is_ascii_alphabetic).count() >= 4
+                    && !purpose.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+            }),
+            "H4 plain English purpose missing before Usage/Options: {help}"
         );
+        assert!(help.contains("Options:"), "H4 key Args/prerequisites explanation missing: {help}");
         assert!(
-            help.contains("怎么用")
-                || help.contains("关键参数")
-                || help.contains("参数：")
-                || help.contains("参数:")
-                || help.contains("选项"),
-            "H4 key Args/prerequisites explanation missing: {help}"
-        );
-        assert!(
-            help.contains(command) && (help.contains("用法") || help.contains("usage:")),
+            help.contains(&format!("Usage: team-agent {command}")),
             "H4 actual usage missing: {help}"
         );
-        assert!(
-            help.contains("下一步") || help.to_lowercase().contains("next action"),
-            "H4 Next Action missing: {help}"
-        );
+        assert!(help.contains("Examples:") && help.contains("Next Action:"),
+            "H4 English Examples/Next Action missing: {help}");
         let examples = examples(&help, command);
         assert!(
             (2..=3).contains(&examples.len()),
@@ -402,11 +391,14 @@ fn h1_root_discovers_all_twenty_nine_once_in_catalog_and_zero_private_names() {
         visible.into_iter().collect::<BTreeSet<_>>(),
         HUMAN.iter().copied().collect()
     );
-    let tokens = words(&help);
+    // Ordinary English words such as "wait"/"sessions" are not CLI entries.
+    // The catalog was checked above; also inspect actual tutorial invocations.
+    let references = Regex::new(r"team-agent\s+([a-z][a-z-]*)").unwrap();
+    let invocations = references.captures_iter(&help).map(|m| m[1].to_string()).collect::<BTreeSet<_>>();
     let leaks = MACHINE
         .iter()
         .chain(RETIRED)
-        .filter(|name| tokens.contains(**name))
+        .filter(|name| invocations.contains(**name))
         .collect::<Vec<_>>();
     assert!(
         leaks.is_empty(),
@@ -606,7 +598,7 @@ fn retired_unknown(command: &str) {
             "retired {argv:?} printed output: {output}"
         );
         assert!(
-            output.contains(&format!("没有这个操作：'{command}'")),
+            output.contains(&format!("Unknown command: '{command}'")),
             "retired {argv:?} must use the generic unknown-command refusal: {output}"
         );
         assert!(output.contains("team-agent --help"), "{output}");

@@ -124,7 +124,7 @@ fn send_hint(entry: &LeaderRegistryEntry) -> String {
     format!(
         "team-agent send {} {}",
         quote_cli_arg(&to),
-        quote_cli_arg("消息")
+        quote_cli_arg("message")
     )
 }
 
@@ -183,19 +183,19 @@ fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
     if rows.is_empty() {
         return match view {
             LeadersView::Live => {
-                "没有可用主控；运行 team-agent doctor --workspace . 检查当前队伍。\n".to_string()
+                "No live leaders. Run team-agent doctor --workspace . for the current team.\n".to_string()
             }
-            LeadersView::All => "没有已登记主控；首次协作用 team-agent pi 打开主控。\n".to_string(),
-            LeadersView::Stale => "没有已失效的主控登记。\n".to_string(),
+            LeadersView::All => "No registered leaders. Open a leader with team-agent pi for first-time collaboration.\n".to_string(),
+            LeadersView::Stale => "No stale leader registrations.\n".to_string(),
         };
     }
-    let mut out = String::from("主控\t状态\t项目\t队伍\t发送命令\n");
+    let mut out = String::from("leader\tstatus\tworkspace\tteam\tsend command\n");
     for row in rows {
         out.push_str("leader\t");
         out.push_str(match row.status {
-            "LIVE" => "可用",
-            "STALE" => "已失效",
-            "AMBIGUOUS" => "需确认归属",
+            "LIVE" => "LIVE",
+            "STALE" => "STALE",
+            "AMBIGUOUS" => "AMBIGUOUS",
             other => other,
         });
         out.push('\t');
@@ -212,7 +212,7 @@ fn format_leaders_human(rows: &[LeaderRow], view: LeadersView) -> String {
                     &row.entry.workspace,
                     Some(&row.entry.team_key),
                 )
-                .unwrap_or_else(|| "请核对项目路径".to_string()),
+                .unwrap_or_else(|| "Verify the workspace path".to_string()),
             );
         }
         out.push('\n');
@@ -240,33 +240,33 @@ fn prune_json(report: &RegistryPruneReport) -> Value {
 }
 
 fn format_prune_human(report: &RegistryPruneReport) -> String {
-    let mut out = format!("仅预览：{}\n", report.dry_run);
+    let mut out = format!("dry_run: {}\n", report.dry_run);
     for (label, items) in [
-        ("可清理登记", &report.candidates),
-        ("已清理", &report.removed),
-        ("保留", &report.kept),
-        ("跳过", &report.skipped),
-        ("错误", &report.errors),
+        ("candidates", &report.candidates),
+        ("removed", &report.removed),
+        ("kept", &report.kept),
+        ("skipped", &report.skipped),
+        ("errors", &report.errors),
     ] {
         out.push_str(&format!("{label}: {}\n", items.len()));
         for item in items {
             out.push_str("  ");
             out.push_str(&item.workspace.display().to_string());
-            out.push_str("，队伍：");
+            out.push_str(", team: ");
             out.push_str(&item.team_key);
             out.push_str(" [");
             out.push_str(match item.reason.as_str() {
-                "LIVE" => "仍可用，保留登记",
-                "team_key_not_found" => "队伍已不在项目中",
-                "team_not_alive" => "队伍已停止",
-                "registry_entry_missing" => "登记已不存在",
+                "LIVE" => "still live; registration retained",
+                "team_key_not_found" => "team no longer exists in the workspace",
+                "team_not_alive" => "team is stopped",
+                "registry_entry_missing" => "registration no longer exists",
                 "registry_entry_changed" | "canonical_state_changed" => {
-                    "登记或队伍已变化，停止清理"
+                    "registration or team changed; cleanup refused"
                 }
-                "canonical_state_unavailable" => "无法读取队伍状态，保留登记",
-                "registry_lock_unavailable" => "登记正被其他操作使用，停止清理",
-                "remove_failed" => "删除登记失败，请查看文件权限",
-                _ => "无法安全确认该登记；请体检所选项目",
+                "canonical_state_unavailable" => "team state unavailable; registration retained",
+                "registry_lock_unavailable" => "registry lock unavailable; cleanup refused",
+                "remove_failed" => "registration removal failed; inspect file permissions",
+                _ => "registration could not be verified safely; diagnose the selected workspace",
             });
             out.push_str("]\n");
         }
@@ -337,13 +337,13 @@ mod tests {
         assert_eq!(lines.len(), 3, "one header and both selected rows: {out}");
         let header = lines[0];
         assert_eq!(header.split('\t').count(), 5);
-        assert!(header.contains("状态") && header.contains("项目") && header.contains("队伍"));
+        assert!(header.contains("status") && header.contains("workspace") && header.contains("team"));
         let live: Vec<_> = lines[1].split('\t').collect();
         assert_eq!(
             &live[..4],
             &[
                 "leader",
-                "可用",
+                "LIVE",
                 "/Volumes/nvme/Projects/讨论team-agent",
                 "wiki-team"
             ]
@@ -354,7 +354,7 @@ mod tests {
                 "team-agent",
                 "send",
                 "leader",
-                "请完成任务并把答案回复给 leader。",
+                "Complete the task and reply to the leader.",
                 "--workspace",
                 "/Volumes/nvme/Projects/讨论team-agent",
                 "--team",
@@ -364,7 +364,7 @@ mod tests {
         let stale: Vec<_> = lines[2].split('\t').collect();
         assert_eq!(
             &stale[..4],
-            &["leader", "已失效", "/Users/alauda/stale", "old-team"]
+            &["leader", "STALE", "/Users/alauda/stale", "old-team"]
         );
         assert_eq!(stale[4], "-", "stale rows must never suggest a send: {out}");
     }
@@ -404,9 +404,9 @@ mod tests {
     #[test]
     fn empty_view_names_are_explicit() {
         for (view, empty, next) in [
-            (LeadersView::Live, "没有可用主控", Some("team-agent doctor")),
-            (LeadersView::Stale, "没有已失效的主控登记", None),
-            (LeadersView::All, "没有已登记主控", Some("team-agent pi")),
+            (LeadersView::Live, "No live leaders", Some("team-agent doctor")),
+            (LeadersView::Stale, "No stale leader registrations", None),
+            (LeadersView::All, "No registered leaders", Some("team-agent pi")),
         ] {
             let out = format_leaders_human(&[], view);
             assert!(out.contains(empty) && out.ends_with('\n'), "{out}");

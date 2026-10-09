@@ -91,11 +91,14 @@ fn doctor_help_points_to_public_doctor_command() {
     let text = output_text(&output);
     assert!(output.status.success(), "doctor --help: {text}");
     assert!(
-        text.contains("team-agent doctor")
-            && text.contains("用法")
-            && text.contains("Examples")
-            && text.contains("下一步"),
+        text.contains("Usage: team-agent doctor")
+            && text.contains("Examples:")
+            && text.contains("Next Action:"),
         "{text}"
+    );
+    assert!(
+        !text.chars().any(|ch| matches!(ch, '\u{3400}'..='\u{9fff}')),
+        "doctor help must retain English guidance: {text}"
     );
 }
 

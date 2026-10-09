@@ -165,14 +165,15 @@ fn purge_agent_help_and_dispatch_are_consistent() {
         output_text(&case.run(["purge-agent", "ghost", "--workspace", case.ws(), "--json"]));
     if help.contains("purge-agent") {
         assert!(
-            !command.contains("invalid choice") && !command.contains("unknown subcommand") && !command.contains("Commands:"),
+            !command.contains("invalid choice") && !command.contains("unknown subcommand")
+                && !command.contains("Unknown command:") && !command.contains("Commands:"),
             "RED6: help exposes purge-agent, so dispatch must be real or the command must be removed from help; help={help} command={command}"
         );
     } else {
         assert!(
             command.contains("unknown subcommand")
                 || command.contains("invalid choice")
-                || command.contains("没有这个操作"),
+                || command.contains("Unknown command:"),
             "RED6: if purge-agent is not implemented, help and dispatch must agree it is absent; help={help} command={command}"
         );
     }

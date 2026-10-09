@@ -149,17 +149,35 @@ fn p3_human_doctor_is_bounded_and_control_clean_for_generated_inputs() {
             None,
         );
         let human = String::from_utf8(output.stdout).expect("human output must be UTF-8");
+        let json = run_with_env(
+            &["doctor", "--workspace", workspace_arg.as_str(), "--team", team.as_str(), "--json"],
+            &workspace, &home, None,
+        );
+        let expected: Value = serde_json::from_slice(&json.stdout).expect("doctor JSON evidence");
+        let mut detail_count = 0;
         for (line_no, line) in human.lines().enumerate() {
-            assert!(
-                line.as_bytes().len() <= 160,
-                "P3 RED: case={index} line={line_no} is {} bytes: {line:?}",
-                line.as_bytes().len()
-            );
+            if let Some(details) = line.strip_prefix("details: ") {
+                detail_count += 1;
+                let details: Value = serde_json::from_str(details).expect("complete diagnostic JSON");
+                for key in ["error", "issues", "suggested_repairs"] {
+                    if expected.get(key).is_some() {
+                        assert_eq!(details.get(key), expected.get(key), "P3 lost full {key}");
+                    }
+                }
+            } else {
+                assert!(
+                    line.as_bytes().len() <= 160,
+                    "P3 RED: case={index} triage line={line_no} is {} bytes: {line:?}",
+                    line.as_bytes().len()
+                );
+            }
             assert!(
                 !line.chars().any(char::is_control),
                 "P3 RED: case={index} leaked control character: {line:?}"
             );
         }
+        assert_eq!(detail_count, 1, "P3 full details must appear exactly once");
+        assert_eq!(json.status.code(), output.status.code(), "P3 text/JSON exit parity");
         if team.is_empty() {
             assert!(output.status.success(), "{human}");
             assert!(human.contains("runtime=not_present"), "{human}");

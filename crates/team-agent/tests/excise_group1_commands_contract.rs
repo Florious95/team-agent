@@ -232,7 +232,7 @@ fn assert_removed_command_contract(command: &str) {
         if output.status.code() != Some(1) {
             violations.push(format!("exit={:?}, expected 1", output.status.code()));
         }
-        let expected_error = format!("没有这个操作：'{command}'");
+        let expected_error = format!("Unknown command: '{command}'");
         if !stderr.contains(&expected_error) {
             violations.push(format!(
                 "stderr lacks {expected_error:?}: {}",

@@ -420,7 +420,7 @@ fn format_status_csv_preserves_agent_order_and_collapses_errors() {
     });
     assert_eq!(
             format_status_csv(&data),
-            "zeta,空闲\nalpha,工作\nerr_failed,错误\nerr_missing_pane,错误\nerr_unknown,错误\nerr_stopped,错误"
+            "zeta,idle\nalpha,working\nerr_failed,error\nerr_missing_pane,error\nerr_unknown,error\nerr_stopped,error"
         );
 }
 
@@ -489,7 +489,7 @@ fn cli_error_payload_plain_runtime() {
     assert_eq!(payload.error, "some other error");
     assert_eq!(
         payload.action,
-        "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
+        "Run team-agent doctor --workspace . for the selected team, or inspect the error log shown here."
     );
     assert_eq!(payload.log, "/tmp/y.log");
     assert_eq!(payload.reason, None);
@@ -511,7 +511,7 @@ fn cli_error_payload_tmux_conflict_quick_start_enrichment() {
     // context reset is only through restart --allow-fresh with explicit consent.
     assert_eq!(
             payload.action,
-            "终端会话 `my-team` 已存在，可能是你的已有队伍。恢复用 team-agent restart；只有明确同意丢弃旧对话才用 --allow-fresh。另建队伍请修改 TEAM.md 的 name 后再 quick-start；不要关闭已有队伍凑成功。"
+            "Terminal session `my-team` already exists and may belong to your existing team. Resume with team-agent restart; use --allow-fresh only after explicitly accepting loss of saved context. To create another team, change the name in TEAM.md before quick-start. Do not shut down an existing team to bypass this refusal."
         );
     let next = payload.next_actions.as_ref().unwrap();
     assert_eq!(next.len(), 2);
@@ -529,11 +529,11 @@ fn cli_error_payload_tmux_conflict_non_quick_start_enrichment() {
     assert_eq!(payload.session_name.as_deref(), Some("my-team"));
     assert_eq!(
         payload.action,
-        "终端会话 `my-team` 已存在，可能属于运行中的队伍。不要关闭它；请使用另一个队伍名称后再启动。"
+        "Terminal session `my-team` already exists and may belong to a running team. Do not shut it down; choose another team name before starting."
     );
     let next = payload.next_actions.as_ref().unwrap();
     assert_eq!(next.len(), 1);
-    assert!(next[0].contains("队伍") && next[0].contains("名称"));
+    assert!(next[0].contains("team") && next[0].contains("name"));
 }
 
 #[test]
@@ -749,7 +749,7 @@ fn cmd_leader_passthrough_help_is_pure_human_guidance() {
             let result = cmd_leader_passthrough(provider, &[alias.into()], &cwd).unwrap();
             assert_eq!(result.exit, ExitCode::Ok);
             assert!(
-                matches!(&result.output, CmdOutput::Human(text) if text.contains(provider) && text.contains("用法") && text.contains("Examples") && text.contains("下一步"))
+                matches!(&result.output, CmdOutput::Human(text) if text.contains(provider) && text.contains("Usage") && text.contains("Examples") && text.contains("Next Action"))
             );
         }
     }

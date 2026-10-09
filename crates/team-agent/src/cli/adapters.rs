@@ -19,6 +19,10 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         return Ok(result);
     }
     append_send_guidance(&mut value, &args.workspace, args.team_id.as_deref());
+    finish_quick_start(value, args)
+}
+
+fn finish_quick_start(mut value: Value, args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     let readiness = value.get("readiness").and_then(Value::as_object);
     let all_resumable_have_session = readiness
         .and_then(|readiness| readiness.get("all_resumable_have_session"))
@@ -36,7 +40,7 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         .get("status")
         .and_then(Value::as_str)
         .map(str::to_string);
-    if !args.detail {
+    if !args.detail && value.get("ok").and_then(Value::as_bool) != Some(false) {
         lifecycle_port::compact_quick_start_value(&mut value);
     }
     if args.json
@@ -45,30 +49,18 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         || !readiness_ready
     {
         let mut result = CmdResult::from_json(value, args.json);
-        if args.json && status.as_deref() == Some("pending_tool_load") {
+        if status.as_deref() == Some("pending_tool_load") {
             result.exit = ExitCode::Ok;
         }
         if !args.json {
             if let CmdOutput::Json(value) = &result.output {
-                let explanation = if value.get("ok").and_then(Value::as_bool) == Some(false) {
-                    format!(
-                        "启动未完成：{}",
-                        value
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("队伍尚未准备好接收任务")
-                    )
-                } else {
-                    "队伍尚未准备好接收任务；请等待工具完成启动。".to_string()
-                };
-                let mut doctor = format!(
-                    "team-agent doctor --workspace {}",
-                    shell_quote(&args.workspace.to_string_lossy())
-                );
-                if let Some(team) = args.team_id.as_deref() {
-                    doctor.push_str(&format!(" --team {}", shell_quote(team)));
-                }
-                result.output = CmdOutput::Human(format!("{explanation}\n下一步：运行 {doctor}，按体检提示处理；用 status 查看状态，不反复起队或重发任务。"));
+                // Typed refusals often have no `error`. Preserve the complete
+                // report instead of replacing its reason/actions with a guess.
+                let safe = crate::redaction::redact_external_value(value);
+                result.output = CmdOutput::Human(format!(
+                    "quick-start report:\n{}",
+                    serde_json::to_string_pretty(&safe)?
+                ));
             }
         }
         Ok(result)
@@ -126,11 +118,11 @@ fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Opti
         retry.push_str(" --json");
     }
     let explanation = if missing_team {
-        format!("这里还没有队伍配置：{}。没有启动任何队友。请自行创建下面两个文件；本命令没有写入这些文件。", team_path.display())
+        format!("Team configuration is missing: {}. No workers were started. Create the two files below; this command did not write them. Error: {error}", team_path.display())
     } else {
-        format!("队友配置尚不完整：{detail}。请补齐角色目录或必需字段；下面仅给安全示例，不覆盖已有文件。")
+        format!("Worker configuration is incomplete: {detail}. Add the role directory or required fields. The examples below do not overwrite existing files. Error: {error}")
     };
-    let next = format!("确认 Pi 已安装并登录；运行 team-agent models --provider pi 核对模型。\n运行 team-agent pi，在该主控的命令行/工具上下文再次执行：\n{retry}");
+    let next = format!("Check that Pi is installed and signed in; verify the model with team-agent models --provider pi.\nRun team-agent pi, then execute this command in that leader's tool context:\n{retry}");
     let mut templates =
         vec![serde_json::json!({"path": role_path, "content": super::emit::WORKER_TEMPLATE})];
     let mut human = explanation.clone();
@@ -140,13 +132,13 @@ fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Opti
             serde_json::json!({"path": team_path, "content": super::emit::TEAM_TEMPLATE}),
         );
         human.push_str(&format!(
-            "\n\n{}：\n{}",
+            "\n\n{}:\n{}",
             team_path.display(),
             super::emit::TEAM_TEMPLATE
         ));
     }
     human.push_str(&format!(
-        "\n\n{}：\n{}\n下一步：\n{next}",
+        "\n\n{}:\n{}\nNext steps:\n{next}",
         role_path.display(),
         super::emit::WORKER_TEMPLATE
     ));
@@ -166,11 +158,7 @@ fn quick_start_config_guidance(value: &mut Value, args: &QuickStartArgs) -> Opti
 /// E13:quick-start "team 起了" 人类输出 = summary + attach 块。所有成功出口共用(别每分支手拷)。
 /// attach_commands 缺/空 → 只 summary(向后兼容)。
 fn quickstart_human(value: &Value) -> String {
-    let summary = if value.get("summary").and_then(Value::as_str) == Some("existing runtime") {
-        "发现已有队伍；请查看返回的连接方式，不会另建同名队伍。"
-    } else {
-        "队伍已启动；下面是连接方式和派发任务的命令。"
-    };
+    let summary = value.get("summary").and_then(Value::as_str).unwrap_or("Team started.");
     let attach: Vec<&str> = value
         .get("attach_commands")
         .and_then(Value::as_array)
@@ -183,14 +171,14 @@ fn quickstart_human(value: &Value) -> String {
         .unwrap_or_default();
     let mut out = String::from(summary);
     if !attach.is_empty() {
-        out.push_str("\n\n连接队伍：");
+        out.push_str("\n\nConnect to the team:");
         for cmd in attach {
             out.push_str("\n  ");
             out.push_str(cmd);
         }
     }
     if !sends.is_empty() {
-        out.push_str("\n\n派发任务（请替换任务内容）：");
+        out.push_str("\n\nSend a task (replace the example message):");
         for cmd in sends {
             out.push_str("\n  ");
             out.push_str(cmd);
@@ -257,7 +245,7 @@ pub(crate) fn send_command(agent: &str, workspace: &Path, team: Option<&str>) ->
     let mut command = format!(
         "team-agent send {} {} --workspace {}",
         shell_quote(agent),
-        shell_quote("请完成任务并把答案回复给 leader。"),
+        shell_quote("Complete the task and reply to the leader."),
         shell_quote(workspace)
     );
     if let Some(team) = team {
@@ -1014,12 +1002,13 @@ fn finalize_doctor_report(report: &mut Value, default_report: bool) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::{
-        append_send_guidance, format_inbox_human, quickstart_human, send_command,
-        split_shell_argv,
+        append_send_guidance, finish_quick_start, format_inbox_human, quickstart_human,
+        send_command, split_shell_argv,
     };
+    use crate::cli::{CmdOutput, ExitCode, QuickStartArgs};
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
 
@@ -1057,11 +1046,11 @@ mod tests {
         });
         let out = quickstart_human(&value);
         assert!(
-            out.contains("队伍已启动"),
+            out.contains("team started"),
             "must show startup summary; got {out}"
         );
         assert!(
-            out.contains("连接队伍："),
+            out.contains("Connect to the team:"),
             "must render attach block; got {out}"
         );
         assert!(
@@ -1100,7 +1089,7 @@ mod tests {
         assert_eq!(
             quickstart_human(&value),
             format!(
-                "队伍已启动；下面是连接方式和派发任务的命令。\n{}",
+                "quick-start complete\n{}",
                 crate::cli::QUICK_START_REMINDER
             )
         );
@@ -1109,7 +1098,7 @@ mod tests {
         assert_eq!(
             quickstart_human(&value2),
             format!(
-                "队伍已启动；下面是连接方式和派发任务的命令。\n{}",
+                "s\n{}",
                 crate::cli::QUICK_START_REMINDER
             )
         );
@@ -1130,7 +1119,7 @@ mod tests {
                 "team-agent",
                 "send",
                 "worker name; echo unsafe",
-                "请完成任务并把答案回复给 leader。",
+                "Complete the task and reply to the leader.",
                 "--workspace",
                 "/tmp/my workspace",
                 "--team",
@@ -1149,7 +1138,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             command,
-            "team-agent send 'worker name; echo unsafe' '请完成任务并把答案回复给 leader。' --workspace '/tmp/my workspace' --team team-a"
+            "team-agent send 'worker name; echo unsafe' 'Complete the task and reply to the leader.' --workspace '/tmp/my workspace' --team team-a"
         );
     }
 
@@ -1206,7 +1195,7 @@ mod tests {
                 "team-agent",
                 "send",
                 "worker",
-                "请完成任务并把答案回复给 leader。",
+                "Complete the task and reply to the leader.",
                 "--workspace",
                 "/tmp/ws",
                 "--team",
@@ -1215,4 +1204,71 @@ mod tests {
         );
     }
 
+    fn quick_start_args(as_json: bool) -> QuickStartArgs {
+        QuickStartArgs {
+            workspace: PathBuf::from("/tmp/first-launch"),
+            agents_dir: PathBuf::from("/tmp/first-launch/.team/current"),
+            name: None,
+            team_id: None,
+            yes: true,
+            json: as_json,
+            detail: false,
+            backend: None,
+        }
+    }
+
+    #[test]
+    fn quick_start_human_preserves_typed_refusals_without_error_field() {
+        for status in ["existing_runtime", "preflight_blocked", "leader_binding_refused"] {
+            let value = json!({
+                "ok": false,
+                "status": status,
+                "reason": "the exact underlying refusal",
+                "summary": "creation refused",
+                "blockers": [{"stage": "identity", "reason": "owner mismatch"}],
+                "next_actions": ["team-agent restart --workspace /tmp/first-launch --team current"],
+                "state_path": "/tmp/first-launch/.team/runtime/state.json",
+                "readiness": {"reason": "underlying readiness evidence"}
+            });
+            let result = finish_quick_start(value.clone(), &quick_start_args(false)).unwrap();
+            assert_eq!(result.exit, ExitCode::Error);
+            let CmdOutput::Human(text) = result.output else { panic!("expected human report") };
+            let rendered: Value = serde_json::from_str(text.strip_prefix("quick-start report:\n").unwrap()).unwrap();
+            assert_eq!(rendered, value, "human projection lost fields for {status}");
+            assert!(!text.contains("team-agent doctor"), "must not replace actual actions");
+            let json_result = finish_quick_start(value.clone(), &quick_start_args(true)).unwrap();
+            assert_eq!(json_result.exit, ExitCode::Error);
+            assert_eq!(json_result.output, CmdOutput::Json(value));
+        }
+    }
+
+    #[test]
+    fn quick_start_human_preserves_original_error_and_actions() {
+        let value = json!({
+            "ok": false,
+            "error": "database initialization failed at /tmp/first-launch/.team/team.db: permission denied",
+            "action": "repair directory permissions",
+            "next_actions": ["inspect the exact database path"]
+        });
+        let result = finish_quick_start(value.clone(), &quick_start_args(false)).unwrap();
+        assert_eq!(result.exit, ExitCode::Error);
+        let CmdOutput::Human(text) = result.output else { panic!("expected human report") };
+        let rendered: Value = serde_json::from_str(text.strip_prefix("quick-start report:\n").unwrap()).unwrap();
+        assert_eq!(rendered, value);
+    }
+
+    #[test]
+    fn pending_tool_load_is_not_reported_as_failed_team_creation() {
+        for as_json in [false, true] {
+            let value = json!({
+                "ok": true,
+                "status": "pending_tool_load",
+                "summary": "Team started; worker tool loading is not yet verified",
+                "readiness": {"ready": false},
+                "next_actions": ["send a task and wait for the actual reply"]
+            });
+            let result = finish_quick_start(value, &quick_start_args(as_json)).unwrap();
+            assert_eq!(result.exit, ExitCode::Ok);
+        }
+    }
 }

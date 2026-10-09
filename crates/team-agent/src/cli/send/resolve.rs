@@ -7,11 +7,11 @@ use serde_json::{json, Value};
 
 pub(super) fn warn_send_alias(flag: &str) {
     let spec = crate::cli::spec::command_spec("send");
-    let sunset = spec.and_then(|spec| spec.sunset).unwrap_or("后续兼容版本");
+    let sunset = spec.and_then(|spec| spec.sunset).unwrap_or("a future compatibility release");
     let action = spec.and_then(|spec| spec.action).unwrap_or(
-        "使用 team-agent send <agent> '任务内容'，通过 --workspace/--team 选择项目和队伍",
+        "Use team-agent send <agent> 'task message'; select the workspace and team with --workspace/--team",
     );
-    eprintln!("提示：{flag} 已弃用，将在{sunset}移除。下一步：{action}");
+    eprintln!("Warning: {flag} is deprecated and will be removed in {sunset}. Next: {action}");
 }
 
 pub(super) fn logical_to_from_args(
@@ -22,7 +22,7 @@ pub(super) fn logical_to_from_args(
         && (args.target.is_some() || args.targets.is_some() || args.to_leader.is_some())
     {
         return Err(CliError::Usage(
-            "队友名与 --to-name/--pane/--to 不能同时使用；请只选一种收信方式".to_string(),
+            "An agent name cannot be combined with --to-name/--pane/--to; choose one addressing mode".to_string(),
         ));
     }
     let supplied = [
@@ -36,7 +36,7 @@ pub(super) fn logical_to_from_args(
     .count();
     if supplied > 1 {
         return Err(CliError::Usage(
-            "队友名、--targets、--to-name 和 --to-leader 不能同时使用；请只选一种收信方式"
+            "An agent name, --targets, --to-name and --to-leader are mutually exclusive; choose one addressing mode"
                 .to_string(),
         ));
     }
@@ -52,11 +52,11 @@ pub(super) fn logical_to_from_args(
     if args.target.is_none() && supplied > 0 && args.message.is_empty() {
         if args.to_name.is_some() {
             return Err(CliError::Usage(
-                "请填写任务内容；--to-name 不能发送空消息".to_string(),
+                "Provide a task message; --to-name cannot send an empty message".to_string(),
             ));
         }
         return Err(CliError::Usage(
-            "请在队友名后填写非空任务内容；例如 team-agent send worker '检查改动'".to_string(),
+            "Provide a nonempty task message after the agent name, such as team-agent send worker 'Review the changes'".to_string(),
         ));
     }
     Ok(logical_to)
@@ -182,7 +182,7 @@ pub(super) fn send_to_logical_to(
         .collect::<Vec<_>>();
     if names.is_empty() || names.len() != logical_to.split(',').count() {
         return Err(CliError::Usage(
-            "收信列表中有空的队友名；请使用 status 返回的名称".to_string(),
+            "The recipient list contains an empty agent name; use names returned by status".to_string(),
         ));
     }
 
@@ -322,7 +322,7 @@ pub(super) fn adapt_positional_bare_error(
         .and_then(|suggested| suggested.rsplit('/').next())
         .map(str::to_string);
     if let Some(suggested) = error.suggested_name.as_deref() {
-        error.action = format!("你是否想发给 {suggested}？确认后使用此队友名；通过 --workspace/--team 选择项目和队伍。");
+        error.action = format!("Did you mean {suggested}? Confirm the agent name; select the workspace and team with --workspace/--team.");
     }
 }
 
@@ -336,7 +336,7 @@ pub(super) fn logical_recipient_id(
             .ok_or_else(|| CliError::Runtime("resolved worker is missing agent id".to_string())),
         crate::cli::named_address::NamedTargetKind::Leader => Ok("leader".to_string()),
         crate::cli::named_address::NamedTargetKind::SessionWindow => Err(CliError::Usage(
-            "不再支持按终端窗口发送；请使用队友名或 leader，并通过 --workspace/--team 选择队伍"
+            "Terminal-window addressing is no longer supported; use an agent name or leader, with --workspace/--team to select scope"
                 .to_string(),
         )),
     }
@@ -350,7 +350,7 @@ pub(super) fn send_to_resolved_name(
     let recipient = logical_recipient_id(resolved)?;
     if resolved.warning.is_some() {
         eprintln!(
-            "提示：旧收信方式已弃用；请用队友名发送，通过 --workspace/--team 选择项目和队伍。"
+            "Warning: legacy addressing is deprecated; send by agent name and select scope with --workspace/--team."
         );
     }
     let target = MessageTarget::Single(recipient);

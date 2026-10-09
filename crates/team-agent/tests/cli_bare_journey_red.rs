@@ -146,7 +146,7 @@ fn missing(args: &[&str]) {
     assert_eq!(out.status.code(), Some(2), "H5 Usage exit2: {args:?}: {t}");
     no_jargon(&t);
     assert!(
-        t.contains("下一步") && (t.contains("示例") || t.contains("怎么用")),
+        t.contains("Usage:") && t.contains("Examples:") && t.contains("Next Action:"),
         "H4 local complete help/Next Action missing: {t}"
     );
     assert!(
@@ -215,7 +215,7 @@ fn h6_empty_input_prints_two_complete_safe_templates_and_real_input_path_without
         "model:",
         "auth_mode: subscription",
         "dangerously_skip_permissions: false",
-        "下一步",
+        "Next steps:",
         "team-agent pi",
         "team-agent quick-start",
     ] {

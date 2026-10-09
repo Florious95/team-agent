@@ -66,7 +66,7 @@ fn backend_pty_literal_refused_no_silent_map_to_conpty() {
     // parser or the factory.
     let err = parse_quick_start(&["--backend", "pty", "--yes"]).expect_err("must refuse");
     assert!(
-        err.contains("\"pty\"") && err.contains("tmux 或 conpty"),
+        err.contains("\"pty\"") && err.contains("tmux or conpty"),
         "usage error must name the bad literal and list the allowed set; got {err}"
     );
 }

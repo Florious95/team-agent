@@ -476,26 +476,62 @@ pub(super) fn annotate_persisted_team_depth(
 }
 
 /// ---
-/// purpose: 判断 runtime state 里是否已存在该 quick-start 团队
-/// returns: 活跃键、teams 表、投影出的团队键、身份字段或 session 名任一命中即 true
+/// purpose: 判断目标团队是否已有 worker runtime，已证明的 Leader-only 登记不算初始化
+/// returns: 未初始化的有效 Leader-only 登记为 false；已有或无法分类的目标 runtime 为 true
 /// ---
 pub(super) fn runtime_state_has_quick_start_team(state: &serde_json::Value, team: &str) -> bool {
-    explicit_active_team_key(state).as_deref() == Some(team)
-        || state
-            .get("teams")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|teams| {
-                teams.contains_key(team)
-                    || teams
-                        .values()
-                        .any(|entry| json_team_identity_matches(entry, team))
-            })
+    let entry = state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(team));
+    if let Some(entry) = entry {
+        return !is_quick_start_leader_bootstrap(entry);
+    }
+    // Legacy aliases still identify existing/ambiguous runtime, not a proven
+    // canonical bootstrap record. Do not grant fresh creation through an alias.
+    if state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|teams| teams.values().any(|entry| json_team_identity_matches(entry, team)))
+    {
+        return true;
+    }
+    let matches = explicit_active_team_key(state).as_deref() == Some(team)
         || crate::state::projection::team_state_key(state) == team
         || json_team_identity_matches(state, team)
         || state
             .get("session_name")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
+            .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team));
+    matches && !is_quick_start_leader_bootstrap(state)
+}
+
+// An empty agent table alone is not fresh: stopped/removed/partial teams keep
+// their spec, session or task history. Only a coherent attached leader binding
+// with no worker initialization evidence may proceed through first creation.
+pub(super) fn is_quick_start_leader_bootstrap(state: &serde_json::Value) -> bool {
+    if !state.is_object()
+        || state.get("teams").is_some_and(|teams| !teams.is_object())
+        || !state.get("agents").and_then(serde_json::Value::as_object).is_some_and(|agents| agents.is_empty())
+        || state.get("spec_path").is_some()
+        || state.get("team_dir").is_some_and(|dir| !dir.is_null())
+        || state.get("session_name").is_some_and(|session| !session.is_null())
+        || state.get("tasks").is_some_and(|tasks| {
+            !tasks.as_object().is_some_and(|tasks| tasks.is_empty())
+                && !tasks.as_array().is_some_and(|tasks| tasks.is_empty())
+        })
+        || state.get("status").is_some_and(|status| status.as_str() != Some("alive"))
+        || state.get("archived_at").is_some_and(|value| !value.is_null())
+    {
+        return false;
+    }
+    let owner = state.get("team_owner");
+    let receiver = state.get("leader_receiver");
+    let owner_pane = owner.and_then(|owner| owner.get("pane_id")).and_then(serde_json::Value::as_str).filter(|pane| !pane.is_empty());
+    let receiver_pane = receiver.and_then(|receiver| receiver.get("pane_id")).and_then(serde_json::Value::as_str);
+    owner_pane.is_some()
+        && owner_pane == receiver_pane
+        && receiver.and_then(|receiver| receiver.get("status")).and_then(serde_json::Value::as_str) == Some("attached")
 }
 
 /// ---
@@ -512,4 +548,127 @@ pub(super) fn json_team_identity_matches(state: &serde_json::Value, team: &str) 
             .get("name")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|value| value == team)
+}
+
+#[cfg(test)]
+mod quick_start_runtime_identity_tests {
+    use super::runtime_state_has_quick_start_team;
+    use serde_json::{json, Value};
+
+    fn leader_bootstrap() -> Value {
+        json!({
+            "agents": {},
+            "session_name": null,
+            "tasks": {},
+            "team_owner": {"pane_id": "%0", "provider": "pi", "owner_epoch": 1},
+            "leader_receiver": {"pane_id": "%0", "status": "attached", "session_name": "team-agent-leader-pi-fixture"},
+            "leader_client": {"diagnostic_only": true}
+        })
+    }
+
+    #[test]
+    fn current_launcher_seed_is_not_initialized_and_is_not_mutated() {
+        let seed = leader_bootstrap();
+        let state = json!({"active_team_key": "current", "team_key": "current", "teams": {"current": seed}});
+        let before = state.clone();
+        assert!(!runtime_state_has_quick_start_team(&state, "current"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn real_native_managed_launcher_empty_array_shape_is_fresh_and_unchanged() {
+        let mut entry = leader_bootstrap();
+        entry["tasks"] = json!([]);
+        entry["is_external_leader"] = json!(false);
+        entry["team_key"] = json!("current");
+        entry["tmux_socket"] = json!("/private/tmp/fixture-native-leader");
+        entry["owner_epoch"] = json!(1);
+        entry["team_owner"]["machine_fingerprint"] = json!("");
+        entry["team_owner"]["leader_session_uuid"] = json!("fixture-native-uuid");
+        entry["leader_receiver"]["owner_epoch"] = json!(1);
+        entry["leader_receiver"]["leader_session_uuid"] = json!("fixture-native-uuid");
+        let state = json!({
+            "agents": {}, "tasks": [], "session_name": null,
+            "active_team_key": "current", "team_key": "current",
+            "teams": {"current": entry}
+        });
+        let before = state.clone();
+        assert!(!runtime_state_has_quick_start_team(&state, "current"));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn legacy_flat_leader_binding_can_initialize() {
+        let mut state = leader_bootstrap();
+        state["active_team_key"] = json!("current");
+        assert!(!runtime_state_has_quick_start_team(&state, "current"));
+    }
+
+    #[test]
+    fn stopped_removed_partial_and_unknown_teams_remain_existing() {
+        let cases = [
+            ("agents", json!({"worker": {"status": "stopped"}})),
+            ("spec_path", json!("/tmp/current/team.spec.yaml")),
+            ("spec_path", Value::Null),
+            ("team_dir", json!("/tmp/.team/current")),
+            ("session_name", json!("team-current")),
+            ("session_name", json!("team-agent-leader-stale-worker-field")),
+            ("tasks", json!({"finished_task": {"status": "done"}})),
+            ("tasks", json!([{"status": "done"}])),
+            ("tasks", Value::Null),
+            ("tasks", json!("unknown")),
+            ("tasks", json!(false)),
+            ("tasks", json!(0)),
+            ("status", json!("stopped")),
+            ("archived_at", json!("2026-10-08")),
+            ("agents", Value::Null),
+            ("agents", json!([])),
+            ("team_owner", Value::Null),
+            ("leader_receiver", json!({"pane_id": "%99", "status": "attached"})),
+            ("leader_receiver", json!({"pane_id": "%0", "status": "pending"})),
+        ];
+        for (key, value) in cases {
+            let mut entry = leader_bootstrap();
+            entry[key] = value;
+            let state = json!({"active_team_key": "current", "teams": {"current": entry}});
+            assert!(runtime_state_has_quick_start_team(&state, "current"), "must protect {key}: {state}");
+        }
+        for entry in [json!({}), Value::Null, json!({"agents": {}, "session_name": null})] {
+            let state = json!({"teams": {"current": entry}});
+            assert!(runtime_state_has_quick_start_team(&state, "current"));
+        }
+    }
+
+    #[test]
+    fn malformed_team_tables_do_not_allow_flat_bootstrap_to_bypass_the_guard() {
+        for teams in [Value::Null, json!([]), json!("damaged")] {
+            let mut state = leader_bootstrap();
+            state["active_team_key"] = json!("current");
+            state["teams"] = teams;
+            assert!(runtime_state_has_quick_start_team(&state, "current"));
+        }
+    }
+
+    #[test]
+    fn only_the_requested_team_supplies_initialization_evidence() {
+        let state = json!({
+            "active_team_key": "other", "spec_path": "/tmp/other/spec.yaml",
+            "session_name": "team-other", "agents": {"other_worker": {}},
+            "teams": {
+                "other": {"spec_path": "/tmp/other/spec.yaml", "agents": {"other_worker": {}}},
+                "current": leader_bootstrap()
+            }
+        });
+        assert!(!runtime_state_has_quick_start_team(&state, "current"));
+        assert!(runtime_state_has_quick_start_team(&state, "other"));
+        assert!(!runtime_state_has_quick_start_team(&state, "new-team"));
+    }
+
+    #[test]
+    fn ambiguous_legacy_identity_is_not_fresh() {
+        let mut first = leader_bootstrap();
+        first["name"] = json!("current");
+        let state = json!({"teams": {"first": first, "second": {"name": "current"}}});
+        assert!(runtime_state_has_quick_start_team(&state, "current"));
+    }
 }

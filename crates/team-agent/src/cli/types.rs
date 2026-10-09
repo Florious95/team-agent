@@ -84,7 +84,7 @@ impl CliError {
             ok: false,
             error: error.clone(),
             action: if super::spec::command_spec(command).is_some() {
-                "先运行 team-agent doctor --workspace . 检查所选队伍，或查看此处列出的错误日志。"
+                "Run team-agent doctor --workspace . for the selected team, or inspect the error log shown here."
             } else {
                 "run `team-agent doctor` or inspect the log path shown here"
             }
@@ -99,27 +99,27 @@ impl CliError {
             payload.session_name = Some(session.clone());
             if command == "quick-start" {
                 payload.action = format!(
-                    "终端会话 `{session}` 已存在，可能是你的已有队伍。恢复用 team-agent restart；只有明确同意丢弃旧对话才用 --allow-fresh。另建队伍请修改 TEAM.md 的 name 后再 quick-start；不要关闭已有队伍凑成功。"
+                    "Terminal session `{session}` already exists and may belong to your existing team. Resume with team-agent restart; use --allow-fresh only after explicitly accepting loss of saved context. To create another team, change the name in TEAM.md before quick-start. Do not shut down an existing team to bypass this refusal."
                 );
                 payload.next_actions = Some(vec![
-                    "如果是自己的已有队伍，使用 team-agent restart 恢复。".to_string(),
-                    "如要另建队伍，修改 TEAM.md 的 name 后再运行 team-agent quick-start。"
+                    "If this is your existing team, resume it with team-agent restart.".to_string(),
+                    "To create another team, change the name in TEAM.md before running team-agent quick-start."
                         .to_string(),
                 ]);
             } else {
                 payload.action = format!(
-                    "终端会话 `{session}` 已存在，可能属于运行中的队伍。不要关闭它；请使用另一个队伍名称后再启动。"
+                    "Terminal session `{session}` already exists and may belong to a running team. Do not shut it down; choose another team name before starting."
                 );
-                payload.next_actions = Some(vec!["请使用另一个队伍名称后再启动。".to_string()]);
+                payload.next_actions = Some(vec!["Choose another team name before starting.".to_string()]);
             }
         } else if error.contains("Team Agent launcher flag")
             && error.contains("must appear before --")
         {
             payload.action =
-                String::from("将主控启动选项放在 -- 前面；-- 后面只能是工具自己的参数。");
+                String::from("Place Team Agent launcher options before --; only native provider arguments belong after --.");
         } else if error.contains("managed launcher refuses a different ambient tmux server") {
             payload.action = String::from(
-                "先退出当前 tmux 客户端再重试；只有明确需要嵌套连接时才在 -- 前加 --allow-nested-attach。",
+                "Leave the current tmux client before retrying. Add --allow-nested-attach before -- only when nested attachment is intentional.",
             );
         }
         payload

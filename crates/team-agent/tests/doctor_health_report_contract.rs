@@ -505,14 +505,27 @@ fn p12_human_output_is_bounded_utf8_control_free_triage() {
             .is_some_and(|line| line.starts_with("doctor:")),
         "P12 doctor human output must use doctor triage prefix: {human}"
     );
+    let expected = report(&run("doctor", &["--json"], &fixture));
+    let mut detail_count = 0;
     for (line_no, line) in human.lines().enumerate() {
-        assert!(
-            line.as_bytes().len() <= 160,
-            "P12 doctor line {line_no} exceeds 160 bytes: {}",
-            line.as_bytes().len()
-        );
+        if let Some(details) = line.strip_prefix("details: ") {
+            detail_count += 1;
+            let details: Value = serde_json::from_str(details).expect("complete diagnostic JSON");
+            for key in ["error", "issues", "suggested_repairs"] {
+                if expected.get(key).is_some() {
+                    assert_eq!(details.get(key), expected.get(key), "P12 lost full {key}");
+                }
+            }
+        } else {
+            assert!(
+                line.as_bytes().len() <= 160,
+                "P12 doctor triage line {line_no} exceeds 160 bytes: {}",
+                line.as_bytes().len()
+            );
+        }
         assert!(!line.chars().any(char::is_control));
     }
+    assert_eq!(detail_count, 1, "P12 full details must appear exactly once");
     assert!(!human.contains("issues: [") && !human.contains("runtime: {"));
 }
 
