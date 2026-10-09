@@ -145,7 +145,7 @@ fn real_owned_command_guard_aborts_spinner_before_timeout_without_another_comman
         executable: "/bin/sh".into(),
         arguments: vec![
             "-c".into(),
-            "printf '\033[?25lOpening auth portal and logging in...'; exec sleep 10".into(),
+            r"printf '\033[?25lOpening auth portal and logging in...'; exec sleep 10".into(),
         ],
         cwd: None,
         environment: team_agent_contract::contract::plan::EnvironmentDelta {
@@ -161,6 +161,7 @@ fn real_owned_command_guard_aborts_spinner_before_timeout_without_another_comman
         },
         reject_stdout: Some(AUTH_PORTAL_MARKER),
     };
+    assert!(request.arguments.iter().all(|arg| !arg.as_encoded_bytes().contains(&0)));
     let mut runner = RealCommandRunner::default();
     let began = Instant::now();
     let result = runner.run(&request);
