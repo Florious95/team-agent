@@ -7,22 +7,17 @@ use crate::host::digest;
 use crate::runtime::delivery::{ControlDefinition, ControlKind};
 use std::time::Duration;
 
-pub const PROFILE: &str = "kiro-2.28.0-v2-tui-macos";
-pub const ENGINE: Digest = Digest([
-    67, 10, 174, 26, 79, 90, 226, 82, 231, 133, 17, 77, 69, 214, 30, 196, 101, 121, 106, 214, 202,
-    150, 56, 63, 183, 202, 56, 61, 217, 107, 23, 18,
-]);
+pub const PROFILE: &str = "kiro-v2-tui-macos";
 pub const POLICY: Digest = Digest([
     164, 212, 44, 211, 110, 104, 19, 79, 151, 125, 118, 45, 26, 228, 173, 129, 13, 207, 154, 246,
     237, 237, 197, 25, 27, 160, 229, 245, 129, 12, 178, 213,
 ]);
 pub static PROFILES: &[InputProfile] = &[InputProfile {
     id: PROFILE,
-    version: super::BUNDLE_VERSION,
+    identity: ProfileIdentity::RuntimeCaptured,
     harness: "v2",
     ui: "tui",
     platform: Platform::MacOs,
-    executable_sha256: ENGINE,
     policy_sha256: POLICY,
     operations: &[
         Operation::FirstBusiness,
@@ -263,6 +258,7 @@ pub fn session_id(text: &str) -> Result<NativeSessionId, ContractError> {
 impl SessionHook for KiroAdapter {
     fn bind(&self, evidence: &ScopedSessionEvidence) -> Result<ResumeBinding, ContractError> {
         if evidence.provider.as_str() != "kiro"
+            || !super::native::is_release_version(&evidence.native.version)
             || !PROFILES[0].matches_native(&evidence.native)
             || evidence.origin != CaptureOrigin::CurrentNativeSession
             || evidence.evidence_sha256 != digest(&evidence.record)

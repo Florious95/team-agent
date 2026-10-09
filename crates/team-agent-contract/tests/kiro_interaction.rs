@@ -88,7 +88,7 @@ fn recipe_has_one_enter_no_payload_trailer_retry_or_queue_keys() {
     assert_eq!(policy.payload_trailer, PayloadTrailer::None);
     assert_eq!(policy.retry_budget, RetryBudget::Never);
     assert!(policy.queue_flush.is_empty());
-    assert_eq!(PROFILES[0].executable_sha256, ENGINE);
+    assert_eq!(PROFILES[0].identity, ProfileIdentity::RuntimeCaptured);
     assert_eq!(PROFILES[0].harness, "v2");
 }
 #[test]
@@ -146,11 +146,11 @@ fn session_parser_requires_label_matching_hint_and_one_uuid() {
 #[test]
 fn session_hook_preserves_scope_hash_and_never_lists_newest_session() {
     let native = NativeIdentity {
-        version: "2.28.0".into(),
+        version: "2.29.0".into(),
         harness: "v2".into(),
         ui: "tui".into(),
         platform: Platform::MacOs,
-        executable_sha256: ENGINE,
+        executable_sha256: digest(b"runtime captured executable"),
     };
     let mut evidence = ScopedSessionEvidence {
         scope: scope(),
@@ -167,6 +167,7 @@ fn session_hook_preserves_scope_hash_and_never_lists_newest_session() {
     };
     let bound = adapter().bind(&evidence).unwrap();
     assert_eq!(bound.source, evidence.scope.identity);
+    assert_eq!(bound.native, evidence.native);
     assert_eq!(bound.evidence_kind, EvidenceKind::Fixture);
     assert!(bound.backing.is_none());
     evidence.native.harness = "v3".into();

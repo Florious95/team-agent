@@ -503,6 +503,12 @@ pub(super) fn policy_evidence(
         .iter()
         .filter(|profile| profile.matches_native(native))
         .flat_map(|profile| {
+            // Bind this observed executable and candidate to the stable recipe.
+            // This is not the historical R0 receipt, nor a business/MCP PASS.
+            let binding_sha256 = digest(format!(
+                "kiro-runtime-policy-v1\n{native:?}\n{}\n{:?}\n{candidate_sha256:?}",
+                profile.id, profile.policy_sha256,
+            ).as_bytes());
             profile
                 .operations
                 .iter()
@@ -515,12 +521,7 @@ pub(super) fn policy_evidence(
                     operation: *operation,
                     kind: EvidenceKind::Native,
                     candidate_sha256,
-                    // R0 receipt identity. candidate_sha256 pins this execution; it is
-                    // not evidence that this candidate's multi-line/MCP acceptance passed.
-                    evidence_sha256: Digest([
-                        210, 3, 154, 238, 164, 146, 236, 246, 222, 117, 184, 175, 6, 161, 249, 174,
-                        34, 11, 62, 21, 144, 91, 144, 34, 42, 117, 63, 194, 80, 105, 205, 123,
-                    ]),
+                    evidence_sha256: binding_sha256,
                 })
         })
         .collect()
@@ -585,4 +586,35 @@ pub fn stop(workspace: &Path, team: &str, seat: &SeatId) -> Result<OperationReco
         io: &mut NoNewIo,
     }
     .teardown(&target.identity, operation)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_bindings_track_runtime_native_identity_not_a_release_receipt() {
+        let mut native = NativeIdentity {
+            version: "2.28.0".into(),
+            harness: "v2".into(),
+            ui: "tui".into(),
+            platform: Platform::MacOs,
+            executable_sha256: digest(b"old image"),
+        };
+        let candidate = digest(b"candidate");
+        let old = policy_evidence(&native, candidate);
+        assert!(!old.is_empty());
+        native.version = "2.29.0".into();
+        native.executable_sha256 = digest(b"updated image");
+        let new = policy_evidence(&native, candidate);
+        assert_eq!(new.len(), old.len());
+        for (old, new) in old.iter().zip(&new) {
+            assert_eq!(new.native, native);
+            assert_eq!(new.candidate_sha256, candidate);
+            assert_eq!(new.policy_sha256, old.policy_sha256);
+            assert_ne!(new.evidence_sha256, old.evidence_sha256);
+        }
+        native.harness = "v3".into();
+        assert!(policy_evidence(&native, candidate).is_empty());
+    }
 }

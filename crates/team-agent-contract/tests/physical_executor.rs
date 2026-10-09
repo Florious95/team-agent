@@ -556,23 +556,29 @@ fn payload_cannot_escape_bracketed_paste_with_embedded_terminal_controls() {
 }
 
 #[test]
-fn policy_cannot_be_reused_for_another_operation_provider_or_evidence_kind() {
+fn runtime_bound_policy_cannot_be_reused_for_another_native_identity_or_authority() {
     let original = target();
-    let d = descriptor("single", &original.native);
+    let mut d = descriptor("single", &original.native);
+    let mut profiles = d.input.profiles.require("profiles").unwrap().to_vec();
+    profiles[0].identity = ProfileIdentity::RuntimeCaptured;
+    d.input.profiles = Support::Supported(Box::leak(profiles.into_boxed_slice()));
     let h = hooks();
     let p = policy(&d, &h, &original, Operation::OrdinarySend);
     let e = envelope("one", "hi");
     let input = PreparedInput::business(&e);
     let attempt = AttemptId::new("mismatch").unwrap();
-    for case in 0..4 {
+    for case in 0..6 {
         let mut t = original.clone();
         let mut op = Operation::OrdinarySend;
         match case {
             0 => op = Operation::FirstBusiness,
             1 => t.provider = ProviderId::new("other-provider").unwrap(),
             2 => t.evidence_kind = EvidenceKind::Native,
-            _ => t.candidate_sha256 = NATIVE,
+            3 => t.candidate_sha256 = NATIVE,
+            4 => t.native.version = "new-release".into(),
+            _ => t.native.executable_sha256 = Digest([99; 32]),
         }
+        assert!(p.profile().matches_native(&t.native));
         let proto = protocol(&t, Duration::ZERO);
         let clock = FakeClock::default();
         let mut journal = MemoryJournal::default();

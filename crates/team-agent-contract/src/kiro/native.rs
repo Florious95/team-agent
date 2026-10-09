@@ -9,8 +9,6 @@ use crate::host::{
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const OBSERVED_HELPER_SHA256: &str =
-    "430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712";
 pub const CHAT_CATALOG_ARGUMENTS: &[&str] = &["chat", "--list-models", "--format", "json"];
 pub const AUTH_PORTAL_MARKER: &[u8] = b"Opening auth portal and logging in...";
 /// CLI syntax and the models[]/model_id JSON schema are observed on 2.28.0.
@@ -73,20 +71,55 @@ pub fn resolve_helper(launcher: &Path, home: &Path) -> Result<PathBuf, HostError
     ))
 }
 
-pub fn parse_version(stdout: &[u8]) -> Result<String, ContractError> {
-    let text = std::str::from_utf8(stdout)
-        .map_err(|_| ContractError::Invalid("Kiro version encoding"))?
-        .trim();
+#[derive(Debug)]
+pub enum EngineProbeError {
+    Host(HostError),
+    InvalidVersion { received: String, truncated: bool },
+}
+impl From<HostError> for EngineProbeError {
+    fn from(error: HostError) -> Self {
+        Self::Host(error)
+    }
+}
+impl std::fmt::Display for EngineProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host(error) => std::fmt::Display::fmt(error, f),
+            Self::InvalidVersion { received, truncated } => write!(
+                f,
+                "invalid Kiro version response {received:?}{}; expected kiro-cli[-chat] major.minor.patch",
+                if *truncated { " (truncated to 256 bytes)" } else { "" }
+            ),
+        }
+    }
+}
+impl std::error::Error for EngineProbeError {}
+
+/// Release syntax only, not a claim about native UI or tool compatibility.
+pub fn is_release_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    (0..3).all(|_| {
+        parts.next().is_some_and(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0'))
+        })
+    }) && parts.next().is_none()
+}
+
+pub fn parse_version(stdout: &[u8]) -> Result<String, EngineProbeError> {
+    // Version banners are a bounded diagnostic exception, never raw argv/env or
+    // arbitrary command captures. Debug formatting escapes terminal controls.
+    let invalid = || EngineProbeError::InvalidVersion {
+        received: String::from_utf8_lossy(&stdout[..stdout.len().min(256)]).into_owned(),
+        truncated: stdout.len() > 256,
+    };
+    let text = std::str::from_utf8(stdout).map_err(|_| invalid())?.trim();
     let version = text
         .strip_prefix("kiro-cli ")
         .or_else(|| text.strip_prefix("kiro-cli-chat "))
-        .ok_or(ContractError::Invalid("Kiro version line"))?;
-    if version != super::BUNDLE_VERSION {
-        return Err(ContractError::Unverified {
-            field: "Kiro version",
-            reason: super::NATIVE_UNVERIFIED,
-        });
-    }
+        .filter(|version| is_release_version(version))
+        .ok_or_else(invalid)?;
     Ok(version.into())
 }
 
@@ -95,7 +128,7 @@ pub fn probe_engine<R: CommandRunner>(
     engine: &Path,
     runner: &mut R,
     bounds: ReadBounds,
-) -> Result<NativeIdentity, HostError> {
+) -> Result<NativeIdentity, EngineProbeError> {
     bounds
         .validate()
         .map_err(|_| HostError::new("Kiro probe bounds", HostErrorKind::Invalid))?;
@@ -103,10 +136,7 @@ pub fn probe_engine<R: CommandRunner>(
     let hash = fingerprint_file(engine, 1024 * 1024 * 1024, bounds.deadline)?;
     let budget = bounds.deadline.saturating_sub(started.elapsed());
     if budget.is_zero() {
-        return Err(HostError::new(
-            "Kiro version deadline",
-            HostErrorKind::Deadline,
-        ));
+        return Err(HostError::new("Kiro version deadline", HostErrorKind::Deadline).into());
     }
     let result = runner.run(&CommandRequest {
         executable: engine.to_path_buf(),
@@ -126,13 +156,18 @@ pub fn probe_engine<R: CommandRunner>(
         },
     });
     if !result.success() {
-        return Err(HostError::new(
-            "Kiro engine version command",
-            HostErrorKind::Command,
-        ));
+        return Err(HostError::new("Kiro engine version command", HostErrorKind::Command).into());
     }
-    let version = parse_version(&result.stdout)
-        .map_err(|_| HostError::new("Kiro engine version", HostErrorKind::Invalid))?;
+    let version = parse_version(&result.stdout)?;
+    let remaining = bounds.deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(HostError::new("Kiro version deadline", HostErrorKind::Deadline).into());
+    }
+    if fingerprint_file(engine, 1024 * 1024 * 1024, remaining)? != hash {
+        return Err(
+            HostError::new("Kiro engine changed during version probe", HostErrorKind::Conflict).into(),
+        );
+    }
     let platform = if cfg!(target_os = "macos") {
         Platform::MacOs
     } else if cfg!(target_os = "linux") {
@@ -222,7 +257,7 @@ pub(super) fn validate_catalog_request(grant: &CatalogRequest) -> Result<(), Con
     grant.native.validate()?;
     require_absolute(&grant.executable, "Kiro catalog engine")?;
     if grant.provider.as_str() != "kiro"
-        || grant.native.version != super::BUNDLE_VERSION
+        || !is_release_version(&grant.native.version)
         || grant.source != CHAT_CATALOG_SOURCE
         || grant
             .executable

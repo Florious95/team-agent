@@ -37,7 +37,7 @@ fn fixture_descriptor() -> ProviderDescriptor {
 fn fixture_request() -> LaunchRequest {
     let mut r = request(std::path::Path::new("/owned runtime"), "worker");
     r.provider = "kiro".into();
-    r.native.version = BUNDLE_VERSION.into();
+    r.native.version = "2.28.0".into();
     r.native.harness = "v2".into();
     r.native.ui = "tui".into();
     r.paths.executable = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat".into();
@@ -54,7 +54,10 @@ fn fixture_resolved(mut r: LaunchRequest) -> ResolvedLaunch {
     // Reuse the existing generic fake profile, explicitly scoped to this synthetic
     // identity, rather than pretend it is a captured Kiro terminal fixture.
     let mut profile = d.input.profiles.require("fake profiles").unwrap()[0].clone();
-    profile.version = Box::leak(r.native.version.clone().into_boxed_str());
+    profile.identity = ProfileIdentity::Exact {
+        version: Box::leak(r.native.version.clone().into_boxed_str()),
+        executable_sha256: r.native.executable_sha256,
+    };
     profile.harness = Box::leak(r.native.harness.clone().into_boxed_str());
     profile.ui = Box::leak(r.native.ui.clone().into_boxed_str());
     let profiles = Box::leak(vec![profile].into_boxed_slice());
@@ -268,16 +271,50 @@ fn promoting_a_descriptor_does_not_open_native_plan_gate() {
 }
 
 #[test]
-fn unknown_version_harness_or_ui_is_not_a_default_fallback() {
+fn malformed_version_or_unknown_harness_or_ui_is_not_a_default_fallback() {
     for field in ["version", "harness", "ui"] {
         let mut resolved = fixture_request();
         match field {
-            "version" => resolved.native.version = "2.29.0".into(),
+            "version" => resolved.native.version = "2.invalid.0".into(),
             "harness" => resolved.native.harness = "v3".into(),
             _ => resolved.native.ui = "classic".into(),
         }
         // Synthetic admission follows the test identity; Kiro itself must reject it.
         assert!(adapter().plan(&fixture_resolved(resolved)).is_err());
+    }
+}
+
+#[test]
+fn runtime_bound_native_plan_fixture_accepts_new_releases_but_fences_catalog_identity() {
+    // Controlled planning only: these are not live probes of these releases.
+    for version in ["2.28.0", "2.29.0", "3.0.0"] {
+        let mut request = fixture_request();
+        request.native.version = version.into();
+        request.native.platform = Platform::MacOs;
+        request.native.executable_sha256 = team_agent_contract::host::digest(version.as_bytes());
+        request.mode = LaunchMode::FullWorker;
+        request.evidence_kind = EvidenceKind::Native;
+        request.input_profile = Some(interaction::PROFILE.into());
+        let adapter = adapter();
+        let hooks = adapter.hooks();
+        let mut catalog = CatalogObservation {
+            provider: ProviderId::new("kiro").unwrap(),
+            native: request.native.clone(),
+            schema: native::CHAT_CATALOG_SOURCE.schema.into(),
+            models: vec![ModelRecord {
+                id: request.model.clone().unwrap(),
+                efforts: Support::Unverified(NATIVE_UNVERIFIED),
+            }],
+        };
+        let resolved = resolve_launch(&KIRO_DESCRIPTOR, &hooks, &request, Some(&catalog)).unwrap();
+        let plan = adapter.plan(&resolved).unwrap();
+        validate_launch_plan(&KIRO_DESCRIPTOR, &resolved, &plan).unwrap();
+        assert_eq!(resolved.request().native, request.native);
+        catalog.native.executable_sha256 = Digest([99; 32]);
+        assert!(matches!(
+            resolve_launch(&KIRO_DESCRIPTOR, &hooks, &request, Some(&catalog)),
+            Err(ContractError::Mismatch("catalog identity"))
+        ));
     }
 }
 
@@ -290,8 +327,8 @@ fn r0_profiles_do_not_admit_a_fixture_identity_or_generic_prompt() {
         Support::Supported(_)
     ));
     assert!(hooks.interaction.require("H6").is_ok());
-    // The exact native binary/platform/profile must match. A synthetic fixture
-    // identity cannot borrow the native R0 profile or its one-key budget.
+    // Runtime binding removes the release allowlist, not platform/profile selection.
+    // A generic fixture cannot borrow the V2/TUI recipe or its one-key budget.
     assert!(KIRO_DESCRIPTOR
         .input
         .resolve(

@@ -15,11 +15,10 @@ pub const NO: Reason = Reason {
 };
 static PROFILES: [InputProfile; 1] = [InputProfile {
     id: "fake",
-    version: "1",
+    identity: ProfileIdentity::Exact { version: "1", executable_sha256: HASH },
     harness: "fake",
     ui: "tui",
     platform: Platform::Linux,
-    executable_sha256: HASH,
     policy_sha256: HASH,
     operations: &[
         Operation::FirstBusiness,

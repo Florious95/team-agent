@@ -1,5 +1,7 @@
 # Kiro 2.28.0：集成实现与原生证据边界
 
+> 本文保留早期取证阶段的事实与限制，不是当前发行版白名单。常青客户端接入及运行时 version/hash 代际绑定见根目录 [KIRO-CONTRACT.md](../../../KIRO-CONTRACT.md)；下列历史版本/SHA 不再作为源码准入门禁。
+
 **当前不是可运行 Kiro 接入，也不是全功能/K5 验收通过。** K1–K4 已组合；参数、物化、原生 helper、有界 read host 与 H1 Catalog 已实现。Catalog 采用认证后真实 JSON；terminal/session/MCP 的未取得证据不能由 fixture、help 或单轮 noninteractive 算题代替。
 
 ## 本轮物证（替代早期全命令 timeout 的结论）
@@ -22,7 +24,7 @@
 
 ### Helper 与有界 catalog read host
 
-`src/kiro/native.rs` 不扫描 HOME，不修改 PATH/软链，不安装组件，不读取环境或凭据。对明确传入的 launcher/home 只检查 canonical launcher sibling、`~/.local/bin/kiro-cli-chat` 和 macOS bundle helper；显式 helper 缺失不切换到另一安装。要求 regular executable，版本不符时拒绝而不 fallback。
+`src/kiro/native.rs` 不扫描 HOME，不修改 PATH/软链，不安装组件，不读取环境或凭据。对明确传入的 launcher/home 只检查 canonical launcher sibling、`~/.local/bin/kiro-cli-chat` 和 macOS bundle helper；显式 helper 缺失不切换到另一安装。要求 regular executable；版本按合法 `major.minor.patch` 解析，畸形输出报告实际 banner（转义、有界），不做版本猜测或 fallback。新版本使用本次动态捕获的 engine hash；探测期间替换以及已启动代际的身份变化仍拒绝。
 
 `CatalogReader` 捕获完整 read grant（provider/native/executable/cwd/source/bounds），调用前核 cwd identity 与 executable hash。只允许 `chat --list-models --format json`；关闭 stdin、stdout/stderr 字节上限、共享绝对 deadline。公共 command runner 支持数据化 stdout guard，发现已观测 auth marker 后终止**本次自有 child**，返回 `ReadFailure::AuthRequired`。不发登录命令、不重试、不换模型。
 

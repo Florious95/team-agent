@@ -24,7 +24,9 @@ Use the normal public `quick-start`, `status`, `send`, and scoped `shutdown` com
 
 `doctor` includes Kiro in its provider inventory on the contract-runtime platform. `installed` only means an executable `kiro-cli` was found on PATH; auth/version/readiness remain unprobed. `team-agent kiro --help` documents the separate leader entry. `team-agent kiro [--json]` currently returns exit 1 with `reason: kiro_leader_not_admitted` (`leader_launch.v1`), without starting a process or binding a leader. This is an explicit capability refusal, not a working leader launcher.
 
-The current transport profile is macOS, Kiro 2.28.0, **V2/TUI**, pinned to the observed engine hash. The launcher is resolved to `kiro-cli-chat`, including the official application-bundle location when the Homebrew dispatcher cannot locate its helper. A mismatched version/hash/profile is rejected, not silently downgraded. `--v3` is not used.
+The current transport recipe is macOS **V2/TUI**, initially observed on Kiro 2.28.0; it is not a release-version or distribution-hash allowlist. Both native banners are parsed as a complete numeric `major.minor.patch`, including 2.29.0 and future releases. Malformed banners are reported with their escaped, bounded actual output. Catalog schema and current terminal observations still have to match; a future incompatible UI is not treated as ready. `--v3` is not used.
+
+The launcher is resolved to `kiro-cli-chat`, including the official application-bundle location when the Homebrew dispatcher cannot locate its helper. Discovery captures the actual version and binary hash, checks that the image did not change during the version probe, and binds that identity to the new generation. Catalog, materialization, spawn, session and physical input retain their exact runtime identity fences. A running generation cannot adopt a replacement binary or reuse a policy resolved for another version/hash. A subsequent fresh launch captures the new installation; no source-code release/hash update is required.
 
 ## Instruction fidelity
 

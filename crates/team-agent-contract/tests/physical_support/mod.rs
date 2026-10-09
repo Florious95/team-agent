@@ -165,11 +165,13 @@ pub fn descriptor(mode: &str, native: &NativeIdentity) -> ProviderDescriptor {
     let profiles = Box::leak(
         vec![InputProfile {
             id: "physical-fixture",
-            version: "fixture-1",
+            identity: ProfileIdentity::Exact {
+                version: "fixture-1",
+                executable_sha256: native.executable_sha256,
+            },
             harness: "fixture",
             ui: "controlled-tui",
             platform: native.platform,
-            executable_sha256: native.executable_sha256,
             policy_sha256: POLICY,
             operations: &[
                 Operation::FirstBusiness,

@@ -12,6 +12,8 @@ pub enum DiscoveryError {
     Executable(&'static str),
     #[error("native discovery failed: {0}")]
     Host(#[from] team_agent_contract::host::HostError),
+    #[error("native engine probe failed: {0}")]
+    Probe(#[from] EngineProbeError),
     #[error("native discovery contract: {0:?}")]
     Contract(ContractError),
     #[error("native model discovery: {0:?}")]
@@ -192,6 +194,24 @@ mod tests {
         assert_eq!(json["models"][0]["efforts"]["state"], "unverified");
         assert_eq!(json["source"]["schema"], "controlled-json");
         assert!(json["current_role_model"].is_null());
+    }
+
+    #[test]
+    fn version_failure_projection_preserves_the_received_version() {
+        let args = ModelsArgs {
+            provider: "kiro".into(),
+            search: None,
+            json: true,
+        };
+        let error = parse_version(b"kiro-cli-chat 2.29.invalid\n").unwrap_err();
+        let result = render_models(&args, Err(DiscoveryError::Probe(error))).unwrap();
+        assert_eq!(result.exit, ExitCode::Error);
+        let CmdOutput::Human(text) = result.output else {
+            panic!("JSON text projection");
+        };
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("kiro-cli-chat 2.29.invalid"));
+        assert_eq!(json["models"], serde_json::json!([]));
     }
 
     #[test]

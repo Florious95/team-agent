@@ -170,14 +170,23 @@ impl SubmitPolicy {
     }
 }
 
+/// A grammar profile is not an executable attestation. RuntimeCaptured selects
+/// a stable UI recipe; exact native identity remains in the generation, policy
+/// evidence, process receipt and every physical fence. It does not authorize a
+/// running generation to adopt a different executable after an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileIdentity {
+    Exact { version: &'static str, executable_sha256: Digest },
+    RuntimeCaptured,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputProfile {
     pub id: &'static str,
-    pub version: &'static str,
+    pub identity: ProfileIdentity,
     pub harness: &'static str,
     pub ui: &'static str,
     pub platform: Platform,
-    pub executable_sha256: Digest,
     pub policy_sha256: Digest,
     pub operations: &'static [Operation],
     pub channel: Channel,
@@ -186,11 +195,16 @@ pub struct InputProfile {
 
 impl InputProfile {
     pub fn matches_native(&self, native: &NativeIdentity) -> bool {
-        self.version == native.version
+        let identity_matches = match self.identity {
+            ProfileIdentity::Exact { version, executable_sha256 } => {
+                version == native.version && executable_sha256 == native.executable_sha256
+            }
+            ProfileIdentity::RuntimeCaptured => native.validate().is_ok(),
+        };
+        identity_matches
             && self.harness == native.harness
             && self.ui == native.ui
             && self.platform == native.platform
-            && self.executable_sha256 == native.executable_sha256
     }
 }
 
@@ -213,6 +227,7 @@ pub struct ResolvedSubmitPolicy<'a> {
     operation: Operation,
     evidence_kind: EvidenceKind,
     candidate_sha256: Digest,
+    native: NativeIdentity,
 }
 
 impl<'a> ResolvedSubmitPolicy<'a> {
@@ -227,6 +242,9 @@ impl<'a> ResolvedSubmitPolicy<'a> {
     }
     pub fn candidate_sha256(&self) -> Digest {
         self.candidate_sha256
+    }
+    pub fn native(&self) -> &NativeIdentity {
+        &self.native
     }
     pub fn profile(&self) -> &InputProfile {
         self.profile
@@ -276,6 +294,7 @@ pub fn resolve_submit_policy<'a>(
         operation: request.operation,
         evidence_kind: request.required_evidence_kind,
         candidate_sha256: request.candidate_sha256,
+        native: request.native.clone(),
     })
 }
 

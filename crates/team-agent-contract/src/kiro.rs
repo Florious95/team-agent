@@ -11,10 +11,6 @@ use std::time::Duration;
 
 use crate::contract::{descriptor::*, hooks::*, plan::*, types::*};
 
-pub const BUNDLE_VERSION: &str = "2.28.0";
-/// Observed dispatcher identity, deliberately not the engine identity used by K2.
-pub const OBSERVED_LAUNCHER_SHA256: &str =
-    "dee3f382fc8f6734fe505b815d786ed634ba67a258ba34986eca50f4f0b5fc22";
 pub const NATIVE_UNVERIFIED: Reason = Reason {
     code: "kiro-r0-missing",
     message: "The requested Kiro capability has no scoped native admission; no fallback is allowed",
@@ -194,7 +190,7 @@ impl PlanHook for KiroAdapter {
                 reason: NATIVE_UNVERIFIED,
             });
         }
-        if request.native.version != BUNDLE_VERSION
+        if !native::is_release_version(&request.native.version)
             || request.native.harness != "v2"
             || request.native.ui != "tui"
             || request.channel != Channel::Tmux
