@@ -408,7 +408,8 @@ fn pane_metadata_accepts_literal_backslash_t_without_unescaping_native_field_con
 fn pane_metadata_native_receipts_preserve_empty_fields() {
     // R3 exact-format and isolated sleep receipts: parser regression only.
     for bytes in [
-        b"$0\t@0\t%0\t77438\ttac-a294d53615c4b59461190e6c\tworker\t0\t\t0\t\t\t120\t40\n".as_slice(),
+        b"$0\t@0\t%0\t77438\ttac-a294d53615c4b59461190e6c\tworker\t0\t\t0\t\t\t120\t40\n"
+            .as_slice(),
         b"$0\t@0\t%0\t72797\tsleep_test\tworker\t0\t\t0\t\t\t120\t40\n".as_slice(),
     ] {
         for stage in [PaneMetadataStage::NewSession, PaneMetadataStage::Query] {

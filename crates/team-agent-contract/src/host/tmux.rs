@@ -169,7 +169,11 @@ pub fn parse_pane(bytes: &[u8], stage: PaneMetadataStage) -> Result<PaneState, H
     let exit_code = if fields[7].is_empty() {
         None
     } else {
-        Some(fields[7].parse().map_err(|_| invalid("tmux exit receipt"))?)
+        Some(
+            fields[7]
+                .parse()
+                .map_err(|_| invalid("tmux exit receipt"))?,
+        )
     };
     let mode = match (fields[8], fields[9]) {
         ("0", "") => PaneMode::Normal,
