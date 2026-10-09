@@ -14,6 +14,7 @@ pub(crate) const MESSAGE_PRESENTATION: &str = "{\"sink\":\"leader\",\"class\":\"
 
 pub(crate) struct MessageWrite<'a> {
     pub id: Option<&'a MessageId>,
+    pub source: Option<&'a InstanceIdentity>,
     pub task: Option<&'a str>,
     pub sender: &'a str,
     pub recipient: &'a str,
@@ -30,8 +31,9 @@ pub(crate) fn write_message(
     scope: &ScopeId,
     message: MessageWrite<'_>,
 ) -> Result<String, Error> {
-    let target = load_seat(tx, &SeatId::new(message.recipient)?)?;
-    if target.is_none() && message.recipient != "leader" {
+    let external = super::forward::peer(tx, message.recipient)?;
+    let target = if external.is_none() { load_seat(tx, &SeatId::new(message.recipient)?)? } else { None };
+    if target.is_none() && external.is_none() && message.recipient != "leader" {
         return Err(Error::Invalid("unknown recipient"));
     }
     if target.as_ref().is_some_and(|s| &s.identity.scope != scope) {
@@ -50,8 +52,20 @@ pub(crate) fn write_message(
     }
     tx.execute("INSERT INTO messages(message_id,owner_team_id,task_id,sender,recipient,status,content,presentation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![id,scope.as_str(),message.task,message.sender,message.recipient,
-            if message.mailbox {"stored_only"} else {"accepted"},message.content,message.presentation])?;
-    if !message.mailbox {
+            if external.is_some() {"forward_pending"} else if message.mailbox {"stored_only"} else {"accepted"},message.content,message.presentation])?;
+    if let Some(external) = external {
+        let source = message.source.ok_or(Error::Invalid("framework forwarding source"))?;
+        if source.scope != *scope || source.seat.as_str() != message.sender { return Err(Error::Fence); }
+        super::forward::insert(tx, &super::forward::ForwardIntent {
+            id: id.clone(), source: source.clone(), route: external.route,
+            payload: super::forward::ForwardPayload::Message {
+                message: MessageId::new(&id)?, task: message.task.map(str::to_owned),
+                sender: message.sender.into(), recipient: message.recipient.into(),
+                content: message.content.into(), mailbox: message.mailbox,
+            },
+            state: super::forward::ForwardState::Pending, receipt: None,
+        })?;
+    } else if !message.mailbox {
         let identity = target
             .map(|s| serde_json::to_string(&s.identity))
             .transpose()?
@@ -85,6 +99,13 @@ impl ContractStore {
     /// Fenced local send. The identity stored with the outbox is resolved in the
     /// same transaction as insertion, never retargeted to a later generation.
     pub fn send_from_operator(&mut self, request: &OperatorSend) -> Result<SendReceipt, Error> {
+        self.send_from_framework(request, &SeatId::new("leader")?)
+    }
+
+    /// A shared framework dispatcher supplies the captured sender. This is not
+    /// exposed as a native tool argument and never routes through a legacy
+    /// fallback. Destination generation and native queue are still atomic.
+    pub fn send_from_framework(&mut self, request: &OperatorSend, sender: &SeatId) -> Result<SendReceipt, Error> {
         if !nonblank(&request.content)
             || request.content.len() > super::mcp::MAX_FRAME_BYTES
             || request
@@ -113,7 +134,7 @@ impl ContractStore {
         let task = request.task.clone().unwrap_or_else(|| id.as_str().into());
         let logical = LogicalEnvelope {
             message: id.clone(),
-            sender: SeatId::new("leader")?,
+            sender: sender.clone(),
             task: Some(task.clone()),
             content: request.content.clone(),
         };
@@ -125,8 +146,9 @@ impl ContractStore {
             &scope,
             MessageWrite {
                 id: Some(&id),
+                source: None,
                 task: Some(&task),
-                sender: "leader",
+                sender: sender.as_str(),
                 recipient: request.recipient.as_str(),
                 content: &request.content,
                 presentation: MESSAGE_PRESENTATION,

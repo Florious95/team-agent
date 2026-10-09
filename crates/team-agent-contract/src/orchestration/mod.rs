@@ -1,5 +1,6 @@
 //! Shared lifecycle and durable messaging. No provider-specific queue or legacy runtime.
 
+pub mod forward;
 pub mod lifecycle;
 pub mod mcp;
 pub mod operator;
