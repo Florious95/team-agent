@@ -292,10 +292,15 @@ fn normalize_result(context: &CallContext, args: &Value) -> Result<Value, Error>
         return Err(Error::Fence);
     }
     for field in ["summary", "status"] {
-        if object.get(field).is_some_and(|v| !v.is_string()) { return Err(Error::Invalid("result field type")); }
+        if object.get(field).is_some_and(|v| !v.is_string()) {
+            return Err(Error::Invalid("result field type"));
+        }
     }
     for field in ["changes", "tests", "risks", "artifacts", "next_actions"] {
-        if object.get(field).is_some_and(|v| !v.as_array().is_some_and(|a| a.iter().all(Value::is_object))) {
+        if object
+            .get(field)
+            .is_some_and(|v| !v.as_array().is_some_and(|a| a.iter().all(Value::is_object)))
+        {
             return Err(Error::Invalid("result array type"));
         }
     }

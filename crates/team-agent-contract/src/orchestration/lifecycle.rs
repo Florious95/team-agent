@@ -149,7 +149,11 @@ impl Lifecycle<'_> {
                     operation: &mut operation,
                     inner: self.io,
                     descriptor: adapter.descriptor,
-                    allowed_requests: if request.mode == ForkMode::NewSeatFullSnapshot { None } else { Some(&[]) },
+                    allowed_requests: if request.mode == ForkMode::NewSeatFullSnapshot {
+                        None
+                    } else {
+                        Some(&[])
+                    },
                 };
                 adapter.hooks.fork.require("H7")?.stage(&resolved, &mut io)
             };
@@ -478,8 +482,13 @@ fn new_operation(
     parent: Option<SeatRecord>,
 ) -> OperationRecord {
     let preserved = if kind == TransactionKind::Restart {
-        parent.as_ref().map(|p|p.resources.iter().map(|r|r.path.clone()).collect()).unwrap_or_default()
-    } else { vec![] };
+        parent
+            .as_ref()
+            .map(|p| p.resources.iter().map(|r| r.path.clone()).collect())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     OperationRecord {
         id,
         kind,
@@ -538,7 +547,10 @@ impl OwnedIo for JournaledIo<'_> {
         {
             return Err(fail(ContractError::Mismatch("owned materialization grant")));
         }
-        if self.allowed_requests.is_some_and(|allowed| !allowed.contains(request)) {
+        if self
+            .allowed_requests
+            .is_some_and(|allowed| !allowed.contains(request))
+        {
             return Err(fail(ContractError::Mismatch("unplanned materialization")));
         }
         let index = self.operation.resources.len();

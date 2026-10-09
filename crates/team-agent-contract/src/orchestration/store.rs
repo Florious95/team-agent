@@ -261,7 +261,9 @@ impl ContractStore {
              UNION ALL SELECT 1 FROM contract_operations WHERE json_extract(record,'$.outcome') IN ('Running','NeedsRecovery') AND json_extract(record,'$.target.identity.seat')<>?1
              AND (json_extract(record,'$.target.pane')=?2 OR json_extract(record,'$.target.binding_key')=?3))",
             params![target.seat.as_str(),operation.target.pane,operation.target.binding_key], |r|r.get(0))?;
-        if route_conflict { return Err(Error::Fence); }
+        if route_conflict {
+            return Err(Error::Fence);
+        }
         let old = load_seat(&tx, &target.seat)?;
         match operation.kind {
             TransactionKind::Startup
@@ -292,10 +294,28 @@ impl ContractStore {
                 return Err(Error::Fence);
             }
         }
-        if !matches!(operation.kind, TransactionKind::InWindowBranch | TransactionKind::Teardown) {
-            let previous: Option<u64> = tx.query_row("SELECT generation FROM contract_generations WHERE seat=?1", [target.seat.as_str()], |r|r.get(0)).optional()?;
-            if previous.unwrap_or(0).checked_add(1) != Some(target.generation.0) { return Err(Error::Fence); }
-            tx.execute("INSERT INTO contract_instances VALUES(?1,?2,?3)", params![target.instance.as_str(),target.seat.as_str(),target.generation.0])?;
+        if !matches!(
+            operation.kind,
+            TransactionKind::InWindowBranch | TransactionKind::Teardown
+        ) {
+            let previous: Option<u64> = tx
+                .query_row(
+                    "SELECT generation FROM contract_generations WHERE seat=?1",
+                    [target.seat.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if previous.unwrap_or(0).checked_add(1) != Some(target.generation.0) {
+                return Err(Error::Fence);
+            }
+            tx.execute(
+                "INSERT INTO contract_instances VALUES(?1,?2,?3)",
+                params![
+                    target.instance.as_str(),
+                    target.seat.as_str(),
+                    target.generation.0
+                ],
+            )?;
             tx.execute("INSERT INTO contract_generations VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET generation=excluded.generation", params![target.seat.as_str(),target.generation.0])?;
         }
         tx.execute(

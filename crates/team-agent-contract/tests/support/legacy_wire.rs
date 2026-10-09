@@ -1,14 +1,29 @@
 // Test-only compatibility oracle: exact pure helper excerpt from the frozen legacy wire.
 use serde_json::Value;
 #[derive(Clone, Copy)]
-enum McpTool { SendMessage, ReportResult, GetTeamStatus }
+enum McpTool {
+    SendMessage,
+    ReportResult,
+    GetTeamStatus,
+}
 impl McpTool {
     fn wire_name(self) -> &'static str {
-        match self { Self::SendMessage => "send_message", Self::ReportResult => "report_result", Self::GetTeamStatus => "get_team_status" }
+        match self {
+            Self::SendMessage => "send_message",
+            Self::ReportResult => "report_result",
+            Self::GetTeamStatus => "get_team_status",
+        }
     }
 }
 pub fn expected() -> Vec<Value> {
-    [McpTool::SendMessage,McpTool::ReportResult,McpTool::GetTeamStatus].into_iter().map(tool_contract).collect()
+    [
+        McpTool::SendMessage,
+        McpTool::ReportResult,
+        McpTool::GetTeamStatus,
+    ]
+    .into_iter()
+    .map(tool_contract)
+    .collect()
 }
 // BEGIN FROZEN EXCERPT
 fn tool_contract(tool: McpTool) -> Value {
