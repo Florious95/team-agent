@@ -6,27 +6,34 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-static ID: AtomicU64 = AtomicU64::new(0);
+const CHILD: &str = "TEAM_AGENT_TEST_LEADER_PROMPT_CLI_CHILD";
 const SENTINEL: &str = "LEADER_ONLY_SENTINEL_309_🙂";
 struct Fixture {
     root: PathBuf,
     home: PathBuf,
     cwd: PathBuf,
+    _boundary: hermetic::HermeticTestEnv,
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "ta-leader-prompt-cli-{}-{}",
-            std::process::id(),
-            ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let home = root.join("home");
-        let cwd = root.join("project");
-        fs::create_dir_all(&home).unwrap();
-        fs::create_dir(&cwd).unwrap();
-        Self { root, home, cwd }
+        assert!(
+            std::env::var_os(CHILD).is_some(),
+            "fixture requires an isolated test process"
+        );
+        let boundary = hermetic::HermeticTestEnv::enter("leader-prompt-cli");
+        let root = boundary.root().to_path_buf();
+        // The shared guard seeds a registry under its own HOME. CLI absence
+        // contracts use a separate, initially empty HOME under the owned root.
+        let home = root.join("cli-home");
+        let cwd = boundary.workspace("project");
+        fs::create_dir(&home).unwrap();
+        Self {
+            root,
+            home,
+            cwd,
+            _boundary: boundary,
+        }
     }
     fn path(&self) -> PathBuf {
         self.home.join(".team-agent/leader-prompt.txt")
@@ -62,10 +69,25 @@ impl Fixture {
         assert!(!String::from_utf8_lossy(&output.stdout).contains(text));
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+// Never mutate the integration runner's process-global HOME in parallel tests.
+// Each body enters the shared guard only inside a one-test child process.
+fn in_isolated_case(name: &str) -> bool {
+    if std::env::var(CHILD).ok().as_deref() == Some(name) {
+        return true;
     }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture", "--test-threads=1"])
+        .env(CHILD, name)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated CLI contract failed: {:?}\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
 }
 fn json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
@@ -73,6 +95,11 @@ fn json(output: &Output) -> Value {
 
 #[test]
 fn leader_prompt_absent_show_clear_help_do_not_create_any_host_or_workspace_files() {
+    if !in_isolated_case(
+        "leader_prompt_absent_show_clear_help_do_not_create_any_host_or_workspace_files",
+    ) {
+        return;
+    }
     let f = Fixture::new();
     for args in [
         vec!["leader-prompt"],
@@ -97,6 +124,11 @@ fn leader_prompt_absent_show_clear_help_do_not_create_any_host_or_workspace_file
 }
 #[test]
 fn leader_prompt_persists_exact_bytes_across_processes_and_cwds_without_mutation_echo() {
+    if !in_isolated_case(
+        "leader_prompt_persists_exact_bytes_across_processes_and_cwds_without_mutation_echo",
+    ) {
+        return;
+    }
     let f = Fixture::new();
     let text = "  literal --help --json\r\nquote\"\\\t🙂\n";
     f.set(text);
@@ -132,6 +164,9 @@ fn leader_prompt_persists_exact_bytes_across_processes_and_cwds_without_mutation
 }
 #[test]
 fn leader_prompt_errors_keep_old_text_and_report_actual_io_without_echo() {
+    if !in_isolated_case("leader_prompt_errors_keep_old_text_and_report_actual_io_without_echo") {
+        return;
+    }
     let f = Fixture::new();
     f.set(SENTINEL);
     for args in [
@@ -182,6 +217,9 @@ fn leader_prompt_errors_keep_old_text_and_report_actual_io_without_echo() {
 }
 #[test]
 fn leader_prompt_multiple_cli_appends_serialize_without_lost_updates() {
+    if !in_isolated_case("leader_prompt_multiple_cli_appends_serialize_without_lost_updates") {
+        return;
+    }
     let f = Fixture::new();
     let mut children = Vec::new();
     for id in 0..8 {
@@ -209,6 +247,10 @@ fn leader_prompt_multiple_cli_appends_serialize_without_lost_updates() {
 }
 #[test]
 fn leader_prompt_management_requires_home_and_never_uses_workspace_fallback() {
+    if !in_isolated_case("leader_prompt_management_requires_home_and_never_uses_workspace_fallback")
+    {
+        return;
+    }
     let f = Fixture::new();
     let absent_home = f.root.join("missing-home");
     let output = f
@@ -246,6 +288,9 @@ fn leader_prompt_management_requires_home_and_never_uses_workspace_fallback() {
 #[cfg(unix)]
 #[test]
 fn leader_prompt_permission_failures_are_typed_and_preserve_old_body() {
+    if !in_isolated_case("leader_prompt_permission_failures_are_typed_and_preserve_old_body") {
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
     let f = Fixture::new();
@@ -327,6 +372,11 @@ fn native_canaries(f: &Fixture) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn leader_prompt_unreadable_and_unsupported_leaders_fail_before_native_spawn_or_state() {
+    if !in_isolated_case(
+        "leader_prompt_unreadable_and_unsupported_leaders_fail_before_native_spawn_or_state",
+    ) {
+        return;
+    }
     for provider in ["pi", "claude", "codex", "grok", "cursor", "copilot"] {
         let f = Fixture::new();
         f.set(SENTINEL);
@@ -371,6 +421,10 @@ fn leader_prompt_unreadable_and_unsupported_leaders_fail_before_native_spawn_or_
 #[cfg(unix)]
 #[test]
 fn leader_prompt_native_slot_conflicts_are_typed_without_partial_team_state() {
+    if !in_isolated_case("leader_prompt_native_slot_conflicts_are_typed_without_partial_team_state")
+    {
+        return;
+    }
     for args in [
         vec![
             "codex",
