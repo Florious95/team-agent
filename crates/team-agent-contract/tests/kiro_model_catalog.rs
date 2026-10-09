@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use team_agent_contract::contract::{
-    descriptor::*, hooks::*, plan::*, session::CwdIdentity, types::*,
-};
+use team_agent_contract::contract::{hooks::*, plan::*, session::CwdIdentity, types::*};
 use team_agent_contract::kiro::{
     native::CHAT_CATALOG_SOURCE, KiroAdapter, McpStdio, KIRO_DESCRIPTOR,
 };
