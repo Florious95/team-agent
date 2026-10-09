@@ -1,64 +1,70 @@
-# K4 Kiro adapter：受证据门禁的文档实现（部分交付）
+# Kiro 2.28.0：集成实现与原生证据边界
 
-**不是可运行 Kiro 接入，不是 R0/原生验收通过。** 本模块实现可独立检验的参数/配置构造与 owned materialization；原生门禁保持关闭。不能用修改 `EvidenceKind` 或复制 fixture descriptor 的方式派生可运行 profile。
+**当前不是可运行 Kiro 接入，也不是全功能/K5 验收通过。** K1–K4 已组合；参数、物化、原生 helper 解析与有界 read host 可独立验证。Catalog/terminal/session/MCP 的未取得证据不能由 fixture 或 help 代替。
 
-## 输入事实，而不是期望能力
+## 本轮物证（替代早期全命令 timeout 的结论）
 
-研究档案 `kiro-discovery/RESEARCH-RECEIPT.md` 记录：
+原始目录：`/Volumes/nvme/tmp/kiro-native-receipts/`；子命令目录 `chat-subcommands/`。由 runner-luna 采集，本开发席未执行 Kiro/登录。
 
-- 2026-10-08 观察到 macOS app bundle `CFBundleShortVersionString=2.28.0`、binary SHA256 `dee3f382fc8f6734fe505b815d786ed634ba67a258ba34986eca50f4f0b5fc22`。
-- `--version`、`--help`、`chat --help`、`agent --help`、`mcp --help` 全部 15 秒 harness TIMEOUT；**没有可用 native stdout/exit 证据**。
-- 2.28.0 安装版本、V2/V3 agent harness、TUI/classic UI 是三个维度；不能把 bundle metadata 当作 CLI version 结果。
-- catalog/schema、native Luna ID/effort、提示符、键序/时序、MCP client registry/回程、SID/resume、rewind、退出码实测均未取得。
-
-官方资料只支撑文档候选：`chat --v3 --agent <owned-name> --model <exact-id> --effort <level> [--trust-all-tools] [--resume-id <bound-id>]`，child environment `KIRO_CHAT_UI=tui`。它不支撑 native profile 的 `Supported`。
+- dispatcher `/opt/homebrew/bin/kiro-cli` 指向 app bundle 的 `kiro-cli`。版本 `2.28.0`、根 help 成功。
+- dispatcher `chat --help` 报 `failed to launch .../.local/bin/kiro-cli-chat`。给 PATH 加 bundle 前缀仍失败；不把 PATH 当修复。
+- 直接 engine `/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat` 的 `--version`、`--help`、`chat --help` exit 0。
+- engine SHA256：`430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712`。dispatcher hash 不得用于 engine PID/image fence。
+- chat help SHA256：`47e22e67d2d6042ceff70b5d6414ece1a367bbbbd675c873a39d1dd3e868bf20`。支持 `--model`、`--effort`（示例 low/medium/high/xhigh/max）、`--list-models`、list-only `--format plain|json|json-pretty`、`--agent`、`--resume-id`、`--v3`、`--tui`、`--trust-all-tools`。
+- `--list` 是 resume-picker 别名，不是 model catalog。
+- catalog 调用 180s 外层 timeout、真实 exit 未取得。101586 bytes 输出（SHA256 `7abd2c71c8eeef941f7ae0eb733f358c880f1ab19fcb73fe568d17b566d25599`）**不是 JSON**：byte 0 为 ESC，首尾都是 `Opening auth portal and logging in...` 的 ANSI spinner。不能推断 EOF 等待、有效模型、原生 Luna ID或成功目录。
+- agent/MCP help 在首错后 NOT-RUN；没有取得成功的 interactive、SID、rewind 或 MCP 回程物证。
 
 ## 已实现的边界
 
-`src/kiro.rs` 提供唯一 `KIRO_DESCRIPTOR`：id=`kiro`、binary=`kiro-cli`、无别名/未知 provider fallback、全量 15 facets。
+`src/kiro.rs` 提供唯一 `KIRO_DESCRIPTOR`：id=`kiro`、public binary=`kiro-cli`、全量 15 facets；物理 plan 只接受 framework 解析后的 `kiro-cli-chat` engine。旧六家、根 manifest/lockfile 未修改。
 
-| 七个 Narrow Hook slot | 当前实际状态 |
+### Helper 与有界 catalog read host
+
+`src/kiro/native.rs` 不扫描 HOME，不修改 PATH/软链，不安装组件，不读取环境或凭据。对明确传入的 launcher/home 只检查 canonical launcher sibling、`~/.local/bin/kiro-cli-chat` 和 macOS bundle helper；显式 helper 缺失不切换到另一安装。要求 regular executable，版本不符时拒绝而不 fallback。
+
+`CatalogReader` 捕获完整 read grant（provider/native/executable/cwd/source/bounds），调用前核 cwd identity 与 executable hash。只允许 `chat --list-models --format json`；关闭 stdin、stdout/stderr 字节上限、共享绝对 deadline。公共 command runner 支持数据化 stdout guard，发现已观测 auth marker 后终止**本次自有 child**，返回 `ReadFailure::AuthRequired`。不发登录命令、不重试、不换模型。
+
+**重要限制：** Kiro 自己可能在输出 marker 之前已打开浏览器；关闭 stdin/取消 child 不保证此前无副作用。因此只在操作员授权的 discovery 阶段使用读端口，本轮认证 blocker 解除前不重跑。超时、缺 exit、超限、无效或尾随 JSON 都不能成功；完整 JSON + exit 0 只通过 raw read 边界，仍不等于已知 catalog schema/H1 能力。
+
+### 七个 Narrow Hook slots
+
+| Hook | 当前实际状态 |
 |---|---|
-| H1 CatalogHook | **Unverified**：文档有 JSON 命令，没有 schema/原始目录；不猜字段、不伪造空 catalog。 |
-| H2 PlanHook | **Bound**：文档限定 V3/TUI、Fixture-only 的确定性 `LaunchPlan`；Native 请求即使绕过 cloned descriptor 也明确拒绝。 |
-| H3 MaterializeHook | **Bound**：单一 owned agent JSON、独占 create、受限 `agent validate` port；失败保留写入 receipt，不覆盖用户配置。 |
-| H4 SessionHook | **Unverified**：`/session-id` 输出 grammar/provenance 尚未取得；不扫数据库/最近 session。 |
-| H5 SemanticReader | **Unverified**：无 native semantic fixture；不拿 spinner/prompt 当 idle 或结果。 |
-| H6 InteractionHook | **Unverified**：无提示符/粘贴/风险确认原始帧及 timing；不伪造通用 `>` matcher 或“2 Enter/500ms”。 |
-| H7 ForkHook | InWindow **Unverified**；FullSnapshot/NativeNewSeat 在 descriptor 的 F0 **Unsupported**，无文件复制、无 slash 执行。 |
+| H1 Catalog | **Unverified**：命令语法已知，真实 JSON/schema/模型目录未知；不猜字段。 |
+| H2 Plan | **Bound / Fixture-only gate**：确定性 V3/TUI 参数计划；Native 请求不能靠 cloned descriptor 绕过未验证输入/会话契约。 |
+| H3 Materialize | **Bound**：owned agent JSON + 独占写入 + 受限 validator；失败保留 receipt。 |
+| H4 Session | **Unverified**：无当前 native SID grammar/provenance；不扫描数据库/最近 session。 |
+| H5 Semantic | **Unverified**：不把 spinner/prompt 当 idle 或业务结果。 |
+| H6 Interaction | **Unverified**：没有当前提示符、paste、Enter/chip/风险确认与 timing fixture；不编造 `>` 或“两个Enter/500ms”。 |
+| H7 Fork | InWindow **Unverified**；FullSnapshot/NativeNewSeat 在 F0 **Unsupported**；不复制认证库或执行 slash。 |
 
-这不是“7 个原生 Hook 已完成”的声明；五个缺证 slot 明确拒绝，比返回空成功的 stub 更重要。Keystroke、Probe、Teardown 不新增 adapter hook，仍归 K2/K3 公共框架。
+Keystroke、三层 Probe、Teardown 不新增 adapter hook，仍由公共 K2/K3 执行。
 
-### 参数/配置实现
+### 参数/配置与物化
 
-- `OsString` argv 保留模型 ID 与空格/Unicode/引号路径边界；不拼 shell、不向 positional INPUT 塞首条业务消息。
-- model/effort 显式携带；`ultra` 映射无证据则拒绝，不映射成 `max` 或改为 `high`；`off`/`none` 本就不属于 K1 的统一 effort 语法。`--trust-all-tools` 只在显式 bypass 请求时产生，启动风险确认仍未验证。
-- `McpStdio` 由 framework 配置真正的 executable/args/env；adapter 不猜尚未存在的 public CLI 参数，也不读取 ambient secrets。
-- owned agent name 用长度前缀编码 scope/seat/instance/generation，防 component 拼接歧义。JSON 在 cwd `.kiro/agents/<owned-name>.json`，prompt 用 JSON 正确转义。
-- 只列固定三工具 `@team/send_message` / `report_result` / `get_team_status` 和 native builtins；不从其他 Provider 拼 `mcp__...` 名称。
-- `includeMcpJson=false`、`includePowers=false` 是计划意图；描述符仍声明 MCP isolation 未验证，不能把 JSON 字段当 native consumed。
-- 不设置 HOME/XDG、不调用全局 settings/AI-assisted agent create、不注入 native hooks、不复制认证库、不建立 adapter queue。
-- H3 校验路径/name/schema/固定 MCP command，再向受限 OwnedIo 写入；native validator超时/错误/过大输出保留资源，不返回成功。
+- argv 使用 `OsString`，保持模型精确 ID、路径空格/Unicode/引号。不拼 shell，不把首条业务消息塞 positional INPUT。
+- `--model`、五档 `--effort` 与显式 bypass `--trust-all-tools` 按 help 构造。`ultra` 拒绝，不降成 max；模型是否支持某 effort 仍由真实 catalog 决定。`--format` **仅用于 list**，不加入 interactive plan。
+- `McpStdio` 由 framework 提供 executable/argv/env；adapter 不猜未落地的 public CLI 参数或 ambient secrets。
+- cwd `.kiro/agents/<owned-name>.json` 的名称含 scope/seat/instance/generation 无歧义长度编码。prompt 用 JSON escaping。
+- 固定三工具及 builtins，`includeMcpJson=false` / `includePowers=false` 仅为计划意图，不冒称 native consumed/isolation 已证。
+- K3 `JournaledIo` 按 descriptor 及 seat 捕获的 resource-kind grant 允许 WorkingDirectory；绝不把任意绝对路径变成权限。
+- `ScopedMaterializer` 对已捕获 cwd/root identity、每个路径分量 no-follow、独占0600文件、必要0700子目录、文件 creation identity/hash 做校验。现有目录不 chmod，不覆盖文件，不递归删除 shared cwd；确认 quiescent 后只删除本次 receipt 对应原 inode/bytes。
+- H3 校验命令仅 `agent validate <owned-path>`。其 native 语法/行为仍待独立 help/实机验证，不能因公共 runner 能执行就升级原生 admission。
 
-`classify_exit` 只分类官方定义的 0/1/3/4；0 是 command success 而非业务结果。4 可能发生于 default agent 已执行工具之后。任何退出或 harness timeout 都不抹除 delivery floor、不授权重跑。
+`classify_exit` 保留官方定义的 0/1/3/4：0 不是业务结果；4 可能出现在 default agent 已发生 effects 之后。`command_failure` 另区分 observed wrapper launch failure、AuthRequired、true timeout、output limit 与 native exit124；所有分类不降低 delivery floor、不授权 replay。
 
-## 仍需补齐，禁止自动启用
+## 未完成项 / K5 准备门
 
-| R0 项 | 当前状态 / 所需证据 |
-|---|---|
-| K01 | bundle 已观察；CLI version/help TIMEOUT，需新鲜成功收据。 |
-| K02 | V3/TUI flags 仅 DOC；需 exact binary/help/argv native 证据。 |
-| K03 | 真实 catalog JSON/schema、Luna ID/effort 未知；禁止换模型绕过。 |
-| K04 | agent lookup/validate、user+workspace ambient MCP 排除待证。 |
-| K05–K07 | startup risk、paste/Enter/chip、busy/queue grammar 与 bounded timing 未测；没有 InputProfile。 |
-| K08 | init/list/call/result/response written/client consumption/presentation 各层原始证据待证。 |
-| K09–K10 | local SID、resume、rewind parent/child 与文件不回滚未测。 |
-| K11 | process exit/stop/remaining resources native receipts 未测。 |
+认证前置由用户负责；不得读 credential store 或自动 login。认证成立后仍须固定 helper identity、真正 catalog/schema 与 Luna 模型/effort；若无 Luna 则有限 native case NOT-RUN，不能换 Claude。
 
-另外，K3 当前 `JournaledIo` 的 captured grant 只允许 runtime root；Kiro 文档候选 agent 文件位于工作 cwd。**两者不同 root 时，K3 会拒绝，不能靠把 cwd 改成 runtime root 绕过。** 将来集成需由 lifecycle owner 增加经 descriptor/ownership 校验的 WorkingDirectory grant 与相应测试；本 adapter PR 不悄悄修改 K3 的清场权限。跨 Team 环境身份过滤也应由 Host/公共 MCP launcher 完成，不能伪造一个未实现的 server argv。
+生产 H4/H5/H6/H7、动态 tmux target 与 K3 持久化接线、共享 supervisor 的实进程入口、MCP 子进程绑定、macOS candidate 与完整盲测用例仍须按实际实现/原始证据关闭，不能把 library 组合写成终端端到端完成。三层探针、F0–F5、物理 executor 的已有单测不等于 Kiro 集成通过。
 
-## 测试口径
+## 自动化口径
 
-`tests/kiro_adapter.rs` 使用明确 Synthetic/Fixture admission 检验纯 argv、carrier report、JSON escaping、exact resume 意图、effort/bypass、H3 partial failure 与 exit 分类，同时验证生产 descriptor、Native H2 与 input slots 保持拒绝。没有假造 catalog、session-id 屏幕或正向 prompt/timing fixture。
+- `kiro_adapter.rs`：受控计划/载体/JSON/资源/effort/bypass/exit，包括生产 admission 拒绝。
+- `kiro_dispatch.rs`：受控 bundle/local/helper 文件布局、直接 engine、版本、dispatcher 分类。
+- `kiro_catalog.rs`：auth spinner、受控大 JSON、真实 EOF、真实自有 subprocess guard、timeout/exit/截断、captured grant/image 拒绝。不调用真实 Kiro。
+- `resource_grants.rs`：共享 cwd grant/no-follow/exclusive/token/dirty/foreign/cleanup。
 
-Grok 自动化结果见本轮 K4 收据；任何 PASS 都不使缺证项从 Unverified 升级。新的原生运行必须使用 leader 固定候选与授权 caller/被测 Luna；现有 timeout 档案不授权再次本机探测、登录或系统配置修改。
+Cargo/fmt/clippy 仅 Grok/授权 CI；真实 source/tree、实际用例数、退出码与清理以构建收据为准。不把新增未执行测试或任何 fixture PASS 写成原生 PASS。

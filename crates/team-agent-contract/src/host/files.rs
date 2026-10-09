@@ -194,25 +194,25 @@ impl ScopedDirectory {
         Ok(file)
     }
 
-    pub fn create_file(&self, name: &str, bytes: &[u8]) -> Result<FileReceipt, FileFailure> {
+    pub fn create_file(&self, name: &str, bytes: &[u8]) -> Result<FileReceipt, Box<FileFailure>> {
         let possible = FileReceipt {
             directory: self.receipt.clone(),
             name: name.to_string(),
             effect: ResourceWriteEffect::MayHaveWritten,
         };
         if !name_valid(name) {
-            return Err(FileFailure {
+            return Err(Box::new(FileFailure {
                 error: HostError::new("owned filename", HostErrorKind::Invalid),
                 possible: None,
-            });
+            }));
         }
         #[cfg(not(unix))]
         {
             let _ = bytes;
-            Err(FileFailure {
+            Err(Box::new(FileFailure {
                 error: HostError::new("create owned file", HostErrorKind::Unsupported),
                 possible: None,
-            })
+            }))
         }
         #[cfg(unix)]
         {

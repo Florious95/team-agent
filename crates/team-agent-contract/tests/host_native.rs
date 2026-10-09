@@ -50,6 +50,7 @@ fn raw_tmux(
             set: BTreeMap::new(),
         },
         stdin: None,
+        reject_stdout: None,
         budget: Duration::from_secs(3),
         limits: OutputLimits {
             stdout: 65536,

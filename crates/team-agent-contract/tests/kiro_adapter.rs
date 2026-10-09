@@ -40,7 +40,7 @@ fn fixture_request() -> LaunchRequest {
     r.native.version = BUNDLE_VERSION.into();
     r.native.harness = "v3".into();
     r.native.ui = "tui".into();
-    r.paths.executable = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli".into();
+    r.paths.executable = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat".into();
     r.paths.cwd.path = "/work/code 中 'quoted'".into();
     r.model = Some("exact-provider-model/KeepCase".into());
     r.prompt = Some("line one\nquotes \" and 中文".into());
@@ -103,6 +103,8 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     assert_eq!(&args[..3], &["chat", "--v3", "--agent"]);
     assert!(args.contains(&"exact-provider-model/KeepCase"));
     assert!(!args.contains(&"--trust-all-tools"));
+    assert!(!args.contains(&"--format")); // list-only, not an interactive response format
+    assert!(!args.contains(&"--list-models"));
     assert!(!args
         .iter()
         .any(|v| v.contains("line one") || *v == "--resume" || *v == "--resume-picker"));
@@ -120,6 +122,24 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     assert_eq!(plan.environment.set["KIRO_CHAT_UI"], "tui");
     assert!(!plan.environment.set.contains_key("HOME"));
     assert!(!plan.environment.set.contains_key("XDG_CONFIG_HOME"));
+}
+
+#[test]
+fn confirmed_help_syntax_does_not_imply_authenticated_model_or_terminal_admission() {
+    for effort in [Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh, Effort::Max] {
+        assert_eq!(KIRO_DESCRIPTOR.effort.admission[effort.index()], EffortAdmission::Pass);
+        let mut request = fixture_request();
+        request.role_effort = Some(effort.as_str().into());
+        let plan = adapter().plan(&fixture_resolved(request)).unwrap();
+        assert!(plan.arguments.windows(2).any(|v| v[0] == "--effort" && v[1] == effort.as_str()));
+    }
+    assert!(matches!(KIRO_DESCRIPTOR.effort.admission[Effort::Ultra.index()], EffortAdmission::Reject(_)));
+    assert!(matches!(KIRO_DESCRIPTOR.model.catalog, Support::Unverified(_)));
+    assert!(matches!(KIRO_DESCRIPTOR.auth.subscription, Support::Unverified(_)));
+    assert!(matches!(KIRO_DESCRIPTOR.input.profiles, Support::Unverified(_)));
+    let mut request = fixture_request();
+    request.paths.executable = "/opt/homebrew/bin/kiro-cli".into();
+    assert!(adapter().plan(&fixture_resolved(request)).is_err());
 }
 
 #[test]

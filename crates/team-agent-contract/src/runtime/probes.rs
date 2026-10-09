@@ -183,19 +183,15 @@ pub fn collect_protocol(
             }
             ProtocolFact::InitializeResponseWritten {
                 server_instance: id,
-            } if id == server_instance && !exited => {
-                if fresh(&event.scope, now) {
-                    initialized = true;
-                    server.scope = event.scope.clone();
-                }
+            } if id == server_instance && !exited && fresh(&event.scope, now) => {
+                initialized = true;
+                server.scope = event.scope.clone();
             }
             ProtocolFact::ToolsListResponseWritten {
                 server_instance: id,
-            } if id == server_instance && !exited => {
-                if fresh(&event.scope, now) {
-                    listed = true;
-                    server.scope = event.scope.clone();
-                }
+            } if id == server_instance && !exited && fresh(&event.scope, now) => {
+                listed = true;
+                server.scope = event.scope.clone();
             }
             ProtocolFact::ClientBound {
                 server_instance: id,

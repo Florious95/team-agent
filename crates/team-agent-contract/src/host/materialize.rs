@@ -264,6 +264,7 @@ impl<R: CommandRunner> OwnedIo for ScopedMaterializer<R> {
                 set: Default::default(),
             },
             stdin: None,
+            reject_stdout: None,
             budget,
             limits: OutputLimits {
                 stdout: request.bounds.max_output_bytes,

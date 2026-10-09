@@ -37,6 +37,9 @@ pub struct CatalogRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadFailure {
+    /// The native read requested authentication; no credentials are inspected and
+    /// no model/catalog result may be inferred from the partial terminal output.
+    AuthRequired,
     TimedOut { elapsed: Duration },
     OutputLimit { limit: usize },
     Exit { code: i32 },

@@ -1,0 +1,151 @@
+//! Select and fingerprint the actual chat engine, not the macOS dispatcher.
+//! No installation, symlink repair, global PATH mutation or credential discovery.
+use std::path::{Path,PathBuf};
+use std::time::{Duration,Instant};
+use crate::contract::{descriptor::CatalogSource,hooks::*,plan::EnvironmentDelta,types::*};
+use crate::host::{command::*,process::{fingerprint_file,resolve_cwd},HostError,HostErrorKind};
+
+pub const OBSERVED_HELPER_SHA256:&str="430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712";
+pub const CHAT_CATALOG_ARGUMENTS:&[&str]=&["chat","--list-models","--format","json"];
+pub const AUTH_PORTAL_MARKER:&[u8]=b"Opening auth portal and logging in...";
+/// CLI syntax is confirmed by native help. The model JSON schema is NOT yet observed.
+pub const CHAT_CATALOG_SOURCE:CatalogSource=CatalogSource {arguments:CHAT_CATALOG_ARGUMENTS,schema:"kiro-2.28.0-catalog-schema-unverified"};
+
+/// `home` is supplied by the framework, not looked up by the provider. Only two
+/// declared installation locations and the launcher's sibling are considered.
+/// The first executable engine is selected; version failure is NOT a reason to
+/// silently substitute another installation or launch a different provider.
+pub fn resolve_helper(launcher:&Path,home:&Path)->Result<PathBuf,HostError> {
+    require_absolute(launcher,"Kiro launcher").map_err(|_|HostError::new("Kiro launcher path",HostErrorKind::Invalid))?;
+    require_absolute(home,"Kiro installation home").map_err(|_|HostError::new("Kiro home path",HostErrorKind::Invalid))?;
+    let mut candidates=vec![];
+    if launcher.file_name().is_some_and(|name|name=="kiro-cli-chat") {candidates.push(launcher.to_path_buf());}
+    else {
+        let canonical=launcher.canonicalize().map_err(|e|HostError::io("Kiro launcher resolution",e))?;
+        if let Some(parent)=canonical.parent() {candidates.push(parent.join("kiro-cli-chat"));}
+        candidates.push(home.join(".local/bin/kiro-cli-chat"));
+        #[cfg(target_os="macos")]
+        candidates.push(PathBuf::from("/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat"));
+    }
+    for candidate in candidates {
+        let metadata=match std::fs::metadata(&candidate) {Ok(m)=>m,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>continue,Err(e)=>return Err(HostError::io("Kiro helper metadata",e))};
+        if !metadata.is_file() {continue;}
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode()&0o111==0 {continue;}
+        }
+        return candidate.canonicalize().map_err(|e|HostError::io("Kiro helper resolution",e));
+    }
+    Err(HostError::new("Kiro chat helper unavailable",HostErrorKind::Unknown))
+}
+
+pub fn parse_version(stdout:&[u8])->Result<String,ContractError> {
+    let text=std::str::from_utf8(stdout).map_err(|_|ContractError::Invalid("Kiro version encoding"))?.trim();
+    let version=text.strip_prefix("kiro-cli ").ok_or(ContractError::Invalid("Kiro version line"))?;
+    if version!=super::BUNDLE_VERSION {return Err(ContractError::Unverified {field:"Kiro version",reason:super::NATIVE_UNVERIFIED});}
+    Ok(version.into())
+}
+
+/// This establishes executable identity only, never T2/T3 or business readiness.
+pub fn probe_engine<R:CommandRunner>(engine:&Path,runner:&mut R,bounds:ReadBounds)->Result<NativeIdentity,HostError> {
+    bounds.validate().map_err(|_|HostError::new("Kiro probe bounds",HostErrorKind::Invalid))?;
+    let started=Instant::now();
+    let hash=fingerprint_file(engine,1024*1024*1024,bounds.deadline)?;
+    let budget=bounds.deadline.saturating_sub(started.elapsed());
+    if budget.is_zero() {return Err(HostError::new("Kiro version deadline",HostErrorKind::Deadline));}
+    let result=runner.run(&CommandRequest {executable:engine.to_path_buf(),arguments:vec!["--version".into()],cwd:None,
+        environment:EnvironmentDelta {remove:Default::default(),set:Default::default()},stdin:None,budget,reject_stdout:Some(AUTH_PORTAL_MARKER),
+        limits:OutputLimits {stdout:bounds.max_output_bytes,stderr:bounds.max_output_bytes,stdin:0}});
+    if !result.success() {return Err(HostError::new("Kiro engine version command",HostErrorKind::Command));}
+    let version=parse_version(&result.stdout).map_err(|_|HostError::new("Kiro engine version",HostErrorKind::Invalid))?;
+    let platform=if cfg!(target_os="macos") {Platform::MacOs} else if cfg!(target_os="linux") {Platform::Linux} else {Platform::Windows};
+    Ok(NativeIdentity {version,harness:"v3".into(),ui:"tui".into(),platform,executable_sha256:hash})
+}
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum CommandFailure {
+    AuthRequired,
+    HelperLaunchFailed,
+    NotStarted,
+    TimedOut,
+    OutputLimit,
+    NativeExit(i32),
+    Unknown,
+}
+/// The observed dispatcher failure does not establish ENOENT, bad permissions,
+/// auth failure, or native tool effects. It is not fixed by adding PATH.
+pub fn command_failure(receipt:&CommandReceipt)->Option<CommandFailure> {
+    if receipt.stdout.windows(AUTH_PORTAL_MARKER.len()).any(|bytes|bytes==AUTH_PORTAL_MARKER) {
+        return Some(CommandFailure::AuthRequired);
+    }
+    if receipt.success() {return None;}
+    if receipt.end==CommandEnd::Exited && receipt.exit_code==Some(1) {
+        if let Ok(stderr)=std::str::from_utf8(&receipt.stderr) {
+            if stderr.lines().any(|line|line.trim().strip_prefix("error: failed to launch ").is_some_and(|path|Path::new(path).is_absolute()&&Path::new(path).file_name().is_some_and(|name|name=="kiro-cli-chat"))) {
+                return Some(CommandFailure::HelperLaunchFailed);
+            }
+        }
+    }
+    Some(match receipt.end {
+        CommandEnd::NotStarted=>CommandFailure::NotStarted,
+        CommandEnd::TimedOut=>CommandFailure::TimedOut,
+        CommandEnd::OutputLimit=>CommandFailure::OutputLimit,
+        CommandEnd::Exited=>receipt.exit_code.map(CommandFailure::NativeExit).unwrap_or(CommandFailure::Unknown),
+        _=>CommandFailure::Unknown,
+    })
+}
+
+pub fn discovery_bounds()->ReadBounds {ReadBounds {deadline:Duration::from_secs(30),max_output_bytes:1024*1024}}
+
+/// Captured read-only command whitelist. Construction does not execute anything.
+/// Native catalog invocation itself can open a browser when the installation is
+/// unauthenticated, even with stdin closed. Call only in an operator-authorized
+/// discovery stage; this guard cancels the observed flow, not its earlier effects.
+/// No retry, login, model fallback or schema promotion is performed here.
+pub struct CatalogReader<R> {grant:CatalogRequest,runner:R}
+impl<R:CommandRunner> CatalogReader<R> {
+    pub fn new(grant:CatalogRequest,runner:R)->Result<Self,ContractError> {
+        grant.bounds.validate()?;
+        require_absolute(&grant.cwd.path,"Kiro catalog cwd")?;
+        grant.native.validate()?;
+        require_absolute(&grant.executable,"Kiro catalog engine")?;
+        if grant.provider.as_str()!="kiro" || grant.native.version!=super::BUNDLE_VERSION
+            || grant.source!=CHAT_CATALOG_SOURCE
+            || !grant.executable.file_name().is_some_and(|name|name=="kiro-cli-chat") {
+            return Err(ContractError::Mismatch("Kiro catalog grant"));
+        }
+        Ok(Self {grant,runner})
+    }
+    pub fn runner_mut(&mut self)->&mut R {&mut self.runner}
+}
+impl<R:CommandRunner> BoundedReadHost for CatalogReader<R> {
+    fn read_catalog(&mut self,request:&CatalogRequest)->Result<ReadOutput,ReadFailure> {
+        if *request!=self.grant {return Err(ReadFailure::Error(ContractError::Mismatch("captured Kiro catalog request")));}
+        let started=Instant::now();
+        if resolve_cwd(&request.cwd.path).map_err(|_|ReadFailure::Error(ContractError::Mismatch("catalog cwd")))?!=request.cwd {
+            return Err(ReadFailure::Error(ContractError::Mismatch("catalog cwd")));
+        }
+        let hash=fingerprint_file(&request.executable,1024*1024*1024,request.bounds.deadline.saturating_sub(started.elapsed()))
+            .map_err(|_|ReadFailure::Error(ContractError::Mismatch("catalog executable")))?;
+        if hash!=request.native.executable_sha256 {return Err(ReadFailure::Error(ContractError::Mismatch("catalog executable")));}
+        let budget=request.bounds.deadline.saturating_sub(started.elapsed());
+        if budget.is_zero() {return Err(ReadFailure::TimedOut {elapsed:started.elapsed()});}
+        let result=self.runner.run(&CommandRequest {executable:request.executable.clone(),
+            arguments:CHAT_CATALOG_ARGUMENTS.iter().map(|arg|(*arg).into()).collect(),cwd:Some(request.cwd.path.clone()),
+            environment:EnvironmentDelta {remove:Default::default(),set:Default::default()},stdin:None,
+            budget,limits:OutputLimits {stdout:request.bounds.max_output_bytes,stderr:request.bounds.max_output_bytes,stdin:0},
+            reject_stdout:Some(AUTH_PORTAL_MARKER)});
+        match command_failure(&result) {
+            Some(CommandFailure::AuthRequired)=>return Err(ReadFailure::AuthRequired),
+            Some(CommandFailure::TimedOut)=>return Err(ReadFailure::TimedOut {elapsed:started.elapsed()}),
+            Some(CommandFailure::OutputLimit)=>return Err(ReadFailure::OutputLimit {limit:request.bounds.max_output_bytes}),
+            Some(CommandFailure::NativeExit(code))=>return Err(ReadFailure::Exit {code}),
+            Some(_)=>return Err(ReadFailure::Unknown(Reason {code:"kiro-catalog-no-exit",message:"The bounded catalog command did not exit successfully"})),
+            None=>{}
+        }
+        // Complete JSON + real exit 0 is the read boundary only. Until H1 has a
+        // native schema fixture this cannot populate an exact-model observation.
+        let _:serde_json::Value=serde_json::from_slice(&result.stdout).map_err(|_|ReadFailure::Error(ContractError::Invalid("Kiro catalog JSON")))?;
+        Ok(ReadOutput {stdout:result.stdout,elapsed:started.elapsed(),exit_code:0})
+    }
+}

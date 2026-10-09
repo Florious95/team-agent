@@ -1,6 +1,7 @@
-//! Kiro documentation-grounded adapter boundary. Native admission is closed:
-//! the 2.28.0 bundle was observed, but all native help/version probes timed out.
-//! No terminal grammar, catalog JSON schema or timing policy is invented here.
+//! Kiro 2.28.0 adapter boundary. Helper version and chat parameter syntax are
+//! observed. Catalog probing requested authentication, not JSON; native input,
+//! session and MCP bindings remain closed until current scoped evidence exists.
+pub mod native;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -9,11 +10,12 @@ use std::time::Duration;
 use crate::contract::{descriptor::*, hooks::*, plan::*, types::*};
 
 pub const BUNDLE_VERSION: &str = "2.28.0";
-pub const OBSERVED_BINARY_SHA256: &str =
+/// Observed dispatcher identity, deliberately not the engine identity used by K2.
+pub const OBSERVED_LAUNCHER_SHA256: &str =
     "dee3f382fc8f6734fe505b815d786ed634ba67a258ba34986eca50f4f0b5fc22";
 pub const NATIVE_UNVERIFIED: Reason = Reason {
     code: "kiro-r0-missing",
-    message: "Only bundle metadata and official documentation are available; native help timed out",
+    message: "Native help is verified, but catalog authentication, terminal/session grammar and MCP binding are not",
 };
 const SNAPSHOT_UNSUPPORTED: Reason = Reason {
     code: "kiro-no-safe-snapshot",
@@ -40,8 +42,18 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         catalog: Support::Unverified(NATIVE_UNVERIFIED),
     },
     effort: EffortFacet {
-        admission: [const { EffortAdmission::Reject(NATIVE_UNVERIFIED) }; 6],
-        carrier: Support::Unverified(NATIVE_UNVERIFIED),
+        admission: [
+            EffortAdmission::Pass,
+            EffortAdmission::Pass,
+            EffortAdmission::Pass,
+            EffortAdmission::Pass,
+            EffortAdmission::Pass,
+            EffortAdmission::Reject(Reason {
+                code: "kiro-effort-ultra-unmapped",
+                message: "Native chat help lists low, medium, high, xhigh and max; not ultra",
+            }),
+        ],
+        carrier: Support::Supported(ValueCarrier::Flag("--effort")),
         inherit_team_default: false,
         model_dependent: true,
     },
@@ -51,7 +63,10 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         compatible_api: Support::Unsupported(AUTH_UNSUPPORTED),
     },
     bypass: BypassFacet {
-        intent: Support::Unverified(NATIVE_UNVERIFIED),
+        intent: Support::Supported(BypassPolicy {
+            enabled_arguments: &["--trust-all-tools"],
+            requires_startup_consent: false,
+        }),
     },
     prompt: PromptFacet {
         carrier: Support::Supported(PromptCarrier::ConfigField),
@@ -184,6 +199,9 @@ impl PlanHook for KiroAdapter {
             || request.auth != AuthMode::NativeSubscription
         {
             return Err(ContractError::Invalid("Kiro documentation fixture scope"));
+        }
+        if !request.paths.executable.file_name().is_some_and(|name| name == "kiro-cli-chat") {
+            return Err(ContractError::Mismatch("Kiro direct chat engine"));
         }
         if self.mcp.executable != request.paths.candidate {
             return Err(ContractError::Mismatch("MCP candidate"));

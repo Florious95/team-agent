@@ -57,6 +57,7 @@ fn command(script: &str, budget: Duration) -> CommandRequest {
             set: BTreeMap::new(),
         },
         stdin: None,
+        reject_stdout: None,
         budget,
         limits: OutputLimits {
             stdout: 65536,

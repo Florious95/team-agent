@@ -23,6 +23,9 @@ pub struct CommandRequest {
     pub stdin: Option<Vec<u8>>,
     pub budget: Duration,
     pub limits: OutputLimits,
+    /// A captured read-command guard, not an instruction parsed from child output.
+    /// Matching cancels only this owned child; it never initiates authentication.
+    pub reject_stdout: Option<&'static [u8]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +34,7 @@ pub enum CommandEnd {
     NotStarted,
     TimedOut,
     OutputLimit,
+    OutputRejected,
     IoError,
     Unsupported,
 }
@@ -146,6 +150,9 @@ impl CommandRunner for RealCommandRunner {
                 .stdin
                 .as_ref()
                 .is_some_and(|bytes| bytes.len() > request.limits.stdin)
+            || request.reject_stdout.is_some_and(|pattern| {
+                pattern.is_empty() || pattern.len() > request.limits.stdout
+            })
         {
             return before_start(CommandEnd::NotStarted, started);
         }
@@ -234,7 +241,13 @@ impl CommandRunner for RealCommandRunner {
                         }
                     }
                     if let Some(pipe) = &mut output {
-                        match drain(pipe, &mut result.stdout, request.limits.stdout) {
+                        let drained = drain(pipe, &mut result.stdout, request.limits.stdout);
+                        if request.reject_stdout.is_some_and(|pattern| {
+                            result.stdout.windows(pattern.len()).any(|window| window == pattern)
+                        }) {
+                            break CommandEnd::OutputRejected;
+                        }
+                        match drained {
                             Ok(true) => output = None,
                             Ok(false) => {}
                             Err(end) => break end,

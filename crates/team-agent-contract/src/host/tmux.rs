@@ -233,6 +233,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             stdin,
             budget,
             limits: self.limits.command_output,
+            reject_stdout: None,
         });
         Ok(result)
     }
@@ -378,7 +379,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             .map_err(|_| HostError::new("launch contract", HostErrorKind::Invalid))?;
         self.directory.check_live()?;
         if self.target.is_some()
-            || &self.directory.receipt().owner != &resolved.request().identity
+            || self.directory.receipt().owner != resolved.request().identity
             || !self
                 .directory
                 .path()
