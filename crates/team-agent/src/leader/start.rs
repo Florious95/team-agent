@@ -403,6 +403,11 @@ pub(crate) fn leader_env_for_identity(
             "1".to_string(),
         );
     }
+    // Managed providers run after `sh -lc`; restore the launcher's native
+    // executable lookup path at invocation, not just in the tmux client env.
+    if let Some(path) = std::env::var_os("PATH").and_then(|path| path.into_string().ok()) {
+        leader_env.insert("PATH".to_string(), path);
+    }
     leader_env
 }
 

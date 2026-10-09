@@ -5,7 +5,7 @@ use crate::provider::argv_route::{self, Config, Mutation, Override, RouteError};
 use crate::provider::Provider;
 use serde_json::{json, Value};
 
-pub(crate) const HELP: &str = "做什么：\n设置工具启动时额外使用的命令行参数，默认关闭。\n用法：team-agent route [status|enable|disable|show [TOOL]|set TOOL -- ARG...|add TOOL -- ARG...|clear TOOL] [--json]\n\n怎么用：\nstatus 看开关；enable 开启；disable 关闭；show 看全部或指定工具的参数。\nset 替换参数；add 追加参数；clear 清除指定工具的参数；--json 给程序读取。\nTOOL 是已支持的工具名称，如 pi/codex/claude/copilot/grok/cursor_agent。\n第一个 -- 后全是工具的字面参数，包含 --help/--json 也不会被这里解析。\n配置保存在 ~/.team-agent/argv-routing.json；影响全机，不按项目或队伍隔离。\nTEAM_AGENT_CLI_ARGV_ROUTING 环境变量优先于保存的开关。\nExamples（可复制）：\nteam-agent route status\nteam-agent route set pi -- --mode text\nteam-agent route enable\n\n下一步（Next Action）：\n用 route show pi 核对参数；仅影响下一次启动，不改变正在运行的对话。\n没有开启或没有配置时，工具仍按原参数启动；不了解参数用途时保持关闭。";
+pub(crate) const HELP: &str = "Purpose:\nConfigure additional provider launch arguments. Disabled by default.\nUsage: team-agent route [status|enable|disable|show [TOOL]|set TOOL -- ARG...|add TOOL -- ARG...|clear TOOL] [--json]\n\nOptions:\nstatus reports the switch; enable/disable change it; show lists all or one provider's arguments.\nset replaces arguments; add appends; clear removes a provider's arguments. Use --json for structured output.\nTOOL is a supported provider name, such as pi/codex/claude/copilot/grok/cursor_agent.\nEverything after the first -- is a literal provider argument, including --help and --json.\nConfiguration: ~/.team-agent/argv-routing.json. This is host-global, not isolated by workspace or team.\nTEAM_AGENT_CLI_ARGV_ROUTING overrides the persisted switch.\nExamples:\nteam-agent route status\nteam-agent route set pi -- --mode text\nteam-agent route enable\n\nNext Action:\nVerify arguments with route show pi. Changes apply to the next launch, not an existing session.\nWithout an enabled configuration, providers retain their original arguments. Leave routing disabled unless the arguments are understood.";
 
 struct Request {
     operation: String,
@@ -16,9 +16,9 @@ struct Request {
 
 fn usage() -> RouteError {
     RouteError {
-        error: "参数不完整或不正确；set/add 需要工具名、-- 和至少一个工具参数".to_string(),
+        error: "Invalid or incomplete arguments; set/add require a provider name, -- and at least one provider argument".to_string(),
         reason: "argv_route_usage",
-        action: "请按 team-agent route --help 的 Examples 填写；例如 team-agent route set pi -- --mode text".to_string(),
+        action: "Follow the Examples in team-agent route --help, such as team-agent route set pi -- --mode text".to_string(),
         config_path: None,
     }
 }
@@ -118,7 +118,7 @@ fn execute(request: &Request) -> Result<Value, RouteError> {
     }
     if override_state != Override::Unset {
         value["notice"] = json!(format!(
-            "当前开关由环境变量 {} 决定（{}）",
+            "Switch overridden by environment variable {} ({})",
             argv_route::ENV_NAME,
             override_state.status()
         ));

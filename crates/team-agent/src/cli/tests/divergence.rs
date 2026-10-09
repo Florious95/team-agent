@@ -457,7 +457,7 @@ fn red_send_target_none_is_not_broadcast() {
     assert_eq!(send_target(None, Some("*")), MessageTarget::Broadcast);
 }
 
-// Unified doctor human output is triage only, including the comms gate.
+// Doctor retains bounded triage navigation plus complete diagnostic details.
 #[test]
 fn cmd_doctor_comms_human_is_compact_triage_without_boundary_prefix() {
     let mut args = DoctorArgs {
@@ -483,8 +483,9 @@ fn cmd_doctor_comms_human_is_compact_triage_without_boundary_prefix() {
     };
     assert_eq!(text, crate::cli::triage::render("doctor", &report));
     assert!(text.starts_with("doctor:"));
-    assert_eq!(text.lines().count(), 1 + report["issues"].as_array().unwrap().len()
+    assert_eq!(text.lines().count(), 2 + report["issues"].as_array().unwrap().len()
         + report["suggested_repairs"].as_array().unwrap().len());
+    assert!(text.lines().last().unwrap().starts_with("details: "));
 }
 
 // ---- #13 / #27 (P2): run() must NOT treat 'claude_code' as a passthrough trigger ----

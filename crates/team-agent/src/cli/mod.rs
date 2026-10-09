@@ -49,12 +49,12 @@ use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str =
-    "这里只检查终端连接是否一致，不实际发送消息，也不证明队友已回复。";
-pub(crate) const QUICK_START_REMINDER: &str = "下一步：向队友派发任务；用 team-agent status 看状态，用 team-agent inbox leader -n 3 看回复，不读取队友终端内容。";
+    "This checks terminal connection consistency only; it does not send a message or prove that a worker replied.";
+pub(crate) const QUICK_START_REMINDER: &str = "Next: send a task. Use team-agent status for status and team-agent inbox leader -n 3 for replies; do not inspect worker terminal content.";
 pub(crate) const SEND_REMINDER: &str =
-    "等队友真正回复，用 team-agent inbox leader -n 3 查看；不要读取队友终端内容。";
+    "Wait for an actual reply; use team-agent inbox leader -n 3. Do not inspect worker terminal content.";
 pub(crate) const STATUS_REMINDER: &str =
-    "下一步：用 team-agent inbox leader -n 3 查看回复；状态不是任务完成证明，不读取队友终端内容。";
+    "Next: use team-agent inbox leader -n 3 for replies. Status is not proof of task completion; do not inspect worker terminal content.";
 
 pub mod adapters;
 pub mod attach_app_server_leader;
@@ -4176,7 +4176,7 @@ pub mod lifecycle_port {
                     "team-agent".to_string(),
                     "send".to_string(),
                     "implementer".to_string(),
-                    "请完成任务并把答案回复给 leader。".to_string(),
+                    "Complete the task and reply to the leader.".to_string(),
                     "--workspace".to_string(),
                     team_dir.to_string_lossy().into_owned(),
                     "--team".to_string(),
@@ -4213,7 +4213,7 @@ pub mod lifecycle_port {
                     "team-agent".to_string(),
                     "send".to_string(),
                     "implementer".to_string(),
-                    "请完成任务并把答案回复给 leader。".to_string(),
+                    "Complete the task and reply to the leader.".to_string(),
                     "--workspace".to_string(),
                     team_dir.to_string_lossy().into_owned(),
                     "--team".to_string(),

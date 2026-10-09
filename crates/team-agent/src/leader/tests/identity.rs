@@ -291,6 +291,27 @@ fn copilot_leader_env_disables_terminal_title_only_for_copilot() {
     }
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn leader_env_preserves_native_path_for_managed_shell_wrapper() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let native_path = "/tmp/native leader/bin:/usr/bin:/bin";
+    let _env = EnvGuard::apply(&[("PATH", Some(native_path))]);
+    let ws = p2_temp_ws("native_path");
+    let identity = leader_identity_context(&ws, None, Some(&serde_json::json!({}))).unwrap();
+    let env = leader_env_for_identity(Provider::Pi, &identity);
+    assert_eq!(env.get("PATH").map(String::as_str), Some(native_path));
+    let command = crate::tmux_backend::leader_shell_wrapper_command(
+        &["pi".to_string(), "--name".to_string(), "leader".to_string()],
+        &ws, &env, &[], "pi",
+    );
+    assert!(command.contains("PATH='/tmp/native leader/bin:/usr/bin:/bin'"));
+    assert!(command.find("PATH=").unwrap() < command.find(" pi --name leader").unwrap());
+    assert_eq!(env.get("TEAM_AGENT_TEAM_ID").map(String::as_str), Some(identity.team_id.as_str()));
+    let _unset = EnvGuard::apply(&[("PATH", None)]);
+    assert!(!leader_env_for_identity(Provider::Pi, &identity).contains_key("PATH"));
+}
+
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
 // Lock CORRECT Python v0.2.11 leader-identity behavior the contracts missed.
 // Golden re-probed via /tmp/probe_p2_leader.py vs team-agent-public @ 439bef8
