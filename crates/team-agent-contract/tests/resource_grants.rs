@@ -148,6 +148,9 @@ fn captured_validator_uses_required_path_option_without_shell_splitting() {
     .unwrap();
     request.native.executable_sha256 =
         team_agent_contract::host::digest(b"controlled validator; never executed");
+    // This exercises owned configuration validation, not the fake terminal's
+    // FullWorker profile (which is deliberately pinned to its own image hash).
+    request.mode = LaunchMode::LaunchOnly;
     let mut h = hooks();
     h.plan = HookBinding::Bound(&CwdPlan);
     let resolved = resolve_launch(&d, &h, &request, None).unwrap();
