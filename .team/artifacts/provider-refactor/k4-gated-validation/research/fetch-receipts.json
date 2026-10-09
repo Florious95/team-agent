@@ -1,0 +1,173 @@
+[
+  {
+    "url": "https://kiro.dev/llms.txt",
+    "final_url": "https://kiro.dev/llms.txt",
+    "status": 200,
+    "path": "/Users/alauda/Documents/code/agent\u524d\u6cbf\u63a2\u7d22/\u591aagent\u534f\u4f5c/.team/artifacts/provider-refactor/kiro-discovery/llms.txt",
+    "bytes": 48847,
+    "sha256": "7ad3aa2ed964811d198ec1742ee10f65f2107a58110bc80f5f32a5ce2e61cc3e",
+    "elapsed_s": 1.988
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/",
+    "final_url": "https://kiro.dev/docs/cli/",
+    "status": 200,
+    "path": "/Users/alauda/Documents/code/agent\u524d\u6cbf\u63a2\u7d22/\u591aagent\u534f\u4f5c/.team/artifacts/provider-refactor/kiro-discovery/cli.html",
+    "bytes": 217330,
+    "sha256": "ebad2c845cadf519a7281bab4648cb3dbe46ed1140ae4a6587a9e2572239b4c9",
+    "elapsed_s": 4.594
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/setup.md",
+    "final_url": "https://kiro.dev/docs/cli/setup.md",
+    "status": 200,
+    "path": "cli-setup.md",
+    "bytes": 10085,
+    "sha256": "ac3d30cf270abec9e47e9ba69afc91833121881eeb2c9e449b9e0093cf1f5694",
+    "elapsed_s": 1.619
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/v3.md",
+    "final_url": "https://kiro.dev/docs/cli/v3.md",
+    "status": 200,
+    "path": "cli-v3.md",
+    "bytes": 6502,
+    "sha256": "3e29831895fa0188d74804477970f60f96f13d81e8af62450c206f70ae02f9c0",
+    "elapsed_s": 1.794
+  },
+  {
+    "url": "https://kiro.dev/docs/reference/cli-commands.md",
+    "final_url": "https://kiro.dev/docs/reference/cli-commands.md",
+    "status": 200,
+    "path": "reference-cli-commands.md",
+    "bytes": 23891,
+    "sha256": "113397e6e1f7d3099bc6bf0946b2d4b01ca81440ae7b70e0094771f5d01fc517",
+    "elapsed_s": 1.945
+  },
+  {
+    "url": "https://kiro.dev/docs/reference/slash-commands.md",
+    "final_url": "https://kiro.dev/docs/reference/slash-commands.md",
+    "status": 200,
+    "path": "reference-slash-commands.md",
+    "bytes": 45899,
+    "sha256": "38365b02da8d8fcf3a384e9f43669e9a42a5915d25381b294f7e961f051fb9ff",
+    "elapsed_s": 2.52
+  },
+  {
+    "url": "https://kiro.dev/docs/reference/exit-codes.md",
+    "final_url": "https://kiro.dev/docs/reference/exit-codes.md",
+    "status": 200,
+    "path": "reference-exit-codes.md",
+    "bytes": 3651,
+    "sha256": "ea376dcee91f1334bb41b6ad0c99595b89427b8c77535b833dda8da8cd09481d",
+    "elapsed_s": 1.843
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/terminal-ui.md",
+    "final_url": "https://kiro.dev/docs/cli/terminal-ui.md",
+    "status": 200,
+    "path": "cli-terminal-ui.md",
+    "bytes": 19906,
+    "sha256": "1115e873590e0d3d9418a9a39ed8e05046b6367e67b0e309a4e4e339e92ec0a5",
+    "elapsed_s": 2.601
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/chat/session-management.md",
+    "final_url": "https://kiro.dev/docs/cli/chat/session-management.md",
+    "status": 200,
+    "path": "cli-chat-session-management.md",
+    "bytes": 11988,
+    "sha256": "e89cf11fae82880aa32927bac48787db3b0acca0330bf551be1a32581695a505",
+    "elapsed_s": 1.731
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/chat/queue-steering.md",
+    "final_url": "https://kiro.dev/docs/cli/chat/queue-steering.md",
+    "status": 200,
+    "path": "cli-chat-queue-steering.md",
+    "bytes": 4127,
+    "sha256": "775c8e15faed5dec14891df542f6040f04d0a8831b1839d1e21edbb151b1c0d9",
+    "elapsed_s": 1.544
+  },
+  {
+    "url": "https://kiro.dev/docs/mcp/configuration.md",
+    "final_url": "https://kiro.dev/docs/mcp/configuration.md",
+    "status": 200,
+    "path": "mcp-configuration.md",
+    "bytes": 24014,
+    "sha256": "43445637b7f83a91e9f90c7a6bcbbb2903eb1d09f8fc914561768c134a0bfc6b",
+    "elapsed_s": 1.716
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/v3/agent-config.md",
+    "final_url": "https://kiro.dev/docs/cli/v3/agent-config.md",
+    "status": 200,
+    "path": "cli-v3-agent-config.md",
+    "bytes": 5180,
+    "sha256": "e0c6571ae5e115721c916bc40e8adcbb2c90941d71e7f31eff7cf63427ad2137",
+    "elapsed_s": 1.796
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/v3/permissions.md",
+    "final_url": "https://kiro.dev/docs/cli/v3/permissions.md",
+    "status": 200,
+    "path": "cli-v3-permissions.md",
+    "bytes": 5733,
+    "sha256": "4f29e234e6532a0f3b3c2ff058185ac73e6e6f34400b66c82bd21c4284694a79",
+    "elapsed_s": 1.435
+  },
+  {
+    "url": "https://kiro.dev/docs/cli/2x-reference.md",
+    "final_url": "https://kiro.dev/docs/cli/2x-reference.md",
+    "status": 200,
+    "path": "cli-2x-reference.md",
+    "bytes": 7708,
+    "sha256": "12368649265858cd5fa9da1a38f0e267c9dc57fef3bba01b39cb4e6c7c0cb6e6",
+    "elapsed_s": 1.582
+  },
+  {
+    "url": "https://kiro.dev/docs/models/available-models.md",
+    "final_url": "https://kiro.dev/docs/models/available-models.md",
+    "status": 200,
+    "path": "models-available-models.md",
+    "bytes": 18202,
+    "sha256": "1c09d648a3b4fe7883df8f4809aec5638bd66dc4f3d1f0eb38a7990161f5624c",
+    "elapsed_s": 1.763
+  },
+  {
+    "url": "https://kiro.dev/docs/models/effort.md",
+    "final_url": "https://kiro.dev/docs/models/effort.md",
+    "status": 200,
+    "path": "models-effort.md",
+    "bytes": 10784,
+    "sha256": "413462bc46688b46499890c887395b01d82a494ab92fc46f881ccbd5160948c3",
+    "elapsed_s": 1.479
+  },
+  {
+    "url": "https://kiro.dev/docs/custom-agents/creating.md",
+    "final_url": "https://kiro.dev/docs/custom-agents/creating.md",
+    "status": 200,
+    "path": "custom-agents-creating.md",
+    "bytes": 6881,
+    "sha256": "74d4fa17750b380be3d4526508576946576bb792b76b903d5276a3f76b17c5cd",
+    "elapsed_s": 1.509
+  },
+  {
+    "url": "https://kiro.dev/docs/checkpoints.md",
+    "final_url": "https://kiro.dev/docs/checkpoints.md",
+    "status": 200,
+    "path": "checkpoints.md",
+    "bytes": 7906,
+    "sha256": "2a86da58cb8dc176cb62ef2106913424eb1697f2e5709e29277a09afb3f34639",
+    "elapsed_s": 2.483
+  },
+  {
+    "url": "https://kiro.dev/docs/custom-agents/configuration-reference.md",
+    "final_url": "https://kiro.dev/docs/custom-agents/configuration-reference.md",
+    "status": 200,
+    "path": "custom-agents-configuration-reference.md",
+    "bytes": 27808,
+    "sha256": "f103f560ddecfafbb98a01ffc2c92b384e78a8ae0254aff3d5630ce8a8edc347",
+    "elapsed_s": 2.197
+  }
+]

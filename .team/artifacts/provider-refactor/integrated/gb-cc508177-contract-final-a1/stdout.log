@@ -1,0 +1,181 @@
+CgroupReceiptBegin
+Schema=gb-cgroup-receipt-v1
+Unit=gb-cc508177-contract-final-a1
+Policy=optional_degraded
+Outcome=applied
+CgroupPath=/sys/fs/cgroup/gb-offload/gb-cc508177-contract-final-a1
+AvailableControllers=cpuset cpu io memory hugetlb pids
+DelegatedControllers=cpu memory pids
+EffectiveWriterUid=0
+EffectiveWriterName=root
+Resource.memory.max.Requested=15032385536
+Resource.memory.max.Applied=true
+Resource.memory.max.Readback=15032385536
+Resource.memory.max.Reason=none
+Resource.memory.high.Requested=12884901888
+Resource.memory.high.Applied=true
+Resource.memory.high.Readback=12884901888
+Resource.memory.high.Reason=none
+Resource.memory.oom.group.Requested=1
+Resource.memory.oom.group.Applied=true
+Resource.memory.oom.group.Readback=1
+Resource.memory.oom.group.Reason=none
+Resource.cpu.max.Requested=800000 100000
+Resource.cpu.max.Applied=true
+Resource.cpu.max.Readback=800000 100000
+Resource.cpu.max.Reason=none
+CgroupReceiptEnd
+ToolchainReceiptBegin
+Toolchain.Schema=gb-rust-toolchain-receipt-v1
+Toolchain.Requested=1.95.0
+Toolchain.RustupHome=/home/box/.rustup
+Toolchain.CargoHome=/home/box/.cargo
+Toolchain.RustcPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc
+Toolchain.RustcIdentity=rustc 1.95.0 (59807616e 2026-04-14)
+Toolchain.CargoPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo
+Toolchain.CargoIdentity=cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+Toolchain.CargoFmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo-fmt
+Toolchain.CargoFmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.RustfmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustfmt
+Toolchain.RustfmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.Verified=true
+ToolchainReceiptEnd
+SourceHEAD=cc508177cd009c6e95de7f6164ff8b3addb6a9ab
+SourceTree=7286988594eecaf745bdf2ce0155e6dd434a11cd
+CARGO_TARGET_DIR=/workspace/grok-bot-offload/jobs/gb-6fae019-pr304-full-b2/work/target
+CONTRACT_TMUX=/usr/bin/tmux
+CONTRACT_PYTHON=/usr/bin/python3.13
+CONTRACT_OLD_SCOPE=fixture-old-scope
+TEAM_AGENT_K2_FOREIGN_PROBE=fixture-foreign-team
+TEST_BEGIN=cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets -- --nocapture
+   Compiling team-agent-contract v0.1.0 (/workspace/grok-bot-offload/jobs/gb-cc508177-contract-final-a1/work/crates/team-agent-contract)
+error[E0597]: `host` does not live long enough
+   --> src/orchestration/physical.rs:367:17
+    |
+347 |         let bootstrap = self.bootstrap.take();
+    |             --------- lifetime `'1` appears in the type of `bootstrap`
+...
+360 |             let mut host = self.reopen(&target, deadline)?;
+    |                 -------- binding `host` declared here
+...
+367 |                 &mut host,
+    |                 ^^^^^^^^^ borrowed value does not live long enough
+...
+379 |                     bootstrap,
+    |                     --------- this usage requires that `host` is borrowed for `'1`
+...
+389 |         })()
+    |         - `host` dropped here while still borrowed
+
+error[E0597]: `input` does not live long enough
+   --> src/orchestration/physical.rs:370:28
+    |
+347 |         let bootstrap = self.bootstrap.take();
+    |             --------- lifetime `'1` appears in the type of `bootstrap`
+...
+358 |             let input = PreparedInput::business(&envelope);
+    |                 ----- binding `input` declared here
+...
+370 |                     input: &input,
+    |                            ^^^^^^ borrowed value does not live long enough
+...
+379 |                     bootstrap,
+    |                     --------- this usage requires that `input` is borrowed for `'1`
+...
+389 |         })()
+    |         - `input` dropped here while still borrowed
+
+error[E0597]: `policy` does not live long enough
+   --> src/orchestration/physical.rs:373:29
+    |
+347 |         let bootstrap = self.bootstrap.take();
+    |             --------- lifetime `'1` appears in the type of `bootstrap`
+348 |         (|| {
+349 |             let policy = self.policy(&target, &job.target.profile, job.operation)?;
+    |                 ------ binding `policy` declared here
+...
+373 |                     policy: &policy,
+    |                             ^^^^^^^ borrowed value does not live long enough
+...
+379 |                     bootstrap,
+    |                     --------- this usage requires that `policy` is borrowed for `'1`
+...
+389 |         })()
+    |         - `policy` dropped here while still borrowed
+
+error[E0597]: `journal` does not live long enough
+   --> src/orchestration/physical.rs:382:17
+    |
+347 |         let bootstrap = self.bootstrap.take();
+    |             --------- lifetime `'1` appears in the type of `bootstrap`
+...
+361 |             let mut journal = FileJournal::new(
+    |                 ----------- binding `journal` declared here
+...
+379 |                     bootstrap,
+    |                     --------- this usage requires that `journal` is borrowed for `'1`
+...
+382 |                 &mut journal,
+    |                 ^^^^^^^^^^^^ borrowed value does not live long enough
+...
+389 |         })()
+    |         - `journal` dropped here while still borrowed
+
+error: lifetime may not live long enough
+   --> src/orchestration/physical.rs:347:25
+    |
+341 |     fn deliver(&mut self, job: &DeliveryJob) -> Result<DeliveryReceipt, Error> {
+    |                ---------
+    |                |
+    |                let's call the lifetime of this reference `'1`
+    |                has type `&mut PhysicalRuntime<'2>`
+...
+347 |         let bootstrap = self.bootstrap.take();
+    |                         ^^^^^^^^^^^^^^^^^^^^^ argument requires that `'1` must outlive `'2`
+    |
+    = note: requirement occurs because of a mutable reference to `std::option::Option<&mut dyn runtime::delivery::BootstrapCommit>`
+    = note: mutable references are invariant over their type parameter
+    = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+   --> src/orchestration/physical.rs:347:25
+    |
+341 |     fn deliver(&mut self, job: &DeliveryJob) -> Result<DeliveryReceipt, Error> {
+    |                ---------       - let's call the lifetime of this reference `'3`
+    |                |
+    |                has type `&mut PhysicalRuntime<'2>`
+...
+347 |         let bootstrap = self.bootstrap.take();
+    |                         ^^^^^^^^^^^^^^^^^^^^^ argument requires that `'3` must outlive `'2`
+    |
+    = note: requirement occurs because of a mutable reference to `std::option::Option<&mut dyn runtime::delivery::BootstrapCommit>`
+    = note: mutable references are invariant over their type parameter
+    = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error[E0373]: closure may outlive the current function, but it borrows `target`, which is owned by the current function
+   --> src/orchestration/physical.rs:348:10
+    |
+341 |     fn deliver(&mut self, job: &DeliveryJob) -> Result<DeliveryReceipt, Error> {
+    |                --------- has type `&mut PhysicalRuntime<'2>`
+...
+348 |         (|| {
+    |          ^^ may outlive borrowed value `target`
+349 |             let policy = self.policy(&target, &job.target.profile, job.operation)?;
+    |                                       ------ `target` is borrowed here
+    |
+note: function requires argument type to outlive `'2`
+   --> src/orchestration/physical.rs:347:25
+    |
+347 |         let bootstrap = self.bootstrap.take();
+    |                         ^^^^^^^^^^^^^^^^^^^^^
+help: to force the closure to take ownership of `target` (and any other referenced variables), use the `move` keyword
+    |
+348 |         (move || {
+    |          ++++
+
+Some errors have detailed explanations: E0373, E0597.
+For more information about an error, try `rustc --explain E0373`.
+error: could not compile `team-agent-contract` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `team-agent-contract` (lib test) due to 7 previous errors
+TEST_EXIT=101

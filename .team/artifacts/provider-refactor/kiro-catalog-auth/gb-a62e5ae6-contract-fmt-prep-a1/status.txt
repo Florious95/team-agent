@@ -1,0 +1,10 @@
+Unit=gb-a62e5ae6-contract-fmt-prep-a1
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=success
+ExecMainStatus=0
+CommandExit=0
+MainPID=702223
+Wiped=no
+Process=

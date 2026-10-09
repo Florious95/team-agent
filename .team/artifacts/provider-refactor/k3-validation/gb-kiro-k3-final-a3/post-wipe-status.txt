@@ -1,0 +1,10 @@
+Unit=gb-kiro-k3-final-a3
+State=terminal
+LoadState=loaded
+ActiveState=inactive
+Result=success
+ExecMainStatus=0
+CommandExit=0
+MainPID=
+Wiped=yes
+Process=
