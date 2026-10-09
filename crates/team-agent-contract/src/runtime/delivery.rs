@@ -230,7 +230,10 @@ pub trait BootstrapCommit {
     ) -> Result<(), HostError>;
 }
 
-pub struct InjectionRequest<'a> {
+/// Attempt-local borrows and the bootstrap port's object lifetime differ. A
+/// long-lived borrowed store must not force local host/policy/journal values to
+/// live as long as that store (mutable trait objects are lifetime-invariant).
+pub struct InjectionRequest<'a, 'bootstrap: 'a> {
     pub target: &'a TargetReceipt,
     pub input: &'a PreparedInput,
     pub attempt: &'a AttemptId,
@@ -241,7 +244,7 @@ pub struct InjectionRequest<'a> {
     pub server_key: &'a str,
     pub deadline: Duration,
     pub freshness: Duration,
-    pub bootstrap: Option<&'a mut dyn BootstrapCommit>,
+    pub bootstrap: Option<&'a mut (dyn BootstrapCommit + 'bootstrap)>,
     /// A lifecycle operation can hold the same lane across inspect/fork/stop; otherwise
     /// this executor acquires it. A held lane is not released by this call.
     pub lane: Option<&'a dyn InputLease>,
@@ -376,9 +379,9 @@ enum Guard {
     Startup(String),
 }
 
-struct Run<'a> {
+struct Run<'a, 'bootstrap: 'a> {
     transport: &'a mut dyn PhysicalTransport,
-    request: InjectionRequest<'a>,
+    request: InjectionRequest<'a, 'bootstrap>,
     journal: &'a mut dyn AttemptJournal,
     observer: Option<&'a dyn DeliveryObserver>,
     clock: &'a dyn Clock,
@@ -395,9 +398,9 @@ struct Run<'a> {
 }
 
 /// The business caller seam delegates to exactly the same executor as native controls.
-pub fn deliver_envelope<'a>(
+pub fn deliver_envelope<'a, 'bootstrap: 'a>(
     transport: &'a mut dyn PhysicalTransport,
-    request: InjectionRequest<'a>,
+    request: InjectionRequest<'a, 'bootstrap>,
     journal: &'a mut dyn AttemptJournal,
     observer: Option<&'a dyn DeliveryObserver>,
     clock: &'a dyn Clock,
@@ -405,9 +408,9 @@ pub fn deliver_envelope<'a>(
     inject_with_contract(transport, request, journal, observer, clock)
 }
 
-pub fn inject_with_contract<'a>(
+pub fn inject_with_contract<'a, 'bootstrap: 'a>(
     transport: &'a mut dyn PhysicalTransport,
-    request: InjectionRequest<'a>,
+    request: InjectionRequest<'a, 'bootstrap>,
     journal: &'a mut dyn AttemptJournal,
     observer: Option<&'a dyn DeliveryObserver>,
     clock: &'a dyn Clock,
@@ -491,7 +494,7 @@ enum Progress {
     OtherQueue,
 }
 
-impl Run<'_> {
+impl Run<'_, '_> {
     fn record(
         &mut self,
         kind: JournalKind,

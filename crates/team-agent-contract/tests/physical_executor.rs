@@ -293,7 +293,7 @@ fn scoped_request<'a>(
     policy: &'a ResolvedSubmitPolicy<'a>,
     proto: &'a ProtocolSnapshot,
     operation: Operation,
-) -> InjectionRequest<'a> {
+) -> InjectionRequest<'a, 'a> {
     InjectionRequest {
         target,
         input,

@@ -345,47 +345,45 @@ impl DeliveryHost for PhysicalRuntime<'_> {
         let target = self.target(&job.target)?.clone();
         // A borrow of bootstrap must not borrow the descriptor/evidence registry.
         let bootstrap = self.bootstrap.take();
-        (|| {
-            let policy = self.policy(&target, &job.target.profile, job.operation)?;
-            if policy.profile().policy_sha256 != job.policy_sha256 {
-                return Err(Error::Fence);
-            }
-            let protocol = self
-                .protocol
-                .as_ref()
-                .ok_or(Error::Invalid("protocol evidence missing"))?;
-            let envelope = PreparedEnvelope::from_logical(&job.envelope)?;
-            let input = PreparedInput::business(&envelope);
-            let deadline = self.deadline()?;
-            let mut host = self.reopen(&target, deadline)?;
-            let mut journal = FileJournal::new(
-                ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?,
-                self.settings.journal_bytes,
-            )
-            .map_err(host_error)?;
-            let report = deliver_envelope(
-                &mut host,
-                InjectionRequest {
-                    target: &target,
-                    input: &input,
-                    attempt: &job.attempt,
-                    operation: job.operation,
-                    policy: &policy,
-                    protocol,
-                    protocol_requirement: ProtocolRequirement::ServerAndClientBinding,
-                    server_key: &job.target.server_key,
-                    deadline,
-                    freshness: self.settings.freshness,
-                    bootstrap,
-                    lane: None,
-                },
-                &mut journal,
-                None,
-                self.clock,
-            );
-            report
-                .business_receipt()
-                .ok_or(Error::Invalid("business receipt missing"))
-        })()
+        let policy = self.policy(&target, &job.target.profile, job.operation)?;
+        if policy.profile().policy_sha256 != job.policy_sha256 {
+            return Err(Error::Fence);
+        }
+        let protocol = self
+            .protocol
+            .as_ref()
+            .ok_or(Error::Invalid("protocol evidence missing"))?;
+        let envelope = PreparedEnvelope::from_logical(&job.envelope)?;
+        let input = PreparedInput::business(&envelope);
+        let deadline = self.deadline()?;
+        let mut host = self.reopen(&target, deadline)?;
+        let mut journal = FileJournal::new(
+            ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?,
+            self.settings.journal_bytes,
+        )
+        .map_err(host_error)?;
+        let report = deliver_envelope(
+            &mut host,
+            InjectionRequest {
+                target: &target,
+                input: &input,
+                attempt: &job.attempt,
+                operation: job.operation,
+                policy: &policy,
+                protocol,
+                protocol_requirement: ProtocolRequirement::ServerAndClientBinding,
+                server_key: &job.target.server_key,
+                deadline,
+                freshness: self.settings.freshness,
+                bootstrap,
+                lane: None,
+            },
+            &mut journal,
+            None,
+            self.clock,
+        );
+        report
+            .business_receipt()
+            .ok_or(Error::Invalid("business receipt missing"))
     }
 }
