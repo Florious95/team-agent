@@ -363,6 +363,35 @@ fn pane_metadata_requires_exact_native_ids_state_and_geometry() {
 }
 
 #[test]
+fn pane_metadata_accepts_literal_backslash_t_without_unescaping_native_field_contents() {
+    let tabs = "$1\t@2\t%3\t123\tsession\tworker\t0\t\t0\t\tbinding\t120\t40\n";
+    let escaped = tabs.replace('\t', r"\t");
+    assert_eq!(
+        parse_pane(tabs.as_bytes()).unwrap(),
+        parse_pane(escaped.as_bytes()).unwrap()
+    );
+    let named = tabs.replace("session", r"session\ttitle");
+    assert_eq!(
+        parse_pane(named.as_bytes()).unwrap().address.session_name,
+        r"session\ttitle"
+    );
+    // Dual-format support does not accept a mixed frame, extra/missing fields,
+    // multiple rows or an invalid native identity/state/geometry.
+    for invalid in [
+        escaped.replacen(r"\t", "\t", 1),
+        escaped.replace(r"\t123\t", r"\t0\t"),
+        escaped.replace(r"\t%3\t", r"\t3\t"),
+        escaped.replace(r"\tworker\t0\t", r"\tworker\tunknown\t"),
+        escaped.replace(r"\t120\t40", r"\t0\t40"),
+        escaped.replace(r"\t120\t40", r"\t120"),
+        escaped.replace(r"\t120\t40", r"\textra\t120\t40"),
+        format!("{escaped}{escaped}"),
+    ] {
+        assert!(parse_pane(invalid.as_bytes()).is_err());
+    }
+}
+
+#[test]
 fn linux_stat_birth_parsing_does_not_split_the_comm_field() {
     let mut fields = vec!["S".to_string(), "55".to_string()];
     fields.extend((0..17).map(|_| "0".to_string()));

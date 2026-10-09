@@ -78,11 +78,14 @@ fn numbered(value: &str, prefix: char) -> bool {
 pub fn parse_pane(bytes: &[u8]) -> Result<PaneState, HostError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|_| HostError::new("tmux metadata encoding", HostErrorKind::Unknown))?;
-    let fields: Vec<_> = text
-        .strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\t')
-        .collect();
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    // Preserve native field contents: prefer real TABs, otherwise accept the
+    // escaped separator spelling. Never globally unescape or merge mixed frames.
+    let fields: Vec<_> = if line.contains('\t') {
+        line.split('\t').collect()
+    } else {
+        line.split(r"\t").collect()
+    };
     if fields.len() != 13
         || !numbered(fields[0], '$')
         || !numbered(fields[1], '@')

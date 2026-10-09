@@ -229,7 +229,31 @@ fn spawn_without_receipt_stays_fenced_across_recovery() {
     .recover(&op.id)
     .unwrap();
     assert_eq!(recovered.outcome, Outcome::NeedsRecovery);
+    // A public shutdown after an unreceipted spawn must not turn the retained
+    // lease's unique-key conflict into Database or clear it to claim success.
+    let seat = store.assert_current(&op.target.identity).unwrap();
+    assert_eq!(
+        Lifecycle {
+            store: &mut store,
+            host: &mut host,
+            io: &mut io,
+        }
+        .teardown(&seat.identity, OperationId::new("stop-unobserved").unwrap()),
+        Err(Error::NeedsRecovery)
+    );
+    assert_eq!(store.assert_current(&seat.identity).unwrap(), seat);
+    assert_eq!(store.unfinished().unwrap(), vec![recovered]);
+    let connection = rusqlite::Connection::open(store.root().join("contract.db")).unwrap();
+    let held: String = connection
+        .query_row(
+            "SELECT operation FROM contract_leases WHERE seat=?1",
+            [seat.identity.seat.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, op.id.as_str());
     assert_eq!(host.spawned, 1);
+    assert_eq!(host.stopped, 0);
     assert_eq!(host.removed, 0);
     assert!(handle(
         &mut store,

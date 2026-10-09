@@ -45,6 +45,7 @@ Each native instance receives an exclusively created `.kiro/agents/<owned-name>.
 
 - Team-wide native configuration/model admission occurs before shared worker spawning.
 - K3 journals materialization, registration, spawn, exact current-session capture, and commit/compensation. K2 owns the private tmux target, executable/birth identity, input lane, effect journal, and scoped teardown.
+- An uncertain spawn/control retains its lifecycle lease. Shutdown then reports `NeedsRecovery`, not a database-connection failure, and preserves resources whose process effects are unproven. It never clears that lease or guesses a target merely to report successful cleanup.
 - `/session-id` must produce one labelled UUID and the matching native resume hint. Session listings, newest files, process liveness, and arbitrary UUIDs are not session bindings.
 - Business input uses a bracketed payload with no added trailer and **one Enter**. There are no confirmation, retry, wrap-gap, or native-queue-flush keys. Multi-line paste/acceptance remains a candidate behavior to be verified against the real binary.
 - The current composer is `›`; `Thinking` / `Kiro is working` are busy observations. A vanished paste alone is not acceptance: the current token must be observed in the native transcript, with the exact message/attempt association.

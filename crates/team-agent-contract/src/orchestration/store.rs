@@ -340,9 +340,13 @@ impl ContractStore {
                 }
             }
         }
+        lifecycle_unleased(&tx, &target.seat)?;
         if let Some(parent) = &operation.parent {
             if current(&tx, &self.scope, &parent.identity)? != *parent {
                 return Err(Error::Fence);
+            }
+            if parent.identity.seat != target.seat {
+                lifecycle_unleased(&tx, &parent.identity.seat)?;
             }
         }
         if !matches!(
@@ -518,6 +522,33 @@ fn route_available(connection: &Connection, target: &SeatRecord) -> Result<(), E
     } else {
         Ok(())
     }
+}
+
+/// A retained lifecycle lease is authority, not a broken database connection.
+/// Check it inside begin's write transaction before allocating a new operation;
+/// never overwrite an uncertain spawn/control lease to make teardown succeed.
+fn lifecycle_unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
+    let held: Option<String> = connection
+        .query_row(
+            "SELECT operation FROM contract_leases WHERE seat=?1",
+            [seat.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(held) = held else {
+        return Ok(());
+    };
+    let raw: String = connection.query_row(
+        "SELECT record FROM contract_operations WHERE id=?1",
+        [held],
+        |row| row.get(0),
+    )?;
+    let operation: OperationRecord = serde_json::from_str(&raw)?;
+    Err(if operation.outcome == Outcome::NeedsRecovery {
+        Error::NeedsRecovery
+    } else {
+        Error::Conflict
+    })
 }
 
 pub(crate) fn unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
