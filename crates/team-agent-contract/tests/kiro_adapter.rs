@@ -64,14 +64,14 @@ fn fixture_resolved(mut r: LaunchRequest) -> ResolvedLaunch {
 }
 
 #[test]
-fn kiro_has_exact_identity_and_no_native_admission_without_r0() {
+fn kiro_catalog_is_bound_but_native_worker_admission_still_requires_terminal_evidence() {
     let adapter = adapter();
     let hooks = adapter.hooks();
     assert_eq!(KIRO_DESCRIPTOR.identity.id, "kiro");
     assert_eq!(KIRO_DESCRIPTOR.identity.binary, "kiro-cli");
     assert!(KIRO_DESCRIPTOR.identity.aliases.is_empty());
+    assert!(validate_descriptor(&KIRO_DESCRIPTOR, &hooks, Operation::Catalog).is_ok());
     for operation in [
-        Operation::Catalog,
         Operation::Fresh,
         Operation::Resume,
         Operation::InWindowBranch,
@@ -83,7 +83,7 @@ fn kiro_has_exact_identity_and_no_native_admission_without_r0() {
             "{operation:?}"
         );
     }
-    assert!(matches!(hooks.catalog, HookBinding::Unverified(_)));
+    assert!(matches!(hooks.catalog, HookBinding::Bound(_)));
     assert!(matches!(hooks.session, HookBinding::Unverified(_)));
     assert!(matches!(hooks.semantic, HookBinding::Unverified(_)));
     assert!(matches!(hooks.interaction, HookBinding::Unverified(_)));
@@ -125,7 +125,7 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
 }
 
 #[test]
-fn confirmed_help_syntax_does_not_imply_authenticated_model_or_terminal_admission() {
+fn confirmed_help_and_catalog_do_not_imply_terminal_admission() {
     for effort in [
         Effort::Low,
         Effort::Medium,
@@ -151,11 +151,11 @@ fn confirmed_help_syntax_does_not_imply_authenticated_model_or_terminal_admissio
     ));
     assert!(matches!(
         KIRO_DESCRIPTOR.model.catalog,
-        Support::Unverified(_)
+        Support::Supported(_)
     ));
     assert!(matches!(
         KIRO_DESCRIPTOR.auth.subscription,
-        Support::Unverified(_)
+        Support::Supported(AuthMechanism::NativeExistingSession)
     ));
     assert!(matches!(
         KIRO_DESCRIPTOR.input.profiles,

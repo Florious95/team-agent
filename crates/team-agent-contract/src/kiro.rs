@@ -1,6 +1,7 @@
 //! Kiro 2.28.0 adapter boundary. Helper version and chat parameter syntax are
-//! observed. Catalog probing requested authentication, not JSON; native input,
-//! session and MCP bindings remain closed until current scoped evidence exists.
+//! observed, including an authenticated model catalog. Native input/session and
+//! MCP bindings remain closed until current scoped evidence exists.
+mod catalog;
 pub mod native;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -15,7 +16,7 @@ pub const OBSERVED_LAUNCHER_SHA256: &str =
     "dee3f382fc8f6734fe505b815d786ed634ba67a258ba34986eca50f4f0b5fc22";
 pub const NATIVE_UNVERIFIED: Reason = Reason {
     code: "kiro-r0-missing",
-    message: "Native help is verified, but catalog authentication, terminal/session grammar and MCP binding are not",
+    message: "Catalog/helper syntax is verified; terminal/session grammar and MCP binding remain unverified",
 };
 const SNAPSHOT_UNSUPPORTED: Reason = Reason {
     code: "kiro-no-safe-snapshot",
@@ -39,7 +40,7 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
     model: ModelFacet {
         selection: Support::Supported(ModelSelection::ExactCatalogId),
         omitted: OmittedModel::Reject,
-        catalog: Support::Unverified(NATIVE_UNVERIFIED),
+        catalog: Support::Supported(native::CHAT_CATALOG_SOURCE),
     },
     effort: EffortFacet {
         admission: [
@@ -58,7 +59,7 @@ pub static KIRO_DESCRIPTOR: ProviderDescriptor = ProviderDescriptor {
         model_dependent: true,
     },
     auth: AuthFacet {
-        subscription: Support::Unverified(NATIVE_UNVERIFIED),
+        subscription: Support::Supported(AuthMechanism::NativeExistingSession),
         official_api: Support::Unsupported(AUTH_UNSUPPORTED),
         compatible_api: Support::Unsupported(AUTH_UNSUPPORTED),
     },
@@ -165,7 +166,7 @@ impl KiroAdapter {
     /// by empty successful implementations, fake parsers or an eighth hook.
     pub fn hooks(&self) -> ProviderHooks<'_> {
         ProviderHooks {
-            catalog: HookBinding::Unverified(NATIVE_UNVERIFIED),
+            catalog: HookBinding::Bound(self),
             plan: HookBinding::Bound(self),
             materialize: HookBinding::Bound(self),
             session: HookBinding::Unverified(NATIVE_UNVERIFIED),

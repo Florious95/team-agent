@@ -13,10 +13,10 @@ pub const OBSERVED_HELPER_SHA256: &str =
     "430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712";
 pub const CHAT_CATALOG_ARGUMENTS: &[&str] = &["chat", "--list-models", "--format", "json"];
 pub const AUTH_PORTAL_MARKER: &[u8] = b"Opening auth portal and logging in...";
-/// CLI syntax is confirmed by native help. The model JSON schema is NOT yet observed.
+/// CLI syntax and the models[]/model_id JSON schema are observed on 2.28.0.
 pub const CHAT_CATALOG_SOURCE: CatalogSource = CatalogSource {
     arguments: CHAT_CATALOG_ARGUMENTS,
-    schema: "kiro-2.28.0-catalog-schema-unverified",
+    schema: "kiro-2.28.0-list-models-json-v1",
 };
 
 /// `home` is supplied by the framework, not looked up by the provider. Only two
@@ -215,22 +215,23 @@ pub struct CatalogReader<R> {
     grant: CatalogRequest,
     runner: R,
 }
+pub(super) fn validate_catalog_request(grant: &CatalogRequest) -> Result<(), ContractError> {
+    grant.bounds.validate()?;
+    require_absolute(&grant.cwd.path, "Kiro catalog cwd")?;
+    grant.native.validate()?;
+    require_absolute(&grant.executable, "Kiro catalog engine")?;
+    if grant.provider.as_str() != "kiro"
+        || grant.native.version != super::BUNDLE_VERSION
+        || grant.source != CHAT_CATALOG_SOURCE
+        || grant.executable.file_name().is_none_or(|name| name != "kiro-cli-chat")
+    {
+        return Err(ContractError::Mismatch("Kiro catalog grant"));
+    }
+    Ok(())
+}
 impl<R: CommandRunner> CatalogReader<R> {
     pub fn new(grant: CatalogRequest, runner: R) -> Result<Self, ContractError> {
-        grant.bounds.validate()?;
-        require_absolute(&grant.cwd.path, "Kiro catalog cwd")?;
-        grant.native.validate()?;
-        require_absolute(&grant.executable, "Kiro catalog engine")?;
-        if grant.provider.as_str() != "kiro"
-            || grant.native.version != super::BUNDLE_VERSION
-            || grant.source != CHAT_CATALOG_SOURCE
-            || grant
-                .executable
-                .file_name()
-                .is_none_or(|name| name != "kiro-cli-chat")
-        {
-            return Err(ContractError::Mismatch("Kiro catalog grant"));
-        }
+        validate_catalog_request(&grant)?;
         Ok(Self { grant, runner })
     }
     pub fn runner_mut(&mut self) -> &mut R {
@@ -309,8 +310,8 @@ impl<R: CommandRunner> BoundedReadHost for CatalogReader<R> {
             }
             None => {}
         }
-        // Complete JSON + real exit 0 is the read boundary only. Until H1 has a
-        // native schema fixture this cannot populate an exact-model observation.
+        // Complete JSON + real exit 0 is the raw read boundary only. H1 separately
+        // validates the observed model schema before producing an observation.
         let _: serde_json::Value = serde_json::from_slice(&result.stdout)
             .map_err(|_| ReadFailure::Error(ContractError::Invalid("Kiro catalog JSON")))?;
         Ok(ReadOutput {

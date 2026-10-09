@@ -1,11 +1,12 @@
-//! Controlled subprocess/JSON fixtures, NOT a native model schema or auth test.
+//! Controlled subprocess/raw-read fixtures, not a live Kiro/auth test. H1 schema
+//! validation of the separately captured native JSON is in kiro_model_catalog.rs.
 #![cfg(unix)]
 mod support;
 use std::time::{Duration, Instant};
 use support::Sandbox;
 use team_agent_contract::contract::{hooks::*, types::*};
 use team_agent_contract::host::{command::*, digest, process::resolve_cwd};
-use team_agent_contract::kiro::native::*;
+use team_agent_contract::kiro::{native::*, KiroAdapter, McpStdio};
 
 struct CapturedRunner {
     output: Option<CommandReceipt>,
@@ -90,7 +91,7 @@ fn observed_auth_spinner_is_typed_even_if_outer_tool_reports_timeout_or_exit_zer
     }
 }
 #[test]
-fn complete_large_json_requires_real_exit_and_is_not_native_catalog_schema_evidence() {
+fn complete_large_json_requires_real_exit_but_raw_read_alone_is_not_model_schema_admission() {
     let sandbox = Sandbox::new();
     let bytes =
         serde_json::to_vec(&serde_json::json!({"fixture_only":"x".repeat(120_000)})).unwrap();
@@ -103,8 +104,30 @@ fn complete_large_json_requires_real_exit_and_is_not_native_catalog_schema_evide
     assert_eq!(raw.exit_code, 0);
     assert_eq!(
         request.source.schema,
-        "kiro-2.28.0-catalog-schema-unverified"
+        "kiro-2.28.0-list-models-json-v1"
     );
+}
+#[test]
+fn captured_native_json_flows_through_bounded_reader_and_bound_h1() {
+    let sandbox = Sandbox::new();
+    let bytes = include_bytes!("fixtures/kiro-2.28.0-models.json");
+    let (request, mut reader) = fixture(
+        &sandbox,
+        receipt(CommandEnd::Exited, Some(0), bytes.to_vec()),
+    );
+    let adapter = KiroAdapter::new(McpStdio {
+        executable: "/fixture/candidate".into(),
+        arguments: vec![],
+        environment: Default::default(),
+    }).unwrap();
+    let hooks = adapter.hooks();
+    let catalog = hooks.catalog.require("H1 CatalogHook").unwrap()
+        .discover(&request, &mut reader).unwrap();
+    assert_eq!(catalog.models.len(), 9);
+    assert_eq!(catalog.provider, request.provider);
+    assert_eq!(catalog.native, request.native);
+    assert_eq!(catalog.schema, CHAT_CATALOG_SOURCE.schema);
+    assert_eq!(reader.runner_mut().calls, 1);
 }
 #[test]
 fn timeout_truncation_invalid_json_and_native_exit_are_never_model_success() {

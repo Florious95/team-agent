@@ -1,6 +1,6 @@
 # Kiro 2.28.0：集成实现与原生证据边界
 
-**当前不是可运行 Kiro 接入，也不是全功能/K5 验收通过。** K1–K4 已组合；参数、物化、原生 helper 解析与有界 read host 可独立验证。Catalog/terminal/session/MCP 的未取得证据不能由 fixture 或 help 代替。
+**当前不是可运行 Kiro 接入，也不是全功能/K5 验收通过。** K1–K4 已组合；参数、物化、原生 helper、有界 read host 与 H1 Catalog 已实现。Catalog 采用认证后真实 JSON；terminal/session/MCP 的未取得证据不能由 fixture、help 或单轮 noninteractive 算题代替。
 
 ## 本轮物证（替代早期全命令 timeout 的结论）
 
@@ -12,8 +12,9 @@
 - engine SHA256：`430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712`。dispatcher hash 不得用于 engine PID/image fence。
 - chat help SHA256：`47e22e67d2d6042ceff70b5d6414ece1a367bbbbd675c873a39d1dd3e868bf20`。支持 `--model`、`--effort`（示例 low/medium/high/xhigh/max）、`--list-models`、list-only `--format plain|json|json-pretty`、`--agent`、`--resume-id`、`--v3`、`--tui`、`--trust-all-tools`。
 - `--list` 是 resume-picker 别名，不是 model catalog。
-- catalog 调用 180s 外层 timeout、真实 exit 未取得。101586 bytes 输出（SHA256 `7abd2c71c8eeef941f7ae0eb733f358c880f1ab19fcb73fe568d17b566d25599`）**不是 JSON**：byte 0 为 ESC，首尾都是 `Opening auth portal and logging in...` 的 ANSI spinner。不能推断 EOF 等待、有效模型、原生 Luna ID或成功目录。
-- agent/MCP help 在首错后 NOT-RUN；没有取得成功的 interactive、SID、rewind 或 MCP 回程物证。
+- **认证前历史失败：** catalog 调用 180s 外层 timeout、真实 exit 未取得。101586 bytes 输出（SHA256 `7abd2c71c8eeef941f7ae0eb733f358c880f1ab19fcb73fe568d17b566d25599`）不是 JSON，而是 `Opening auth portal and logging in...` 的 ANSI spinner。该失败不作废，也不能解释为等待 EOF。
+- **用户完成认证后：** `live-auth/catalog.stdout` 为 1719 bytes 完整 JSON，`catalog.exit` 为 0；SHA256 `7206950ed86df1f4835f38452981d1c0e28312fb7f2f292f43b828b08d295ce6`。原字节存为 `tests/fixtures/kiro-2.28.0-models.json`。顶层为 `models` 数组与 `default_model`；模型字段为 `model_id`、`model_name`、`context_window_tokens`，另有描述和费率。原始目录有 **9** 项（包括 `claude-sonnet-4`、`minimax-m2.1`），不是消息摘录的 7 项；没有 Luna 或 per-model effort 字段。
+- leader 提供同一 helper 的 noninteractive 单轮算题 exit 0 / 5535；它不证明 interactive 提示符、键序、SID、rewind 或 MCP 回程。agent/MCP help 仍无成功收据；未读取 `whoami.stdout`、凭据或账户数据库。
 
 ## 已实现的边界
 
@@ -25,13 +26,15 @@
 
 `CatalogReader` 捕获完整 read grant（provider/native/executable/cwd/source/bounds），调用前核 cwd identity 与 executable hash。只允许 `chat --list-models --format json`；关闭 stdin、stdout/stderr 字节上限、共享绝对 deadline。公共 command runner 支持数据化 stdout guard，发现已观测 auth marker 后终止**本次自有 child**，返回 `ReadFailure::AuthRequired`。不发登录命令、不重试、不换模型。
 
-**重要限制：** Kiro 自己可能在输出 marker 之前已打开浏览器；关闭 stdin/取消 child 不保证此前无副作用。因此只在操作员授权的 discovery 阶段使用读端口，本轮认证 blocker 解除前不重跑。超时、缺 exit、超限、无效或尾随 JSON 都不能成功；完整 JSON + exit 0 只通过 raw read 边界，仍不等于已知 catalog schema/H1 能力。
+**重要限制：** Kiro 自己可能在输出 marker 之前已打开浏览器；关闭 stdin/取消 child 不保证此前无副作用。因此只在操作员授权的 discovery 阶段使用读端口，认证失效仍返回 `AuthRequired`，不自动登录。超时、缺 exit、超限、无效或尾随 JSON 都不能成功；完整 JSON + exit 0 先通过 raw read 边界，随后 H1 独立校验 schema。
+
+`src/kiro/catalog.rs` 绑定 H1 与 `kiro-2.28.0-list-models-json-v1`：直接反序列化已观测字段，拒绝空/重复 ID、重复已知字段、缺项、无效 context window、空目录与不在目录中的 default。只把 `model_id` 精确映射为 `ModelRecord.id`；显示名不是 alias，大小写不折叠，EOL 描述不授权移除模型，`default_model` 不授权省略用户选模。未知元数据不变成能力；全部 per-model efforts 保持 `Unverified`。subscription 的 `NativeExistingSession` 表示已支持的认证机制，不是缓存“永远已登录”状态。
 
 ### 七个 Narrow Hook slots
 
 | Hook | 当前实际状态 |
 |---|---|
-| H1 Catalog | **Unverified**：命令语法已知，真实 JSON/schema/模型目录未知；不猜字段。 |
+| H1 Catalog | **Bound**：有界 host + 认证后原始 9 项 JSON/schema；精确 ID、不默认选模、不推断 effort。 |
 | H2 Plan | **Bound / Fixture-only gate**：确定性 V3/TUI 参数计划；Native 请求不能靠 cloned descriptor 绕过未验证输入/会话契约。 |
 | H3 Materialize | **Bound**：owned agent JSON + 独占写入 + 受限 validator；失败保留 receipt。 |
 | H4 Session | **Unverified**：无当前 native SID grammar/provenance；不扫描数据库/最近 session。 |
@@ -44,7 +47,7 @@ Keystroke、三层 Probe、Teardown 不新增 adapter hook，仍由公共 K2/K3 
 ### 参数/配置与物化
 
 - argv 使用 `OsString`，保持模型精确 ID、路径空格/Unicode/引号。不拼 shell，不把首条业务消息塞 positional INPUT。
-- `--model`、五档 `--effort` 与显式 bypass `--trust-all-tools` 按 help 构造。`ultra` 拒绝，不降成 max；模型是否支持某 effort 仍由真实 catalog 决定。`--format` **仅用于 list**，不加入 interactive plan。
+- `--model`、五档 `--effort` 与显式 bypass `--trust-all-tools` 按 help 构造。`ultra` 拒绝，不降成 max；当前真实 catalog 未报告模型 effort 能力，因此有 effort 的真实解析请求仍拒绝为 `Unverified`，不因 CLI 接受 flag 就放行。`--format` **仅用于 list**，不加入 interactive plan。
 - `McpStdio` 由 framework 提供 executable/argv/env；adapter 不猜未落地的 public CLI 参数或 ambient secrets。
 - cwd `.kiro/agents/<owned-name>.json` 的名称含 scope/seat/instance/generation 无歧义长度编码。prompt 用 JSON escaping。
 - 固定三工具及 builtins，`includeMcpJson=false` / `includePowers=false` 仅为计划意图，不冒称 native consumed/isolation 已证。
@@ -56,7 +59,7 @@ Keystroke、三层 Probe、Teardown 不新增 adapter hook，仍由公共 K2/K3 
 
 ## 未完成项 / K5 准备门
 
-认证前置由用户负责；不得读 credential store 或自动 login。认证成立后仍须固定 helper identity、真正 catalog/schema 与 Luna 模型/effort；若无 Luna 则有限 native case NOT-RUN，不能换 Claude。
+用户认证与真实 catalog/schema 已有成功收据；不读 credential store 或自动 login。当前 9 个模型没有 Luna。既有实测规则要求 caller/被测 Agent 都用 Luna，因此 K5 仍为 NOT-RUN；除非用户明确批准例外，不换 Claude、不将 Auto 当 Luna。固定 helper/native identity、终端 profile 与其他接入证据仍必需。
 
 动态 tmux target 持久化与 K2/K3 组合端口见 [physical lifecycle bridge](physical-lifecycle.md)。生产 H4/H5/H6/H7、共享 supervisor 的实进程入口、MCP 子进程绑定、macOS candidate 与完整盲测用例仍须按实际实现/原始证据关闭，不能把 library 组合写成终端端到端完成。三层探针、F0–F5、物理 executor 的已有单测不等于 Kiro 集成通过。
 
@@ -64,7 +67,8 @@ Keystroke、三层 Probe、Teardown 不新增 adapter hook，仍由公共 K2/K3 
 
 - `kiro_adapter.rs`：受控计划/载体/JSON/资源/effort/bypass/exit，包括生产 admission 拒绝。
 - `kiro_dispatch.rs`：受控 bundle/local/helper 文件布局、直接 engine、版本、dispatcher 分类。
-- `kiro_catalog.rs`：auth spinner、受控大 JSON、真实 EOF、真实自有 subprocess guard、timeout/exit/截断、captured grant/image 拒绝。不调用真实 Kiro。
+- `kiro_catalog.rs`：auth spinner、受控大 JSON、真实 EOF、真实自有 subprocess guard、timeout/exit/截断、captured grant/image 拒绝，以及原始 catalog 经 read host → H1 的组合。不调用真实 Kiro。
+- `kiro_model_catalog.rs`：原始 9 项 JSON、精确 ID/元数据边界、缺项/畸形/重复 authority 字段、read grant 前置拒绝与 host 失败传播。原生 JSON fixture 不是一次新的原生执行。
 - `resource_grants.rs`：共享 cwd grant/no-follow/exclusive/token/dirty/foreign/cleanup。
 
 Cargo/fmt/clippy 仅 Grok/授权 CI；真实 source/tree、实际用例数、退出码与清理以构建收据为准。不把新增未执行测试或任何 fixture PASS 写成原生 PASS。
