@@ -149,6 +149,7 @@ impl Lifecycle<'_> {
                     operation: &mut operation,
                     inner: self.io,
                     descriptor: adapter.descriptor,
+                    allowed_requests: if request.mode == ForkMode::NewSeatFullSnapshot { None } else { Some(&[]) },
                 };
                 adapter.hooks.fork.require("H7")?.stage(&resolved, &mut io)
             };
@@ -282,6 +283,7 @@ impl Lifecycle<'_> {
                     operation,
                     inner: self.io,
                     descriptor: adapter.descriptor,
+                    allowed_requests: Some(&plan.materialization),
                 };
                 adapter
                     .hooks
@@ -475,6 +477,9 @@ fn new_operation(
     target: SeatRecord,
     parent: Option<SeatRecord>,
 ) -> OperationRecord {
+    let preserved = if kind == TransactionKind::Restart {
+        parent.as_ref().map(|p|p.resources.iter().map(|r|r.path.clone()).collect()).unwrap_or_default()
+    } else { vec![] };
     OperationRecord {
         id,
         kind,
@@ -485,7 +490,7 @@ fn new_operation(
         resources: vec![],
         effect: DeliveryEffect::NoEffect,
         outcome: Outcome::Running,
-        preserved: vec![],
+        preserved,
         failure: None,
     }
 }
@@ -497,6 +502,7 @@ struct JournaledIo<'a> {
     operation: &'a mut OperationRecord,
     inner: &'a mut dyn OwnedIo,
     descriptor: &'a ProviderDescriptor,
+    allowed_requests: Option<&'a [OwnedResourceRequest]>,
 }
 impl OwnedIo for JournaledIo<'_> {
     fn create_exclusive(
@@ -532,6 +538,9 @@ impl OwnedIo for JournaledIo<'_> {
         {
             return Err(fail(ContractError::Mismatch("owned materialization grant")));
         }
+        if self.allowed_requests.is_some_and(|allowed| !allowed.contains(request)) {
+            return Err(fail(ContractError::Mismatch("unplanned materialization")));
+        }
         let index = self.operation.resources.len();
         self.operation.resources.push(OwnedResourceReceipt {
             path: request.path.clone(),
@@ -553,6 +562,8 @@ impl OwnedIo for JournaledIo<'_> {
                     || receipt.operation != self.operation.id
                     || receipt.kind != request.kind
                     || Some(receipt.disposition) != disposition
+                    || !receipt.exclusive
+                    || !matches!(receipt.write_effect, ResourceWriteEffect::Written { .. })
                 {
                     return Err(fail(ContractError::Mismatch("owned write receipt")));
                 }

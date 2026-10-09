@@ -153,7 +153,7 @@ pub fn tick(
         "INSERT INTO contract_leases VALUES(?1,?2)",
         params![identity.seat.as_str(), attempt.as_str()],
     )?;
-    tx.execute("UPDATE contract_outbox SET target=?1,state='in_flight',attempt=?2,effect='\"MayHavePasted\"' WHERE message_id=?3 AND state='queued'",
+    tx.execute("UPDATE contract_outbox SET target=?1,state='in_flight',attempt=?2,effect='\"MayHaveSubmitted\"' WHERE message_id=?3 AND state='queued'",
         params![encoded_identity,attempt.as_str(),id])?;
     tx.execute("UPDATE messages SET status='target_resolved',delivery_attempts=delivery_attempts+1 WHERE message_id=?1",[&id])?;
     tx.commit()?;
@@ -181,13 +181,13 @@ pub fn tick(
                 && receipt.policy_sha256 == job.policy_sha256 =>
         {
             (
-                DeliveryEffect::MayHavePasted.retain_floor(receipt.effect_floor),
+                DeliveryEffect::MayHaveSubmitted.retain_floor(receipt.effect_floor),
                 receipt.failure.is_some()
                     || receipt.persistence != PersistenceState::Durable
                     || receipt.effect_floor != DeliveryEffect::Submitted,
             )
         }
-        _ => (DeliveryEffect::MayHavePasted, true),
+        _ => (DeliveryEffect::MayHaveSubmitted, true),
     };
     let tx = store
         .connection

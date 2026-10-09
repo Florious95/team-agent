@@ -291,6 +291,14 @@ fn normalize_result(context: &CallContext, args: &Value) -> Result<Value, Error>
     if object.contains_key("sender") || object.contains_key("owner_team_id") {
         return Err(Error::Fence);
     }
+    for field in ["summary", "status"] {
+        if object.get(field).is_some_and(|v| !v.is_string()) { return Err(Error::Invalid("result field type")); }
+    }
+    for field in ["changes", "tests", "risks", "artifacts", "next_actions"] {
+        if object.get(field).is_some_and(|v| !v.as_array().is_some_and(|a| a.iter().all(Value::is_object))) {
+            return Err(Error::Invalid("result array type"));
+        }
+    }
     object.insert("schema_version".into(), json!(1));
     object.entry("status").or_insert(json!("completed"));
     object

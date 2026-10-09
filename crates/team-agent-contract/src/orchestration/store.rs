@@ -17,6 +17,8 @@ PRAGMA application_id=1413563187;
 PRAGMA user_version=1;
 CREATE TABLE contract_meta(scope TEXT NOT NULL, endpoint TEXT NOT NULL, root TEXT NOT NULL);
 CREATE TABLE contract_seats(seat TEXT PRIMARY KEY, record TEXT NOT NULL);
+CREATE TABLE contract_generations(seat TEXT PRIMARY KEY, generation INTEGER NOT NULL);
+CREATE TABLE contract_instances(instance TEXT PRIMARY KEY, seat TEXT NOT NULL, generation INTEGER NOT NULL);
 CREATE TABLE contract_operations(id TEXT PRIMARY KEY, record TEXT NOT NULL);
 CREATE TABLE contract_leases(seat TEXT PRIMARY KEY, operation TEXT NOT NULL);
 CREATE TABLE contract_calls(caller TEXT NOT NULL, call_key TEXT NOT NULL, request TEXT NOT NULL, response TEXT NOT NULL,
@@ -254,12 +256,18 @@ impl ContractStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = &operation.target.identity;
+        let route_conflict: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM contract_seats WHERE seat<>?1 AND (json_extract(record,'$.pane')=?2 OR json_extract(record,'$.binding_key')=?3)
+             UNION ALL SELECT 1 FROM contract_operations WHERE json_extract(record,'$.outcome') IN ('Running','NeedsRecovery') AND json_extract(record,'$.target.identity.seat')<>?1
+             AND (json_extract(record,'$.target.pane')=?2 OR json_extract(record,'$.target.binding_key')=?3))",
+            params![target.seat.as_str(),operation.target.pane,operation.target.binding_key], |r|r.get(0))?;
+        if route_conflict { return Err(Error::Fence); }
         let old = load_seat(&tx, &target.seat)?;
         match operation.kind {
             TransactionKind::Startup
             | TransactionKind::NewSeatFullSnapshot
             | TransactionKind::NativeNewSeat => {
-                if old.is_some() || target.generation.0 != 1 {
+                if old.is_some() {
                     return Err(Error::Conflict);
                 }
             }
@@ -268,7 +276,7 @@ impl ContractStore {
                 if old.as_ref() != Some(parent)
                     || target.seat != parent.identity.seat
                     || target.instance == parent.identity.instance
-                    || parent.identity.generation.0.checked_add(1) != Some(target.generation.0)
+                    || target.generation <= parent.identity.generation
                 {
                     return Err(Error::Fence);
                 }
@@ -283,6 +291,12 @@ impl ContractStore {
             if current(&tx, &self.scope, &parent.identity)? != *parent {
                 return Err(Error::Fence);
             }
+        }
+        if !matches!(operation.kind, TransactionKind::InWindowBranch | TransactionKind::Teardown) {
+            let previous: Option<u64> = tx.query_row("SELECT generation FROM contract_generations WHERE seat=?1", [target.seat.as_str()], |r|r.get(0)).optional()?;
+            if previous.unwrap_or(0).checked_add(1) != Some(target.generation.0) { return Err(Error::Fence); }
+            tx.execute("INSERT INTO contract_instances VALUES(?1,?2,?3)", params![target.instance.as_str(),target.seat.as_str(),target.generation.0])?;
+            tx.execute("INSERT INTO contract_generations VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET generation=excluded.generation", params![target.seat.as_str(),target.generation.0])?;
         }
         tx.execute(
             "INSERT INTO contract_leases VALUES(?1,?2)",
