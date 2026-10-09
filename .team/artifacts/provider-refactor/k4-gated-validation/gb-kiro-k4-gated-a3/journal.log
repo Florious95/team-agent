@@ -1,0 +1,168 @@
+CgroupReceiptBegin
+Schema=gb-cgroup-receipt-v1
+Unit=gb-kiro-k4-gated-a3
+Policy=optional_degraded
+Outcome=applied
+CgroupPath=/sys/fs/cgroup/gb-offload/gb-kiro-k4-gated-a3
+AvailableControllers=cpuset cpu io memory hugetlb pids
+DelegatedControllers=cpu memory pids
+EffectiveWriterUid=0
+EffectiveWriterName=root
+Resource.memory.max.Requested=15032385536
+Resource.memory.max.Applied=true
+Resource.memory.max.Readback=15032385536
+Resource.memory.max.Reason=none
+Resource.memory.high.Requested=12884901888
+Resource.memory.high.Applied=true
+Resource.memory.high.Readback=12884901888
+Resource.memory.high.Reason=none
+Resource.memory.oom.group.Requested=1
+Resource.memory.oom.group.Applied=true
+Resource.memory.oom.group.Readback=1
+Resource.memory.oom.group.Reason=none
+Resource.cpu.max.Requested=800000 100000
+Resource.cpu.max.Applied=true
+Resource.cpu.max.Readback=800000 100000
+Resource.cpu.max.Reason=none
+CgroupReceiptEnd
+ToolchainReceiptBegin
+Toolchain.Schema=gb-rust-toolchain-receipt-v1
+Toolchain.Requested=1.95.0
+Toolchain.RustupHome=/home/box/.rustup
+Toolchain.CargoHome=/home/box/.cargo
+Toolchain.RustcPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc
+Toolchain.RustcIdentity=rustc 1.95.0 (59807616e 2026-04-14)
+Toolchain.CargoPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo
+Toolchain.CargoIdentity=cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+Toolchain.CargoFmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/cargo-fmt
+Toolchain.CargoFmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.RustfmtPath=/home/box/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustfmt
+Toolchain.RustfmtIdentity=rustfmt 1.9.0-stable (59807616e1 2026-04-14)
+Toolchain.Verified=true
+ToolchainReceiptEnd
+TestedSource=af0da943d42eb2a3fef7110ff408125bb7161286
+TestedTree=9d3f5ed02e3f0477d170433e1268f6e951c9d274
+   Compiling team-agent-contract v0.1.0 (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a3/work/crates/team-agent-contract)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.91s
+     Running unittests src/lib.rs (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract/target/debug/deps/team_agent_contract-98078f121d63170f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/contracts.rs (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract/target/debug/deps/contracts-96b291cb36db091e)
+
+running 34 tests
+test bootstrap_is_explicit_single_use_and_never_bypasses_unknown_surface ... ok
+test effect_floor_never_decreases_after_observation_or_persistence_failure ... ok
+test catalog_is_bound_to_native_identity_and_schema_and_cannot_be_ambiguous ... ok
+test environment_unset_precedes_overlay_without_reading_process_environment ... ok
+test effort_grammar_is_finite_and_does_not_downgrade ... ok
+test exact_provider_lookup_has_no_default_or_implicit_alias ... ok
+test first_input_needs_current_composer_but_not_its_own_t3c_reply ... ok
+test exact_native_model_is_preserved_without_vendor_stripping_or_case_folding ... ok
+test fork_families_require_distinct_admission_and_target_identity ... ok
+test fork_launch_preflight_uses_only_h2_without_staging_or_false_restart ... ok
+test independent_protocol_facts_are_preserved_when_process_probe_fails ... ok
+test invalid_timing_missing_guards_overflow_and_newline_submit_are_rejected ... ok
+test fork_launch_rejects_missing_mixed_or_mismatched_context_before_staging ... ok
+test fresh_and_resume_requests_cannot_silently_substitute_each_other ... ok
+test ignored_effort_requires_an_explicit_carrier_report ... ok
+test in_window_stage_cannot_become_a_new_seat_or_exit_command ... ok
+test ownership_paths_and_resource_classification_fail_closed ... ok
+test plans_are_deterministic_and_keep_argv_boundaries ... ok
+test native_new_seat_plans_parent_argument_but_does_not_resume_parent ... ok
+test missing_or_dangling_carriers_and_changed_effort_value_are_rejected ... ok
+test resume_rejects_other_harness_owner_cwd_cloud_and_missing_exact_path ... ok
+test read_bounds_are_finite_and_positive ... ok
+test snapshot_stage_requires_exact_binding_owned_receipt_and_backing_digest ... ok
+test required_hooks_are_operation_specific_and_never_empty_success ... ok
+test submit_budgets_separate_confirmation_retry_wrap_and_queue ... ok
+test submit_policy_resolution_requires_the_exact_profile_and_evidence_scope ... ok
+test team_effort_is_not_inherited_without_policy_and_role_wins ... ok
+test snapshot_target_allocation_is_distinct_and_not_a_turn_branch ... ok
+test terminal_policy_rejects_rpc_and_worker_input_still_requires_h6_without_startup_modals ... ok
+test stale_generation_endpoint_sequence_time_and_pid_cannot_reuse_ready ... ok
+test unknown_capture_and_busy_are_not_permission_to_send_keys ... ok
+test worker_launch_rejects_ambient_mcp_and_global_mutation ... ok
+test worker_launch_rejects_unsupported_auth_missing_prompt_unverified_profile_and_wrong_channel ... ok
+test uncertain_writes_remain_in_partial_receipts_and_never_complete_snapshot_stage ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/kiro_adapter.rs (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract/target/debug/deps/kiro_adapter-0fbb59112b32c1b6)
+
+running 12 tests
+test exit_codes_never_authorize_replay_or_erase_possible_effects ... ok
+test documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json ... ok
+test kiro_has_exact_identity_and_no_native_admission_without_r0 ... ok
+test documented_exact_resume_never_becomes_latest_or_cloud_discovery ... ok
+test effort_and_bypass_are_explicit_and_not_inferred_from_native_banner ... ok
+test materialization_rejects_ambient_mcp_or_wrong_owned_name_before_io ... ok
+test no_prompt_matcher_or_enter_timing_is_claimed_from_documentation ... ok
+test promoting_a_descriptor_does_not_open_native_plan_gate ... ok
+test materialization_writes_only_the_planned_config_after_owned_validation ... ok
+test ultra_effort_is_not_guessed_as_a_native_flag_or_silently_downgraded ... ok
+test unknown_version_harness_or_ui_is_not_a_default_fallback ... ok
+test materialization_retains_written_receipts_when_native_validation_is_unknown ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lifecycle_mcp.rs (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract/target/debug/deps/lifecycle_mcp-5f8e9f7b10602002)
+
+running 16 tests
+test preflight_rejects_before_any_side_effect ... ok
+test failed_postwrite_materialization_preserves_uncertain_receipt ... ok
+test scope_endpoint_and_legacy_root_are_not_adopted ... ok
+test mailbox_silent_and_schema_keep_only_three_public_tools ... ok
+test result_and_outbox_are_atomic_idempotent_and_identity_bound ... ok
+test captured_spawn_failure_compensates_only_known_process_and_owned_resources ... ok
+test restart_preserves_sid_and_fences_old_generation_and_mcp ... ok
+test server_write_failure_does_not_erase_result_or_claim_client_consumption ... ok
+test spawn_without_receipt_stays_fenced_across_recovery ... ok
+test stale_or_wrong_probe_never_reaches_physical_host ... ok
+test startup_and_mcp_result_survive_reopen_without_promoting_readiness ... ok
+test shared_supervisor_consumes_bootstrap_once_durably ... ok
+test uncertain_effect_is_not_replayed_after_reopen_or_new_tick ... ok
+test unsupported_fork_has_no_operation_or_host_effects ... ok
+test teardown_stops_exact_seat_and_preserves_snapshot_backing ... ok
+test all_fork_modes_use_f0_to_f5_and_preserve_parent ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/transaction_faults.rs (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a1/work/crates/team-agent-contract/target/debug/deps/transaction_faults-0b84269ea373e9e4)
+
+running 10 tests
+test persisted_ids_and_owned_paths_revalidate_on_deserialize ... ok
+test conflicting_pane_or_binding_is_rejected_before_second_materialization ... ok
+test wire_snapshot_matches_the_unchanged_legacy_pure_contract ... ok
+test f2_registration_failure_recovers_staging_without_spawning ... ok
+test result_notification_failure_rolls_back_result_and_dedup_in_one_transaction ... ok
+test f5_receipt_failure_finishes_committed_operation_without_replaying_or_compensating ... ok
+test lost_postsubmit_db_commit_never_becomes_noeffect_or_replay ... ok
+test concurrent_same_call_has_one_durable_message_and_one_response ... ok
+test f4_commit_failure_rolls_back_only_its_registration_after_stopping_owned_process ... ok
+test failed_restart_restores_stopped_parent_and_never_reuses_generation ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+    Checking zerocopy v0.8.62
+    Checking once_cell v1.21.4
+    Checking cfg-if v1.0.5
+    Checking serde_core v1.0.228
+    Checking zmij v1.0.23
+    Checking libsqlite3-sys v0.30.1
+    Checking itoa v1.0.18
+    Checking memchr v2.8.3
+    Checking bitflags v2.13.2
+    Checking smallvec v1.16.2
+    Checking fallible-streaming-iterator v0.1.9
+    Checking fallible-iterator v0.3.0
+    Checking serde v1.0.228
+    Checking serde_json v1.0.149
+    Checking ahash v0.8.12
+    Checking hashbrown v0.14.5
+    Checking hashlink v0.9.1
+    Checking rusqlite v0.32.1
+    Checking team-agent-contract v0.1.0 (/workspace/grok-bot-offload/jobs/gb-kiro-k4-gated-a3/work/crates/team-agent-contract)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.40s
