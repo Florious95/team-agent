@@ -126,17 +126,41 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
 
 #[test]
 fn confirmed_help_syntax_does_not_imply_authenticated_model_or_terminal_admission() {
-    for effort in [Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh, Effort::Max] {
-        assert_eq!(KIRO_DESCRIPTOR.effort.admission[effort.index()], EffortAdmission::Pass);
+    for effort in [
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ] {
+        assert_eq!(
+            KIRO_DESCRIPTOR.effort.admission[effort.index()],
+            EffortAdmission::Pass
+        );
         let mut request = fixture_request();
         request.role_effort = Some(effort.as_str().into());
         let plan = adapter().plan(&fixture_resolved(request)).unwrap();
-        assert!(plan.arguments.windows(2).any(|v| v[0] == "--effort" && v[1] == effort.as_str()));
+        assert!(plan
+            .arguments
+            .windows(2)
+            .any(|v| v[0] == "--effort" && v[1] == effort.as_str()));
     }
-    assert!(matches!(KIRO_DESCRIPTOR.effort.admission[Effort::Ultra.index()], EffortAdmission::Reject(_)));
-    assert!(matches!(KIRO_DESCRIPTOR.model.catalog, Support::Unverified(_)));
-    assert!(matches!(KIRO_DESCRIPTOR.auth.subscription, Support::Unverified(_)));
-    assert!(matches!(KIRO_DESCRIPTOR.input.profiles, Support::Unverified(_)));
+    assert!(matches!(
+        KIRO_DESCRIPTOR.effort.admission[Effort::Ultra.index()],
+        EffortAdmission::Reject(_)
+    ));
+    assert!(matches!(
+        KIRO_DESCRIPTOR.model.catalog,
+        Support::Unverified(_)
+    ));
+    assert!(matches!(
+        KIRO_DESCRIPTOR.auth.subscription,
+        Support::Unverified(_)
+    ));
+    assert!(matches!(
+        KIRO_DESCRIPTOR.input.profiles,
+        Support::Unverified(_)
+    ));
     let mut request = fixture_request();
     request.paths.executable = "/opt/homebrew/bin/kiro-cli".into();
     assert!(adapter().plan(&fixture_resolved(request)).is_err());

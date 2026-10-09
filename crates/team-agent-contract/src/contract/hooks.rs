@@ -40,9 +40,15 @@ pub enum ReadFailure {
     /// The native read requested authentication; no credentials are inspected and
     /// no model/catalog result may be inferred from the partial terminal output.
     AuthRequired,
-    TimedOut { elapsed: Duration },
-    OutputLimit { limit: usize },
-    Exit { code: i32 },
+    TimedOut {
+        elapsed: Duration,
+    },
+    OutputLimit {
+        limit: usize,
+    },
+    Exit {
+        code: i32,
+    },
     Unknown(Reason),
     Error(ContractError),
 }

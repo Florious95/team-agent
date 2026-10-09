@@ -200,7 +200,12 @@ impl PlanHook for KiroAdapter {
         {
             return Err(ContractError::Invalid("Kiro documentation fixture scope"));
         }
-        if !request.paths.executable.file_name().is_some_and(|name| name == "kiro-cli-chat") {
+        if !request
+            .paths
+            .executable
+            .file_name()
+            .is_some_and(|name| name == "kiro-cli-chat")
+        {
             return Err(ContractError::Mismatch("Kiro direct chat engine"));
         }
         if self.mcp.executable != request.paths.candidate {
