@@ -166,7 +166,8 @@ impl Lifecycle<'_> {
             self.store.save(&operation, false)?;
             match staged {
                 NativeForkPlan::InWindow { control } => {
-                    operation.phase = Phase::F3Spawn;
+                    // No new-seat registration/spawn phase for an in-window branch.
+                    operation.phase = Phase::F1Stage;
                     operation.pending = Some("native-control".into());
                     operation.effect = DeliveryEffect::MayHaveSubmitted;
                     self.store.save(&operation, false)?;
@@ -223,7 +224,15 @@ impl Lifecycle<'_> {
         if !matches!(operation.outcome, Outcome::Running | Outcome::NeedsRecovery) {
             return Ok(operation);
         }
-        self.compensate(&mut operation)?;
+        if operation.phase == Phase::F4Commit && operation.pending.is_none() {
+            // F4 already committed; a lost F5 receipt is not permission to undo
+            // the native branch or stop a successfully committed process.
+            operation.phase = Phase::F5Receipt;
+            operation.outcome = Outcome::Committed;
+            self.store.save(&operation, true)?;
+        } else {
+            self.compensate(&mut operation)?;
+        }
         Ok(operation)
     }
 

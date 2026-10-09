@@ -266,8 +266,7 @@ impl ContractStore {
         let mut stmt = self
             .connection
             .prepare("SELECT fact FROM contract_facts ORDER BY rowid")?;
-        Ok(stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<Result<Vec<_>, _>>()?)
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }

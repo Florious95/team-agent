@@ -126,8 +126,8 @@ fn call(
             let recipients = if to == "*" {
                 let mut stmt =
                     tx.prepare("SELECT seat FROM contract_seats WHERE seat<>?1 ORDER BY seat")?;
-                stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?
+                let rows = stmt.query_map([context.identity.seat.as_str()], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
             } else {
                 vec![to.to_string()]
             };

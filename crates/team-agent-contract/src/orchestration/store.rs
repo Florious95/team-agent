@@ -320,7 +320,8 @@ impl ContractStore {
         if lease.as_deref() != Some(operation.id.as_str()) {
             return Err(Error::Fence);
         }
-        if !publish && operation.kind == TransactionKind::Restart {
+        let rollback = operation.outcome == Outcome::Compensated;
+        if operation.kind == TransactionKind::Restart && (rollback || (!publish && matches!(operation.phase, Phase::F0Preflight | Phase::F1Stage))) {
             if let Some(parent) = &operation.parent {
                 tx.execute(
                     "UPDATE contract_seats SET record=?1 WHERE seat=?2",
@@ -331,7 +332,12 @@ impl ContractStore {
                 )?;
             }
         }
-        if publish {
+        if rollback && matches!(operation.kind, TransactionKind::Startup | TransactionKind::NewSeatFullSnapshot | TransactionKind::NativeNewSeat) {
+            if let Some(current) = load_seat(&tx, &operation.target.identity.seat)? {
+                if current.identity != operation.target.identity { return Err(Error::Fence); }
+                tx.execute("DELETE FROM contract_seats WHERE seat=?1", [operation.target.identity.seat.as_str()])?;
+            }
+        } else if publish && !(rollback && operation.kind == TransactionKind::Restart) {
             tx.execute("INSERT INTO contract_seats VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET record=excluded.record",
                 params![operation.target.identity.seat.as_str(),serde_json::to_string(&operation.target)?])?;
         }
