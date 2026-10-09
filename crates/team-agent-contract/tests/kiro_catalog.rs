@@ -102,10 +102,7 @@ fn complete_large_json_requires_real_exit_but_raw_read_alone_is_not_model_schema
     let raw = reader.read_catalog(&request).unwrap();
     assert_eq!(raw.stdout, bytes);
     assert_eq!(raw.exit_code, 0);
-    assert_eq!(
-        request.source.schema,
-        "kiro-2.28.0-list-models-json-v1"
-    );
+    assert_eq!(request.source.schema, "kiro-2.28.0-list-models-json-v1");
 }
 #[test]
 fn captured_native_json_flows_through_bounded_reader_and_bound_h1() {
@@ -119,10 +116,15 @@ fn captured_native_json_flows_through_bounded_reader_and_bound_h1() {
         executable: "/fixture/candidate".into(),
         arguments: vec![],
         environment: Default::default(),
-    }).unwrap();
+    })
+    .unwrap();
     let hooks = adapter.hooks();
-    let catalog = hooks.catalog.require("H1 CatalogHook").unwrap()
-        .discover(&request, &mut reader).unwrap();
+    let catalog = hooks
+        .catalog
+        .require("H1 CatalogHook")
+        .unwrap()
+        .discover(&request, &mut reader)
+        .unwrap();
     assert_eq!(catalog.models.len(), 9);
     assert_eq!(catalog.provider, request.provider);
     assert_eq!(catalog.native, request.native);

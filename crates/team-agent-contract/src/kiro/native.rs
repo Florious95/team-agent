@@ -223,7 +223,10 @@ pub(super) fn validate_catalog_request(grant: &CatalogRequest) -> Result<(), Con
     if grant.provider.as_str() != "kiro"
         || grant.native.version != super::BUNDLE_VERSION
         || grant.source != CHAT_CATALOG_SOURCE
-        || grant.executable.file_name().is_none_or(|name| name != "kiro-cli-chat")
+        || grant
+            .executable
+            .file_name()
+            .is_none_or(|name| name != "kiro-cli-chat")
     {
         return Err(ContractError::Mismatch("Kiro catalog grant"));
     }
