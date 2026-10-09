@@ -219,7 +219,9 @@ fn acquire_lock(path: &Path) -> Result<Lock, PromptError> {
     match builder.create(parent) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && parent.is_dir() => {}
-        Err(error) => return Err(PromptError::io("leader_prompt_write_failed", path, error)),
+        Err(error) => {
+            return Err(PromptError::io("leader_prompt_write_failed", parent, error).at_config(path))
+        }
     }
     let lock_path = parent.join("leader-prompt.lock");
     regular_target(&lock_path, "leader_prompt_write_failed")
@@ -283,12 +285,16 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), PromptError> {
         .write(true)
         .create_new(true)
         .open(&temp)
-        .map_err(|error| PromptError::io("leader_prompt_write_failed", path, error))?;
+        .map_err(|error| {
+            PromptError::io("leader_prompt_write_failed", &temp, error).at_config(path)
+        })?;
     let result = (|| {
         file.write_all(text.as_bytes())
             .and_then(|_| file.flush())
             .and_then(|_| file.sync_all())
-            .map_err(|error| PromptError::io("leader_prompt_write_failed", path, error))?;
+            .map_err(|error| {
+                PromptError::io("leader_prompt_write_failed", &temp, error).at_config(path)
+            })?;
         drop(file);
         // Rename replaces this directory entry; it never follows a target symlink.
         regular_target(path, "leader_prompt_write_failed")?;
@@ -608,6 +614,22 @@ mod tests {
             text.split("\n\n").map(str::to_string).collect();
         assert_eq!(entries, (0..12).map(|id| format!("entry-{id}")).collect());
         assert_eq!(text.split("\n\n").count(), 12);
+    }
+    #[test]
+    fn leader_prompt_temp_io_error_identifies_the_actual_operation_path() {
+        let f = Fixture::new();
+        let path = f.0.join("missing-parent/leader-prompt.txt");
+        let error = write_atomic(&path, "new").unwrap_err();
+        assert_eq!(error.config_path.as_deref(), Some(path.as_path()));
+        assert_eq!(error.io_kind.as_deref(), Some("NotFound"));
+        let actual = error.io_path.unwrap();
+        assert_eq!(actual.parent(), path.parent());
+        assert!(actual
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".leader-prompt-"));
+        assert_ne!(actual, path);
     }
     #[test]
     fn leader_prompt_bounded_lock_timeout_preserves_body_and_foreign_temp() {

@@ -210,6 +210,27 @@ fn leader_prompt_multiple_cli_appends_serialize_without_lost_updates() {
 #[test]
 fn leader_prompt_management_requires_home_and_never_uses_workspace_fallback() {
     let f = Fixture::new();
+    let absent_home = f.root.join("missing-home");
+    let output = f
+        .command(&["leader-prompt", "set", "--json", "--", "text"])
+        .env("HOME", &absent_home)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(json(&output)["reason"], "leader_prompt_write_failed");
+    assert_eq!(json(&output)["io_kind"], "NotFound");
+    assert_eq!(
+        json(&output)["config_path"],
+        absent_home
+            .join(".team-agent/leader-prompt.txt")
+            .to_str()
+            .unwrap()
+    );
+    assert_eq!(
+        json(&output)["io_path"],
+        absent_home.join(".team-agent").to_str().unwrap()
+    );
+    assert!(!absent_home.exists());
     for home in ["", "relative"] {
         let output = f
             .command(&["leader-prompt", "show", "--json"])
