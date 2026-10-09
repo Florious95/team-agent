@@ -54,11 +54,7 @@ const HUMAN: &[&str] = &[
     "install-skill",
     "inbox",
 ];
-const MACHINE: &[&str] = &[
-    "wait",
-    "attach-app-server-leader",
-    "coordinator",
-];
+const MACHINE: &[&str] = &["wait", "attach-app-server-leader", "coordinator"];
 const JARGON: &[&str] = &[
     "fully-qualified",
     "fully qualified",
@@ -104,8 +100,17 @@ fn canary_path(env: &HermeticTestEnv) -> String {
     fs::create_dir(&bin).unwrap();
     let log = env.root().join("native-called");
     for tool in [
-        "pi", "codex", "claude", "copilot", "grok", "agent", "cursor", "gh", "tmux",
-        "kiro-cli", "kiro-cli-chat",
+        "pi",
+        "codex",
+        "claude",
+        "copilot",
+        "grok",
+        "agent",
+        "cursor",
+        "gh",
+        "tmux",
+        "kiro-cli",
+        "kiro-cli-chat",
     ] {
         let path = bin.join(tool);
         fs::write(
@@ -256,17 +261,24 @@ fn help_property(command: &str) {
         assert!(
             description.strip_prefix("Purpose:").is_some_and(|purpose| {
                 purpose.chars().filter(char::is_ascii_alphabetic).count() >= 4
-                    && !purpose.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+                    && !purpose
+                        .chars()
+                        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
             }),
             "H4 plain English purpose missing before Usage/Options: {help}"
         );
-        assert!(help.contains("Options:"), "H4 key Args/prerequisites explanation missing: {help}");
+        assert!(
+            help.contains("Options:"),
+            "H4 key Args/prerequisites explanation missing: {help}"
+        );
         assert!(
             help.contains(&format!("Usage: team-agent {command}")),
             "H4 actual usage missing: {help}"
         );
-        assert!(help.contains("Examples:") && help.contains("Next Action:"),
-            "H4 English Examples/Next Action missing: {help}");
+        assert!(
+            help.contains("Examples:") && help.contains("Next Action:"),
+            "H4 English Examples/Next Action missing: {help}"
+        );
         let examples = examples(&help, command);
         assert!(
             (2..=3).contains(&examples.len()),
@@ -396,7 +408,10 @@ fn h1_root_discovers_all_thirty_once_in_catalog_and_zero_private_names() {
     // Ordinary English words such as "wait"/"sessions" are not CLI entries.
     // The catalog was checked above; also inspect actual tutorial invocations.
     let references = Regex::new(r"team-agent\s+([a-z][a-z-]*)").unwrap();
-    let invocations = references.captures_iter(&help).map(|m| m[1].to_string()).collect::<BTreeSet<_>>();
+    let invocations = references
+        .captures_iter(&help)
+        .map(|m| m[1].to_string())
+        .collect::<BTreeSet<_>>();
     let leaks = MACHINE
         .iter()
         .chain(RETIRED)
@@ -580,7 +595,14 @@ fn retired_unknown(command: &str) {
         "results" => vec!["--case", "c", "--team", "t"],
         "validate" | "preflight" => vec![ws.as_str()],
         "peek" => vec![
-            "worker", "--allow-raw-screen", "--head", "2", "--tail", "5", "--search", "needle",
+            "worker",
+            "--allow-raw-screen",
+            "--head",
+            "2",
+            "--tail",
+            "5",
+            "--search",
+            "needle",
         ],
         "wait-ready" => vec!["--timeout", "0"],
         _ => vec!["--team", "t"],
@@ -645,6 +667,8 @@ retired_properties! {
 #[test]
 fn r289_retired_names_have_no_catalog_record() {
     for command in RETIRED {
-        assert!(catalog::COMMAND_SPECS.iter().all(|spec| spec.name != *command));
+        assert!(catalog::COMMAND_SPECS
+            .iter()
+            .all(|spec| spec.name != *command));
     }
 }

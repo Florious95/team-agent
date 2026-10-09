@@ -301,10 +301,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
 
 // Script compatibility is deliberately outside the human catalog and suggestions.
 fn is_machine_command(command: &str) -> bool {
-    matches!(
-        command,
-        "wait" | "coordinator" | "attach-app-server-leader"
-    )
+    matches!(command, "wait" | "coordinator" | "attach-app-server-leader")
 }
 
 fn dispatch_machine(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
@@ -366,7 +363,11 @@ pub(crate) fn default_help() -> String {
         "Observation and collaboration",
         &["leaders", "doctor", "approvals"],
     );
-    append_help_section(&mut out, "Configuration", &["route", "profile", "install-skill"]);
+    append_help_section(
+        &mut out,
+        "Configuration",
+        &["route", "profile", "install-skill"],
+    );
     append_help_section(
         &mut out,
         "Guided recovery",
@@ -496,7 +497,10 @@ pub(super) fn command_help(command: Option<&str>) -> String {
     } else {
         "Use --json for structured output. --workspace selects the project; supported commands use --team to select the team."
     };
-    let mut out = format!("Purpose:\n{}.\nUsage: {}\n\nOptions:\n{}\n{}\nExamples:\n{}\n\nNext Action:\n{}", spec.summary, spec.usage, details, scope, examples, next);
+    let mut out = format!(
+        "Purpose:\n{}.\nUsage: {}\n\nOptions:\n{}\n{}\nExamples:\n{}\n\nNext Action:\n{}",
+        spec.summary, spec.usage, details, scope, examples, next
+    );
     if name == "quick-start" {
         out.push_str(&format!("\n\nMinimal two-file configuration (create manually; not written automatically):\nTEAM.md:\n{TEAM_TEMPLATE}\nagents/worker.md:\n{WORKER_TEMPLATE}"));
     }
@@ -504,7 +508,9 @@ pub(super) fn command_help(command: Option<&str>) -> String {
         out.push_str("\nDiscover models with team-agent models --provider cursor_agent.");
     }
     if name == "copilot" {
-        out.push_str("\nCopilot has no team-agent models entrypoint; consult native provider help.");
+        out.push_str(
+            "\nCopilot has no team-agent models entrypoint; consult native provider help.",
+        );
     }
     out
 }
@@ -1255,16 +1261,20 @@ fn warn_send_legacy_delivery_flags(args: &[String]) {
         "--message-id",
     ];
     let spec = command_spec("send");
-    let sunset = spec.and_then(|spec| spec.sunset).unwrap_or("a future compatibility release");
-    let action = spec
-        .and_then(|spec| spec.action)
-        .unwrap_or("Use team-agent send <agent> 'task message'; select scope with --workspace/--team");
+    let sunset = spec
+        .and_then(|spec| spec.sunset)
+        .unwrap_or("a future compatibility release");
+    let action = spec.and_then(|spec| spec.action).unwrap_or(
+        "Use team-agent send <agent> 'task message'; select scope with --workspace/--team",
+    );
     for flag in FLAGS {
         if args
             .iter()
             .any(|arg| arg == flag || arg.starts_with(&format!("{flag}=")))
         {
-            eprintln!("Warning: {flag} is deprecated and will be removed in {sunset}. Next: {action}");
+            eprintln!(
+                "Warning: {flag} is deprecated and will be removed in {sunset}. Next: {action}"
+            );
         }
     }
 }
@@ -2154,7 +2164,10 @@ mod tests {
                 !is_machine_command(command),
                 "retired Machine route: {command}"
             );
-            assert!(!is_known_subcommand(command), "retired help gate: {command}");
+            assert!(
+                !is_known_subcommand(command),
+                "retired help gate: {command}"
+            );
         }
     }
 
@@ -2341,9 +2354,13 @@ mod tests {
             assert_english(&command_help(Some(spec.name)));
         }
         for text in [
-            TEAM_TEMPLATE, WORKER_TEMPLATE, HUMAN_NAVIGATION,
-            crate::cli::route::HELP, crate::cli::COMMS_BOUNDARY_TEXT,
-            crate::cli::QUICK_START_REMINDER, crate::cli::SEND_REMINDER,
+            TEAM_TEMPLATE,
+            WORKER_TEMPLATE,
+            HUMAN_NAVIGATION,
+            crate::cli::route::HELP,
+            crate::cli::COMMS_BOUNDARY_TEXT,
+            crate::cli::QUICK_START_REMINDER,
+            crate::cli::SEND_REMINDER,
             crate::cli::STATUS_REMINDER,
         ] {
             assert_english(text);

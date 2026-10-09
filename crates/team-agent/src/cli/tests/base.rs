@@ -810,7 +810,11 @@ fn kiro_doctor_inventory_is_read_only_and_does_not_claim_native_readiness() {
     assert_eq!(inventory["kiro"]["installed"], false);
     assert_eq!(inventory["codex"]["command"], "codex");
     let launcher = bin.join("kiro-cli");
-    std::fs::write(&launcher, "#!/bin/sh\nprintf called > \"$0.called\"\nexit 0\n").unwrap();
+    std::fs::write(
+        &launcher,
+        "#!/bin/sh\nprintf called > \"$0.called\"\nexit 0\n",
+    )
+    .unwrap();
     for (mode, installed) in [(0o600, false), (0o700, true)] {
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(mode)).unwrap();
         assert_eq!(
@@ -874,6 +878,10 @@ fn kiro_leader_entry_has_help_and_typed_refusal_without_native_or_fallback_effec
         assert_eq!(crate::cli::run(&argv, &cwd), ExitCode::Error);
     }
     assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
-    assert_eq!(std::fs::read_dir(&bin).unwrap().count(), 5, "no tool invoked");
+    assert_eq!(
+        std::fs::read_dir(&bin).unwrap().count(),
+        5,
+        "no tool invoked"
+    );
     assert!(env.registry_entries().is_empty());
 }

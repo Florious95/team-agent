@@ -342,7 +342,13 @@ pub(crate) fn diagnose_runtime_for_workspace(
         &mut repairs,
     );
     append_legacy_snapshot_issue(workspace, state, &mut issues);
-    append_coordinator_health_issue(workspace, state, coordinator_health, &mut issues, &mut repairs);
+    append_coordinator_health_issue(
+        workspace,
+        state,
+        coordinator_health,
+        &mut issues,
+        &mut repairs,
+    );
     append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
 }
@@ -373,7 +379,9 @@ pub(crate) fn workspace_has_existing_team_runtime(
         let terminal = team_state
             .get("status")
             .and_then(Value::as_str)
-            .is_some_and(|status| matches!(status, "stopped" | "shutdown" | "archived" | "terminal"));
+            .is_some_and(|status| {
+                matches!(status, "stopped" | "shutdown" | "archived" | "terminal")
+            });
         if terminal {
             return false;
         }
@@ -695,14 +703,13 @@ pub(crate) fn append_registry_channel_unbound_to_report(
     repairs.push(recovery_hint(&team_key, issue_id, repair));
     object.insert("issues".to_string(), Value::Array(issues));
     object.insert("suggested_repairs".to_string(), Value::Array(repairs));
-    let is_healthy_unattached_host =
-        class == crate::lifecycle::launch::LeaderBindingClass::Unbound
-            && object.get("ok").and_then(Value::as_bool) == Some(true)
-            && object
-                .get("profile_smoke")
-                .and_then(|profile| profile.get("checks"))
-                .and_then(Value::as_array)
-                .is_some_and(|checks| !checks.is_empty());
+    let is_healthy_unattached_host = class == crate::lifecycle::launch::LeaderBindingClass::Unbound
+        && object.get("ok").and_then(Value::as_bool) == Some(true)
+        && object
+            .get("profile_smoke")
+            .and_then(|profile| profile.get("checks"))
+            .and_then(Value::as_array)
+            .is_some_and(|checks| !checks.is_empty());
     if !is_healthy_unattached_host {
         object.insert("ok".to_string(), Value::Bool(false));
     }
@@ -1054,8 +1061,7 @@ mod tests {
                 pane_pid: None,
                 leader_env: Default::default(),
             }]);
-        let Some((_, repair)) =
-            live_leader_workspace_mismatch(&workspace, &state, &transport)
+        let Some((_, repair)) = live_leader_workspace_mismatch(&workspace, &state, &transport)
         else {
             panic!("workspace mismatch repair required");
         };
@@ -1109,7 +1115,8 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&workspace).unwrap();
-        let state = json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null});
+        let state =
+            json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null});
         let mut issues = json!([]);
         let mut repairs = json!([]);
         append_registry_channel_unbound_issue(
