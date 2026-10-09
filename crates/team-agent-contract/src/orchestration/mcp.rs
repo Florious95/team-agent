@@ -1,5 +1,6 @@
 //! Three logical MCP tools. Transport-injected identity is never read from arguments.
-use super::store::{current, load_seat, next_id, unleased, ContractStore, SeatStatus};
+use super::operator::{write_message, MessageWrite, MESSAGE_PRESENTATION};
+use super::store::{current, next_id, unleased, ContractStore, SeatStatus};
 use super::Error;
 use crate::contract::types::*;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -11,6 +12,7 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Created by the scoped server/transport, not by tools/call JSON. Connection ID
 /// must be unique per transport connection: JSON-RPC IDs alone are not durable
 /// idempotency keys and may legitimately be reused on another connection.
+#[derive(Clone)]
 pub struct CallContext {
     pub identity: InstanceIdentity,
     pub binding_key: String,
@@ -134,25 +136,10 @@ fn call(
             };
             let mut ids = vec![];
             for recipient in recipients {
-                let target = load_seat(&tx, &SeatId::new(&recipient)?)?;
-                if target.is_none() && recipient != "leader" {
-                    return Err(Error::Invalid("unknown recipient"));
-                }
-                let id = next_id(&tx, "msg")?;
-                let status = if mailbox { "stored_only" } else { "accepted" };
-                tx.execute("INSERT INTO messages(message_id,owner_team_id,task_id,sender,recipient,status,content,presentation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                    params![id,scope.as_str(),context.task_id,context.identity.seat.as_str(),recipient,status,content,"{\"sink\":\"leader\",\"class\":\"message\"}"])?;
-                if !mailbox {
-                    let identity = target
-                        .map(|v| serde_json::to_string(&v.identity))
-                        .transpose()?
-                        .unwrap_or_else(|| "null".into());
-                    tx.execute(
-                        "INSERT INTO contract_outbox VALUES(?1,?2,'queued',NULL,'\"NoEffect\"')",
-                        params![id, identity],
-                    )?;
-                }
-                ids.push(id);
+                ids.push(write_message(&tx, &scope, MessageWrite {
+                    id: None, task: Some(&context.task_id), sender: context.identity.seat.as_str(),
+                    recipient: &recipient, content, presentation: MESSAGE_PRESENTATION, mailbox,
+                })?);
             }
             json!({"ok":true,"status":if mailbox {"stored_only"} else {"queued"},"message_ids":ids})
         }
@@ -187,17 +174,11 @@ fn call(
                     .and_then(Value::as_str)
                     == Some("leader")
                 {
-                    let message = next_id(&tx, "msg")?;
-                    let target = load_seat(&tx, &SeatId::new("leader")?)?
-                        .map(|v| serde_json::to_string(&v.identity))
-                        .transpose()?
-                        .unwrap_or_else(|| "null".into());
-                    tx.execute("INSERT INTO messages(message_id,owner_team_id,task_id,sender,recipient,status,content,presentation) VALUES(?1,?2,?3,?4,'leader','accepted',?5,?6)",
-                        params![message,scope.as_str(),context.task_id,context.identity.seat.as_str(),encoded,envelope["presentation"].to_string()])?;
-                    tx.execute(
-                        "INSERT INTO contract_outbox VALUES(?1,?2,'queued',NULL,'\"NoEffect\"')",
-                        params![message, target],
-                    )?;
+                    write_message(&tx, &scope, MessageWrite {
+                        id: None, task: Some(&context.task_id), sender: context.identity.seat.as_str(),
+                        recipient: "leader", content: &encoded,
+                        presentation: &envelope["presentation"].to_string(), mailbox: false,
+                    })?;
                 }
                 json!({"ok":true,"status":"persisted","result_id":id,"leader_notified":false})
             }
@@ -382,9 +363,22 @@ pub fn response_written(
 pub fn serve<R: BufRead, W: Write>(
     store: &mut ContractStore,
     context: &CallContext,
+    reader: R,
+    writer: W,
+) -> Result<(), Error> {
+    serve_with_context(store, |_, _| Ok(context.clone()), reader, writer)
+}
+
+/// A persistent native transport resolves its fenced identity/task for each
+/// frame. The resolver is framework-owned; tool arguments never confer identity.
+/// This shares the same bounded framing, handlers and response-written boundary.
+pub fn serve_with_context<R: BufRead, W: Write, F>(
+    store: &mut ContractStore,
+    mut resolve_context: F,
     mut reader: R,
     mut writer: W,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where F: FnMut(&mut ContractStore, &Value) -> Result<CallContext, Error> {
     loop {
         let mut frame = vec![];
         let read = std::io::Read::take(&mut reader, (MAX_FRAME_BYTES + 1) as u64)
@@ -396,7 +390,12 @@ pub fn serve<R: BufRead, W: Write>(
             return Err(Error::Invalid("MCP frame too large"));
         }
         let request: Value = serde_json::from_slice(&frame)?;
-        let (response, success) = match handle(store, context, &request) {
+        let context = resolve_context(store, &request);
+        let handled = match &context {
+            Ok(context) => handle(store, context, &request),
+            Err(error) => Err(error.clone()),
+        };
+        let (response, success) = match handled {
             Ok(response) => (response, true),
             Err(_) => (
                 Some(
@@ -411,7 +410,7 @@ pub fn serve<R: BufRead, W: Write>(
             writer.write_all(b"\n")?;
             writer.flush()?;
             if success {
-                response_written(store, context, &request)?;
+                response_written(store, &context?, &request)?;
             }
         }
     }

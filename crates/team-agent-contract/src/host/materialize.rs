@@ -256,6 +256,7 @@ impl<R: CommandRunner> OwnedIo for ScopedMaterializer<R> {
             arguments: vec![
                 "agent".into(),
                 "validate".into(),
+                "--path".into(),
                 request.resource.path.path().into_os_string(),
             ],
             cwd: Some(root.path.clone()),

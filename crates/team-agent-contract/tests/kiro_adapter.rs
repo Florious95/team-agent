@@ -103,6 +103,7 @@ fn documentation_plan_keeps_argument_boundaries_and_encodes_owned_agent_json() {
     assert_eq!(&args[..3], &["chat", "--v3", "--agent"]);
     assert!(args.contains(&"exact-provider-model/KeepCase"));
     assert!(!args.contains(&"--trust-all-tools"));
+    assert!(args.contains(&"--require-mcp-startup"));
     assert!(!args.contains(&"--format")); // list-only, not an interactive response format
     assert!(!args.contains(&"--list-models"));
     assert!(!args
@@ -186,7 +187,7 @@ fn effort_and_bypass_are_explicit_and_not_inferred_from_native_banner() {
             .count(),
         1
     );
-    assert!(!plan.arguments.iter().any(|v| v == "--require-mcp-startup")); // TUI behavior not yet verified
+    assert_eq!(plan.arguments.iter().filter(|v| *v == "--require-mcp-startup").count(), 1); // syntax/exit intent, not proof of client binding
 }
 
 #[test]

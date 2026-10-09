@@ -224,8 +224,12 @@ impl PlanHook for KiroAdapter {
             "includeMcpJson":false,"includePowers":false,
             "mcpServers":{"team":{"command":self.mcp.executable.to_str().ok_or(ContractError::Invalid("MCP path utf8"))?,"args":self.mcp.arguments,"env":self.mcp.environment}}
         })).map_err(|_|ContractError::Invalid("Kiro agent JSON"))?;
-        let mut arguments: Vec<OsString> =
-            vec!["chat".into(), "--v3".into(), "--agent".into(), name.into()];
+        // Native 2.28.0 help confirms that a failed enabled MCP server must
+        // stop startup with exit 3, rather than silently dropping the tools.
+        let mut arguments: Vec<OsString> = vec![
+            "chat".into(), "--v3".into(), "--agent".into(), name.into(),
+            "--require-mcp-startup".into(),
+        ];
         let model = flag(
             &mut arguments,
             "--model",
