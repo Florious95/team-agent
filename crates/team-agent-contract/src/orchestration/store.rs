@@ -321,7 +321,10 @@ impl ContractStore {
             return Err(Error::Fence);
         }
         let rollback = operation.outcome == Outcome::Compensated;
-        if operation.kind == TransactionKind::Restart && (rollback || (!publish && matches!(operation.phase, Phase::F0Preflight | Phase::F1Stage))) {
+        if operation.kind == TransactionKind::Restart
+            && (rollback
+                || (!publish && matches!(operation.phase, Phase::F0Preflight | Phase::F1Stage)))
+        {
             if let Some(parent) = &operation.parent {
                 tx.execute(
                     "UPDATE contract_seats SET record=?1 WHERE seat=?2",
@@ -332,10 +335,22 @@ impl ContractStore {
                 )?;
             }
         }
-        if rollback && matches!(operation.kind, TransactionKind::Startup | TransactionKind::NewSeatFullSnapshot | TransactionKind::NativeNewSeat) {
+        if rollback
+            && matches!(
+                operation.kind,
+                TransactionKind::Startup
+                    | TransactionKind::NewSeatFullSnapshot
+                    | TransactionKind::NativeNewSeat
+            )
+        {
             if let Some(current) = load_seat(&tx, &operation.target.identity.seat)? {
-                if current.identity != operation.target.identity { return Err(Error::Fence); }
-                tx.execute("DELETE FROM contract_seats WHERE seat=?1", [operation.target.identity.seat.as_str()])?;
+                if current.identity != operation.target.identity {
+                    return Err(Error::Fence);
+                }
+                tx.execute(
+                    "DELETE FROM contract_seats WHERE seat=?1",
+                    [operation.target.identity.seat.as_str()],
+                )?;
             }
         } else if publish && !(rollback && operation.kind == TransactionKind::Restart) {
             tx.execute("INSERT INTO contract_seats VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET record=excluded.record",
