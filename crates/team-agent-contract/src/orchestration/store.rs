@@ -14,13 +14,15 @@ use crate::contract::types::*;
 const APPLICATION_ID: i64 = 0x54414333;
 const SCHEMA: &str = "
 PRAGMA application_id=1413563187;
-PRAGMA user_version=1;
+PRAGMA user_version=2;
 CREATE TABLE contract_meta(scope TEXT NOT NULL, endpoint TEXT NOT NULL, root TEXT NOT NULL);
 CREATE TABLE contract_seats(seat TEXT PRIMARY KEY, record TEXT NOT NULL);
 CREATE TABLE contract_generations(seat TEXT PRIMARY KEY, generation INTEGER NOT NULL);
 CREATE TABLE contract_instances(instance TEXT PRIMARY KEY, seat TEXT NOT NULL, generation INTEGER NOT NULL);
 CREATE TABLE contract_operations(id TEXT PRIMARY KEY, record TEXT NOT NULL);
 CREATE TABLE contract_leases(seat TEXT PRIMARY KEY, operation TEXT NOT NULL);
+CREATE TABLE contract_bootstrap(owner TEXT PRIMARY KEY, attempt TEXT NOT NULL UNIQUE,
+ confirmed INTEGER NOT NULL CHECK(confirmed IN (0,1)));
 CREATE TABLE contract_calls(caller TEXT NOT NULL, call_key TEXT NOT NULL, request TEXT NOT NULL, response TEXT NOT NULL,
  PRIMARY KEY(caller,call_key));
 CREATE TABLE contract_facts(caller TEXT NOT NULL, call_key TEXT NOT NULL, fact TEXT NOT NULL,
@@ -59,6 +61,10 @@ pub struct SeatRecord {
     pub evidence_kind: EvidenceKind,
     pub status: SeatStatus,
     pub process: Option<ProcessIdentity>,
+    /// Captured K2 target; persisted atomically with the actual F3 routing. A
+    /// deserialized value never authorizes transport without a live host recheck.
+    #[serde(default)]
+    pub physical: Option<crate::host::transport::TargetReceipt>,
     pub session: Option<ResumeBinding>,
     pub resources: Vec<OwnedResourceReceipt>,
     /// Captured descriptor grant; only these resource classes may use this
@@ -180,7 +186,7 @@ impl ContractStore {
         // Verify identity before pragmas, migrations, or writes.
         let app: i64 = connection.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if app != APPLICATION_ID || version != 1 {
+        if app != APPLICATION_ID || version != 2 {
             return Err(Error::Fence);
         }
         let stored: (String, String, String) =
@@ -251,7 +257,8 @@ impl ContractStore {
 
     pub(crate) fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {
         if operation.target.identity.scope != self.scope
-            || operation.target.endpoint != self.endpoint
+            || (!matches!(operation.kind, TransactionKind::InWindowBranch | TransactionKind::Teardown)
+                && operation.target.endpoint != self.endpoint)
         {
             return Err(Error::Fence);
         }
@@ -259,14 +266,7 @@ impl ContractStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let target = &operation.target.identity;
-        let route_conflict: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM contract_seats WHERE seat<>?1 AND (json_extract(record,'$.pane')=?2 OR json_extract(record,'$.binding_key')=?3)
-             UNION ALL SELECT 1 FROM contract_operations WHERE json_extract(record,'$.outcome') IN ('Running','NeedsRecovery') AND json_extract(record,'$.target.identity.seat')<>?1
-             AND (json_extract(record,'$.target.pane')=?2 OR json_extract(record,'$.target.binding_key')=?3))",
-            params![target.seat.as_str(),operation.target.pane,operation.target.binding_key], |r|r.get(0))?;
-        if route_conflict {
-            return Err(Error::Fence);
-        }
+        route_available(&tx, &operation.target)?;
         let old = load_seat(&tx, &target.seat)?;
         match operation.kind {
             TransactionKind::Startup
@@ -390,6 +390,7 @@ impl ContractStore {
                 )?;
             }
         } else if publish && !(rollback && operation.kind == TransactionKind::Restart) {
+            route_available(&tx, &operation.target)?;
             tx.execute("INSERT INTO contract_seats VALUES(?1,?2) ON CONFLICT(seat) DO UPDATE SET record=excluded.record",
                 params![operation.target.identity.seat.as_str(),serde_json::to_string(&operation.target)?])?;
         }
@@ -454,6 +455,19 @@ pub(crate) fn current(
     }
     Ok(record)
 }
+fn route_available(connection: &Connection, target: &SeatRecord) -> Result<(), Error> {
+    // Pane IDs are local to a tmux endpoint. The captured binding is globally
+    // unique within this store; neither field is safe to compare on its own.
+    let conflict: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM contract_seats WHERE seat<>?1 AND
+         ((json_extract(record,'$.endpoint')=?2 AND json_extract(record,'$.pane')=?3) OR json_extract(record,'$.binding_key')=?4)
+         UNION ALL SELECT 1 FROM contract_operations WHERE json_extract(record,'$.outcome') IN ('Running','NeedsRecovery')
+         AND json_extract(record,'$.target.identity.seat')<>?1 AND
+         ((json_extract(record,'$.target.endpoint')=?2 AND json_extract(record,'$.target.pane')=?3) OR json_extract(record,'$.target.binding_key')=?4))",
+        params![target.identity.seat.as_str(), target.endpoint, target.pane, target.binding_key], |r| r.get(0))?;
+    if conflict { Err(Error::Fence) } else { Ok(()) }
+}
+
 pub(crate) fn unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
     let exists: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM contract_leases WHERE seat=?1)",

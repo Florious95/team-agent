@@ -12,7 +12,7 @@ use crate::contract::types::{Digest, EvidenceKind, InstanceIdentity, NativeIdent
 
 /// Captured host facts for persistence. A value alone is NOT permission to act:
 /// the concrete transport checks its owned receipt, directory and live pane on every call.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TargetReceipt {
     pub directory: DirectoryReceipt,
     pub endpoint: PathBuf,

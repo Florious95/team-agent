@@ -14,8 +14,22 @@ use crate::contract::types::*;
 /// Framework port, not an eighth adapter hook. Implementations must fence every
 /// OS action by scope/endpoint + process birth identity. Control uses K2's sole
 /// physical executor, never send-keys or an adapter-owned queue.
+pub struct SpawnedProcess {
+    pub process: ProcessIdentity,
+    pub endpoint: String,
+    pub pane: String,
+    pub binding_key: String,
+    pub physical: Option<crate::host::transport::TargetReceipt>,
+}
+
 pub trait LifecycleHost {
-    fn spawn(&mut self, seat: &SeatRecord, plan: &LaunchPlan) -> Result<ProcessIdentity, Error>;
+    fn spawn(
+        &mut self,
+        descriptor: &ProviderDescriptor,
+        resolved: &ResolvedLaunch,
+        seat: &SeatRecord,
+        plan: &LaunchPlan,
+    ) -> Result<SpawnedProcess, Error>;
     fn stop(&mut self, seat: &SeatRecord) -> Result<(), Error>;
     fn control(
         &mut self,
@@ -183,6 +197,9 @@ impl Lifecycle<'_> {
                     if binding.native_session == request.source.native_session {
                         return Err(Error::Fence);
                     }
+                    if let Some(target) = &mut operation.target.physical {
+                        target.native_session = Some(binding.native_session.clone());
+                    }
                     operation.target.session = Some(binding);
                     operation.target.status = SeatStatus::Starting; // old T2/T3b are invalid for the new SID
                     operation.pending = None;
@@ -268,6 +285,7 @@ impl Lifecycle<'_> {
             evidence_kind: request.evidence_kind,
             status: SeatStatus::Starting,
             process: None,
+            physical: None,
             session: None,
             resources: vec![],
             workspace_resources: descriptor
@@ -334,15 +352,39 @@ impl Lifecycle<'_> {
         operation.phase = Phase::F3Spawn;
         operation.pending = Some("spawn".into());
         self.store.save(operation, true)?;
-        let process = self.host.spawn(&operation.target, plan)?;
-        if process.pid == 0
-            || process.birth_identity.trim().is_empty()
-            || process.executable != plan.executable
-            || process.executable_sha256 != operation.target.native.executable_sha256
+        let spawned = self.host.spawn(adapter.descriptor, resolved, &operation.target, plan)?;
+        if spawned.process.pid == 0
+            || spawned.process.birth_identity.trim().is_empty()
+            || spawned.process.executable != plan.executable
+            || spawned.process.executable_sha256 != operation.target.native.executable_sha256
+            || spawned.endpoint.trim().is_empty()
+            || spawned.pane.trim().is_empty()
+            || spawned.binding_key.trim().is_empty()
+            || (operation.target.evidence_kind == EvidenceKind::Native && spawned.physical.is_none())
         {
             return Err(Error::Fence);
         }
-        operation.target.process = Some(process);
+        if let Some(target) = &spawned.physical {
+            if target.identity() != &operation.target.identity
+                || target.provider != operation.target.provider
+                || target.native != operation.target.native
+                || target.cwd != operation.target.cwd
+                || target.evidence_kind != operation.target.evidence_kind
+                || target.process.identity != spawned.process
+                || target.endpoint.to_str() != Some(spawned.endpoint.as_str())
+                || target.pane != spawned.pane
+                || target.binding != spawned.binding_key
+                || target.native_session.is_some()
+                || !target.directory.path.starts_with(self.store.root())
+            {
+                return Err(Error::Fence);
+            }
+        }
+        operation.target.process = Some(spawned.process);
+        operation.target.endpoint = spawned.endpoint;
+        operation.target.pane = spawned.pane;
+        operation.target.binding_key = spawned.binding_key;
+        operation.target.physical = spawned.physical;
         operation.pending = None;
         self.store.save(operation, true)?;
         if adapter.descriptor.session.fresh
@@ -369,6 +411,9 @@ impl Lifecycle<'_> {
                     return Err(Error::Fence)
                 }
                 _ => {}
+            }
+            if let Some(target) = &mut operation.target.physical {
+                target.native_session = Some(binding.native_session.clone());
             }
             operation.target.session = Some(binding);
         } else if resolved.request().operation != Operation::Fresh {

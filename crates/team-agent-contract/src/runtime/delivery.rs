@@ -29,6 +29,19 @@ pub struct PreparedEnvelope {
     token: Range<usize>,
 }
 impl PreparedEnvelope {
+    /// The shared Team protocol renderer (same header/task/token grammar as
+    /// legacy messaging::delivery::render_message), never adapter-specific.
+    pub fn from_logical(envelope: &LogicalEnvelope) -> Result<Self, ContractError> {
+        let mut header = format!("Team Agent message from {}", envelope.sender.as_str());
+        if let Some(task) = envelope.task.as_deref().filter(|task| !task.is_empty()) {
+            header.push_str(&format!(" for {task}"));
+        }
+        let token = format!("[team-agent-token:{}]", envelope.message.as_str());
+        let rendered = format!("{header}:\n\n{}\n\n{token}", envelope.content);
+        let end = rendered.len();
+        Self::from_rendered(envelope.message.clone(), rendered, end - token.len()..end)
+    }
+
     pub fn from_rendered(
         message: MessageId,
         rendered: String,

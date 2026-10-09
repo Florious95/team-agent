@@ -2,6 +2,7 @@
 
 pub mod lifecycle;
 pub mod mcp;
+pub mod physical;
 pub mod store;
 pub mod supervisor;
 

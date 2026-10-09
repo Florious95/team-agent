@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::clock::{remaining, Clock};
 use super::command::{CommandEnd, CommandReceipt, CommandRequest, CommandRunner, OutputLimits};
-use super::files::{fingerprint_materialized, FileReceipt, ScopedDirectory};
+use super::files::{fingerprint_materialized, DirectoryReceipt, FileReceipt, ScopedDirectory};
 use super::process::{
     capture_process, fingerprint_file, resolve_cwd, sample_process, ProcessState,
 };
@@ -54,6 +54,12 @@ pub struct PaneState {
     pub binding: String,
     pub columns: u16,
     pub rows: u16,
+}
+
+fn directory_signature(owner: &DirectoryReceipt) -> String {
+    let key = format!("{}:{}:{}:{}:{}:{}", owner.owner.scope.as_str(), owner.owner.seat.as_str(),
+        owner.owner.instance.as_str(), owner.owner.generation.0, owner.device, owner.inode);
+    digest_hex(digest(key.as_bytes()))
 }
 
 fn numbered(value: &str, prefix: char) -> bool {
@@ -200,6 +206,34 @@ impl<R: CommandRunner> TmuxHost<R> {
             buffers: BTreeMap::new(),
         })
     }
+    /// Reopen only a supervisor-persisted receipt, never a discovered pane or
+    /// caller-supplied PID. The private directory, socket inode, pane binding,
+    /// dimensions and native birth/image are checked before returning authority.
+    /// Dead panes are retained so lifecycle teardown can observe their exit.
+    pub fn restore_owned(
+        target: TargetReceipt,
+        executable: PathBuf,
+        limits: HostLimits,
+        runner: R,
+        clock: &dyn Clock,
+        deadline: Duration,
+    ) -> Result<Self, HostError> {
+        let directory = ScopedDirectory::reopen(target.directory.clone())?;
+        let mut host = Self::new(directory, executable, limits, runner)?;
+        let binding = digest_hex(digest(format!("{}:{}:{}", directory_signature(&target.directory), target.socket_device, target.socket_inode).as_bytes()));
+        if target.endpoint != host.endpoint
+            || target.binding != binding
+            || target.columns != limits.columns
+            || target.rows != limits.rows
+            || resolve_cwd(&target.cwd.path)? != target.cwd
+        {
+            return Err(HostError::new("persisted target identity", HostErrorKind::Ownership));
+        }
+        host.target = Some(target.clone());
+        host.check_bound(&target, clock, deadline, false)?;
+        Ok(host)
+    }
+
     pub fn directory(&self) -> &ScopedDirectory {
         &self.directory
     }
@@ -487,17 +521,7 @@ impl<R: CommandRunner> TmuxHost<R> {
                 }
             }
         }
-        let owner = self.directory.receipt();
-        let key = format!(
-            "{}:{}:{}:{}:{}:{}",
-            owner.owner.scope.as_str(),
-            owner.owner.seat.as_str(),
-            owner.owner.instance.as_str(),
-            owner.owner.generation.0,
-            owner.device,
-            owner.inode
-        );
-        let signature = digest_hex(digest(key.as_bytes()));
+        let signature = directory_signature(self.directory.receipt());
         let session_name = format!("tac-{}", &signature[..24]);
         let mut shell = b"exec /bin/sh ".to_vec();
         shell.extend(quote(self.directory.path().join("launch.sh").as_os_str())?);

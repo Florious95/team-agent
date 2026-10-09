@@ -8,7 +8,7 @@ use crate::contract::probe::ProcessIdentity;
 use crate::contract::types::Digest;
 use sha2::{Digest as _, Sha256};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImageStamp {
     pub device: u64,
     pub inode: u64,
@@ -16,7 +16,7 @@ pub struct ImageStamp {
     pub modified_ns: i128,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessStamp {
     pub identity: ProcessIdentity,
     pub parent: u32,

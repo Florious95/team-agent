@@ -141,6 +141,9 @@ pub fn tick(
     } else {
         Operation::FirstBusiness
     };
+    if operation == Operation::FirstBusiness {
+        tx.execute("INSERT INTO contract_bootstrap VALUES(?1,?2,0)", params![encoded_identity, attempt.as_str()])?;
+    }
     // Admission + bootstrap consumption + serialized target lease + write-ahead
     // physical intent are one commit. Losing contenders never call the host.
     target.bootstrap_used = true;
@@ -222,6 +225,39 @@ pub fn tick(
         effect,
         uncertain,
     })
+}
+
+/// The physical executor's one-use confirmation of K3's already durable claim.
+/// Owns another connection to the same scoped database, never a second queue.
+pub struct OutboxBootstrap {
+    store: ContractStore,
+}
+impl OutboxBootstrap {
+    pub fn new(store: ContractStore) -> Self { Self { store } }
+    fn consume_claim(&mut self, owner: &InstanceIdentity, attempt: &AttemptId) -> Result<(), Error> {
+        let scope = self.store.scope().clone();
+        let tx = self.store.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let seat = current(&tx, &scope, owner)?;
+        if !seat.bootstrap_used { return Err(Error::Fence); }
+        let lease: Option<String> = tx.query_row("SELECT operation FROM contract_leases WHERE seat=?1", [owner.seat.as_str()], |r| r.get(0)).optional()?;
+        if lease.as_deref() != Some(attempt.as_str()) { return Err(Error::Fence); }
+        let target = serde_json::to_string(owner)?;
+        let count: u64 = tx.query_row("SELECT COUNT(*) FROM contract_outbox WHERE target=?1 AND attempt=?2 AND state='in_flight'", params![target, attempt.as_str()], |r| r.get(0))?;
+        if count != 1 { return Err(Error::Fence); }
+        let confirmed = tx.execute("UPDATE contract_bootstrap SET confirmed=1 WHERE owner=?1 AND attempt=?2 AND confirmed=0", params![target, attempt.as_str()])?;
+        if confirmed != 1 { return Err(Error::Conflict); }
+        tx.commit()?;
+        Ok(())
+    }
+}
+impl crate::runtime::delivery::BootstrapCommit for OutboxBootstrap {
+    fn consume(&mut self, owner: &InstanceIdentity, attempt: &AttemptId, clock: &dyn crate::host::clock::Clock, deadline: Duration) -> Result<(), crate::host::HostError> {
+        use crate::host::{HostError, HostErrorKind};
+        let budget = crate::host::clock::remaining(clock, deadline).ok_or_else(|| HostError::new("bootstrap deadline", HostErrorKind::Deadline))?;
+        self.store.connection.busy_timeout(budget.min(Duration::from_secs(5)))
+            .map_err(|_| HostError::new("bootstrap store wait", HostErrorKind::Unknown))?;
+        self.consume_claim(owner, attempt).map_err(|_| HostError::new("bootstrap claim fence", HostErrorKind::Ownership))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

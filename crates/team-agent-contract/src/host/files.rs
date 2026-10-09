@@ -6,7 +6,7 @@ use super::{digest, HostError, HostErrorKind};
 use crate::contract::plan::ResourceWriteEffect;
 use crate::contract::types::{require_absolute, Digest, InstanceIdentity};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirectoryReceipt {
     pub path: PathBuf,
     pub owner: InstanceIdentity,
@@ -14,7 +14,7 @@ pub struct DirectoryReceipt {
     pub inode: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileReceipt {
     pub directory: DirectoryReceipt,
     pub name: String,

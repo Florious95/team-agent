@@ -319,10 +319,11 @@ pub struct FakeHost {
     pub fail_capture: bool,
     pub fail_stop: bool,
     pub uncertain_delivery: bool,
+    pub route_after_spawn: Option<(String, String, String)>,
     pub sessions: BTreeMap<String, ResumeBinding>,
 }
 impl LifecycleHost for FakeHost {
-    fn spawn(&mut self, seat: &SeatRecord, plan: &LaunchPlan) -> Result<ProcessIdentity, Error> {
+    fn spawn(&mut self, _: &ProviderDescriptor, _: &ResolvedLaunch, seat: &SeatRecord, plan: &LaunchPlan) -> Result<SpawnedProcess, Error> {
         self.spawned += 1;
         if self.fail_spawn {
             return Err(Error::Host("spawn response lost"));
@@ -352,11 +353,17 @@ impl LifecycleHost for FakeHost {
                 backing,
             },
         );
-        Ok(ProcessIdentity {
-            pid: 1000 + self.spawned as u32,
-            birth_identity: format!("birth-{}", self.spawned),
-            executable: plan.executable.clone(),
-            executable_sha256: HASH,
+        let (endpoint, pane, binding_key) = self.route_after_spawn.clone().unwrap_or_else(|| {
+            (seat.endpoint.clone(), seat.pane.clone(), seat.binding_key.clone())
+        });
+        Ok(SpawnedProcess {
+            process: ProcessIdentity {
+                pid: 1000 + self.spawned as u32,
+                birth_identity: format!("birth-{}", self.spawned),
+                executable: plan.executable.clone(),
+                executable_sha256: HASH,
+            },
+            endpoint, pane, binding_key, physical: None,
         })
     }
     fn stop(&mut self, _: &SeatRecord) -> Result<(), Error> {

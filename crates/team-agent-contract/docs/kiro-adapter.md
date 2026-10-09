@@ -58,7 +58,7 @@ Keystroke、三层 Probe、Teardown 不新增 adapter hook，仍由公共 K2/K3 
 
 认证前置由用户负责；不得读 credential store 或自动 login。认证成立后仍须固定 helper identity、真正 catalog/schema 与 Luna 模型/effort；若无 Luna 则有限 native case NOT-RUN，不能换 Claude。
 
-生产 H4/H5/H6/H7、动态 tmux target 与 K3 持久化接线、共享 supervisor 的实进程入口、MCP 子进程绑定、macOS candidate 与完整盲测用例仍须按实际实现/原始证据关闭，不能把 library 组合写成终端端到端完成。三层探针、F0–F5、物理 executor 的已有单测不等于 Kiro 集成通过。
+动态 tmux target 持久化与 K2/K3 组合端口见 [physical lifecycle bridge](physical-lifecycle.md)。生产 H4/H5/H6/H7、共享 supervisor 的实进程入口、MCP 子进程绑定、macOS candidate 与完整盲测用例仍须按实际实现/原始证据关闭，不能把 library 组合写成终端端到端完成。三层探针、F0–F5、物理 executor 的已有单测不等于 Kiro 集成通过。
 
 ## 自动化口径
 

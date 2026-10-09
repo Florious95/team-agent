@@ -2,7 +2,7 @@
 
 独立 nested Cargo workspace，不加入旧 workspace、不依赖旧 `team-agent` crate。`contract` 保持纯函数；`host` / `runtime` 提供 scoped OS/tmux、唯一物理 executor、journal 和探针；`orchestration` 提供 SQLite 共享生命周期/MCP/supervisor。保持 `unsafe_code=forbid`。
 
-统一分支正在进行真实 Host 接线与 Kiro 原生证据闭环；不能把组合源码或 fixture 通过当作原生验收。历史 K4 门禁见 [Kiro adapter 报告](docs/kiro-adapter.md)，物理层见 [执行器指南](docs/physical-executor.md)。
+统一分支的 [physical lifecycle bridge](docs/physical-lifecycle.md) 将动态 tmux target 与同库生命周期/outbox 接线；Kiro 原生证据闭环及 public runtime 入口仍未完成，不能把组合源码或 fixture 通过当作原生验收。历史 K4 门禁见 [Kiro adapter 报告](docs/kiro-adapter.md)，物理层见 [执行器指南](docs/physical-executor.md)。
 
 设计输入：黄金 [`provider-contract-spec.md`](../../docs/reference/provider-contract-spec.md)，以及 Kiro 独立框架任务书的 K1 边界。旧六家、根 manifest/lockfile 与所有既有 tracked 文件必须保持不变。
 
