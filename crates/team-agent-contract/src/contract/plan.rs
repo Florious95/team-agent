@@ -481,6 +481,9 @@ pub struct OwnedResourceReceipt {
     pub disposition: ResourceDisposition,
     pub write_effect: ResourceWriteEffect,
     pub exclusive: bool,
+    /// Captured filesystem identity, not deletion authority. Hosts must still
+    /// fence the owner/root, exclude writers and compare current identity/bytes.
+    pub creation_identity: Option<Digest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -537,6 +540,15 @@ fn require_carried(carrier: &CarrierUse, requested: bool) -> Result<(), Contract
     }
 }
 
+/// One scope mapping shared by planning, lifecycle grants and owned host I/O.
+pub fn materialization_scope(descriptor: &ProviderDescriptor, kind: ResourceKind) -> ResourceScope {
+    match kind {
+        ResourceKind::McpConfig => descriptor.mcp.scope,
+        ResourceKind::SessionBacking | ResourceKind::RuntimeBridge => ResourceScope::RuntimeRoot,
+        _ => descriptor.workspace.config_scope,
+    }
+}
+
 /// Validates plan structure/provenance, not the truth of native flags or encoded config.
 /// Native interpretation still needs provider-specific tests and native evidence.
 pub fn validate_launch_plan(
@@ -564,13 +576,7 @@ pub fn validate_launch_plan(
     }
     let mut paths = Vec::new();
     for resource in &plan.materialization {
-        let scope = match resource.kind {
-            ResourceKind::McpConfig => descriptor.mcp.scope,
-            ResourceKind::SessionBacking | ResourceKind::RuntimeBridge => {
-                ResourceScope::RuntimeRoot
-            }
-            _ => descriptor.workspace.config_scope,
-        };
+        let scope = materialization_scope(descriptor, resource.kind);
         let root = match scope {
             ResourceScope::RuntimeRoot => &request.paths.runtime_root,
             ResourceScope::WorkingDirectory => &request.paths.cwd.path,

@@ -1258,6 +1258,7 @@ fn staged_snapshot(fork: &ResolvedFork) -> NativeForkPlan {
                     bytes_sha256: POLICY_HASH,
                 },
                 exclusive: true,
+                creation_identity: None,
             }],
         },
     }

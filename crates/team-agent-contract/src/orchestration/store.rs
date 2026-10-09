@@ -61,6 +61,9 @@ pub struct SeatRecord {
     pub process: Option<ProcessIdentity>,
     pub session: Option<ResumeBinding>,
     pub resources: Vec<OwnedResourceReceipt>,
+    /// Captured descriptor grant; only these resource classes may use this
+    /// seat's exact cwd identity. Host I/O must recheck the directory identity.
+    pub workspace_resources: Vec<crate::contract::descriptor::ResourceKind>,
     pub bootstrap_used: bool,
 }
 

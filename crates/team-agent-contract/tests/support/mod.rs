@@ -287,6 +287,7 @@ impl OwnedIo for FakeIo {
             },
             write_effect: ResourceWriteEffect::Written { bytes_sha256: HASH },
             exclusive: true,
+            creation_identity: None,
         })
     }
     fn read_bound_session(

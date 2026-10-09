@@ -3,6 +3,7 @@
 pub mod clock;
 pub mod command;
 pub mod files;
+pub mod materialize;
 pub mod process;
 pub mod shell;
 pub mod tmux;
