@@ -1322,10 +1322,9 @@ mod tests {
             ),
             ExitCode::Error
         );
-        assert_eq!(
-            crate::cli::spec::command_spec("models").unwrap().usage,
-            "team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok] [QUERY|--search TEXT] [--json]"
-        );
+        let usage = "team-agent models [--provider pi|cursor_agent|codex|claude|claude_code|grok|kiro] [QUERY|--search TEXT] [--json]";
+        assert_eq!(crate::cli::spec::command_spec("models").unwrap().usage, usage);
+        assert!(crate::cli::emit::command_help(Some("models")).contains(usage));
     }
 
     #[test]

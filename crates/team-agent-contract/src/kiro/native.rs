@@ -79,6 +79,7 @@ pub fn parse_version(stdout: &[u8]) -> Result<String, ContractError> {
         .trim();
     let version = text
         .strip_prefix("kiro-cli ")
+        .or_else(|| text.strip_prefix("kiro-cli-chat "))
         .ok_or(ContractError::Invalid("Kiro version line"))?;
     if version != super::BUNDLE_VERSION {
         return Err(ContractError::Unverified {

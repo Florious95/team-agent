@@ -75,15 +75,30 @@ fn nonexecutable_helper_is_not_claimed_as_available() {
     assert!(resolve_helper(&direct, &sandbox.parent).is_err());
 }
 #[test]
-fn observed_version_and_dispatch_failure_are_classified_without_auth_or_noeffect_inference() {
-    assert_eq!(parse_version(b"kiro-cli 2.28.0\n").unwrap(), "2.28.0");
+fn observed_launcher_and_chat_engine_banners_preserve_version_fence() {
+    for text in [
+        b"kiro-cli 2.28.0\n".as_slice(),
+        b"kiro-cli-chat 2.28.0\n",
+        b"kiro-cli-chat 2.28.0\r\n",
+        b"kiro-cli-chat 2.28.0",
+    ] {
+        assert_eq!(parse_version(text).unwrap(), "2.28.0");
+    }
     for text in [
         b"2.28.0".as_slice(),
+        b"other-cli 2.28.0",
+        b"kiro-cli-chat-preview 2.28.0",
         b"kiro-cli 2.29.0",
+        b"kiro-cli-chat 2.29.0",
         b"kiro-cli 2.28.0\nextra",
+        b"kiro-cli-chat 2.28.0\nextra",
+        b"kiro-cli-chat \xff",
     ] {
         assert!(parse_version(text).is_err());
     }
+}
+#[test]
+fn dispatch_failure_is_classified_without_auth_or_noeffect_inference() {
     let failure = failed(
         CommandEnd::Exited,
         Some(1),
