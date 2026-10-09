@@ -215,7 +215,7 @@ fn h6_empty_input_prints_two_complete_safe_templates_and_real_input_path_without
         "model:",
         "auth_mode: subscription",
         "dangerously_skip_permissions: false",
-        "Next Action:",
+        "Next steps:",
         "team-agent pi",
         "team-agent quick-start",
     ] {
