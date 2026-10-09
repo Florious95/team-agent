@@ -352,7 +352,9 @@ impl Lifecycle<'_> {
         operation.phase = Phase::F3Spawn;
         operation.pending = Some("spawn".into());
         self.store.save(operation, true)?;
-        let spawned = self.host.spawn(adapter.descriptor, resolved, &operation.target, plan)?;
+        let spawned = self
+            .host
+            .spawn(adapter.descriptor, resolved, &operation.target, plan)?;
         if spawned.process.pid == 0
             || spawned.process.birth_identity.trim().is_empty()
             || spawned.process.executable != plan.executable
@@ -360,7 +362,8 @@ impl Lifecycle<'_> {
             || spawned.endpoint.trim().is_empty()
             || spawned.pane.trim().is_empty()
             || spawned.binding_key.trim().is_empty()
-            || (operation.target.evidence_kind == EvidenceKind::Native && spawned.physical.is_none())
+            || (operation.target.evidence_kind == EvidenceKind::Native
+                && spawned.physical.is_none())
         {
             return Err(Error::Fence);
         }

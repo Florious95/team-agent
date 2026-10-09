@@ -57,8 +57,15 @@ pub struct PaneState {
 }
 
 fn directory_signature(owner: &DirectoryReceipt) -> String {
-    let key = format!("{}:{}:{}:{}:{}:{}", owner.owner.scope.as_str(), owner.owner.seat.as_str(),
-        owner.owner.instance.as_str(), owner.owner.generation.0, owner.device, owner.inode);
+    let key = format!(
+        "{}:{}:{}:{}:{}:{}",
+        owner.owner.scope.as_str(),
+        owner.owner.seat.as_str(),
+        owner.owner.instance.as_str(),
+        owner.owner.generation.0,
+        owner.device,
+        owner.inode
+    );
     digest_hex(digest(key.as_bytes()))
 }
 
@@ -220,14 +227,25 @@ impl<R: CommandRunner> TmuxHost<R> {
     ) -> Result<Self, HostError> {
         let directory = ScopedDirectory::reopen(target.directory.clone())?;
         let mut host = Self::new(directory, executable, limits, runner)?;
-        let binding = digest_hex(digest(format!("{}:{}:{}", directory_signature(&target.directory), target.socket_device, target.socket_inode).as_bytes()));
+        let binding = digest_hex(digest(
+            format!(
+                "{}:{}:{}",
+                directory_signature(&target.directory),
+                target.socket_device,
+                target.socket_inode
+            )
+            .as_bytes(),
+        ));
         if target.endpoint != host.endpoint
             || target.binding != binding
             || target.columns != limits.columns
             || target.rows != limits.rows
             || resolve_cwd(&target.cwd.path)? != target.cwd
         {
-            return Err(HostError::new("persisted target identity", HostErrorKind::Ownership));
+            return Err(HostError::new(
+                "persisted target identity",
+                HostErrorKind::Ownership,
+            ));
         }
         host.target = Some(target.clone());
         host.check_bound(&target, clock, deadline, false)?;

@@ -257,8 +257,10 @@ impl ContractStore {
 
     pub(crate) fn begin(&mut self, operation: &OperationRecord) -> Result<(), Error> {
         if operation.target.identity.scope != self.scope
-            || (!matches!(operation.kind, TransactionKind::InWindowBranch | TransactionKind::Teardown)
-                && operation.target.endpoint != self.endpoint)
+            || (!matches!(
+                operation.kind,
+                TransactionKind::InWindowBranch | TransactionKind::Teardown
+            ) && operation.target.endpoint != self.endpoint)
         {
             return Err(Error::Fence);
         }
@@ -465,7 +467,11 @@ fn route_available(connection: &Connection, target: &SeatRecord) -> Result<(), E
          AND json_extract(record,'$.target.identity.seat')<>?1 AND
          ((json_extract(record,'$.target.endpoint')=?2 AND json_extract(record,'$.target.pane')=?3) OR json_extract(record,'$.target.binding_key')=?4))",
         params![target.identity.seat.as_str(), target.endpoint, target.pane, target.binding_key], |r| r.get(0))?;
-    if conflict { Err(Error::Fence) } else { Ok(()) }
+    if conflict {
+        Err(Error::Fence)
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn unleased(connection: &Connection, seat: &SeatId) -> Result<(), Error> {
