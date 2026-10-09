@@ -84,8 +84,7 @@ pub fn registry_tools(text: &str, server: &str) -> Option<Vec<LogicalTool>> {
         || text
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .next_back()
+            .rfind(|line| !line.is_empty())
             != Some("esc to close · ↑↓ to scroll")
     {
         return None;
