@@ -1,0 +1,96 @@
+{
+  "schema": "kiro-catalog-validation-v1",
+  "status": "H1_AUTOMATION_VERIFIED_K5_NOT_RUN",
+  "pr": "https://github.com/Florious95/team-agent/pull/307",
+  "branch": "feat/kiro-contract-integrated",
+  "builder_result_id": "res_d84379fa2190",
+  "tested_head": "fcbbc752c594e0f8107f1c047145d03db5f75244",
+  "tested_tree": "667db1bd937de84212816dc12e32deeea6b74c78",
+  "rust_toolchain": "1.95.0",
+  "runs": [
+    {
+      "unit": "gb-a62e5ae6-contract-fmt-prep-a1",
+      "source_head": "a62e5ae6502a9a421f3e74168501d603bab48592",
+      "fmt_exit": 0,
+      "command_exit": 0,
+      "post_wipe": true
+    },
+    {
+      "unit": "gb-90c2d553-contract-final-a1",
+      "source_head": "90c2d553575489cc30057c87141d4fcf63e76ae9",
+      "source_tree": "fc8ea8417e366b200b5af16bdf31f32bae823a8f",
+      "passed": 159,
+      "failed": 0,
+      "ignored": 0,
+      "test_exit": 0,
+      "clippy_exit": 101,
+      "failure": "unused test import descriptor::* in tests/kiro_model_catalog.rs",
+      "fmt_check": "NOT_RUN_AFTER_CLIPPY_FAILURE",
+      "command_exit": 101,
+      "post_wipe": true
+    },
+    {
+      "unit": "gb-fcbbc752-contract-fmt-prep-a1",
+      "source_head": "fcbbc752c594e0f8107f1c047145d03db5f75244",
+      "fmt_exit": 0,
+      "formatting_changes": false,
+      "command_exit": 0,
+      "post_wipe": true
+    },
+    {
+      "unit": "gb-fcbbc752-contract-final-a1",
+      "source_head": "fcbbc752c594e0f8107f1c047145d03db5f75244",
+      "source_tree": "667db1bd937de84212816dc12e32deeea6b74c78",
+      "test_targets_including_zero_test_lib": 14,
+      "passed": 159,
+      "failed": 0,
+      "ignored": 0,
+      "test_exit": 0,
+      "clippy_exit": 0,
+      "fmt_check_exit": 0,
+      "command_exit": 0,
+      "exec_main_status": 0,
+      "post_wipe": true
+    }
+  ],
+  "native_catalog": {
+    "source": "/Volumes/nvme/tmp/kiro-native-receipts/live-auth/catalog.stdout",
+    "exit_receipt": "/Volumes/nvme/tmp/kiro-native-receipts/live-auth/catalog.exit",
+    "exit": 0,
+    "bytes": 1719,
+    "sha256": "7206950ed86df1f4835f38452981d1c0e28312fb7f2f292f43b828b08d295ce6",
+    "fixture": "crates/team-agent-contract/tests/fixtures/kiro-2.28.0-models.json",
+    "schema": "kiro-2.28.0-list-models-json-v1",
+    "models": ["auto", "claude-sonnet-4.5", "claude-sonnet-4", "claude-haiku-4.5", "deepseek-3.2", "minimax-m2.5", "minimax-m2.1", "glm-5", "qwen3-coder-next"],
+    "default_model": "auto",
+    "luna_present": false,
+    "per_model_effort_support": "UNVERIFIED"
+  },
+  "native_engine": {
+    "path": "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat",
+    "version": "2.28.0",
+    "sha256": "430aae1a4f5ae252e785114d45d61ec465796ad6ca96383fb7ca383dd96b1712",
+    "is_team_agent_candidate": false
+  },
+  "k5": {
+    "status": "NOT_RUN",
+    "candidate": null,
+    "workspace": null,
+    "configuration": null,
+    "admission_spec": "PR-K5-NATIVE-ACCEPTANCE.md",
+    "explicit_case_model": "claude-sonnet-4.5",
+    "caller_model_family": "Luna",
+    "model_exception_authority": ["msg_d63a82ab75d8", "msg_a701be8cc5f8"],
+    "blockers": ["public supervisor/MCP subprocess entry", "native input/session/config/client-binding evidence", "Mac candidate and complete frozen case package"],
+    "no_claims": ["native lifecycle acceptance", "restart/resume acceptance", "Fork acceptance", "complete provider functionality"]
+  },
+  "archive_policy": {
+    "original_artifact_manifests_verified": true,
+    "pre_wipe_status_files_preserved": true,
+    "post_wipe_status_files_are_separate_read_only_observations": true,
+    "job_wipe_is_not_shared_cache_or_fixture_root_deletion": true,
+    "credentials_read": false,
+    "local_mac_rust_commands_run": false,
+    "developer_native_execution": false
+  }
+}

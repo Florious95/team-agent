@@ -59,7 +59,7 @@ Keystroke、三层 Probe、Teardown 不新增 adapter hook，仍由公共 K2/K3 
 
 ## 未完成项 / K5 准备门
 
-用户认证与真实 catalog/schema 已有成功收据；不读 credential store 或自动 login。当前 9 个模型没有 Luna。既有实测规则要求 caller/被测 Agent 都用 Luna，因此 K5 仍为 NOT-RUN；除非用户明确批准例外，不换 Claude、不将 Auto 当 Luna。固定 helper/native identity、终端 profile 与其他接入证据仍必需。
+用户认证与真实 catalog/schema 已有成功收据；不读 credential store 或自动 login。当前 9 个模型没有 Luna，不得自动换 Claude 或将 Auto 当 Luna。非 Luna 被测模型必须有逐例明确授权；本轮仅 `claude-sonnet-4.5` 的例外和 Luna caller 要求见 [K5 准入说明](../../../.team/artifacts/provider-refactor/kiro-catalog-auth/PR-K5-NATIVE-ACCEPTANCE.md)。该授权不补齐缺失的公共入口、Mac candidate 或 terminal/session/MCP 证据；K5 仍为 NOT-RUN。
 
 动态 tmux target 持久化与 K2/K3 组合端口见 [physical lifecycle bridge](physical-lifecycle.md)。生产 H4/H5/H6/H7、共享 supervisor 的实进程入口、MCP 子进程绑定、macOS candidate 与完整盲测用例仍须按实际实现/原始证据关闭，不能把 library 组合写成终端端到端完成。三层探针、F0–F5、物理 executor 的已有单测不等于 Kiro 集成通过。
 
