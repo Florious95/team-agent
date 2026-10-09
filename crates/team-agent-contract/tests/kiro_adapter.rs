@@ -69,7 +69,7 @@ fn kiro_has_exact_identity_and_no_native_admission_without_r0() {
     let hooks = adapter.hooks();
     assert_eq!(KIRO_DESCRIPTOR.identity.id, "kiro");
     assert_eq!(KIRO_DESCRIPTOR.identity.binary, "kiro-cli");
-    assert_eq!(KIRO_DESCRIPTOR.identity.aliases, &[]);
+    assert!(KIRO_DESCRIPTOR.identity.aliases.is_empty());
     for operation in [
         Operation::Catalog,
         Operation::Fresh,
